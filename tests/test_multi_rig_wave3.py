@@ -1,19 +1,24 @@
 import os
 import sys
 import types
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QWidget
 import pytest
 
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.shared_state import ActionFeedbackService
 from freqinout.core.software_status_service import SoftwareStatusService
-from freqinout.core.station_runtime_manager import StationRuntimeManager
+from freqinout.core.station_runtime_manager import DeviceRuntime, StationRuntimeManager
+from freqinout.gui import controlfreq_tab as controlfreq_mod
+from freqinout.gui import qsy_helper
+from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.qsy_helper import scheduler_enabled, set_scheduler_enabled_override
 
 
@@ -184,6 +189,30 @@ def test_station_runtime_manager_primary_snapshot_includes_operating_policy(monk
     assert policy["assignment_state"] == "temporary_override"
 
 
+def test_device_runtime_snapshot_defaults_launch_policy_off_when_missing() -> None:
+    runtime = DeviceRuntime(
+        {
+            "id": 7,
+            "name": "Manual Radio",
+            "control_backend": "manual",
+            "runtime_active": 1,
+        },
+        is_primary=True,
+        assignment={"assignment_state": "active"},
+        operating_profile={
+            "name": "Missing Launch Policy",
+            "scheduler_enabled": True,
+            "use_messages": True,
+            "use_map": True,
+            "use_background_ingest": True,
+            "use_net_control_tabs": True,
+        },
+    )
+
+    assert runtime.operating_policy()["use_launch_control"] is False
+    assert runtime.snapshot().use_launch_control is False
+
+
 def test_settings_tab_supports_operating_profiles_and_assignments(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -279,6 +308,89 @@ def test_scheduler_engine_runtime_scheduler_override_updates_status_and_helper(m
         assert scheduler_enabled(settings) is False
     finally:
         set_scheduler_enabled_override(None)
+
+
+def test_scheduler_engine_runtime_timer_policy_override(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    engine = SchedulerEngine()
+    engine.settings.set("freq_enforcement_mode", "On Schedule Change")
+    engine.settings.set("freq_prompt_interval", "Hourly")
+
+    engine.set_runtime_timer_policy(
+        {
+            "freq_enforcement_mode": "Prompt",
+            "freq_prompt_interval": "Every 10 minutes",
+            "fldigi_enforcement_mode": "Nope",
+            "js8_prompt_interval": "Select Interval",
+        }
+    )
+
+    assert engine._enforcement_mode("freq_enforcement_mode") == "Prompt"
+    assert engine._prompt_interval_minutes("freq_prompt_interval") == 10
+    assert engine._enforcement_mode("fldigi_enforcement_mode") == "On Schedule Change"
+    assert engine._prompt_interval_minutes("js8_prompt_interval") == 60
+
+    engine.set_runtime_timer_policy(None)
+    assert engine._enforcement_mode("freq_enforcement_mode") == "On Schedule Change"
+    assert engine._prompt_interval_minutes("freq_prompt_interval") == 60
+
+
+def test_hold_duration_helpers_prefer_runtime_profile_default() -> None:
+    QApplication.instance() or QApplication([])
+
+    class _Settings:
+        def get(self, key, default=None):
+            return 60 if key == "schedule_hold_minutes_default" else default
+
+    settings = _Settings()
+    assert qsy_helper.get_hold_duration_default(settings) == 60
+    assert qsy_helper.get_hold_duration_default(settings, {"schedule_hold_minutes_default": 90}) == 90
+    assert qsy_helper.get_hold_duration_default(settings, {"schedule_hold_minutes_default": 45}) == 30
+
+    combo = QComboBox()
+    combo.addItem("No data")
+    assert qsy_helper.selected_hold_duration(combo, settings, {"schedule_hold_minutes_default": 120}) == 120
+    qsy_helper.refresh_hold_duration_combo(combo, settings, {"schedule_hold_minutes_default": 90})
+    assert combo.currentData() == 90
+
+
+def test_runtime_hold_duration_uses_active_radio_profile() -> None:
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    control_source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    helper_source = Path("freqinout/gui/qsy_helper.py").read_text(encoding="utf-8")
+
+    assert "from freqinout.core.multi_radio_store import DEFAULT_HOLD_DURATION_MINUTES, SUPPORTED_HOLD_DURATION_MINUTES" in helper_source
+    assert "HOLD_DURATION_PRESETS: tuple[int, ...] = tuple(sorted(SUPPORTED_HOLD_DURATION_MINUTES))" in helper_source
+    assert "def get_hold_duration_default(settings, profile" in helper_source
+    assert 'profile.get("schedule_hold_minutes_default")' in helper_source
+    assert "def hold_duration_profile_for_window" in helper_source
+    assert "profile=getattr(self, \"_active_runtime_profile\", None)" in main_source
+    assert "getattr(self, \"_active_runtime_profile\", None)" in main_source[
+        main_source.index("def _selected_sidebar_hold_minutes")
+        : main_source.index("def _on_sidebar_hold_duration_changed")
+    ]
+    assert 'profile.get("schedule_hold_minutes_default"' in main_source[
+        main_source.index("def _runtime_state_signature_for")
+        : main_source.index("def _runtime_timer_policy_for")
+    ]
+    assert "self._sync_hold_duration_combos()" in main_source[
+        main_source.index("def _apply_runtime_profile_state")
+        : main_source.index("set_scheduler_enabled_override", main_source.index("def _apply_runtime_profile_state"))
+    ]
+    assert "def _runtime_hold_duration_profile" in control_source
+    assert "selected_hold_duration(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())" in control_source
+    assert "refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())" in control_source
+
+
+def test_main_window_runtime_timer_policy_push_failures_are_logged() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "failed to apply startup runtime timer policy" in source
+    assert "failed to apply runtime timer policy" in source
+    assert "self.scheduler.set_runtime_timer_policy(self._runtime_timer_policy_for(self._active_runtime_profile))" in source
+    assert "self.scheduler.set_runtime_timer_policy(self._runtime_timer_policy_for(profile))" in source
 
 
 class FakeStore:
@@ -386,6 +498,34 @@ class StubTab(QWidget):
         return
 
 
+class FakeQsyCombo:
+    def __init__(self, data=None) -> None:
+        self._data = data
+
+    def currentData(self):
+        return self._data
+
+
+class FakeActionButton:
+    def __init__(self) -> None:
+        self.text_value = ""
+        self.tooltip_value = ""
+        self.enabled_value = False
+        self.style_value = ""
+
+    def setText(self, value: str) -> None:
+        self.text_value = value
+
+    def setToolTip(self, value: str) -> None:
+        self.tooltip_value = value
+
+    def setEnabled(self, value: bool) -> None:
+        self.enabled_value = bool(value)
+
+    def setStyleSheet(self, value: str) -> None:
+        self.style_value = value
+
+
 class StubSettingsTab(StubTab):
     settings_saved = Signal()
     device_profiles_changed = Signal()
@@ -393,7 +533,7 @@ class StubSettingsTab(StubTab):
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, **_kwargs) -> None:
         super().__init__(parent)
         self.launch_orchestrator = StubLaunchOrchestrator()
 
@@ -426,6 +566,7 @@ class StubScheduler(QObject):
         self.fldigi_log = fldigi_log
         self.station_runtime_manager = station_runtime_manager
         self.runtime_enabled = True
+        self.runtime_timer_policy = {}
         self.current_schedule_entry = {}
 
     def start(self) -> None:
@@ -439,6 +580,9 @@ class StubScheduler(QObject):
 
     def set_runtime_scheduler_enabled(self, enabled: bool | None) -> None:
         self.runtime_enabled = True if enabled is None else bool(enabled)
+
+    def set_runtime_timer_policy(self, policy) -> None:
+        self.runtime_timer_policy = dict(policy or {})
 
     def get_status_summary(self) -> dict[str, object]:
         return {
@@ -476,6 +620,9 @@ class StubBackgroundIngest(QObject):
 
     def is_running(self) -> bool:
         return self._running
+
+    def refresh_runtime_settings(self) -> None:
+        return
 
 
 class StubJS8ControlClient:
@@ -604,6 +751,12 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
             "name": "Base Station",
             "control_backend": "flrig",
             "deployment_mode": "full",
+            "freq_enforcement_mode": "Prompt",
+            "freq_prompt_interval": "Every 10 minutes",
+            "fldigi_enforcement_mode": "On Schedule Change",
+            "fldigi_prompt_interval": "Hourly",
+            "js8_enforcement_mode": "Prompt",
+            "js8_prompt_interval": "Every 5 minutes",
         },
         {
             "operating_profile_name": "Field Policy",
@@ -628,6 +781,14 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
         assert _nav_button(window, "VHF/UHF").isHidden() is True
         assert window.background_ingest.is_running() is False
         assert window.scheduler.runtime_enabled is False
+        assert window.scheduler.runtime_timer_policy == {
+            "freq_enforcement_mode": "Prompt",
+            "freq_prompt_interval": "Every 10 minutes",
+            "fldigi_enforcement_mode": "On Schedule Change",
+            "fldigi_prompt_interval": "Hourly",
+            "js8_enforcement_mode": "Prompt",
+            "js8_prompt_interval": "Every 5 minutes",
+        }
         assert "Field Policy" in window.runtime_mode_label.text()
 
         current_before = window.stack.currentIndex()
@@ -641,3 +802,382 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
         window.deleteLater()
         app.processEvents()
 
+
+def test_controlfreq_active_hold_allows_new_qsy_without_resume(monkeypatch):
+    monkeypatch.setattr(controlfreq_mod, "button_style", lambda role, theme: role)
+    fake = types.SimpleNamespace(
+        settings=types.SimpleNamespace(),
+        freq_combo=FakeQsyCombo({"freq": 7.268, "band": "40M", "mode": "LSB"}),
+        freq_action_btn=FakeActionButton(),
+        _hold_state_snapshot={"active": True, "remaining_sec": 1800},
+        _freq_action_busy_reason_label=None,
+    )
+    fake._theme = lambda: {"text": "#000"}
+    fake.window = lambda: types.SimpleNamespace(scheduler=None)
+    fake._get_active_frequency_mhz = lambda: 7.078
+    fake._selected_hold_minutes = lambda: 30
+    fake._apply_frequency_action_busy_override = lambda reason: None
+    fake._selected_qsy_pending = lambda active: ControlFreqTab._selected_qsy_pending(fake, active)
+
+    ControlFreqTab._update_frequency_action_styles(fake, scheduled=7.078, active=7.078)
+
+    assert fake._primary_freq_action_mode == "qsy"
+    assert fake.freq_action_btn.text_value == "QSY + Hold"
+    assert fake.freq_action_btn.enabled_value is True
+    assert fake.freq_action_btn.style_value == "warning"
+
+
+def test_controlfreq_schedule_row_qsy_uses_hold_path_without_resume(monkeypatch):
+    calls = []
+    feedback_calls = []
+    refresh_calls = []
+
+    def fake_qsy_with_hold(window, settings, meta, minutes):
+        calls.append((window, settings, meta, minutes))
+        return 60
+
+    monkeypatch.setattr(controlfreq_mod, "perform_qsy_with_hold", fake_qsy_with_hold)
+    monkeypatch.setattr(controlfreq_mod.QTimer, "singleShot", lambda _ms, callback: callback())
+
+    fake_window = types.SimpleNamespace()
+    fake_settings = types.SimpleNamespace()
+    fake = types.SimpleNamespace(
+        settings=fake_settings,
+        _force_hero_resync=False,
+        _hold_state_snapshot={"active": True, "remaining_sec": 1800},
+    )
+    fake.window = lambda: fake_window
+    fake._selected_hold_minutes = lambda: 60
+    fake._schedule_qsy_meta = lambda entry: {"freq": 7.268, "band": "40M", "mode": "LSB"}
+    fake._refresh_frequency_control = lambda *args, **kwargs: refresh_calls.append((args, kwargs))
+    fake._publish_qsy_action_feedback = lambda meta, minutes, source_surface: feedback_calls.append(
+        (meta, minutes, source_surface)
+    )
+
+    ControlFreqTab._on_schedule_action_clicked(
+        fake,
+        {"action_kind": "qsy", "freq_mhz": 7.268, "group": "DX", "band": "40M"},
+    )
+
+    assert calls == [(fake_window, fake_settings, {"freq": 7.268, "band": "40M", "mode": "LSB"}, 60)]
+    assert fake._force_hero_resync is True
+    assert len(refresh_calls) == 2
+    assert feedback_calls == [({"freq": 7.268, "band": "40M", "mode": "LSB"}, 60, "controlfreq_schedule")]
+
+
+def test_controlfreq_qsy_success_publishes_radio_feedback_event() -> None:
+    service = ActionFeedbackService()
+    fake_window = types.SimpleNamespace(
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    fake = types.SimpleNamespace()
+    fake.window = lambda: fake_window
+    fake._qsy_feedback_target = lambda: ControlFreqTab._qsy_feedback_target(fake)
+    fake._qsy_feedback_frequency_label = lambda meta: ControlFreqTab._qsy_feedback_frequency_label(meta)
+
+    ControlFreqTab._publish_qsy_action_feedback(
+        fake,
+        {"freq": 7.268, "mode": "LSB"},
+        60,
+        source_surface="controlfreq",
+    )
+
+    events = service.recent(scope="radio")
+    assert len(events) == 1
+    assert events[0].action_type == "qsy"
+    assert events[0].status == "succeeded"
+    assert events[0].summary == "QSY sent to DX10: 7.268 LSB"
+    assert events[0].detail == "Frequency changed and scheduling paused for 60 minutes."
+    assert events[0].radio_profile_id == "7"
+    assert events[0].target_label == "DX10"
+    assert events[0].source_surface == "controlfreq"
+
+
+def test_controlfreq_qsy_success_uses_feedback_instead_of_success_popup() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    freq_block = source[source.index("def _on_freq_set_clicked") : source.index("def _on_freq_selection_changed")]
+    row_block = source[source.index("def _on_schedule_action_clicked") : source.index("def _schedule_qsy_meta")]
+
+    assert "_publish_qsy_action_feedback(meta, mins, source_surface=\"controlfreq\")" in freq_block
+    assert "_publish_qsy_action_feedback(meta, mins, source_surface=\"controlfreq_schedule\")" in row_block
+    assert '"QSY Applied"' not in freq_block
+    assert '"QSY Applied"' not in row_block
+
+
+def test_controlfreq_qsy_blocked_feedback_publishes_radio_event() -> None:
+    service = ActionFeedbackService()
+    fake_window = types.SimpleNamespace(
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    fake = types.SimpleNamespace()
+    fake.window = lambda: fake_window
+    fake._qsy_feedback_target = lambda: ControlFreqTab._qsy_feedback_target(fake)
+
+    ControlFreqTab._publish_qsy_blocked_feedback(
+        fake,
+        "QSY blocked: select a frequency first.",
+        "Choose a ControlFreq frequency before sending QSY.",
+        source_surface="controlfreq",
+    )
+
+    events = service.recent(scope="radio")
+    assert len(events) == 1
+    assert events[0].action_type == "qsy"
+    assert events[0].status == "blocked"
+    assert events[0].summary == "QSY blocked: select a frequency first."
+    assert events[0].detail == "Choose a ControlFreq frequency before sending QSY."
+    assert events[0].radio_profile_id == "7"
+    assert events[0].target_label == "DX10"
+    assert events[0].source_surface == "controlfreq"
+
+
+def test_controlfreq_qsy_validation_uses_feedback_instead_of_local_popups() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    freq_block = source[source.index("def _on_freq_set_clicked") : source.index("def _on_freq_selection_changed")]
+    row_block = source[source.index("def _on_schedule_action_clicked") : source.index("def _schedule_qsy_meta")]
+
+    assert "_publish_qsy_blocked_feedback(" in freq_block
+    assert "_publish_qsy_blocked_feedback(" in row_block
+    assert 'QMessageBox.information(\n                self,\n                "Frequency Control"' not in freq_block
+    assert 'QMessageBox.warning(self, "Frequency Control", "Select a frequency first.")' not in freq_block
+    assert 'QMessageBox.warning(self, "Frequency Control", "No matching operating-group frequency is configured.")' not in row_block
+
+
+def test_controlfreq_no_selected_frequency_publishes_blocked_feedback(monkeypatch) -> None:
+    feedback_calls = []
+    warning_calls = []
+    fake = types.SimpleNamespace(
+        settings=types.SimpleNamespace(get=lambda _key, default="": "FLRig"),
+        freq_combo=FakeQsyCombo(None),
+    )
+    fake._publish_qsy_blocked_feedback = lambda summary, detail="", source_surface="": feedback_calls.append(
+        (summary, detail, source_surface)
+    )
+    monkeypatch.setattr(controlfreq_mod.QMessageBox, "warning", lambda *args: warning_calls.append(args))
+
+    ControlFreqTab._on_freq_set_clicked(fake)
+
+    assert feedback_calls == [
+        (
+            "QSY blocked: select a frequency first.",
+            "Choose a ControlFreq frequency before sending QSY.",
+            "controlfreq",
+        )
+    ]
+    assert warning_calls == []
+
+
+def test_qsy_helper_shared_ptt_block_publishes_feedback_without_warning(monkeypatch) -> None:
+    service = ActionFeedbackService()
+    warning_calls = []
+
+    class _Scheduler:
+        def get_status_summary(self):
+            return {
+                "shared_ptt_blocked": True,
+                "shared_ptt_reason": "Shared PTT group AMP-A is in use by Remote Rig.",
+            }
+
+        def apply_manual_qsy(self, entry):
+            raise AssertionError("QSY should be blocked before apply_manual_qsy")
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper.QMessageBox, "warning", lambda *args: warning_calls.append(args))
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268, "band": "40M", "mode": "LSB"})
+
+    events = service.recent(scope="radio")
+    assert result is False
+    assert warning_calls == []
+    assert len(events) == 1
+    assert events[0].status == "blocked"
+    assert events[0].action_type == "qsy"
+    assert events[0].summary == "QSY blocked: shared PTT path is busy."
+    assert events[0].detail == "Shared PTT group AMP-A is in use by Remote Rig."
+    assert events[0].radio_profile_id == "7"
+    assert events[0].target_label == "DX10"
+    assert events[0].source_surface == "qsy_helper"
+
+
+def test_qsy_helper_blocked_feedback_falls_back_to_warning_without_service(monkeypatch) -> None:
+    warning_calls = []
+    window = types.SimpleNamespace(scheduler=None)
+    monkeypatch.setattr(qsy_helper.QMessageBox, "warning", lambda *args: warning_calls.append(args))
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268})
+
+    assert result is False
+    assert warning_calls
+    assert warning_calls[0][1] == "Scheduler"
+
+
+def test_qsy_helper_invalid_frequency_publishes_blocked_feedback(monkeypatch) -> None:
+    service = ActionFeedbackService()
+    warning_calls = []
+    window = types.SimpleNamespace(
+        scheduler=types.SimpleNamespace(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper.QMessageBox, "warning", lambda *args: warning_calls.append(args))
+
+    result = qsy_helper.perform_qsy(window, {"freq": object()})
+
+    events = service.recent(scope="radio")
+    assert result is False
+    assert warning_calls == []
+    assert len(events) == 1
+    assert events[0].status == "blocked"
+    assert events[0].summary == "QSY blocked: selected frequency is invalid."
+    assert "could not be used for QSY" in events[0].detail
+
+
+def test_qsy_helper_rf_conflict_cancel_publishes_blocked_override_feedback(monkeypatch) -> None:
+    service = ActionFeedbackService()
+
+    class _Scheduler:
+        def evaluate_coordination_conflict(self, entry, source="QSY"):
+            return {
+                "warning": True,
+                "summary": "RF conflict: Remote Rig on same band.",
+                "detail": "Target 7.268 MHz overlaps Remote Rig.",
+            }
+
+        def get_status_summary(self):
+            return {"shared_ptt_blocked": False}
+
+        def apply_manual_qsy(self, entry, ignore_coordination_prompt=False):
+            raise AssertionError("QSY should not proceed after RF conflict cancel")
+
+    class _FakeMessageBox:
+        AcceptRole = 0
+        RejectRole = 1
+
+        def __init__(self, parent=None):
+            self._cancel = None
+            self._clicked = None
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def setText(self, text):
+            self.text = text
+
+        def setInformativeText(self, text):
+            self.detail = text
+
+        def addButton(self, label, role):
+            button = object()
+            if label == "Cancel":
+                self._cancel = button
+            return button
+
+        def exec(self):
+            self._clicked = self._cancel
+
+        def clickedButton(self):
+            return self._clicked
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FakeMessageBox)
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268, "band": "40M", "mode": "LSB"})
+
+    events = service.recent(scope="radio")
+    assert result is False
+    assert len(events) == 1
+    assert events[0].action_type == "qsy_override"
+    assert events[0].status == "blocked"
+    assert events[0].summary == "QSY cancelled: RF conflict warning."
+    assert events[0].detail == "Target 7.268 MHz overlaps Remote Rig."
+    assert events[0].source_surface == "qsy_helper_conflict"
+
+
+def test_qsy_helper_rf_conflict_proceed_publishes_override_feedback(monkeypatch) -> None:
+    service = ActionFeedbackService()
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.apply_calls = []
+
+        def evaluate_coordination_conflict(self, entry, source="QSY"):
+            return {
+                "warning": True,
+                "summary": "RF conflict: Remote Rig on same band.",
+                "detail": "Target 7.268 MHz overlaps Remote Rig.",
+            }
+
+        def get_status_summary(self):
+            return {"shared_ptt_blocked": False}
+
+        def apply_manual_qsy(self, entry, ignore_coordination_prompt=False):
+            self.apply_calls.append(bool(ignore_coordination_prompt))
+
+    class _FakeMessageBox:
+        AcceptRole = 0
+        RejectRole = 1
+
+        def __init__(self, parent=None):
+            self._proceed = None
+            self._clicked = None
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def setText(self, text):
+            self.text = text
+
+        def setInformativeText(self, text):
+            self.detail = text
+
+        def addButton(self, label, role):
+            button = object()
+            if label == "Proceed QSY":
+                self._proceed = button
+            return button
+
+        def exec(self):
+            self._clicked = self._proceed
+
+        def clickedButton(self):
+            return self._clicked
+
+    scheduler = _Scheduler()
+    window = types.SimpleNamespace(
+        scheduler=scheduler,
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FakeMessageBox)
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268, "band": "40M", "mode": "LSB"})
+
+    events = service.recent(scope="radio")
+    assert result is True
+    assert scheduler.apply_calls == [True]
+    assert len(events) == 1
+    assert events[0].action_type == "qsy_override"
+    assert events[0].status == "succeeded"
+    assert events[0].summary == "QSY override accepted: RF conflict warning acknowledged."
+    assert events[0].detail == "Target 7.268 MHz overlaps Remote Rig."
+    assert events[0].source_surface == "qsy_helper_conflict"
+
+
+def test_controlfreq_selected_qsy_pending_logs_malformed_metadata(monkeypatch):
+    messages = []
+    fake = types.SimpleNamespace(freq_combo=FakeQsyCombo({"freq": object()}))
+    monkeypatch.setattr(controlfreq_mod.log, "debug", lambda message, *args: messages.append(message % args))
+
+    assert ControlFreqTab._selected_qsy_pending(fake, 7.078) is True
+    assert messages
+    assert "selected QSY metadata could not be compared" in messages[0]

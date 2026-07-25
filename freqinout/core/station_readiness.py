@@ -622,7 +622,7 @@ def build_station_readiness_report(
                     state_key="not_enabled",
                 )
             )
-        if int(profile.get("launch_enabled", 1) or 0) != 1:
+        if int(profile.get("launch_enabled", 0) or 0) != 1:
             issues.append(
                 ReadinessIssue(
                     severity="informational",

@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
@@ -278,6 +278,7 @@ class SchedulerEngine(QObject):
         self.fldigi_log: Optional[object] = fldigi_log
         self.station_runtime_manager = station_runtime_manager
         self._runtime_scheduler_enabled_override: Optional[bool] = None
+        self._runtime_timer_policy_override: Dict[str, str] = {}
 
         # We keep a small cache of the last applied entry so we don't
         # spam the rig with identical commands.
@@ -449,6 +450,23 @@ class SchedulerEngine(QObject):
 
     def set_runtime_scheduler_enabled(self, enabled: Optional[bool]) -> None:
         self._runtime_scheduler_enabled_override = None if enabled is None else bool(enabled)
+
+    def set_runtime_timer_policy(self, policy: Optional[Mapping[str, Any]]) -> None:
+        if not isinstance(policy, Mapping):
+            self._runtime_timer_policy_override = {}
+            return
+        allowed_modes = {"On Schedule Change", "Prompt"}
+        allowed_intervals = {"Hourly", "Every 5 minutes", "Every 10 minutes", "Every 15 minutes", "Every 30 minutes"}
+        values: Dict[str, str] = {}
+        for key in ("freq_enforcement_mode", "fldigi_enforcement_mode", "js8_enforcement_mode"):
+            value = str(policy.get(key, "") or "").strip()
+            if value in allowed_modes:
+                values[key] = value
+        for key in ("freq_prompt_interval", "fldigi_prompt_interval", "js8_prompt_interval"):
+            value = str(policy.get(key, "") or "").strip()
+            if value in allowed_intervals:
+                values[key] = value
+        self._runtime_timer_policy_override = values
 
     def _scheduler_enabled(self) -> bool:
         override = self._runtime_scheduler_enabled_override
@@ -1717,6 +1735,9 @@ class SchedulerEngine(QObject):
         return normalized
 
     def _enforcement_mode(self, key: str, default: str = "On Schedule Change") -> str:
+        override = self._runtime_timer_policy_override.get(key)
+        if override in {"On Schedule Change", "Prompt"}:
+            return override
         try:
             raw = (self.settings.get(key, default) or default).strip()
         except Exception:
@@ -1726,10 +1747,12 @@ class SchedulerEngine(QObject):
         return raw
 
     def _prompt_interval_minutes(self, key: str, default: int = 60) -> int:
-        try:
-            raw = (self.settings.get(key, "Hourly") or "Hourly").strip()
-        except Exception:
-            raw = "Hourly"
+        raw = self._runtime_timer_policy_override.get(key)
+        if not raw:
+            try:
+                raw = (self.settings.get(key, "Hourly") or "Hourly").strip()
+            except Exception:
+                raw = "Hourly"
         mapping = {
             "Hourly": 60,
             "Every 5 minutes": 5,

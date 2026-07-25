@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
         self.suspend_duration_combo.setMaximumWidth(112)
         self.suspend_duration_combo.setToolTip("Temporary schedule hold duration.")
         self.suspend_duration_combo.currentIndexChanged.connect(self._on_sidebar_hold_duration_changed)
-        refresh_hold_duration_combo(self.suspend_duration_combo, self.settings)
+        refresh_hold_duration_combo(self.suspend_duration_combo, self.settings, self._active_runtime_profile)
         self.logs_active_btn = QPushButton("Logs Active")
         self.logs_active_btn.setFixedWidth(140)
         self.logs_active_btn.clicked.connect(self._open_logs_window)
@@ -462,8 +462,8 @@ class MainWindow(QMainWindow):
         self.action_feedback_dismiss_btn.clicked.connect(self._hide_action_feedback_banner)
         self.action_feedback_history_btn = QToolButton()
         self.action_feedback_history_btn.setText("History")
-        self.action_feedback_history_btn.setToolTip("Show recent Settings actions")
-        self.action_feedback_history_btn.setAccessibleName("Recent Settings actions")
+        self.action_feedback_history_btn.setToolTip("Show recent actions")
+        self.action_feedback_history_btn.setAccessibleName("Recent actions")
         self.action_feedback_history_btn.clicked.connect(self._show_recent_actions_dialog)
         feedback_layout.addWidget(self.action_feedback_history_btn, 0)
         feedback_layout.addWidget(self.action_feedback_dismiss_btn, 0)
@@ -550,6 +550,11 @@ class MainWindow(QMainWindow):
                 self.scheduler.set_runtime_scheduler_enabled(bool(startup_policy.get("scheduler_enabled", True)))
         except Exception:
             pass
+        try:
+            if hasattr(self.scheduler, "set_runtime_timer_policy"):
+                self.scheduler.set_runtime_timer_policy(self._runtime_timer_policy_for(self._active_runtime_profile))
+        except Exception as e:
+            log.debug("MainWindow: failed to apply startup runtime timer policy: %s", e)
         try:
             set_scheduler_enabled_override(bool(startup_policy.get("scheduler_enabled", True)))
         except Exception:
@@ -783,8 +788,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "action_feedback_banner"):
             self.action_feedback_banner.setVisible(False)
 
+    @staticmethod
+    def _action_feedback_banner_scopes() -> set[str]:
+        return {"settings", "radio", "scheduler"}
+
     def _on_action_feedback_event(self, event: ActionFeedbackEvent) -> None:
-        if str(event.scope or "").strip().lower() != "settings":
+        if str(event.scope or "").strip().lower() not in self._action_feedback_banner_scopes():
             return
         if not hasattr(self, "action_feedback_banner"):
             return
@@ -827,7 +836,7 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Recent Actions")
-        dialog.setAccessibleName("Recent Settings actions")
+        dialog.setAccessibleName("Recent actions")
         dialog.setModal(False)
         dialog.setMinimumWidth(520)
         dialog.setMinimumHeight(260)
@@ -837,22 +846,22 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(dialog)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
-        title = QLabel("Recent Settings Actions")
+        title = QLabel("Recent Actions")
         title.setStyleSheet("font-weight: 700;")
         root.addWidget(title)
 
-        events = self.action_feedback_service.recent(scope="settings")[:20]
+        events = self.action_feedback_service.recent()[:20]
         if not events:
-            empty = QLabel("No recent Settings actions.")
+            empty = QLabel("No recent actions.")
             empty.setWordWrap(True)
             root.addWidget(empty)
         else:
             scroll = QScrollArea(dialog)
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.NoFrame)
-            scroll.setAccessibleName("Recent Settings actions list")
+            scroll.setAccessibleName("Recent actions list")
             rows_widget = QWidget()
-            rows_widget.setAccessibleName("Recent Settings actions")
+            rows_widget.setAccessibleName("Recent actions")
             rows_layout = QVBoxLayout(rows_widget)
             rows_layout.setContentsMargins(0, 0, 0, 0)
             rows_layout.setSpacing(6)
@@ -1542,6 +1551,41 @@ class MainWindow(QMainWindow):
         if hasattr(self, "map_filters_container"):
             self.map_filters_container.setVisible(False)
 
+    def _schedule_feedback_target(self) -> tuple[str | None, str]:
+        profile = getattr(self, "_active_runtime_profile", None)
+        if isinstance(profile, dict):
+            profile_id = profile.get("id")
+            label = str(profile.get("name") or profile.get("label") or "").strip()
+            return (str(profile_id) if profile_id not in (None, "") else None, label or "Radio")
+        return None, "Radio"
+
+    def _publish_schedule_control_feedback(
+        self,
+        *,
+        action_type: str,
+        status: str,
+        summary: str,
+        detail: str = "",
+    ) -> None:
+        service = getattr(self, "action_feedback_service", None)
+        if service is None or not hasattr(service, "publish"):
+            log.debug("MainWindow: action feedback service unavailable for schedule control.")
+            return
+        radio_profile_id, target_label = self._schedule_feedback_target()
+        try:
+            service.publish(
+                scope="scheduler",
+                action_type=action_type,
+                status=status,
+                summary=str(summary or "").strip(),
+                radio_profile_id=radio_profile_id,
+                target_label=target_label,
+                detail=str(detail or "").strip(),
+                source_surface="main_window_schedule_control",
+            )
+        except Exception as e:
+            log.debug("MainWindow: failed to publish schedule control feedback: %s", e)
+
     def _on_resume_schedule_clicked(self) -> None:
         resumed = False
         try:
@@ -1555,7 +1599,7 @@ class MainWindow(QMainWindow):
                         self.on_hold_state_changed(force_reload=False)
                     except Exception:
                         pass
-                    self.scheduler.apply_current_entry(
+                    result = self.scheduler.apply_current_entry(
                         force=True,
                         ignore_wait_prompt=True,
                         ignore_suspend=True,
@@ -1563,11 +1607,39 @@ class MainWindow(QMainWindow):
                         ignore_varac_busy=True,
                         ignore_fldigi_busy=True,
                     )
+                    if result is False:
+                        self._publish_schedule_control_feedback(
+                            action_type="resume_schedule",
+                            status="failed",
+                            summary="Resume failed: schedule control could not return to plan.",
+                            detail="Scheduler reported that the current schedule entry could not be applied.",
+                        )
+                        return
                     resumed = True
-        except Exception:
-            pass
-        if not resumed:
+        except Exception as e:
+            log.debug("MainWindow: resume schedule action failed: %s", e)
+            self._publish_schedule_control_feedback(
+                action_type="resume_schedule",
+                status="failed",
+                summary="Resume failed: schedule control could not return to plan.",
+                detail=str(e) or "Schedule control failed while resuming.",
+            )
             return
+        if not resumed:
+            self._publish_schedule_control_feedback(
+                action_type="resume_schedule",
+                status="blocked",
+                summary="Resume blocked: scheduler is unavailable.",
+                detail="Schedule control could not resume because the scheduler is unavailable.",
+            )
+            return
+        _radio_id, target_label = self._schedule_feedback_target()
+        self._publish_schedule_control_feedback(
+            action_type="resume_schedule",
+            status="succeeded",
+            summary=f"{target_label} returned to schedule.",
+            detail="Schedule control resumed for the active radio.",
+        )
         try:
             self._refresh_scheduler_status_panel()
         except Exception:
@@ -1587,18 +1659,43 @@ class MainWindow(QMainWindow):
     def _on_suspend_schedule_clicked(self) -> None:
         try:
             if not hasattr(self, "scheduler"):
+                self._publish_schedule_control_feedback(
+                    action_type="suspend_schedule",
+                    status="blocked",
+                    summary="Suspend blocked: scheduler is unavailable.",
+                    detail="Schedule control could not pause because the scheduler is unavailable.",
+                )
                 return
             hold_snapshot = suspend_snapshot(self.settings)
             if hold_snapshot.get("active"):
                 self._on_resume_schedule_clicked()
                 return
-            suspend_schedule_hold(self, self.settings, self._selected_sidebar_hold_minutes())
-        except Exception:
-            pass
+            mins = self._selected_sidebar_hold_minutes()
+            suspend_schedule_hold(self, self.settings, mins)
+            _radio_id, target_label = self._schedule_feedback_target()
+            self._publish_schedule_control_feedback(
+                action_type="suspend_schedule",
+                status="succeeded",
+                summary=f"{target_label} suspended for {mins} minutes.",
+                detail=f"Schedule control paused for {mins} minutes.",
+            )
+        except Exception as e:
+            log.debug("MainWindow: suspend schedule action failed: %s", e)
+            self._publish_schedule_control_feedback(
+                action_type="suspend_schedule",
+                status="failed",
+                summary="Suspend failed: schedule control could not pause.",
+                detail=str(e) or "Schedule control failed while suspending.",
+            )
+            return
         self._refresh_scheduler_status_panel()
 
     def _selected_sidebar_hold_minutes(self) -> int:
-        return selected_hold_duration(getattr(self, "suspend_duration_combo", None), self.settings)
+        return selected_hold_duration(
+            getattr(self, "suspend_duration_combo", None),
+            self.settings,
+            getattr(self, "_active_runtime_profile", None),
+        )
 
     def _on_sidebar_hold_duration_changed(self) -> None:
         mins = self._selected_sidebar_hold_minutes()
@@ -1644,7 +1741,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
-                refresh_hold_duration_combo(combo, self.settings)
+                refresh_hold_duration_combo(combo, self.settings, getattr(self, "_active_runtime_profile", None))
             except Exception:
                 continue
 
@@ -1761,7 +1858,12 @@ class MainWindow(QMainWindow):
                 resume_schedule_hold(self, self.settings)
                 return
         if snapshot.get("active"):
-            set_active_hold_duration(self, self.settings, notify=False)
+            set_active_hold_duration(
+                self,
+                self.settings,
+                notify=False,
+                profile=getattr(self, "_active_runtime_profile", None),
+            )
             snapshot = suspend_snapshot(self.settings, allow_reload=False)
         self._dispatch_hold_snapshot(snapshot, force=True, sync_combos=True)
 
@@ -1802,7 +1904,11 @@ class MainWindow(QMainWindow):
                     not self.suspend_duration_combo.view().isVisible()
                     and not self.suspend_duration_combo.hasFocus()
                 ):
-                    refresh_hold_duration_combo(self.suspend_duration_combo, self.settings)
+                    refresh_hold_duration_combo(
+                        self.suspend_duration_combo,
+                        self.settings,
+                        getattr(self, "_active_runtime_profile", None),
+                    )
             except Exception:
                 pass
         control_mode = status.get("control_mode")
@@ -2425,7 +2531,7 @@ class MainWindow(QMainWindow):
     def _build_prompt_hold_duration_combo(self, parent) -> QComboBox:
         combo = QComboBox(parent)
         combo.setToolTip("Temporary schedule hold duration.")
-        refresh_hold_duration_combo(combo, self.settings)
+        refresh_hold_duration_combo(combo, self.settings, getattr(self, "_active_runtime_profile", None))
         return combo
 
     def _attach_prompt_hold_duration_row(self, msg: QMessageBox, combo: QComboBox) -> None:
@@ -2505,7 +2611,7 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                mins = selected_hold_duration(hold_combo, self.settings)
+                mins = selected_hold_duration(hold_combo, self.settings, getattr(self, "_active_runtime_profile", None))
                 set_hold_duration_default(self.settings, mins)
                 self._sync_hold_duration_combos()
                 self.scheduler.resolve_off_schedule("suspend", items=items, minutes=mins)
@@ -2536,7 +2642,7 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                mins = selected_hold_duration(hold_combo, self.settings)
+                mins = selected_hold_duration(hold_combo, self.settings, getattr(self, "_active_runtime_profile", None))
                 set_hold_duration_default(self.settings, mins)
                 self._sync_hold_duration_combos()
                 self.scheduler.resolve_varac_wait("suspend", minutes=mins)
@@ -2576,7 +2682,7 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                mins = selected_hold_duration(hold_combo, self.settings)
+                mins = selected_hold_duration(hold_combo, self.settings, getattr(self, "_active_runtime_profile", None))
                 set_hold_duration_default(self.settings, mins)
                 self._sync_hold_duration_combos()
                 self.scheduler.resolve_coordination_conflict("suspend", minutes=mins)
@@ -3123,7 +3229,28 @@ class MainWindow(QMainWindow):
             bool(policy.get("swap_active", False)),
             str(policy.get("swap_mode", "") or "").strip().lower(),
             str(policy.get("swap_summary", "") or "").strip(),
+            str(profile.get("freq_enforcement_mode", "") or "").strip(),
+            str(profile.get("freq_prompt_interval", "") or "").strip(),
+            str(profile.get("fldigi_enforcement_mode", "") or "").strip(),
+            str(profile.get("fldigi_prompt_interval", "") or "").strip(),
+            str(profile.get("js8_enforcement_mode", "") or "").strip(),
+            str(profile.get("js8_prompt_interval", "") or "").strip(),
+            int(profile.get("schedule_hold_minutes_default", 0) or 0),
         )
+
+    @staticmethod
+    def _runtime_timer_policy_for(profile: object) -> dict[str, object]:
+        if not isinstance(profile, dict):
+            return {}
+        keys = (
+            "freq_enforcement_mode",
+            "freq_prompt_interval",
+            "fldigi_enforcement_mode",
+            "fldigi_prompt_interval",
+            "js8_enforcement_mode",
+            "js8_prompt_interval",
+        )
+        return {key: profile.get(key) for key in keys if str(profile.get(key, "") or "").strip()}
 
     def _primary_runtime_policy(self) -> dict[str, object]:
         manager = getattr(self, "station_runtime_manager", None)
@@ -3287,6 +3414,15 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "scheduler") and self.scheduler is not None and hasattr(self.scheduler, "set_runtime_scheduler_enabled"):
                 self.scheduler.set_runtime_scheduler_enabled(bool(policy.get("scheduler_enabled", True)))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scheduler") and self.scheduler is not None and hasattr(self.scheduler, "set_runtime_timer_policy"):
+                self.scheduler.set_runtime_timer_policy(self._runtime_timer_policy_for(profile))
+        except Exception as e:
+            log.debug("MainWindow: failed to apply runtime timer policy: %s", e)
+        try:
+            self._sync_hold_duration_combos()
         except Exception:
             pass
         try:

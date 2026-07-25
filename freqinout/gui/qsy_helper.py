@@ -5,11 +5,13 @@ import datetime
 import time
 
 from PySide6.QtWidgets import QComboBox, QMessageBox
+from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode
+from freqinout.core.multi_radio_store import DEFAULT_HOLD_DURATION_MINUTES, SUPPORTED_HOLD_DURATION_MINUTES
 
 
-HOLD_DURATION_PRESETS: tuple[int, ...] = (30, 60, 90, 120)
-DEFAULT_HOLD_DURATION_MIN = 30
+HOLD_DURATION_PRESETS: tuple[int, ...] = tuple(sorted(SUPPORTED_HOLD_DURATION_MINUTES))
+DEFAULT_HOLD_DURATION_MIN = DEFAULT_HOLD_DURATION_MINUTES
 HOLD_WARNING_SECONDS = 10 * 60
 HOLD_CRITICAL_SECONDS = 2 * 60
 _HOLD_DURATION_DEFAULT_CACHE: Dict[str, Optional[int]] = {"minutes": None}
@@ -154,20 +156,111 @@ def _coordination_conflict_warning(scheduler, entry: Dict) -> Dict[str, object]:
     return dict(payload) if isinstance(payload, dict) else {}
 
 
+def _qsy_feedback_target(window) -> tuple[Optional[str], str]:
+    profile = getattr(window, "_active_runtime_profile", None) if window is not None else None
+    if isinstance(profile, dict):
+        profile_id = profile.get("id")
+        label = str(profile.get("name") or profile.get("label") or "").strip()
+        return (str(profile_id) if profile_id not in (None, "") else None, label or "Radio")
+    return None, "Radio"
+
+
+def _publish_qsy_blocked_feedback(
+    window,
+    summary: str,
+    detail: str = "",
+    *,
+    source_surface: str = "qsy_helper",
+) -> bool:
+    try:
+        service = getattr(window, "action_feedback_service", None) if window is not None else None
+    except Exception:
+        service = None
+    if service is None or not hasattr(service, "publish"):
+        return False
+    radio_profile_id, target_label = _qsy_feedback_target(window)
+    try:
+        service.publish(
+            scope="radio",
+            action_type="qsy",
+            status="blocked",
+            summary=str(summary or "").strip(),
+            radio_profile_id=radio_profile_id,
+            target_label=target_label,
+            detail=str(detail or "").strip(),
+            source_surface=source_surface,
+        )
+        return True
+    except Exception as e:
+        log.debug("QSY helper: failed to publish blocked feedback: %s", e)
+        return False
+
+
+def _publish_qsy_override_feedback(
+    window,
+    *,
+    status: str,
+    summary: str,
+    detail: str = "",
+) -> bool:
+    try:
+        service = getattr(window, "action_feedback_service", None) if window is not None else None
+    except Exception:
+        service = None
+    if service is None or not hasattr(service, "publish"):
+        return False
+    radio_profile_id, target_label = _qsy_feedback_target(window)
+    try:
+        service.publish(
+            scope="radio",
+            action_type="qsy_override",
+            status=status,
+            summary=str(summary or "").strip(),
+            radio_profile_id=radio_profile_id,
+            target_label=target_label,
+            detail=str(detail or "").strip(),
+            source_surface="qsy_helper_conflict",
+        )
+        return True
+    except Exception as e:
+        log.debug("QSY helper: failed to publish RF conflict feedback: %s", e)
+        return False
+
+
 def perform_qsy(window, meta: Dict) -> bool:
     try:
         scheduler = getattr(window, "scheduler", None)
     except Exception:
         scheduler = None
     if not scheduler:
-        QMessageBox.warning(window, "Scheduler", "Scheduler engine is unavailable.")
+        if not _publish_qsy_blocked_feedback(
+            window,
+            "QSY blocked: scheduler is unavailable.",
+            "Scheduler engine is unavailable.",
+        ):
+            QMessageBox.warning(window, "Scheduler", "Scheduler engine is unavailable.")
         return False
     freq = meta.get("freq")
     if freq is None:
-        QMessageBox.warning(window, "QSY", "Select a frequency before QSY.")
+        if not _publish_qsy_blocked_feedback(
+            window,
+            "QSY blocked: select a frequency first.",
+            "Select a frequency before QSY.",
+        ):
+            QMessageBox.warning(window, "QSY", "Select a frequency before QSY.")
+        return False
+    try:
+        freq_text = f"{float(freq):.3f}"
+    except Exception:
+        if not _publish_qsy_blocked_feedback(
+            window,
+            "QSY blocked: selected frequency is invalid.",
+            f"Frequency value {freq!r} could not be used for QSY.",
+        ):
+            QMessageBox.warning(window, "QSY", "Selected frequency is invalid.")
         return False
     entry = {
-        "frequency": f"{float(freq):.3f}",
+        "frequency": freq_text,
         "band": meta.get("band", ""),
         "mode": meta.get("mode", ""),
         "auto_tune": bool(meta.get("auto_tune", False)),
@@ -177,7 +270,12 @@ def perform_qsy(window, meta: Dict) -> bool:
     }
     block_reason = _shared_ptt_block_reason(scheduler)
     if block_reason:
-        QMessageBox.warning(window, "QSY Blocked", block_reason)
+        if not _publish_qsy_blocked_feedback(
+            window,
+            "QSY blocked: shared PTT path is busy.",
+            block_reason,
+        ):
+            QMessageBox.warning(window, "QSY Blocked", block_reason)
         return False
     conflict = _coordination_conflict_warning(scheduler, entry)
     if bool(conflict.get("warning")):
@@ -191,7 +289,19 @@ def perform_qsy(window, meta: Dict) -> bool:
         msg.addButton("Cancel", QMessageBox.RejectRole)
         msg.exec()
         if msg.clickedButton() != proceed_btn:
+            _publish_qsy_override_feedback(
+                window,
+                status="blocked",
+                summary="QSY cancelled: RF conflict warning.",
+                detail=detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+            )
             return False
+        _publish_qsy_override_feedback(
+            window,
+            status="succeeded",
+            summary="QSY override accepted: RF conflict warning acknowledged.",
+            detail=detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+        )
         try:
             scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
         except TypeError:
@@ -209,7 +319,9 @@ def normalize_hold_minutes(value) -> int:
     return mins if mins in HOLD_DURATION_PRESETS else DEFAULT_HOLD_DURATION_MIN
 
 
-def get_hold_duration_default(settings) -> int:
+def get_hold_duration_default(settings, profile: Optional[Dict[str, object]] = None) -> int:
+    if isinstance(profile, dict) and profile.get("schedule_hold_minutes_default") not in (None, ""):
+        return normalize_hold_minutes(profile.get("schedule_hold_minutes_default"))
     cached = _HOLD_DURATION_DEFAULT_CACHE.get("minutes")
     if isinstance(cached, int):
         return normalize_hold_minutes(cached)
@@ -230,6 +342,12 @@ def set_hold_duration_default(settings, minutes: int) -> int:
     except Exception:
         pass
     return mins
+
+
+def hold_duration_profile_for_window(window) -> Optional[Dict[str, object]]:
+    root = _top_level_hold_window(window)
+    profile = getattr(root, "_active_runtime_profile", None) if root is not None else None
+    return profile if isinstance(profile, dict) else None
 
 
 def _top_level_hold_window(window):
@@ -264,8 +382,8 @@ def notify_hold_duration_default_changed(window) -> None:
         pass
 
 
-def refresh_hold_duration_combo(combo: QComboBox, settings) -> None:
-    current = get_hold_duration_default(settings)
+def refresh_hold_duration_combo(combo: QComboBox, settings, profile: Optional[Dict[str, object]] = None) -> None:
+    current = get_hold_duration_default(settings, profile)
     combo.blockSignals(True)
     combo.clear()
     for mins in HOLD_DURATION_PRESETS:
@@ -275,12 +393,16 @@ def refresh_hold_duration_combo(combo: QComboBox, settings) -> None:
     combo.blockSignals(False)
 
 
-def selected_hold_duration(combo: Optional[QComboBox], settings) -> int:
+def selected_hold_duration(
+    combo: Optional[QComboBox],
+    settings,
+    profile: Optional[Dict[str, object]] = None,
+) -> int:
     if combo is None:
-        return get_hold_duration_default(settings)
+        return get_hold_duration_default(settings, profile)
     data = combo.currentData()
     if data is None:
-        return get_hold_duration_default(settings)
+        return get_hold_duration_default(settings, profile)
     return normalize_hold_minutes(data)
 
 
@@ -344,8 +466,12 @@ def set_active_hold_duration(
     minutes: Optional[int] = None,
     *,
     notify: bool = True,
+    profile: Optional[Dict[str, object]] = None,
 ) -> int:
-    mins = normalize_hold_minutes(minutes if minutes is not None else get_hold_duration_default(settings))
+    active_profile = profile if isinstance(profile, dict) else hold_duration_profile_for_window(window)
+    mins = normalize_hold_minutes(
+        minutes if minutes is not None else get_hold_duration_default(settings, active_profile)
+    )
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=mins)
     try:
         scheduler = getattr(window, "scheduler", None)

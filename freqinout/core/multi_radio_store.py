@@ -41,6 +41,10 @@ SUPPORTED_DEPLOYMENT_MODES = frozenset({"full", "minimal"})
 SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "scheduled", "inactive", "superseded"})
 EFFECTIVE_ASSIGNMENT_STATES = frozenset({"active", "temporary_override"})
 SUPPORTED_SCHEDULER_MODES = frozenset({"full", "simple"})
+DEFAULT_TIMER_ENFORCEMENT_MODE = "On Schedule Change"
+DEFAULT_TIMER_PROMPT_INTERVAL = "Hourly"
+DEFAULT_HOLD_DURATION_MINUTES = 30
+SUPPORTED_HOLD_DURATION_MINUTES = frozenset({30, 60, 90, 120})
 SHARED_PTT_POLICY_TYPE = "shared_ptt"
 SHARED_PTT_POLICY_PRIORITY = 20
 RF_CONFLICT_POLICY_TYPE = "rf_conflict"
@@ -107,6 +111,13 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "message_paths",
         "launch_control_enabled",
         "use_scheduler",
+        "schedule_hold_minutes_default",
+        "freq_enforcement_mode",
+        "freq_prompt_interval",
+        "fldigi_enforcement_mode",
+        "fldigi_prompt_interval",
+        "js8_enforcement_mode",
+        "js8_prompt_interval",
     }
 )
 
@@ -220,6 +231,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_vault_runtime_state_v1 TEXT,
             varac_bbs_vault_last_summary TEXT,
             varac_cluster_member_enabled INTEGER DEFAULT 0,
+            scheduler_enabled INTEGER NOT NULL DEFAULT 1,
+            schedule_hold_minutes_default INTEGER NOT NULL DEFAULT 30,
+            freq_enforcement_mode TEXT NOT NULL DEFAULT 'On Schedule Change',
+            freq_prompt_interval TEXT NOT NULL DEFAULT 'Hourly',
+            fldigi_enforcement_mode TEXT NOT NULL DEFAULT 'On Schedule Change',
+            fldigi_prompt_interval TEXT NOT NULL DEFAULT 'Hourly',
+            js8_enforcement_mode TEXT NOT NULL DEFAULT 'On Schedule Change',
+            js8_prompt_interval TEXT NOT NULL DEFAULT 'Hourly',
             launch_enabled INTEGER NOT NULL DEFAULT 0,
             launch_path TEXT,
             launch_cmd TEXT,
@@ -305,6 +324,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_vault_runtime_state_v1": "TEXT",
             "varac_bbs_vault_last_summary": "TEXT",
             "varac_cluster_member_enabled": "INTEGER DEFAULT 0",
+            "scheduler_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "schedule_hold_minutes_default": "INTEGER NOT NULL DEFAULT 30",
+            "freq_enforcement_mode": "TEXT NOT NULL DEFAULT 'On Schedule Change'",
+            "freq_prompt_interval": "TEXT NOT NULL DEFAULT 'Hourly'",
+            "fldigi_enforcement_mode": "TEXT NOT NULL DEFAULT 'On Schedule Change'",
+            "fldigi_prompt_interval": "TEXT NOT NULL DEFAULT 'Hourly'",
+            "js8_enforcement_mode": "TEXT NOT NULL DEFAULT 'On Schedule Change'",
+            "js8_prompt_interval": "TEXT NOT NULL DEFAULT 'Hourly'",
             "launch_enabled": "INTEGER NOT NULL DEFAULT 0",
             "launch_path": "TEXT",
             "launch_cmd": "TEXT",
@@ -654,6 +681,11 @@ def _coerce_int(value: Any, default: int) -> int:
         return int(value if value not in (None, "") else default)
     except Exception:
         return int(default)
+
+
+def _normalize_hold_duration_minutes(value: Any) -> int:
+    minutes = _coerce_int(value, DEFAULT_HOLD_DURATION_MINUTES)
+    return minutes if minutes in SUPPORTED_HOLD_DURATION_MINUTES else DEFAULT_HOLD_DURATION_MINUTES
 
 
 def _coerce_optional_int(value: Any, default: Optional[int] = None) -> Optional[int]:
@@ -2114,7 +2146,9 @@ def _resolve_device_profile_links_conn(conn: sqlite3.Connection, profile: Mappin
         operating = _record_by_id(conn, "operating_profiles", int(assignment["operating_profile_id"]))
         if operating:
             data["operating_profile_id"] = operating["id"]
-            data["scheduler_enabled"] = _coerce_bool_int(operating.get("scheduler_enabled", 1), True)
+            data["operating_scheduler_enabled"] = _coerce_bool_int(operating.get("scheduler_enabled", 1), True)
+            if data.get("scheduler_enabled") is None:
+                data["scheduler_enabled"] = data["operating_scheduler_enabled"]
             data["use_launch_control"] = _coerce_bool_int(operating.get("use_launch_control", 0), False)
     return data
 
@@ -2309,6 +2343,33 @@ def _legacy_settings_projection_from_device(
     scheduler_enabled = device_profile.get("scheduler_enabled")
     if scheduler_enabled is not None:
         updates["use_scheduler"] = bool(_coerce_bool_int(scheduler_enabled, True))
+    updates["schedule_hold_minutes_default"] = _normalize_hold_duration_minutes(
+        device_profile.get("schedule_hold_minutes_default", DEFAULT_HOLD_DURATION_MINUTES),
+    )
+    updates["freq_enforcement_mode"] = _coerce_text(
+        device_profile.get("freq_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+        DEFAULT_TIMER_ENFORCEMENT_MODE,
+    )
+    updates["freq_prompt_interval"] = _coerce_text(
+        device_profile.get("freq_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+        DEFAULT_TIMER_PROMPT_INTERVAL,
+    )
+    updates["fldigi_enforcement_mode"] = _coerce_text(
+        device_profile.get("fldigi_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+        DEFAULT_TIMER_ENFORCEMENT_MODE,
+    )
+    updates["fldigi_prompt_interval"] = _coerce_text(
+        device_profile.get("fldigi_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+        DEFAULT_TIMER_PROMPT_INTERVAL,
+    )
+    updates["js8_enforcement_mode"] = _coerce_text(
+        device_profile.get("js8_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+        DEFAULT_TIMER_ENFORCEMENT_MODE,
+    )
+    updates["js8_prompt_interval"] = _coerce_text(
+        device_profile.get("js8_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+        DEFAULT_TIMER_PROMPT_INTERVAL,
+    )
     return updates
 
 
@@ -2565,6 +2626,40 @@ def _seed_device_defaults(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
         ),
         "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
+        "scheduler_enabled": _settings_bool(settings_values, "use_scheduler", True),
+        "schedule_hold_minutes_default": _normalize_hold_duration_minutes(
+            settings_values.get("schedule_hold_minutes_default", DEFAULT_HOLD_DURATION_MINUTES)
+        ),
+        "freq_enforcement_mode": _settings_text(
+            settings_values,
+            "freq_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "freq_prompt_interval": _settings_text(
+            settings_values,
+            "freq_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
+        "fldigi_enforcement_mode": _settings_text(
+            settings_values,
+            "fldigi_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "fldigi_prompt_interval": _settings_text(
+            settings_values,
+            "fldigi_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
+        "js8_enforcement_mode": _settings_text(
+            settings_values,
+            "js8_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "js8_prompt_interval": _settings_text(
+            settings_values,
+            "js8_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), False),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -2972,6 +3067,40 @@ def mirror_legacy_settings_into_runtime_active_device(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
         ),
         "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
+        "scheduler_enabled": _settings_bool(settings_values, "use_scheduler", True),
+        "schedule_hold_minutes_default": _normalize_hold_duration_minutes(
+            settings_values.get("schedule_hold_minutes_default", DEFAULT_HOLD_DURATION_MINUTES)
+        ),
+        "freq_enforcement_mode": _settings_text(
+            settings_values,
+            "freq_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "freq_prompt_interval": _settings_text(
+            settings_values,
+            "freq_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
+        "fldigi_enforcement_mode": _settings_text(
+            settings_values,
+            "fldigi_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "fldigi_prompt_interval": _settings_text(
+            settings_values,
+            "fldigi_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
+        "js8_enforcement_mode": _settings_text(
+            settings_values,
+            "js8_enforcement_mode",
+            DEFAULT_TIMER_ENFORCEMENT_MODE,
+        ),
+        "js8_prompt_interval": _settings_text(
+            settings_values,
+            "js8_prompt_interval",
+            DEFAULT_TIMER_PROMPT_INTERVAL,
+        ),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), False),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -3416,6 +3545,58 @@ class MultiRadioStore:
             "varac_bbs_vault_last_summary": _coerce_text(
                 payload.get("varac_bbs_vault_last_summary", (existing or {}).get("varac_bbs_vault_last_summary", "")),
                 "",
+            ),
+            "scheduler_enabled": _coerce_bool_int(
+                payload.get("scheduler_enabled", (existing or {}).get("scheduler_enabled", 1)),
+                True,
+            ),
+            "schedule_hold_minutes_default": _normalize_hold_duration_minutes(
+                payload.get(
+                    "schedule_hold_minutes_default",
+                    (existing or {}).get("schedule_hold_minutes_default", DEFAULT_HOLD_DURATION_MINUTES),
+                ),
+            ),
+            "freq_enforcement_mode": _coerce_text(
+                payload.get(
+                    "freq_enforcement_mode",
+                    (existing or {}).get("freq_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+                ),
+                DEFAULT_TIMER_ENFORCEMENT_MODE,
+            ),
+            "freq_prompt_interval": _coerce_text(
+                payload.get(
+                    "freq_prompt_interval",
+                    (existing or {}).get("freq_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+                ),
+                DEFAULT_TIMER_PROMPT_INTERVAL,
+            ),
+            "fldigi_enforcement_mode": _coerce_text(
+                payload.get(
+                    "fldigi_enforcement_mode",
+                    (existing or {}).get("fldigi_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+                ),
+                DEFAULT_TIMER_ENFORCEMENT_MODE,
+            ),
+            "fldigi_prompt_interval": _coerce_text(
+                payload.get(
+                    "fldigi_prompt_interval",
+                    (existing or {}).get("fldigi_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+                ),
+                DEFAULT_TIMER_PROMPT_INTERVAL,
+            ),
+            "js8_enforcement_mode": _coerce_text(
+                payload.get(
+                    "js8_enforcement_mode",
+                    (existing or {}).get("js8_enforcement_mode", DEFAULT_TIMER_ENFORCEMENT_MODE),
+                ),
+                DEFAULT_TIMER_ENFORCEMENT_MODE,
+            ),
+            "js8_prompt_interval": _coerce_text(
+                payload.get(
+                    "js8_prompt_interval",
+                    (existing or {}).get("js8_prompt_interval", DEFAULT_TIMER_PROMPT_INTERVAL),
+                ),
+                DEFAULT_TIMER_PROMPT_INTERVAL,
             ),
             "launch_enabled": _coerce_bool_int(payload.get("launch_enabled", (existing or {}).get("launch_enabled", 0)), False),
             "launch_path": _coerce_text(payload.get("launch_path", (existing or {}).get("launch_path", "")), ""),

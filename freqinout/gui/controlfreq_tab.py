@@ -224,7 +224,7 @@ class ControlFreqTab(QWidget):
         self._message_summary_ready.connect(self._on_message_summary_ready)
         self.destroyed.connect(lambda *_args: self._shutdown_message_summary_executor())
         self._build_ui()
-        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
         self._restore_ui_state()
         self._apply_theme()
         self._refresh_all()
@@ -2581,7 +2581,7 @@ class ControlFreqTab(QWidget):
         except Exception:
             pass
         og_list = load_operating_groups(self.settings)
-        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
         current = selected_qsy_meta(self.freq_combo)
         current_freq = None
         try:
@@ -3220,6 +3220,17 @@ class ControlFreqTab(QWidget):
             return None
         return None
 
+    def _selected_qsy_pending(self, active: Optional[float]) -> bool:
+        meta = selected_qsy_meta(self.freq_combo)
+        if not meta:
+            return False
+        try:
+            selected = float(meta.get("freq", 0.0))
+            return active is None or abs(selected - float(active)) > 0.0005
+        except Exception as e:
+            log.debug("ControlFreq: selected QSY metadata could not be compared: %s", e)
+            return True
+
     def _update_frequency_action_styles(
         self,
         scheduled: Optional[float] = None,
@@ -3235,10 +3246,11 @@ class ControlFreqTab(QWidget):
             scheduled = current_scheduler_freq(self.window())
         if active is None:
             active = self._get_active_frequency_mhz()
+        qsy_pending = self._selected_qsy_pending(active)
         hold_snapshot = self._hold_state_snapshot if isinstance(self._hold_state_snapshot, dict) else None
         if not isinstance(hold_snapshot, dict):
             hold_snapshot = suspend_snapshot(self.settings)
-        if hold_snapshot.get("active"):
+        if hold_snapshot.get("active") and not qsy_pending:
             remaining_sec = hold_snapshot.get("remaining_sec")
             self._primary_freq_action_mode = "resume"
             self.freq_action_btn.setText(active_hold_button_text(remaining_sec))
@@ -3261,14 +3273,6 @@ class ControlFreqTab(QWidget):
                     mismatch = bool(status.get("off_schedule"))
         except Exception:
             pass
-        qsy_pending = False
-        meta = selected_qsy_meta(self.freq_combo)
-        if meta:
-            try:
-                selected = float(meta.get("freq", 0.0))
-                qsy_pending = active is None or abs(selected - float(active)) > 0.0005
-            except Exception:
-                qsy_pending = True
         if qsy_pending:
             self._primary_freq_action_mode = "qsy"
             mins = self._selected_hold_minutes()
@@ -3305,7 +3309,7 @@ class ControlFreqTab(QWidget):
         self._on_freq_set_clicked()
 
     def _selected_hold_minutes(self) -> int:
-        return selected_hold_duration(self.hold_duration_combo, self.settings)
+        return selected_hold_duration(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
 
     def _on_hold_duration_changed(self) -> None:
         mins = self._selected_hold_minutes()
@@ -3320,10 +3324,18 @@ class ControlFreqTab(QWidget):
                 not self.hold_duration_combo.view().isVisible()
                 and not self.hold_duration_combo.hasFocus()
             ):
-                refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+                refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
         except Exception:
             pass
         self._update_frequency_action_styles()
+
+    def _runtime_hold_duration_profile(self) -> Optional[Dict[str, object]]:
+        try:
+            root = self.window()
+        except Exception:
+            root = None
+        profile = getattr(root, "_active_runtime_profile", None) if root is not None else None
+        return profile if isinstance(profile, dict) else None
 
     def _update_active_label_style(
         self, scheduled: Optional[float], active: Optional[float]
@@ -3339,18 +3351,95 @@ class ControlFreqTab(QWidget):
             color = theme["warning"] if mismatch else theme.get("text_muted", theme["text"])
             self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {color};")
 
+    def _qsy_feedback_target(self) -> Tuple[Optional[str], str]:
+        try:
+            root = self.window()
+        except Exception:
+            root = None
+        profile = getattr(root, "_active_runtime_profile", None) if root is not None else None
+        if isinstance(profile, dict):
+            profile_id = profile.get("id")
+            label = str(profile.get("name") or profile.get("label") or "").strip()
+            return (str(profile_id) if profile_id not in (None, "") else None, label or "Radio")
+        return None, "Radio"
+
+    @staticmethod
+    def _qsy_feedback_frequency_label(meta: Dict[str, Any]) -> str:
+        try:
+            freq = f"{float(meta.get('freq')):.3f}"
+        except Exception:
+            freq = str(meta.get("freq") or "").strip()
+        mode = str(meta.get("mode") or "").strip()
+        return f"{freq} {mode}".strip()
+
+    def _publish_qsy_action_feedback(self, meta: Dict[str, Any], minutes: int, *, source_surface: str) -> None:
+        try:
+            root = self.window()
+            service = getattr(root, "action_feedback_service", None) if root is not None else None
+        except Exception:
+            service = None
+        if service is None or not hasattr(service, "publish"):
+            log.debug("ControlFreq: action feedback service unavailable for QSY success.")
+            return
+        radio_profile_id, target_label = self._qsy_feedback_target()
+        freq_label = self._qsy_feedback_frequency_label(meta)
+        summary_target = target_label or "Radio"
+        summary = f"QSY sent to {summary_target}: {freq_label}" if freq_label else f"QSY sent to {summary_target}"
+        detail = f"Frequency changed and scheduling paused for {int(minutes)} minutes."
+        try:
+            service.publish(
+                scope="radio",
+                action_type="qsy",
+                status="succeeded",
+                summary=summary,
+                radio_profile_id=radio_profile_id,
+                target_label=target_label,
+                detail=detail,
+                source_surface=source_surface,
+            )
+        except Exception as e:
+            log.debug("ControlFreq: failed to publish QSY action feedback: %s", e)
+
+    def _publish_qsy_blocked_feedback(self, summary: str, detail: str = "", *, source_surface: str) -> None:
+        try:
+            root = self.window()
+            service = getattr(root, "action_feedback_service", None) if root is not None else None
+        except Exception:
+            service = None
+        if service is None or not hasattr(service, "publish"):
+            log.debug("ControlFreq: action feedback service unavailable for QSY blocked feedback.")
+            return
+        radio_profile_id, target_label = self._qsy_feedback_target()
+        try:
+            service.publish(
+                scope="radio",
+                action_type="qsy",
+                status="blocked",
+                summary=str(summary or "").strip(),
+                radio_profile_id=radio_profile_id,
+                target_label=target_label,
+                detail=str(detail or "").strip(),
+                source_surface=source_surface,
+            )
+        except Exception as e:
+            log.debug("ControlFreq: failed to publish QSY blocked feedback: %s", e)
+
     def _on_freq_set_clicked(self) -> None:
         control_via = (self.settings.get("control_via", "") or "").strip()
         if control_via not in {"FLRig", "RIGCTLD", "JS8Call"}:
-            QMessageBox.information(
-                self,
-                "Frequency Control",
+            self._publish_qsy_blocked_feedback(
+                "QSY blocked: frequency control is not configured.",
                 "Frequency control is available when Control Via is FLRig, RIGCTLD, or JS8Call.",
+                source_surface="controlfreq",
             )
             return
         meta = selected_qsy_meta(self.freq_combo)
         if not meta:
-            QMessageBox.warning(self, "Frequency Control", "Select a frequency first.")
+            self._publish_qsy_blocked_feedback(
+                "QSY blocked: select a frequency first.",
+                "Choose a ControlFreq frequency before sending QSY.",
+                source_surface="controlfreq",
+            )
             return
         mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
         ok = mins > 0
@@ -3363,11 +3452,7 @@ class ControlFreqTab(QWidget):
                 button_style("success" if ok else "warning", theme)
             )
         if ok:
-            QMessageBox.information(
-                self,
-                "QSY Applied",
-                f"Frequency changed and scheduling paused for {mins} minutes.",
-            )
+            self._publish_qsy_action_feedback(meta, mins, source_surface="controlfreq")
             QTimer.singleShot(0, self._refresh_frequency_control)
             QTimer.singleShot(800, self._refresh_frequency_control)
         else:
@@ -3665,18 +3750,18 @@ class ControlFreqTab(QWidget):
             return
         meta = self._schedule_qsy_meta(entry)
         if not meta:
-            QMessageBox.warning(self, "Frequency Control", "No matching operating-group frequency is configured.")
+            self._publish_qsy_blocked_feedback(
+                "QSY blocked: no matching frequency is configured.",
+                "No matching operating-group frequency is configured for this schedule row.",
+                source_surface="controlfreq_schedule",
+            )
             return
         mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
         ok = mins > 0
         if ok:
             self._force_hero_resync = True
             self._refresh_frequency_control()
-            QMessageBox.information(
-                self,
-                "QSY Applied",
-                f"Frequency changed and scheduling paused for {mins} minutes.",
-            )
+            self._publish_qsy_action_feedback(meta, mins, source_surface="controlfreq_schedule")
 
             def _refresh_qsy_hero() -> None:
                 self._force_hero_resync = True

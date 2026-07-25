@@ -182,7 +182,7 @@ class DeviceSettingsProxy:
             "sdr_host": str(profile.get("sdr_host", "") or "").strip(),
             "sdr_port": profile.get("sdr_port"),
             "message_paths": {},
-            "launch_control_enabled": bool(int(profile.get("launch_enabled", 1) or 0)),
+            "launch_control_enabled": bool(int(profile.get("launch_enabled", 0) or 0)),
         }
         flrig_path = str(profile.get("flrig_path", "") or "").strip()
         if flrig_path:
@@ -502,7 +502,7 @@ class DeviceRuntime:
             "use_messages": _row_bool(operating.get("use_messages", 1), True),
             "use_map": _row_bool(operating.get("use_map", 1), True),
             "use_background_ingest": _row_bool(operating.get("use_background_ingest", 1), True),
-            "use_launch_control": _row_bool(operating.get("use_launch_control", 1), True),
+            "use_launch_control": _row_bool(operating.get("use_launch_control", 0), False),
             "use_net_control_tabs": _row_bool(operating.get("use_net_control_tabs", 1), True),
         }
 
@@ -782,7 +782,7 @@ class DeviceRuntime:
             use_messages=bool(policy.get("use_messages", True)),
             use_map=bool(policy.get("use_map", True)),
             use_background_ingest=bool(policy.get("use_background_ingest", True)),
-            use_launch_control=bool(policy.get("use_launch_control", True)),
+            use_launch_control=bool(policy.get("use_launch_control", False)),
             use_net_control_tabs=bool(policy.get("use_net_control_tabs", True)),
             control_ready=bool(control_ready),
             overall_state=overall_state,
@@ -1413,7 +1413,7 @@ class StationRuntimeManager:
                 "use_messages": True,
                 "use_map": True,
                 "use_background_ingest": True,
-                "use_launch_control": True,
+                "use_launch_control": False,
                 "use_net_control_tabs": True,
                 "swap_active": False,
                 "swap_mode": "",

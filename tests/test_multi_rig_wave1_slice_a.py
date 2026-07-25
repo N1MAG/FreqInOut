@@ -72,6 +72,7 @@ def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path)
     assert devices[0]["launch_enabled"] == 0
     assert devices[0]["flrig_port"] == 12345
     assert devices[0]["js8_port"] == 2442
+    assert devices[0]["schedule_hold_minutes_default"] == 30
     assert len(operating) == 1
     assert operating[0]["system_key"] == "default_operating"
     assert operating[0]["scheduler_enabled"] == 1
@@ -539,6 +540,14 @@ def test_migration_key_map_targets_exist_in_schema():
             "rig_port",
             "launch_path",
             "launch_enabled",
+            "scheduler_enabled",
+            "schedule_hold_minutes_default",
+            "freq_enforcement_mode",
+            "freq_prompt_interval",
+            "fldigi_enforcement_mode",
+            "fldigi_prompt_interval",
+            "js8_enforcement_mode",
+            "js8_prompt_interval",
             "flmsg_path",
             "flmsg_message_path",
             "flamp_path",
@@ -583,6 +592,143 @@ def test_migration_key_map_targets_exist_in_schema():
     for table, columns in expected_columns.items():
         spec_columns = set(SETTINGS_TABLE_SPECS[table]["columns"])
         assert columns <= spec_columns
+
+
+def test_device_profile_timer_policy_is_seeded_from_legacy_settings(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(
+        db_path,
+        {
+            "control_via": "FLRig",
+            "use_scheduler": False,
+            "schedule_hold_minutes_default": 60,
+            "freq_enforcement_mode": "Prompt",
+            "freq_prompt_interval": "Every 15 minutes",
+            "fldigi_enforcement_mode": "Disabled",
+            "fldigi_prompt_interval": "Every 30 minutes",
+            "js8_enforcement_mode": "Prompt",
+            "js8_prompt_interval": "Every 5 minutes",
+        },
+    )
+
+    settings = SettingsManager()
+    result = ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+    store = MultiRadioStore(settings_db_path())
+    devices = store.list_device_profiles()
+
+    assert result.applied is True
+    assert len(devices) == 1
+    device = devices[0]
+    assert device["scheduler_enabled"] == 0
+    assert device["schedule_hold_minutes_default"] == 60
+    assert device["freq_enforcement_mode"] == "Prompt"
+    assert device["freq_prompt_interval"] == "Every 15 minutes"
+    assert device["fldigi_enforcement_mode"] == "Disabled"
+    assert device["fldigi_prompt_interval"] == "Every 30 minutes"
+    assert device["js8_enforcement_mode"] == "Prompt"
+    assert device["js8_prompt_interval"] == "Every 5 minutes"
+
+
+def test_timer_policy_mirrors_between_legacy_settings_and_active_device(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    settings.set("use_scheduler", False)
+    settings.set("schedule_hold_minutes_default", 90)
+    settings.set("freq_enforcement_mode", "Prompt")
+    settings.set("freq_prompt_interval", "Every 15 minutes")
+    settings.set("fldigi_enforcement_mode", "Disabled")
+    settings.set("fldigi_prompt_interval", "Every 30 minutes")
+    settings.set("js8_enforcement_mode", "Prompt")
+    settings.set("js8_prompt_interval", "Every 5 minutes")
+
+    mirrored = mirror_legacy_settings_into_runtime_active_device(
+        settings._conn,  # type: ignore[arg-type]
+        settings.all(),
+        keys_changed={"freq_enforcement_mode"},
+    )
+    assert mirrored is not None
+
+    store = MultiRadioStore(settings_db_path())
+    device = store.list_device_profiles()[0]
+    assert device["scheduler_enabled"] == 0
+    assert device["schedule_hold_minutes_default"] == 90
+    assert device["freq_enforcement_mode"] == "Prompt"
+    assert device["freq_prompt_interval"] == "Every 15 minutes"
+    assert device["fldigi_enforcement_mode"] == "Disabled"
+    assert device["fldigi_prompt_interval"] == "Every 30 minutes"
+    assert device["js8_enforcement_mode"] == "Prompt"
+    assert device["js8_prompt_interval"] == "Every 5 minutes"
+
+    store.save_device_profile(
+        {
+            **device,
+            "scheduler_enabled": 1,
+            "schedule_hold_minutes_default": 120,
+            "freq_enforcement_mode": "On Schedule Change",
+            "freq_prompt_interval": "Hourly",
+            "fldigi_enforcement_mode": "Prompt",
+            "fldigi_prompt_interval": "Every 10 minutes",
+            "js8_enforcement_mode": "Disabled",
+            "js8_prompt_interval": "Hourly",
+        }
+    )
+    projected = store.sync_runtime_active_device_to_legacy_settings(int(device["id"]))
+    settings.reload()
+
+    assert projected is not None
+    assert settings.get("use_scheduler") is True
+    assert settings.get("schedule_hold_minutes_default") == 120
+    assert settings.get("freq_enforcement_mode") == "On Schedule Change"
+    assert settings.get("freq_prompt_interval") == "Hourly"
+    assert settings.get("fldigi_enforcement_mode") == "Prompt"
+    assert settings.get("fldigi_prompt_interval") == "Every 10 minutes"
+    assert settings.get("js8_enforcement_mode") == "Disabled"
+    assert settings.get("js8_prompt_interval") == "Hourly"
+
+
+def test_hold_duration_normalizes_at_store_boundaries(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(
+        db_path,
+        {
+            "control_via": "FLRig",
+            "schedule_hold_minutes_default": 45,
+        },
+    )
+
+    settings = SettingsManager()
+    result = ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+    store = MultiRadioStore(settings_db_path())
+    device = store.list_device_profiles()[0]
+
+    assert result.applied is True
+    assert device["schedule_hold_minutes_default"] == 30
+
+    settings.set("schedule_hold_minutes_default", 45)
+    mirrored = mirror_legacy_settings_into_runtime_active_device(
+        settings._conn,  # type: ignore[arg-type]
+        settings.all(),
+        keys_changed={"schedule_hold_minutes_default"},
+    )
+    assert mirrored is not None
+    device = store.list_device_profiles()[0]
+    assert device["schedule_hold_minutes_default"] == 30
+
+    saved = store.save_device_profile({**device, "schedule_hold_minutes_default": 45})
+    assert saved["schedule_hold_minutes_default"] == 30
+
+    projected = store.sync_runtime_active_device_to_legacy_settings(int(saved["id"]))
+    settings.reload()
+    assert projected is not None
+    assert settings.get("schedule_hold_minutes_default") == 30
 
 
 def test_default_seed_is_idempotent(monkeypatch, tmp_path):
