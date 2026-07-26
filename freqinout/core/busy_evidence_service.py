@@ -33,6 +33,8 @@ BUSY_PRIORITY = {
     "js8_tx": 30,
     "fldigi_tx": 31,
     "wsjtx_tx": 32,
+    "varac_busy": 33,
+    "varac_waiting_for_frequency": 34,
     "control_backend_busy": 40,
     "control_backend_unreachable": 41,
     "control_backend_unknown": 42,

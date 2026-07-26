@@ -403,6 +403,20 @@ class PttConflictEvidence:
 
 
 @dataclass(frozen=True)
+class BusyState:
+    radio_profile_id: str
+    busy: bool = False
+    severity: str = "none"
+    source_family: str = ""
+    reason_code: str = ""
+    summary: str = ""
+    top_evidence_id: Optional[str] = None
+    evidence_ids: tuple[str, ...] = ()
+    ptt_conflict_ids: tuple[str, ...] = ()
+    updated_at_utc: str = field(default_factory=_utc_now_iso)
+
+
+@dataclass(frozen=True)
 class StationHealthIssue:
     id: str
     scope: str

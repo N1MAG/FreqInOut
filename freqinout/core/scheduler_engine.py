@@ -967,18 +967,28 @@ class SchedulerEngine(QObject):
                 key: ts for key, ts in self._scheduler_event_last.items() if ts >= cutoff
             }
         self._scheduler_event_last[sig] = now_ts
+        radio_profile_id = ""
+        try:
+            radio_id = self._primary_manual_control_radio_id()
+            radio_profile_id = f"radio_{int(radio_id)}" if radio_id is not None else ""
+        except Exception:
+            radio_profile_id = ""
+        clean_metadata = {k: v for k, v in metadata.items() if v is not None}
+        if radio_profile_id and "radio_profile_id" not in clean_metadata:
+            clean_metadata["radio_profile_id"] = radio_profile_id
         record_scheduler_event(
             event_type=event_type,
             code=code,
             source=source_text,
             action=action,
             detail=detail,
+            radio_profile_id=radio_profile_id,
             frequency_hz=freq_hz,
             band=band_text,
             mode=mode_text,
             vfo=vfo_text,
             schedule_key=schedule_key,
-            metadata={k: v for k, v in metadata.items() if v is not None},
+            metadata=clean_metadata,
         )
 
     def _clear_scheduler_health_issue(self, name: str, **metadata) -> None:
@@ -1902,6 +1912,7 @@ class SchedulerEngine(QObject):
         self._fldigi_busy_check_in_flight = False
         self._fldigi_busy_check_token += 1
         self._fldigi_busy_check_next_ts = 0.0
+        self._clear_fldigi_busy_evidence()
         self._clear_scheduler_health_issue("fldigi-busy")
 
     def _queue_fldigi_busy_check(
@@ -2097,6 +2108,7 @@ class SchedulerEngine(QObject):
             return True, "checking FLDigi receive activity"
         checked_ts = float(status.get("checked_ts") or 0.0)
         if checked_ts <= 0.0 or now_ts - checked_ts >= self._fldigi_busy_check_interval_s:
+            self._clear_fldigi_busy_evidence()
             self._fldigi_busy_check_result = None
             self._queue_fldigi_busy_check(
                 entry_key=entry_key,
@@ -2105,11 +2117,13 @@ class SchedulerEngine(QObject):
             )
             return True, "checking FLDigi receive activity"
         if status.get("error"):
+            self._clear_fldigi_busy_evidence()
             return False, None
         busy = bool(status.get("busy"))
         if not busy:
             self._fldigi_busy_since_ts = None
             self._fldigi_busy_last_reason = None
+            self._clear_fldigi_busy_evidence()
             self._clear_scheduler_health_issue("fldigi-busy")
             return False, None
         if self._fldigi_busy_since_ts is None:
@@ -2165,6 +2179,7 @@ class SchedulerEngine(QObject):
             hold_age_s=round(hold_age, 1),
             source=source,
         )
+        self._publish_fldigi_busy_evidence(reason=reason)
         self._record_scheduler_event(
             "hold",
             "fldigi_busy",
@@ -2193,6 +2208,7 @@ class SchedulerEngine(QObject):
         if protected_busy:
             ignore_busy = False
         if ignore_busy or not busy:
+            self._clear_external_busy_evidence(key)
             if key == "js8":
                 self._js8_busy_entry_key = None
                 self._js8_busy_since_ts = None
@@ -2205,8 +2221,10 @@ class SchedulerEngine(QObject):
                 self._varac_wait_since_ts = None
             return False, None
         if (self._manual_net_fldigi_active or self._manual_net_js8_active) and not protected_busy:
+            self._clear_external_busy_evidence(key)
             return False, None
         if (source or "").upper() == "NET" and not protected_busy:
+            self._clear_external_busy_evidence(key)
             return False, None
 
         now_ts = now_ts if now_ts is not None else time.time()
@@ -2236,6 +2254,11 @@ class SchedulerEngine(QObject):
         hold_age = max(0.0, now_ts - since)
         detail_reason = reason or "busy"
         if protected_busy:
+            self._publish_external_busy_evidence(
+                kind=key,
+                reason=detail_reason,
+                protected_busy=True,
+            )
             self._record_scheduler_health_issue(
                 health_key,
                 f"holding schedule change because {label} protected traffic is active ({detail_reason})",
@@ -2257,6 +2280,7 @@ class SchedulerEngine(QObject):
             )
             return True, detail_reason
         if hold_age >= self._external_busy_watchdog_s:
+            self._clear_external_busy_evidence(key)
             log.warning(
                 "SchedulerEngine: %s busy watchdog breaking away after %.1fs hold (reason=%s).",
                 label,
@@ -2288,6 +2312,11 @@ class SchedulerEngine(QObject):
             setattr(self, since_attr, None)
             return False, None
 
+        self._publish_external_busy_evidence(
+            kind=key,
+            reason=detail_reason,
+            protected_busy=False,
+        )
         self._record_scheduler_health_issue(
             health_key,
             f"holding schedule change because {label} is busy ({detail_reason})",
@@ -2664,6 +2693,93 @@ class SchedulerEngine(QObject):
 
     def _local_ptt_busy_evidence_id(self, radio_id: int) -> str:
         return f"busy_local_ptt_{int(radio_id)}"
+
+    def _external_busy_evidence_id(self, kind: str, radio_id: int) -> str:
+        normalized = (kind or "external").strip().lower().replace("-", "_")
+        return f"busy_{normalized}_{int(radio_id)}"
+
+    def _fldigi_busy_evidence_id(self, radio_id: int) -> str:
+        return f"busy_fldigi_{int(radio_id)}"
+
+    @staticmethod
+    def _external_busy_evidence_fields(kind: str, *, protected_busy: bool = False) -> Tuple[str, str]:
+        key = (kind or "").strip().lower()
+        if key == "js8":
+            return "js8", "js8_tx"
+        if key == "varac-wait":
+            return "varac", "varac_waiting_for_frequency"
+        if key == "varac" and protected_busy:
+            return "varac", "varac_transfer"
+        if key == "varac":
+            return "varac", "varac_busy"
+        return "unknown", "control_backend_busy"
+
+    def _publish_external_busy_evidence(
+        self,
+        *,
+        kind: str,
+        reason: str,
+        protected_busy: bool = False,
+    ) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        source_family, reason_code = self._external_busy_evidence_fields(kind, protected_busy=protected_busy)
+        detail = str(reason or "busy").strip() or "busy"
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            self._busy_evidence_service.publish(
+                BusyEvidence(
+                    id=self._external_busy_evidence_id(kind, radio_id),
+                    radio_profile_id=f"radio_{radio_id}",
+                    source_family=source_family,
+                    reason_code=reason_code,
+                    severity="hard" if protected_busy else "soft",
+                    evidence_timestamp_utc=now,
+                    description=detail,
+                )
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to publish external busy evidence: %s", exc)
+
+    def _clear_external_busy_evidence(self, kind: str) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._busy_evidence_service.clear(self._external_busy_evidence_id(kind, radio_id))
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear external busy evidence: %s", exc)
+
+    def _publish_fldigi_busy_evidence(self, *, reason: str) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        detail = str(reason or "RX activity").strip() or "RX activity"
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            self._busy_evidence_service.publish(
+                BusyEvidence(
+                    id=self._fldigi_busy_evidence_id(radio_id),
+                    radio_profile_id=f"radio_{radio_id}",
+                    source_family="fl",
+                    reason_code="receive_decode",
+                    severity="soft",
+                    evidence_timestamp_utc=now,
+                    description=detail,
+                )
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to publish FLDigi busy evidence: %s", exc)
+
+    def _clear_fldigi_busy_evidence(self) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._busy_evidence_service.clear(self._fldigi_busy_evidence_id(radio_id))
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear FLDigi busy evidence: %s", exc)
 
     def _publish_local_ptt_busy_evidence(self, *, source: str) -> None:
         radio_id = self._primary_manual_control_radio_id()
