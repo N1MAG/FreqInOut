@@ -27,6 +27,7 @@ SEVERITIES = frozenset({"hard", "soft"})
 BUSY_PRIORITY = {
     "ptt_active": 10,
     "ptt_unknown_unsafe": 11,
+    "shared_ptt_interlock": 12,
     "varac_transfer": 20,
     "protected_file_transfer": 21,
     "js8_tx": 30,

@@ -11,9 +11,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from freqinout.core.logger import log
+from freqinout.core.busy_evidence_service import BusyEvidenceService
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.ptt_conflict_service import PttConflictService
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.scheduler_events import record_scheduler_event
 from freqinout.core.schedule_targeting import (
@@ -21,7 +23,7 @@ from freqinout.core.schedule_targeting import (
     schedule_row_matches_target_context,
 )
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.shared_state import SchedulerManualTarget
+from freqinout.core.shared_state import BusyEvidence, PttConflictEvidence, SchedulerManualTarget
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -274,6 +276,8 @@ class SchedulerEngine(QObject):
         self.settings = SettingsManager()
         self._software_status = SoftwareStatusService(self.settings)
         self._manual_control_service = SchedulerManualControlService(MultiRadioStore(settings_db_path()))
+        self._busy_evidence_service = BusyEvidenceService(MultiRadioStore(settings_db_path()))
+        self._ptt_conflict_service = PttConflictService(MultiRadioStore(settings_db_path()))
         self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
         self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
@@ -2654,6 +2658,72 @@ class SchedulerEngine(QObject):
             self._manual_control_service.resume(radio_id)
         except Exception as exc:
             log.debug("SchedulerEngine: failed to persist manual resume state: %s", exc)
+
+    def _shared_ptt_busy_evidence_id(self, radio_id: int) -> str:
+        return f"busy_shared_ptt_{int(radio_id)}"
+
+    def _publish_shared_ptt_block_evidence(
+        self,
+        shared_ptt: Dict[str, object],
+        *,
+        source: str,
+    ) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        ptt_group = str(shared_ptt.get("ptt_group", "") or "").strip()
+        if not ptt_group:
+            return
+        owner_id = shared_ptt.get("owner_device_profile_id")
+        try:
+            owner_device_id = int(owner_id) if owner_id not in (None, "") else None
+        except Exception:
+            owner_device_id = None
+        reason = str(shared_ptt.get("reason", "") or "").strip() or f"Shared PTT group {ptt_group} is active."
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            self._busy_evidence_service.publish(
+                BusyEvidence(
+                    id=self._shared_ptt_busy_evidence_id(radio_id),
+                    radio_profile_id=f"radio_{radio_id}",
+                    source_family="ptt",
+                    reason_code="shared_ptt_interlock",
+                    severity="hard",
+                    evidence_timestamp_utc=now,
+                    description=reason,
+                )
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to publish shared PTT busy evidence: %s", exc)
+        try:
+            self._ptt_conflict_service.publish(
+                PttConflictEvidence(
+                    id=f"ptt_shared_{int(radio_id)}",
+                    ptt_group=ptt_group,
+                    requested_radio_id=f"radio_{radio_id}",
+                    blocking_radio_id=f"radio_{owner_device_id}" if owner_device_id is not None else None,
+                    severity="hard",
+                    source="scheduler_shared_ptt",
+                    created_at_utc=now,
+                )
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to publish shared PTT conflict evidence: %s", exc)
+
+    def _clear_shared_ptt_block_evidence(self) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._busy_evidence_service.clear(self._shared_ptt_busy_evidence_id(radio_id))
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear shared PTT busy evidence: %s", exc)
+        try:
+            for evidence in self._ptt_conflict_service.active_for_radio(f"radio_{radio_id}"):
+                if evidence.source == "scheduler_shared_ptt":
+                    self._ptt_conflict_service.clear(evidence.id)
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear shared PTT conflict evidence: %s", exc)
 
     def _last_entry_matches_schedule_identity(self, entry: Optional[Dict]) -> bool:
         key = self._last_entry_key
@@ -5393,6 +5463,7 @@ class SchedulerEngine(QObject):
             shared_reason = str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
             busy_reasons.append(shared_reason)
             ptt_hold_active = True
+            self._publish_shared_ptt_block_evidence(shared_ptt, source=source)
             self._record_scheduler_health_issue(
                 "flrig-ptt",
                 f"holding schedule change because {shared_reason}",
@@ -5413,6 +5484,8 @@ class SchedulerEngine(QObject):
                 throttle_sec=15.0,
                 control_mode=control_mode,
             )
+        else:
+            self._clear_shared_ptt_block_evidence()
         if not ptt_hold_active:
             self._clear_scheduler_health_issue("flrig-ptt")
             if self._last_ptt_active and not ptt_state_known:
