@@ -14,10 +14,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QLabel,
     QPushButton,
     QSizePolicy,
     QTableWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -864,6 +866,8 @@ def test_settings_autofill_feedback_helper_publishes_configure_event() -> None:
         status="partial",
         summary="Auto-fill updated JS8Call: Filled 1 field(s). Not found: 1.",
         detail="JS8Call DIRECTED.TXT: filled /tmp/DIRECTED.TXT",
+        section="js8",
+        operation="result",
     )
 
     events = service.recent(scope="settings")
@@ -873,7 +877,7 @@ def test_settings_autofill_feedback_helper_publishes_configure_event() -> None:
     assert events[0].summary.startswith("Auto-fill updated JS8Call")
     assert events[0].radio_profile_id == "7"
     assert events[0].target_label == "DX10"
-    assert events[0].source_surface == "settings"
+    assert events[0].source_surface == "settings.configure_automatically.js8.result"
 
 
 def test_settings_autofill_feedback_status_and_labels_are_clear() -> None:
@@ -896,6 +900,18 @@ def test_settings_autofill_feedback_status_and_labels_are_clear() -> None:
     )
     assert SettingsTab._autofill_health_key("js8") == "js8call"
     assert SettingsTab._autofill_health_key("fast_light") == "fast_light"
+    assert (
+        SettingsTab._autofill_feedback_source_surface("js8", "scan")
+        == "settings.configure_automatically.js8.scan"
+    )
+    assert (
+        SettingsTab._autofill_feedback_source_surface("fast light", "replace suggestions")
+        == "settings.configure_automatically.fast_light.replace_suggestions"
+    )
+    assert (
+        SettingsTab._autofill_feedback_source_surface("unknown", "")
+        == "settings.configure_automatically.general.event"
+    )
     assert (
         SettingsTab._autofill_readiness_summary("JS8Call", "JS8Call DIRECTED.TXT path missing; Forms path missing")
         == "Auto-fill needs review in JS8Call: JS8Call DIRECTED.TXT path missing."
@@ -992,6 +1008,7 @@ def test_settings_autofill_readiness_feedback_publishes_only_when_warned() -> No
     assert events[0].summary == "Auto-fill needs review in JS8Call: JS8Call DIRECTED.TXT path missing."
     assert "Forms path missing" in events[0].detail
     assert events[0].radio_profile_id == "7"
+    assert events[0].source_surface == "settings.configure_automatically.js8.readiness"
 
 
 def test_settings_autofill_readiness_feedback_skips_when_section_is_ok() -> None:
@@ -1118,6 +1135,8 @@ def test_settings_guardrail_warnings_are_visible_in_readiness_card_source() -> N
 
     assert "self.device_profile_guardrail_status_label = QLabel(\"\")" in source
     assert "deviceProfileGuardrailStatus" in source
+    assert 'self.review_guardrail_conflicts_btn = QPushButton("Review Conflicts")' in source
+    assert "self.review_guardrail_conflicts_btn.clicked.connect(self._review_device_profile_guardrail_conflicts)" in source
     assert "guardrail_warnings = self._current_multi_rig_guardrail_messages()" in readiness_block
     assert "has_guardrail_warnings = self._set_device_profile_guardrail_status(guardrail_warnings)" in readiness_block
     assert "self._set_device_profile_guardrail_status(())" in readiness_block
@@ -1131,15 +1150,22 @@ def test_settings_guardrail_review_affordance_is_non_disruptive() -> None:
     copy_block = source[
         source.index("def _copy_device_profile_guardrail_warnings(") : source.index("def _launch_sequence_feedback_status")
     ]
+    review_block = source[
+        source.index("def _review_device_profile_guardrail_conflicts(") : source.index("def _guardrail_copy_summary")
+    ]
 
     assert 'self.copy_guardrail_summary_btn = QPushButton("Copy Guardrails")' in source
     assert "self.copy_guardrail_summary_btn.setVisible(False)" in source
     assert "self.copy_guardrail_summary_btn.clicked.connect(self._copy_device_profile_guardrail_warnings)" in source
+    assert "review_button.setVisible(bool(text))" in source
+    assert "review_button.setEnabled(bool(text))" in source
     assert "button.setVisible(bool(text))" in source
     assert "button.setEnabled(bool(text))" in source
     assert 'action_type="copy_guardrails"' in copy_block
     assert "self._guardrail_copy_text(warnings, radio_profile_id=radio_id, target_label=target)" in copy_block
     assert "QMessageBox" not in copy_block
+    assert 'action_type="review_guardrails"' in review_block
+    assert "QMessageBox" not in review_block
     assert SettingsTab._guardrail_copy_summary(1) == "Copied 1 multi-rig guardrail warning."
     assert SettingsTab._guardrail_copy_summary(2) == "Copied 2 multi-rig guardrail warnings."
     assert "No multi-rig guardrail warnings to copy." in source
@@ -1222,6 +1248,62 @@ def test_settings_copy_guardrail_warnings_copies_text_and_publishes_feedback(mon
     assert events[0].detail == clipboard.text
     assert events[0].radio_profile_id == "7"
     assert events[0].target_label == "DX10"
+
+
+def test_settings_guardrail_review_rows_include_targets_and_affected_radios() -> None:
+    from freqinout.core.multi_rig_guardrails import MultiRigGuardrailWarning
+    from freqinout.gui.settings_tab import SettingsTab
+
+    rows = SettingsTab._guardrail_review_rows(
+        (
+            MultiRigGuardrailWarning(
+                warning_type="duplicate_js8_endpoint",
+                resource_type="JS8Call API endpoint",
+                resource_value="127.0.0.1:2442",
+                affected_radio_ids=(7, 8),
+                affected_radio_names=("DX10", "Field"),
+            ),
+            MultiRigGuardrailWarning(
+                warning_type="duplicate_varac_db_path",
+                resource_type="VarAC database path",
+                resource_value="/varac/shared/varac.db",
+                affected_radio_ids=(9,),
+                affected_radio_names=("VarAC Node",),
+            ),
+        )
+    )
+
+    assert rows[0]["message"] == "Duplicate JS8Call API endpoint 127.0.0.1:2442 on active radios: DX10, Field."
+    assert rows[0]["affected_radio_ids"] == (7, 8)
+    assert rows[0]["affected_radio_names"] == ("DX10", "Field")
+    assert rows[0]["target_attr"] == "js8_section_group"
+    assert rows[1]["target_attr"] == "varac_section_group"
+    assert SettingsTab._guardrail_warning_target_attr("duplicate_flrig_endpoint") == "fast_light_section_group"
+    assert SettingsTab._guardrail_warning_target_attr("unknown") == "radio_profile_section_group"
+
+
+def test_settings_guardrail_conflict_focus_selects_radio_and_target_section() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    target_group = QGroupBox("JS8Call Settings")
+    target_group.setCheckable(True)
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.js8_section_group = target_group
+    focused = []
+    selected = []
+    tab.focus_radio_profile = lambda radio_id: focused.append(radio_id) or True
+    tab._select_settings_section_group = lambda group: selected.append(group)
+
+    try:
+        assert SettingsTab._focus_guardrail_conflict(tab, 7, "js8_section_group") is True
+        assert focused == [7]
+        assert selected == [target_group]
+        assert target_group.isChecked() is True
+    finally:
+        target_group.deleteLater()
+        app.processEvents()
 
 
 def test_settings_contextual_autofill_publishes_scan_and_result_feedback() -> None:
@@ -1308,6 +1390,7 @@ def test_settings_autofill_preserved_suggestions_copy_is_non_disruptive(monkeypa
     assert events[0].summary == "Copied 1 preserved JS8Call Auto-Fill suggestion."
     assert events[0].detail == clipboard.text
     assert events[0].radio_profile_id == "7"
+    assert events[0].source_surface == "settings.configure_automatically.js8.copy_suggestions"
 
 
 def test_settings_autofill_dismiss_suggestions_clears_cache_without_dirtying() -> None:
@@ -1348,6 +1431,7 @@ def test_settings_autofill_dismiss_suggestions_clears_cache_without_dirtying() -
     assert events[0].summary == "Dismissed 1 preserved JS8Call Auto-Fill suggestion."
     assert "DIRECTED.TXT: keep /manual/DIRECTED.TXT; suggested /detected/DIRECTED.TXT" in events[0].detail
     assert events[0].radio_profile_id == "7"
+    assert events[0].source_surface == "settings.configure_automatically.js8.dismiss_suggestions"
 
 
 def test_settings_autofill_dismiss_single_suggestion_clears_one_row_without_dirtying() -> None:
@@ -1397,6 +1481,7 @@ def test_settings_autofill_dismiss_single_suggestion_clears_one_row_without_dirt
     assert events[0].status == "succeeded"
     assert events[0].summary == "Dismissed DIRECTED.TXT Auto-Fill suggestion for JS8Call."
     assert "DIRECTED.TXT: keep /manual/DIRECTED.TXT; suggested /detected/DIRECTED.TXT" in events[0].detail
+    assert events[0].source_surface == "settings.configure_automatically.js8.dismiss_suggestion"
 
 
 def test_settings_autofill_replace_suggestions_updates_cached_fields() -> None:
@@ -1453,6 +1538,7 @@ def test_settings_autofill_replace_suggestions_updates_cached_fields() -> None:
     assert events[0].summary == "Replaced 1 JS8Call Auto-Fill suggestion."
     assert "DIRECTED.TXT: replaced /manual/DIRECTED.TXT with /detected/DIRECTED.TXT" in events[0].detail
     assert events[0].radio_profile_id == "7"
+    assert events[0].source_surface == "settings.configure_automatically.js8.replace_suggestions"
 
 
 def test_settings_autofill_replace_single_suggestion_updates_one_field() -> None:
@@ -1519,6 +1605,7 @@ def test_settings_autofill_replace_single_suggestion_updates_one_field() -> None
     assert events[0].status == "succeeded"
     assert events[0].summary == "Replaced DIRECTED.TXT Auto-Fill suggestion for JS8Call."
     assert "DIRECTED.TXT: replaced /manual/DIRECTED.TXT with /detected/DIRECTED.TXT" in events[0].detail
+    assert events[0].source_surface == "settings.configure_automatically.js8.replace_suggestion"
 
 
 def test_settings_autofill_replace_single_suggestion_missing_target_reports_partial_and_keeps_row() -> None:
@@ -1556,6 +1643,7 @@ def test_settings_autofill_replace_single_suggestion_missing_target_reports_part
     assert events[0].status == "partial"
     assert events[0].summary == "Could not replace Missing Field Auto-Fill suggestion."
     assert "Missing Field: no editable target found" in events[0].detail
+    assert events[0].source_surface == "settings.configure_automatically.js8.replace_suggestion"
 
 
 def test_settings_autofill_replace_suggestions_keeps_skipped_items_and_reports_partial() -> None:
@@ -1594,6 +1682,7 @@ def test_settings_autofill_replace_suggestions_keeps_skipped_items_and_reports_p
     assert events[0].status == "partial"
     assert events[0].summary == "Replaced 0 JS8Call Auto-Fill suggestions; skipped 1 suggestion."
     assert "Missing Field: no editable target found" in events[0].detail
+    assert events[0].source_surface == "settings.configure_automatically.js8.replace_suggestions"
 
 
 def test_settings_autofill_replace_suggestions_does_not_dirty_already_matching_field() -> None:
@@ -2436,9 +2525,56 @@ def test_radio_profile_stack_guidance_panel_is_wired_to_readiness_refresh() -> N
     assert "self.radio_profile_stack_guidance_section.setVisible(bool(items))" in guidance_block
     assert "self.radio_profile_stack_guidance_section.setChecked(bool(items))" in guidance_block
     assert "label.setAccessibleName(f\"Stack guidance: {message}\")" in guidance_block
+    assert 'return (message, "Enable Software Options", "radio_profile_software_stack_section", "warning")' in source
     assert "btn.clicked.connect(lambda _checked=False, g=target_group: self._select_settings_section_group(g))" in guidance_block
     assert "self._refresh_radio_profile_stack_guidance(readiness_report, None, None)" in readiness_block
     assert "self._refresh_radio_profile_stack_guidance(readiness_report, int(focused_radio_id), profile)" in readiness_block
+
+
+def test_radio_profile_no_software_guidance_opens_software_stack_section() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    app = QApplication.instance() or QApplication([])
+    rows_widget = QWidget()
+    rows = QVBoxLayout(rows_widget)
+    target_group = QGroupBox("Software Stack")
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.settings = types.SimpleNamespace(get=lambda _key, default=None: default)
+    tab.radio_profile_stack_guidance_rows = rows
+    tab.radio_profile_stack_guidance_section = QGroupBox("Stack Guidance")
+    tab.radio_profile_stack_guidance_section.setCheckable(True)
+    tab.radio_profile_stack_guidance_widget = QWidget()
+    tab.radio_profile_software_stack_section = target_group
+    selected = []
+    tab._select_settings_section_group = lambda group: selected.append(group)
+
+    try:
+        SettingsTab._refresh_radio_profile_stack_guidance(
+            tab,
+            None,
+            7,
+            {"id": 7, "name": "DX10", "enabled": 1, "runtime_active": 1, "launch_enabled": 1},
+        )
+        app.processEvents()
+
+        assert rows.count() == 1
+        row = rows.itemAt(0).widget()
+        assert row is not None
+        button = row.findChild(QPushButton)
+        assert button is not None
+        assert button.text() == "Enable Software Options"
+        assert button.accessibleName() == "Enable Software Options"
+        assert button.isEnabled() is True
+
+        button.click()
+
+        assert selected == [target_group]
+        assert tab.radio_profile_stack_guidance_section.isVisible() is True
+        assert tab.radio_profile_stack_guidance_section.isChecked() is True
+    finally:
+        rows_widget.deleteLater()
+        target_group.deleteLater()
+        app.processEvents()
 
 
 def test_fast_light_visibility_includes_rigctld_backend() -> None:
@@ -2521,11 +2657,29 @@ def test_radio_profile_advanced_edit_wording_keeps_software_settings_inline() ->
 
     assert 'self.edit_device_profile_btn = QPushButton("Advanced Radio Edit")' in source
     assert "identity, role, hardware, and core connection details" in source
-    assert 'dlg.setWindowTitle("Advanced Radio Edit" if existing else "Add Radio")' in source
+    assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in source
+    assert 'self.edit_device_profile_btn.setAccessibleName("Advanced Radio Edit")' in source
+    assert "def _device_profile_dialog_title" in source
+    assert "def _device_profile_dialog_intro" in source
+    assert "def _device_profile_dialog_save_text" in source
+    assert "dlg.setWindowTitle(dlg_title)" in source
     assert 'QMessageBox.information(self, "Advanced Radio Edit", "Select one radio to edit.")' in source
     assert 'QMessageBox.warning(self, "Advanced Radio Edit", "Please select only one radio to edit.")' in source
     assert "Enable at least one software option above" in source
     assert "Use Edit Radio Details to choose the software" not in source
+
+
+def test_radio_profile_guided_add_dialog_copy_is_distinct_from_advanced_edit() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    assert SettingsTab._device_profile_dialog_title(None) == "Guided Add Radio"
+    assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Advanced Radio Edit"
+    assert SettingsTab._device_profile_dialog_save_text(None) == "Save Radio"
+    assert SettingsTab._device_profile_dialog_save_text({"id": 7}) == "Save Changes"
+    assert "one step at a time" in SettingsTab._device_profile_dialog_intro(None)
+    assert "software used by that radio" in SettingsTab._device_profile_dialog_intro(None)
+    assert "readiness before saving" in SettingsTab._device_profile_dialog_intro(None)
+    assert "selected-radio Settings sections" in SettingsTab._device_profile_dialog_intro({"id": 7})
 
 
 def test_radio_profile_software_flag_helpers_define_inline_stack_choices() -> None:
@@ -3206,8 +3360,8 @@ def test_radio_profile_no_software_stack_guidance_item_warns_only_when_actionabl
     assert SettingsTab._radio_profile_has_software_option(tab, launch_only_profile) is False
     assert SettingsTab._radio_profile_no_software_stack_guidance_item(tab, launch_only_profile) == (
         "No software options are enabled for this radio. Enable at least one software option above so FIO can operate it.",
-        "Review Software Used",
-        "radio_profile_section_group",
+        "Enable Software Options",
+        "radio_profile_software_stack_section",
         "warning",
     )
     assert SettingsTab._radio_profile_no_software_stack_guidance_item(
@@ -3215,8 +3369,8 @@ def test_radio_profile_no_software_stack_guidance_item_warns_only_when_actionabl
         {"enabled": 1, "runtime_active": 1, "runtime_primary": 0},
     ) == (
         "No software options are enabled for this radio. Enable at least one software option above so FIO can operate it.",
-        "Review Software Used",
-        "radio_profile_section_group",
+        "Enable Software Options",
+        "radio_profile_software_stack_section",
         "warning",
     )
     assert SettingsTab._radio_profile_has_software_option(tab, {"control_backend": "rigctld"}) is True
@@ -3259,7 +3413,7 @@ def test_radio_profile_no_software_guardrail_is_wired_to_stack_guidance() -> Non
     assert '"launch_control"' not in software_option_block
     assert '"launch_enabled"' not in software_option_block
     assert "for key in self._radio_profile_software_option_keys()" in has_software_block
-    assert 'return (message, "Review Software Used", "radio_profile_section_group", "warning")' in guidance_block
+    assert 'return (message, "Enable Software Options", "radio_profile_software_stack_section", "warning")' in guidance_block
     assert "no_software_item = self._radio_profile_no_software_stack_guidance_item(profile)" in guidance_block
     assert "if no_software_item is not None:" in guidance_block
     assert "items.append(no_software_item)" in guidance_block

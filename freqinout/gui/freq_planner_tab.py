@@ -25,7 +25,9 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.plan_context_label import PLAN_CONTEXT_FALLBACK_TEXT, PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
 
 DAY_NAMES = [
@@ -38,6 +40,7 @@ DAY_NAMES = [
     "Saturday",
 ]
 DAY_NAMES_UPPER = [d.upper() for d in DAY_NAMES]
+FREQPLANNER_CONTEXT_FALLBACK_TEXT = PLAN_CONTEXT_FALLBACK_TEXT
 
 
 class FreqPlannerTab(QWidget):
@@ -67,9 +70,10 @@ class FreqPlannerTab(QWidget):
     COL_LOCAL = 1
     COL_DAY_OFFSET = 2  # Sunday at column 2
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service or PlanContextService()
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local = default_mode != "UTC"
         self._show_band = True
@@ -101,6 +105,17 @@ class FreqPlannerTab(QWidget):
         header.addWidget(self.local_label)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        self.plan_context_label = PlanContextLabel(
+            "freqplanner",
+            service=self.plan_context_service,
+            fallback_text=FREQPLANNER_CONTEXT_FALLBACK_TEXT,
+        )
+        self.plan_context_label.setToolTip(
+            "Use FreqPlanner to verify where and when the saved plan expects activity. Edit the source rows in HF Daily, HF Nets, SOP Builder, or Settings."
+        )
+        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         self.band_legend = QWidget()
         self.band_legend_layout = QHBoxLayout(self.band_legend)
@@ -886,6 +901,7 @@ class FreqPlannerTab(QWidget):
             self.settings.reload()
         except Exception:
             pass
+        self.plan_context_label.refresh_context(refresh=True)
         self.table.clearContents()
         tz_name, tz_abbr = self._current_timezone_label()
         if not self._show_local:
@@ -1625,6 +1641,7 @@ class FreqPlannerTab(QWidget):
             self.settings.reload()
         except Exception:
             pass
+        self.plan_context_label.invalidate_context()
         self._apply_theme()
         self.rebuild_table()
 

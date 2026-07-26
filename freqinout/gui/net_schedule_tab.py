@@ -47,12 +47,14 @@ from freqinout.core.schedule_targeting import (
     schedule_target_identity_parts,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style, font_css
 
 
@@ -122,8 +124,8 @@ DAY_NAMES = [
 DAY_OPTIONS = ["ALL"] + DAY_NAMES
 SCHEDULE_TARGET_SCOPE_ITEMS = [
     ("Station", TARGET_SCOPE_STATION),
-    ("Device Profile", TARGET_SCOPE_DEVICE_PROFILE),
-    ("Operating Profile", TARGET_SCOPE_OPERATING_PROFILE),
+    ("Radio Profile", TARGET_SCOPE_DEVICE_PROFILE),
+    ("Frequency Plan", TARGET_SCOPE_OPERATING_PROFILE),
 ]
 
 _FLDIGI_MODE_OPTIONS_FALLBACK = [
@@ -232,9 +234,10 @@ class NetScheduleTab(QWidget):
     RES_COL_COMMENT = 16
     RES_COL_UPDATED = 17
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service or PlanContextService()
         self._status_service = SoftwareStatusService(self.settings)
         self._sop_manager = SOPManager()
         self._net_name_history: List[str] = []
@@ -299,6 +302,17 @@ class NetScheduleTab(QWidget):
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        self.plan_context_label = PlanContextLabel(
+            "net_schedule",
+            service=self.plan_context_service,
+            fallback_text="Net Schedules uses the current radio and Frequency Plan context when reviewing net rows.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan net schedule changes apply to."
+        )
+        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         # table
         self.table = QTableWidget()
@@ -477,14 +491,14 @@ class NetScheduleTab(QWidget):
     def _operating_target_label(row: Dict[str, Any]) -> str:
         name = str(row.get("name") or "").strip()
         profile_id = int(row.get("id", 0) or 0)
-        return name or f"Profile #{profile_id}"
+        return name or f"Frequency Plan #{profile_id}"
 
     @staticmethod
     def _target_scope_tooltip() -> str:
         return (
             "Station rows apply to any current station-default runtime. "
-            "Device Profile rows apply only when that device is the station default. "
-            "Operating Profile rows apply only when the station-default device carries that effective assignment. "
+            "Radio Profile rows apply only when that radio is the station default. "
+            "Frequency Plan rows apply only when the station-default radio carries that assigned plan. "
             "Full radio-owned schedule orchestration is a later-phase feature and is not modeled by these compatibility targets."
         )
 
@@ -571,6 +585,11 @@ class NetScheduleTab(QWidget):
         Reload settings and operating groups after Save Settings.
         Refresh group/band/mode combos in existing rows.
         """
+        try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
+        except Exception:
+            pass
         try:
             self.settings.reload()
         except Exception:

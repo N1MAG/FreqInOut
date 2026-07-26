@@ -22,11 +22,23 @@ DEFAULT_HELP_CONTEXT = HelpContext(
 
 HELP_CONTEXTS: Dict[str, HelpContext] = {
     "help.overview": DEFAULT_HELP_CONTEXT,
+    "help.glossary": HelpContext(
+        key="help.glossary",
+        anchor="operating-plan-glossary",
+        title="Operating Plan Glossary",
+        summary="Plain-language definitions for Frequency Plan, Assigned Plan, Operating Plan, Schedule Source, Radio Profile, and the shared plan context cue.",
+    ),
+    "help.plan-context": HelpContext(
+        key="help.plan-context",
+        anchor="plan-context-cue",
+        title="Plan Context Cue Help",
+        summary="Read-only radio and Frequency Plan context shown on planning and operating tabs.",
+    ),
     "tab.controlfreq": HelpContext(
         key="tab.controlfreq",
         anchor="controlfreq",
         title="ControlFreq Help",
-        summary="Frequency control, schedule awareness, activity panels, unread message and BBS file awareness, and operator decision support.",
+        summary="Frequency control, plan context cue, schedule awareness, activity panels, unread message and BBS file awareness, and operator decision support.",
     ),
     "controlfreq.actions": HelpContext(
         key="controlfreq.actions",
@@ -38,7 +50,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.messages",
         anchor="messages",
         title="Messages Help",
-        summary="Inbox review, visible-tab refresh, BBS status, message filters, and traffic actions.",
+        summary="Inbox review, plan context cue, visible-tab refresh, BBS status, message filters, and traffic actions.",
     ),
     "messages.compose": HelpContext(
         key="messages.compose",
@@ -62,7 +74,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.map",
         anchor="map",
         title="Map Help",
-        summary="Map layers, report icons, filters, traffic overlays, and station-visibility controls.",
+        summary="Map plan context cue, layers, report icons, filters, traffic overlays, and station-visibility controls.",
     ),
     "tab.station-health": HelpContext(
         key="tab.station-health",
@@ -92,19 +104,25 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.hf-daily",
         anchor="hf-daily",
         title="HF Frequency Schedule Help",
-        summary="Active HF schedule rows, resource-backed candidates, and SOP-aware conflict review.",
+        summary="Active HF schedule rows, plan context cue, resource-backed candidates, and SOP-aware conflict review.",
     ),
     "tab.hf-nets": HelpContext(
         key="tab.hf-nets",
         anchor="hf-nets",
         title="Net Schedules Help",
-        summary="Net schedule editing, net resources, and Net or SOP policy decisions.",
+        summary="Net schedule editing, plan context cue, net resources, and Net or SOP policy decisions.",
     ),
     "tab.hf-peers": HelpContext(
         key="tab.hf-peers",
         anchor="hf-peers",
         title="HF Peers Help",
         summary="Peer schedule imports, manual entries, cleanup actions, filters, and overlap review.",
+    ),
+    "tab.sop-builder": HelpContext(
+        key="tab.sop-builder",
+        anchor="sop-builder",
+        title="SOP Builder Help",
+        summary="SOP profile editing, plan context cue, conflict-aware activation, versions, and export workflow.",
     ),
     "tab.settings": HelpContext(
         key="tab.settings",

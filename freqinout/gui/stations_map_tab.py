@@ -68,6 +68,7 @@ from freqinout.core.operator_activity import (
     load_operator_activity_summary,
     record_js8_activity_batch,
 )
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_ingest import ingest_varac
@@ -76,6 +77,7 @@ from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import current_scheduler_freq
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import (
     resolve_theme,
     resolve_ui_text_scale,
@@ -440,8 +442,9 @@ class StationsMapTab(QWidget):
     USA/Canada stations are shown; map tiles are streamed from OSM (requires network).
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
+        self.plan_context_service = plan_context_service
         self.show_callsigns = False
         self.stations: List[StationPoint] = []
         self._map_file: Optional[Path] = None
@@ -791,12 +794,12 @@ class StationsMapTab(QWidget):
     def _emit_map_event(self, event: str, **meta: object) -> None:
         payload = {
             "event": str(event or "").strip(),
-            "state": self._map_runtime_state,
-            "visible": bool(self._map_visible),
-            "initialized": bool(self._map_initialized),
-            "loading": bool(self._map_page_loading),
-            "markers": int(self._map_marker_count),
-            "links": int(self._map_link_count),
+            "state": getattr(self, "_map_runtime_state", "cold"),
+            "visible": bool(getattr(self, "_map_visible", False)),
+            "initialized": bool(getattr(self, "_map_initialized", False)),
+            "loading": bool(getattr(self, "_map_page_loading", False)),
+            "markers": int(getattr(self, "_map_marker_count", 0) or 0),
+            "links": int(getattr(self, "_map_link_count", 0) or 0),
         }
         payload.update(meta)
         try:
@@ -879,31 +882,34 @@ class StationsMapTab(QWidget):
         self._update_map_support_card()
 
     def _request_map_refresh(self, *, level: str = "medium", reason: str = "", preserve_view: object = True) -> None:
-        if self._is_shutting_down:
+        if getattr(self, "_is_shutting_down", False):
             return
         requested_rank = self._refresh_level_rank(level)
-        if not self._app_active:
+        if not getattr(self, "_app_active", True):
             self._map_dirty = True
-            self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
-            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_level = max(getattr(self, "_pending_refresh_level", 0), requested_rank)
+            self._pending_refresh_reason = reason or getattr(self, "_pending_refresh_reason", "")
             self._pending_refresh_preserve_view = preserve_view
             self._emit_map_event("render_deferred_inactive", level=self._refresh_level_name(requested_rank), reason=reason)
             return
-        if not self._map_visible:
+        if not getattr(self, "_map_visible", False):
             self._map_dirty = True
-            self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
-            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_level = max(getattr(self, "_pending_refresh_level", 0), requested_rank)
+            self._pending_refresh_reason = reason or getattr(self, "_pending_refresh_reason", "")
             self._pending_refresh_preserve_view = preserve_view
             return
-        if self._map_page_loading:
+        if getattr(self, "_map_page_loading", False):
             self._map_dirty = True
             self._render_requested_during_load = True
-            self._render_requested_during_load_level = max(self._render_requested_during_load_level, requested_rank)
-            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._render_requested_during_load_level = max(
+                getattr(self, "_render_requested_during_load_level", 0),
+                requested_rank,
+            )
+            self._pending_refresh_reason = reason or getattr(self, "_pending_refresh_reason", "")
             self._pending_refresh_preserve_view = preserve_view
             self._emit_map_event("render_queued_while_loading", level=self._refresh_level_name(requested_rank), reason=reason)
             return
-        self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
+        self._pending_refresh_level = max(getattr(self, "_pending_refresh_level", 0), requested_rank)
         if reason:
             self._pending_refresh_reason = reason
         self._pending_refresh_preserve_view = preserve_view
@@ -911,7 +917,11 @@ class StationsMapTab(QWidget):
         if requested_rank >= 3:
             delay_ms = 30
         self._render_pending = True
-        self._map_refresh_timer.start(delay_ms)
+        timer = getattr(self, "_map_refresh_timer", None)
+        if timer is None:
+            self._schedule_render()
+            return
+        timer.start(delay_ms)
         self._emit_map_event("render_requested", level=self._refresh_level_name(requested_rank), reason=reason)
 
     def _flush_requested_map_refresh(self) -> None:
@@ -1424,6 +1434,22 @@ class StationsMapTab(QWidget):
         top_row.addWidget(self._help_button, alignment=Qt.AlignLeft)
         top_row.addStretch(1)
         layout.addLayout(top_row)
+
+        map_context_text = (
+            "Map uses the current radio and Frequency Plan context when reviewing station and traffic overlays."
+        )
+        self.plan_context_label = PlanContextLabel(
+            "map",
+            service=self.plan_context_service,
+            fallback_text=map_context_text,
+            create_service=self.plan_context_service is not None,
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan Map overlays are being reviewed against."
+        )
+        layout.addWidget(self.plan_context_label)
+        if self.plan_context_service is not None:
+            self.plan_context_label.refresh_context(refresh=True)
 
         self._map_support_card = QFrame(self)
         support_layout = QHBoxLayout(self._map_support_card)
@@ -6172,7 +6198,10 @@ class StationsMapTab(QWidget):
         else:
             self._set_map_runtime_state(
                 "ready",
-                f"Map is ready with {int(self._map_marker_count)} station markers and {int(self._map_link_count)} links.",
+                (
+                    f"Map is ready with {int(getattr(self, '_map_marker_count', 0) or 0)} station markers "
+                    f"and {int(getattr(self, '_map_link_count', 0) or 0)} links."
+                ),
             )
         if not ok or self.web is None:
             return
@@ -6193,10 +6222,14 @@ class StationsMapTab(QWidget):
                 sitrep_state_summary=payload.get("sitrep_state_summary", []),
                 sitrep_summary_group=payload.get("sitrep_summary_group", ""),
             )
-        if self._map_visible and (self._map_dirty or self._render_requested_during_load):
+        if getattr(self, "_map_visible", False) and (
+            getattr(self, "_map_dirty", False) or getattr(self, "_render_requested_during_load", False)
+        ):
             self._render_requested_during_load = False
             self._map_dirty = False
-            queued_level = self._refresh_level_name(max(int(self._render_requested_during_load_level or 0), 2))
+            queued_level = self._refresh_level_name(
+                max(int(getattr(self, "_render_requested_during_load_level", 0) or 0), 2)
+            )
             self._render_requested_during_load_level = 0
             self._request_map_refresh(level=queued_level, reason="post_load", preserve_view=True)
 
@@ -6233,12 +6266,12 @@ class StationsMapTab(QWidget):
         sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
         sitrep_summary_group: str = "",
     ) -> None:
-        if self.web is None:
+        if getattr(self, "web", None) is None:
             return
-        if not self._map_visible or not self._app_active:
+        if not getattr(self, "_map_visible", False) or not getattr(self, "_app_active", True):
             self._map_dirty = True
             return
-        if self._map_page_loading or not self._map_initialized:
+        if getattr(self, "_map_page_loading", False) or not getattr(self, "_map_initialized", False):
             self._pending_map_payload = {
                 "markers": list(markers),
                 "links": list(links),

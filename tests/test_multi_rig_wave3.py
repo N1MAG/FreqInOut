@@ -443,7 +443,7 @@ class StubTab(QWidget):
     local_data_updated = Signal()
     sop_data_changed = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, **_kwargs) -> None:
         super().__init__(parent)
 
     def on_settings_saved(self) -> None:

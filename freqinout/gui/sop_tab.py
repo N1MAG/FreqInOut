@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel, QPdfWriter
@@ -40,9 +40,12 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
+from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.utils.timezones import get_timezone
 
@@ -305,9 +308,10 @@ class _LegacySOPTab(QWidget):
     LAYER_COL_MODE = 7
     LAYER_COL_REMOVE = 8
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service or PlanContextService()
         self.manager = SOPManager()
         self._profiles: List[Dict[str, Any]] = []
         self._selected_profile_id: int | None = None
@@ -368,11 +372,23 @@ class _LegacySOPTab(QWidget):
         self._layer_sync_timer.timeout.connect(self._refresh_layer_sync_hint)
         self._schedule_layer_sync_refresh()
 
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("<h3>SOP Builder</h3>"))
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open SOP Builder help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.sop-builder"))
+        title_row.addWidget(self.help_btn)
         title_row.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -382,6 +398,17 @@ class _LegacySOPTab(QWidget):
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         title_row.addWidget(self.time_toggle_btn)
         root.addLayout(title_row)
+
+        self.plan_context_label = PlanContextLabel(
+            "sop",
+            service=self.plan_context_service,
+            fallback_text="SOP Builder uses the current Frequency Plan and radio context when reviewing HF and Local procedures.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan SOP work should be reviewed against."
+        )
+        root.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         header = QHBoxLayout()
         self.profile_combo = QComboBox()
@@ -498,7 +525,7 @@ class _LegacySOPTab(QWidget):
         layer_box = QGroupBox("SOP Schedule Layer (Overrides HF While Active)")
         layer_layout = QVBoxLayout(layer_box)
         layer_hint = QLabel(
-            "Optional schedule profile for this SOP. While SOP is Active, these rows supersede HF schedule. "
+            "Optional frequency-plan layer for this SOP. While SOP is Active, these rows supersede HF schedule. "
             "Net schedule remains highest priority."
         )
         layer_hint.setWordWrap(True)
@@ -4159,6 +4186,10 @@ class SOPTab(_LegacySOPTab):
 
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("<h3>SOP Builder</h3>"))
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open SOP Builder help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.sop-builder"))
+        title_row.addWidget(self.help_btn)
         title_row.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -4168,6 +4199,17 @@ class SOPTab(_LegacySOPTab):
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         title_row.addWidget(self.time_toggle_btn)
         root.addLayout(title_row)
+
+        self.plan_context_label = PlanContextLabel(
+            "sop",
+            service=self.plan_context_service,
+            fallback_text="SOP Builder uses the current Frequency Plan and radio context when reviewing HF and Local procedures.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan SOP work should be reviewed against."
+        )
+        root.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         header = QHBoxLayout()
         self.profile_combo = QComboBox()
@@ -7925,6 +7967,11 @@ class SOPTab(_LegacySOPTab):
     def on_settings_saved(self) -> None:
         try:
             self.settings.reload()
+        except Exception:
+            pass
+        try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
         except Exception:
             pass
         selected_id = int(self._selected_profile_id or 0)

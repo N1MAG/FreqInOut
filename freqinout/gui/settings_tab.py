@@ -110,6 +110,7 @@ from freqinout.core.multi_radio_store import (
     ensure_multi_rig_migration,
     multi_rig_guardrail_warnings,
 )
+from freqinout.core.multi_rig_guardrails import MultiRigGuardrailWarning, collect_multi_rig_guardrail_warnings
 from freqinout.core.multi_rig_runtime_status import (
     STARTUP_DEFERRED,
     STARTUP_EXISTING_UNMIGRATED,
@@ -2727,11 +2728,16 @@ class SettingsTab(QWidget):
         self.copy_guardrail_summary_btn.setToolTip("Copy the current multi-rig guardrail warnings for review.")
         self.copy_guardrail_summary_btn.setVisible(False)
         self.copy_guardrail_summary_btn.clicked.connect(self._copy_device_profile_guardrail_warnings)
+        self.review_guardrail_conflicts_btn = QPushButton("Review Conflicts")
+        self.review_guardrail_conflicts_btn.setToolTip("Review affected radios and jump to the relevant Settings section.")
+        self.review_guardrail_conflicts_btn.setVisible(False)
+        self.review_guardrail_conflicts_btn.clicked.connect(self._review_device_profile_guardrail_conflicts)
         self.copy_readiness_summary_btn = QPushButton("Copy Readiness Summary")
         self.copy_readiness_summary_btn.clicked.connect(self._copy_readiness_summary)
         readiness_actions = QHBoxLayout()
         readiness_actions.setContentsMargins(0, 0, 0, 0)
         readiness_actions.addStretch()
+        readiness_actions.addWidget(self.review_guardrail_conflicts_btn)
         readiness_actions.addWidget(self.copy_guardrail_summary_btn)
         readiness_actions.addWidget(self.copy_readiness_summary_btn)
         readiness_layout.addLayout(readiness_actions)
@@ -2750,17 +2756,22 @@ class SettingsTab(QWidget):
         device_actions.setHorizontalSpacing(8)
         device_actions.setVerticalSpacing(6)
         self.add_device_profile_btn = QPushButton("Add Radio")
+        self.add_device_profile_btn.setToolTip(
+            "Start guided setup for a new radio: identity, software used, connection, and readiness."
+        )
+        self.add_device_profile_btn.setAccessibleName("Guided Add Radio")
         self.add_device_profile_btn.clicked.connect(self._add_device_profile)
         self.edit_device_profile_btn = QPushButton("Advanced Radio Edit")
         self.edit_device_profile_btn.setToolTip("Edit selected-radio identity, role, hardware, and core connection details.")
+        self.edit_device_profile_btn.setAccessibleName("Advanced Radio Edit")
         self.edit_device_profile_btn.clicked.connect(self._edit_device_profile)
         self.activate_device_profile_btn = QPushButton("Use Now")
         self.activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
         self.deactivate_device_profile_btn = QPushButton("Stop Using Now")
         self.deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)
-        self.assign_radio_schedule_btn = QPushButton("Assign Schedule...")
+        self.assign_radio_schedule_btn = QPushButton("Assign Plan...")
         self.assign_radio_schedule_btn.clicked.connect(self._assign_schedule_to_selected_radios)
-        self.restore_radio_schedule_btn = QPushButton("Restore Schedule")
+        self.restore_radio_schedule_btn = QPushButton("Restore Plan")
         self.restore_radio_schedule_btn.clicked.connect(self._restore_schedule_for_selected_radios)
         self.set_active_device_profile_btn = QPushButton("Make Default")
         self.set_active_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
@@ -2800,7 +2811,7 @@ class SettingsTab(QWidget):
                 "Deploy",
                 "Software",
                 "Endpoint",
-                "Assigned Schedule",
+                "Assigned Plan",
                 "Readiness",
                 "Launch",
                 "PTT Group",
@@ -2878,7 +2889,7 @@ class SettingsTab(QWidget):
         self.radio_profile_section_group = device_group
         self._add_settings_section(device_group, scope="radio")
 
-        operating_group = QGroupBox("Schedule Profiles")
+        operating_group = QGroupBox("Frequency Plans")
         operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         operating_layout = QVBoxLayout()
         operating_layout.setSpacing(6)
@@ -2891,11 +2902,11 @@ class SettingsTab(QWidget):
             self.operating_profiles_guidance_card,
             self.operating_profiles_guidance_title_label,
             self.operating_profiles_guidance_status_label,
-        ) = _make_support_card("Focused Schedule Profile Guidance", "operatingProfilesGuidanceStatus")
+        ) = _make_support_card("Focused Frequency Plan Guidance", "operatingProfilesGuidanceStatus")
         operating_layout.addWidget(self.operating_profiles_guidance_card)
 
         operating_actions = QHBoxLayout()
-        self.add_operating_profile_btn = QPushButton("Add Schedule")
+        self.add_operating_profile_btn = QPushButton("Add Plan")
         self.add_operating_profile_btn.clicked.connect(self._add_operating_profile)
         self.edit_operating_profile_btn = QPushButton("Edit Selected")
         self.edit_operating_profile_btn.clicked.connect(self._edit_operating_profile)
@@ -2940,12 +2951,12 @@ class SettingsTab(QWidget):
 
         operating_container = QWidget()
         operating_container.setLayout(operating_layout)
-        operating_group = self._make_collapsible_group("Schedule Profiles", operating_container, checked=True, fit_content=False)
+        operating_group = self._make_collapsible_group("Frequency Plans", operating_container, checked=True, fit_content=False)
         self._register_collapsible_group(operating_group, self._summary_operating_profiles)
         operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(operating_group, scope="radio")
 
-        assignments_group = QGroupBox("Radio Schedule Assignments")
+        assignments_group = QGroupBox("Assigned Plans")
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         assignments_layout = QVBoxLayout()
         assignments_layout.setSpacing(6)
@@ -2962,17 +2973,17 @@ class SettingsTab(QWidget):
             self.device_assignments_guidance_card,
             self.device_assignments_guidance_title_label,
             self.device_assignments_guidance_status_label,
-        ) = _make_support_card("Focused Radio Schedule Guidance", "deviceAssignmentsGuidanceStatus")
+        ) = _make_support_card("Focused Assigned Plan Guidance", "deviceAssignmentsGuidanceStatus")
         assignments_layout.addWidget(self.device_assignments_guidance_card)
 
         assignments_actions = QHBoxLayout()
         self.assign_device_operating_profile_btn = QPushButton("Assign / Override...")
         self.assign_device_operating_profile_btn.clicked.connect(self._assign_operating_profile_to_selected_devices)
-        self.temporary_profile_swap_btn = QPushButton("Temporary Swap...")
+        self.temporary_profile_swap_btn = QPushButton("Temporary Plan Swap...")
         self.temporary_profile_swap_btn.clicked.connect(self._start_temporary_profile_swap)
         self.restore_profile_swap_btn = QPushButton("Restore Swap")
         self.restore_profile_swap_btn.clicked.connect(self._restore_temporary_profile_swap)
-        self.restore_device_operating_profile_btn = QPushButton("Restore Default Schedule")
+        self.restore_device_operating_profile_btn = QPushButton("Restore Default Plan")
         self.restore_device_operating_profile_btn.clicked.connect(self._restore_default_operating_profile_for_selected_devices)
         assignments_actions.addStretch()
         assignments_actions.addWidget(self.assign_device_operating_profile_btn)
@@ -2988,7 +2999,7 @@ class SettingsTab(QWidget):
                 "Active",
                 "Default",
                 "Radio",
-                "Schedule Profile",
+                "Frequency Plan",
                 "State",
                 "Policy",
                 "Endpoint",
@@ -3018,7 +3029,7 @@ class SettingsTab(QWidget):
 
         assignments_container = QWidget()
         assignments_container.setLayout(assignments_layout)
-        assignments_group = self._make_collapsible_group("Radio Schedule Assignments", assignments_container, checked=True, fit_content=False)
+        assignments_group = self._make_collapsible_group("Assigned Plans", assignments_container, checked=True, fit_content=False)
         self._register_collapsible_group(assignments_group, self._summary_device_assignments)
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(assignments_group, scope="radio")
@@ -6469,6 +6480,8 @@ class SettingsTab(QWidget):
             status="in_progress",
             summary=f"Auto-fill scanning {section_label}.",
             detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+            section=section,
+            operation="scan",
         )
         all_results = self._detect_autofill_results(section)
         wanted = set(keys)
@@ -6515,6 +6528,8 @@ class SettingsTab(QWidget):
             status="in_progress",
             summary=f"Auto-fill scanning {self._autofill_section_label('fast_light')}.",
             detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+            section="fast_light",
+            operation="scan",
         )
         self._apply_autofill_results("fast_light", self.software_path_detector.detect_fast_light())
 
@@ -6523,6 +6538,8 @@ class SettingsTab(QWidget):
             status="in_progress",
             summary=f"Auto-fill scanning {self._autofill_section_label('js8')}.",
             detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+            section="js8",
+            operation="scan",
         )
         self._apply_autofill_results("js8", self.software_path_detector.detect_js8())
 
@@ -6531,6 +6548,8 @@ class SettingsTab(QWidget):
             status="in_progress",
             summary=f"Auto-fill scanning {self._autofill_section_label('varac')}.",
             detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+            section="varac",
+            operation="scan",
         )
         self._apply_autofill_results("varac", self.software_path_detector.detect_varac())
 
@@ -6597,6 +6616,8 @@ class SettingsTab(QWidget):
             ),
             summary=f"Auto-fill updated {self._autofill_section_label(section)}: {summary}",
             detail=detail or summary,
+            section=section,
+            operation="result",
         )
         self._refresh_section_titles()
         self._refresh_section_nav_health()
@@ -6786,6 +6807,7 @@ class SettingsTab(QWidget):
             summary=self._autofill_preserved_copy_summary(section_label, len(suggestions)),
             detail=text,
             action_type="copy_autofill_suggestions",
+            source_surface=self._autofill_feedback_source_surface(section, "copy_suggestions"),
         )
 
     @staticmethod
@@ -6808,6 +6830,7 @@ class SettingsTab(QWidget):
             summary=self._autofill_dismiss_summary(section_label, len(suggestions)),
             detail=detail,
             action_type="dismiss_autofill_suggestions",
+            source_surface=self._autofill_feedback_source_surface(section, "dismiss_suggestions"),
         )
 
     def _dismiss_autofill_preserved_suggestion(self, section: str, index: int) -> None:
@@ -6824,6 +6847,7 @@ class SettingsTab(QWidget):
             summary=f"Dismissed {label} Auto-Fill suggestion for {section_label}.",
             detail=self._autofill_preserved_suggestions_text(section_label, (suggestion,)),
             action_type="dismiss_autofill_suggestion",
+            source_surface=self._autofill_feedback_source_surface(section, "dismiss_suggestion"),
         )
 
     @staticmethod
@@ -6852,6 +6876,7 @@ class SettingsTab(QWidget):
                 summary=f"Could not replace {label} Auto-Fill suggestion.",
                 detail=f"{label}: no editable target found",
                 action_type="replace_autofill_suggestion",
+                source_surface=self._autofill_feedback_source_surface(section, "replace_suggestion"),
             )
             return
         previous = edit.text().strip()
@@ -6878,6 +6903,7 @@ class SettingsTab(QWidget):
             else f"{label} already matched the Auto-Fill suggestion.",
             detail=detail,
             action_type="replace_autofill_suggestion",
+            source_surface=self._autofill_feedback_source_surface(section, "replace_suggestion"),
         )
 
     def _replace_autofill_preserved_suggestions(self, section: str) -> None:
@@ -6918,6 +6944,7 @@ class SettingsTab(QWidget):
             summary=self._autofill_replace_summary(section_label, len(replaced_lines), len(skipped_lines)),
             detail="\n".join(detail_lines),
             action_type="replace_autofill_suggestions",
+            source_surface=self._autofill_feedback_source_surface(section, "replace_suggestions"),
         )
 
     def _autofill_target_edit(self, key: str) -> Optional[QLineEdit]:
@@ -8560,6 +8587,7 @@ class SettingsTab(QWidget):
         action_type: str = "save",
         radio_profile_id: Optional[str] = None,
         target_label: str = "",
+        source_surface: str = "settings",
     ) -> None:
         radio_id = radio_profile_id
         target = str(target_label or "").strip()
@@ -8574,7 +8602,7 @@ class SettingsTab(QWidget):
                 radio_profile_id=radio_id,
                 target_label=target,
                 detail=detail,
-                source_surface="settings",
+                source_surface=source_surface,
             )
             self._last_action_feedback_event = event
             self._set_settings_action_feedback_status(event.status, event.summary, event.detail)
@@ -8617,12 +8645,31 @@ class SettingsTab(QWidget):
             return "succeeded"
         return "blocked"
 
-    def _publish_autofill_feedback(self, *, status: str, summary: str, detail: str = "") -> None:
+    @staticmethod
+    def _autofill_feedback_source_surface(section: str, operation: str) -> str:
+        normalized_section = str(section or "").strip().lower().replace("-", "_").replace(" ", "_")
+        normalized_operation = str(operation or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized_section not in {"fast_light", "js8", "varac"}:
+            normalized_section = "general"
+        if not normalized_operation:
+            normalized_operation = "event"
+        return f"settings.configure_automatically.{normalized_section}.{normalized_operation}"
+
+    def _publish_autofill_feedback(
+        self,
+        *,
+        status: str,
+        summary: str,
+        detail: str = "",
+        section: str = "",
+        operation: str = "event",
+    ) -> None:
         self._publish_settings_action_feedback(
             status=status,
             summary=summary,
             detail=detail,
             action_type="configure_automatically",
+            source_surface=self._autofill_feedback_source_surface(section, operation),
         )
 
     @staticmethod
@@ -8653,6 +8700,8 @@ class SettingsTab(QWidget):
                 status="partial",
                 summary=self._autofill_readiness_summary(section_label, detail),
                 detail=detail,
+                section=section,
+                operation="readiness",
             )
         except Exception:
             log.exception("SettingsTab: failed to publish auto-fill readiness feedback.")
@@ -8675,6 +8724,19 @@ class SettingsTab(QWidget):
         except Exception as exc:
             self._last_multi_rig_guardrail_collection_error = str(exc) or exc.__class__.__name__
             log.exception("SettingsTab: failed to collect multi-rig guardrail warnings.")
+            return ()
+
+    def _current_multi_rig_guardrail_details(self) -> Tuple[MultiRigGuardrailWarning, ...]:
+        try:
+            self._last_multi_rig_guardrail_collection_error = ""
+            db_path = Path(getattr(self.multi_radio_store, "db_path", ""))
+            if not db_path:
+                return ()
+            with sqlite3.connect(db_path) as conn:
+                return tuple(collect_multi_rig_guardrail_warnings(conn))
+        except Exception as exc:
+            self._last_multi_rig_guardrail_collection_error = str(exc) or exc.__class__.__name__
+            log.exception("SettingsTab: failed to collect structured multi-rig guardrail warnings.")
             return ()
 
     @staticmethod
@@ -8732,7 +8794,131 @@ class SettingsTab(QWidget):
                 if text
                 else "No multi-rig guardrail warnings to copy."
             )
+        review_button = getattr(self, "review_guardrail_conflicts_btn", None)
+        if review_button is not None:
+            review_button.setVisible(bool(text))
+            review_button.setEnabled(bool(text))
+            review_button.setToolTip(
+                "Review affected radios and jump to the relevant Settings section."
+                if text
+                else "No multi-rig guardrail conflicts to review."
+            )
         return bool(text)
+
+    @staticmethod
+    def _guardrail_warning_target_attr(warning_type: str) -> str:
+        normalized = str(warning_type or "").strip().lower()
+        if "js8" in normalized:
+            return "js8_section_group"
+        if any(key in normalized for key in ("flrig", "fldigi", "flamp", "flmsg", "rigctld")):
+            return "fast_light_section_group"
+        if "varac" in normalized:
+            return "varac_section_group"
+        return "radio_profile_section_group"
+
+    @classmethod
+    def _guardrail_review_rows(
+        cls,
+        warnings: Sequence[MultiRigGuardrailWarning],
+    ) -> Tuple[Dict[str, Any], ...]:
+        rows: List[Dict[str, Any]] = []
+        for warning in warnings:
+            rows.append(
+                {
+                    "message": str(getattr(warning, "message", "") or "").strip(),
+                    "warning_type": str(getattr(warning, "warning_type", "") or "").strip(),
+                    "resource_type": str(getattr(warning, "resource_type", "") or "").strip(),
+                    "resource_value": str(getattr(warning, "resource_value", "") or "").strip(),
+                    "affected_radio_ids": tuple(int(item or 0) for item in getattr(warning, "affected_radio_ids", ()) or ()),
+                    "affected_radio_names": tuple(str(item or "").strip() for item in getattr(warning, "affected_radio_names", ()) or ()),
+                    "target_attr": cls._guardrail_warning_target_attr(str(getattr(warning, "warning_type", "") or "")),
+                }
+            )
+        return tuple(rows)
+
+    def _focus_guardrail_conflict(self, radio_id: int, target_attr: str = "") -> bool:
+        focused = self.focus_radio_profile(int(radio_id or 0))
+        target_group = getattr(self, str(target_attr or "").strip(), None)
+        if isinstance(target_group, QGroupBox):
+            try:
+                target_group.setChecked(True)
+            except Exception:
+                pass
+            self._select_settings_section_group(target_group)
+        return focused or isinstance(target_group, QGroupBox)
+
+    def _review_device_profile_guardrail_conflicts(self) -> None:
+        warnings = self._current_multi_rig_guardrail_details()
+        if not warnings:
+            messages = self._current_multi_rig_guardrail_messages()
+            self._set_device_profile_guardrail_status(messages)
+            return
+
+        rows = self._guardrail_review_rows(warnings)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Review Multi-Rig Conflicts")
+        dlg.setAccessibleName("Review Multi-Rig Conflicts")
+        dlg.resize(760, 520)
+        layout = QVBoxLayout(dlg)
+        intro = QLabel("Review duplicated endpoints and paths, then focus an affected radio to adjust its Settings fields.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        layout.addWidget(scroll, 1)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(8)
+        scroll.setWidget(body)
+
+        for row in rows:
+            panel = QFrame()
+            panel.setFrameShape(QFrame.StyledPanel)
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(10, 8, 10, 8)
+            panel_layout.setSpacing(6)
+            title = QLabel(str(row.get("message", "")) or "Review this multi-rig guardrail warning.")
+            title.setWordWrap(True)
+            title.setAccessibleName(f"Guardrail conflict: {title.text()}")
+            panel_layout.addWidget(title)
+            detail = QLabel(
+                f"{row.get('resource_type', 'Resource')}: {row.get('resource_value', '--')}\n"
+                f"Affected radios: {', '.join(row.get('affected_radio_names', ()) or ('--',))}"
+            )
+            detail.setWordWrap(True)
+            panel_layout.addWidget(detail)
+            action_row = QHBoxLayout()
+            action_row.setContentsMargins(0, 0, 0, 0)
+            for radio_id, radio_name in zip(row.get("affected_radio_ids", ()), row.get("affected_radio_names", ())):
+                btn = QPushButton(f"Focus {radio_name or radio_id}")
+                btn.setAccessibleName(f"Focus guardrail radio {radio_name or radio_id}")
+                btn.setToolTip("Focus this radio and open the Settings section most likely to contain the conflicting field.")
+                btn.clicked.connect(
+                    lambda _checked=False, ident=int(radio_id), target=str(row.get("target_attr", "")): self._focus_guardrail_conflict(ident, target)
+                )
+                action_row.addWidget(btn)
+            action_row.addStretch(1)
+            panel_layout.addLayout(action_row)
+            body_layout.addWidget(panel)
+        body_layout.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.close)
+        layout.addWidget(buttons)
+        dlg.show()
+        self._guardrail_review_dialog = dlg
+        radio_id, target = self._selected_settings_feedback_target()
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary=f"Opened {len(rows)} multi-rig guardrail conflict review item(s).",
+            detail="\n".join(str(row.get("message", "")) for row in rows),
+            action_type="review_guardrails",
+            radio_profile_id=radio_id,
+            target_label=target,
+        )
 
     @staticmethod
     def _guardrail_copy_summary(warning_count: int) -> str:
@@ -9427,9 +9613,9 @@ class SettingsTab(QWidget):
                 f"{'Enabled' if int(operating.get('scheduler_enabled', 1) or 0) == 1 else 'Off'} / {scheduler_mode}"
             )
         elif assignment_name != "Unassigned":
-            scheduler = str(assignment.get("shell_summary", "") or "Assigned schedule")
+            scheduler = str(assignment.get("shell_summary", "") or "Assigned plan")
         else:
-            scheduler = "No assigned schedule"
+            scheduler = "No assigned plan"
         try:
             offset = int(profile.get("js8_offset_hz", 0) or 0)
         except Exception:
@@ -9856,7 +10042,7 @@ class SettingsTab(QWidget):
         message, role = self._radio_profile_no_software_message(profile)
         if role != "warning":
             return None
-        return (message, "Review Software Used", "radio_profile_section_group", "warning")
+        return (message, "Enable Software Options", "radio_profile_software_stack_section", "warning")
 
     def _refresh_radio_profile_software_flag_controls(self, profile: Optional[Dict[str, Any]] = None) -> None:
         checks = getattr(self, "_radio_profile_software_flag_checks", {})
@@ -11857,9 +12043,9 @@ class SettingsTab(QWidget):
                 self.device_profile_readiness_card.setVisible(bool(has_guardrail_warnings))
             assigned_schedule = self._assignment_display_text(assignment_name, assignment_state)
             schedule_text = (
-                f" Assigned schedule: {assigned_schedule}."
+                f" Assigned plan: {assigned_schedule}."
                 if assignment_name != "Unassigned"
-                else " No schedule profile is currently assigned."
+                else " No frequency plan is currently assigned."
             )
             message = f"{name} is ready.{schedule_text}"
             if hasattr(self, "device_profile_readiness_status_label"):
@@ -11878,9 +12064,9 @@ class SettingsTab(QWidget):
             detail_text += f" | {len(issue_lines) - 4} more item(s)"
         assigned_schedule = self._assignment_display_text(assignment_name, assignment_state)
         schedule_text = (
-            f"Assigned schedule: {assigned_schedule}. "
+            f"Assigned plan: {assigned_schedule}. "
             if assignment_name != "Unassigned"
-            else "No schedule profile is currently assigned. "
+            else "No frequency plan is currently assigned. "
         )
         message = f"{readiness_summary_status_text(summary, subject=name)} {schedule_text}".strip()
         detail_message = readiness_state_description(summary.overall_state)
@@ -12002,15 +12188,15 @@ class SettingsTab(QWidget):
                 self.operating_profiles_guidance_card,
                 self.operating_profiles_guidance_title_label,
                 self.operating_profiles_guidance_status_label,
-                title="Focused Schedule Profile Guidance",
-                text="Add a schedule profile to define how a radio should behave when that profile is assigned to it.",
+                title="Focused Frequency Plan Guidance",
+                text="Add a frequency plan to define where and when a radio should operate when that plan is assigned to it.",
                 level="info",
             )
             return
         profile = self._operating_profile_by_id(int(focused_id))
         if not profile:
             return
-        name = str(profile.get("name", "") or "Schedule Profile").strip() or "Schedule Profile"
+        name = str(profile.get("name", "") or "Frequency Plan").strip() or "Frequency Plan"
         assigned_rows = [
             row
             for row in self.device_assignments
@@ -12020,7 +12206,7 @@ class SettingsTab(QWidget):
         if int(profile.get("enabled", 1) or 0) != 1:
             text = (
                 f"{name} is disabled. Enable it before assigning it to a radio. "
-                f"Schedule behavior is {self._scheduler_mode_label(profile.get('scheduler_mode', 'full'))}."
+                f"Plan behavior is {self._scheduler_mode_label(profile.get('scheduler_mode', 'full'))}."
             )
             level = "warning"
         else:
@@ -12035,7 +12221,7 @@ class SettingsTab(QWidget):
             else:
                 text = (
                     f"{name} is ready to assign. "
-                    f"Schedule behavior: {self._scheduler_mode_label(profile.get('scheduler_mode', 'full'))}. "
+                    f"Plan behavior: {self._scheduler_mode_label(profile.get('scheduler_mode', 'full'))}. "
                     f"Behavior: {shell_summary}."
                 )
                 level = "info"
@@ -12077,16 +12263,16 @@ class SettingsTab(QWidget):
         focused_id = self._current_device_assignment_focus_id()
         active_swap = dict(self.active_profile_swap or {})
         if not focused_id:
-            text = "Assignments connect radios to schedule profiles. Select a row to review whether that radio is using its default schedule/profile or a temporary override."
+            text = "Assigned Plans connect radios to frequency plans. Select a row to review whether that radio is using its default plan or a temporary override."
             if active_swap:
                 text = (
-                    "A temporary swap is active. Review the focused assignment rows and use Restore Swap when the temporary Station Default handoff is no longer needed."
+                    "A temporary plan swap is active. Review the focused assignment rows and use Restore Swap when the temporary Station Default handoff is no longer needed."
                 )
             self._set_guidance_card_state(
                 self.device_assignments_guidance_card,
                 self.device_assignments_guidance_title_label,
                 self.device_assignments_guidance_status_label,
-                title="Focused Radio Schedule Guidance",
+                title="Focused Assigned Plan Guidance",
                 text=text,
                 level="warning" if active_swap else "info",
             )
@@ -12107,12 +12293,12 @@ class SettingsTab(QWidget):
         if state == "temporary_override":
             text = (
                 f"{device_name} is running a temporary override with {operating_name}. "
-                "Use Restore Default Schedule when the temporary assignment window ends."
+                "Use Restore Default Plan when the temporary assignment window ends."
             )
             level = "warning"
         elif row.get("operating_profile_id") in (None, "", 0):
             text = (
-                f"{device_name} is currently unassigned. Assign a schedule profile if this radio should participate in Station Default schedule workflows."
+                f"{device_name} is currently unassigned. Assign a frequency plan if this radio should participate in Station Default schedule workflows."
             )
             level = "warning"
         else:
@@ -12126,7 +12312,7 @@ class SettingsTab(QWidget):
             self.device_assignments_guidance_card,
             self.device_assignments_guidance_title_label,
             self.device_assignments_guidance_status_label,
-            title=f"{device_name} Schedule Guidance",
+            title=f"{device_name} Assigned Plan Guidance",
             text=text,
             level=level,
         )
@@ -12747,7 +12933,7 @@ class SettingsTab(QWidget):
         if refresh_section_titles:
             self._refresh_section_titles()
 
-    # ---------- Schedule Profiles / Radio Schedule Assignments ---------- #
+    # ---------- Frequency Plans / Assigned Plans ---------- #
 
     def _summary_operating_profiles(self) -> str:
         count = len(self.operating_profiles)
@@ -12755,13 +12941,13 @@ class SettingsTab(QWidget):
             [row for row in self.operating_profiles if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1]
         )
         if count <= 0:
-            return "No schedule profiles"
-        return f"{count} schedule profile{'s' if count != 1 else ''}, {enabled_count} enabled"
+            return "No frequency plans"
+        return f"{count} frequency plan{'s' if count != 1 else ''}, {enabled_count} enabled"
 
     def _summary_device_assignments(self) -> str:
         rows = [row for row in self.device_assignments if isinstance(row, dict)]
         if not rows:
-            return "No radio schedule assignments"
+            return "No assigned plans"
         overrides = len(
             [row for row in rows if str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"]
         )
@@ -12884,7 +13070,7 @@ class SettingsTab(QWidget):
         if not hasattr(self, "operating_profiles_hint_label"):
             return
         if not self.operating_profiles:
-            self.operating_profiles_hint_label.setText("No schedule profiles are available.")
+            self.operating_profiles_hint_label.setText("No frequency plans are available.")
             return
         primary_assignment = next(
             (
@@ -12894,11 +13080,11 @@ class SettingsTab(QWidget):
             ),
             None,
         )
-        hint = "Schedule profiles define what the scheduler controls for the default radio."
+        hint = "Frequency plans define where and when the scheduler should guide the default radio."
         if isinstance(primary_assignment, dict):
             operating_name = str(primary_assignment.get("operating_profile_name", "") or "").strip() or DEFAULT_OPERATING_NAME
             state_label = self._assignment_state_label(str(primary_assignment.get("assignment_state", "") or "active"))
-            hint = f"Station default schedule: {operating_name} ({state_label}). " + hint
+            hint = f"Station default assigned plan: {operating_name} ({state_label}). " + hint
         self.operating_profiles_hint_label.setText(hint)
 
     def _update_device_assignments_hint(self) -> None:
@@ -12912,28 +13098,28 @@ class SettingsTab(QWidget):
             if mode == "carry_primary_profile":
                 carried_name = (
                     str(active_swap.get("applied_operating_profile_name", "") or "").strip()
-                    or "the previous primary schedule profile"
+                    or "the previous primary frequency plan"
                 )
                 self.device_assignments_hint_label.setText(
-                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    f"Temporary plan swap active: {source_name} -> {target_name}. "
                     f"{carried_name} is temporarily applied on the target radio. Restore Swap returns the previous primary and target assignment."
                 )
             else:
                 self.device_assignments_hint_label.setText(
-                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    f"Temporary plan swap active: {source_name} -> {target_name}. "
                     "Restore Swap returns the previous primary radio without rewriting endpoint settings."
                 )
             return
         rows = [row for row in self.device_assignments if isinstance(row, dict)]
         if not rows:
-            self.device_assignments_hint_label.setText("No radio schedule assignments are available.")
+            self.device_assignments_hint_label.setText("No assigned plans are available.")
             return
         assigned = len([row for row in rows if row.get("operating_profile_id") not in (None, "", 0)])
         overrides = len(
             [row for row in rows if str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"]
         )
         primary = next((row for row in rows if int(row.get("runtime_primary", 0) or 0) == 1), None)
-        hint = f"{assigned} radio{'s' if assigned != 1 else ''} currently have an effective schedule/profile assignment."
+        hint = f"{assigned} radio{'s' if assigned != 1 else ''} currently have an effective assigned plan."
         if overrides:
             hint += f" {overrides} temporary override{'s are' if overrides != 1 else ' is'} active."
         if isinstance(primary, dict):
@@ -13017,7 +13203,7 @@ class SettingsTab(QWidget):
         try:
             self.operating_profiles = list(self.multi_radio_store.list_operating_profiles())
         except Exception:
-            log.exception("Failed loading schedule profiles from store.")
+            log.exception("Failed loading frequency plans from store.")
             self.operating_profiles = []
         self._operating_profiles_table_loading = True
         try:
@@ -13162,7 +13348,7 @@ class SettingsTab(QWidget):
 
     def _open_operating_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Edit Schedule Profile" if existing else "Add Schedule Profile")
+        dlg.setWindowTitle("Edit Frequency Plan" if existing else "Add Frequency Plan")
         dlg.resize(560, 0)
         layout = QVBoxLayout(dlg)
         form = QFormLayout()
@@ -13172,7 +13358,7 @@ class SettingsTab(QWidget):
         name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
         form.addRow("Name:", name_edit)
 
-        enabled_chk = QCheckBox("Profile Enabled")
+        enabled_chk = QCheckBox("Plan Enabled")
         enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
         form.addRow("", enabled_chk)
 
@@ -13191,7 +13377,7 @@ class SettingsTab(QWidget):
         mode_idx = scheduler_mode_combo.findData(current_mode)
         scheduler_mode_combo.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
         self._fit_combo_to_contents(scheduler_mode_combo, minimum=220)
-        form.addRow("Schedule Behavior:", scheduler_mode_combo)
+        form.addRow("Plan Behavior:", scheduler_mode_combo)
 
         preferred_bands_edit = QLineEdit(
             self._preferred_band_text(
@@ -13221,7 +13407,7 @@ class SettingsTab(QWidget):
         use_net_control_tabs_chk.setChecked(bool((existing or {}).get("use_net_control_tabs", 1)))
         form.addRow("", use_net_control_tabs_chk)
 
-        allow_profile_swap_chk = QCheckBox("Allow profile swap coordination")
+        allow_profile_swap_chk = QCheckBox("Allow assigned plan swap coordination")
         allow_profile_swap_chk.setChecked(bool((existing or {}).get("allow_profile_swap", 0)))
         form.addRow("", allow_profile_swap_chk)
 
@@ -13245,13 +13431,13 @@ class SettingsTab(QWidget):
                 disabled.append("net control tabs")
             if disabled:
                 info_label.setText(
-                    "When this profile is assigned to the Station Default device, it suppresses: "
+                    "When this frequency plan is assigned to the Station Default radio, it suppresses: "
                     + ", ".join(disabled)
                     + "."
                 )
             else:
                 info_label.setText(
-                    "This profile leaves the current Station Default compatibility shell fully enabled."
+                    "This frequency plan leaves the current Station Default compatibility shell fully enabled."
                 )
 
         for chk in (
@@ -13273,7 +13459,7 @@ class SettingsTab(QWidget):
         def _save() -> None:
             name = name_edit.text().strip()
             if not name:
-                QMessageBox.warning(self, "Validation", "Operating profile name is required.")
+                QMessageBox.warning(self, "Validation", "Frequency plan name is required.")
                 return
             out.update(
                 {
@@ -13305,11 +13491,11 @@ class SettingsTab(QWidget):
         try:
             self.multi_radio_store.save_operating_profile(values)
         except ValueError as exc:
-            QMessageBox.warning(self, "Schedule Profiles", str(exc))
+            QMessageBox.warning(self, "Frequency Plans", str(exc))
             return
         except Exception:
             log.exception("Failed to save operating profile.")
-            QMessageBox.warning(self, "Schedule Profiles", "Unable to save the schedule profile.")
+            QMessageBox.warning(self, "Frequency Plans", "Unable to save the frequency plan.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13324,10 +13510,10 @@ class SettingsTab(QWidget):
     def _edit_operating_profile(self) -> None:
         selected = self._selected_operating_profiles()
         if not selected:
-            QMessageBox.information(self, "Edit Schedule Profile", "Select one schedule profile to edit.")
+            QMessageBox.information(self, "Edit Frequency Plan", "Select one frequency plan to edit.")
             return
         if len(selected) > 1:
-            QMessageBox.warning(self, "Edit Schedule Profile", "Please select only one schedule profile to edit.")
+            QMessageBox.warning(self, "Edit Frequency Plan", "Please select only one frequency plan to edit.")
             return
         updated = self._open_operating_profile_dialog(existing=selected[0])
         if not updated:
@@ -13337,12 +13523,12 @@ class SettingsTab(QWidget):
     def _delete_operating_profiles(self) -> None:
         selected = self._selected_operating_profiles()
         if not selected:
-            QMessageBox.information(self, "Delete Schedule Profiles", "Select one or more schedule profiles to delete.")
+            QMessageBox.information(self, "Delete Frequency Plans", "Select one or more frequency plans to delete.")
             return
         confirm = QMessageBox.question(
             self,
-            "Delete Schedule Profiles",
-            f"Delete {len(selected)} selected schedule profile(s)?",
+            "Delete Frequency Plans",
+            f"Delete {len(selected)} selected frequency plan(s)?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -13352,20 +13538,20 @@ class SettingsTab(QWidget):
             for row in selected:
                 self.multi_radio_store.delete_operating_profile(int(row.get("id", 0) or 0))
         except ValueError as exc:
-            QMessageBox.warning(self, "Delete Schedule Profiles", str(exc))
+            QMessageBox.warning(self, "Delete Frequency Plans", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed deleting operating profiles.")
-            QMessageBox.warning(self, "Delete Schedule Profiles", "Unable to delete the selected schedule profiles.")
+            QMessageBox.warning(self, "Delete Frequency Plans", "Unable to delete the selected frequency plans.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
         QMessageBox.information(
             self,
-            "Delete Schedule Profiles",
-            f"Deleted {len(selected)} schedule profile{'s' if len(selected) != 1 else ''}.",
+            "Delete Frequency Plans",
+            f"Deleted {len(selected)} frequency plan{'s' if len(selected) != 1 else ''}.",
         )
 
     def _open_assignment_dialog(self, selected_devices: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -13375,28 +13561,28 @@ class SettingsTab(QWidget):
         if not enabled_profiles:
             QMessageBox.information(
                 self,
-                "Radio Schedule Assignments",
-                "Create or enable a schedule profile before assigning it to a radio.",
+                "Assigned Plans",
+                "Create or enable a frequency plan before assigning it to a radio.",
             )
             return None
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Assign Schedule Profile")
+        dlg.setWindowTitle("Assign Frequency Plan")
         dlg.resize(540, 0)
         layout = QVBoxLayout(dlg)
         form = QFormLayout()
         layout.addLayout(form)
 
         summary_label = QLabel(
-            f"Apply one effective schedule/profile assignment to {len(selected_devices)} selected radio{'s' if len(selected_devices) != 1 else ''}."
+            f"Apply one effective plan assignment to {len(selected_devices)} selected radio{'s' if len(selected_devices) != 1 else ''}."
         )
         summary_label.setWordWrap(True)
         form.addRow("", summary_label)
 
         profile_combo = QComboBox()
         for row in enabled_profiles:
-            profile_combo.addItem(str(row.get("name", "") or "Schedule Profile"), int(row.get("id", 0) or 0))
-        form.addRow("Schedule Profile:", profile_combo)
+            profile_combo.addItem(str(row.get("name", "") or "Frequency Plan"), int(row.get("id", 0) or 0))
+        form.addRow("Frequency Plan:", profile_combo)
 
         state_combo = QComboBox()
         for label, value in OPERATING_ASSIGNMENT_STATE_OPTIONS:
@@ -13419,10 +13605,10 @@ class SettingsTab(QWidget):
             state = str(state_combo.currentData() or "active").strip().lower()
             if state == "temporary_override":
                 info_label.setText(
-                    "Temporary Override becomes effective immediately. Automatic timed expiry is not active in this checkpoint; restore the default schedule/profile manually when the override ends."
+                    "Temporary Override becomes effective immediately. Automatic timed expiry is not active in this checkpoint; restore the default assigned plan manually when the override ends."
                 )
             else:
-                info_label.setText("Active assignments become the current radio schedule/profile immediately.")
+                info_label.setText("Active assignments become the current assigned plan for this radio immediately.")
 
         state_combo.currentIndexChanged.connect(_update_hint)
         _update_hint()
@@ -13435,7 +13621,7 @@ class SettingsTab(QWidget):
         def _save() -> None:
             profile_id = int(profile_combo.currentData() or 0)
             if profile_id <= 0:
-                QMessageBox.warning(self, "Validation", "Select a schedule profile.")
+                QMessageBox.warning(self, "Validation", "Select a frequency plan.")
                 return
             state = str(state_combo.currentData() or "active").strip().lower() or "active"
             reason_value = reason_edit.text().strip()
@@ -13460,7 +13646,7 @@ class SettingsTab(QWidget):
     def _assign_operating_profile_to_selected_devices(self) -> None:
         selected = self._selected_assignment_rows()
         if not selected:
-            QMessageBox.information(self, "Radio Schedule Assignments", "Select one or more radios to assign.")
+            QMessageBox.information(self, "Assigned Plans", "Select one or more radios to assign.")
             return
         values = self._open_assignment_dialog(selected)
         if not values:
@@ -13475,12 +13661,12 @@ class SettingsTab(QWidget):
                     ends_utc=str(values.get("ends_utc", "") or ""),
                 )
         except ValueError as exc:
-            QMessageBox.warning(self, "Radio Schedule Assignments", str(exc))
+            QMessageBox.warning(self, "Assigned Plans", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed updating radio schedule assignments.")
-            QMessageBox.warning(self, "Radio Schedule Assignments", "Unable to update the selected radio schedule assignments.")
+            QMessageBox.warning(self, "Assigned Plans", "Unable to update the selected assigned plans.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13489,18 +13675,18 @@ class SettingsTab(QWidget):
     def _restore_default_operating_profile_for_selected_devices(self) -> None:
         selected = self._selected_assignment_rows()
         if not selected:
-            QMessageBox.information(self, "Radio Schedule Assignments", "Select one or more radios to restore.")
+            QMessageBox.information(self, "Assigned Plans", "Select one or more radios to restore.")
             return
         try:
             for row in selected:
                 self.multi_radio_store.restore_default_operating_profile(int(row.get("device_profile_id", 0) or 0))
         except ValueError as exc:
-            QMessageBox.warning(self, "Radio Schedule Assignments", str(exc))
+            QMessageBox.warning(self, "Assigned Plans", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
-            log.exception("Failed restoring default schedule profile.")
-            QMessageBox.warning(self, "Radio Schedule Assignments", "Unable to restore the default schedule/profile.")
+            log.exception("Failed restoring default frequency plan.")
+            QMessageBox.warning(self, "Assigned Plans", "Unable to restore the default assigned plan.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13509,7 +13695,7 @@ class SettingsTab(QWidget):
     def _assign_schedule_to_selected_radios(self) -> None:
         selected = self._selected_device_profiles_as_assignment_rows()
         if not selected:
-            QMessageBox.information(self, "Assign Schedule", "Select one or more radios to assign.")
+            QMessageBox.information(self, "Assign Plan", "Select one or more radios to assign.")
             return
         values = self._open_assignment_dialog(selected)
         if not values:
@@ -13524,12 +13710,12 @@ class SettingsTab(QWidget):
                     ends_utc=str(values.get("ends_utc", "") or ""),
                 )
         except ValueError as exc:
-            QMessageBox.warning(self, "Assign Schedule", str(exc))
+            QMessageBox.warning(self, "Assign Plan", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
-            log.exception("Failed assigning schedule from radio profiles.")
-            QMessageBox.warning(self, "Assign Schedule", "Unable to update the selected radio schedule assignments.")
+            log.exception("Failed assigning plan from radio profiles.")
+            QMessageBox.warning(self, "Assign Plan", "Unable to update the selected assigned plans.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13538,18 +13724,18 @@ class SettingsTab(QWidget):
     def _restore_schedule_for_selected_radios(self) -> None:
         selected = self._selected_device_profiles()
         if not selected:
-            QMessageBox.information(self, "Restore Schedule", "Select one or more radios to restore.")
+            QMessageBox.information(self, "Restore Plan", "Select one or more radios to restore.")
             return
         try:
             for row in selected:
                 self.multi_radio_store.restore_default_operating_profile(int(row.get("id", 0) or 0))
         except ValueError as exc:
-            QMessageBox.warning(self, "Restore Schedule", str(exc))
+            QMessageBox.warning(self, "Restore Plan", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed restoring schedule from radio profiles.")
-            QMessageBox.warning(self, "Restore Schedule", "Unable to restore the selected radio schedule assignments.")
+            QMessageBox.warning(self, "Restore Plan", "Unable to restore the selected assigned plans.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13565,13 +13751,13 @@ class SettingsTab(QWidget):
             None,
         )
         if not isinstance(primary_row, dict):
-            QMessageBox.warning(self, "Temporary Swap", "The current Station Default radio assignment could not be resolved.")
+            QMessageBox.warning(self, "Temporary Plan Swap", "The current Station Default radio assignment could not be resolved.")
             return None
         primary_profile = self._operating_profile_by_id(int(primary_row.get("operating_profile_id", 0) or 0))
         allow_carry = bool(primary_profile and int(primary_profile.get("allow_profile_swap", 0) or 0) == 1)
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Temporary Profile Swap")
+        dlg.setWindowTitle("Temporary Plan Swap")
         dlg.resize(560, 0)
         layout = QVBoxLayout(dlg)
         form = QFormLayout()
@@ -13586,20 +13772,20 @@ class SettingsTab(QWidget):
         form.addRow("", summary_label)
 
         form.addRow("Current Primary:", QLabel(str(primary_row.get("device_name", "") or "")))
-        form.addRow("Primary Profile:", QLabel(str(primary_row.get("operating_profile_name", "") or "Unassigned")))
+        form.addRow("Primary Assigned Plan:", QLabel(str(primary_row.get("operating_profile_name", "") or "Unassigned")))
         form.addRow("Target Radio:", QLabel(str(target_row.get("device_name", "") or "")))
-        form.addRow("Target Profile:", QLabel(str(target_row.get("operating_profile_name", "") or "Unassigned")))
+        form.addRow("Target Assigned Plan:", QLabel(str(target_row.get("operating_profile_name", "") or "Unassigned")))
 
         mode_combo = QComboBox()
-        mode_combo.addItem("Use target radio schedule (Recommended)", "use_target_profile")
+        mode_combo.addItem("Use target radio assigned plan (Recommended)", "use_target_profile")
         if allow_carry:
-            mode_combo.addItem("Carry current Station Default schedule", "carry_primary_profile")
+            mode_combo.addItem("Carry current Station Default assigned plan", "carry_primary_profile")
         form.addRow("Swap Mode:", mode_combo)
 
         reason_edit = QLineEdit()
         reason_edit.setPlaceholderText("Optional operator note")
         reason_edit.setText(
-            f"Temporary swap {str(primary_row.get('device_name', '') or 'primary')} -> {str(target_row.get('device_name', '') or 'target')}"
+            f"Temporary plan swap {str(primary_row.get('device_name', '') or 'primary')} -> {str(target_row.get('device_name', '') or 'target')}"
         )
         form.addRow("Reason:", reason_edit)
 
@@ -13614,18 +13800,18 @@ class SettingsTab(QWidget):
         def _update_hint() -> None:
             mode = str(mode_combo.currentData() or "use_target_profile").strip().lower()
             if mode == "carry_primary_profile":
-                carried_name = str((primary_profile or {}).get("name", "") or "Current Station Default Schedule")
+                carried_name = str((primary_profile or {}).get("name", "") or "Current Station Default Assigned Plan")
                 info_label.setText(
                     f"{carried_name} will be copied onto the target radio as a temporary override. "
                     "Restore Swap returns the target radio to its prior effective assignment."
                 )
             elif not allow_carry:
                 info_label.setText(
-                    "The current Station Default schedule does not allow carried swaps, so this workflow keeps the target radio's existing effective schedule."
+                    "The current Station Default assigned plan does not allow carried swaps, so this workflow keeps the target radio's existing effective assigned plan."
                 )
             else:
                 info_label.setText(
-                    "This swap changes the Station Default radio temporarily but leaves the target radio's current effective schedule in place."
+                    "This swap changes the Station Default radio temporarily but leaves the target radio's current effective assigned plan in place."
                 )
 
         mode_combo.currentIndexChanged.connect(_update_hint)
@@ -13654,24 +13840,24 @@ class SettingsTab(QWidget):
 
     def _start_temporary_profile_swap(self) -> None:
         if isinstance(self.active_profile_swap, dict) and self.active_profile_swap:
-            QMessageBox.information(self, "Temporary Swap", "A temporary swap is already active. Restore it before starting another.")
+            QMessageBox.information(self, "Temporary Plan Swap", "A temporary plan swap is already active. Restore it before starting another.")
             return
         selected = self._selected_assignment_rows()
         if not selected:
-            QMessageBox.information(self, "Temporary Swap", "Select one active non-primary radio to use as the temporary swap target.")
+            QMessageBox.information(self, "Temporary Plan Swap", "Select one active non-primary radio to use as the temporary plan swap target.")
             return
         if len(selected) != 1:
-            QMessageBox.warning(self, "Temporary Swap", "Please select exactly one active non-primary radio as the temporary swap target.")
+            QMessageBox.warning(self, "Temporary Plan Swap", "Please select exactly one active non-primary radio as the temporary plan swap target.")
             return
         target_row = selected[0]
         if int(target_row.get("runtime_primary", 0) or 0) == 1:
-            QMessageBox.information(self, "Temporary Swap", "The selected radio is already the Station Default runtime.")
+            QMessageBox.information(self, "Temporary Plan Swap", "The selected radio is already the Station Default runtime.")
             return
         if str(target_row.get("device_class", "") or "").strip().lower() == "observer":
-            QMessageBox.warning(self, "Temporary Swap", "Observer / SDR radios cannot be used as temporary-swap targets.")
+            QMessageBox.warning(self, "Temporary Plan Swap", "Observer / SDR radios cannot be used as temporary plan swap targets.")
             return
         if int(target_row.get("runtime_active", 0) or 0) != 1:
-            QMessageBox.warning(self, "Temporary Swap", "The temporary swap target must already be active.")
+            QMessageBox.warning(self, "Temporary Plan Swap", "The temporary plan swap target must already be active.")
             return
         values = self._open_temporary_profile_swap_dialog(target_row)
         if not values:
@@ -13684,12 +13870,12 @@ class SettingsTab(QWidget):
                 ends_utc=str(values.get("ends_utc", "") or ""),
             )
         except ValueError as exc:
-            QMessageBox.warning(self, "Temporary Swap", str(exc))
+            QMessageBox.warning(self, "Temporary Plan Swap", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed starting temporary profile swap.")
-            QMessageBox.warning(self, "Temporary Swap", "Unable to start the temporary profile swap.")
+            QMessageBox.warning(self, "Temporary Plan Swap", "Unable to start the temporary plan swap.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13698,7 +13884,7 @@ class SettingsTab(QWidget):
     def _restore_temporary_profile_swap(self) -> None:
         active_swap = dict(self.active_profile_swap or {})
         if not active_swap:
-            QMessageBox.information(self, "Restore Swap", "No temporary profile swap is currently active.")
+            QMessageBox.information(self, "Restore Swap", "No temporary plan swap is currently active.")
             return
         source_name = str(active_swap.get("source_device_name", "") or "").strip() or "previous primary"
         target_name = str(active_swap.get("target_device_name", "") or "").strip() or "temporary target"
@@ -13719,7 +13905,7 @@ class SettingsTab(QWidget):
             return
         except Exception:
             log.exception("Failed restoring temporary profile swap.")
-            QMessageBox.warning(self, "Restore Swap", "Unable to restore the temporary profile swap.")
+            QMessageBox.warning(self, "Restore Swap", "Unable to restore the temporary plan swap.")
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
@@ -13739,15 +13925,35 @@ class SettingsTab(QWidget):
         )
         return confirm == QMessageBox.Yes
 
+    @staticmethod
+    def _device_profile_dialog_title(existing: Optional[Dict[str, Any]] = None) -> str:
+        return "Advanced Radio Edit" if existing else "Guided Add Radio"
+
+    @staticmethod
+    def _device_profile_dialog_intro(existing: Optional[Dict[str, Any]] = None) -> str:
+        if existing:
+            return (
+                "Edit the selected radio's identity, role, and core connection details. "
+                "Software-specific settings remain available in the selected-radio Settings sections behind this dialog."
+            )
+        return (
+            "Set up a new radio one step at a time: choose the radio identity, pick the software used by that radio, "
+            "enter the connection details that matter, and review readiness before saving."
+        )
+
+    @staticmethod
+    def _device_profile_dialog_save_text(existing: Optional[Dict[str, Any]] = None) -> str:
+        return "Save Changes" if existing else "Save Radio"
+
     def _open_device_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Advanced Radio Edit" if existing else "Add Radio")
+        dlg_title = self._device_profile_dialog_title(existing)
+        dlg.setWindowTitle(dlg_title)
+        dlg.setAccessibleName(dlg_title)
         dlg.resize(760, 720)
         layout = QVBoxLayout(dlg)
-        intro = QLabel(
-            "Choose the radio identity, role, and core connection details. "
-            "After saving, the selected radio's JS8Call, Fast Light, VarAC, and launch settings are edited in the Settings sections behind this dialog."
-        )
+        intro = QLabel(self._device_profile_dialog_intro(existing))
+        intro.setAccessibleName(f"{dlg_title} guidance")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -14640,6 +14846,10 @@ class SettingsTab(QWidget):
         body_layout.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save_button = buttons.button(QDialogButtonBox.Save)
+        if save_button is not None:
+            save_button.setText(self._device_profile_dialog_save_text(existing))
+            save_button.setAccessibleName(self._device_profile_dialog_save_text(existing))
         layout.addWidget(buttons)
 
         out: Dict[str, Any] = {}
@@ -14742,7 +14952,7 @@ class SettingsTab(QWidget):
         self._update_device_assignment_action_buttons()
         self._refresh_section_titles()
         self._refresh_contextual_autofill_buttons()
-        self._refresh_running_status(force=True)
+        self._refresh_running_status_compat(force=True)
         if emit_saved:
             try:
                 self.settings_saved.emit()
@@ -15870,7 +16080,7 @@ class SettingsTab(QWidget):
                     self._publish_launch_control_feedback(
                         status="blocked",
                         summary="Launch blocked: Launch Control is disabled.",
-                        detail=reason or "Launch Control is disabled by the primary schedule profile.",
+                        detail=reason or "Launch Control is disabled by the primary frequency plan.",
                     )
                     return
             except Exception:
@@ -16147,7 +16357,13 @@ class SettingsTab(QWidget):
     def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
         if not self._active:
             return
-        self._refresh_running_status(force=True)
+        self._refresh_running_status_compat(force=True)
+
+    def _refresh_running_status_compat(self, force: bool = False) -> None:
+        try:
+            self._refresh_running_status(force=force)
+        except TypeError:
+            self._refresh_running_status()
 
     def _refresh_running_status(self, force: bool = False):
         _perf_t0 = time.perf_counter()
@@ -16196,7 +16412,7 @@ class SettingsTab(QWidget):
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
                 self.loading_label.setVisible(False)
-            self._refresh_running_status(force=True)
+            self._refresh_running_status_compat(force=True)
             self._update_launch_selected_state()
             self._update_device_profile_action_buttons()
             self._update_op_group_action_buttons()

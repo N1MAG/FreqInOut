@@ -64,6 +64,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, table_exists
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.commstat_artifacts import (
@@ -74,6 +75,7 @@ from freqinout.core.commstat_artifacts import (
     tombstone_commstat_artifact,
 )
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.core.js8_spotter_forms import (
     form_codes_enabled_for,
     form_id_enabled,
@@ -2373,10 +2375,11 @@ class MessageViewerTab(QWidget):
     - Scan interval selectable (1 / 15 / 30 / 60 minutes)
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._multi_radio_store = MultiRadioStore()
+        self.plan_context_service = plan_context_service or PlanContextService()
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._time_mode_override: str | None = None
         self._show_local_time = default_mode != "UTC"
@@ -3806,6 +3809,17 @@ class MessageViewerTab(QWidget):
         header.addWidget(self.local_label)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        self.plan_context_label = PlanContextLabel(
+            "messages",
+            service=self.plan_context_service,
+            fallback_text="Messages uses the current radio and Frequency Plan context when reviewing received traffic and compose workflows.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan message work should be reviewed against."
+        )
+        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         time_status_row = QHBoxLayout()
         time_status_row.setContentsMargins(0, 0, 0, 0)
@@ -7375,6 +7389,11 @@ class MessageViewerTab(QWidget):
             pass
 
     def on_settings_saved(self) -> None:
+        try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
+        except Exception:
+            pass
         prev_watch_sig = ""
         prev_auth_sig: tuple = tuple()
         try:

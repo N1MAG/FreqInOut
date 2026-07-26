@@ -45,6 +45,26 @@
     Tip: if a button appears muted, it usually means no eligible action is available yet. Select a row, start a net, or complete required fields to enable the next step.
   </div>
 
+  <h2 id="operating-plan-glossary">Operating Plan Glossary</h2>
+  <p><strong>Purpose</strong>: these terms explain how FreqInOut connects planning, radios, scheduler behavior, messages, maps, and SOP output.</p>
+  <ul class="section-list">
+    <li><strong>Frequency Plan</strong>: a reusable plan that describes where and when a radio should operate. It can include frequencies, schedule sources, operating groups, bands, modes, and operator notes.</li>
+    <li><strong>Assigned Plan</strong>: the relationship between one radio profile and one frequency plan. A radio consumes an assigned plan; the plan itself remains reusable.</li>
+    <li><strong>Operating Plan</strong>: the broader Where / When / What picture used during operations and SOP export. In this release, FIO composes it from frequency plans, assigned radios, groups, procedures, message rules, and runtime context.</li>
+    <li><strong>Schedule Source</strong>: the source of schedule or activity information, such as a public schedule, local group schedule, imported document, or manual entry.</li>
+    <li><strong>Radio Profile</strong>: the execution or monitoring endpoint. It describes a radio, SDR, gateway, or observer setup, including software, control details, transmit capability, readiness, and assigned plan.</li>
+  </ul>
+
+  <h2 id="plan-context-cue">Plan Context Cue</h2>
+  <p><strong>Purpose</strong>: the plan context cue is a read-only line shown near the top of major planning and operating tabs so operators can confirm which radio and Frequency Plan the tab is currently describing.</p>
+  <p><strong>Where it appears</strong>: HF Frequency Schedule, Net Schedules, FreqPlanner, SOP Builder, Messages, ControlFreq, and Map.</p>
+  <ul class="section-list">
+    <li><strong>What it tells you</strong>: the selected or current radio profile, its assigned Frequency Plan, whether the radio is primary or active for the tab, and whether Scheduler, Messages, and Map participation are enabled for that radio.</li>
+    <li><strong>Temporary hints</strong>: when applicable, the cue can show operator-visible state such as a current runtime override, blocked readiness, or disabled participation that explains why the tab may not be following the default plan.</li>
+    <li><strong>Informational only</strong>: This cue is informational only. It does not change the active radio, send QSY commands, hold or resume the scheduler, filter Messages, filter Map, change SOP priority, or rewrite schedule rows.</li>
+    <li><strong>When it looks wrong</strong>: check the selected radio in Settings, Assigned Plans, runtime participation flags, and the schedule or SOP row that owns the intended operating change.</li>
+  </ul>
+
   <h2 id="quick-start">Quick Start</h2>
   <p><strong>Goal</strong>: get one station configured in the same order FreqInOut expects to use it, so the scheduler, message workflows, map, and launch controls all agree with each other. Quick Start is intentionally more guided than brief. If a step feels unfamiliar, follow the link in that step before moving on.</p>
   <ol class="section-list">
@@ -95,9 +115,9 @@
       </tr>
       <tr>
         <td><a href="#freqplanner">FreqPlanner</a></td>
-        <td>This is the week-at-a-glance schedule sanity check.</td>
-        <td>The display toggles teach you to compare Local/UTC time and Band/Frequency views without editing the schedule.</td>
-        <td>Use it after schedule or SOP edits to catch coverage gaps, crowded periods, or surprising active windows before operating.</td>
+        <td>This is the week-at-a-glance Frequency Plan coverage check.</td>
+        <td>The display toggles teach you to compare Local/UTC time and Band/Frequency views without editing the source schedule rows.</td>
+        <td>Use it after Frequency Plan, schedule, or SOP edits to catch coverage gaps, crowded periods, or surprising active windows before operating.</td>
       </tr>
       <tr>
         <td><a href="#messages">Messages</a></td>
@@ -283,7 +303,7 @@
   <ul class="section-list">
     <li><strong>What belongs here</strong>: short-horizon operating decisions, temporary holds, schedule confidence, and quick status review.</li>
     <li><strong>What does not belong here</strong>: building schedules, maintaining rosters, or deep software configuration. Use the schedule tabs, Operators tabs, and Settings for that work.</li>
-    <li><strong>Cross-tab interaction</strong>: ControlFreq reflects results from Settings, HF Daily, HF Nets, SOP Builder, Messages, and the software status providers. If this tab looks wrong, the cause is often upstream in one of those areas.</li>
+    <li><strong>Cross-tab interaction</strong>: ControlFreq reflects results from Settings, assigned Frequency Plans, HF Daily, HF Nets, SOP Builder, Messages, and the software status providers. If the current plan or next action looks wrong, the cause is often upstream in one of those areas.</li>
   </ul>
 
   <h3 id="controlfreq-actions">Actions</h3>
@@ -332,11 +352,11 @@
   </table>
 
   <h2 id="freqplanner">FreqPlanner</h2>
-  <p><strong>Purpose</strong>: read-only visual planner for HF, Net, and SOP-effective schedule coverage.</p>
-  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the whole week at a glance. Use it after schedule edits, after SOP changes, or whenever you want to see coverage and congestion without reading every row in the schedule editors.</p>
+  <p><strong>Purpose</strong>: read-only visual planner for Frequency Plan coverage across HF, Net, and SOP-effective schedule windows.</p>
+  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the whole week at a glance. Use it after Frequency Plan edits, after SOP changes, or whenever you want to see coverage and congestion without reading every source row.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: validate structure after editing <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, or <a href="#sop-builder">SOP Builder</a>.</li>
-    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the schedule or SOP tabs rather than expecting FreqPlanner to be the editing surface.</li>
+    <li><strong>Best use</strong>: validate Frequency Plan structure after editing <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, <a href="#sop-builder">SOP Builder</a>, or plan assignment in Settings.</li>
+    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the source schedule, SOP, or Settings plan-assignment surfaces rather than expecting FreqPlanner to be the editing surface.</li>
   </ul>
   <table>
     <thead>
@@ -448,7 +468,7 @@
   <p><strong>Why you use it</strong>: Map is a decision-support surface, not just a picture. It helps you compare who is active, which regions are reporting, who may be reachable now, and where a relay path may be plausible based on recent evidence and schedules.</p>
   <ul class="section-list">
     <li><strong>Best use</strong>: pair Map with ControlFreq when deciding where to spend time next, and pair it with Messages when you want geographic context for a report or operator.</li>
-    <li><strong>Cross-tab interaction</strong>: Map consumes operator data, schedule data, JS8/VarAC/CommStat evidence, and SitRep summaries. If labels, groups, or status colors look wrong here, the source is usually in Operators, Settings, or Messages rather than the map itself.</li>
+    <li><strong>Cross-tab interaction</strong>: Map consumes operator data, Frequency Plan and schedule-source data, JS8/VarAC/CommStat evidence, and SitRep summaries. If labels, groups, plan coverage, or status colors look wrong here, the source is usually in Operators, Settings, schedules, or Messages rather than the map itself.</li>
     <li><strong>Operational caution</strong>: path overlays and peer schedule overlays are aids, not guarantees. Treat them as clues that help you make a better radio decision, not as proof that a path is available right now.</li>
   </ul>
 
@@ -516,7 +536,7 @@
 
   <h2 id="station-health">Station Health</h2>
   <p><strong>Purpose</strong>: Station Health shows what FIO knows about the programs and scheduler checks that can affect station control.</p>
-  <p><strong>Explain this to me</strong>: FIO is the operating console, but it still depends on other programs and, in multi-rig, on the selected radio profile. FLRig may answer for a radio. FLDigi may provide receive-state clues. JS8Call or VarAC may be busy moving traffic. Background ingest jobs may be reading message stores. Station Health is the plain-language place where FIO says, “Here is what I checked, here is the last thing I saw, and here is whether I am waiting, backing off, or working normally.”</p>
+  <p><strong>Explain this to me</strong>: FIO is the operating console, but it still depends on other programs and, in multi-rig, on the selected radio profile and its assigned current plan. FLRig may answer for a radio. FLDigi may provide receive-state clues. JS8Call or VarAC may be busy moving traffic. Background ingest jobs may be reading message stores. Station Health is the plain-language place where FIO says, “Here is what I checked, here is the last thing I saw, and here is whether I am waiting, backing off, or working normally.”</p>
   <p><strong>Why you use it</strong>: if a tab feels delayed, a status indicator says a program is unreachable, a schedule change did not happen when expected, or the left menu highlights Station Health, open this tab to see what FIO is waiting on. It is meant to answer “what is FIO seeing right now?” without making the operator read a technical log first.</p>
   <ul class="section-list">
     <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, scheduler status snapshots, scheduler control tasks, shared PTT interlock holds, and other checks FIO uses while building the operating picture.</li>
@@ -788,10 +808,10 @@
   </ul>
 
   <h2 id="hf-daily">Schedules: HF Daily</h2>
-  <p><strong>Purpose</strong>: manage active HF daily schedule rows and resource-backed schedule candidates.</p>
+  <p><strong>Purpose</strong>: manage active HF daily source rows and resource-backed candidates that feed the station's Frequency Plan.</p>
   <p><strong>Why you use it</strong>: HF Daily defines the backbone of routine HF operation. This is where you decide what the scheduler should normally follow when no special SOP or net priority rule is taking precedence.</p>
   <ul class="section-list">
-    <li><strong>Think of it as baseline intent</strong>: if SOP Builder expresses a temporary operational posture, HF Daily expresses the normal everyday HF plan that the station returns to.</li>
+    <li><strong>Think of it as baseline intent</strong>: if SOP Builder expresses a temporary operational posture, HF Daily expresses the normal everyday HF source rows that the Frequency Plan returns to.</li>
     <li><strong>Cross-tab interaction</strong>: rows saved here directly influence ControlFreq, FreqPlanner, Map schedule context, and scheduler-driven QSY behavior.</li>
     <li><strong>Common mistake</strong>: when operators see a mismatch in ControlFreq, they often adjust the radio first. Usually it is better to confirm the HF Daily row and the active SOP state first.</li>
   </ul>
@@ -853,11 +873,11 @@
   </div>
 
   <h2 id="hf-nets">Schedules: HF Nets</h2>
-  <p><strong>Purpose</strong>: manage net schedule rows and the net resource catalog.</p>
+  <p><strong>Purpose</strong>: manage net schedule source rows and the net resource catalog that can contribute to Frequency Plan coverage.</p>
   <p><strong>Why you use it</strong>: HF Nets is where you define structured scheduled net activity, especially when that activity has its own timing, FLDigi expectations, and conflict rules that should not be treated as generic baseline HF presence.</p>
   <ul class="section-list">
     <li><strong>Best use</strong>: use HF Nets for recurring organized activity that needs its own identity, offsets, and optional priority decisions against SOP windows.</li>
-    <li><strong>Cross-tab interaction</strong>: saved net rows influence ControlFreq outlook, scheduler decisions, net-control workflows, and policy prompts when SOP windows overlap.</li>
+    <li><strong>Cross-tab interaction</strong>: saved net rows influence Frequency Plan coverage, ControlFreq outlook, scheduler decisions, net-control workflows, and policy prompts when SOP windows overlap.</li>
     <li><strong>Why a separate tab exists</strong>: net operations usually need more structure than ordinary HF presence, so FreqInOut keeps the planning surface separate from HF Daily on purpose.</li>
   </ul>
 
@@ -1112,6 +1132,18 @@
       <tr>
         <td>FreqInOut Settings</td>
         <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, Software Used checkboxes, operating status, setup readiness, and enforcement/prompt timers</td>
+      </tr>
+      <tr>
+        <td>Radio Profile</td>
+        <td>One-radio-at-a-time identity, software options, connection readiness, assigned plan, timer behavior, launch behavior, and advanced radio inventory</td>
+      </tr>
+      <tr>
+        <td>Frequency Plans</td>
+        <td>Reusable plans that define where and when a radio should operate; includes plan behavior and workflow participation flags</td>
+      </tr>
+      <tr>
+        <td>Assigned Plans</td>
+        <td>Radio-to-plan assignment review, temporary overrides, plan restore actions, and station-default assignment visibility</td>
       </tr>
       <tr id="settings-hf-groups">
         <td>HF Operating Groups</td>

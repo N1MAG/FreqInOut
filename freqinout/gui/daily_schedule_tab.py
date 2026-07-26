@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QColor
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
@@ -52,6 +53,7 @@ from freqinout.core.schedule_targeting import (
 from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style, font_css
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
@@ -109,8 +111,8 @@ BAND_OPTIONS = [
 MODE_OPTIONS = ["Digi", "SSB"]
 SCHEDULE_TARGET_SCOPE_ITEMS = [
     ("Station", TARGET_SCOPE_STATION),
-    ("Device Profile", TARGET_SCOPE_DEVICE_PROFILE),
-    ("Operating Profile", TARGET_SCOPE_OPERATING_PROFILE),
+    ("Radio Profile", TARGET_SCOPE_DEVICE_PROFILE),
+    ("Frequency Plan", TARGET_SCOPE_OPERATING_PROFILE),
 ]
 
 
@@ -206,9 +208,10 @@ class DailyScheduleTab(QWidget):
     RES_COL_UPDATED = 10
     RES_COL_CONFLICT = 11
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service or PlanContextService()
         self._status_service = SoftwareStatusService(self.settings)
         try:
             self.settings.reload()
@@ -295,14 +298,14 @@ class DailyScheduleTab(QWidget):
     def _operating_target_label(row: Dict[str, Any]) -> str:
         name = str(row.get("name") or "").strip()
         profile_id = int(row.get("id", 0) or 0)
-        return name or f"Profile #{profile_id}"
+        return name or f"Frequency Plan #{profile_id}"
 
     @staticmethod
     def _target_scope_tooltip() -> str:
         return (
             "Station rows apply to any current station-default runtime. "
-            "Device Profile rows apply only when that device is the station default. "
-            "Operating Profile rows apply only when the station-default device carries that effective assignment."
+            "Radio Profile rows apply only when that radio is the station default. "
+            "Frequency Plan rows apply only when the station-default radio carries that assigned plan."
         )
 
     def _populate_target_value_combo(
@@ -423,6 +426,17 @@ class DailyScheduleTab(QWidget):
         self.effective_source_label = QLabel("Runtime Source: --")
         self.effective_source_label.setToolTip("Shows which runtime schedule source is currently driving decisions.")
         layout.addLayout(header)
+
+        self.plan_context_label = PlanContextLabel(
+            "hf_schedule",
+            service=self.plan_context_service,
+            fallback_text="HF Schedule uses the current radio and Frequency Plan context when reviewing active schedule rows.",
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan schedule changes apply to."
+        )
+        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.refresh_context(refresh=True)
 
         # QSY controls row (right aligned under time bar)
         qsy_row = QHBoxLayout()
@@ -5535,6 +5549,11 @@ class DailyScheduleTab(QWidget):
         """
         Refresh operating groups/QSY options when settings are saved.
         """
+        try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
+        except Exception:
+            pass
         try:
             self.settings.reload()
         except Exception:

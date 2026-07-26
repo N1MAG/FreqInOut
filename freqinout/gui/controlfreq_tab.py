@@ -39,6 +39,7 @@ from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.schedule_targeting import (
     normalize_schedule_target_fields,
@@ -88,6 +89,7 @@ from freqinout.gui.stations_map_tab import (
     maidenhead_to_latlon,
 )
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style, led_style
 from freqinout.version import __version__
 
@@ -105,9 +107,10 @@ class ControlFreqTab(QWidget):
 
     _message_summary_ready = Signal(int, object, object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.plan_context_service = plan_context_service
         self._sop_manager = SOPManager()
         self._timer: Optional[QTimer] = None
         self._active = False
@@ -273,6 +276,22 @@ class ControlFreqTab(QWidget):
         self.focus_mode_btn.setVisible(False)
 
         root.addLayout(header)
+
+        controlfreq_context_text = (
+            "ControlFreq uses the current radio and Frequency Plan context when reviewing schedule control."
+        )
+        self.plan_context_label = PlanContextLabel(
+            "controlfreq",
+            service=self.plan_context_service,
+            fallback_text=controlfreq_context_text,
+            create_service=self.plan_context_service is not None,
+        )
+        self.plan_context_label.setToolTip(
+            "Use this context to confirm which radio and assigned Frequency Plan ControlFreq is displaying."
+        )
+        root.addWidget(self.plan_context_label)
+        if self.plan_context_service is not None:
+            self.plan_context_label.refresh_context(refresh=True)
 
         self.readiness_review_widget = QWidget()
         readiness_layout = QVBoxLayout(self.readiness_review_widget)
@@ -1340,6 +1359,11 @@ class ControlFreqTab(QWidget):
             self._heavy_refresh_pending = False
 
     def on_settings_saved(self) -> None:
+        try:
+            self.plan_context_label.invalidate_context()
+            self.plan_context_label.refresh_context(refresh=True)
+        except Exception:
+            pass
         self._invalidate_theme_cache()
         self._settings_reload_mtime_ns = 0
         try:

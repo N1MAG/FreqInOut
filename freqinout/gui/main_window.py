@@ -40,6 +40,7 @@ from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackService
 from freqinout.core.station_runtime_manager import StationRuntimeManager
@@ -127,6 +128,7 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsManager()
         self.action_feedback_service = ActionFeedbackService()
+        self.plan_context_service = PlanContextService()
         self._action_feedback_unsubscribe = None
         self._notify_startup_status("Loading application settings...")
         self.dependency_status_service = get_dependency_status_service(self.settings)
@@ -154,11 +156,11 @@ class MainWindow(QMainWindow):
         self._launch_progress_dialog: QProgressDialog | None = None
         self._launch_progress_total = 0
         self._launch_progress_done = 0
-        self.hf_schedule_tab = DailyScheduleTab(self)  # this tab is labeled "HF Frequency Schedule"
-        self.net_tab = NetScheduleTab(self)
+        self.hf_schedule_tab = DailyScheduleTab(self, plan_context_service=self.plan_context_service)  # this tab is labeled "HF Frequency Schedule"
+        self.net_tab = NetScheduleTab(self, plan_context_service=self.plan_context_service)
         self.fldigi_tab = FldigiNetControlTab(self)
         self.js8_tab = JS8CallNetControlTab(self)
-        self.sop_tab = SOPTab(self)
+        self.sop_tab = SOPTab(self, plan_context_service=self.plan_context_service)
         self.operator_history_tab = OperatorHistoryTab(self)
         self.local_operator_tab = LocalOperatorTab(self)
         self.local_ncs_tab = LocalNCSTab(self)
@@ -167,7 +169,7 @@ class MainWindow(QMainWindow):
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
         self._context_help_dialog: ContextHelpDialog | None = None
-        self.controlfreq_tab = ControlFreqTab(self)
+        self.controlfreq_tab = ControlFreqTab(self, plan_context_service=self.plan_context_service)
         self.station_overview_tab = StationOverviewTab(self)
         self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
         self.station_health_tab = StationHealthTab(self)
@@ -182,7 +184,7 @@ class MainWindow(QMainWindow):
         self.freq_planner_tab = None
         self.message_viewer_tab = None
         # Build Map eagerly (hidden) so first click does not lazy-swap widgets.
-        self.stations_map_tab = StationsMapTab(self)
+        self.stations_map_tab = StationsMapTab(self, plan_context_service=self.plan_context_service)
         self._map_prop_target_syncing = False
 
         self._lazy_placeholders = {}
@@ -570,7 +572,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
                 self.launch_orchestrator.set_runtime_launch_enabled(
                     self._runtime_launch_enabled(self._active_runtime_profile, startup_policy),
-                    reason="Launch Control is disabled by the primary operating profile.",
+                    reason="Launch Control is disabled by the primary frequency plan.",
                 )
             self._launch_startup_suppressed = not self._runtime_launch_enabled(self._active_runtime_profile, startup_policy)
         except Exception:
@@ -3019,7 +3021,7 @@ class MainWindow(QMainWindow):
             settings=self.settings,
             min_ms=5.0,
         ):
-            self.freq_planner_tab = FreqPlannerTab(self)
+            self.freq_planner_tab = FreqPlannerTab(self, plan_context_service=self.plan_context_service)
             try:
                 self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
             except Exception:
@@ -3032,7 +3034,7 @@ class MainWindow(QMainWindow):
             settings=self.settings,
             min_ms=5.0,
         ):
-            self.message_viewer_tab = MessageViewerTab(self)
+            self.message_viewer_tab = MessageViewerTab(self, plan_context_service=self.plan_context_service)
             try:
                 self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
             except Exception:
@@ -3045,7 +3047,7 @@ class MainWindow(QMainWindow):
             settings=self.settings,
             min_ms=5.0,
         ):
-            self.stations_map_tab = StationsMapTab(self)
+            self.stations_map_tab = StationsMapTab(self, plan_context_service=self.plan_context_service)
             return self.stations_map_tab
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
@@ -3145,6 +3147,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_settings_saved_for_lazy_tabs(self) -> None:
+        self._refresh_plan_context_labels("settings_saved")
         try:
             if self.freq_planner_tab is not None:
                 self.freq_planner_tab.on_settings_saved()
@@ -3168,6 +3171,31 @@ class MainWindow(QMainWindow):
             self._refresh_map_prop_target_controls()
         except Exception:
             pass
+
+    def _plan_context_consumer_widgets(self) -> tuple[object | None, ...]:
+        return (
+            getattr(self, "hf_schedule_tab", None),
+            getattr(self, "net_tab", None),
+            getattr(self, "freq_planner_tab", None),
+            getattr(self, "sop_tab", None),
+            getattr(self, "message_viewer_tab", None),
+            getattr(self, "controlfreq_tab", None),
+            getattr(self, "stations_map_tab", None),
+        )
+
+    def _refresh_plan_context_labels(self, reason: str = "") -> None:
+        try:
+            self.plan_context_service.invalidate()
+        except Exception as e:
+            log.debug("MainWindow: plan context invalidation failed for %s: %s", reason or "refresh", e)
+        for widget in self._plan_context_consumer_widgets():
+            label = getattr(widget, "plan_context_label", None)
+            if label is None or not hasattr(label, "refresh_context"):
+                continue
+            try:
+                label.refresh_context(refresh=True)
+            except Exception as e:
+                log.debug("MainWindow: plan context label refresh failed for %s: %s", reason or "refresh", e)
 
     def _load_runtime_active_device_profile(self) -> dict[str, object]:
         manager = getattr(self, "station_runtime_manager", None)
@@ -3337,7 +3365,7 @@ class MainWindow(QMainWindow):
             restrictions.append("launch control off")
         if not restrictions:
             return swap_summary
-        operating_txt = operating_name or "assigned operating profile"
+        operating_txt = operating_name or "assigned frequency plan"
         state_txt = "temporary override" if assignment_state == "temporary_override" else "active policy"
         detail = f"{profile_label}{backend_txt} is running under {operating_txt} ({state_txt}): {'; '.join(restrictions)}."
         if swap_summary:
@@ -3397,7 +3425,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
                 self.launch_orchestrator.set_runtime_launch_enabled(
                     not self._launch_startup_suppressed,
-                    reason="Launch Control is disabled by the primary operating profile.",
+                    reason="Launch Control is disabled by the primary frequency plan.",
                 )
         except Exception:
             pass
@@ -3694,6 +3722,7 @@ class MainWindow(QMainWindow):
     def _on_runtime_settings_saved(self) -> None:
         self._rebuild_runtime_clients()
         self._apply_runtime_profile_state()
+        self._refresh_plan_context_labels("runtime_settings_saved")
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_start_js8_rx_listener"):
                 self.stations_map_tab._start_js8_rx_listener()
@@ -3708,6 +3737,7 @@ class MainWindow(QMainWindow):
     def _on_runtime_device_profiles_changed(self) -> None:
         self._rebuild_runtime_clients()
         self._apply_runtime_profile_state()
+        self._refresh_plan_context_labels("runtime_device_profiles_changed")
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_start_js8_rx_listener"):
                 self.stations_map_tab._start_js8_rx_listener()

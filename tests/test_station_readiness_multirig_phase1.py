@@ -405,8 +405,8 @@ def test_settings_source_promotes_radio_readiness_cards() -> None:
     assert "Live Radio Readiness" in source
     assert "device_profile_readiness_card" in source
     assert "Copy Readiness Summary" in source
-    assert "Focused Schedule Profile Guidance" in source
-    assert "Focused Radio Schedule Guidance" in source
+    assert "Focused Frequency Plan Guidance" in source
+    assert "Focused Assigned Plan Guidance" in source
     assert "Focused VarAC Cluster Guidance" in source
     assert "Focused VarAC Membership Guidance" in source
     assert "Enable Cluster Mode" in source
@@ -417,10 +417,10 @@ def test_settings_source_promotes_radio_readiness_cards() -> None:
     assert 'QCheckBox("JS8Call")' in source
     assert 'QCheckBox("JS8Spotter")' in source
     assert 'QCheckBox("CommStat")' in source
-    assert "Assigned Schedule" in source
-    assert "Assign Schedule..." in source
-    assert "Restore Schedule" in source
-    assert "Restore Default Schedule" in source
+    assert "Assigned Plan" in source
+    assert "Assign Plan..." in source
+    assert "Restore Plan" in source
+    assert "Restore Default Plan" in source
     assert "Radio Readiness:" not in source
 
 
