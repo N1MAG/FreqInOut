@@ -14,12 +14,14 @@ from freqinout.core.logger import log
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.scheduler_events import record_scheduler_event
 from freqinout.core.schedule_targeting import (
     normalize_schedule_target_fields,
     schedule_row_matches_target_context,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.shared_state import SchedulerManualTarget
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -271,6 +273,7 @@ class SchedulerEngine(QObject):
         self._assert_scheduler_thread_contract()
         self.settings = SettingsManager()
         self._software_status = SoftwareStatusService(self.settings)
+        self._manual_control_service = SchedulerManualControlService(MultiRadioStore(settings_db_path()))
         self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
         self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
@@ -659,6 +662,13 @@ class SchedulerEngine(QObject):
             )
         except Exception:
             return None, None
+
+    def _primary_manual_control_radio_id(self) -> Optional[int]:
+        device_profile_id, _operating_profile_id = self._primary_schedule_target_context()
+        try:
+            return int(device_profile_id) if device_profile_id not in (None, "") else None
+        except Exception:
+            return None
 
     def _filter_rows_for_runtime_target(
         self,
@@ -2382,6 +2392,7 @@ class SchedulerEngine(QObject):
             pass
         self._manual_qsy_active = False
         self._manual_qsy_entry_key = None
+        self._record_manual_resume_state()
         self._prompt_active = False
         self._prompt_items = []
         self._prompt_entry_key = None
@@ -2574,6 +2585,75 @@ class SchedulerEngine(QObject):
             self._expected_fldigi_mode(row),
             self._expected_fldigi_offset(row),
         )
+
+    def _manual_control_target_from_entry(
+        self,
+        entry: Optional[Dict],
+        *,
+        source_action: str,
+    ) -> Optional[SchedulerManualTarget]:
+        row = entry or {}
+        frequency_hz = self._parse_freq_hz(str(row.get("frequency") or "").strip()) or 0
+        if frequency_hz <= 0:
+            return None
+        vfo_raw = str(row.get("vfo") or "A").strip().upper()[:1]
+        vfo = vfo_raw if vfo_raw in {"A", "B"} else "A"
+        return SchedulerManualTarget(
+            frequency_hz=frequency_hz,
+            mode=self._resolve_rig_mode(row),
+            vfo=vfo,
+            offset_hz=self._js8_offset_setting(),
+            source_action=source_action,
+        )
+
+    def _record_manual_qsy_state(self, entry: Optional[Dict], *, operator_source: str = "controlfreq") -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        target = self._manual_control_target_from_entry(entry, source_action="qsy")
+        if radio_id is None or target is None:
+            return
+        try:
+            self._manual_control_service.set_manual_qsy(
+                radio_id,
+                target,
+                reason_code="operator_qsy",
+                operator_source=operator_source,
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to persist manual QSY state: %s", exc)
+
+    def _record_manual_hold_state(
+        self,
+        *,
+        until: datetime.datetime,
+        operator_source: str = "main_control_center",
+    ) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            hold_until_utc = (
+                until.astimezone(datetime.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            self._manual_control_service.hold(
+                radio_id,
+                hold_until_utc=hold_until_utc,
+                reason_code="operator_hold",
+                operator_source=operator_source,
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to persist manual hold state: %s", exc)
+
+    def _record_manual_resume_state(self) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._manual_control_service.resume(radio_id)
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to persist manual resume state: %s", exc)
 
     def _last_entry_matches_schedule_identity(self, entry: Optional[Dict]) -> bool:
         key = self._last_entry_key
@@ -3340,6 +3420,7 @@ class SchedulerEngine(QObject):
             until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
             if hasattr(self.settings, "set"):
                 self.settings.set("schedule_suspend_until", until.timestamp())
+            self._record_manual_hold_state(until=until, operator_source="main_control_center")
         except Exception:
             pass
 
@@ -4538,6 +4619,8 @@ class SchedulerEngine(QObject):
             ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_fldigi_busy=True,
         )
+        if not self._coordination_prompt_active:
+            self._record_manual_qsy_state(entry, operator_source="controlfreq")
 
     # ------------------------------------------------------------------
     # Active entry lookup

@@ -388,6 +388,105 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "CREATE INDEX IF NOT EXISTS idx_runtime_policies_operator_suppressed ON runtime_policies(operator_suppressed)",
         ),
     },
+    "scheduler_manual_control_states": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS scheduler_manual_control_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            radio_profile_id INTEGER NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'on_schedule',
+            manual_target_json TEXT NOT NULL DEFAULT '{}',
+            hold_until_utc TEXT,
+            reason_code TEXT,
+            operator_source TEXT NOT NULL DEFAULT 'scheduler',
+            latest_event_id TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "radio_profile_id": "INTEGER NOT NULL UNIQUE",
+            "state": "TEXT NOT NULL DEFAULT 'on_schedule'",
+            "manual_target_json": "TEXT NOT NULL DEFAULT '{}'",
+            "hold_until_utc": "TEXT",
+            "reason_code": "TEXT",
+            "operator_source": "TEXT NOT NULL DEFAULT 'scheduler'",
+            "latest_event_id": "TEXT",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_manual_control_radio_profile_id ON scheduler_manual_control_states(radio_profile_id)",
+            "CREATE INDEX IF NOT EXISTS idx_scheduler_manual_control_state ON scheduler_manual_control_states(state)",
+        ),
+    },
+    "busy_evidence": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS busy_evidence (
+            id TEXT PRIMARY KEY,
+            radio_profile_id INTEGER NOT NULL,
+            source_family TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            evidence_timestamp_utc TEXT NOT NULL,
+            expiration_timestamp_utc TEXT,
+            description TEXT,
+            latest_event_id TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "id": "TEXT PRIMARY KEY",
+            "radio_profile_id": "INTEGER NOT NULL",
+            "source_family": "TEXT NOT NULL DEFAULT 'unknown'",
+            "reason_code": "TEXT NOT NULL DEFAULT 'unknown'",
+            "severity": "TEXT NOT NULL DEFAULT 'soft'",
+            "evidence_timestamp_utc": "TEXT NOT NULL DEFAULT ''",
+            "expiration_timestamp_utc": "TEXT",
+            "description": "TEXT",
+            "latest_event_id": "TEXT",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_busy_evidence_radio_profile_id ON busy_evidence(radio_profile_id)",
+            "CREATE INDEX IF NOT EXISTS idx_busy_evidence_severity ON busy_evidence(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_busy_evidence_expiration ON busy_evidence(expiration_timestamp_utc)",
+        ),
+    },
+    "ptt_conflict_evidence": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS ptt_conflict_evidence (
+            id TEXT PRIMARY KEY,
+            ptt_group TEXT NOT NULL,
+            requested_radio_id INTEGER NOT NULL,
+            blocking_radio_id INTEGER,
+            severity TEXT NOT NULL DEFAULT 'hard',
+            source TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(requested_radio_id) REFERENCES device_profiles(id) ON DELETE CASCADE,
+            FOREIGN KEY(blocking_radio_id) REFERENCES device_profiles(id) ON DELETE SET NULL
+        )
+        """,
+        "columns": {
+            "id": "TEXT PRIMARY KEY",
+            "ptt_group": "TEXT NOT NULL DEFAULT ''",
+            "requested_radio_id": "INTEGER NOT NULL",
+            "blocking_radio_id": "INTEGER",
+            "severity": "TEXT NOT NULL DEFAULT 'hard'",
+            "source": "TEXT",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_ptt_conflict_group ON ptt_conflict_evidence(ptt_group)",
+            "CREATE INDEX IF NOT EXISTS idx_ptt_conflict_requested_radio ON ptt_conflict_evidence(requested_radio_id)",
+            "CREATE INDEX IF NOT EXISTS idx_ptt_conflict_blocking_radio ON ptt_conflict_evidence(blocking_radio_id)",
+        ),
+    },
     "js8_instances": {
         "ddl": """
         CREATE TABLE IF NOT EXISTS js8_instances (
