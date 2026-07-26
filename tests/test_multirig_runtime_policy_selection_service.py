@@ -251,6 +251,34 @@ def test_suppressed_radios_cannot_be_activated(tmp_path):
         selection.set_active_runtime_radios((radio_shared_state_id(first["id"]), second_id), source=SOURCE_SCHEDULER)
 
 
+def test_scheduler_cannot_activate_unassigned_observer_radio(tmp_path):
+    store = _store(tmp_path)
+    first = _radio(store, "radio_a", "Radio A", active=True, primary=True, display_order=1)
+    observer = store.save_device_profile(
+        {
+            "system_key": "observer_a",
+            "name": "Observer A",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "display_order": 2,
+        }
+    )
+    selection = DurableRuntimeSelectionService(store)
+
+    with pytest.raises(SelectionWriteError, match="receive-only assigned Frequency Plan"):
+        selection.set_active_runtime_radios(
+            (radio_shared_state_id(first["id"]), radio_shared_state_id(observer["id"])),
+            source=SOURCE_SCHEDULER,
+        )
+
+    refreshed = store.get_device_profile(int(observer["id"]))
+    assert refreshed is not None
+    assert int(refreshed.get("runtime_active", 0) or 0) == 0
+    assert store.get_effective_assignment_for_device(int(observer["id"])) is None
+
+
 def test_suppressing_primary_promotes_lowest_order_remaining_primary(tmp_path):
     store = _store(tmp_path)
     first = _radio(store, "radio_a", "Radio A", active=True, primary=True, display_order=10)

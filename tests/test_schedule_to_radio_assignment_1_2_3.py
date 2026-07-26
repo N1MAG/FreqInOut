@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from freqinout.core.multi_radio_store import DEFAULT_OPERATING_SYSTEM_KEY, MultiRadioStore, settings_db_path
 from freqinout.core.settings_manager import SettingsManager
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def test_settings_source_exposes_radio_first_schedule_assignment_controls() -> None:
@@ -60,6 +65,51 @@ def test_phase5_runtime_surfaces_use_frequency_plan_language() -> None:
     assert 'operating_txt = operating_name or "assigned operating profile"' not in main_source
 
 
+def test_phase5_observer_plan_assignment_source_guardrails() -> None:
+    settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    store_source = Path("freqinout/core/multi_radio_store.py").read_text(encoding="utf-8")
+
+    assert "receive_only INTEGER NOT NULL DEFAULT 0" in store_source
+    assert "def _validate_assignment_plan_compatibility" in store_source
+    assert "Observer / SDR radios can only be assigned receive-only frequency plans." in store_source
+    assert 'QCheckBox("Receive-only plan (observer / SDR compatible)")' in settings_source
+    assert '"Receive-only"' in settings_source
+    assert "Observer / SDR radios can only be assigned receive-only frequency plans." in settings_source
+
+
+def test_phase5_frequency_plan_source_provenance_source_wiring() -> None:
+    store_source = Path("freqinout/core/multi_radio_store.py").read_text(encoding="utf-8")
+    projection_source = Path("freqinout/core/shared_state_persistence.py").read_text(encoding="utf-8")
+    context_source = Path("freqinout/core/plan_context_service.py").read_text(encoding="utf-8")
+    label_source = Path("freqinout/gui/plan_context_label.py").read_text(encoding="utf-8")
+
+    assert "source_refs_json TEXT NOT NULL DEFAULT '[]'" in store_source
+    assert "schedule_refs_json TEXT NOT NULL DEFAULT '[]'" in store_source
+    assert "frequency_refs_json TEXT NOT NULL DEFAULT '[]'" in store_source
+    assert "group_refs_json TEXT NOT NULL DEFAULT '[]'" in store_source
+    assert "def _coerce_ref_list_json_text" in store_source
+    assert "source_refs=_json_string_tuple(row.get(\"source_refs_json\"))" in projection_source
+    assert "source_ref_count: int = 0" in context_source
+    assert "Sources: {', '.join(ref_counts)}." in label_source
+
+
+def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
+    planner_source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
+
+    assert "self.frequency_plan_combo = QComboBox()" in planner_source
+    assert 'self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")' in planner_source
+    assert 'self.save_plan_btn = QPushButton("Save Plan")' in planner_source
+    assert 'self.assign_plan_btn = QPushButton("Assign Plan")' in planner_source
+    assert 'self.make_active_plan_btn = QPushButton("Make Active")' in planner_source
+    assert 'self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")' in planner_source
+    assert "Frequency Plan workspace action placeholder" in planner_source
+    assert 'self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")' in planner_source
+    assert 'self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")' in planner_source
+    assert "Plan editing actions arrive in a later update." in planner_source
+    assert "def _refresh_plan_workspace_header(self) -> None:" in planner_source
+    assert "self._refresh_plan_workspace_header()" in planner_source
+
+
 def test_phase5_schedule_tabs_use_frequency_plan_target_language() -> None:
     daily_source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
     net_source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
@@ -73,8 +123,14 @@ def test_phase5_schedule_tabs_use_frequency_plan_target_language() -> None:
         assert 'return name or f"Frequency Plan #{profile_id}"' in source
         assert "Radio Profile rows apply only when that radio is the station default." in source
         assert "Frequency Plan rows apply only when the station-default radio carries that assigned plan." in source
+        assert "Missing Frequency Plan #" in source
+        assert "No Frequency Plans" in source
+        assert "Frequency Plan-targeted rows require a Frequency Plan." in source
         assert "Device Profile rows apply only" not in source
         assert "Operating Profile rows apply only" not in source
+        assert "Missing operating profile" not in source
+        assert "No operating profiles" not in source
+        assert "Operating-profile-targeted rows require an operating profile." not in source
         assert 'return name or f"Profile #{profile_id}"' not in source
 
     assert "Read-only Frequency Plan coverage review" in plan_label_source
@@ -143,6 +199,53 @@ def test_sop_builder_uses_shared_plan_context_label() -> None:
     assert '"sop",' in source
     assert "service=self.plan_context_service" in source
     assert "self.plan_context_label.refresh_context(refresh=True)" in source
+    assert 'self.operating_plan_inputs_label.setObjectName("sopOperatingPlanInputsSummary")' in source
+    assert "Operating Plan Inputs:" in source
+    assert "def _refresh_operating_plan_inputs_summary(self) -> None:" in source
+    assert "self._refresh_operating_plan_inputs_summary()" in source
+    assert "context.source_ref_count" in source
+    assert "context.receive_only" in source
+
+
+def test_sop_builder_active_widget_renders_operating_plan_inputs_summary(monkeypatch, tmp_path) -> None:
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from freqinout.core.plan_context_service import PlanContextService
+    from freqinout.gui.sop_tab import SOPTab
+
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    plan = store.save_operating_profile(
+        {
+            "name": "RX Watch SOP Plan",
+            "scheduler_enabled": 0,
+            "receive_only": 1,
+            "source_refs": ["src_hf", "src_net"],
+            "schedule_refs": ["hf:mon:1900"],
+        }
+    )
+    primary_radio = next(row for row in store.list_device_profiles() if int(row.get("runtime_primary", 0) or 0) == 1)
+    store.set_device_operating_profile(int(primary_radio["id"]), int(plan["id"]))
+    store.set_device_profile_runtime_active(int(primary_radio["id"]), True)
+
+    tab = SOPTab(plan_context_service=PlanContextService(store))
+    try:
+        label = tab.findChild(QLabel, "sopOperatingPlanInputsSummary")
+
+        assert label is not None
+        assert label is tab.operating_plan_inputs_label
+        assert f"Operating Plan Inputs: RX Watch SOP Plan assigned to {primary_radio['name']}" in label.text()
+        assert "receive-only" in label.text()
+        assert "2 sources" in label.text()
+        assert "1 schedule ref" in label.text()
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_messages_uses_shared_plan_context_label() -> None:
@@ -243,3 +346,175 @@ def test_multi_radio_store_round_trips_schedule_assignment_for_radio(monkeypatch
     restored = store.get_effective_assignment_for_device(int(primary_radio["id"]))
     assert restored is not None
     assert int(restored["operating_profile_id"]) == int(default_profile["id"])
+
+
+def test_multi_radio_store_round_trips_frequency_plan_provenance_fields(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    created = store.save_operating_profile(
+        {
+            "name": "Source Audit Plan",
+            "category": "Event",
+            "status": "draft",
+            "source_refs": ["src_hf", "src_net", "src_hf"],
+            "schedule_refs": "hf:mon:1900, net:tue:2000",
+            "frequency_refs": ["freq_40m"],
+            "group_refs": ["ARES"],
+            "notes": "Reviewed by operator.",
+        }
+    )
+    loaded = store.get_operating_profile(int(created["id"]))
+
+    assert loaded is not None
+    assert loaded["category"] == "event"
+    assert loaded["status"] == "draft"
+    assert loaded["source_refs_json"] == '["src_hf", "src_net"]'
+    assert loaded["schedule_refs_json"] == '["hf:mon:1900", "net:tue:2000"]'
+    assert loaded["frequency_refs_json"] == '["freq_40m"]'
+    assert loaded["group_refs_json"] == '["ARES"]'
+    assert loaded["notes"] == "Reviewed by operator."
+
+
+def test_multi_radio_store_requires_receive_only_plan_for_observer_radio(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    observer_radio = store.save_device_profile(
+        {
+            "name": "RX Observer SDR",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "observer",
+            "control_backend": "manual",
+            "sdr_host": "127.0.0.1",
+            "sdr_port": 8073,
+        }
+    )
+    tx_plan = store.save_operating_profile(
+        {
+            "name": "Transmit-capable Plan",
+            "enabled": 1,
+            "receive_only": 0,
+        }
+    )
+    rx_plan = store.save_operating_profile(
+        {
+            "name": "Receive-only Plan",
+            "enabled": 1,
+            "scheduler_enabled": 0,
+            "use_launch_control": 0,
+            "receive_only": 1,
+        }
+    )
+
+    with pytest.raises(ValueError, match="receive-only frequency plans"):
+        store.set_device_operating_profile(int(observer_radio["id"]), int(tx_plan["id"]))
+
+    assigned = store.set_device_operating_profile(int(observer_radio["id"]), int(rx_plan["id"]))
+
+    assert int(assigned["device_profile_id"]) == int(observer_radio["id"])
+    assert int(assigned["operating_profile_id"]) == int(rx_plan["id"])
+
+
+def test_multi_radio_store_blocks_receive_only_plan_edit_when_assigned_to_observer(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    observer_radio = store.save_device_profile(
+        {
+            "name": "RX Watch",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "observer",
+            "control_backend": "manual",
+        }
+    )
+    rx_plan = store.save_operating_profile(
+        {
+            "name": "Observer Watch Plan",
+            "enabled": 1,
+            "scheduler_enabled": 0,
+            "receive_only": 1,
+        }
+    )
+    store.set_device_operating_profile(int(observer_radio["id"]), int(rx_plan["id"]))
+
+    with pytest.raises(ValueError, match="keep the plan receive-only"):
+        store.save_operating_profile({"id": int(rx_plan["id"]), "name": "Observer Watch Plan", "receive_only": 0})
+
+    saved = store.get_operating_profile(int(rx_plan["id"]))
+    assert saved is not None
+    assert int(saved["receive_only"]) == 1
+
+
+def test_multi_radio_store_blocks_observer_class_edit_with_transmit_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    radio = store.save_device_profile(
+        {
+            "name": "Secondary TX",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+        }
+    )
+    tx_plan = store.save_operating_profile(
+        {
+            "name": "Transmit Plan",
+            "enabled": 1,
+            "receive_only": 0,
+        }
+    )
+    store.set_device_operating_profile(int(radio["id"]), int(tx_plan["id"]))
+
+    with pytest.raises(ValueError, match="receive-only frequency plans"):
+        store.save_device_profile({"id": int(radio["id"]), "name": "Secondary TX", "device_class": "observer"})
+
+    saved = store.get_device_profile(int(radio["id"]))
+    assert saved is not None
+    assert saved["device_class"] == "tx_rx"
+
+
+def test_multi_radio_store_does_not_auto_assign_default_plan_to_unassigned_observer(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    observer_radio = store.save_device_profile(
+        {
+            "name": "Unassigned RX Watch",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "observer",
+            "control_backend": "manual",
+        }
+    )
+
+    with pytest.raises(ValueError, match="receive-only frequency plans"):
+        store.set_device_profile_runtime_active(int(observer_radio["id"]), True)
+
+    assert store.get_effective_assignment_for_device(int(observer_radio["id"])) is None
+    refreshed = store.get_device_profile(int(observer_radio["id"]))
+    assert refreshed is not None
+    assert int(refreshed["runtime_active"]) == 0

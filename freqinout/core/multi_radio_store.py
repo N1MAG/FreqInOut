@@ -41,6 +41,8 @@ SUPPORTED_DEPLOYMENT_MODES = frozenset({"full", "minimal"})
 SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "scheduled", "inactive", "superseded"})
 EFFECTIVE_ASSIGNMENT_STATES = frozenset({"active", "temporary_override"})
 SUPPORTED_SCHEDULER_MODES = frozenset({"full", "simple"})
+SUPPORTED_FREQUENCY_PLAN_CATEGORIES = frozenset({"normal", "event", "portable", "exercise", "emergency", "ad_hoc", "rx_watch"})
+SUPPORTED_FREQUENCY_PLAN_STATUSES = frozenset({"draft", "saved", "archived"})
 DEFAULT_TIMER_ENFORCEMENT_MODE = "On Schedule Change"
 DEFAULT_TIMER_PROMPT_INTERVAL = "Hourly"
 DEFAULT_HOLD_DURATION_MINUTES = 30
@@ -506,14 +508,22 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             name TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 1,
             description TEXT,
+            category TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'saved',
             scheduler_enabled INTEGER NOT NULL DEFAULT 1,
             scheduler_mode TEXT NOT NULL DEFAULT 'full',
             preferred_band_set_json TEXT NOT NULL DEFAULT '[]',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            schedule_refs_json TEXT NOT NULL DEFAULT '[]',
+            frequency_refs_json TEXT NOT NULL DEFAULT '[]',
+            group_refs_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT,
             use_messages INTEGER NOT NULL DEFAULT 1,
             use_map INTEGER NOT NULL DEFAULT 1,
             use_background_ingest INTEGER NOT NULL DEFAULT 1,
             use_launch_control INTEGER NOT NULL DEFAULT 0,
             use_net_control_tabs INTEGER NOT NULL DEFAULT 1,
+            receive_only INTEGER NOT NULL DEFAULT 0,
             allow_profile_swap INTEGER NOT NULL DEFAULT 0,
             created_utc TEXT NOT NULL,
             updated_utc TEXT NOT NULL
@@ -524,14 +534,22 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "name": "TEXT NOT NULL",
             "enabled": "INTEGER NOT NULL DEFAULT 1",
             "description": "TEXT",
+            "category": "TEXT NOT NULL DEFAULT 'normal'",
+            "status": "TEXT NOT NULL DEFAULT 'saved'",
             "scheduler_enabled": "INTEGER NOT NULL DEFAULT 1",
             "scheduler_mode": "TEXT NOT NULL DEFAULT 'full'",
             "preferred_band_set_json": "TEXT NOT NULL DEFAULT '[]'",
+            "source_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "schedule_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "frequency_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "group_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "notes": "TEXT",
             "use_messages": "INTEGER NOT NULL DEFAULT 1",
             "use_map": "INTEGER NOT NULL DEFAULT 1",
             "use_background_ingest": "INTEGER NOT NULL DEFAULT 1",
             "use_launch_control": "INTEGER NOT NULL DEFAULT 0",
             "use_net_control_tabs": "INTEGER NOT NULL DEFAULT 1",
+            "receive_only": "INTEGER NOT NULL DEFAULT 0",
             "allow_profile_swap": "INTEGER NOT NULL DEFAULT 0",
             "created_utc": "TEXT NOT NULL",
             "updated_utc": "TEXT NOT NULL",
@@ -817,6 +835,16 @@ def _normalize_assignment_state(value: Any, default: str = "active") -> str:
     return state if state in SUPPORTED_ASSIGNMENT_STATES else default
 
 
+def _normalize_frequency_plan_category(value: Any, default: str = "normal") -> str:
+    category = _coerce_text(value, default).strip().lower().replace(" ", "_").replace("-", "_") or default
+    return category if category in SUPPORTED_FREQUENCY_PLAN_CATEGORIES else default
+
+
+def _normalize_frequency_plan_status(value: Any, default: str = "saved") -> str:
+    status = _coerce_text(value, default).strip().lower() or default
+    return status if status in SUPPORTED_FREQUENCY_PLAN_STATUSES else default
+
+
 def normalize_ptt_group(value: Any) -> str:
     text = _coerce_text(value, "")
     if not text:
@@ -876,6 +904,27 @@ def _coerce_json_list_text(value: Any) -> str:
     return json.dumps(_parse_json_list(value), sort_keys=True)
 
 
+def _parse_ref_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = []
+    refs = [_coerce_text(item, "").strip() for item in parsed]
+    return list(dict.fromkeys(ref for ref in refs if ref))
+
+
+def _coerce_ref_list_json_text(value: Any) -> str:
+    return json.dumps(_parse_ref_list(value), sort_keys=True)
+
+
 def _normalize_varac_cluster_id(value: Any, fallback: str = "CLUSTER") -> str:
     text = _coerce_text(value, fallback).upper() or fallback
     text = re.sub(r"\s+", "-", text)
@@ -887,6 +936,34 @@ def _normalize_varac_cluster_id(value: Any, fallback: str = "CLUSTER") -> str:
 def _is_observer_device_class(value: Any) -> bool:
     raw = value.get("device_class", "tx_rx") if isinstance(value, Mapping) else value
     return _coerce_text(raw, "tx_rx").lower() == "observer"
+
+
+def _is_receive_only_operating_profile(value: Any) -> bool:
+    raw = value.get("receive_only", 0) if isinstance(value, Mapping) else value
+    return bool(_coerce_bool_int(raw, False))
+
+
+def _validate_assignment_plan_compatibility(device: Mapping[str, Any], operating: Mapping[str, Any]) -> None:
+    if _is_observer_device_class(device) and not _is_receive_only_operating_profile(operating):
+        raise ValueError("Observer / SDR radios can only be assigned receive-only frequency plans.")
+
+
+def _operating_profile_has_observer_assignments(conn: sqlite3.Connection, operating_profile_id: int) -> bool:
+    placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
+    row = conn.execute(
+        f"""
+        SELECT assignments.id
+          FROM operating_profile_assignments AS assignments
+          JOIN device_profiles AS devices
+            ON devices.id = assignments.device_profile_id
+         WHERE assignments.operating_profile_id=?
+           AND assignments.assignment_state IN ({placeholders})
+           AND LOWER(COALESCE(devices.device_class, 'tx_rx'))='observer'
+         LIMIT 1
+        """,
+        (int(operating_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
+    ).fetchone()
+    return row is not None
 
 
 def _normalize_profile_swap_mode(value: Any, default: str = "use_target_profile") -> str:
@@ -1800,6 +1877,8 @@ def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, 
         "name": _coerce_text(payload.get("name", (existing or {}).get("name", DEFAULT_OPERATING_NAME)), DEFAULT_OPERATING_NAME) or DEFAULT_OPERATING_NAME,
         "enabled": _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True),
         "description": _coerce_text(payload.get("description", (existing or {}).get("description", "")), ""),
+        "category": _normalize_frequency_plan_category(payload.get("category", (existing or {}).get("category", "normal"))),
+        "status": _normalize_frequency_plan_status(payload.get("status", (existing or {}).get("status", "saved"))),
         "scheduler_enabled": _coerce_bool_int(payload.get("scheduler_enabled", (existing or {}).get("scheduler_enabled", 1)), True),
         "scheduler_mode": scheduler_mode,
         "preferred_band_set_json": _coerce_json_array_text(
@@ -1808,11 +1887,25 @@ def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, 
                 payload.get("preferred_band_set_json", (existing or {}).get("preferred_band_set_json", "[]")),
             )
         ),
+        "source_refs_json": _coerce_ref_list_json_text(
+            payload.get("source_refs", payload.get("source_refs_json", (existing or {}).get("source_refs_json", "[]")))
+        ),
+        "schedule_refs_json": _coerce_ref_list_json_text(
+            payload.get("schedule_refs", payload.get("schedule_refs_json", (existing or {}).get("schedule_refs_json", "[]")))
+        ),
+        "frequency_refs_json": _coerce_ref_list_json_text(
+            payload.get("frequency_refs", payload.get("frequency_refs_json", (existing or {}).get("frequency_refs_json", "[]")))
+        ),
+        "group_refs_json": _coerce_ref_list_json_text(
+            payload.get("group_refs", payload.get("group_refs_json", (existing or {}).get("group_refs_json", "[]")))
+        ),
+        "notes": _coerce_text(payload.get("notes", (existing or {}).get("notes", "")), ""),
         "use_messages": _coerce_bool_int(payload.get("use_messages", (existing or {}).get("use_messages", 1)), True),
         "use_map": _coerce_bool_int(payload.get("use_map", (existing or {}).get("use_map", 1)), True),
         "use_background_ingest": _coerce_bool_int(payload.get("use_background_ingest", (existing or {}).get("use_background_ingest", 1)), True),
         "use_launch_control": _coerce_bool_int(payload.get("use_launch_control", (existing or {}).get("use_launch_control", 0)), False),
         "use_net_control_tabs": _coerce_bool_int(payload.get("use_net_control_tabs", (existing or {}).get("use_net_control_tabs", 1)), True),
+        "receive_only": _coerce_bool_int(payload.get("receive_only", (existing or {}).get("receive_only", 0)), False),
         "allow_profile_swap": _coerce_bool_int(
             payload.get("allow_profile_swap", (existing or {}).get("allow_profile_swap", 0)),
             False,
@@ -1869,22 +1962,23 @@ def _set_device_operating_profile_conn(
 ) -> Dict[str, Any]:
     desired_state = _normalize_assignment_state(assignment_state, "active")
     if desired_state not in EFFECTIVE_ASSIGNMENT_STATES:
-        raise ValueError("Only active or temporary_override assignments can become the effective device assignment.")
+        raise ValueError("Only active or temporary override assignments can become the effective radio assignment.")
 
     device = _record_by_id(conn, "device_profiles", int(device_profile_id))
     if not device:
         raise KeyError(f"Unknown device profile id: {device_profile_id}")
     operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
     if not operating:
-        raise KeyError(f"Unknown operating profile id: {operating_profile_id}")
+        raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
     if int(operating.get("enabled", 1) or 0) != 1:
-        raise ValueError("Cannot assign a disabled operating profile.")
+        raise ValueError("Cannot assign a disabled Frequency Plan.")
+    _validate_assignment_plan_compatibility(device, operating)
     active_swap = _active_profile_swap_policy_conn(conn)
     if active_swap is not None and not allow_active_swap_edit:
         source_id = int(active_swap.get("source_device_id", 0) or 0)
         target_id = int(active_swap.get("target_device_id", 0) or 0)
         if int(device_profile_id) in {source_id, target_id}:
-            raise ValueError("Restore the active temporary swap before editing assignments on the swap source/target devices.")
+            raise ValueError("Restore the active Temporary Plan Swap before editing assignments on the source/target radios.")
 
     current = _effective_assignment_for_device(conn, int(device_profile_id))
     now_iso = _utc_now_iso()
@@ -1969,7 +2063,7 @@ def _restore_default_operating_profile_conn(
     conn: sqlite3.Connection,
     device_profile_id: int,
     *,
-    reason: str = "Restored default operating profile.",
+    reason: str = "Restored default Frequency Plan.",
     created_by: str = "settings_ui",
     allow_active_swap_edit: bool = False,
 ) -> Dict[str, Any]:
@@ -1992,7 +2086,7 @@ def _restore_assignment_snapshot_conn(
     device_profile_id: int,
     snapshot: Optional[Mapping[str, Any]],
     *,
-    fallback_reason: str = "Restored previous operating profile after temporary swap.",
+    fallback_reason: str = "Restored previous Frequency Plan after Temporary Plan Swap.",
     created_by: str = "settings_ui",
     allow_active_swap_edit: bool = False,
 ) -> Dict[str, Any]:
@@ -2050,6 +2144,13 @@ def _runtime_active_device_profiles(conn: sqlite3.Connection) -> List[Dict[str, 
 def _ensure_default_assignment(conn: sqlite3.Connection, device_id: int, operating_profile_id: int) -> None:
     if _effective_assignment_for_device(conn, int(device_id)):
         return
+    device = _record_by_id(conn, "device_profiles", int(device_id))
+    if not device:
+        raise KeyError(f"Unknown device profile id: {device_id}")
+    operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
+    if not operating:
+        raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
+    _validate_assignment_plan_compatibility(device, operating)
     row = conn.execute(
         """
         SELECT id
@@ -2470,14 +2571,22 @@ def _seed_operating_defaults(settings_values: Mapping[str, Any]) -> Dict[str, An
     return {
         "system_key": DEFAULT_OPERATING_SYSTEM_KEY,
         "name": DEFAULT_OPERATING_NAME,
+        "category": "normal",
+        "status": "saved",
         "scheduler_enabled": _settings_bool(settings_values, "use_scheduler", True),
         "scheduler_mode": "full",
         "preferred_band_set_json": "[]",
+        "source_refs_json": "[]",
+        "schedule_refs_json": "[]",
+        "frequency_refs_json": "[]",
+        "group_refs_json": "[]",
+        "notes": "",
         "use_messages": 1,
         "use_map": 1,
         "use_background_ingest": 1,
         "use_launch_control": _settings_bool(settings_values, "launch_control_enabled", False),
         "use_net_control_tabs": 1,
+        "receive_only": 0,
         "allow_profile_swap": 0,
     }
 
@@ -3611,6 +3720,14 @@ class MultiRadioStore:
             "created_utc": (existing or {}).get("created_utc", now_iso),
             "updated_utc": now_iso,
         }
+        if device_class == "observer" and requested_id is not None:
+            assignment = _effective_assignment_for_device(conn, int(requested_id))
+            if assignment:
+                operating = _record_by_id(conn, "operating_profiles", int(assignment.get("operating_profile_id", 0) or 0))
+                if operating:
+                    _validate_assignment_plan_compatibility(record, operating)
+            elif record["runtime_active"]:
+                raise ValueError("Observer / SDR radios require a receive-only assigned Frequency Plan before activation.")
         columns = list(record.keys())
         if existing:
             assignments = ", ".join(f"{name}=?" for name in columns)
@@ -3734,7 +3851,16 @@ class MultiRadioStore:
             active_swap = _active_profile_swap_policy_conn(conn)
             enabled = _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True)
             if existing and str(existing.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY and enabled != 1:
-                raise ValueError("Cannot disable the default operating profile.")
+                raise ValueError("Cannot disable the default Frequency Plan.")
+            receive_only = _coerce_bool_int(payload.get("receive_only", (existing or {}).get("receive_only", 0)), False)
+            if (
+                existing
+                and receive_only != 1
+                and _operating_profile_has_observer_assignments(conn, int(requested_id))
+            ):
+                raise ValueError(
+                    "This Frequency Plan is assigned to observer / SDR radios. Remove those assignments or keep the plan receive-only."
+                )
             if existing and enabled != 1:
                 placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
                 assigned = conn.execute(
@@ -3748,13 +3874,13 @@ class MultiRadioStore:
                     (int(requested_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
                 ).fetchone()
                 if assigned is not None:
-                    raise ValueError("Cannot disable an operating profile while it is assigned to a device.")
+                    raise ValueError("Cannot disable a Frequency Plan while it is assigned to a radio.")
                 if active_swap is not None:
                     restore_target = dict((active_swap.get("action") or {}).get("restore_target_assignment") or {})
                     restore_target_id = restore_target.get("operating_profile_id")
                     if restore_target_id not in (None, "") and int(restore_target_id) == int(requested_id):
                         raise ValueError(
-                            "Cannot disable this operating profile while it is captured as the restore target for an active temporary swap."
+                            "Cannot disable this Frequency Plan while it is captured as the restore target for an active Temporary Plan Swap."
                         )
             return _save_operating_profile_conn(conn, payload)
 
@@ -3762,16 +3888,16 @@ class MultiRadioStore:
         with self._connect() as conn:
             operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
             if not operating:
-                raise KeyError(f"Unknown operating profile id: {operating_profile_id}")
+                raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
             if str(operating.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY:
-                raise ValueError("Cannot delete the default operating profile.")
+                raise ValueError("Cannot delete the default Frequency Plan.")
             active_swap = _active_profile_swap_policy_conn(conn)
             if active_swap is not None:
                 restore_target = dict((active_swap.get("action") or {}).get("restore_target_assignment") or {})
                 restore_target_id = restore_target.get("operating_profile_id")
                 if restore_target_id not in (None, "") and int(restore_target_id) == int(operating_profile_id):
                     raise ValueError(
-                        "Cannot delete this operating profile while it is captured as the restore target for an active temporary swap."
+                        "Cannot delete this Frequency Plan while it is captured as the restore target for an active Temporary Plan Swap."
                     )
             placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
             assigned = conn.execute(
@@ -3785,7 +3911,7 @@ class MultiRadioStore:
                 (int(operating_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
             ).fetchone()
             if assigned is not None:
-                raise ValueError("Cannot delete an operating profile while it is assigned to a device.")
+                raise ValueError("Cannot delete a Frequency Plan while it is assigned to a radio.")
             conn.execute("DELETE FROM operating_profile_assignments WHERE operating_profile_id=?", (int(operating_profile_id),))
             conn.execute("DELETE FROM operating_profiles WHERE id=?", (int(operating_profile_id),))
             conn.commit()
@@ -3839,7 +3965,7 @@ class MultiRadioStore:
         self,
         device_profile_id: int,
         *,
-        reason: str = "Restored default operating profile.",
+        reason: str = "Restored default Frequency Plan.",
         created_by: str = "settings_ui",
     ) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -3866,31 +3992,31 @@ class MultiRadioStore:
     ) -> Dict[str, Any]:
         with self._connect() as conn:
             if _active_profile_swap_policy_conn(conn) is not None:
-                raise ValueError("A temporary profile swap is already active. Restore it before starting another swap.")
+                raise ValueError("A Temporary Plan Swap is already active. Restore it before starting another swap.")
 
             source_id = int(_normalize_runtime_primary_device(conn) or 0)
             if source_id <= 0:
-                raise ValueError("A primary device profile is required before starting a temporary swap.")
+                raise ValueError("A primary radio is required before starting a Temporary Plan Swap.")
             if int(target_device_profile_id) == source_id:
-                raise ValueError("Select a different active device profile as the temporary swap target.")
+                raise ValueError("Select a different active radio as the Temporary Plan Swap target.")
 
             source_row = _record_by_id(conn, "device_profiles", source_id)
             target_row = _record_by_id(conn, "device_profiles", int(target_device_profile_id))
             if not source_row:
-                raise ValueError("The current primary device profile could not be resolved.")
+                raise ValueError("The current primary radio could not be resolved.")
             if not target_row:
-                raise KeyError(f"Unknown target device profile id: {target_device_profile_id}")
+                raise KeyError(f"Unknown target radio id: {target_device_profile_id}")
             if int(target_row.get("enabled", 1) or 0) != 1:
-                raise ValueError("The selected temporary swap target is disabled.")
+                raise ValueError("The selected Temporary Plan Swap target is disabled.")
             if int(target_row.get("runtime_active", 0) or 0) != 1:
-                raise ValueError("The selected temporary swap target must already be active.")
+                raise ValueError("The selected Temporary Plan Swap target must already be active.")
             if _coerce_text(target_row.get("device_class", "tx_rx"), "tx_rx").lower() == "observer":
-                raise ValueError("Observer / SDR device profiles cannot be used as temporary-swap targets.")
+                raise ValueError("Observer / SDR radios cannot be used as Temporary Plan Swap targets.")
 
             source_assignment = _ensure_effective_assignment_for_device(conn, source_id)
             target_assignment = _ensure_effective_assignment_for_device(conn, int(target_device_profile_id))
             if not source_assignment:
-                raise ValueError("The current primary device does not have an effective operating profile assignment.")
+                raise ValueError("The current primary radio does not have an assigned Frequency Plan.")
 
             mode_value = _normalize_profile_swap_mode(mode, "use_target_profile")
             reason_value = _coerce_text(reason, "")
@@ -3912,9 +4038,9 @@ class MultiRadioStore:
                     int(source_assignment.get("operating_profile_id", 0) or 0),
                 )
                 if not source_operating_profile:
-                    raise ValueError("The current primary device does not have a valid operating profile to carry.")
+                    raise ValueError("The current primary radio does not have a valid Frequency Plan to carry.")
                 if int(source_operating_profile.get("allow_profile_swap", 0) or 0) != 1:
-                    raise ValueError("The current primary operating profile does not allow profile swap coordination.")
+                    raise ValueError("The current primary Frequency Plan does not allow Temporary Plan Swap coordination.")
                 applied_target = _set_device_operating_profile_conn(
                     conn,
                     int(target_device_profile_id),
@@ -3964,21 +4090,21 @@ class MultiRadioStore:
     def restore_temporary_profile_swap(
         self,
         *,
-        reason: str = "Restored temporary profile swap.",
+        reason: str = "Restored Temporary Plan Swap.",
         created_by: str = "settings_ui",
     ) -> Dict[str, Any]:
         with self._connect() as conn:
             policy = _active_profile_swap_policy_conn(conn)
             if policy is None:
-                raise ValueError("No temporary profile swap is currently active.")
+                raise ValueError("No Temporary Plan Swap is currently active.")
 
             source_id = int(policy.get("source_device_id", 0) or 0)
             target_id = int(policy.get("target_device_id", 0) or 0)
             source_row = _record_by_id(conn, "device_profiles", source_id)
             if not source_row:
-                raise ValueError("Cannot restore the temporary swap because the original primary device no longer exists.")
+                raise ValueError("Cannot restore the Temporary Plan Swap because the original primary radio no longer exists.")
             if int(source_row.get("enabled", 1) or 0) != 1:
-                raise ValueError("Cannot restore the temporary swap while the original primary device profile is disabled.")
+                raise ValueError("Cannot restore the Temporary Plan Swap while the original primary radio is disabled.")
 
             action = dict(policy.get("action") or {})
             created_by_value = _coerce_text(created_by, "settings_ui") or "settings_ui"
@@ -4412,7 +4538,7 @@ class MultiRadioStore:
             if active_swap is not None:
                 current_target_id = int(active_swap.get("target_device_id", 0) or 0)
                 if int(device_profile_id) != current_target_id:
-                    raise ValueError("Restore the active temporary swap before changing the primary device profile.")
+                    raise ValueError("Restore the active Temporary Plan Swap before changing the primary radio.")
             return self._set_runtime_active_device_conn(conn, int(device_profile_id), deactivate_others=True)
 
     def set_runtime_primary_device_profile(self, device_profile_id: int) -> Dict[str, Any]:
@@ -4421,7 +4547,7 @@ class MultiRadioStore:
             if active_swap is not None:
                 current_target_id = int(active_swap.get("target_device_id", 0) or 0)
                 if int(device_profile_id) != current_target_id:
-                    raise ValueError("Restore the active temporary swap before changing the primary device profile.")
+                    raise ValueError("Restore the active Temporary Plan Swap before changing the primary radio.")
             return self._set_runtime_primary_device_conn(conn, int(device_profile_id), deactivate_others=False)
 
     def sync_shared_ptt_policies(self) -> List[Dict[str, Any]]:
@@ -4463,7 +4589,7 @@ class MultiRadioStore:
                 source_id = int(active_swap.get("source_device_id", 0) or 0)
                 target_id = int(active_swap.get("target_device_id", 0) or 0)
                 if int(device_profile_id) in {source_id, target_id}:
-                    raise ValueError("Restore the active temporary swap before changing runtime activation on the swap source/target devices.")
+                    raise ValueError("Restore the active Temporary Plan Swap before changing runtime activation on the source/target radios.")
             if active:
                 backend = _coerce_text(device.get("control_backend", "manual"), "manual").lower()
                 if backend not in SUPPORTED_RUNTIME_CONTROL_BACKENDS:

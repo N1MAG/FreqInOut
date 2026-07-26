@@ -13002,6 +13002,8 @@ class SettingsTab(QWidget):
         if not isinstance(profile, dict):
             return "Unassigned"
         bits: List[str] = []
+        if int(profile.get("receive_only", 0) or 0) == 1:
+            bits.append("Receive-only")
         if int(profile.get("scheduler_enabled", 1) or 0) != 1:
             bits.append("Scheduler Off")
         if int(profile.get("use_messages", 1) or 0) != 1:
@@ -13407,6 +13409,10 @@ class SettingsTab(QWidget):
         use_net_control_tabs_chk.setChecked(bool((existing or {}).get("use_net_control_tabs", 1)))
         form.addRow("", use_net_control_tabs_chk)
 
+        receive_only_chk = QCheckBox("Receive-only plan (observer / SDR compatible)")
+        receive_only_chk.setChecked(bool((existing or {}).get("receive_only", 0)))
+        form.addRow("", receive_only_chk)
+
         allow_profile_swap_chk = QCheckBox("Allow assigned plan swap coordination")
         allow_profile_swap_chk.setChecked(bool((existing or {}).get("allow_profile_swap", 0)))
         form.addRow("", allow_profile_swap_chk)
@@ -13429,15 +13435,22 @@ class SettingsTab(QWidget):
                 disabled.append("Launch Control")
             if not use_net_control_tabs_chk.isChecked():
                 disabled.append("net control tabs")
+            prefix = (
+                "Receive-only plan: can be assigned to observer / SDR radios and should not be used as a transmit target. "
+                if receive_only_chk.isChecked()
+                else "Transmit-capable plan: assign to transmit/receive radios. "
+            )
             if disabled:
                 info_label.setText(
-                    "When this frequency plan is assigned to the Station Default radio, it suppresses: "
+                    prefix
+                    + "When this frequency plan is assigned to the Station Default radio, it suppresses: "
                     + ", ".join(disabled)
                     + "."
                 )
             else:
                 info_label.setText(
-                    "This frequency plan leaves the current Station Default compatibility shell fully enabled."
+                    prefix
+                    + "This frequency plan leaves the current Station Default compatibility shell fully enabled."
                 )
 
         for chk in (
@@ -13447,6 +13460,7 @@ class SettingsTab(QWidget):
             use_background_ingest_chk,
             use_launch_control_chk,
             use_net_control_tabs_chk,
+            receive_only_chk,
         ):
             chk.toggled.connect(_update_hint)
         _update_hint()
@@ -13476,6 +13490,7 @@ class SettingsTab(QWidget):
                     "use_background_ingest": bool(use_background_ingest_chk.isChecked()),
                     "use_launch_control": bool(use_launch_control_chk.isChecked()),
                     "use_net_control_tabs": bool(use_net_control_tabs_chk.isChecked()),
+                    "receive_only": bool(receive_only_chk.isChecked()),
                     "allow_profile_swap": bool(allow_profile_swap_chk.isChecked()),
                 }
             )
@@ -13579,9 +13594,18 @@ class SettingsTab(QWidget):
         summary_label.setWordWrap(True)
         form.addRow("", summary_label)
 
+        selected_has_observer = any(
+            str(row.get("device_class", "") or "").strip().lower() == "observer"
+            for row in selected_devices
+            if isinstance(row, dict)
+        )
+
         profile_combo = QComboBox()
         for row in enabled_profiles:
-            profile_combo.addItem(str(row.get("name", "") or "Frequency Plan"), int(row.get("id", 0) or 0))
+            label = str(row.get("name", "") or "Frequency Plan")
+            if int(row.get("receive_only", 0) or 0) == 1:
+                label = f"{label} (receive-only)"
+            profile_combo.addItem(label, int(row.get("id", 0) or 0))
         form.addRow("Frequency Plan:", profile_combo)
 
         state_combo = QComboBox()
@@ -13603,12 +13627,20 @@ class SettingsTab(QWidget):
 
         def _update_hint() -> None:
             state = str(state_combo.currentData() or "active").strip().lower()
+            prefix = (
+                "Observer / SDR radios can only be assigned receive-only frequency plans. "
+                if selected_has_observer
+                else ""
+            )
             if state == "temporary_override":
                 info_label.setText(
-                    "Temporary Override becomes effective immediately. Automatic timed expiry is not active in this checkpoint; restore the default assigned plan manually when the override ends."
+                    prefix
+                    + "Temporary Override becomes effective immediately. Automatic timed expiry is not active in this checkpoint; restore the default assigned plan manually when the override ends."
                 )
             else:
-                info_label.setText("Active assignments become the current assigned plan for this radio immediately.")
+                info_label.setText(
+                    prefix + "Active assignments become the current assigned plan for this radio immediately."
+                )
 
         state_combo.currentIndexChanged.connect(_update_hint)
         _update_hint()
@@ -13622,6 +13654,17 @@ class SettingsTab(QWidget):
             profile_id = int(profile_combo.currentData() or 0)
             if profile_id <= 0:
                 QMessageBox.warning(self, "Validation", "Select a frequency plan.")
+                return
+            selected_profile = next(
+                (row for row in enabled_profiles if int(row.get("id", 0) or 0) == profile_id),
+                None,
+            )
+            if selected_has_observer and int((selected_profile or {}).get("receive_only", 0) or 0) != 1:
+                QMessageBox.warning(
+                    self,
+                    "Assigned Plans",
+                    "Observer / SDR radios can only be assigned receive-only frequency plans.",
+                )
                 return
             state = str(state_combo.currentData() or "active").strip().lower() or "active"
             reason_value = reason_edit.text().strip()

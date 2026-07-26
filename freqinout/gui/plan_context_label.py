@@ -20,12 +20,23 @@ def plan_context_display_text(context: Optional[PlanContext]) -> str:
     scheduler = "on" if context.scheduler_participating else "off"
     messages = "on" if context.messages_enabled else "off"
     map_state = "on" if context.map_enabled else "off"
+    receive_only = " Receive-only plan." if context.receive_only else ""
+    ref_counts = []
+    if context.source_ref_count:
+        ref_counts.append(f"{context.source_ref_count} source{'s' if context.source_ref_count != 1 else ''}")
+    if context.schedule_ref_count:
+        ref_counts.append(f"{context.schedule_ref_count} schedule ref{'s' if context.schedule_ref_count != 1 else ''}")
+    if context.frequency_ref_count:
+        ref_counts.append(f"{context.frequency_ref_count} frequency ref{'s' if context.frequency_ref_count != 1 else ''}")
+    if context.group_ref_count:
+        ref_counts.append(f"{context.group_ref_count} group ref{'s' if context.group_ref_count != 1 else ''}")
+    provenance = f" Sources: {', '.join(ref_counts)}." if ref_counts else ""
     temporary = " Temporary override is active." if context.temporary_override else ""
     blocker = f" Attention: {context.top_blocker}" if context.top_blocker else ""
     return (
         f"Reviewing {context.plan_label} for {context.radio_label} "
         f"({runtime}). Scheduler: {scheduler}. Messages: {messages}. Map: {map_state}."
-        f"{temporary}{blocker}"
+        f"{receive_only}{provenance}{temporary}{blocker}"
     )
 
 

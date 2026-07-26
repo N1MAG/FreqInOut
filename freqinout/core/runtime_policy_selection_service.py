@@ -495,7 +495,9 @@ class DurableRuntimeSelectionService:
                 self.policy_store._ensure_policy_row(conn, int(device_id))
                 row = conn.execute(
                     """
-                    SELECT d.enabled, COALESCE(p.operator_suppressed, 0) AS operator_suppressed
+                    SELECT d.enabled,
+                           d.device_class,
+                           COALESCE(p.operator_suppressed, 0) AS operator_suppressed
                       FROM device_profiles d
                       LEFT JOIN runtime_policies p ON p.radio_profile_id=d.id
                      WHERE d.id=?
@@ -504,10 +506,17 @@ class DurableRuntimeSelectionService:
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"Unknown device profile id: {device_id}")
-                if not _bool(row[0], True):
+                row_data = dict(row)
+                if not _bool(row_data.get("enabled"), True):
                     raise SelectionWriteError(f"Cannot activate disabled radio {radio_shared_state_id(device_id)}.")
-                if _bool(row[1], False):
+                if _bool(row_data.get("operator_suppressed"), False):
                     raise SelectionWriteError(f"Cannot activate operator-suppressed radio {radio_shared_state_id(device_id)}.")
+                if str(row_data.get("device_class", "") or "").strip().lower() == "observer":
+                    operating = self.policy_store._effective_operating_row(conn, int(device_id))
+                    if not operating or not _bool(operating.get("receive_only"), False):
+                        raise SelectionWriteError(
+                            "Observer / SDR radios require a receive-only assigned Frequency Plan before activation."
+                        )
             id_set = set(device_ids)
             rows = conn.execute("SELECT id FROM device_profiles").fetchall()
             for row in rows:

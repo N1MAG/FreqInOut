@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import time
 import sqlite3
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QComboBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -116,6 +118,37 @@ class FreqPlannerTab(QWidget):
         )
         layout.addWidget(self.plan_context_label)
         self.plan_context_label.refresh_context(refresh=True)
+
+        plan_workspace = QHBoxLayout()
+        plan_workspace.addWidget(QLabel("Frequency Plan:"))
+        self.frequency_plan_combo = QComboBox()
+        self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")
+        self.frequency_plan_combo.currentIndexChanged.connect(self._on_frequency_plan_selected)
+        plan_workspace.addWidget(self.frequency_plan_combo, 1)
+        self.save_plan_btn = QPushButton("Save Plan")
+        self.assign_plan_btn = QPushButton("Assign Plan")
+        self.make_active_plan_btn = QPushButton("Make Active")
+        self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")
+        for btn in (
+            self.save_plan_btn,
+            self.assign_plan_btn,
+            self.make_active_plan_btn,
+            self.use_ad_hoc_plan_btn,
+        ):
+            btn.setEnabled(False)
+            btn.setToolTip("Frequency Plan workspace action placeholder; editing and assignment flows arrive in a later Phase 5 slice.")
+            plan_workspace.addWidget(btn)
+        layout.addLayout(plan_workspace)
+
+        self.frequency_plan_summary_label = QLabel("")
+        self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")
+        self.frequency_plan_summary_label.setWordWrap(True)
+        layout.addWidget(self.frequency_plan_summary_label)
+        self.frequency_plan_action_hint_label = QLabel("Plan editing actions arrive in a later update.")
+        self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")
+        self.frequency_plan_action_hint_label.setWordWrap(True)
+        layout.addWidget(self.frequency_plan_action_hint_label)
+        self._refresh_plan_workspace_header()
 
         self.band_legend = QWidget()
         self.band_legend_layout = QHBoxLayout(self.band_legend)
@@ -228,6 +261,92 @@ class FreqPlannerTab(QWidget):
             if prev is None or level < prev:
                 out[group] = level
         return out
+
+    @staticmethod
+    def _json_ref_count(value: Any) -> int:
+        if isinstance(value, (list, tuple, set)):
+            return len([item for item in value if str(item or "").strip()])
+        if value in (None, ""):
+            return 0
+        try:
+            parsed = json.loads(str(value))
+        except Exception:
+            parsed = [part.strip() for part in str(value).split(",") if part.strip()]
+        if not isinstance(parsed, list):
+            return 0
+        return len([item for item in parsed if str(item or "").strip()])
+
+    def _frequency_plan_summary_text(self, profile: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(profile, dict):
+            return "No Frequency Plan selected."
+        status = str(profile.get("status", "saved") or "saved").strip().title()
+        category = str(profile.get("category", "normal") or "normal").replace("_", " ").title()
+        source_count = self._json_ref_count(profile.get("source_refs_json"))
+        schedule_count = self._json_ref_count(profile.get("schedule_refs_json"))
+        frequency_count = self._json_ref_count(profile.get("frequency_refs_json"))
+        group_count = self._json_ref_count(profile.get("group_refs_json"))
+        refs: List[str] = []
+        if source_count:
+            refs.append(f"{source_count} source{'s' if source_count != 1 else ''}")
+        if schedule_count:
+            refs.append(f"{schedule_count} schedule ref{'s' if schedule_count != 1 else ''}")
+        if frequency_count:
+            refs.append(f"{frequency_count} frequency ref{'s' if frequency_count != 1 else ''}")
+        if group_count:
+            refs.append(f"{group_count} group ref{'s' if group_count != 1 else ''}")
+        ref_text = ", ".join(refs) if refs else "No source refs yet"
+        return f"{status} {category} plan. {ref_text}."
+
+    def _refresh_plan_workspace_header(self) -> None:
+        if not hasattr(self, "frequency_plan_combo"):
+            return
+        selected_id = self.frequency_plan_combo.currentData()
+        try:
+            plans = list(self.plan_context_service.store.list_operating_profiles())
+        except Exception:
+            plans = []
+        context = self.plan_context_service.context_for_tab("freqplanner", refresh=True)
+        context_plan_id = 0
+        if context is not None and context.frequency_plan_id:
+            try:
+                context_plan_id = int(str(context.frequency_plan_id).split("_")[-1])
+            except Exception:
+                context_plan_id = 0
+        preferred_id = int(selected_id or 0) or context_plan_id
+        self.frequency_plan_combo.blockSignals(True)
+        self.frequency_plan_combo.clear()
+        for plan in plans:
+            plan_id = int(plan.get("id", 0) or 0)
+            label = str(plan.get("name", "") or f"Frequency Plan #{plan_id}")
+            status = str(plan.get("status", "saved") or "saved").strip().lower()
+            if status == "draft":
+                label = f"{label} (draft)"
+            self.frequency_plan_combo.addItem(label, plan_id)
+        if preferred_id:
+            idx = self.frequency_plan_combo.findData(preferred_id)
+            if idx >= 0:
+                self.frequency_plan_combo.setCurrentIndex(idx)
+        self.frequency_plan_combo.blockSignals(False)
+        self._update_frequency_plan_summary()
+
+    def _selected_frequency_plan_row(self) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "frequency_plan_combo"):
+            return None
+        selected_id = int(self.frequency_plan_combo.currentData() or 0)
+        if selected_id <= 0:
+            return None
+        try:
+            return self.plan_context_service.store.get_operating_profile(selected_id)
+        except Exception:
+            return None
+
+    def _update_frequency_plan_summary(self) -> None:
+        if not hasattr(self, "frequency_plan_summary_label"):
+            return
+        self.frequency_plan_summary_label.setText(self._frequency_plan_summary_text(self._selected_frequency_plan_row()))
+
+    def _on_frequency_plan_selected(self, *_args: Any) -> None:
+        self._update_frequency_plan_summary()
 
     @classmethod
     def _condition_level_match(cls, condition_levels: str, group_level: Optional[int]) -> bool:
@@ -902,6 +1021,7 @@ class FreqPlannerTab(QWidget):
         except Exception:
             pass
         self.plan_context_label.refresh_context(refresh=True)
+        self._refresh_plan_workspace_header()
         self.table.clearContents()
         tz_name, tz_abbr = self._current_timezone_label()
         if not self._show_local:

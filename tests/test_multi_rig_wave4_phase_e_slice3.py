@@ -142,11 +142,11 @@ def test_store_carry_swap_restores_target_assignment_and_blocks_unsafe_edits(mon
     assert int(target_during["operating_profile_id"]) == int(source_profile["id"])
     assert str(target_during["assignment_state"] or "") == "temporary_override"
 
-    with pytest.raises(ValueError, match="Restore the active temporary swap"):
+    with pytest.raises(ValueError, match="Restore the active Temporary Plan Swap"):
         store.set_device_operating_profile(int(source["id"]), int(target_profile["id"]))
-    with pytest.raises(ValueError, match="Restore the active temporary swap"):
+    with pytest.raises(ValueError, match="Restore the active Temporary Plan Swap"):
         store.set_device_profile_runtime_active(int(source["id"]), False)
-    with pytest.raises(ValueError, match="Restore the active temporary swap"):
+    with pytest.raises(ValueError, match="Restore the active Temporary Plan Swap"):
         store.set_runtime_primary_device_profile(int(source["id"]))
     with pytest.raises(ValueError, match="restore target"):
         store.save_operating_profile({"id": int(target_profile["id"]), "enabled": False})
@@ -235,7 +235,7 @@ def test_settings_tab_persists_allow_profile_swap_and_handles_swap_start_restore
         active_swap = store.get_active_profile_swap()
         assert active_swap is not None
         assert int(active_swap["target_device_id"]) == int(target["id"])
-        assert "Temporary swap active" in tab.device_assignments_hint_label.text()
+        assert "Temporary plan swap active" in tab.device_assignments_hint_label.text()
 
         monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
         tab._restore_temporary_profile_swap()

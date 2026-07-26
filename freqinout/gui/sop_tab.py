@@ -4210,6 +4210,14 @@ class SOPTab(_LegacySOPTab):
         )
         root.addWidget(self.plan_context_label)
         self.plan_context_label.refresh_context(refresh=True)
+        self.operating_plan_inputs_label = QLabel("")
+        self.operating_plan_inputs_label.setObjectName("sopOperatingPlanInputsSummary")
+        self.operating_plan_inputs_label.setWordWrap(True)
+        self.operating_plan_inputs_label.setToolTip(
+            "Read-only summary of the current radio, assigned Frequency Plan, and source inputs SOP Builder should review against."
+        )
+        root.addWidget(self.operating_plan_inputs_label)
+        self._refresh_operating_plan_inputs_summary()
 
         header = QHBoxLayout()
         self.profile_combo = QComboBox()
@@ -7961,6 +7969,38 @@ class SOPTab(_LegacySOPTab):
         self._refresh_inline_conflict_badges()
         self._schedule_realtime_hf_conflict_check()
 
+    def _operating_plan_inputs_summary_text(self) -> str:
+        try:
+            context = self.plan_context_service.context_for_tab("sop", refresh=True)
+        except Exception:
+            context = None
+        if context is None:
+            return "Operating Plan Inputs: no active Frequency Plan context."
+        ref_counts: List[str] = []
+        if context.source_ref_count:
+            ref_counts.append(f"{context.source_ref_count} source{'s' if context.source_ref_count != 1 else ''}")
+        if context.schedule_ref_count:
+            ref_counts.append(
+                f"{context.schedule_ref_count} schedule ref{'s' if context.schedule_ref_count != 1 else ''}"
+            )
+        if context.frequency_ref_count:
+            ref_counts.append(
+                f"{context.frequency_ref_count} frequency ref{'s' if context.frequency_ref_count != 1 else ''}"
+            )
+        if context.group_ref_count:
+            ref_counts.append(f"{context.group_ref_count} group ref{'s' if context.group_ref_count != 1 else ''}")
+        source_text = ", ".join(ref_counts) if ref_counts else "no source refs yet"
+        mode = "receive-only" if context.receive_only else "transmit-capable"
+        return (
+            f"Operating Plan Inputs: {context.plan_label} assigned to {context.radio_label}; "
+            f"{mode}; {source_text}."
+        )
+
+    def _refresh_operating_plan_inputs_summary(self) -> None:
+        if not hasattr(self, "operating_plan_inputs_label"):
+            return
+        self.operating_plan_inputs_label.setText(self._operating_plan_inputs_summary_text())
+
     def on_hf_schedule_saved(self) -> None:
         self._clear_hf_schedule_slot_cache()
 
@@ -7972,6 +8012,7 @@ class SOPTab(_LegacySOPTab):
         try:
             self.plan_context_label.invalidate_context()
             self.plan_context_label.refresh_context(refresh=True)
+            self._refresh_operating_plan_inputs_summary()
         except Exception:
             pass
         selected_id = int(self._selected_profile_id or 0)
@@ -8061,6 +8102,8 @@ class SOPTab(_LegacySOPTab):
         try:
             theme = resolve_theme(self.settings)
             self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "operating_plan_inputs_label"):
+                self.operating_plan_inputs_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             if hasattr(self, "activation_defaults_hint_label"):
                 self.activation_defaults_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             if hasattr(self, "activation_conflict_summary_label"):

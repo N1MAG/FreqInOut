@@ -57,6 +57,14 @@ def _observer_device(store: MultiRadioStore) -> dict[str, object]:
             "frontend_group": "FRONT-A",
         }
     )
+    rx_plan = store.save_operating_profile(
+        {
+            "name": "North SDR Watch",
+            "scheduler_enabled": False,
+            "receive_only": True,
+        }
+    )
+    store.set_device_operating_profile(int(observer["id"]), int(rx_plan["id"]), reason="Observer receive-only watch.")
     store.set_device_profile_runtime_active(int(observer["id"]), True)
     saved = next(
         row for row in store.list_device_profiles() if int(row.get("id", 0) or 0) == int(observer["id"])
@@ -124,6 +132,7 @@ def test_station_runtime_manager_reports_observer_follow_guidance(monkeypatch, t
             "name": "Observer Watch",
             "preferred_band_set": ["40m", "80m"],
             "scheduler_enabled": False,
+            "receive_only": True,
         }
     )
     store.set_device_operating_profile(
@@ -207,11 +216,13 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
                 "use_launch_control": True,
                 "use_net_control_tabs": True,
                 "allow_profile_swap": False,
+                "receive_only": True,
             }
         )
         watch = next(row for row in store.list_operating_profiles() if row["name"] == "Observer Watch")
         assert json.loads(str(watch["preferred_band_set_json"])) == ["40M", "80M"]
 
+        store.set_device_operating_profile(int(observer["id"]), int(watch["id"]), reason="Observer receive-only watch.")
         store.set_device_profile_runtime_active(int(observer["id"]), True)
         tab._refresh_multi_radio_tables()
 
@@ -220,8 +231,8 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
             for row in range(tab.device_profiles_table.rowCount())
             if int(tab.device_profiles_table.item(row, 3).data(Qt.UserRole) or 0) == int(observer["id"])
         )
-        assert tab.device_profiles_table.item(row_index, 6).text() == "Observer SDR 10.0.0.50:7300"
-        assert tab.device_profiles_table.item(row_index, 9).text() == "Observer / SDR"
+        assert tab.device_profiles_table.item(row_index, 8).text() == "Observer SDR 10.0.0.50:7300"
+        assert tab.device_profiles_table.item(row_index, 13).text() == "Observer / SDR"
 
         _select_device_profiles(tab, [int(observer["id"])])
         tab._update_device_profile_action_buttons()
@@ -248,6 +259,7 @@ def test_station_overview_shows_observer_follow_guidance(monkeypatch, tmp_path):
             "name": "Observer Watch",
             "preferred_band_set": ["40m", "80m"],
             "scheduler_enabled": False,
+            "receive_only": True,
         }
     )
     store.set_device_operating_profile(

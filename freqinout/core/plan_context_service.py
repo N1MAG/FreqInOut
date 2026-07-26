@@ -35,6 +35,11 @@ class PlanContext:
     map_enabled: bool = False
     launch_enabled: bool = False
     net_control_enabled: bool = False
+    receive_only: bool = False
+    source_ref_count: int = 0
+    schedule_ref_count: int = 0
+    frequency_ref_count: int = 0
+    group_ref_count: int = 0
     current_frequency: str = ""
     next_target: str = ""
     scheduler_state: str = "unknown"
@@ -166,6 +171,11 @@ class PlanContextService:
             map_enabled=policy.map_link_enabled if policy else False,
             launch_enabled=policy.launch_control_enabled if policy else False,
             net_control_enabled=policy.net_control_participation_enabled if policy else False,
+            receive_only=assignment.receive_only if assignment else False,
+            source_ref_count=len(plan.source_refs) if plan else 0,
+            schedule_ref_count=len(plan.schedule_refs) if plan else 0,
+            frequency_ref_count=len(plan.frequency_refs) if plan else 0,
+            group_ref_count=len(plan.group_refs) if plan else 0,
             top_blocker=self._top_blocker(policy),
         )
 

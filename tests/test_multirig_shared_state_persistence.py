@@ -32,6 +32,7 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
             "scheduler_enabled": 0,
             "use_messages": 1,
             "use_map": 1,
+            "receive_only": 1,
         }
     )
     primary = store.save_device_profile(
@@ -75,6 +76,12 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
     }
     assert (f"radio_{primary['id']}", f"plan_{primary_plan['id']}") in assigned
     assert (f"radio_{observer['id']}", f"plan_{observer_plan['id']}") in assigned
+    receive_only = {
+        (assignment.radio_profile_id, assignment.frequency_plan_id): assignment.receive_only
+        for assignment in snapshot.assigned_plans
+    }
+    assert receive_only[(f"radio_{primary['id']}", f"plan_{primary_plan['id']}")] is False
+    assert receive_only[(f"radio_{observer['id']}", f"plan_{observer_plan['id']}")] is True
 
 
 def test_radio_profile_projection_populates_canonical_software_flags(tmp_path):
@@ -212,3 +219,35 @@ def test_operating_profile_projection_keeps_description_out_of_notes(tmp_path):
 
     assert projected.description == "Operator-facing description"
     assert projected.notes == ""
+
+
+def test_frequency_plan_projection_preserves_source_and_provenance_refs(tmp_path):
+    store = _store(tmp_path)
+    with store._connect() as conn:
+        set_multi_rig_migration_version(conn)
+    plan = store.save_operating_profile(
+        {
+            "system_key": "provenance_plan",
+            "name": "Provenance Plan",
+            "category": "rx_watch",
+            "status": "draft",
+            "source_refs": ["src_hf_daily", "src_net_schedule"],
+            "schedule_refs": ["hf_daily:monday:1900"],
+            "frequency_refs": ["freq_40m"],
+            "group_refs": ["ARES"],
+            "notes": "Imported from operator schedule review.",
+        }
+    )
+
+    snapshot = build_shared_state_snapshot(store)
+    projected = next(item for item in snapshot.frequency_plans if item.id == f"plan_{plan['id']}")
+
+    assert projected.category == "rx_watch"
+    assert projected.status == "draft"
+    assert projected.draft is True
+    assert projected.saved is False
+    assert projected.source_refs == ("src_hf_daily", "src_net_schedule")
+    assert projected.schedule_refs == ("hf_daily:monday:1900",)
+    assert projected.frequency_refs == ("freq_40m",)
+    assert projected.group_refs == ("ARES",)
+    assert projected.notes == "Imported from operator schedule review."

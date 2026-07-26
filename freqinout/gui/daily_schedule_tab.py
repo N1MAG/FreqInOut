@@ -349,11 +349,11 @@ class DailyScheduleTab(QWidget):
                 combo.addItem(self._operating_target_label(row), int(row.get("id", 0) or 0))
             if target_operating_profile_id is not None and combo.findData(int(target_operating_profile_id)) < 0:
                 combo.addItem(
-                    f"Missing operating profile #{int(target_operating_profile_id)}",
+                    f"Missing Frequency Plan #{int(target_operating_profile_id)}",
                     int(target_operating_profile_id),
                 )
             if combo.count() <= 0:
-                combo.addItem("No operating profiles", None)
+                combo.addItem("No Frequency Plans", None)
                 combo.setEnabled(False)
                 return
             combo.setEnabled(True)
@@ -5057,7 +5057,7 @@ class DailyScheduleTab(QWidget):
                 format_errors.append(f"Row {r+1}: Device-targeted rows require a device profile.")
                 continue
             if target_scope == TARGET_SCOPE_OPERATING_PROFILE and target_operating_profile_id is None:
-                format_errors.append(f"Row {r+1}: Operating-profile-targeted rows require an operating profile.")
+                format_errors.append(f"Row {r+1}: Frequency Plan-targeted rows require a Frequency Plan.")
                 continue
 
             # Enforce frequency validity for band/mode

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
@@ -59,6 +60,21 @@ def _id(prefix: str, value: object) -> str:
     return f"{prefix}_{text}" if text else ""
 
 
+def _json_string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    elif value in (None, ""):
+        raw_items = []
+    else:
+        try:
+            loaded = json.loads(str(value))
+        except Exception:
+            loaded = [part.strip() for part in str(value).split(",") if part.strip()]
+        raw_items = loaded if isinstance(loaded, list) else []
+    items = [_text(item) for item in raw_items]
+    return tuple(dict.fromkeys(item for item in items if item))
+
+
 def radio_profile_from_device_row(row: Mapping[str, Any]) -> RadioProfile:
     device_class = _text(row.get("device_class"), "tx_rx").lower() or "tx_rx"
     control_backend = _text(row.get("control_backend"), "manual").lower() or "manual"
@@ -89,21 +105,29 @@ def radio_profile_from_device_row(row: Mapping[str, Any]) -> RadioProfile:
 
 
 def frequency_plan_from_operating_row(row: Mapping[str, Any]) -> FrequencyPlan:
+    status = _text(row.get("status"), "saved").lower() or "saved"
     return FrequencyPlan(
         id=_id("plan", row.get("id")),
         name=_text(row.get("name"), "Operating Plan") or "Operating Plan",
         description=_text(row.get("description")),
-        category="normal",
-        status="saved",
-        draft=False,
-        saved=True,
+        category=_text(row.get("category"), "normal").lower() or "normal",
+        status=status,
+        source_refs=_json_string_tuple(row.get("source_refs_json")),
+        schedule_refs=_json_string_tuple(row.get("schedule_refs_json")),
+        frequency_refs=_json_string_tuple(row.get("frequency_refs_json")),
+        group_refs=_json_string_tuple(row.get("group_refs_json")),
+        draft=status == "draft",
+        saved=status == "saved",
         notes=_text(row.get("notes")),
         created_utc=_text(row.get("created_utc")) or _utc_now_iso(),
         updated_utc=_text(row.get("updated_utc")) or _utc_now_iso(),
     )
 
 
-def assigned_plan_from_assignment_row(row: Mapping[str, Any]) -> AssignedPlan:
+def assigned_plan_from_assignment_row(
+    row: Mapping[str, Any],
+    operating_row: Optional[Mapping[str, Any]] = None,
+) -> AssignedPlan:
     state = _text(row.get("assignment_state"), "active").lower() or "active"
     return AssignedPlan(
         id=_id("assignment", row.get("id")),
@@ -114,7 +138,7 @@ def assigned_plan_from_assignment_row(row: Mapping[str, Any]) -> AssignedPlan:
         default=False,
         temporary_override=state == "temporary_override",
         temporary_override_until_utc=_text(row.get("temporary_override_until_utc")) or None,
-        receive_only=False,
+        receive_only=_boolish((operating_row or {}).get("receive_only"), False),
         scheduler_enforcement="enabled",
         scheduler_mode=_text(row.get("scheduler_mode"), "full_fio_workflow") or "full_fio_workflow",
         created_utc=_text(row.get("created_utc")) or _utc_now_iso(),
@@ -133,6 +157,7 @@ class SharedStatePersistenceAdapter:
         device_rows = self.store.list_device_profiles()
         operating_rows = self.store.list_operating_profiles()
         assignment_rows = self.store.list_effective_assignments()
+        operating_by_id = {int(row.get("id", 0) or 0): row for row in operating_rows}
 
         policies = list(policy_store.list_policies(runtime_status=runtime_status))
         selection = selection_service.state(runtime_status=runtime_status)
@@ -140,7 +165,13 @@ class SharedStatePersistenceAdapter:
         return SharedStateSnapshot(
             radio_profiles=tuple(radio_profile_from_device_row(row) for row in device_rows),
             frequency_plans=tuple(frequency_plan_from_operating_row(row) for row in operating_rows),
-            assigned_plans=tuple(assigned_plan_from_assignment_row(row) for row in assignment_rows),
+            assigned_plans=tuple(
+                assigned_plan_from_assignment_row(
+                    row,
+                    operating_by_id.get(int(row.get("operating_profile_id", 0) or 0)),
+                )
+                for row in assignment_rows
+            ),
             runtime_policies=tuple(policies),
             selection_state=selection,
             runtime_status=runtime_status,
