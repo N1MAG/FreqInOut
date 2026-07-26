@@ -8,6 +8,7 @@ from freqinout.core.multi_rig_runtime_status import radio_shared_state_id
 from freqinout.core.ptt_conflict_service import PttConflictService
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.shared_state import PttConflictEvidence
 
 
 class _Rig:
@@ -44,6 +45,20 @@ class _SharedPttManager:
             owner_ptt_active=False,
             target_ptt_active=False,
             reason="Shared PTT group AMP-A is clear.",
+        )
+
+
+class _ClearSharedPttManager:
+    def shared_ptt_lock_snapshot(self, *, force=False):
+        return SimpleNamespace(
+            ptt_group="",
+            blocked=False,
+            owner_device_profile_id=None,
+            owner_name="",
+            owner_backend="",
+            owner_ptt_active=False,
+            target_ptt_active=False,
+            reason="",
         )
 
 
@@ -91,6 +106,59 @@ def test_scheduler_shared_ptt_block_publishes_busy_and_conflict_evidence(monkeyp
         engine.stop()
 
 
+def test_scheduler_local_ptt_active_publishes_busy_evidence(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile()
+    assert primary is not None
+    primary_id = radio_shared_state_id(primary["id"])
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None, station_runtime_manager=_ClearSharedPttManager())
+    queued: list[tuple[str, int]] = []
+    try:
+        _configure_scheduler_for_apply(monkeypatch, engine, queued)
+        engine._status_flrig_ptt_known = True
+        engine._status_flrig_ptt_ts = 9_999_999_999.0
+        engine._last_ptt_active = True
+
+        engine._apply_schedule_entry({"frequency": "7.078", "band": "40M", "mode": "Digi", "vfo": "A"}, "HF")
+
+        busy = BusyEvidenceService(store).top_busy_reason(primary_id)
+        assert queued == []
+        assert busy is not None
+        assert busy.reason_code == "ptt_active"
+        assert busy.severity == "hard"
+        assert busy.description == "Rig PTT is active."
+    finally:
+        engine.stop()
+
+
+def test_scheduler_local_ptt_clear_removes_scheduler_owned_busy_evidence(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile()
+    assert primary is not None
+    primary_id = radio_shared_state_id(primary["id"])
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None, station_runtime_manager=_ClearSharedPttManager())
+    queued: list[tuple[str, int]] = []
+    try:
+        _configure_scheduler_for_apply(monkeypatch, engine, queued)
+        entry = {"frequency": "7.078", "band": "40M", "mode": "Digi", "vfo": "A"}
+        engine._status_flrig_ptt_known = True
+        engine._status_flrig_ptt_ts = 9_999_999_999.0
+        engine._last_ptt_active = True
+        engine._apply_schedule_entry(entry, "HF")
+        assert BusyEvidenceService(store).top_busy_reason(primary_id) is not None
+
+        engine._last_ptt_active = False
+        engine._apply_schedule_entry(entry, "HF")
+
+        assert BusyEvidenceService(store).top_busy_reason(primary_id) is None
+    finally:
+        engine.stop()
+
+
 def test_scheduler_shared_ptt_clear_removes_scheduler_owned_evidence(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
@@ -118,3 +186,32 @@ def test_scheduler_shared_ptt_clear_removes_scheduler_owned_evidence(monkeypatch
     finally:
         engine.stop()
 
+
+def test_scheduler_shared_ptt_clear_keeps_conflict_where_primary_is_only_blocker(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile()
+    assert primary is not None
+    other = store.save_device_profile({"name": "Other Requested Rig", "control_backend": "flrig", "ptt_group": "AMP-A"})
+    primary_id = radio_shared_state_id(primary["id"])
+    other_id = radio_shared_state_id(other["id"])
+    service = PttConflictService(store)
+    service.publish(
+        PttConflictEvidence(
+            id=f"ptt_shared_{int(other['id'])}",
+            ptt_group="AMP-A",
+            requested_radio_id=other_id,
+            blocking_radio_id=primary_id,
+            severity="hard",
+            source="scheduler_shared_ptt",
+        )
+    )
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None)
+    try:
+        engine._clear_shared_ptt_block_evidence()
+
+        assert [item.id for item in service.active_for_radio(primary_id)] == [f"ptt_shared_{int(other['id'])}"]
+        assert [item.id for item in service.active_for_radio(other_id)] == [f"ptt_shared_{int(other['id'])}"]
+    finally:
+        engine.stop()

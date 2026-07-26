@@ -2662,6 +2662,38 @@ class SchedulerEngine(QObject):
     def _shared_ptt_busy_evidence_id(self, radio_id: int) -> str:
         return f"busy_shared_ptt_{int(radio_id)}"
 
+    def _local_ptt_busy_evidence_id(self, radio_id: int) -> str:
+        return f"busy_local_ptt_{int(radio_id)}"
+
+    def _publish_local_ptt_busy_evidence(self, *, source: str) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            self._busy_evidence_service.publish(
+                BusyEvidence(
+                    id=self._local_ptt_busy_evidence_id(radio_id),
+                    radio_profile_id=f"radio_{radio_id}",
+                    source_family="ptt",
+                    reason_code="ptt_active",
+                    severity="hard",
+                    evidence_timestamp_utc=now,
+                    description="Rig PTT is active.",
+                )
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to publish local PTT busy evidence: %s", exc)
+
+    def _clear_local_ptt_busy_evidence(self) -> None:
+        radio_id = self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._busy_evidence_service.clear(self._local_ptt_busy_evidence_id(radio_id))
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear local PTT busy evidence: %s", exc)
+
     def _publish_shared_ptt_block_evidence(
         self,
         shared_ptt: Dict[str, object],
@@ -2719,9 +2751,7 @@ class SchedulerEngine(QObject):
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear shared PTT busy evidence: %s", exc)
         try:
-            for evidence in self._ptt_conflict_service.active_for_radio(f"radio_{radio_id}"):
-                if evidence.source == "scheduler_shared_ptt":
-                    self._ptt_conflict_service.clear(evidence.id)
+            self._ptt_conflict_service.clear(f"ptt_shared_{int(radio_id)}")
         except Exception as exc:
             log.debug("SchedulerEngine: failed to clear shared PTT conflict evidence: %s", exc)
 
@@ -5438,6 +5468,7 @@ class SchedulerEngine(QObject):
         if want_freq_change and ptt_state_known and actual_state.flrig_ptt_active:
             busy_reasons.append("Rig PTT is active")
             ptt_hold_active = True
+            self._publish_local_ptt_busy_evidence(source=source)
             self._record_scheduler_health_issue(
                 "flrig-ptt",
                 "holding schedule change because rig PTT is active",
@@ -5458,6 +5489,8 @@ class SchedulerEngine(QObject):
                 throttle_sec=15.0,
                 control_mode=control_mode,
             )
+        else:
+            self._clear_local_ptt_busy_evidence()
         shared_ptt = self._shared_ptt_lock_status(force=bool(force))
         if want_freq_change and bool(shared_ptt.get("blocked")):
             shared_reason = str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
