@@ -226,6 +226,8 @@ def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
     assert "self.operating_profiles_section_group = operating_group" in source
     assert 'self._make_collapsible_group(\n            "Frequency Plans",' in source
     assert "fit_content_in_stack=True" in source
+    assert "self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())" in source
+    assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" in source
     assert 'self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))' in source
     assert "self.trusted_hash_table.setMaximumHeight(240)" in source
     assert "self.gpg_keys_table.setMaximumHeight(300)" in source

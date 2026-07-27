@@ -464,8 +464,8 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
         assert tab.sections_scroll.widgetResizable() is True
         assert tab._section_meta[tab.op_groups_section_group]["fit_content_in_stack"] is True
         assert tab._section_meta[tab.local_net_section_group]["fit_content_in_stack"] is True
-        assert tab.op_groups_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
-        assert tab.local_net_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+        assert tab.op_groups_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
+        assert tab.local_net_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
 
         tab.operating_groups = [
             {
@@ -497,8 +497,8 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
         app.processEvents()
 
         expanded_heights = {
-            tab.op_groups_section_group: tab.op_groups_section_group.maximumHeight(),
-            tab.local_net_section_group: tab.local_net_section_group.maximumHeight(),
+            tab.op_groups_section_group: tab.op_groups_section_group.minimumHeight(),
+            tab.local_net_section_group: tab.local_net_section_group.minimumHeight(),
         }
 
         for group, table in (
@@ -506,9 +506,8 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
             (tab.local_net_section_group, tab.local_net_table),
         ):
             assert group.minimumHeight() == expanded_heights[group]
-            assert group.maximumHeight() == expanded_heights[group]
+            assert group.maximumHeight() == 16777215
             assert expanded_heights[group] >= table.maximumHeight()
-            assert expanded_heights[group] < 16777215
             assert table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
             assert table.maximumHeight() < table.horizontalHeader().height() + (table.rowCount() * max(table.rowHeight(0), 24))
 
@@ -527,9 +526,9 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
             app.processEvents()
 
             assert content.isHidden() is False
-            assert group.maximumHeight() == expanded_heights[group]
             assert group.minimumHeight() == expanded_heights[group]
-            assert group.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+            assert group.maximumHeight() == 16777215
+            assert group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
     finally:
         tab.deleteLater()
         app.processEvents()

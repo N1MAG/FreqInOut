@@ -2364,6 +2364,7 @@ class SettingsTab(QWidget):
         self.sections_scroll.setFrameShape(QFrame.NoFrame)
         self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sections_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())
         self.sections_scroll.setWidget(self.sections_stack)
         sections_row.addWidget(self.sections_scroll, 1)
         main_layout.addLayout(sections_row, 1)
@@ -6026,8 +6027,12 @@ class SettingsTab(QWidget):
                     extra = margins.top() + margins.bottom()
                 target_height = content.sizeHint().height() + header_height + extra
                 group.setMinimumHeight(target_height)
-                group.setMaximumHeight(target_height)
-                group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                if stacked_mode:
+                    group.setMaximumHeight(16777215)
+                    group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                else:
+                    group.setMaximumHeight(target_height)
+                    group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             else:
                 group.setMinimumHeight(0)
                 group.setMaximumHeight(16777215)
@@ -6049,6 +6054,9 @@ class SettingsTab(QWidget):
         header_btn = meta.get("header_btn")
         expanded = bool(header_btn.isChecked()) if header_btn else bool(content.isVisible())
         self._apply_collapsed_state(group, content, expanded)
+        current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
+        if current_widget is group:
+            self._sync_current_section_scroll_size()
 
     def _collapsed_height(self, group: QGroupBox) -> int:
         header_btn = self._section_meta.get(group, {}).get("header_btn")
