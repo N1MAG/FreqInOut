@@ -263,6 +263,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
+    assert "right_layout.setSpacing(10)" in source
+    assert "border-bottom: 2px solid" in source
     assert "self._status_timer.timeout.connect(self._refresh_station_overview)" in source
     assert "self._refresh_station_command_bar(force=False)" in source
     assert "btn.setEnabled(False)" in source
@@ -276,6 +278,114 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_hold_btn.clicked.connect" not in source
     assert "self.station_command_suspend_btn.clicked.connect" not in source
     assert "self.station_command_resume_btn.clicked.connect" not in source
+
+
+def test_phase7_dropdown_checklist_summarizes_multi_select(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.dropdown_checklist import DropdownChecklist
+
+    widget = DropdownChecklist("Sources")
+    try:
+        widget.set_options([("js8", "JS8Call"), ("varac", "VarAC"), ("spotter", "JS8Spotter")])
+
+        assert widget.text() == "Sources: All"
+        assert widget.all_selected() is True
+
+        widget.set_selected_values(["js8", "spotter"])
+
+        assert widget.text() == "Sources: 2 selected"
+        assert widget.selected_values() == {"js8", "spotter"}
+        assert widget.all_selected() is False
+
+        widget.set_selected_values([])
+
+        assert widget.text() == "Sources: None"
+        assert widget.selected_values() == set()
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_messages_workspace_filters_are_below_title_without_context_sentence() -> None:
+    source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.operating_group_filter = DropdownChecklist("Operating Group")' in source
+    assert 'self.source_filter = DropdownChecklist("Sources")' in source
+    assert 'self.operating_group_filter.setObjectName("messageOperatingGroupFilter")' in source
+    assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
+    assert "inbox_row.addWidget(self.time_toggle_btn)" in source
+    assert "inbox_row.addWidget(self.operating_group_filter)" in source
+    assert "inbox_row.addWidget(self.source_filter)" in source
+    assert 'fallback_text="Messages uses the current radio and Frequency Plan context' not in source
+    assert "self.plan_context_label.setVisible(False)" in source
+    assert "def _row_matches_workspace_filters" in source
+    assert "def _message_source_options" in source
+    assert "def _message_group_options" in source
+
+
+def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import message_viewer_tab as msg_mod
+
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_js8_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_pending_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_bbs_auto_archive_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_initial_refresh", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_refresh_compose_forms", lambda self: None)
+
+    tab = msg_mod.MessageViewerTab()
+    try:
+        rows = [
+            msg_mod.UnifiedMessage("JS8 MSG", "NEW", "A", "B", 3, "3", "JS8", "js8", SimpleNamespace()),
+            msg_mod.UnifiedMessage(
+                "SitRep",
+                "INFO",
+                "C",
+                "D",
+                2,
+                "2",
+                "SitRep",
+                "sitrep",
+                SimpleNamespace(report_group="HF NETS"),
+            ),
+            msg_mod.UnifiedMessage("VarAC", "READ", "E", "F", 1, "1", "VarAC", "varac", SimpleNamespace()),
+        ]
+        tab._message_rows = rows
+        tab._refresh_message_filters(rows)
+
+        assert tab.source_filter.text() == "Sources: All"
+        assert tab.operating_group_filter.text() == "Operating Group: All"
+        assert tab._row_matches_workspace_filters(rows[0]) is True
+
+        tab.source_filter.set_selected_values(["sitrep"])
+
+        assert tab._row_matches_workspace_filters(rows[0]) is False
+        assert tab._row_matches_workspace_filters(rows[1]) is True
+
+        tab.source_filter.set_selected_values([])
+
+        assert tab._row_matches_workspace_filters(rows[1]) is False
+
+        tab.source_filter.set_selected_values(["sitrep"])
+        tab.operating_group_filter.set_selected_values(["HF NETS"])
+
+        assert tab._row_matches_workspace_filters(rows[1]) is True
+        assert tab._row_matches_workspace_filters(rows[2]) is False
+
+        tab._clear_filters()
+
+        assert tab.source_filter.all_selected() is True
+        assert tab.operating_group_filter.all_selected() is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -> None:

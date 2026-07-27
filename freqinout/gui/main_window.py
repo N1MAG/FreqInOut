@@ -461,7 +461,7 @@ class MainWindow(QMainWindow):
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(4)
+        right_layout.setSpacing(10)
 
         self.runtime_mode_banner = QFrame(right_container)
         self.runtime_mode_banner.setVisible(False)
@@ -506,7 +506,7 @@ class MainWindow(QMainWindow):
         self.station_command_bar.setAccessibleName("Station command context")
         self.station_command_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         command_layout = QHBoxLayout(self.station_command_bar)
-        command_layout.setContentsMargins(10, 6, 10, 6)
+        command_layout.setContentsMargins(10, 8, 10, 8)
         command_layout.setSpacing(8)
         command_layout.addWidget(QLabel("Radio"), 0)
         self.station_command_radio_combo = QComboBox(self.station_command_bar)
@@ -2888,11 +2888,12 @@ class MainWindow(QMainWindow):
             return
         border = theme.get("border", "#CDD6E0")
         surface = theme.get("surface", "#FFFFFF")
+        surface_alt = theme.get("surface_alt", "#F6F8FA")
         text = theme.get("text", "#222222")
         muted = theme.get("text_muted", "#6A737D")
         self.station_command_bar.setStyleSheet(
             "QFrame#stationCommandBar {"
-            f"background: {surface}; border: 1px solid {border}; border-radius: 6px;"
+            f"background: {surface_alt}; border: 1px solid {border}; border-bottom: 2px solid {border}; border-radius: 6px;"
             "}"
         )
         for label in (

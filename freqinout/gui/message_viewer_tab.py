@@ -19,7 +19,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Sequence
+from typing import Any, Dict, List, Tuple, Optional, Sequence, Set
 
 from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal, QObject, QThread
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
@@ -145,6 +145,7 @@ from freqinout.core.nbems_compose import (
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
+from freqinout.gui.dropdown_checklist import DropdownChecklist
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
@@ -230,6 +231,16 @@ RECEIVED_FILTER_CHOICES = [
     ("Last 24 hours", 24 * 60 * 60),
     ("Last 7 days", 7 * 24 * 60 * 60),
 ]
+MESSAGE_SOURCE_LABELS = {
+    "js8": "JS8Call",
+    "spotter": "JS8Spotter",
+    "varac": "VarAC",
+    "flmsg": "FLMSG",
+    "flamp": "FLAmp",
+    "bbs": "BBS",
+    "sitrep": "SitRep",
+    "commstat": "CommStat",
+}
 
 
 def _safe_js8_text(value: object, *, limit: int = JS8_SAFE_TEXT_LIMIT, upper: bool = False) -> str:
@@ -3796,6 +3807,7 @@ class MessageViewerTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Message Viewer</h3>"))
@@ -3807,29 +3819,21 @@ class MessageViewerTab(QWidget):
         self.time_toggle_btn = QPushButton("Times: Local" if self._show_local_time else "Times: UTC")
         self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.utc_label)
-        header.addWidget(self.local_label)
-        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         self.plan_context_label = PlanContextLabel(
             "messages",
             service=self.plan_context_service,
-            fallback_text="Messages uses the current radio and Frequency Plan context when reviewing received traffic and compose workflows.",
+            fallback_text="Message workspace context is available from Help.",
         )
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan message work should be reviewed against."
         )
-        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.setVisible(False)
         self.plan_context_label.refresh_context(refresh=True)
 
-        time_status_row = QHBoxLayout()
-        time_status_row.setContentsMargins(0, 0, 0, 0)
-        time_status_row.addStretch()
         self.message_check_status_label = QLabel("Next check: --")
         self.message_check_status_label.setToolTip("Shows when FIO will next check for new messages while this tab is open.")
-        time_status_row.addWidget(self.message_check_status_label)
-        layout.addLayout(time_status_row)
 
         loading_row = QHBoxLayout()
         self.loading_label = QLabel("Checking Messages...")
@@ -3898,6 +3902,18 @@ class MessageViewerTab(QWidget):
         self.received_filter.setToolTip("Limit visible messages to a recent receive window.")
         self.received_filter.currentIndexChanged.connect(self._on_filter_changed)
         fit_combo_box_to_contents(self.received_filter)
+
+        self.operating_group_filter = DropdownChecklist("Operating Group")
+        self.operating_group_filter.setObjectName("messageOperatingGroupFilter")
+        self.operating_group_filter.setToolTip("Show messages for all or selected operating groups.")
+        self.operating_group_filter.selectionChanged.connect(self._on_filter_changed)
+        self.operating_group_filter.set_options([("unassigned", "Unassigned")])
+
+        self.source_filter = DropdownChecklist("Sources")
+        self.source_filter.setObjectName("messageSourceFilter")
+        self.source_filter.setToolTip("Show messages from all or selected message sources.")
+        self.source_filter.selectionChanged.connect(self._on_filter_changed)
+        self.source_filter.set_options(self._message_source_options([]))
 
         self.refresh_btn = QPushButton("Refresh Now")
         self.refresh_btn.clicked.connect(self._on_refresh_now)
@@ -3971,6 +3987,9 @@ class MessageViewerTab(QWidget):
         inbox_row.setSpacing(8)
         inbox_row.addWidget(QLabel("Received:"))
         inbox_row.addWidget(self.received_filter)
+        inbox_row.addWidget(self.time_toggle_btn)
+        inbox_row.addWidget(self.operating_group_filter)
+        inbox_row.addWidget(self.source_filter)
         inbox_row.addWidget(QLabel("Check:"))
         inbox_row.addWidget(self.message_check_combo)
         inbox_row.addWidget(self.refresh_btn)
@@ -3986,6 +4005,7 @@ class MessageViewerTab(QWidget):
         inbox_row.addWidget(QLabel("BBS:"))
         inbox_row.addWidget(self.bbs_status_btn)
         inbox_row.addWidget(self.bbs_manage_btn)
+        inbox_row.addWidget(self.message_check_status_label)
         inbox_row.addStretch()
 
         compose_wrap = QWidget()
@@ -5215,6 +5235,8 @@ class MessageViewerTab(QWidget):
         for widget in (
             self.received_filter,
             self.message_check_combo,
+            self.operating_group_filter,
+            self.source_filter,
             self.message_check_status_label,
             self.refresh_btn,
             self.mark_all_read_btn,
@@ -8125,6 +8147,7 @@ class MessageViewerTab(QWidget):
         fit_combo_box_to_contents(self.status_filter)
         fit_combo_box_to_contents(self.from_filter)
         fit_combo_box_to_contents(self.to_filter)
+        self._refresh_workspace_filter_options(rows)
         self._update_excluded_types_button_state()
 
     def _apply_message_filters(self) -> None:
@@ -8138,6 +8161,8 @@ class MessageViewerTab(QWidget):
 
         filtered = []
         for row in rows:
+            if not self._row_matches_workspace_filters(row):
+                continue
             if not self._row_matches_type_filter(row, type_sel):
                 continue
             if apply_hidden_types and self._excluded_msg_types and self._row_matches_excluded_type(row):
@@ -8180,16 +8205,93 @@ class MessageViewerTab(QWidget):
         self._render_messages_table(filtered)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
+        selected_groups = self._selected_message_groups()
+        selected_sources = self._selected_message_sources()
         log.debug(
-            "MessageViewer: filters type=%s hidden=%d status=%s from=%s to=%s rcv=%s => %d rows",
+            "MessageViewer: filters type=%s hidden=%d status=%s from=%s to=%s rcv=%s groups=%s sources=%s => %d rows",
             type_sel,
             len(self._excluded_msg_types) if apply_hidden_types else 0,
             status_sel,
             from_sel,
             to_sel,
             rcv_query or "ALL",
+            sorted(selected_groups) if selected_groups is not None else ["ALL"],
+            sorted(selected_sources) if selected_sources is not None else ["ALL"],
             len(filtered),
         )
+
+    def _refresh_workspace_filter_options(self, rows: List[UnifiedMessage]) -> None:
+        if hasattr(self, "operating_group_filter"):
+            selected_groups = None
+            if not self.operating_group_filter.all_selected():
+                selected_groups = sorted(self.operating_group_filter.selected_values())
+            self.operating_group_filter.set_options(
+                self._message_group_options(rows),
+                selected_values=selected_groups,
+                select_all_when_empty=selected_groups is None,
+            )
+        if hasattr(self, "source_filter"):
+            selected_sources = None
+            if not self.source_filter.all_selected():
+                selected_sources = sorted(self.source_filter.selected_values())
+            self.source_filter.set_options(
+                self._message_source_options(rows),
+                selected_values=selected_sources,
+                select_all_when_empty=selected_sources is None,
+            )
+
+    def _message_source_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
+        origins = {self._message_source_value(row) for row in rows}
+        if not origins:
+            origins = set(MESSAGE_SOURCE_LABELS)
+        return [
+            (origin, MESSAGE_SOURCE_LABELS.get(origin, origin.upper()))
+            for origin in sorted(origin for origin in origins if origin)
+        ]
+
+    def _message_group_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
+        groups = {self._message_group_value(row) for row in rows}
+        if not groups:
+            groups = {"unassigned"}
+        options: list[tuple[str, str]] = []
+        for group in sorted(group for group in groups if group):
+            label = "Unassigned" if group == "unassigned" else group
+            options.append((group, label))
+        return options
+
+    def _message_source_value(self, row: UnifiedMessage) -> str:
+        return str(getattr(row, "origin", "") or "").strip().lower()
+
+    def _message_group_value(self, row: UnifiedMessage) -> str:
+        payload = getattr(row, "payload", None)
+        for attr in ("report_group", "group", "operating_group"):
+            value = normalize_group_name(getattr(payload, attr, "") if payload is not None else "")
+            if value:
+                return value
+        return "unassigned"
+
+    def _selected_message_sources(self) -> Optional[Set[str]]:
+        if hasattr(self, "source_filter"):
+            if self.source_filter.all_selected():
+                return None
+            return self.source_filter.selected_values()
+        return None
+
+    def _selected_message_groups(self) -> Optional[Set[str]]:
+        if hasattr(self, "operating_group_filter"):
+            if self.operating_group_filter.all_selected():
+                return None
+            return self.operating_group_filter.selected_values()
+        return None
+
+    def _row_matches_workspace_filters(self, row: UnifiedMessage) -> bool:
+        sources = self._selected_message_sources()
+        if sources is not None and self._message_source_value(row) not in sources:
+            return False
+        groups = self._selected_message_groups()
+        if groups is not None and self._message_group_value(row) not in groups:
+            return False
+        return True
 
     def _is_filter_or_sort_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
@@ -8203,6 +8305,10 @@ class MessageViewerTab(QWidget):
         if from_sel:
             return True
         if to_sel:
+            return True
+        if self._selected_message_sources() is not None:
+            return True
+        if self._selected_message_groups() is not None:
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
@@ -8238,6 +8344,10 @@ class MessageViewerTab(QWidget):
         if from_sel:
             return True
         if to_sel:
+            return True
+        if self._selected_message_sources() is not None:
+            return True
+        if self._selected_message_groups() is not None:
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
@@ -8293,6 +8403,8 @@ class MessageViewerTab(QWidget):
             and self.status_filter.currentText() in ("", "Status...")
             and self.from_filter.currentText() in ("",)
             and self.to_filter.currentText() in ("",)
+            and self._selected_message_sources() is None
+            and self._selected_message_groups() is None
             and not self.rcv_search.text().strip()
         ):
             return
@@ -8306,6 +8418,14 @@ class MessageViewerTab(QWidget):
         self.from_filter.setCurrentText("")
         self.to_filter.setCurrentText("")
         self.rcv_search.clear()
+        if hasattr(self, "source_filter"):
+            self.source_filter.set_selected_values(
+                [value for value, _label in self._message_source_options(self._message_rows)]
+            )
+        if hasattr(self, "operating_group_filter"):
+            self.operating_group_filter.set_selected_values(
+                [value for value, _label in self._message_group_options(self._message_rows)]
+            )
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
         self.from_filter.blockSignals(False)
