@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QFrame,
@@ -42,6 +42,9 @@ def _state_badge_style(state: str, theme: dict[str, str]) -> str:
 
 
 class StationOverviewTab(QWidget):
+    CONTROL_CENTER_HEALTH_COLUMN = 4
+    health_details_requested = Signal(int, str)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.settings = SettingsManager()
@@ -51,6 +54,7 @@ class StationOverviewTab(QWidget):
         self._tab_active = False
         self._refresh_dirty = False
         self._last_render_signature: tuple[object, ...] = tuple()
+        self._control_center_snapshots: list[DeviceRuntimeSnapshot] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -87,6 +91,8 @@ class StationOverviewTab(QWidget):
         self.control_center_table.setMaximumHeight(220)
         self.control_center_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.control_center_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.control_center_table.cellClicked.connect(self._on_control_center_cell_clicked)
+        self.control_center_table.cellDoubleClicked.connect(self._on_control_center_cell_clicked)
         header = self.control_center_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -354,7 +360,8 @@ class StationOverviewTab(QWidget):
 
     def _refresh_control_center_table(self, snapshots: Iterable[DeviceRuntimeSnapshot]) -> None:
         table = self.control_center_table
-        rows = [self._control_center_row_values(snapshot) for snapshot in snapshots]
+        self._control_center_snapshots = list(snapshots)
+        rows = [self._control_center_row_values(snapshot) for snapshot in self._control_center_snapshots]
         table.setRowCount(len(rows))
         for row_idx, values in enumerate(rows):
             for col_idx, value in enumerate(values):
@@ -363,8 +370,21 @@ class StationOverviewTab(QWidget):
                     item.setTextAlignment(Qt.AlignCenter)
                 else:
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if col_idx == self.CONTROL_CENTER_HEALTH_COLUMN:
+                    item.setToolTip("Open Health Details for this radio or SDR.")
                 table.setItem(row_idx, col_idx, item)
         table.resizeRowsToContents()
+
+    def _on_control_center_cell_clicked(self, row: int, column: int) -> None:
+        if int(column) == self.CONTROL_CENTER_HEALTH_COLUMN:
+            self._request_health_details_for_row(row)
+
+    def _request_health_details_for_row(self, row: int) -> None:
+        try:
+            snapshot = self._control_center_snapshots[int(row)]
+        except Exception:
+            return
+        self.health_details_requested.emit(int(snapshot.device_profile_id or 0), str(snapshot.name or "").strip())
 
     @staticmethod
     def _merged_service_states(service_states: dict[str, dict[str, object]]) -> list[tuple[str, str, str]]:

@@ -31,6 +31,8 @@ class StationHealthTab(QWidget):
         self._tab_active = False
         self._last_summary: dict[str, object] = {"issue_count": 0, "severity": "ok", "items": []}
         self._scope_resolver: Optional[ScopeResolver] = None
+        self._pending_focus_scope = ""
+        self._pending_focus_radio_id: Optional[int] = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(10000)
         self._refresh_timer.timeout.connect(self.refresh_from_registry)
@@ -123,6 +125,11 @@ class StationHealthTab(QWidget):
 
     def set_scope_resolver(self, resolver: Optional[ScopeResolver]) -> None:
         self._scope_resolver = resolver
+        self.refresh_from_registry()
+
+    def focus_scope(self, *, device_profile_id: Optional[int] = None, scope_name: str = "") -> None:
+        self._pending_focus_radio_id = device_profile_id if device_profile_id not in (None, 0) else None
+        self._pending_focus_scope = str(scope_name or "").strip()
         self.refresh_from_registry()
 
     def set_tab_active(self, active: bool) -> None:
@@ -220,6 +227,29 @@ class StationHealthTab(QWidget):
             for col, value in enumerate(values):
                 self.table.setItem(row, col, self._item(value, severity=severity if col == 2 else ""))
         self.table.resizeRowsToContents()
+        self._apply_pending_focus_scope()
+
+    def _apply_pending_focus_scope(self) -> None:
+        scope_name = str(getattr(self, "_pending_focus_scope", "") or "").strip()
+        radio_id = getattr(self, "_pending_focus_radio_id", None)
+        candidates = {scope_name.lower()} if scope_name else set()
+        if radio_id not in (None, 0, ""):
+            candidates.add(f"radio {int(radio_id)}".lower())
+        if not candidates:
+            return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            text = str(item.text() if item is not None else "").strip().lower()
+            if text and text in candidates:
+                self.table.selectRow(row)
+                self.table.scrollToItem(item)
+                self._clear_pending_focus_scope()
+                return
+        self._clear_pending_focus_scope()
+
+    def _clear_pending_focus_scope(self) -> None:
+        self._pending_focus_scope = ""
+        self._pending_focus_radio_id = None
 
     @staticmethod
     def _format_scheduler_ts(value: object) -> str:

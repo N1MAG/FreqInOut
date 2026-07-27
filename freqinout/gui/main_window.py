@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self.station_health_tab = StationHealthTab(self)
         self._refresh_station_health_scope_map()
         self.station_health_tab.set_scope_resolver(self._station_health_scope_resolver)
+        self.station_overview_tab.health_details_requested.connect(self._open_station_health_detail)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
         self._sop_data_refresh_timer.setSingleShot(True)
@@ -2823,6 +2824,18 @@ class MainWindow(QMainWindow):
                     ident,
                 ),
             )
+
+    def _open_station_health_detail(self, device_profile_id: int = 0, scope_name: str = "") -> None:
+        try:
+            self.station_health_tab.focus_scope(
+                device_profile_id=int(device_profile_id or 0),
+                scope_name=str(scope_name or "").strip(),
+            )
+        except Exception:
+            pass
+        idx = self._screen_index_by_label.get("Station Health", -1)
+        if idx >= 0:
+            self._set_screen(idx)
 
     def _apply_app_theme(self):
         app = QApplication.instance()

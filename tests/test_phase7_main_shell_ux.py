@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QTableWidgetItem
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -151,6 +151,70 @@ def test_phase7_collapsed_station_group_shows_health_alert(monkeypatch) -> None:
 
     header.deleteLater()
     app.processEvents()
+
+
+def test_phase7_station_control_center_health_details_affordance(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.station_overview_tab import StationOverviewTab
+
+    tab = StationOverviewTab()
+    tab._control_center_snapshots = [SimpleNamespace(device_profile_id=42, name="Portable SDR")]
+    captured: list[tuple[int, str]] = []
+    tab.health_details_requested.connect(lambda profile_id, name: captured.append((profile_id, name)))
+
+    tab._request_health_details_for_row(0)
+
+    assert captured == [(42, "Portable SDR")]
+
+    tab.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_health_focus_scope_selects_matching_row(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.station_health_tab import StationHealthTab
+
+    tab = StationHealthTab()
+    tab.table.setRowCount(2)
+    tab.table.setItem(0, 0, QTableWidgetItem("Station-wide"))
+    tab.table.setItem(1, 0, QTableWidgetItem("Portable SDR"))
+    tab._pending_focus_scope = "Portable SDR"
+
+    tab._apply_pending_focus_scope()
+
+    assert tab.table.currentRow() == 1
+    assert tab._pending_focus_scope == ""
+    assert tab._pending_focus_radio_id is None
+
+    tab.table.selectRow(0)
+    tab._apply_pending_focus_scope()
+
+    assert tab.table.currentRow() == 0
+
+    tab.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_control_center_wires_health_detail_navigation() -> None:
+    overview_source = Path("freqinout/gui/station_overview_tab.py").read_text(encoding="utf-8")
+    health_source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "CONTROL_CENTER_HEALTH_COLUMN = 4" in overview_source
+    assert "health_details_requested = Signal(int, str)" in overview_source
+    assert "self.control_center_table.cellClicked.connect(self._on_control_center_cell_clicked)" in overview_source
+    assert "self.control_center_table.cellDoubleClicked.connect(self._on_control_center_cell_clicked)" in overview_source
+    assert "if int(column) == self.CONTROL_CENTER_HEALTH_COLUMN:" in overview_source
+    assert "Open Health Details for this radio or SDR." in overview_source
+    assert "def focus_scope(" in health_source
+    assert "def _apply_pending_focus_scope(self) -> None:" in health_source
+    assert "def _clear_pending_focus_scope(self) -> None:" in health_source
+    assert "self.station_overview_tab.health_details_requested.connect(self._open_station_health_detail)" in main_source
+    assert 'idx = self._screen_index_by_label.get("Station Health", -1)' in main_source
 
 
 def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
