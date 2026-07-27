@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QTextEdit,
     QPushButton,
     QLabel,
@@ -28,6 +29,8 @@ class LogViewerTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self.log_file = _get_log_file()
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
 
         self._build_ui()
         self._apply_theme()
@@ -49,28 +52,16 @@ class LogViewerTab(QWidget):
         header.addWidget(title, 1)
         layout.addLayout(header)
 
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
-
         self.refresh_btn = QPushButton("Refresh")
         self.clear_btn = QPushButton("Clear")
         self.search_btn = QPushButton("Search")
         self.open_btn = QPushButton("Open Log")
+        self.search_label = QLabel("Search:")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search log text...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumWidth(180)
 
-        filter_row.addWidget(self.refresh_btn)
-        filter_row.addWidget(self.clear_btn)
-        filter_row.addWidget(self.open_btn)
-
-        filter_row.addSpacing(12)
-        filter_row.addWidget(QLabel("Search:"))
-        filter_row.addWidget(self.search_input, 1)
-        filter_row.addWidget(self.search_btn)
-
-        filter_row.addSpacing(12)
         font_group = QWidget()
         font_layout = QHBoxLayout(font_group)
         font_layout.setContentsMargins(0, 0, 0, 0)
@@ -80,9 +71,8 @@ class LogViewerTab(QWidget):
         self.font_spin.setRange(8, 20)
         self.font_spin.setValue(10)
         font_layout.addWidget(self.font_spin)
-        filter_row.addWidget(font_group)
+        self.font_group = font_group
 
-        filter_row.addSpacing(12)
         level_group = QWidget()
         level_layout = QHBoxLayout(level_group)
         level_layout.setContentsMargins(0, 0, 0, 0)
@@ -91,9 +81,13 @@ class LogViewerTab(QWidget):
         self.level_combo = QComboBox()
         self.level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG", "ALL"])
         level_layout.addWidget(self.level_combo)
-        filter_row.addWidget(level_group)
+        self.level_group = level_group
 
-        layout.addLayout(filter_row)
+        self._log_filter_layout = QGridLayout()
+        self._log_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._log_filter_layout.setSpacing(8)
+        layout.addLayout(self._log_filter_layout)
+        self._arrange_log_filter_row(compact=False)
 
         self.text = QTextEdit()
         self.text.setReadOnly(True)
@@ -114,6 +108,60 @@ class LogViewerTab(QWidget):
 
         self._update_font()
         self._apply_theme()
+        self._update_log_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_log_responsive_layout()
+
+    def _log_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_log_responsive_layout(self) -> None:
+        if not hasattr(self, "_log_filter_layout"):
+            return
+        mode = self._log_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and self._log_filter_layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        self._arrange_log_filter_row(compact=(mode == "compact"))
+
+    def _arrange_log_filter_row(self, *, compact: bool) -> None:
+        layout = self._log_filter_layout
+        while layout.count():
+            layout.takeAt(0)
+        for col in range(8):
+            layout.setColumnStretch(col, 0)
+        if compact:
+            placements = [
+                (self.refresh_btn, 0, 0),
+                (self.clear_btn, 0, 1),
+                (self.open_btn, 0, 2),
+                (self.search_label, 1, 0),
+                (self.search_input, 1, 1, 1, 3),
+                (self.search_btn, 1, 4),
+                (self.font_group, 2, 0),
+                (self.level_group, 2, 1),
+            ]
+        else:
+            placements = [
+                (self.refresh_btn, 0, 0),
+                (self.clear_btn, 0, 1),
+                (self.open_btn, 0, 2),
+                (self.search_label, 0, 3),
+                (self.search_input, 0, 4),
+                (self.search_btn, 0, 5),
+                (self.font_group, 0, 6),
+                (self.level_group, 0, 7),
+            ]
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+        layout.setColumnStretch(4 if not compact else 3, 1)
 
     def _update_font(self):
         size = self.font_spin.value()

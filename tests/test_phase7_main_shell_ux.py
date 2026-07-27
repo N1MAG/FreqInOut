@@ -407,17 +407,51 @@ def test_phase7_map_hides_legacy_visible_plan_context_prose() -> None:
 def test_phase7_logs_use_header_and_inline_filter_row_search() -> None:
     source = Path("freqinout/gui/log_viewer.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def _update_font")]
-    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QHBoxLayout()")]
-    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("self.refresh_btn")]
+    filter_block = build_block[build_block.index("self.refresh_btn") :]
     search_block = source[source.index("def _search") :]
 
     assert 'title = QLabel("Logs / Diagnostics")' in header_block
     assert "header.addWidget(self.refresh_btn" not in header_block
-    assert "filter_row.addWidget(self.refresh_btn)" in filter_block
+    assert "self._log_filter_layout = QGridLayout()" in filter_block
+    assert "(self.refresh_btn, 0, 0)" in source
+    assert "(self.search_input, 1, 1, 1, 3)" in source
+    assert "def _update_log_responsive_layout(self) -> None:" in source
     assert "self.search_input = QLineEdit()" in filter_block
     assert "self.search_input.returnPressed.connect(self._search)" in filter_block
     assert "QInputDialog.getText" not in search_block
     assert "QMessageBox.information" not in search_block
+
+
+def test_phase7_logs_filter_row_reflows_at_compact_width(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.log_viewer import LogViewerTab
+
+    tab = LogViewerTab()
+    try:
+        tab.timer.stop()
+        tab.resize(1000, 800)
+        tab._update_log_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "compact"
+        assert tab._log_filter_layout.itemAtPosition(1, 0).widget() is tab.search_label
+        assert tab._log_filter_layout.itemAtPosition(2, 0).widget() is tab.font_group
+
+        tab.resize(1400, 900)
+        tab._update_log_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "wide"
+        assert tab._log_filter_layout.itemAtPosition(0, 3).widget() is tab.search_label
+        assert tab._log_filter_layout.itemAtPosition(0, 6).widget() is tab.font_group
+    finally:
+        tab.timer.stop()
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() -> None:
