@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QTableWidgetItem
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QPushButton, QTableWidgetItem
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -140,6 +141,9 @@ def test_phase7_hf_nets_uses_compact_default_with_view_edit_details() -> None:
     assert "self._net_resource_filter_layout = QGridLayout()" in source
     assert "(self.time_toggle_btn, 0, 0)" in source
     assert "def _update_net_responsive_layout(self) -> None:" in source
+    assert 'self.net_schedule_scroll_area.setObjectName("netScheduleScrollArea")' in source
+    assert "self.net_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
+    assert "def _apply_net_compact_table_sizing(self, *, compact: bool) -> None:" in source
 
 
 def test_phase7_hf_nets_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
@@ -212,6 +216,10 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
         assert tab._responsive_layout_mode == "compact"
         assert tab._net_action_layout.itemAtPosition(1, 0).widget() is tab.move_to_resources_btn
         assert tab._net_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
+        assert tab.net_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_NETNAME) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_FREQ) == QHeaderView.ResizeToContents
 
         tab.resize(1400, 900)
         tab._update_net_responsive_layout()
@@ -240,6 +248,9 @@ def test_phase7_hf_daily_uses_compact_default_with_view_edit_details() -> None:
     assert "self._daily_resource_filter_layout = QGridLayout()" in source
     assert "(self.time_toggle_btn, 0, 0)" in source
     assert "def _update_daily_responsive_layout(self) -> None:" in source
+    assert 'self.daily_schedule_scroll_area.setObjectName("dailyScheduleScrollArea")' in source
+    assert "self.daily_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
+    assert "def _apply_daily_compact_table_sizing(self, *, compact: bool) -> None:" in source
 
 
 def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
@@ -311,6 +322,10 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         assert tab._responsive_layout_mode == "compact"
         assert tab._daily_action_layout.itemAtPosition(1, 0).widget() is tab.move_to_resources_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
+        assert tab.daily_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_TARGET) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_FREQ) == QHeaderView.ResizeToContents
 
         tab.resize(1400, 900)
         tab._update_daily_responsive_layout()

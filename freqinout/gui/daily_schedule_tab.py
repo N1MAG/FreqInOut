@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QMenu,
     QInputDialog,
+    QScrollArea,
 )
 from PySide6.QtGui import QAction, QColor
 
@@ -419,7 +420,19 @@ class DailyScheduleTab(QWidget):
     # ---------------- UI ---------------- #
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.daily_schedule_scroll_area = QScrollArea()
+        self.daily_schedule_scroll_area.setObjectName("dailyScheduleScrollArea")
+        self.daily_schedule_scroll_area.setWidgetResizable(True)
+        self.daily_schedule_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.daily_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer_layout.addWidget(self.daily_schedule_scroll_area)
+
+        content = QWidget()
+        content.setObjectName("dailyScheduleScrollContent")
+        self.daily_schedule_scroll_area.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setSpacing(10)
 
         header = QHBoxLayout()
@@ -708,6 +721,7 @@ class DailyScheduleTab(QWidget):
             return
         self._responsive_layout_mode = mode
         self._arrange_daily_action_rows(compact=(mode == "compact"))
+        self._apply_daily_compact_table_sizing(compact=(mode == "compact"))
 
     @staticmethod
     def _clear_grid_layout(layout: QGridLayout) -> None:
@@ -772,6 +786,76 @@ class DailyScheduleTab(QWidget):
         self._place_grid_widgets(self._daily_resource_filter_layout, filter_placements)
         self._daily_action_layout.setColumnStretch(8 if not compact else 5, 1)
         self._daily_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
+
+    @staticmethod
+    def _set_table_resize_modes(
+        table: QTableWidget,
+        resize_to_contents: set[int],
+        stretch: set[int],
+    ) -> None:
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for col in range(table.columnCount()):
+            if col in stretch:
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
+            elif col in resize_to_contents:
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.Interactive)
+
+    def _apply_daily_compact_table_sizing(self, *, compact: bool) -> None:
+        if not hasattr(self, "table") or not hasattr(self, "resources_table"):
+            return
+        show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
+        if compact and not show_all:
+            self._set_table_resize_modes(
+                self.table,
+                {
+                    self.COL_SELECT,
+                    self.COL_DAY,
+                    self.COL_MODE,
+                    self.COL_BAND,
+                    self.COL_FREQ,
+                    self.COL_START,
+                    self.COL_END,
+                },
+                {self.COL_GROUP, self.COL_TARGET},
+            )
+        else:
+            self._set_table_resize_modes(
+                self.table,
+                {self.COL_SELECT},
+                {
+                    self.COL_DAY,
+                    self.COL_SOURCE,
+                    self.COL_GROUP,
+                    self.COL_MODE,
+                    self.COL_BAND,
+                    self.COL_FREQ,
+                    self.COL_START,
+                    self.COL_END,
+                    self.COL_AUTOTUNE,
+                    self.COL_TARGET_SCOPE,
+                    self.COL_TARGET,
+                },
+            )
+
+        self._set_table_resize_modes(
+            self.resources_table,
+            {
+                self.RES_COL_SELECT,
+                self.RES_COL_SET,
+                self.RES_COL_DAY,
+                self.RES_COL_MODE,
+                self.RES_COL_BAND,
+                self.RES_COL_FREQ,
+                self.RES_COL_START,
+                self.RES_COL_END,
+                self.RES_COL_SOURCE,
+                self.RES_COL_UPDATED,
+            },
+            {self.RES_COL_GROUP, self.RES_COL_CONFLICT},
+        )
 
     def _load_operating_groups(self) -> List[Dict]:
         return qsy_load_operating_groups(self.settings)
@@ -4198,6 +4282,9 @@ class DailyScheduleTab(QWidget):
             show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
         for col in range(self.table.columnCount()):
             self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)
+        self._apply_daily_compact_table_sizing(
+            compact=self._daily_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        )
         if hasattr(self, "view_edit_btn"):
             self.view_edit_btn.setToolTip(
                 "Hide advanced HF schedule fields for normal scanning."
