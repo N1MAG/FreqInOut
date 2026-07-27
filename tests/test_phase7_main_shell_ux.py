@@ -363,6 +363,9 @@ def test_phase7_hf_peers_keeps_times_in_filter_row_not_title_header() -> None:
     assert "(self.tz_toggle_btn, 0, 9)" in source
     assert "(self.tz_toggle_btn, 1, 6)" in source
     assert "def _update_peer_responsive_layout(self) -> None:" in source
+    assert 'self.peer_schedule_scroll_area.setObjectName("peerScheduleScrollArea")' in source
+    assert "self.peer_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
+    assert "def _apply_peer_table_sizing(self, *, compact: bool) -> None:" in source
 
 
 def test_phase7_hf_peers_action_rows_reflow_at_compact_width(monkeypatch, tmp_path) -> None:
@@ -385,6 +388,10 @@ def test_phase7_hf_peers_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         assert tab._peer_action_layout.itemAtPosition(1, 0).widget() is tab.selected_row_label
         assert tab._peer_filter_layout.itemAtPosition(1, 0).widget() is tab.search_filter_label
         assert tab._peer_filter_layout.itemAtPosition(1, 6).widget() is tab.tz_toggle_btn
+        assert tab.peer_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(tab._overlap_col) == QHeaderView.Stretch
+        assert tab.table.horizontalHeader().sectionResizeMode(5) == QHeaderView.ResizeToContents
 
         tab.resize(1400, 900)
         tab._update_peer_responsive_layout()

@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLineEdit,
     QFormLayout,
+    QHeaderView,
+    QScrollArea,
 )
 
 from freqinout.core.checkins_db import upsert_operator_metadata
@@ -454,7 +456,19 @@ class PeerSchedTab(QWidget):
     # ---------- UI ----------
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.peer_schedule_scroll_area = QScrollArea()
+        self.peer_schedule_scroll_area.setObjectName("peerScheduleScrollArea")
+        self.peer_schedule_scroll_area.setWidgetResizable(True)
+        self.peer_schedule_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.peer_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer_layout.addWidget(self.peer_schedule_scroll_area)
+
+        content = QWidget()
+        content.setObjectName("peerScheduleScrollContent")
+        self.peer_schedule_scroll_area.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setSpacing(8)
 
         header = QHBoxLayout()
@@ -529,7 +543,7 @@ class PeerSchedTab(QWidget):
         self._overlap_col = self.COLS.index("OVERLAP")
         self._set_time_headers()
         self.table.setSortingEnabled(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         layout.addWidget(self.table)
@@ -575,6 +589,7 @@ class PeerSchedTab(QWidget):
             return
         self._responsive_layout_mode = mode
         self._arrange_peer_action_rows(compact=(mode == "compact"))
+        self._apply_peer_table_sizing(compact=(mode == "compact"))
 
     @staticmethod
     def _clear_grid_layout(layout: QGridLayout) -> None:
@@ -657,6 +672,18 @@ class PeerSchedTab(QWidget):
         self._peer_action_layout.setColumnStretch(7 if not compact else 4, 1)
         self._peer_cleanup_layout.setColumnStretch(4, 1)
         self._peer_filter_layout.setColumnStretch(7 if not compact else 4, 1)
+
+    def _apply_peer_table_sizing(self, *, compact: bool) -> None:
+        if not hasattr(self, "table"):
+            return
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        stretch_columns = {0, 1, 3, self._overlap_col} if compact else {1, 3, self._overlap_col}
+        for col in range(self.table.columnCount()):
+            if col in stretch_columns:
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
     # ---------- data ----------
 
