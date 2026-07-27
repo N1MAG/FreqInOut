@@ -220,6 +220,23 @@ def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path
     try:
         tab.set_runtime_manager(manager)
         assert "active device profile" in tab.summary_label.text()
+        assert tab.control_center_table.objectName() == "stationControlCenterTable"
+        assert tab.control_center_table.rowCount() >= 1
+        assert tab.control_center_table.columnCount() == 6
+        assert tab.control_center_table.horizontalHeaderItem(0).text() == "Radio / SDR"
+        assert tab.control_center_table.horizontalHeaderItem(2).text() == "Control State"
+        assert tab.control_center_table.horizontalHeaderItem(5).text() == "Actions"
+        row_text = [
+            tab.control_center_table.item(row, 0).text()
+            for row in range(tab.control_center_table.rowCount())
+            if tab.control_center_table.item(row, 0) is not None
+        ]
+        assert any("Remote FLRig" in text for text in row_text)
+        assert {
+            tab.control_center_table.item(row, 5).text()
+            for row in range(tab.control_center_table.rowCount())
+            if tab.control_center_table.item(row, 5) is not None
+        } == {"Read-only"}
         assert tab.cards_layout.count() >= 3
     finally:
         tab.deleteLater()

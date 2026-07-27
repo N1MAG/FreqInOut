@@ -4,15 +4,21 @@ from typing import Iterable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QScrollArea,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from freqinout.core.busy_state_service import BusyStateService
+from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_runtime_manager import DeviceRuntimeSnapshot, StationRuntimeManager
 from freqinout.gui.theme import led_style, resolve_theme
@@ -40,6 +46,8 @@ class StationOverviewTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._runtime_manager: Optional[StationRuntimeManager] = None
+        self._busy_state_service: Optional[BusyStateService] = None
+        self._manual_control_service: Optional[SchedulerManualControlService] = None
         self._tab_active = False
         self._refresh_dirty = False
         self._last_render_signature: tuple[object, ...] = tuple()
@@ -59,6 +67,35 @@ class StationOverviewTab(QWidget):
         self.alerts_label.setVisible(False)
         layout.addWidget(self.alerts_label)
 
+        control_title = QLabel("<b>Station Control Center</b>")
+        control_title.setAccessibleName("Station Control Center")
+        layout.addWidget(control_title)
+
+        self.control_center_table = QTableWidget(0, 6)
+        self.control_center_table.setObjectName("stationControlCenterTable")
+        self.control_center_table.setAccessibleName("Station Control Center table")
+        self.control_center_table.setHorizontalHeaderLabels(
+            ["Radio / SDR", "Now", "Control State", "Next Schedule Action", "Health", "Actions"]
+        )
+        self.control_center_table.verticalHeader().setVisible(False)
+        self.control_center_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.control_center_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.control_center_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.control_center_table.setAlternatingRowColors(True)
+        self.control_center_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.control_center_table.setMinimumHeight(124)
+        self.control_center_table.setMaximumHeight(220)
+        self.control_center_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.control_center_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        header = self.control_center_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        layout.addWidget(self.control_center_table, 0)
+
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -74,6 +111,9 @@ class StationOverviewTab(QWidget):
 
     def set_runtime_manager(self, manager: Optional[StationRuntimeManager]) -> None:
         self._runtime_manager = manager
+        store = getattr(manager, "store", None) if manager is not None else None
+        self._busy_state_service = BusyStateService(store) if store is not None else None
+        self._manual_control_service = SchedulerManualControlService(store) if store is not None else None
         self._refresh_dirty = True
         self.refresh_from_manager(force=True)
 
@@ -158,13 +198,18 @@ class StationOverviewTab(QWidget):
                     str(snapshot.swap_role or ""),
                     str(snapshot.swap_summary or ""),
                     self._service_signature(snapshot.service_states),
+                    self._control_center_row_values(snapshot),
                 )
             )
         return tuple(rendered)
 
+    def _control_center_signature(self, snapshots: Iterable[DeviceRuntimeSnapshot]) -> tuple[object, ...]:
+        return tuple(self._control_center_row_values(snapshot) for snapshot in snapshots)
+
     def _rebuild_cards(self, snapshots: Iterable[DeviceRuntimeSnapshot]) -> None:
         snaps = list(snapshots)
         self._clear_cards()
+        self._refresh_control_center_table(snaps)
         self.alerts_label.setVisible(False)
         self.alerts_label.clear()
         if not snaps:
@@ -211,6 +256,115 @@ class StationOverviewTab(QWidget):
             self.alerts_label.setVisible(True)
         for snap in snaps:
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, self._build_runtime_card(snap, theme))
+
+    @staticmethod
+    def _manual_state_label(raw_state: str) -> str:
+        state = str(raw_state or "on_schedule").strip().lower()
+        labels = {
+            "on_schedule": "On Schedule",
+            "manual_hold": "Manual Hold",
+            "manual_suspend": "Suspended",
+            "manual_qsy": "Manual Control",
+            "busy_hold": "Busy Hold",
+            "unavailable": "Unavailable",
+        }
+        return labels.get(state, "On Schedule")
+
+    def _manual_state_for(self, snapshot: DeviceRuntimeSnapshot) -> tuple[str, str]:
+        service = self._manual_control_service
+        if service is None:
+            return ("on_schedule", "")
+        try:
+            state = service.get_state(int(snapshot.device_profile_id or 0))
+        except Exception:
+            return ("on_schedule", "")
+        suffix = ""
+        if state.hold_until_utc:
+            suffix = str(state.hold_until_utc or "").replace("T", " ").replace("Z", "Z")
+        return (state.state, suffix)
+
+    def _busy_label_for(self, snapshot: DeviceRuntimeSnapshot) -> str:
+        if snapshot.ptt_active or snapshot.shared_ptt_blocked:
+            return "Busy: PTT"
+        service = self._busy_state_service
+        if service is None:
+            return ""
+        try:
+            busy = service.state_for_radio(int(snapshot.device_profile_id or 0))
+        except Exception:
+            return ""
+        if not busy.busy:
+            return ""
+        summary = str(busy.summary or busy.reason_code or "Busy").strip()
+        if summary.lower().startswith("busy"):
+            return summary
+        return f"Busy: {summary}"
+
+    def _control_state_text(self, snapshot: DeviceRuntimeSnapshot) -> str:
+        busy_label = self._busy_label_for(snapshot)
+        if busy_label:
+            return busy_label
+        if snapshot.device_class == "observer":
+            return "Monitor"
+        state, suffix = self._manual_state_for(snapshot)
+        label = self._manual_state_label(state)
+        if suffix and state in {"manual_hold", "manual_suspend", "manual_qsy"}:
+            return f"{label} until {suffix}"
+        if not snapshot.scheduler_enabled:
+            return "Scheduler Off"
+        return label
+
+    @staticmethod
+    def _next_schedule_text(snapshot: DeviceRuntimeSnapshot) -> str:
+        if snapshot.device_class == "observer":
+            return snapshot.observer_follow_summary or "Receive-only monitor"
+        if not snapshot.assigned_operating_profile_name:
+            return "No assigned plan"
+        if not snapshot.scheduler_enabled:
+            return "Scheduler disabled"
+        return f"Assigned plan: {snapshot.assigned_operating_profile_name}"
+
+    @staticmethod
+    def _health_text(snapshot: DeviceRuntimeSnapshot) -> str:
+        services = []
+        for label, state, _tooltip in StationOverviewTab._merged_service_states(snapshot.service_states):
+            family = label.upper().replace("FLRIG", "FL").replace("FLDIGI", "FL")
+            family = family.replace("JS8CALL", "JS8").replace("VARAC", "VA")
+            state_code = str(state or "idle").strip().lower()
+            marker = "ok" if state_code == "ok" else ("!" if state_code in {"warn", "error"} else "-")
+            services.append(f"{family} {marker}")
+        if services:
+            return " | ".join(services[:4])
+        if snapshot.overall_state:
+            return str(snapshot.overall_state).title()
+        return "No health data"
+
+    def _control_center_row_values(self, snapshot: DeviceRuntimeSnapshot) -> tuple[str, str, str, str, str, str]:
+        role = "SDR" if snapshot.device_class == "observer" else "HF"
+        radio = f"{snapshot.name or f'Device {snapshot.device_profile_id}'} ({role})"
+        now = " ".join(part for part in (snapshot.current_frequency_label, snapshot.current_band) if part).strip()
+        return (
+            radio,
+            now or "Unavailable",
+            self._control_state_text(snapshot),
+            self._next_schedule_text(snapshot),
+            self._health_text(snapshot),
+            "Read-only",
+        )
+
+    def _refresh_control_center_table(self, snapshots: Iterable[DeviceRuntimeSnapshot]) -> None:
+        table = self.control_center_table
+        rows = [self._control_center_row_values(snapshot) for snapshot in snapshots]
+        table.setRowCount(len(rows))
+        for row_idx, values in enumerate(rows):
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if col_idx in {1, 2, 5}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                table.setItem(row_idx, col_idx, item)
+        table.resizeRowsToContents()
 
     @staticmethod
     def _merged_service_states(service_states: dict[str, dict[str, object]]) -> list[tuple[str, str, str]]:

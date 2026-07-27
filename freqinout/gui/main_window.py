@@ -4059,6 +4059,16 @@ class MainWindow(QMainWindow):
             # reminder on the accordion header.
             if key == "NCS" and (not expanded) and any(bool(v) for v in self._ncs_net_active.values()):
                 role = "warning"
+            if key == "Station" and not expanded:
+                issue_count, severity = self._station_health_alert_counts()
+                if issue_count > 0:
+                    role = "danger" if severity == "danger" else "warning"
+                    header.setToolTip(
+                        f"Station Health: {issue_count} responsiveness issue"
+                        f"{'s' if issue_count != 1 else ''}. Expand Station or open Health Details."
+                    )
+                else:
+                    header.setToolTip("")
             self._set_nav_group_header_visual_state(header, expanded)
             try:
                 header.setStyleSheet(button_style(role, theme) + align_style)
@@ -4085,6 +4095,9 @@ class MainWindow(QMainWindow):
         key_txt = str(key or "").strip()
         if key_txt == "NCS":
             return any(bool(v) for v in self._ncs_net_active.values())
+        if key_txt == "Station":
+            issue_count, _severity = self._station_health_alert_counts()
+            return issue_count > 0
         return False
 
     def _auto_collapse_inactive_nav_groups(self) -> None:
@@ -4577,17 +4590,24 @@ class MainWindow(QMainWindow):
         self._station_health_alert_summary = dict(summary)
         self._update_ncs_nav_button_styles()
 
-    def _apply_station_health_nav_alert(self, theme: dict[str, str], align_style: str) -> None:
-        idx = getattr(self, "_station_health_nav_index", None)
-        if idx is None or idx < 0 or idx >= len(getattr(self, "nav_buttons", [])):
-            return
-        btn = self.nav_buttons[idx]
+    def _station_health_alert_counts(self) -> tuple[int, str]:
         try:
             summary = getattr(self, "_station_health_alert_summary", None)
             if not isinstance(summary, dict):
                 summary = summarize_station_health(include_ok=False)
             issue_count = int(summary.get("issue_count", 0) or 0)
             severity = str(summary.get("severity", "ok") or "ok")
+            return issue_count, severity
+        except Exception:
+            return 0, "ok"
+
+    def _apply_station_health_nav_alert(self, theme: dict[str, str], align_style: str) -> None:
+        idx = getattr(self, "_station_health_nav_index", None)
+        if idx is None or idx < 0 or idx >= len(getattr(self, "nav_buttons", [])):
+            return
+        btn = self.nav_buttons[idx]
+        try:
+            issue_count, severity = self._station_health_alert_counts()
             if issue_count <= 0:
                 btn.setToolTip("Station Health: no known external software responsiveness issues.")
                 return

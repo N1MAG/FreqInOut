@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MethodType
+
+from PySide6.QtWidgets import QApplication, QPushButton
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -32,6 +35,9 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert 'return "FreqPlanner"' in source
     assert '("Station Health", "Station Health")' not in source
     assert '"Schedules": False' not in source
+    assert 'if key == "Station" and not expanded:' in source
+    assert "self._station_health_alert_counts()" in source
+    assert "Expand Station or open Health Details." in source
 
 
 def test_phase7_station_workspace_decisions_are_specified() -> None:
@@ -80,3 +86,31 @@ def test_phase7_table_time_toggles_use_times_wording() -> None:
     assert "Times: UTC" in combined
     assert "Showing: Local" not in combined
     assert "Showing: UTC" not in combined
+
+
+def test_phase7_collapsed_station_group_shows_health_alert(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+    from freqinout.gui.theme import get_theme
+
+    window = MainWindow.__new__(MainWindow)
+    header = QPushButton("Station")
+    window._nav_group_order = ["Station"]
+    window._nav_group_headers = {"Station": header}
+    window._nav_group_states = {"Station": False}
+    window._ncs_net_active = {}
+    window._station_health_alert_summary = {"issue_count": 2, "severity": "danger"}
+    window._nav_button_alignment_style = MainWindow._nav_button_alignment_style
+    window._sync_nav_group_header_font = MethodType(MainWindow._sync_nav_group_header_font, window)
+    window._set_nav_group_header_visual_state = MethodType(MainWindow._set_nav_group_header_visual_state, window)
+    window._station_health_alert_counts = MethodType(MainWindow._station_health_alert_counts, window)
+
+    MainWindow._update_nav_group_header_styles(window, get_theme("light"))
+
+    assert "Station Health: 2 responsiveness issues" in header.toolTip()
+    assert "#C62828" in header.styleSheet()
+
+    header.deleteLater()
+    app.processEvents()
