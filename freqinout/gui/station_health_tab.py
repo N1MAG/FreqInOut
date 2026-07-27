@@ -53,13 +53,18 @@ class StationHealthTab(QWidget):
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open Station Health help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.station-health"))
-        header.addWidget(self.refresh_btn, 0, Qt.AlignRight)
         header.addWidget(self.help_btn, 0, Qt.AlignRight)
         layout.addLayout(header)
 
         self.summary_label = QLabel("")
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addStretch(1)
+        action_row.addWidget(self.refresh_btn, 0, Qt.AlignRight)
+        layout.addLayout(action_row)
 
         self.note_label = QLabel(
             "This view shows external software responsiveness and scheduler holds based on what FIO has observed."
