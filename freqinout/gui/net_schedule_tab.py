@@ -297,37 +297,34 @@ class NetScheduleTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
-        # header with clocks
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Net Schedules</h3>"))
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open Net Schedules help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-nets"))
-        header.addWidget(self.help_btn)
         header.addStretch()
+        header.addWidget(self.help_btn)
         self.utc_label = QLabel()
         self.local_label = QLabel()
         self.utc_label.setVisible(False)
         self.local_label.setVisible(False)
-        header.addWidget(self.utc_label)
-        header.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Times: Local" if self._show_local else "Times: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         self.plan_context_label = PlanContextLabel(
             "net_schedule",
             service=self.plan_context_service,
-            fallback_text="Net Schedules uses the current radio and Frequency Plan context when reviewing net rows.",
+            fallback_text="Net schedule workspace context is available from Help.",
         )
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan net schedule changes apply to."
         )
-        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.setVisible(False)
         self.plan_context_label.refresh_context(refresh=True)
 
         # table
@@ -356,6 +353,7 @@ class NetScheduleTab(QWidget):
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.export_btn = QPushButton("Export Net Schedule")
         self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
+        btn_row.addWidget(self.time_toggle_btn)
         btn_row.addWidget(self.add_btn)
         btn_row.addWidget(self.del_btn)
         btn_row.addWidget(self.view_edit_btn)

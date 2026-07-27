@@ -325,6 +325,20 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "def _message_group_options" in source
 
 
+def test_phase7_hf_schedule_tabs_hide_context_sentence_and_pull_times_into_actions() -> None:
+    daily_source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    nets_source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert "HF Schedule uses the current radio and Frequency Plan context" not in daily_source
+    assert "Net Schedules uses the current radio and Frequency Plan context" not in nets_source
+    assert "self.plan_context_label.setVisible(False)" in daily_source
+    assert "self.plan_context_label.setVisible(False)" in nets_source
+    assert "btn_row.addWidget(self.time_toggle_btn)" in daily_source
+    assert "btn_row.addWidget(self.time_toggle_btn)" in nets_source
+    assert "layout.setSpacing(10)" in daily_source
+    assert "layout.setSpacing(10)" in nets_source
+
+
 def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))

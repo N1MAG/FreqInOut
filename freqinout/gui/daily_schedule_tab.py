@@ -417,27 +417,24 @@ class DailyScheduleTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>HF Frequency Schedule</h3>"))
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open HF Frequency Schedule help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-daily"))
-        header.addWidget(self.help_btn)
         header.addStretch()
+        header.addWidget(self.help_btn)
 
-        # UTC / Local labels like net_schedule_tab
         self.utc_label = QLabel()
         self.local_label = QLabel()
         self.utc_label.setVisible(False)
         self.local_label.setVisible(False)
-        header.addWidget(self.utc_label)
-        header.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Times: Local" if self._show_local else "Times: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.time_toggle_btn)
         self.effective_source_label = QLabel("Runtime Source: --")
         self.effective_source_label.setToolTip("Shows which runtime schedule source is currently driving decisions.")
         layout.addLayout(header)
@@ -445,12 +442,12 @@ class DailyScheduleTab(QWidget):
         self.plan_context_label = PlanContextLabel(
             "hf_schedule",
             service=self.plan_context_service,
-            fallback_text="HF Schedule uses the current radio and Frequency Plan context when reviewing active schedule rows.",
+            fallback_text="HF schedule workspace context is available from Help.",
         )
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan schedule changes apply to."
         )
-        layout.addWidget(self.plan_context_label)
+        self.plan_context_label.setVisible(False)
         self.plan_context_label.refresh_context(refresh=True)
 
         # QSY controls row (right aligned under time bar)
@@ -583,6 +580,7 @@ class DailyScheduleTab(QWidget):
         self.import_hf_schedule_action = self.import_export_menu.addAction("Import HF Schedule")
         self.export_hf_schedule_action = self.import_export_menu.addAction("Export HF Schedule")
         self.import_export_btn.setMenu(self.import_export_menu)
+        btn_row.addWidget(self.time_toggle_btn)
         btn_row.addWidget(self.add_row_btn)
         btn_row.addWidget(self.del_row_btn)
         btn_row.addWidget(self.view_edit_btn)
