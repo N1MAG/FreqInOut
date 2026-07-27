@@ -196,6 +196,10 @@ def test_phase7_hf_daily_uses_compact_default_with_view_edit_details() -> None:
     assert "self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)" in source
     assert "Show all editable fields for the active HF schedule rows." in source
     assert "Hide advanced HF schedule fields for normal scanning." in source
+    assert "self._daily_action_layout = QGridLayout()" in source
+    assert "self._daily_resource_filter_layout = QGridLayout()" in source
+    assert "(self.time_toggle_btn, 0, 0)" in source
+    assert "def _update_daily_responsive_layout(self) -> None:" in source
 
 
 def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
@@ -239,6 +243,42 @@ def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_pat
         assert tab.table.isColumnHidden(tab.COL_SOURCE) is True
         assert tab.table.isColumnHidden(tab.COL_GROUP) is False
         assert "Show all editable" in tab.view_edit_btn.toolTip()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import daily_schedule_tab as daily_mod
+
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_sop_panel_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_load_schedule", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_profiles_panel", lambda self, **_kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_populate_schedule_resources_table", lambda self: None)
+
+    tab = daily_mod.DailyScheduleTab()
+    try:
+        tab.resize(1000, 800)
+        tab._update_daily_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "compact"
+        assert tab._daily_action_layout.itemAtPosition(1, 0).widget() is tab.move_to_resources_btn
+        assert tab._daily_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
+
+        tab.resize(1400, 900)
+        tab._update_daily_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "wide"
+        assert tab._daily_action_layout.itemAtPosition(0, 4).widget() is tab.move_to_resources_btn
+        assert tab._daily_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -559,7 +599,8 @@ def test_phase7_hf_schedule_tabs_hide_context_sentence_and_pull_times_into_actio
     assert "Net Schedules uses the current radio and Frequency Plan context" not in nets_source
     assert "self.plan_context_label.setVisible(False)" in daily_source
     assert "self.plan_context_label.setVisible(False)" in nets_source
-    assert "btn_row.addWidget(self.time_toggle_btn)" in daily_source
+    assert "self._daily_action_layout = QGridLayout()" in daily_source
+    assert "(self.time_toggle_btn, 0, 0)" in daily_source
     assert "btn_row.addWidget(self.time_toggle_btn)" in nets_source
     assert "layout.setSpacing(10)" in daily_source
     assert "layout.setSpacing(10)" in nets_source

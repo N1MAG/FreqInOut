@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QToolButton,
@@ -269,6 +270,8 @@ class DailyScheduleTab(QWidget):
         self._last_tab_activation_refresh_ts: float = 0.0
         self._tab_activation_refresh_interval_sec: float = 10.0
         self._last_activation_schedule_token: Tuple[Any, ...] | None = None
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
 
         self._build_ui()
         self._refresh_qsy_options()
@@ -562,8 +565,6 @@ class DailyScheduleTab(QWidget):
         sop_overlay_layout.addWidget(self.sop_overlay_table)
         layout.addWidget(self.sop_overlay_box)
 
-        # Buttons row
-        btn_row = QHBoxLayout()
         self.add_row_btn = QPushButton("Add Row")
         self.del_row_btn = QPushButton("Delete Selected")
         self.view_edit_btn = QPushButton("View/Edit")
@@ -580,32 +581,23 @@ class DailyScheduleTab(QWidget):
         self.import_hf_schedule_action = self.import_export_menu.addAction("Import HF Schedule")
         self.export_hf_schedule_action = self.import_export_menu.addAction("Export HF Schedule")
         self.import_export_btn.setMenu(self.import_export_menu)
-        btn_row.addWidget(self.time_toggle_btn)
-        btn_row.addWidget(self.add_row_btn)
-        btn_row.addWidget(self.del_row_btn)
-        btn_row.addWidget(self.view_edit_btn)
-        btn_row.addWidget(self.move_to_resources_btn)
-        btn_row.addWidget(self.resources_resolve_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.import_export_btn)
-        btn_row.addWidget(self.save_btn)
-        layout.addLayout(btn_row)
+        self._daily_action_layout = QGridLayout()
+        self._daily_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._daily_action_layout.setSpacing(8)
+        layout.addLayout(self._daily_action_layout)
 
         resources_header = QHBoxLayout()
         resources_header.addWidget(QLabel("<h3>Schedule Resources</h3>"))
         resources_header.addStretch()
         layout.addLayout(resources_header)
 
-        filters_row = QHBoxLayout()
-        filters_row.addWidget(QLabel("Set:"))
+        self.resources_set_label = QLabel("Set:")
         self.resources_set_combo = QComboBox()
         self.resources_set_combo.addItem("All", "All")
-        filters_row.addWidget(self.resources_set_combo)
-        filters_row.addWidget(QLabel("Filter:"))
+        self.resources_filter_label = QLabel("Filter:")
         self.resources_group_filter = QLineEdit()
         self.resources_group_filter.setPlaceholderText("Search set/group/band/frequency...")
         self.resources_group_filter.setMaximumWidth(360)
-        filters_row.addWidget(self.resources_group_filter, 1)
         self.add_to_schedule_btn = QToolButton()
         self.add_to_schedule_btn.setPopupMode(QToolButton.MenuButtonPopup)
         self.add_to_schedule_btn.setFont(self.add_row_btn.font())
@@ -617,12 +609,13 @@ class DailyScheduleTab(QWidget):
         self.add_to_schedule_btn.setMenu(add_menu)
         self.add_to_schedule_default_action = QAction("Move Selected to Active", self)
         self.add_to_schedule_btn.setDefaultAction(self.add_to_schedule_default_action)
-        filters_row.addWidget(self.add_to_schedule_btn)
         self.resources_delete_btn = QPushButton("Delete Selected")
-        filters_row.addWidget(self.resources_delete_btn)
         self.resources_refresh_btn = QPushButton("Refresh")
-        filters_row.addWidget(self.resources_refresh_btn)
-        layout.addLayout(filters_row)
+        self._daily_resource_filter_layout = QGridLayout()
+        self._daily_resource_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._daily_resource_filter_layout.setSpacing(8)
+        layout.addLayout(self._daily_resource_filter_layout)
+        self._arrange_daily_action_rows(compact=False)
 
         self.resources_table = QTableWidget()
         self.resources_table.setColumnCount(self.RES_COL_CONFLICT + 1)
@@ -695,6 +688,90 @@ class DailyScheduleTab(QWidget):
         self._apply_compact_schedule_view(False)
         self._update_delete_button_state()
         self._update_resource_action_state()
+        self._update_daily_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_daily_responsive_layout()
+
+    def _daily_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_daily_responsive_layout(self) -> None:
+        if not hasattr(self, "_daily_resource_filter_layout"):
+            return
+        mode = self._daily_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and self._daily_resource_filter_layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        self._arrange_daily_action_rows(compact=(mode == "compact"))
+
+    @staticmethod
+    def _clear_grid_layout(layout: QGridLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    @staticmethod
+    def _place_grid_widgets(layout: QGridLayout, placements: list[tuple]) -> None:
+        for col in range(12):
+            layout.setColumnStretch(col, 0)
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+
+    def _arrange_daily_action_rows(self, *, compact: bool) -> None:
+        for grid in (self._daily_action_layout, self._daily_resource_filter_layout):
+            self._clear_grid_layout(grid)
+
+        if compact:
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.add_row_btn, 0, 1),
+                (self.del_row_btn, 0, 2),
+                (self.view_edit_btn, 0, 3),
+                (self.move_to_resources_btn, 1, 0, 1, 2),
+                (self.resources_resolve_btn, 1, 2),
+                (self.import_export_btn, 1, 3),
+                (self.save_btn, 1, 4),
+            ]
+            filter_placements = [
+                (self.resources_set_label, 0, 0),
+                (self.resources_set_combo, 0, 1),
+                (self.resources_filter_label, 0, 2),
+                (self.resources_group_filter, 0, 3, 1, 2),
+                (self.add_to_schedule_btn, 1, 0),
+                (self.resources_delete_btn, 1, 1),
+                (self.resources_refresh_btn, 1, 2),
+            ]
+        else:
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.add_row_btn, 0, 1),
+                (self.del_row_btn, 0, 2),
+                (self.view_edit_btn, 0, 3),
+                (self.move_to_resources_btn, 0, 4),
+                (self.resources_resolve_btn, 0, 5),
+                (self.import_export_btn, 0, 6),
+                (self.save_btn, 0, 7),
+            ]
+            filter_placements = [
+                (self.resources_set_label, 0, 0),
+                (self.resources_set_combo, 0, 1),
+                (self.resources_filter_label, 0, 2),
+                (self.resources_group_filter, 0, 3),
+                (self.add_to_schedule_btn, 0, 4),
+                (self.resources_delete_btn, 0, 5),
+                (self.resources_refresh_btn, 0, 6),
+            ]
+
+        self._place_grid_widgets(self._daily_action_layout, action_placements)
+        self._place_grid_widgets(self._daily_resource_filter_layout, filter_placements)
+        self._daily_action_layout.setColumnStretch(8 if not compact else 5, 1)
+        self._daily_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
 
     def _load_operating_groups(self) -> List[Dict]:
         return qsy_load_operating_groups(self.settings)
