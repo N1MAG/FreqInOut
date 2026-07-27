@@ -119,3 +119,18 @@ def test_phase7_collapsed_station_group_shows_health_alert(monkeypatch) -> None:
 
     header.deleteLater()
     app.processEvents()
+
+
+def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert "op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
+    assert "logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
+    assert "self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
+    assert "self.operating_profiles_section_group = operating_group" in source
+    assert 'self._make_collapsible_group(\n            "Frequency Plans",' in source
+    assert "fit_content_in_stack=True" in source
+    assert 'self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))' in source
+    assert "self.trusted_hash_table.setMaximumHeight(240)" in source
+    assert "self.gpg_keys_table.setMaximumHeight(300)" in source
+    assert "gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source

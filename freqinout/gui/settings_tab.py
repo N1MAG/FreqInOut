@@ -2379,7 +2379,7 @@ class SettingsTab(QWidget):
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
         self._set_section_health_key(op_group, "freqinout")
-        op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._add_settings_section(self.operator_information_section_group, scope="global")
         self._add_settings_section(op_group, scope="global")
 
@@ -2937,7 +2937,7 @@ class SettingsTab(QWidget):
         self.operating_profiles_table.setSelectionMode(QTableWidget.SingleSelection)
         self.operating_profiles_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
         self.operating_profiles_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.operating_profiles_table.currentCellChanged.connect(
             lambda _r, _c, _pr, _pc: self._update_operating_profile_guidance_detail()
         )
@@ -2953,9 +2953,16 @@ class SettingsTab(QWidget):
 
         operating_container = QWidget()
         operating_container.setLayout(operating_layout)
-        operating_group = self._make_collapsible_group("Frequency Plans", operating_container, checked=True, fit_content=False)
+        operating_group = self._make_collapsible_group(
+            "Frequency Plans",
+            operating_container,
+            checked=True,
+            fit_content=True,
+            fit_content_in_stack=True,
+        )
         self._register_collapsible_group(operating_group, self._summary_operating_profiles)
-        operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.operating_profiles_section_group = operating_group
         self._add_settings_section(operating_group, scope="radio")
 
         assignments_group = QGroupBox("Assigned Plans")
@@ -3182,7 +3189,7 @@ class SettingsTab(QWidget):
             help_context_key="settings.logging",
         )
         self._register_collapsible_group(logging_section, self._summary_logging_settings)
-        logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         # HF Operating Groups panel
         ops_group = QGroupBox("HF Operating Groups")
@@ -4013,7 +4020,8 @@ class SettingsTab(QWidget):
         th_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         th_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.trusted_hash_table.setMinimumHeight(180)
-        self.trusted_hash_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.trusted_hash_table.setMaximumHeight(240)
+        self.trusted_hash_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         trusted_hash_v.addWidget(self.trusted_hash_table, 1)
         gpg_v.addWidget(_make_message_auth_subsection("Trusted Hashes", trusted_hash_tab, checked=False))
 
@@ -4092,8 +4100,9 @@ class SettingsTab(QWidget):
         gpg_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.gpg_keys_table.setMinimumHeight(280)
-        self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.gpg_keys_table.setMinimumHeight(220)
+        self.gpg_keys_table.setMaximumHeight(300)
+        self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         gpg_keys_v.addWidget(self.gpg_keys_table, 1)
         self.gpg_key_detail_label = QLabel("Select a key to view details.")
         self.gpg_key_detail_label.setWordWrap(True)
@@ -4181,7 +4190,7 @@ class SettingsTab(QWidget):
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
-        gpg_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        gpg_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         gpg_group = self._make_collapsible_group(
             "Message Auth (Key/Hash)",
             gpg_container,
@@ -4190,7 +4199,7 @@ class SettingsTab(QWidget):
             help_context_key="settings.message-auth",
         )
         self._register_collapsible_group(gpg_group, self._summary_gpg_settings)
-        gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         # VarAC Settings
         varac_group = QGroupBox("VarAC Settings")
@@ -13241,6 +13250,7 @@ class SettingsTab(QWidget):
         finally:
             self._operating_profiles_table_loading = False
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)
+        self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))
         if table.rowCount() > 0 and table.currentRow() < 0:
             table.selectRow(0)
         self._update_operating_profiles_hint()
