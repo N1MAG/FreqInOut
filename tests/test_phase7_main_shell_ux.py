@@ -330,6 +330,62 @@ def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
     assert "self.plan_context_label.setVisible(False)" in filter_block
 
 
+def test_phase7_controlfreq_has_responsive_card_layout_breakpoint() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert "self._responsive_layout_mode = \"wide\"" in source
+    assert "self._responsive_compact_width = 1200" in source
+    assert "self.top_overview_row = QHBoxLayout()" in source
+    assert "def _controlfreq_responsive_mode_for_width" in source
+    assert "def _update_responsive_layout(self) -> None:" in source
+    assert "self.top_overview_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)" in source
+    assert "self.top_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)" in source
+    assert "if getattr(self, \"_responsive_layout_mode\", \"wide\") == \"wide\":" in source
+    assert "if getattr(self, \"_responsive_layout_mode\", \"wide\") != \"wide\":" in source
+    assert "QTimer.singleShot(0, self._update_responsive_layout)" in source
+
+
+def test_phase7_controlfreq_restores_wide_splitter_sizes_after_compact(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from PySide6.QtCore import Qt
+
+    from freqinout.gui import controlfreq_tab as controlfreq_mod
+
+    monkeypatch.setattr(controlfreq_mod.ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+
+    tab = controlfreq_mod.ControlFreqTab()
+    try:
+        tab.resize(1400, 900)
+        tab.show()
+        app.processEvents()
+
+        tab.top_splitter.resize(1000, 300)
+        tab._saved_top_sizes = [200, 800]
+
+        tab.resize(1000, 800)
+        tab._update_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "compact"
+        assert tab.top_splitter.orientation() == Qt.Vertical
+
+        tab.resize(1400, 900)
+        tab._update_responsive_layout()
+        app.processEvents()
+
+        wide_sizes = tab.top_splitter.sizes()
+        assert tab._responsive_layout_mode == "wide"
+        assert tab.top_splitter.orientation() == Qt.Horizontal
+        assert len(wide_sizes) == 2
+        assert wide_sizes[1] > wide_sizes[0] * 2
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_sop_moves_times_into_management_rows_and_hides_context() -> None:
     source = Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
 

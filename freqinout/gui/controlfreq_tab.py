@@ -15,6 +15,7 @@ from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
+    QBoxLayout,
     QGridLayout,
     QVBoxLayout,
     QHBoxLayout,
@@ -179,6 +180,8 @@ class ControlFreqTab(QWidget):
         self._view_syncing = False
         self._card_expanded_heights: Dict[str, int] = {}
         self._card_animations: Dict[str, QPropertyAnimation] = {}
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
         self.status_labels: Dict[str, QLabel] = {}
         self._status_text_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
@@ -493,14 +496,14 @@ class ControlFreqTab(QWidget):
         btn_row.addStretch(1)
         freq_layout.addLayout(btn_row)
 
-        top_overview_row = QHBoxLayout()
+        self.top_overview_row = QHBoxLayout()
         self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.freq_ctrl_box.setMinimumWidth(380)
         self.freq_ctrl_box.setMaximumWidth(540)
         self.inbox_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        top_overview_row.addWidget(self.freq_ctrl_box, 0)
-        top_overview_row.addWidget(self.inbox_box, 1)
-        root.addLayout(top_overview_row)
+        self.top_overview_row.addWidget(self.freq_ctrl_box, 0)
+        self.top_overview_row.addWidget(self.inbox_box, 1)
+        root.addLayout(self.top_overview_row)
         self._lock_frequency_control_height()
 
         view_row = QHBoxLayout()
@@ -619,6 +622,7 @@ class ControlFreqTab(QWidget):
         self.shortcut_resume_schedule.activated.connect(self._on_resume_schedule_clicked)
         self.refresh_btn.setToolTip("Refresh (Ctrl+R)")
         self.freq_action_btn.setToolTip("QSY now and pause schedule control for the selected duration (Ctrl+Enter)")
+        QTimer.singleShot(0, self._update_responsive_layout)
 
     @staticmethod
     def _setup_table_defaults(table: QTableWidget) -> None:
@@ -640,6 +644,41 @@ class ControlFreqTab(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_freq_meta_text()
+        self._update_responsive_layout()
+
+    def _controlfreq_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_responsive_layout(self) -> None:
+        if not hasattr(self, "top_overview_row") or not hasattr(self, "top_splitter"):
+            return
+        mode = self._controlfreq_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode:
+            return
+        self._responsive_layout_mode = mode
+        compact = mode == "compact"
+        try:
+            self.top_overview_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+            self.top_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        except Exception:
+            pass
+        if compact:
+            self.freq_ctrl_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.freq_ctrl_box.setMinimumWidth(0)
+            self.freq_ctrl_box.setMaximumWidth(16777215)
+            self.inbox_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.top_splitter.setSizes([1, 1])
+        else:
+            self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+            self.freq_ctrl_box.setMinimumWidth(380)
+            self.freq_ctrl_box.setMaximumWidth(540)
+        self._rebalance_main_card_layout()
+        if not compact:
+            self._apply_saved_splitter_sizes()
+        self._sync_top_panel_heights()
 
     def _lock_frequency_control_height(self) -> None:
         try:
@@ -656,6 +695,11 @@ class ControlFreqTab(QWidget):
 
     def _sync_top_panel_heights(self) -> None:
         try:
+            if getattr(self, "_responsive_layout_mode", "wide") == "compact":
+                for widget in (self.freq_ctrl_box, self.inbox_box, self.activity_box):
+                    widget.setMinimumHeight(0)
+                    widget.setMaximumHeight(16777215)
+                return
             self.activity_box.setMinimumHeight(0)
             self.activity_box.setMaximumHeight(16777215)
             h_freq = max(140, int(self.freq_ctrl_box.sizeHint().height()))
@@ -700,9 +744,10 @@ class ControlFreqTab(QWidget):
 
     def _persist_ui_state(self) -> None:
         try:
-            self._saved_top_sizes = list(self.top_splitter.sizes())
-            self._saved_left_sizes = list(self.left_splitter.sizes())
-            self._saved_right_sizes = list(self.right_splitter.sizes())
+            if getattr(self, "_responsive_layout_mode", "wide") == "wide":
+                self._saved_top_sizes = list(self.top_splitter.sizes())
+                self._saved_left_sizes = list(self.left_splitter.sizes())
+                self._saved_right_sizes = list(self.right_splitter.sizes())
             values = {
                 "controlfreq_show_local": bool(self._show_local),
                 "controlfreq_focus_mode": bool(self._focus_mode),
@@ -760,6 +805,8 @@ class ControlFreqTab(QWidget):
         self._apply_view_state(animated=False)
 
     def _apply_saved_splitter_sizes(self) -> None:
+        if getattr(self, "_responsive_layout_mode", "wide") != "wide":
+            return
         try:
             if len(self._saved_top_sizes) == self.top_splitter.count():
                 self.top_splitter.setSizes([max(1, int(v)) for v in self._saved_top_sizes])
@@ -962,6 +1009,9 @@ class ControlFreqTab(QWidget):
             else:
                 self.left_splitter.setSizes([0, 1])
         if left_visible or right_visible:
+            if getattr(self, "_responsive_layout_mode", "wide") == "compact":
+                self.top_splitter.setSizes([1 if left_visible else 0, 1 if right_visible else 0])
+                return
             if left_visible and right_visible:
                 self.top_splitter.setSizes([1, 1])
             elif left_visible:
