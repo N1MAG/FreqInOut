@@ -277,6 +277,15 @@ def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     assert "action_row.addWidget(self.refresh_btn" in action_block
 
 
+def test_phase7_map_hides_legacy_visible_plan_context_prose() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("self._map_support_card = QFrame")]
+
+    assert "self.plan_context_label = PlanContextLabel(" in build_block
+    assert "self.plan_context_label.setVisible(False)" in build_block
+    assert "layout.addWidget(self.plan_context_label)" in build_block
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")

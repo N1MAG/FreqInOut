@@ -1447,6 +1447,7 @@ class StationsMapTab(QWidget):
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan Map overlays are being reviewed against."
         )
+        self.plan_context_label.setVisible(False)
         layout.addWidget(self.plan_context_label)
         if self.plan_context_service is not None:
             self.plan_context_label.refresh_context(refresh=True)
