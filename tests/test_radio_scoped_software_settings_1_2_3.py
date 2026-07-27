@@ -212,8 +212,8 @@ def test_settings_radio_context_labels_and_save_feedback_share_selected_radio() 
 def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     nav_build_block = source[
-        source.index("self.global_settings_toggle_btn = QToolButton()")
-        : source.index("self.sections_nav_list.hide()")
+        source.index("nav_panel = QWidget()")
+        : source.index("self.sections_stack = QStackedWidget()")
     ]
     add_section_block = source[
         source.index("def _add_settings_section")
@@ -230,6 +230,11 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert 'self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Selected Radio")' in nav_build_block
     assert "self.global_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert "self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
+    assert 'nav_panel.setObjectName("settingsSectionNavPanel")' in nav_build_block
+    assert 'self.settings_section_nav_scroll.setObjectName("settingsSectionNavScroll")' in nav_build_block
+    assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
+    assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
+    assert "self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in nav_build_block
     assert 'btn.setAccessibleName(f"Settings navigation: {title}")' in add_section_block
     assert "btn.setStyleSheet(self._settings_nav_button_style(role, theme))" in style_block
     assert "self._settings_nav_group_toggle_role(\"global\")" in style_block
@@ -242,6 +247,40 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert '" QToolButton {"' in style_block
     assert '" padding-left: 8px;"' in style_block
     assert '" padding-right: 10px;"' in style_block
+
+
+def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        tab.show()
+        app.processEvents()
+
+        assert tab.settings_section_nav_scroll.widgetResizable() is True
+        assert tab.settings_section_nav_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.settings_section_nav_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.settings_section_nav_scroll.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.settings_section_nav_scroll.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+        assert tab.settings_section_nav_scroll.maximumWidth() <= 250
+        assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+
+        tab.resize(720, 420)
+        app.processEvents()
+
+        assert tab.settings_section_nav_scroll.isVisible() is True
+        assert tab.settings_section_nav_scroll.width() <= tab.settings_section_nav_scroll.maximumWidth()
+        assert tab.settings_section_nav_scroll.height() > 0
+    finally:
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_settings_nav_group_toggle_role_distinguishes_expanded_groups() -> None:
