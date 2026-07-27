@@ -365,6 +365,11 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_hold_btn.setObjectName("stationCommandHold")' in source
     assert 'self.station_command_suspend_btn.setObjectName("stationCommandSuspend")' in source
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
+    assert "command_layout = QGridLayout(self.station_command_bar)" in source
+    assert "command_layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)" in source
+    assert "command_layout.addWidget(self.station_command_qsy_btn, 1, 5)" in source
+    assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)" in source
+    assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)" in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
     assert "right_layout.setSpacing(10)" in source
@@ -390,6 +395,18 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_hold_btn.clicked.connect" not in source
     assert "self.station_command_suspend_btn.clicked.connect" not in source
     assert "self.station_command_resume_btn.clicked.connect" not in source
+
+
+def test_phase7_sidebar_schedule_actions_removed_from_ledge() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "status_layout.addLayout(hold_row)" not in source
+    assert "status_layout.addWidget(self.suspend_schedule_btn" not in source
+    assert "status_layout.addWidget(self.resume_schedule_btn" not in source
+    assert "def _hide_sidebar_schedule_controls(self) -> None:" in source
+    assert "self._hide_sidebar_schedule_controls()" in source
+    assert 'QPushButton("Suspend", self.scheduler_status_container)' in source
+    assert 'QPushButton("Resume Schedule", self.scheduler_status_container)' in source
 
 
 def test_phase7_dropdown_checklist_summarizes_multi_select(monkeypatch) -> None:

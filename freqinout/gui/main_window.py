@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QStackedWidget,
     QVBoxLayout,
     QPushButton,
@@ -383,13 +384,13 @@ class MainWindow(QMainWindow):
         self.scheduler_status_reasons_layout = QVBoxLayout(self.scheduler_status_reasons)
         self.scheduler_status_reasons_layout.setContentsMargins(0, 0, 0, 0)
         self.scheduler_status_reasons_layout.setSpacing(2)
-        self.resume_schedule_btn = QPushButton("Resume Schedule")
+        self.resume_schedule_btn = QPushButton("Resume Schedule", self.scheduler_status_container)
         self.resume_schedule_btn.setFixedWidth(140)
         self.resume_schedule_btn.clicked.connect(self._on_resume_schedule_clicked)
-        self.suspend_schedule_btn = QPushButton("Suspend")
+        self.suspend_schedule_btn = QPushButton("Suspend", self.scheduler_status_container)
         self.suspend_schedule_btn.setFixedWidth(140)
         self.suspend_schedule_btn.clicked.connect(self._on_suspend_schedule_clicked)
-        self.suspend_duration_combo = QComboBox()
+        self.suspend_duration_combo = QComboBox(self.scheduler_status_container)
         self.suspend_duration_combo.setMinimumWidth(96)
         self.suspend_duration_combo.setMaximumWidth(112)
         self.suspend_duration_combo.setToolTip("Temporary schedule hold duration.")
@@ -408,19 +409,12 @@ class MainWindow(QMainWindow):
             pass
         status_layout.addWidget(self.scheduler_status_header)
         status_layout.addWidget(self.scheduler_status_reasons)
-        hold_row = QHBoxLayout()
-        hold_row.setContentsMargins(0, 0, 0, 0)
-        hold_row.setSpacing(6)
-        hold_row.addStretch()
-        self.suspend_duration_label = QLabel("Hold")
-        hold_row.addWidget(self.suspend_duration_label)
-        hold_row.addWidget(self.suspend_duration_combo)
-        hold_row.addStretch()
-        status_layout.addLayout(hold_row)
-        status_layout.addWidget(self.suspend_schedule_btn, alignment=Qt.AlignCenter)
-        status_layout.addWidget(self.resume_schedule_btn, alignment=Qt.AlignCenter)
-        status_layout.addWidget(self.logs_active_btn, alignment=Qt.AlignCenter)
+        self.suspend_duration_label = QLabel("Hold", self.scheduler_status_container)
+        self.suspend_duration_label.setVisible(False)
+        self.suspend_duration_combo.setVisible(False)
+        self.suspend_schedule_btn.setVisible(False)
         self.resume_schedule_btn.setVisible(False)
+        status_layout.addWidget(self.logs_active_btn, alignment=Qt.AlignCenter)
         status_dock_layout.addWidget(self.scheduler_status_container)
 
         # Condition levels panel (global; per-HF operating group status card).
@@ -505,29 +499,39 @@ class MainWindow(QMainWindow):
         self.station_command_bar.setObjectName("stationCommandBar")
         self.station_command_bar.setAccessibleName("Station command context")
         self.station_command_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        command_layout = QHBoxLayout(self.station_command_bar)
+        command_layout = QGridLayout(self.station_command_bar)
         command_layout.setContentsMargins(10, 8, 10, 8)
         command_layout.setSpacing(8)
+        command_layout.setColumnStretch(2, 1)
+        command_layout.setColumnStretch(3, 1)
+        command_layout.setColumnStretch(4, 2)
         self.station_command_radio_label = QLabel("Radio")
         self.station_command_radio_label.setObjectName("stationCommandRadioLabel")
-        command_layout.addWidget(self.station_command_radio_label, 0)
+        command_layout.addWidget(self.station_command_radio_label, 0, 0)
         self.station_command_radio_combo = QComboBox(self.station_command_bar)
         self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")
-        self.station_command_radio_combo.setMinimumWidth(140)
+        self.station_command_radio_combo.setMinimumWidth(120)
+        self.station_command_radio_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.station_command_radio_combo.currentIndexChanged.connect(self._on_station_command_radio_changed)
-        command_layout.addWidget(self.station_command_radio_combo, 0)
+        command_layout.addWidget(self.station_command_radio_combo, 0, 1)
         self.station_command_now_label = QLabel("Now: unavailable")
         self.station_command_now_label.setObjectName("stationCommandNow")
         self.station_command_now_label.setWordWrap(False)
-        command_layout.addWidget(self.station_command_now_label, 0)
+        self.station_command_now_label.setMinimumWidth(0)
+        self.station_command_now_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        command_layout.addWidget(self.station_command_now_label, 0, 2)
         self.station_command_state_label = QLabel("State: unknown")
         self.station_command_state_label.setObjectName("stationCommandState")
         self.station_command_state_label.setWordWrap(False)
-        command_layout.addWidget(self.station_command_state_label, 0)
+        self.station_command_state_label.setMinimumWidth(0)
+        self.station_command_state_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        command_layout.addWidget(self.station_command_state_label, 0, 3)
         self.station_command_next_label = QLabel("Next: none")
         self.station_command_next_label.setObjectName("stationCommandNext")
         self.station_command_next_label.setWordWrap(False)
-        command_layout.addWidget(self.station_command_next_label, 1)
+        self.station_command_next_label.setMinimumWidth(0)
+        self.station_command_next_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        command_layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)
         self.station_command_qsy_btn = QPushButton("QSY...")
         self.station_command_qsy_btn.setObjectName("stationCommandQsy")
         self.station_command_hold_btn = QPushButton("Hold")
@@ -544,7 +548,11 @@ class MainWindow(QMainWindow):
         ):
             btn.setEnabled(False)
             btn.setToolTip("Station command wiring is not enabled yet.")
-            command_layout.addWidget(btn, 0)
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        command_layout.addWidget(self.station_command_qsy_btn, 1, 5)
+        command_layout.addWidget(self.station_command_hold_btn, 1, 6)
+        command_layout.addWidget(self.station_command_suspend_btn, 1, 7)
+        command_layout.addWidget(self.station_command_resume_btn, 1, 8)
         right_layout.addWidget(self.station_command_bar, 0)
 
         right_layout.addWidget(self.stack, stretch=1)
@@ -1876,6 +1884,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._auto_collapse_inactive_nav_groups()
+        self._hide_sidebar_schedule_controls()
+
+    def _hide_sidebar_schedule_controls(self) -> None:
+        for widget in (
+            getattr(self, "resume_schedule_btn", None),
+            getattr(self, "suspend_schedule_btn", None),
+            getattr(self, "suspend_duration_label", None),
+            getattr(self, "suspend_duration_combo", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.setVisible(False)
+                except Exception:
+                    pass
 
     def _dispatch_hold_snapshot(
         self,
@@ -2050,6 +2072,7 @@ class MainWindow(QMainWindow):
                 self.scheduler_status_container.adjustSize()
             except Exception:
                 pass
+            self._hide_sidebar_schedule_controls()
             self._auto_collapse_inactive_nav_groups()
             return
 
@@ -2213,6 +2236,7 @@ class MainWindow(QMainWindow):
             self.scheduler_status_container.adjustSize()
         except Exception:
             pass
+        self._hide_sidebar_schedule_controls()
         self._auto_collapse_inactive_nav_groups()
 
     def _get_next_sop_action_minutes(self):
