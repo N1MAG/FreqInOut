@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QPushButton, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QTableWidgetItem
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -123,6 +123,108 @@ def test_phase7_table_time_toggles_use_times_wording() -> None:
     assert "Times: UTC" in combined
     assert "Showing: Local" not in combined
     assert "Showing: UTC" not in combined
+
+
+def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert 'self.station_command_bar.setObjectName("stationCommandBar")' in source
+    assert 'self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")' in source
+    assert 'self.station_command_qsy_btn.setObjectName("stationCommandQsy")' in source
+    assert 'self.station_command_hold_btn.setObjectName("stationCommandHold")' in source
+    assert 'self.station_command_suspend_btn.setObjectName("stationCommandSuspend")' in source
+    assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
+    assert "right_layout.addWidget(self.station_command_bar, 0)" in source
+    assert "right_layout.addWidget(self.stack, stretch=1)" in source
+    assert "self._status_timer.timeout.connect(self._refresh_station_overview)" in source
+    assert "self._refresh_station_command_bar(force=False)" in source
+    assert "btn.setEnabled(False)" in source
+    assert "Command target:" in source
+
+
+def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    snapshots = [
+        SimpleNamespace(
+            device_profile_id=1,
+            name="DX10",
+            device_class="tx_rx",
+            runtime_primary=False,
+            current_frequency_label="7.078 MHz",
+            current_band="40M",
+            scheduler_enabled=True,
+            status_summary="On Schedule",
+            overall_state="ok",
+            ptt_active=False,
+            shared_ptt_blocked=False,
+            assigned_operating_profile_name="All Features",
+            observer_follow_summary="",
+        ),
+        SimpleNamespace(
+            device_profile_id=2,
+            name="icom",
+            device_class="tx_rx",
+            runtime_primary=True,
+            current_frequency_label="14.078 MHz",
+            current_band="20M",
+            scheduler_enabled=True,
+            status_summary="Manual Hold",
+            overall_state="warn",
+            ptt_active=False,
+            shared_ptt_blocked=False,
+            assigned_operating_profile_name="Net Plan",
+            observer_follow_summary="",
+        ),
+    ]
+
+    class FakeManager:
+        def get_runtime_snapshots(self, *, force: bool = False):
+            return list(snapshots)
+
+    window = MainWindow.__new__(MainWindow)
+    window.station_runtime_manager = FakeManager()
+    window._station_command_selected_profile_id = None
+    window._station_command_bar_loading = False
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_now_label = QLabel()
+    window.station_command_state_label = QLabel()
+    window.station_command_next_label = QLabel()
+    window.station_command_qsy_btn = QPushButton("QSY...")
+    window.station_command_hold_btn = QPushButton("Hold")
+    window.station_command_suspend_btn = QPushButton("Suspend")
+    window.station_command_resume_btn = QPushButton("Resume")
+
+    MainWindow._refresh_station_command_bar(window, force=True)
+
+    assert window.station_command_radio_combo.currentData() == 2
+    assert window.station_command_now_label.text() == "Now: 14.078 MHz 20M"
+    assert window.station_command_state_label.text() == "State: Manual Hold"
+    assert window.station_command_next_label.text() == "Next: Plan: Net Plan"
+    assert window.station_command_qsy_btn.isEnabled() is False
+    assert "Command target: icom" in window.station_command_qsy_btn.toolTip()
+
+    window.station_command_radio_combo.setCurrentIndex(0)
+    MainWindow._on_station_command_radio_changed(window, 0)
+
+    assert window._station_command_selected_profile_id == 1
+    assert window.station_command_now_label.text() == "Now: 7.078 MHz 40M"
+
+    for widget in (
+        window.station_command_radio_combo,
+        window.station_command_now_label,
+        window.station_command_state_label,
+        window.station_command_next_label,
+        window.station_command_qsy_btn,
+        window.station_command_hold_btn,
+        window.station_command_suspend_btn,
+        window.station_command_resume_btn,
+    ):
+        widget.deleteLater()
+    app.processEvents()
 
 
 def test_phase7_collapsed_station_group_shows_health_alert(monkeypatch) -> None:
