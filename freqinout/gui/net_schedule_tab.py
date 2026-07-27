@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
@@ -279,6 +280,8 @@ class NetScheduleTab(QWidget):
         ] = OrderedDict()
         self._net_sop_conflict_cache_limit: int = 6
         self._net_sop_conflict_cache_epoch: int = 0
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
 
         self._build_ui()
         self._load()
@@ -343,8 +346,6 @@ class NetScheduleTab(QWidget):
         hv.setMinimumSectionSize(50)
         layout.addWidget(self.table)
 
-        # buttons
-        btn_row = QHBoxLayout()
         self.add_btn = QPushButton("Add Row")
         self.del_btn = QPushButton("Delete Selected")
         self.view_edit_btn = QPushButton("View/Edit")
@@ -353,17 +354,11 @@ class NetScheduleTab(QWidget):
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.export_btn = QPushButton("Export Net Schedule")
         self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
-        btn_row.addWidget(self.time_toggle_btn)
-        btn_row.addWidget(self.add_btn)
-        btn_row.addWidget(self.del_btn)
-        btn_row.addWidget(self.view_edit_btn)
-        btn_row.addWidget(self.move_to_resources_btn)
-        btn_row.addWidget(self.export_btn)
-        btn_row.addWidget(self.manage_net_sop_policies_btn)
-        btn_row.addStretch()
         self.save_btn = QPushButton("Save Net Schedule")
-        btn_row.addWidget(self.save_btn)
-        layout.addLayout(btn_row)
+        self._net_action_layout = QGridLayout()
+        self._net_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._net_action_layout.setSpacing(8)
+        layout.addLayout(self._net_action_layout)
 
         # Net resources section
         res_header = QHBoxLayout()
@@ -374,15 +369,12 @@ class NetScheduleTab(QWidget):
         res_header.addWidget(self.net_resources_hint)
         layout.addLayout(res_header)
 
-        res_controls = QHBoxLayout()
-        res_controls.addWidget(QLabel("Set:"))
+        self.resource_set_label = QLabel("Set:")
         self.resource_set_combo = QComboBox()
         self.resource_set_combo.addItem("All", "All")
-        res_controls.addWidget(self.resource_set_combo)
-        res_controls.addWidget(QLabel("Search:"))
+        self.resource_search_label = QLabel("Search:")
         self.resource_search = QLineEdit()
         self.resource_search.setPlaceholderText("Search all resource fields...")
-        res_controls.addWidget(self.resource_search, 1)
         self.add_to_schedule_btn = QToolButton()
         self.add_to_schedule_btn.setPopupMode(QToolButton.MenuButtonPopup)
         add_menu = QMenu(self.add_to_schedule_btn)
@@ -410,11 +402,11 @@ class NetScheduleTab(QWidget):
 
         self.edit_resource_btn = QPushButton("Edit Selected")
         self.delete_resource_btn = QPushButton("Delete Selected Resources")
-        res_controls.addWidget(self.add_to_schedule_btn)
-        res_controls.addWidget(self.manage_resources_btn)
-        res_controls.addWidget(self.edit_resource_btn)
-        res_controls.addWidget(self.delete_resource_btn)
-        layout.addLayout(res_controls)
+        self._net_resource_filter_layout = QGridLayout()
+        self._net_resource_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._net_resource_filter_layout.setSpacing(8)
+        layout.addLayout(self._net_resource_filter_layout)
+        self._arrange_net_action_rows(compact=False)
 
         self.resources_table = QTableWidget()
         self.resources_table.setColumnCount(18)
@@ -483,6 +475,92 @@ class NetScheduleTab(QWidget):
         self._conflict_refresh_timer.setSingleShot(True)
         self._conflict_refresh_timer.setInterval(180)
         self._conflict_refresh_timer.timeout.connect(self._refresh_net_sop_conflict_highlighting)
+        self._update_net_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_net_responsive_layout()
+
+    def _net_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_net_responsive_layout(self) -> None:
+        if not hasattr(self, "_net_resource_filter_layout"):
+            return
+        mode = self._net_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and self._net_resource_filter_layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        self._arrange_net_action_rows(compact=(mode == "compact"))
+
+    @staticmethod
+    def _clear_grid_layout(layout: QGridLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    @staticmethod
+    def _place_grid_widgets(layout: QGridLayout, placements: list[tuple]) -> None:
+        for col in range(12):
+            layout.setColumnStretch(col, 0)
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+
+    def _arrange_net_action_rows(self, *, compact: bool) -> None:
+        for grid in (self._net_action_layout, self._net_resource_filter_layout):
+            self._clear_grid_layout(grid)
+
+        if compact:
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.add_btn, 0, 1),
+                (self.del_btn, 0, 2),
+                (self.view_edit_btn, 0, 3),
+                (self.move_to_resources_btn, 1, 0, 1, 2),
+                (self.export_btn, 1, 2),
+                (self.manage_net_sop_policies_btn, 1, 3),
+                (self.save_btn, 1, 4),
+            ]
+            filter_placements = [
+                (self.resource_set_label, 0, 0),
+                (self.resource_set_combo, 0, 1),
+                (self.resource_search_label, 0, 2),
+                (self.resource_search, 0, 3, 1, 2),
+                (self.add_to_schedule_btn, 1, 0),
+                (self.manage_resources_btn, 1, 1),
+                (self.edit_resource_btn, 1, 2),
+                (self.delete_resource_btn, 1, 3),
+            ]
+        else:
+            action_placements = [
+                (self.time_toggle_btn, 0, 0),
+                (self.add_btn, 0, 1),
+                (self.del_btn, 0, 2),
+                (self.view_edit_btn, 0, 3),
+                (self.move_to_resources_btn, 0, 4),
+                (self.export_btn, 0, 5),
+                (self.manage_net_sop_policies_btn, 0, 6),
+                (self.save_btn, 0, 7),
+            ]
+            filter_placements = [
+                (self.resource_set_label, 0, 0),
+                (self.resource_set_combo, 0, 1),
+                (self.resource_search_label, 0, 2),
+                (self.resource_search, 0, 3),
+                (self.add_to_schedule_btn, 0, 4),
+                (self.manage_resources_btn, 0, 5),
+                (self.edit_resource_btn, 0, 6),
+                (self.delete_resource_btn, 0, 7),
+            ]
+
+        self._place_grid_widgets(self._net_action_layout, action_placements)
+        self._place_grid_widgets(self._net_resource_filter_layout, filter_placements)
+        self._net_action_layout.setColumnStretch(8 if not compact else 5, 1)
+        self._net_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
 
     def _resize_table_columns(self) -> None:
         try:
