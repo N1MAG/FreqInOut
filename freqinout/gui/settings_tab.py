@@ -2939,6 +2939,7 @@ class SettingsTab(QWidget):
         self.operating_profiles_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
         self.operating_profiles_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.operating_profiles_table.setWordWrap(False)
         self.operating_profiles_table.currentCellChanged.connect(
             lambda _r, _c, _pr, _pc: self._update_operating_profile_guidance_detail()
         )
@@ -3558,7 +3559,9 @@ class SettingsTab(QWidget):
         self.spotter_mapper_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.spotter_mapper_table.setAlternatingRowColors(True)
         self.spotter_mapper_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
-        self.spotter_mapper_table.setMinimumHeight(180)
+        self.spotter_mapper_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.spotter_mapper_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.spotter_mapper_table.setWordWrap(False)
         mapper_header_view = self.spotter_mapper_table.horizontalHeader()
         mapper_header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         mapper_header_view.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -8429,6 +8432,8 @@ class SettingsTab(QWidget):
         finally:
             self._spotter_mapper_loading = False
             self.spotter_mapper_table.blockSignals(previous_signal_state)
+        self._fit_table_height_to_rows(self.spotter_mapper_table, min_rows=3, max_rows=6, extra_rows=0)
+        self._refresh_fit_content_section_height(getattr(self, "js8_section_group", None))
 
     def _on_spotter_mapper_changed(self, *_args) -> None:
         if self._spotter_mapper_loading:

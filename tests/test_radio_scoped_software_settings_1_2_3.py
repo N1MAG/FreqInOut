@@ -358,6 +358,36 @@ def test_settings_group_tables_use_compact_height_policy() -> None:
     assert "self._refresh_fit_content_section_height(getattr(self, \"local_net_section_group\", None))" in local_refresh_block
 
 
+def test_settings_frequency_plan_and_spotter_tables_own_their_scroll_geometry() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    frequency_build_block = source[
+        source.index("self.operating_profiles_table = QTableWidget(0, 6)")
+        : source.index("assignments_group = QGroupBox(\"Assigned Plans\")")
+    ]
+    frequency_refresh_block = source[
+        source.index("def _refresh_operating_profiles_table")
+        : source.index("def _refresh_device_assignments_table")
+    ]
+    spotter_build_block = source[
+        source.index("self.spotter_mapper_table = QTableWidget(0, 8)")
+        : source.index("mapper_hint = QLabel(")
+    ]
+    spotter_refresh_block = source[
+        source.index("def _refresh_spotter_form_mapper")
+        : source.index("def _on_spotter_mapper_changed")
+    ]
+
+    assert "self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in frequency_build_block
+    assert "self.operating_profiles_table.setWordWrap(False)" in frequency_build_block
+    assert "self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)" in frequency_refresh_block
+    assert "self._refresh_fit_content_section_height(getattr(self, \"operating_profiles_section_group\", None))" in frequency_refresh_block
+    assert "self.spotter_mapper_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in spotter_build_block
+    assert "self.spotter_mapper_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in spotter_build_block
+    assert "self.spotter_mapper_table.setWordWrap(False)" in spotter_build_block
+    assert "self._fit_table_height_to_rows(self.spotter_mapper_table, min_rows=3, max_rows=6, extra_rows=0)" in spotter_refresh_block
+    assert "self._refresh_fit_content_section_height(getattr(self, \"js8_section_group\", None))" in spotter_refresh_block
+
+
 def test_fit_table_height_to_rows_caps_body_and_keeps_header_scroll_space() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -444,6 +474,74 @@ def test_settings_group_tables_visual_geometry_caps_to_internal_scroll(monkeypat
             assert table.maximumHeight() < full_body_height
             assert table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
             assert table.horizontalHeader().height() > 0
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_settings_frequency_plan_and_spotter_table_geometry_caps_to_internal_scroll(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        plans = [
+            {
+                "id": idx + 1,
+                "name": f"Plan {idx}",
+                "enabled": 1,
+                "scheduler_enabled": 1,
+                "description": "A longer description that should not expand the table row body.",
+            }
+            for idx in range(10)
+        ]
+        tab.multi_radio_store = types.SimpleNamespace(list_operating_profiles=lambda: list(plans))
+        tab._refresh_operating_profiles_table(refresh_assignments=False)
+        tab._refresh_spotter_form_mapper()
+        app.processEvents()
+
+        frequency_table = tab.operating_profiles_table
+        assert frequency_table.rowCount() == 10
+        assert frequency_table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert frequency_table.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
+        assert frequency_table.wordWrap() is False
+
+        default_row_height = max(frequency_table.verticalHeader().defaultSectionSize(), 24)
+        row_height = max(frequency_table.rowHeight(0), default_row_height)
+        expected_frequency = (
+            frequency_table.horizontalHeader().height()
+            + (8 * row_height)
+            + frequency_table.horizontalScrollBar().sizeHint().height()
+            + (frequency_table.frameWidth() * 2)
+            + 8
+        )
+        assert frequency_table.minimumHeight() == expected_frequency
+        assert frequency_table.maximumHeight() == expected_frequency
+        assert frequency_table.maximumHeight() < frequency_table.horizontalHeader().height() + (10 * row_height)
+
+        spotter_table = tab.spotter_mapper_table
+        assert spotter_table.rowCount() >= 5
+        assert spotter_table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert spotter_table.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
+        assert spotter_table.wordWrap() is False
+
+        spotter_default_row_height = max(spotter_table.verticalHeader().defaultSectionSize(), 24)
+        spotter_row_height = max(spotter_table.rowHeight(0), spotter_default_row_height)
+        expected_spotter = (
+            spotter_table.horizontalHeader().height()
+            + (min(spotter_table.rowCount(), 6) * spotter_row_height)
+            + spotter_table.horizontalScrollBar().sizeHint().height()
+            + (spotter_table.frameWidth() * 2)
+            + 8
+        )
+        assert spotter_table.minimumHeight() == expected_spotter
+        assert spotter_table.maximumHeight() == expected_spotter
     finally:
         tab.deleteLater()
         app.processEvents()
