@@ -638,7 +638,7 @@ class _LegacySOPTab(QWidget):
             self.new_btn,
             self.save_btn,
             self.delete_btn,
-            self.versions_btn,
+            getattr(self, "versions_btn", None),
             self.export_pdf_btn,
             self.export_import_btn,
             self.add_row_btn,
@@ -648,6 +648,8 @@ class _LegacySOPTab(QWidget):
             self.refresh_btn,
         ]
         for btn in buttons:
+            if btn is None:
+                continue
             try:
                 txt = str(btn.text() or "").strip()
             except Exception:

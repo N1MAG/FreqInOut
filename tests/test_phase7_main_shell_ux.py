@@ -339,6 +339,21 @@ def test_phase7_sop_moves_times_into_management_rows_and_hides_context() -> None
     assert "Operating Plan Inputs:" in source
 
 
+def test_phase7_legacy_sop_accessibility_guard_tolerates_missing_versions_button(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.sop_tab import _LegacySOPTab
+
+    tab = _LegacySOPTab()
+    try:
+        assert not hasattr(tab, "versions_btn")
+        tab._apply_accessibility_width_guards()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
