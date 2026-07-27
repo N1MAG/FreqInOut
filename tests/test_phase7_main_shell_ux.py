@@ -485,6 +485,8 @@ def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
 def test_phase7_controlfreq_has_responsive_card_layout_breakpoint() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
 
+    assert 'self.controlfreq_scroll.setObjectName("controlfreqScrollArea")' in source
+    assert "self.controlfreq_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
     assert "self._responsive_layout_mode = \"wide\"" in source
     assert "self._responsive_compact_width = 1200" in source
     assert "self.top_overview_row = QHBoxLayout()" in source
@@ -492,6 +494,8 @@ def test_phase7_controlfreq_has_responsive_card_layout_breakpoint() -> None:
     assert "def _update_responsive_layout(self) -> None:" in source
     assert "self.top_overview_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)" in source
     assert "self.top_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)" in source
+    assert "freq_h = max(170, int(self.freq_ctrl_box.sizeHint().height()))" in source
+    assert "(self.freq_ctrl_box, freq_h)" in source
     assert "if getattr(self, \"_responsive_layout_mode\", \"wide\") == \"wide\":" in source
     assert "if getattr(self, \"_responsive_layout_mode\", \"wide\") != \"wide\":" in source
     assert "QTimer.singleShot(0, self._update_responsive_layout)" in source
@@ -533,6 +537,36 @@ def test_phase7_controlfreq_restores_wide_splitter_sizes_after_compact(monkeypat
         assert tab.top_splitter.orientation() == Qt.Horizontal
         assert len(wide_sizes) == 2
         assert wide_sizes[1] > wide_sizes[0] * 2
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_controlfreq_compact_mode_scrolls_without_clipping_frequency_card(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from PySide6.QtCore import Qt
+
+    from freqinout.gui import controlfreq_tab as controlfreq_mod
+
+    monkeypatch.setattr(controlfreq_mod.ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+
+    tab = controlfreq_mod.ControlFreqTab()
+    try:
+        tab.resize(1000, 650)
+        tab._update_responsive_layout()
+        app.processEvents()
+
+        assert tab.controlfreq_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.controlfreq_scroll.widget() is tab.controlfreq_content
+        assert tab._responsive_layout_mode == "compact"
+        assert tab.top_overview_row.direction() == controlfreq_mod.QBoxLayout.TopToBottom
+        assert tab.freq_ctrl_box.minimumHeight() >= 170
+        assert tab.freq_ctrl_box.maximumHeight() == 16777215
+        assert tab.intersection_box.minimumHeight() >= 130
+        assert tab.schedule_box.minimumHeight() >= 140
     finally:
         tab.deleteLater()
         app.processEvents()

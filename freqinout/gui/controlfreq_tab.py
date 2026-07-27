@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QMenu,
     QCompleter,
+    QScrollArea,
+    QFrame,
 )
 
 from freqinout.core.config_paths import get_config_dir
@@ -236,9 +238,21 @@ class ControlFreqTab(QWidget):
         self._refresh_all()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.controlfreq_scroll = QScrollArea(self)
+        self.controlfreq_scroll.setObjectName("controlfreqScrollArea")
+        self.controlfreq_scroll.setWidgetResizable(True)
+        self.controlfreq_scroll.setFrameShape(QFrame.NoFrame)
+        self.controlfreq_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.controlfreq_scroll, 1)
+
+        self.controlfreq_content = QWidget(self.controlfreq_scroll)
+        root = QVBoxLayout(self.controlfreq_content)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
+        self.controlfreq_scroll.setWidget(self.controlfreq_content)
 
         header = QHBoxLayout()
         title = QLabel("<h3>ControlFreq</h3>")
@@ -696,8 +710,23 @@ class ControlFreqTab(QWidget):
     def _sync_top_panel_heights(self) -> None:
         try:
             if getattr(self, "_responsive_layout_mode", "wide") == "compact":
-                for widget in (self.freq_ctrl_box, self.inbox_box, self.activity_box):
-                    widget.setMinimumHeight(0)
+                freq_h = max(170, int(self.freq_ctrl_box.sizeHint().height()))
+                inbox_h = max(
+                    150,
+                    int(self._message_summary_target_height or 0),
+                    int(self.inbox_box.sizeHint().height()),
+                )
+                activity_h = max(150, int(self.activity_box.sizeHint().height()))
+                intersection_h = max(130, int(self.intersection_box.sizeHint().height()))
+                schedule_h = max(140, int(self.schedule_box.sizeHint().height()))
+                for widget, height in (
+                    (self.freq_ctrl_box, freq_h),
+                    (self.inbox_box, inbox_h),
+                    (self.activity_box, activity_h),
+                    (self.intersection_box, intersection_h),
+                    (self.schedule_box, schedule_h),
+                ):
+                    widget.setMinimumHeight(height)
                     widget.setMaximumHeight(16777215)
                 return
             self.activity_box.setMinimumHeight(0)
