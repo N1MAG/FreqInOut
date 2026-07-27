@@ -244,6 +244,14 @@ def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_pat
         app.processEvents()
 
 
+def test_phase7_hf_peers_uses_view_edit_selected_row_wording() -> None:
+    source = Path("freqinout/gui/peer_sched_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.edit_btn = QPushButton("View/Edit Selected Row")' in source
+    assert 'self.edit_btn.setToolTip("View or edit the selected explicit row.")' in source
+    assert 'self.edit_btn = QPushButton("Edit Selected Row")' not in source
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
