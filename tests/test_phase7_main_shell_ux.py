@@ -140,6 +140,11 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self._refresh_station_command_bar(force=False)" in source
     assert "btn.setEnabled(False)" in source
     assert "Command target:" in source
+    assert "SUPPORTED_RUNTIME_CONTROL_BACKENDS" in source
+    assert "def _station_command_configured_profiles" in source
+    assert "def _station_command_is_controllable_profile" in source
+    assert "No configured radios" in source
+    assert 'device_class == "observer"' in source
     assert "self.station_command_qsy_btn.clicked.connect" not in source
     assert "self.station_command_hold_btn.clicked.connect" not in source
     assert "self.station_command_suspend_btn.clicked.connect" not in source
@@ -189,8 +194,41 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
         def get_runtime_snapshots(self, *, force: bool = False):
             return list(snapshots)
 
+    class FakeStore:
+        def list_device_profiles(self):
+            return [
+                {
+                    "id": 1,
+                    "name": "DX10",
+                    "device_class": "tx_rx",
+                    "control_backend": "flrig",
+                    "runtime_active": 1,
+                    "runtime_primary": 0,
+                    "assigned_operating_profile_name": "All Features",
+                },
+                {
+                    "id": 2,
+                    "name": "icom",
+                    "device_class": "tx_rx",
+                    "control_backend": "rigctld",
+                    "runtime_active": 1,
+                    "runtime_primary": 1,
+                    "assigned_operating_profile_name": "Net Plan",
+                },
+                {
+                    "id": 4,
+                    "name": "Spare Rig",
+                    "device_class": "tx_rx",
+                    "control_backend": "js8call",
+                    "runtime_active": "0",
+                    "runtime_primary": 0,
+                    "assigned_operating_profile_name": "Backup Plan",
+                },
+            ]
+
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
+    window.multi_radio_store = FakeStore()
     window._station_command_selected_profile_id = None
     window._station_command_bar_loading = False
     window.station_command_radio_combo = QComboBox()
@@ -204,6 +242,11 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
 
     MainWindow._refresh_station_command_bar(window, force=True)
 
+    assert [window.station_command_radio_combo.itemText(idx) for idx in range(window.station_command_radio_combo.count())] == [
+        "DX10 (HF)",
+        "icom (HF)",
+        "Spare Rig (HF)",
+    ]
     assert window.station_command_radio_combo.currentData() == 2
     assert window.station_command_now_label.text() == "Now: 14.078 MHz 20M"
     assert window.station_command_state_label.text() == "State: Manual Hold"
@@ -216,6 +259,14 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
 
     assert window._station_command_selected_profile_id == 1
     assert window.station_command_now_label.text() == "Now: 7.078 MHz 40M"
+
+    window.station_command_radio_combo.setCurrentIndex(2)
+    MainWindow._on_station_command_radio_changed(window, 2)
+
+    assert window._station_command_selected_profile_id == 4
+    assert window.station_command_now_label.text() == "Now: unavailable"
+    assert window.station_command_state_label.text() == "State: Configured inactive"
+    assert window.station_command_next_label.text() == "Next: Plan: Backup Plan"
 
     for widget in (
         window.station_command_radio_combo,
@@ -231,7 +282,7 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     app.processEvents()
 
 
-def test_phase7_station_command_bar_handles_no_active_radio(monkeypatch) -> None:
+def test_phase7_station_command_bar_handles_no_configured_radio(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
 
@@ -241,8 +292,13 @@ def test_phase7_station_command_bar_handles_no_active_radio(monkeypatch) -> None
         def get_runtime_snapshots(self, *, force: bool = False):
             return []
 
+    class FakeStore:
+        def list_device_profiles(self):
+            return []
+
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
+    window.multi_radio_store = FakeStore()
     window._station_command_selected_profile_id = 88
     window._station_command_bar_loading = False
     window.station_command_radio_combo = QComboBox()
@@ -257,12 +313,12 @@ def test_phase7_station_command_bar_handles_no_active_radio(monkeypatch) -> None
     MainWindow._refresh_station_command_bar(window, force=True)
 
     assert window._station_command_selected_profile_id is None
-    assert window.station_command_radio_combo.currentText() == "No active radios"
+    assert window.station_command_radio_combo.currentText() == "No configured radios"
     assert window.station_command_now_label.text() == "Now: unavailable"
-    assert window.station_command_state_label.text() == "State: no active radio"
+    assert window.station_command_state_label.text() == "State: no configured radio"
     assert window.station_command_next_label.text() == "Next: none"
     assert window.station_command_qsy_btn.isEnabled() is False
-    assert window.station_command_qsy_btn.toolTip() == "No active radio is available for station commands."
+    assert window.station_command_qsy_btn.toolTip() == "No configured radio is available for station commands."
 
     for widget in (
         window.station_command_radio_combo,
@@ -278,7 +334,7 @@ def test_phase7_station_command_bar_handles_no_active_radio(monkeypatch) -> None
     app.processEvents()
 
 
-def test_phase7_station_command_bar_renders_observer_context(monkeypatch) -> None:
+def test_phase7_station_command_bar_excludes_observer_from_qsy_targets(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
 
@@ -304,8 +360,22 @@ def test_phase7_station_command_bar_renders_observer_context(monkeypatch) -> Non
         def get_runtime_snapshots(self, *, force: bool = False):
             return [snapshot]
 
+    class FakeStore:
+        def list_device_profiles(self):
+            return [
+                {
+                    "id": 3,
+                    "name": "KiwiSDR",
+                    "device_class": "observer",
+                    "control_backend": "manual",
+                    "runtime_active": 1,
+                    "runtime_primary": 0,
+                }
+            ]
+
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
+    window.multi_radio_store = FakeStore()
     window._station_command_selected_profile_id = None
     window._station_command_bar_loading = False
     window.station_command_radio_combo = QComboBox()
@@ -319,9 +389,8 @@ def test_phase7_station_command_bar_renders_observer_context(monkeypatch) -> Non
 
     MainWindow._refresh_station_command_bar(window, force=True)
 
-    assert window.station_command_radio_combo.currentText() == "KiwiSDR (SDR)"
-    assert window.station_command_state_label.text() == "State: Monitor"
-    assert window.station_command_next_label.text() == "Next: Following icom"
+    assert window.station_command_radio_combo.currentText() == "No configured radios"
+    assert window.station_command_state_label.text() == "State: no configured radio"
     assert window.station_command_qsy_btn.isEnabled() is False
 
     for widget in (

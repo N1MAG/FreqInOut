@@ -4,7 +4,7 @@ import datetime
 import sqlite3
 import sys
 import time
-from typing import Callable
+from typing import Callable, Mapping
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -38,7 +38,7 @@ from pathlib import Path
 from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
-from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
@@ -3659,12 +3659,33 @@ class MainWindow(QMainWindow):
         self._refresh_station_command_bar(force=False)
 
     @staticmethod
+    def _station_command_value(source: object, key: str, default: object = "") -> object:
+        if isinstance(source, Mapping):
+            return source.get(key, default)
+        return getattr(source, key, default)
+
+    @staticmethod
+    def _station_command_bool(value: object, default: bool = False) -> bool:
+        if value in (None, ""):
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
     def _station_command_snapshot_name(snapshot: object) -> str:
         try:
-            name = str(getattr(snapshot, "name", "") or "").strip()
+            name = str(MainWindow._station_command_value(snapshot, "name", "") or "").strip()
             if name:
                 return name
-            ident = int(getattr(snapshot, "device_profile_id", 0) or 0)
+            ident = int(
+                MainWindow._station_command_value(
+                    snapshot,
+                    "device_profile_id",
+                    MainWindow._station_command_value(snapshot, "id", 0),
+                )
+                or 0
+            )
             return f"Radio {ident}" if ident > 0 else "Radio"
         except Exception:
             return "Radio"
@@ -3672,7 +3693,14 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _station_command_snapshot_id(snapshot: object) -> int:
         try:
-            return int(getattr(snapshot, "device_profile_id", 0) or 0)
+            return int(
+                MainWindow._station_command_value(
+                    snapshot,
+                    "device_profile_id",
+                    MainWindow._station_command_value(snapshot, "id", 0),
+                )
+                or 0
+            )
         except Exception:
             return 0
 
@@ -3680,8 +3708,8 @@ class MainWindow(QMainWindow):
     def _station_command_frequency_text(snapshot: object) -> str:
         try:
             parts = [
-                str(getattr(snapshot, "current_frequency_label", "") or "").strip(),
-                str(getattr(snapshot, "current_band", "") or "").strip(),
+                str(MainWindow._station_command_value(snapshot, "current_frequency_label", "") or "").strip(),
+                str(MainWindow._station_command_value(snapshot, "current_band", "") or "").strip(),
             ]
             text = " ".join(part for part in parts if part).strip()
             return text or "unavailable"
@@ -3691,16 +3719,23 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _station_command_state_text(snapshot: object) -> str:
         try:
-            if bool(getattr(snapshot, "ptt_active", False)) or bool(getattr(snapshot, "shared_ptt_blocked", False)):
+            if MainWindow._station_command_bool(MainWindow._station_command_value(snapshot, "ptt_active", False)) or MainWindow._station_command_bool(
+                MainWindow._station_command_value(snapshot, "shared_ptt_blocked", False)
+            ):
                 return "Busy: PTT"
-            if str(getattr(snapshot, "device_class", "") or "").strip().lower() == "observer":
+            if str(MainWindow._station_command_value(snapshot, "device_class", "") or "").strip().lower() == "observer":
                 return "Monitor"
-            if not bool(getattr(snapshot, "scheduler_enabled", True)):
+            if not MainWindow._station_command_bool(MainWindow._station_command_value(snapshot, "runtime_active", True), default=True):
+                return "Configured inactive"
+            if not MainWindow._station_command_bool(
+                MainWindow._station_command_value(snapshot, "scheduler_enabled", True),
+                default=True,
+            ):
                 return "Scheduler Off"
-            summary = str(getattr(snapshot, "status_summary", "") or "").strip()
+            summary = str(MainWindow._station_command_value(snapshot, "status_summary", "") or "").strip()
             if summary:
                 return summary
-            state = str(getattr(snapshot, "overall_state", "") or "").strip()
+            state = str(MainWindow._station_command_value(snapshot, "overall_state", "") or "").strip()
             return state.title() if state else "On Schedule"
         except Exception:
             return "unknown"
@@ -3708,27 +3743,72 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _station_command_next_text(snapshot: object) -> str:
         try:
-            if str(getattr(snapshot, "device_class", "") or "").strip().lower() == "observer":
-                return str(getattr(snapshot, "observer_follow_summary", "") or "").strip() or "Receive-only monitor"
-            plan = str(getattr(snapshot, "assigned_operating_profile_name", "") or "").strip()
+            if str(MainWindow._station_command_value(snapshot, "device_class", "") or "").strip().lower() == "observer":
+                return (
+                    str(MainWindow._station_command_value(snapshot, "observer_follow_summary", "") or "").strip()
+                    or "Receive-only monitor"
+                )
+            plan = str(
+                MainWindow._station_command_value(
+                    snapshot,
+                    "assigned_operating_profile_name",
+                    MainWindow._station_command_value(snapshot, "operating_profile_name", ""),
+                )
+                or ""
+            ).strip()
             if not plan:
                 return "No assigned plan"
-            if not bool(getattr(snapshot, "scheduler_enabled", True)):
+            if not MainWindow._station_command_bool(
+                MainWindow._station_command_value(snapshot, "scheduler_enabled", True),
+                default=True,
+            ):
                 return "Scheduler disabled"
             return f"Plan: {plan}"
         except Exception:
             return "none"
 
-    def _station_command_selected_snapshot(self, snapshots: list[object]) -> object | None:
+    @staticmethod
+    def _station_command_is_controllable_profile(profile: object) -> bool:
+        device_class = str(MainWindow._station_command_value(profile, "device_class", "tx_rx") or "tx_rx").strip().lower()
+        if device_class == "observer":
+            return False
+        backend = str(MainWindow._station_command_value(profile, "control_backend", "manual") or "manual").strip().lower()
+        return backend in SUPPORTED_RUNTIME_CONTROL_BACKENDS
+
+    def _station_command_configured_profiles(self) -> list[dict]:
+        try:
+            profiles = list(self.multi_radio_store.list_device_profiles())
+        except Exception:
+            profiles = []
+        return [dict(profile) for profile in profiles if self._station_command_is_controllable_profile(profile)]
+
+    def _station_command_selected_snapshot(self, choices: list[object]) -> object | None:
         selected_id = getattr(self, "_station_command_selected_profile_id", None)
         if selected_id not in (None, 0):
-            for snapshot in snapshots:
+            for snapshot in choices:
                 if self._station_command_snapshot_id(snapshot) == int(selected_id):
                     return snapshot
-        primary = next((snapshot for snapshot in snapshots if bool(getattr(snapshot, "runtime_primary", False))), None)
+        primary = next(
+            (
+                snapshot
+                for snapshot in choices
+                if self._station_command_bool(self._station_command_value(snapshot, "runtime_primary", False))
+            ),
+            None,
+        )
         if primary is not None:
             return primary
-        return snapshots[0] if snapshots else None
+        active = next(
+            (
+                snapshot
+                for snapshot in choices
+                if self._station_command_bool(self._station_command_value(snapshot, "runtime_active", False))
+            ),
+            None,
+        )
+        if active is not None:
+            return active
+        return choices[0] if choices else None
 
     def _refresh_station_command_bar(self, *, force: bool = False) -> None:
         if not hasattr(self, "station_command_radio_combo"):
@@ -3740,19 +3820,34 @@ class MainWindow(QMainWindow):
                 snapshots = list(manager.get_runtime_snapshots(force=force))
             except Exception:
                 snapshots = []
-        selected = self._station_command_selected_snapshot(snapshots)
+        snapshot_by_id = {self._station_command_snapshot_id(snapshot): snapshot for snapshot in snapshots}
+        choices: list[object] = []
+        seen_ids: set[int] = set()
+        for profile in self._station_command_configured_profiles():
+            ident = self._station_command_snapshot_id(profile)
+            if ident <= 0 or ident in seen_ids:
+                continue
+            choices.append(snapshot_by_id.get(ident, profile))
+            seen_ids.add(ident)
+        for snapshot in snapshots:
+            ident = self._station_command_snapshot_id(snapshot)
+            if ident > 0 and ident not in seen_ids and self._station_command_is_controllable_profile(snapshot):
+                choices.append(snapshot)
+                seen_ids.add(ident)
+
+        selected = self._station_command_selected_snapshot(choices)
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
         self._station_command_bar_loading = True
         combo = self.station_command_radio_combo
         previous_block = combo.blockSignals(True)
         try:
             combo.clear()
-            for snapshot in snapshots:
+            for snapshot in choices:
                 ident = self._station_command_snapshot_id(snapshot)
-                role = "SDR" if str(getattr(snapshot, "device_class", "") or "").strip().lower() == "observer" else "HF"
+                role = "SDR" if str(self._station_command_value(snapshot, "device_class", "") or "").strip().lower() == "observer" else "HF"
                 combo.addItem(f"{self._station_command_snapshot_name(snapshot)} ({role})", ident)
             if combo.count() <= 0:
-                combo.addItem("No active radios", 0)
+                combo.addItem("No configured radios", 0)
             for index in range(combo.count()):
                 try:
                     if int(combo.itemData(index) or 0) == int(selected_id):
@@ -3774,9 +3869,9 @@ class MainWindow(QMainWindow):
         else:
             self._station_command_selected_profile_id = None
             self.station_command_now_label.setText("Now: unavailable")
-            self.station_command_state_label.setText("State: no active radio")
+            self.station_command_state_label.setText("State: no configured radio")
             self.station_command_next_label.setText("Next: none")
-            tooltip = "No active radio is available for station commands."
+            tooltip = "No configured radio is available for station commands."
         for btn in (
             self.station_command_qsy_btn,
             self.station_command_hold_btn,
