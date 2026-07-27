@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QProgressBar,
     QPushButton,
@@ -2399,6 +2400,8 @@ class MessageViewerTab(QWidget):
             cfg.get("excluded_msg_types", [])
         )
         self._available_type_filters: List[str] = []
+        self._responsive_layout_mode = "wide"
+        self._responsive_compact_width = 1200
         msg_paths = self.settings.get("message_paths", {}) or {}
         self.watch_dirs: List[Dict] = []
         for origin in ["js8", "varac", "flmsg", "flamp"]:
@@ -3983,37 +3986,26 @@ class MessageViewerTab(QWidget):
         compose_row.addWidget(self.messages_help_btn)
         compose_row.addStretch()
 
-        inbox_row = QHBoxLayout()
-        inbox_row.setSpacing(8)
-        inbox_row.addWidget(QLabel("Received:"))
-        inbox_row.addWidget(self.received_filter)
-        inbox_row.addWidget(self.time_toggle_btn)
-        inbox_row.addWidget(self.operating_group_filter)
-        inbox_row.addWidget(self.source_filter)
-        inbox_row.addWidget(QLabel("Check:"))
-        inbox_row.addWidget(self.message_check_combo)
-        inbox_row.addWidget(self.refresh_btn)
+        self.inbox_received_label = QLabel("Received:")
+        self.inbox_check_label = QLabel("Check:")
+        self.inbox_bbs_label = QLabel("BBS:")
         self.export_selected_btn = QPushButton("Export Selected...")
         if self._export_selected_available:
             self.export_selected_btn.clicked.connect(self._export_selected_csv)
         self.export_selected_btn.setEnabled(False)
         self.export_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         self.export_selected_btn.setVisible(False)
-        inbox_row.addWidget(self.mark_all_read_btn)
-        inbox_row.addWidget(self.more_actions_btn)
-        inbox_row.addSpacing(14)
-        inbox_row.addWidget(QLabel("BBS:"))
-        inbox_row.addWidget(self.bbs_status_btn)
-        inbox_row.addWidget(self.bbs_manage_btn)
-        inbox_row.addWidget(self.message_check_status_label)
-        inbox_row.addStretch()
 
         compose_wrap = QWidget()
         compose_wrap.setLayout(compose_row)
         self._compose_tools_row = compose_wrap
         inbox_wrap = QWidget()
-        inbox_wrap.setLayout(inbox_row)
+        self._inbox_actions_layout = QGridLayout()
+        self._inbox_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self._inbox_actions_layout.setSpacing(8)
+        inbox_wrap.setLayout(self._inbox_actions_layout)
         self._inbox_actions_row = inbox_wrap
+        self._arrange_inbox_action_controls(compact=False)
 
         header_stack = QVBoxLayout()
         header_stack.setSpacing(6)
@@ -4163,6 +4155,79 @@ class MessageViewerTab(QWidget):
         self.messages_mode_stack.addWidget(self.compose_page)
         self._set_messages_mode(self._messages_mode, save=False)
         self._setup_clock_timer()
+        QTimer.singleShot(0, self._update_messages_responsive_layout)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_messages_responsive_layout()
+
+    def _messages_responsive_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < int(self._responsive_compact_width) else "wide"
+        except Exception:
+            return "wide"
+
+    def _update_messages_responsive_layout(self) -> None:
+        layout = getattr(self, "_inbox_actions_layout", None)
+        if layout is None:
+            return
+        mode = self._messages_responsive_mode_for_width(int(self.width() or 0))
+        if mode == self._responsive_layout_mode and layout.count() > 0:
+            return
+        self._responsive_layout_mode = mode
+        compact = mode == "compact"
+        self._arrange_inbox_action_controls(compact=compact)
+        if hasattr(self, "compose_splitter"):
+            self.compose_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+
+    def _arrange_inbox_action_controls(self, *, compact: bool) -> None:
+        layout = getattr(self, "_inbox_actions_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            layout.takeAt(0)
+        for col in range(14):
+            layout.setColumnStretch(col, 0)
+        if compact:
+            placements = [
+                (self.inbox_received_label, 0, 0),
+                (self.received_filter, 0, 1),
+                (self.time_toggle_btn, 0, 2),
+                (self.operating_group_filter, 0, 3),
+                (self.source_filter, 0, 4),
+                (self.inbox_check_label, 1, 0),
+                (self.message_check_combo, 1, 1),
+                (self.refresh_btn, 1, 2),
+                (self.mark_all_read_btn, 1, 3),
+                (self.more_actions_btn, 1, 4),
+                (self.inbox_bbs_label, 2, 0),
+                (self.bbs_status_btn, 2, 1),
+                (self.bbs_manage_btn, 2, 2),
+                (self.message_check_status_label, 2, 3, 1, 2),
+            ]
+        else:
+            placements = [
+                (self.inbox_received_label, 0, 0),
+                (self.received_filter, 0, 1),
+                (self.time_toggle_btn, 0, 2),
+                (self.operating_group_filter, 0, 3),
+                (self.source_filter, 0, 4),
+                (self.inbox_check_label, 0, 5),
+                (self.message_check_combo, 0, 6),
+                (self.refresh_btn, 0, 7),
+                (self.mark_all_read_btn, 0, 8),
+                (self.more_actions_btn, 0, 9),
+                (self.inbox_bbs_label, 0, 10),
+                (self.bbs_status_btn, 0, 11),
+                (self.bbs_manage_btn, 0, 12),
+                (self.message_check_status_label, 0, 13),
+            ]
+        for item in placements:
+            widget, row, col, *span = item
+            row_span, col_span = span if span else (1, 1)
+            layout.addWidget(widget, row, col, row_span, col_span)
+        layout.setColumnStretch(4, 1)
+        layout.setColumnStretch(13 if not compact else 4, 1)
 
     def _setup_clock_timer(self) -> None:
         if self._clock_timer is not None:
@@ -4336,6 +4401,7 @@ class MessageViewerTab(QWidget):
         root.addWidget(setup_box)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.compose_splitter = splitter
         field_box = QGroupBox("Form Fields")
         field_layout = QVBoxLayout(field_box)
         self.compose_field_scroll = QScrollArea()

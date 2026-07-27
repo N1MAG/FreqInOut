@@ -500,14 +500,17 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert 'self.source_filter = DropdownChecklist("Sources")' in source
     assert 'self.operating_group_filter.setObjectName("messageOperatingGroupFilter")' in source
     assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
-    assert "inbox_row.addWidget(self.time_toggle_btn)" in source
-    assert "inbox_row.addWidget(self.operating_group_filter)" in source
-    assert "inbox_row.addWidget(self.source_filter)" in source
+    assert "self._inbox_actions_layout = QGridLayout()" in source
+    assert "(self.time_toggle_btn, 0, 2)" in source
+    assert "(self.operating_group_filter, 0, 3)" in source
+    assert "(self.source_filter, 0, 4)" in source
     assert 'fallback_text="Messages uses the current radio and Frequency Plan context' not in source
     assert "self.plan_context_label.setVisible(False)" in source
     assert "def _row_matches_workspace_filters" in source
     assert "def _message_source_options" in source
     assert "def _message_group_options" in source
+    assert "def _update_messages_responsive_layout(self) -> None:" in source
+    assert "self.compose_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)" in source
 
 
 def test_phase7_hf_schedule_tabs_hide_context_sentence_and_pull_times_into_actions() -> None:
@@ -582,6 +585,50 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
 
         assert tab.source_filter.all_selected() is True
         assert tab.operating_group_filter.all_selected() is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from PySide6.QtCore import Qt
+
+    from freqinout.gui import message_viewer_tab as msg_mod
+
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_js8_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_pending_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_bbs_auto_archive_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_initial_refresh", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_refresh_compose_forms", lambda self: None)
+
+    tab = msg_mod.MessageViewerTab()
+    try:
+        tab.resize(1000, 800)
+        tab._update_messages_responsive_layout()
+        app.processEvents()
+
+        compact_layout = tab._inbox_actions_layout
+        assert tab._responsive_layout_mode == "compact"
+        assert compact_layout.itemAtPosition(0, 3).widget() is tab.operating_group_filter
+        assert compact_layout.itemAtPosition(1, 0).widget() is tab.inbox_check_label
+        assert compact_layout.itemAtPosition(2, 0).widget() is tab.inbox_bbs_label
+        assert tab.compose_splitter.orientation() == Qt.Vertical
+
+        tab.resize(1400, 900)
+        tab._update_messages_responsive_layout()
+        app.processEvents()
+
+        wide_layout = tab._inbox_actions_layout
+        assert tab._responsive_layout_mode == "wide"
+        assert wide_layout.itemAtPosition(0, 5).widget() is tab.inbox_check_label
+        assert wide_layout.itemAtPosition(0, 10).widget() is tab.inbox_bbs_label
+        assert tab.compose_splitter.orientation() == Qt.Horizontal
     finally:
         tab.deleteLater()
         app.processEvents()
