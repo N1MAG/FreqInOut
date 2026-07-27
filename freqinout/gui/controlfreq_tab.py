@@ -267,7 +267,7 @@ class ControlFreqTab(QWidget):
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         header.addWidget(self.clear_filters_btn)
 
-        self.time_toggle_btn = QPushButton("Showing: Local")
+        self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
 
@@ -333,6 +333,7 @@ class ControlFreqTab(QWidget):
         right_status_col.setContentsMargins(0, 0, 0, 0)
         right_status_col.setSpacing(6)
         self.current_time_label = QLabel("--")
+        self.current_time_label.setVisible(False)
         self.current_time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.current_time_label.setMinimumWidth(160)
         self.current_time_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1600,7 +1601,7 @@ class ControlFreqTab(QWidget):
         return list(rows)
 
     def _update_time_toggle_text(self) -> None:
-        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self.time_toggle_btn.setText("Times: Local" if self._show_local else "Times: UTC")
         self._update_time_toggle_style()
 
     def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:

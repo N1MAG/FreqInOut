@@ -2023,6 +2023,8 @@ class SettingsTab(QWidget):
 
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         header_layout.addWidget(self.utc_label)
         header_layout.addWidget(self.local_label)
         main_layout.addLayout(header_layout)

@@ -49,6 +49,7 @@ from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
+from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
@@ -225,6 +226,7 @@ class MainWindow(QMainWindow):
         self._nav_specs = [
             ("ControlFreq", "ControlFreq"),
             ("Station", "Station Overview"),
+            ("Health Details", "Station Health"),
             ("FreqPlanner", "FreqPlanner"),
             ("Messages", "Messages"),
             ("Map", "Map"),
@@ -237,7 +239,6 @@ class MainWindow(QMainWindow):
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("SOP Builder", "SOP"),
-            ("Station Health", "Station Health"),
             ("Settings", "Settings"),
             ("Help", "Help"),
         ]
@@ -257,6 +258,27 @@ class MainWindow(QMainWindow):
         self.logo_label.setAlignment(Qt.AlignCenter)
         nav_main_layout.addWidget(self.logo_label)
         self._set_logo_pixmap()
+
+        # Global clock stays visible above navigation so individual tabs do not
+        # need to compete for live Local/UTC clock space.
+        self.ledge_clock_widget = QFrame(self.nav_widget)
+        self.ledge_clock_widget.setObjectName("mainLedgeClock")
+        self.ledge_clock_widget.setFrameShape(QFrame.StyledPanel)
+        self.ledge_clock_widget.setAccessibleName("Local and UTC clock")
+        ledge_clock_layout = QVBoxLayout(self.ledge_clock_widget)
+        ledge_clock_layout.setContentsMargins(6, 5, 6, 5)
+        ledge_clock_layout.setSpacing(2)
+        self.ledge_local_time_label = QLabel("Local --")
+        self.ledge_local_time_label.setObjectName("ledgeLocalTime")
+        self.ledge_local_time_label.setAlignment(Qt.AlignCenter)
+        self.ledge_local_time_label.setAccessibleName("Local time")
+        self.ledge_utc_time_label = QLabel("UTC --")
+        self.ledge_utc_time_label.setObjectName("ledgeUtcTime")
+        self.ledge_utc_time_label.setAlignment(Qt.AlignCenter)
+        self.ledge_utc_time_label.setAccessibleName("UTC time")
+        ledge_clock_layout.addWidget(self.ledge_local_time_label)
+        ledge_clock_layout.addWidget(self.ledge_utc_time_label)
+        nav_main_layout.addWidget(self.ledge_clock_widget)
 
         # Scrollable navigation zone (buttons + map filters + group toggles).
         self.nav_scroll = QScrollArea(self.nav_widget)
@@ -284,7 +306,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["NCS", "Schedules", "Operators"]
+        self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
 
         for nav_idx, (button_label, screen_label) in enumerate(self._nav_specs):
@@ -623,6 +645,11 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._refresh_station_health_alert)
         self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
+        self._ledge_clock_timer = QTimer(self)
+        self._ledge_clock_timer.setInterval(1000)
+        self._ledge_clock_timer.timeout.connect(self._update_ledge_clock)
+        self._ledge_clock_timer.start()
+        self._update_ledge_clock()
         self._condition_levels_refresh_timer = QTimer(self)
         self._condition_levels_refresh_timer.setSingleShot(True)
         self._condition_levels_refresh_timer.setInterval(90)
@@ -2398,6 +2425,26 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+    def _update_ledge_clock(self) -> None:
+        if not hasattr(self, "ledge_local_time_label") or not hasattr(self, "ledge_utc_time_label"):
+            return
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        utc_day = now_utc.strftime("%a")
+        utc_text = now_utc.strftime(f"UTC {utc_day} %H:%M:%S Z")
+        try:
+            tz_name = str(self.settings.get("timezone", "UTC") or "UTC")
+            tz = get_timezone(tz_name)
+            now_local = now_utc.astimezone(tz)
+            local_day = now_local.strftime("%a")
+            abbr = now_local.tzname() or tz_name
+            local_text = now_local.strftime(f"Local {local_day} %H:%M:%S {abbr}")
+        except Exception:
+            local_text = "Local --"
+        self.ledge_local_time_label.setText(local_text)
+        self.ledge_utc_time_label.setText(utc_text)
+        self.ledge_local_time_label.setToolTip(local_text)
+        self.ledge_utc_time_label.setToolTip(utc_text)
+
     def _update_scheduler_action_button_widths(self) -> None:
         buttons = [
             getattr(self, "resume_schedule_btn", None),
@@ -2467,6 +2514,7 @@ class MainWindow(QMainWindow):
         for container in (
             getattr(self, "scheduler_status_container", None),
             getattr(self, "condition_level_container", None),
+            getattr(self, "ledge_clock_widget", None),
         ):
             if container is None:
                 continue
@@ -2796,6 +2844,10 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "condition_levels_edit_btn"):
                 self._style_condition_levels_edit_action(theme)
+        except Exception:
+            pass
+        try:
+            self._style_ledge_clock(theme)
         except Exception:
             pass
         if hasattr(self, "map_prop_badge"):
@@ -3900,15 +3952,17 @@ class MainWindow(QMainWindow):
 
     def _load_nav_group_states(self) -> dict[str, bool]:
         # Default to collapsed sections for first-run clarity on smaller windows.
-        defaults = {"NCS": False, "Schedules": False, "Operators": False}
+        defaults = {"Station": False, "FreqPlanner": False, "NCS": False, "Operators": False}
         try:
             raw = self.settings.get("main_nav_group_states", {}) or {}
         except Exception:
             raw = {}
         if isinstance(raw, dict):
             # Backward compatibility for prior key name.
-            if "Schedules" not in raw and "Schedule" in raw:
-                raw["Schedules"] = raw.get("Schedule")
+            if "FreqPlanner" not in raw and "Schedules" in raw:
+                raw["FreqPlanner"] = raw.get("Schedules")
+            if "FreqPlanner" not in raw and "Schedule" in raw:
+                raw["FreqPlanner"] = raw.get("Schedule")
             for key in defaults:
                 if key in raw:
                     defaults[key] = bool(raw.get(key))
@@ -3925,15 +3979,17 @@ class MainWindow(QMainWindow):
         screen = str(screen_label or "").strip()
         if screen in {"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}:
             return "NCS"
+        if screen == "Station Health":
+            return "Station"
         if screen in {"HF Schedule", "Net Schedule", "Peer Schedules"}:
-            return "Schedules"
+            return "FreqPlanner"
         if screen in {"HF Operators", "Local Operators"}:
             return "Operators"
         txt = str(button_label or "").strip()
         if txt.startswith("NCS -"):
             return "NCS"
         if txt.startswith("Schedule -"):
-            return "Schedules"
+            return "FreqPlanner"
         if txt.startswith("Operators -"):
             return "Operators"
         return ""
@@ -4336,6 +4392,32 @@ class MainWindow(QMainWindow):
         save_btn.clicked.connect(_save)
         cancel_btn.clicked.connect(dlg.reject)
         dlg.exec()
+
+    def _style_ledge_clock(self, theme: dict[str, str] | None = None) -> None:
+        if not hasattr(self, "ledge_clock_widget"):
+            return
+        palette = theme or resolve_theme(self.settings)
+        border = palette.get("border", "#D0D7DE")
+        panel = palette.get("panel", palette.get("background", "#FFFFFF"))
+        text = palette.get("text", "#202124")
+        muted = palette.get("muted", "#5F6368")
+        self.ledge_clock_widget.setStyleSheet(
+            f"""
+            QFrame#mainLedgeClock {{
+                background: {panel};
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QLabel#ledgeLocalTime {{
+                color: {text};
+                font-weight: 600;
+            }}
+            QLabel#ledgeUtcTime {{
+                color: {muted};
+                font-weight: 600;
+            }}
+            """
+        )
 
     def _set_screen(self, index: int) -> None:
         with perf_span(

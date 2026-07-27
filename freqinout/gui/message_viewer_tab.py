@@ -3802,7 +3802,9 @@ class MessageViewerTab(QWidget):
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
-        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local_time else "Showing: UTC")
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
+        self.time_toggle_btn = QPushButton("Times: Local" if self._show_local_time else "Times: UTC")
         self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.utc_label)
@@ -4169,7 +4171,7 @@ class MessageViewerTab(QWidget):
         local_day = now_local.strftime("%a")
         self.local_label.setText(now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {local_abbr}"))
         if hasattr(self, "time_toggle_btn"):
-            self.time_toggle_btn.setText("Showing: Local" if self._show_local_time else "Showing: UTC")
+            self.time_toggle_btn.setText("Times: Local" if self._show_local_time else "Times: UTC")
 
     def _build_compose_page(self) -> QWidget:
         page = QWidget()
@@ -7781,13 +7783,13 @@ class MessageViewerTab(QWidget):
         mode = self._current_time_mode()
         tz_name, tz_abbr = self._current_timezone_label()
         if mode == "UTC":
-            self.time_toggle_btn.setText("Showing: UTC")
+            self.time_toggle_btn.setText("Times: UTC")
             self._messages_model.set_time_header("RCV_DT (UTC)")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
             )
         else:
-            self.time_toggle_btn.setText("Showing: Local")
+            self.time_toggle_btn.setText("Times: Local")
             self._messages_model.set_time_header(f"RCV_DT ({tz_abbr})")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", f"Last Seen ({tz_abbr})", "Status", "Actions"]
@@ -7820,7 +7822,7 @@ class MessageViewerTab(QWidget):
         local_day = now_local.strftime("%a")
         self.local_label.setText(now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {local_abbr}"))
         if hasattr(self, "time_toggle_btn"):
-            self.time_toggle_btn.setText("Showing: Local" if self._show_local_time else "Showing: UTC")
+            self.time_toggle_btn.setText("Times: Local" if self._show_local_time else "Times: UTC")
 
     def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
         if theme is None:

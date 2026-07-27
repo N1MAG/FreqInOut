@@ -416,9 +416,11 @@ class DailyScheduleTab(QWidget):
         # UTC / Local labels like net_schedule_tab
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
-        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local else "Showing: UTC")
+        self.time_toggle_btn = QPushButton("Times: Local" if self._show_local else "Times: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
@@ -755,7 +757,7 @@ class DailyScheduleTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {ui_abbr}")
         )
-        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self.time_toggle_btn.setText("Times: Local" if self._show_local else "Times: UTC")
         self._update_time_toggle_style()
         self._update_effective_source_label()
 

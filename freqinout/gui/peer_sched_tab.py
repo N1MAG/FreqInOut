@@ -459,7 +459,7 @@ class PeerSchedTab(QWidget):
         header.addStretch()
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setToolTip("Reload peer schedule data from the database.")
-        self.tz_toggle_btn = QPushButton("Showing: UTC")
+        self.tz_toggle_btn = QPushButton("Times: UTC")
         self.tz_toggle_btn.setToolTip("Switch the table between UTC and local time display.")
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open HF Peers help.")
@@ -558,7 +558,7 @@ class PeerSchedTab(QWidget):
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-peers"))
         self.table.cellClicked.connect(self._on_table_cell_clicked)
         self.table.itemSelectionChanged.connect(self._update_row_action_state)
-        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
+        self.tz_toggle_btn.setText("Times: Local" if self._show_local_times else "Times: UTC")
         self._apply_theme()
         self._update_delete_button_state()
         self._update_row_action_state()
@@ -1204,7 +1204,7 @@ class PeerSchedTab(QWidget):
 
     def _toggle_timezone_view(self) -> None:
         self._show_local_times = not self._show_local_times
-        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
+        self.tz_toggle_btn.setText("Times: Local" if self._show_local_times else "Times: UTC")
         self._set_time_headers()
         self._update_timezone_button_style()
         self._apply_filters()
