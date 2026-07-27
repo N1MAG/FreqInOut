@@ -255,15 +255,53 @@ def test_phase7_hf_peers_uses_view_edit_selected_row_wording() -> None:
 def test_phase7_hf_peers_keeps_times_in_filter_row_not_title_header() -> None:
     source = Path("freqinout/gui/peer_sched_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("# Table")]
-    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("action_row = QHBoxLayout()")]
-    action_block = build_block[build_block.index("action_row = QHBoxLayout()") : build_block.index("cleanup_row = QHBoxLayout()")]
-    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("self.schedule_source_label")]
+    action_block = build_block[build_block.index("self.schedule_source_label") : build_block.index("self.cleanup_label")]
+    filter_block = build_block[build_block.index("self.callsign_filter_label") :]
 
     assert "header.addWidget(self.help_btn)" in header_block
     assert "header.addWidget(self.refresh_btn)" not in header_block
     assert "header.addWidget(self.tz_toggle_btn)" not in header_block
-    assert "action_row.addWidget(self.refresh_btn)" in action_block
-    assert "filter_row.addWidget(self.tz_toggle_btn)" in filter_block
+    assert "self._peer_action_layout = QGridLayout()" in action_block
+    assert "(self.refresh_btn, 0, 3)" in source
+    assert "self._peer_filter_layout = QGridLayout()" in filter_block
+    assert "(self.tz_toggle_btn, 0, 9)" in source
+    assert "(self.tz_toggle_btn, 1, 6)" in source
+    assert "def _update_peer_responsive_layout(self) -> None:" in source
+
+
+def test_phase7_hf_peers_action_rows_reflow_at_compact_width(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.peer_sched_tab import PeerSchedTab
+
+    monkeypatch.setattr(PeerSchedTab, "_load_operator_meta", lambda self: None)
+    monkeypatch.setattr(PeerSchedTab, "_load_data", lambda self: None)
+
+    tab = PeerSchedTab()
+    try:
+        tab.resize(1000, 800)
+        tab._update_peer_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "compact"
+        assert tab._peer_action_layout.itemAtPosition(1, 0).widget() is tab.selected_row_label
+        assert tab._peer_filter_layout.itemAtPosition(1, 0).widget() is tab.search_filter_label
+        assert tab._peer_filter_layout.itemAtPosition(1, 6).widget() is tab.tz_toggle_btn
+
+        tab.resize(1400, 900)
+        tab._update_peer_responsive_layout()
+        app.processEvents()
+
+        assert tab._responsive_layout_mode == "wide"
+        assert tab._peer_action_layout.itemAtPosition(0, 4).widget() is tab.selected_row_label
+        assert tab._peer_filter_layout.itemAtPosition(0, 6).widget() is tab.search_filter_label
+        assert tab._peer_filter_layout.itemAtPosition(0, 9).widget() is tab.tz_toggle_btn
+    finally:
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
