@@ -302,6 +302,17 @@ def test_phase7_logs_use_header_and_inline_filter_row_search() -> None:
     assert "QMessageBox.information" not in search_block
 
 
+def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() -> None:
+    source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("self.frequency_plan_summary_label")]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("layout.addLayout(header)")]
+    plan_block = build_block[build_block.index("plan_workspace = QHBoxLayout()") :]
+
+    assert "header.addWidget(self.time_toggle_btn)" not in header_block
+    assert "self.plan_context_label.setVisible(False)" in build_block
+    assert "plan_workspace.addWidget(self.time_toggle_btn)" in plan_block
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")

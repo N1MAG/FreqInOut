@@ -107,7 +107,6 @@ class FreqPlannerTab(QWidget):
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
-        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         self.plan_context_label = PlanContextLabel(
@@ -118,15 +117,18 @@ class FreqPlannerTab(QWidget):
         self.plan_context_label.setToolTip(
             "Use FreqPlanner to verify where and when the saved plan expects activity. Edit the source rows in HF Daily, HF Nets, SOP Builder, or Settings."
         )
+        self.plan_context_label.setVisible(False)
         layout.addWidget(self.plan_context_label)
         self.plan_context_label.refresh_context(refresh=True)
 
         plan_workspace = QHBoxLayout()
+        plan_workspace.setSpacing(8)
         plan_workspace.addWidget(QLabel("Frequency Plan:"))
         self.frequency_plan_combo = QComboBox()
         self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")
         self.frequency_plan_combo.currentIndexChanged.connect(self._on_frequency_plan_selected)
         plan_workspace.addWidget(self.frequency_plan_combo, 1)
+        plan_workspace.addWidget(self.time_toggle_btn)
         self.save_plan_btn = QPushButton("Save Plan")
         self.assign_plan_btn = QPushButton("Assign Plan")
         self.make_active_plan_btn = QPushButton("Make Active")
