@@ -92,6 +92,8 @@ class LocalNCSTab(QWidget):
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         layout.addLayout(header)

@@ -62,9 +62,13 @@ def test_phase7_high_use_tabs_hide_duplicate_live_clocks() -> None:
         "messages": Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8"),
         "hf_daily": Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8"),
         "hf_nets": Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8"),
+        "sop": Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8"),
+        "fldigi_ncs": Path("freqinout/gui/fldigi_net_control_tab.py").read_text(encoding="utf-8"),
+        "js8_ncs": Path("freqinout/gui/js8call_net_control_tab.py").read_text(encoding="utf-8"),
+        "local_ncs": Path("freqinout/gui/local_ncs_tab.py").read_text(encoding="utf-8"),
     }
 
-    for key in ("settings", "freqplanner", "messages", "hf_daily", "hf_nets"):
+    for key in ("settings", "freqplanner", "messages", "hf_daily", "hf_nets", "sop", "fldigi_ncs", "js8_ncs", "local_ncs"):
         assert "self.utc_label.setVisible(False)" in sources[key]
         assert "self.local_label.setVisible(False)" in sources[key]
 
@@ -79,6 +83,7 @@ def test_phase7_table_time_toggles_use_times_wording() -> None:
         "freqinout/gui/daily_schedule_tab.py",
         "freqinout/gui/net_schedule_tab.py",
         "freqinout/gui/peer_sched_tab.py",
+        "freqinout/gui/sop_tab.py",
     ]
     combined = "\n".join(Path(path).read_text(encoding="utf-8") for path in source_paths)
 

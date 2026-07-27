@@ -224,6 +224,8 @@ class FldigiNetControlTab(QWidget):
         title_row.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.utc_label.setVisible(False)
+        self.local_label.setVisible(False)
         title_row.addWidget(self.utc_label)
         title_row.addWidget(self.local_label)
         self.total_checkins_label = QLabel("Total Check-ins: 0")
