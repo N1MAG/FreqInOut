@@ -516,6 +516,7 @@ class MainWindow(QMainWindow):
         self.station_command_now_label.setWordWrap(False)
         self.station_command_now_label.setMinimumWidth(0)
         self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.station_command_now_label.setToolTip("Current frequency/control target. Frequency selection will expand here in a later slice.")
         self.station_command_state_label = QLabel("State: unknown")
         self.station_command_state_label.setObjectName("stationCommandState")
         self.station_command_state_label.setWordWrap(False)
@@ -526,6 +527,14 @@ class MainWindow(QMainWindow):
         self.station_command_next_label.setWordWrap(False)
         self.station_command_next_label.setMinimumWidth(0)
         self.station_command_next_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.station_command_duration_combo = QComboBox(self.station_command_bar)
+        self.station_command_duration_combo.setObjectName("stationCommandDuration")
+        self.station_command_duration_combo.addItems(["30 min", "15 min", "1 hr", "2 hr", "Manual"])
+        self.station_command_duration_combo.setToolTip(
+            "Duration for future QSY/Hold/Suspend actions. Manual means hold until the operator changes it."
+        )
+        self.station_command_duration_combo.setEnabled(False)
+        self.station_command_duration_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.station_command_qsy_btn = QPushButton("QSY...")
         self.station_command_qsy_btn.setObjectName("stationCommandQsy")
         self.station_command_hold_btn = QPushButton("Hold")
@@ -2921,12 +2930,20 @@ class MainWindow(QMainWindow):
         )
         for label in (
             getattr(self, "station_command_radio_label", None),
-            getattr(self, "station_command_now_label", None),
             getattr(self, "station_command_state_label", None),
             getattr(self, "station_command_next_label", None),
         ):
             if label is not None:
                 label.setStyleSheet(f"background: transparent; color: {text}; font-weight: 600;")
+        if getattr(self, "station_command_now_label", None) is not None:
+            self.station_command_now_label.setStyleSheet(
+                "QLabel#stationCommandNow {"
+                f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
+                f"border: 1px solid {border}; border-radius: 5px; padding: 5px 8px; font-weight: 700;"
+                "}"
+            )
+        if getattr(self, "station_command_duration_combo", None) is not None:
+            self.station_command_duration_combo.setStyleSheet(f"color: {muted};")
         for btn in (
             getattr(self, "station_command_qsy_btn", None),
             getattr(self, "station_command_hold_btn", None),
@@ -2957,6 +2974,7 @@ class MainWindow(QMainWindow):
             self.station_command_now_label,
             self.station_command_state_label,
             self.station_command_next_label,
+            self.station_command_duration_combo,
             self.station_command_qsy_btn,
             self.station_command_hold_btn,
             self.station_command_suspend_btn,
@@ -2971,28 +2989,29 @@ class MainWindow(QMainWindow):
             self.station_command_state_label.setWordWrap(False)
             self.station_command_next_label.setWordWrap(False)
             layout.addWidget(self.station_command_radio_label, 0, 0)
-            layout.addWidget(self.station_command_radio_combo, 0, 1, 1, 3)
-            layout.addWidget(self.station_command_now_label, 1, 0, 1, 2)
-            layout.addWidget(self.station_command_state_label, 1, 2, 1, 2)
-            layout.addWidget(self.station_command_next_label, 2, 0, 1, 4)
-            layout.addWidget(self.station_command_qsy_btn, 3, 0)
-            layout.addWidget(self.station_command_hold_btn, 3, 1)
-            layout.addWidget(self.station_command_suspend_btn, 3, 2)
-            layout.addWidget(self.station_command_resume_btn, 3, 3)
-            layout.setColumnStretch(3, 1)
+            layout.addWidget(self.station_command_radio_combo, 0, 1)
+            layout.addWidget(self.station_command_now_label, 0, 2, 1, 2)
+            layout.addWidget(self.station_command_duration_combo, 1, 0)
+            layout.addWidget(self.station_command_qsy_btn, 1, 1)
+            layout.addWidget(self.station_command_hold_btn, 1, 2)
+            layout.addWidget(self.station_command_suspend_btn, 1, 3)
+            layout.addWidget(self.station_command_resume_btn, 1, 4)
+            layout.addWidget(self.station_command_state_label, 2, 0, 1, 2)
+            layout.addWidget(self.station_command_next_label, 2, 2, 1, 3)
+            layout.setColumnStretch(4, 1)
         else:
             layout.addWidget(self.station_command_radio_label, 0, 0)
             layout.addWidget(self.station_command_radio_combo, 0, 1)
-            layout.addWidget(self.station_command_now_label, 0, 2)
-            layout.addWidget(self.station_command_state_label, 0, 3)
-            layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)
-            layout.addWidget(self.station_command_qsy_btn, 1, 5)
-            layout.addWidget(self.station_command_hold_btn, 1, 6)
-            layout.addWidget(self.station_command_suspend_btn, 1, 7)
-            layout.addWidget(self.station_command_resume_btn, 1, 8)
-            layout.setColumnStretch(2, 1)
+            layout.addWidget(self.station_command_now_label, 0, 2, 1, 2)
+            layout.addWidget(self.station_command_duration_combo, 0, 4)
+            layout.addWidget(self.station_command_qsy_btn, 0, 5)
+            layout.addWidget(self.station_command_hold_btn, 0, 6)
+            layout.addWidget(self.station_command_suspend_btn, 0, 7)
+            layout.addWidget(self.station_command_resume_btn, 0, 8)
+            layout.addWidget(self.station_command_state_label, 1, 0, 1, 2)
+            layout.addWidget(self.station_command_next_label, 1, 2, 1, 5)
             layout.setColumnStretch(3, 1)
-            layout.setColumnStretch(4, 2)
+            layout.setColumnStretch(9, 2)
 
     def _apply_app_theme(self):
         app = QApplication.instance()
