@@ -254,8 +254,10 @@ def test_phase7_hf_peers_uses_view_edit_selected_row_wording() -> None:
 
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
 
     assert 'self.station_command_bar.setObjectName("stationCommandBar")' in source
+    assert 'self.station_command_radio_label.setObjectName("stationCommandRadioLabel")' in source
     assert 'self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")' in source
     assert 'self.station_command_qsy_btn.setObjectName("stationCommandQsy")' in source
     assert 'self.station_command_hold_btn.setObjectName("stationCommandHold")' in source
@@ -265,6 +267,14 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
     assert "right_layout.setSpacing(10)" in source
     assert "border-bottom: 2px solid" in source
+    assert "station_control_surface" in source
+    assert "station_control_border" in source
+    assert "station_control_text" in source
+    assert "station_control_muted" in source
+    assert "QFrame#stationCommandBar QLabel" in source
+    assert "background: transparent; color:" in source
+    assert '"station_control_surface": "#D7EAF8"' in theme_source
+    assert '"station_control_surface": "#12324A"' in theme_source
     assert "self._status_timer.timeout.connect(self._refresh_station_overview)" in source
     assert "self._refresh_station_command_bar(force=False)" in source
     assert "btn.setEnabled(False)" in source

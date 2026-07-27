@@ -508,7 +508,9 @@ class MainWindow(QMainWindow):
         command_layout = QHBoxLayout(self.station_command_bar)
         command_layout.setContentsMargins(10, 8, 10, 8)
         command_layout.setSpacing(8)
-        command_layout.addWidget(QLabel("Radio"), 0)
+        self.station_command_radio_label = QLabel("Radio")
+        self.station_command_radio_label.setObjectName("stationCommandRadioLabel")
+        command_layout.addWidget(self.station_command_radio_label, 0)
         self.station_command_radio_combo = QComboBox(self.station_command_bar)
         self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")
         self.station_command_radio_combo.setMinimumWidth(140)
@@ -2886,23 +2888,26 @@ class MainWindow(QMainWindow):
     def _style_station_command_bar(self, theme: dict) -> None:
         if not hasattr(self, "station_command_bar"):
             return
-        border = theme.get("border", "#CDD6E0")
-        surface = theme.get("surface", "#FFFFFF")
-        surface_alt = theme.get("surface_alt", "#F6F8FA")
-        text = theme.get("text", "#222222")
-        muted = theme.get("text_muted", "#6A737D")
+        border = theme.get("station_control_border", theme.get("accent", "#2E6F9E"))
+        surface = theme.get("station_control_surface", theme.get("surface_alt", "#F6F8FA"))
+        text = theme.get("station_control_text", theme.get("text", "#222222"))
+        muted = theme.get("station_control_muted", theme.get("text_muted", "#6A737D"))
         self.station_command_bar.setStyleSheet(
             "QFrame#stationCommandBar {"
-            f"background: {surface_alt}; border: 1px solid {border}; border-bottom: 2px solid {border}; border-radius: 6px;"
+            f"background: {surface}; border: 1px solid {border}; border-bottom: 2px solid {border}; border-radius: 6px;"
+            "}"
+            "QFrame#stationCommandBar QLabel {"
+            f"background: transparent; color: {text};"
             "}"
         )
         for label in (
+            getattr(self, "station_command_radio_label", None),
             getattr(self, "station_command_now_label", None),
             getattr(self, "station_command_state_label", None),
             getattr(self, "station_command_next_label", None),
         ):
             if label is not None:
-                label.setStyleSheet(f"color: {text}; font-weight: 600;")
+                label.setStyleSheet(f"background: transparent; color: {text}; font-weight: 600;")
         for btn in (
             getattr(self, "station_command_qsy_btn", None),
             getattr(self, "station_command_hold_btn", None),
