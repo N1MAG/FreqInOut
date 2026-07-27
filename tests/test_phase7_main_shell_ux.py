@@ -313,6 +313,23 @@ def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() 
     assert "plan_workspace.addWidget(self.time_toggle_btn)" in plan_block
 
 
+def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("header = QHBoxLayout()") : source.index("self.readiness_review_widget = QWidget()")]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QHBoxLayout()")]
+    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+
+    assert "header.addWidget(self.help_btn)" in header_block
+    assert "header.addWidget(self.search_edit" not in header_block
+    assert "header.addWidget(self.time_toggle_btn" not in header_block
+    assert "filter_row.addWidget(self.search_edit" in filter_block
+    assert "filter_row.addWidget(self.group_combo)" in filter_block
+    assert "filter_row.addWidget(self.refresh_btn)" in filter_block
+    assert "filter_row.addWidget(self.clear_filters_btn)" in filter_block
+    assert "filter_row.addWidget(self.time_toggle_btn)" in filter_block
+    assert "self.plan_context_label.setVisible(False)" in filter_block
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")

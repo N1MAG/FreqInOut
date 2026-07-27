@@ -246,36 +246,40 @@ class ControlFreqTab(QWidget):
         header.addWidget(self.help_btn)
 
         header.addStretch(1)
+        root.addLayout(header)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by keyword...")
         self.search_edit.textChanged.connect(self._on_filters_changed)
         self.search_edit.setMinimumWidth(340)
         self.search_edit.setMaximumWidth(420)
-        header.addWidget(self.search_edit)
+        filter_row.addWidget(self.search_edit, 1)
 
         self.group_combo = QComboBox()
         self.group_combo.setMinimumWidth(180)
         self.group_combo.currentIndexChanged.connect(self._on_filters_changed)
-        header.addWidget(self.group_combo)
+        filter_row.addWidget(self.group_combo)
 
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_all)
-        header.addWidget(self.refresh_btn)
+        filter_row.addWidget(self.refresh_btn)
 
         self.clear_filters_btn = QPushButton("Clear Filters")
         self.clear_filters_btn.clicked.connect(self._clear_filters)
-        header.addWidget(self.clear_filters_btn)
+        filter_row.addWidget(self.clear_filters_btn)
 
         self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.time_toggle_btn)
+        filter_row.addWidget(self.time_toggle_btn)
 
         self.focus_mode_btn = QPushButton("Focus Mode: Off")
         self.focus_mode_btn.clicked.connect(self._toggle_focus_mode)
         self.focus_mode_btn.setVisible(False)
 
-        root.addLayout(header)
+        root.addLayout(filter_row)
 
         controlfreq_context_text = (
             "ControlFreq uses the current radio and Frequency Plan context when reviewing schedule control."
@@ -289,6 +293,7 @@ class ControlFreqTab(QWidget):
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan ControlFreq is displaying."
         )
+        self.plan_context_label.setVisible(False)
         root.addWidget(self.plan_context_label)
         if self.plan_context_service is not None:
             self.plan_context_label.refresh_context(refresh=True)
