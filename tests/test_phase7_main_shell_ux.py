@@ -125,6 +125,66 @@ def test_phase7_table_time_toggles_use_times_wording() -> None:
     assert "Showing: UTC" not in combined
 
 
+def test_phase7_hf_nets_uses_compact_default_with_view_edit_details() -> None:
+    source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert "COMPACT_VISIBLE_COLUMNS = frozenset(" in source
+    assert 'self.view_edit_btn = QPushButton("View/Edit")' in source
+    assert "self.view_edit_btn.setCheckable(True)" in source
+    assert "self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)" in source
+    assert "def _apply_compact_schedule_view" in source
+    assert "self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)" in source
+    assert "Show all editable fields for the selected net schedule rows." in source
+    assert "Hide advanced schedule fields for normal net scanning." in source
+
+
+def test_phase7_hf_nets_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import net_schedule_tab as net_mod
+
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_bootstrap_net_resources", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_load_resources_from_db", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resource_set_combo", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resources_table", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_schedule_net_sop_conflict_refresh", lambda self, **_kwargs: None)
+
+    tab = net_mod.NetScheduleTab()
+    try:
+        assert tab.view_edit_btn.text() == "View/Edit"
+        assert tab.view_edit_btn.isCheckable() is True
+        assert tab.view_edit_btn.isChecked() is False
+
+        assert tab.table.isColumnHidden(tab.COL_RECURRENCE) is True
+        assert tab.table.isColumnHidden(tab.COL_MONTH_WEEKS) is True
+        assert tab.table.isColumnHidden(tab.COL_FLDIGI_MODE) is True
+        assert tab.table.isColumnHidden(tab.COL_AUTOTUNE) is True
+        assert tab.table.isColumnHidden(tab.COL_NETNAME) is False
+        assert tab.table.isColumnHidden(tab.COL_START) is False
+        assert tab.table.isColumnHidden(tab.COL_END) is False
+        assert tab.table.isColumnHidden(tab.COL_FREQ) is False
+        assert tab.table.isColumnHidden(tab.COL_TARGET) is False
+
+        tab.view_edit_btn.setChecked(True)
+        app.processEvents()
+
+        assert all(not tab.table.isColumnHidden(col) for col in range(tab.table.columnCount()))
+        assert "Hide advanced" in tab.view_edit_btn.toolTip()
+
+        tab.view_edit_btn.setChecked(False)
+        app.processEvents()
+
+        assert tab.table.isColumnHidden(tab.COL_RECURRENCE) is True
+        assert tab.table.isColumnHidden(tab.COL_NETNAME) is False
+        assert "Show all editable" in tab.view_edit_btn.toolTip()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 

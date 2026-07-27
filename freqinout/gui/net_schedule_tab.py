@@ -214,6 +214,20 @@ class NetScheduleTab(QWidget):
     COL_AUTOTUNE = 14
     COL_TARGET_SCOPE = 15
     COL_TARGET = 16
+    COMPACT_VISIBLE_COLUMNS = frozenset(
+        {
+            COL_SELECT,
+            COL_DAY,
+            COL_GROUP,
+            COL_MODE,
+            COL_BAND,
+            COL_FREQ,
+            COL_START,
+            COL_END,
+            COL_NETNAME,
+            COL_TARGET,
+        }
+    )
 
     RES_COL_SOURCE = 0
     RES_COL_SET = 1
@@ -336,11 +350,15 @@ class NetScheduleTab(QWidget):
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton("Add Row")
         self.del_btn = QPushButton("Delete Selected")
+        self.view_edit_btn = QPushButton("View/Edit")
+        self.view_edit_btn.setCheckable(True)
+        self.view_edit_btn.setToolTip("Show or hide the full editable net schedule fields.")
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.export_btn = QPushButton("Export Net Schedule")
         self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
         btn_row.addWidget(self.add_btn)
         btn_row.addWidget(self.del_btn)
+        btn_row.addWidget(self.view_edit_btn)
         btn_row.addWidget(self.move_to_resources_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.manage_net_sop_policies_btn)
@@ -437,6 +455,7 @@ class NetScheduleTab(QWidget):
         # signals
         self.add_btn.clicked.connect(self._add_row)
         self.del_btn.clicked.connect(self._delete_rows)
+        self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
         self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
         self.export_btn.clicked.connect(self._export_schedule)
         self.save_btn.clicked.connect(self._save)
@@ -458,6 +477,7 @@ class NetScheduleTab(QWidget):
         self._update_clock_labels()
         self._setup_clock_timer()
         self._apply_theme()
+        self._apply_compact_schedule_view(False)
         self._resize_table_columns()
         self._update_delete_button_state()
         self._update_resource_action_state()
@@ -472,6 +492,26 @@ class NetScheduleTab(QWidget):
             self.resources_table.resizeColumnsToContents()
         except Exception:
             pass
+
+    def _apply_compact_schedule_view(self, show_all: bool | None = None) -> None:
+        if not hasattr(self, "table"):
+            return
+        if show_all is None:
+            show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
+        for col in range(self.table.columnCount()):
+            self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setToolTip(
+                "Hide advanced schedule fields for normal net scanning."
+                if show_all
+                else "Show all editable fields for the selected net schedule rows."
+            )
+            try:
+                self.view_edit_btn.setStyleSheet(
+                    button_style("info" if show_all else "muted", resolve_theme(self.settings))
+                )
+            except Exception:
+                pass
 
     def _refresh_schedule_target_catalogs(self) -> None:
         try:
@@ -659,6 +699,8 @@ class NetScheduleTab(QWidget):
         self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.add_btn.setStyleSheet(button_style("primary", theme))
         self.del_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setStyleSheet(button_style("info" if self.view_edit_btn.isChecked() else "muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("info", theme))
         self.manage_net_sop_policies_btn.setStyleSheet(button_style("muted", theme))
