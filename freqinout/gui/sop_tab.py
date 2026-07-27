@@ -398,7 +398,6 @@ class _LegacySOPTab(QWidget):
         title_row.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        title_row.addWidget(self.time_toggle_btn)
         root.addLayout(title_row)
 
         self.plan_context_label = PlanContextLabel(
@@ -409,15 +408,18 @@ class _LegacySOPTab(QWidget):
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan SOP work should be reviewed against."
         )
+        self.plan_context_label.setVisible(False)
         root.addWidget(self.plan_context_label)
         self.plan_context_label.refresh_context(refresh=True)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         self.profile_combo = QComboBox()
         self.profile_combo.setPlaceholderText("Select existing or add new...")
         self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
         header.addWidget(QLabel("SOP:"))
         header.addWidget(self.profile_combo, stretch=1)
+        header.addWidget(self.time_toggle_btn)
 
         self.new_btn = QPushButton("New")
         self.save_btn = QPushButton("Save")
@@ -4201,7 +4203,6 @@ class SOPTab(_LegacySOPTab):
         title_row.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        title_row.addWidget(self.time_toggle_btn)
         root.addLayout(title_row)
 
         self.plan_context_label = PlanContextLabel(
@@ -4212,6 +4213,7 @@ class SOPTab(_LegacySOPTab):
         self.plan_context_label.setToolTip(
             "Use this context to confirm which radio and assigned Frequency Plan SOP work should be reviewed against."
         )
+        self.plan_context_label.setVisible(False)
         root.addWidget(self.plan_context_label)
         self.plan_context_label.refresh_context(refresh=True)
         self.operating_plan_inputs_label = QLabel("")
@@ -4224,10 +4226,12 @@ class SOPTab(_LegacySOPTab):
         self._refresh_operating_plan_inputs_summary()
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         self.profile_combo = QComboBox()
         self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
         header.addWidget(QLabel("Manage SOP:"))
         header.addWidget(self.profile_combo, stretch=1)
+        header.addWidget(self.time_toggle_btn)
 
         self.new_btn = QPushButton("New SOP")
         self.save_btn = QPushButton("Save")

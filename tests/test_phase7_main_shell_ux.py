@@ -330,6 +330,15 @@ def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
     assert "self.plan_context_label.setVisible(False)" in filter_block
 
 
+def test_phase7_sop_moves_times_into_management_rows_and_hides_context() -> None:
+    source = Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
+
+    assert source.count("title_row.addWidget(self.time_toggle_btn)") == 0
+    assert source.count("header.addWidget(self.time_toggle_btn)") == 2
+    assert source.count("self.plan_context_label.setVisible(False)") >= 2
+    assert "Operating Plan Inputs:" in source
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
