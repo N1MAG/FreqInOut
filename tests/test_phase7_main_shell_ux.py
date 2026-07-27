@@ -4,7 +4,7 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QPushButton, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QGridLayout, QHeaderView, QLabel, QPushButton, QTableWidgetItem
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -629,11 +629,15 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_hold_btn.setObjectName("stationCommandHold")' in source
     assert 'self.station_command_suspend_btn.setObjectName("stationCommandSuspend")' in source
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
-    assert "command_layout = QGridLayout(self.station_command_bar)" in source
-    assert "command_layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)" in source
-    assert "command_layout.addWidget(self.station_command_qsy_btn, 1, 5)" in source
-    assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)" in source
-    assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)" in source
+    assert "self.station_command_layout = QGridLayout(self.station_command_bar)" in source
+    assert "def _station_command_layout_mode_for_width(self, width: int) -> str:" in source
+    assert "def _apply_station_command_bar_layout(self, *, force: bool = False) -> None:" in source
+    assert 'return "compact" if int(width) < 1100 else "wide"' in source
+    assert "layout.addWidget(self.station_command_next_label, 2, 0, 1, 4)" in source
+    assert "layout.addWidget(self.station_command_qsy_btn, 3, 0)" in source
+    assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
+    assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
+    assert "self._apply_station_command_bar_layout(force=True)" in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
     assert "right_layout.setSpacing(10)" in source
@@ -659,6 +663,51 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_hold_btn.clicked.connect" not in source
     assert "self.station_command_suspend_btn.clicked.connect" not in source
     assert "self.station_command_resume_btn.clicked.connect" not in source
+
+
+def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.station_command_bar = QFrame()
+    window.station_command_layout = QGridLayout(window.station_command_bar)
+    window._station_command_layout_mode = ""
+    window.station_command_radio_label = QLabel("Radio")
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_now_label = QLabel("Now: unavailable")
+    window.station_command_state_label = QLabel("State: On Schedule")
+    window.station_command_next_label = QLabel("Next: No assigned plan")
+    window.station_command_qsy_btn = QPushButton("QSY...")
+    window.station_command_hold_btn = QPushButton("Hold")
+    window.station_command_suspend_btn = QPushButton("Suspend")
+    window.station_command_resume_btn = QPushButton("Resume")
+
+    try:
+        window.station_command_bar.resize(900, 120)
+        MainWindow._apply_station_command_bar_layout(window, force=True)
+        app.processEvents()
+
+        assert window._station_command_layout_mode == "compact"
+        assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_now_label
+        assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_next_label
+        assert window.station_command_layout.itemAtPosition(3, 0).widget() is window.station_command_qsy_btn
+        assert window.station_command_layout.itemAtPosition(3, 3).widget() is window.station_command_resume_btn
+
+        window.station_command_bar.resize(1300, 120)
+        MainWindow._apply_station_command_bar_layout(window)
+        app.processEvents()
+
+        assert window._station_command_layout_mode == "wide"
+        assert window.station_command_layout.itemAtPosition(0, 2).widget() is window.station_command_now_label
+        assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_next_label
+        assert window.station_command_layout.itemAtPosition(1, 5).widget() is window.station_command_qsy_btn
+    finally:
+        window.station_command_bar.deleteLater()
+        app.processEvents()
 
 
 def test_phase7_sidebar_schedule_actions_removed_from_ledge() -> None:

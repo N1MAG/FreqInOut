@@ -499,39 +499,33 @@ class MainWindow(QMainWindow):
         self.station_command_bar.setObjectName("stationCommandBar")
         self.station_command_bar.setAccessibleName("Station command context")
         self.station_command_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        command_layout = QGridLayout(self.station_command_bar)
+        self.station_command_layout = QGridLayout(self.station_command_bar)
+        command_layout = self.station_command_layout
         command_layout.setContentsMargins(10, 8, 10, 8)
         command_layout.setSpacing(8)
-        command_layout.setColumnStretch(2, 1)
-        command_layout.setColumnStretch(3, 1)
-        command_layout.setColumnStretch(4, 2)
+        self._station_command_layout_mode = ""
         self.station_command_radio_label = QLabel("Radio")
         self.station_command_radio_label.setObjectName("stationCommandRadioLabel")
-        command_layout.addWidget(self.station_command_radio_label, 0, 0)
         self.station_command_radio_combo = QComboBox(self.station_command_bar)
         self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")
         self.station_command_radio_combo.setMinimumWidth(120)
         self.station_command_radio_combo.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.station_command_radio_combo.currentIndexChanged.connect(self._on_station_command_radio_changed)
-        command_layout.addWidget(self.station_command_radio_combo, 0, 1)
         self.station_command_now_label = QLabel("Now: unavailable")
         self.station_command_now_label.setObjectName("stationCommandNow")
         self.station_command_now_label.setWordWrap(False)
         self.station_command_now_label.setMinimumWidth(0)
-        self.station_command_now_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        command_layout.addWidget(self.station_command_now_label, 0, 2)
+        self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.station_command_state_label = QLabel("State: unknown")
         self.station_command_state_label.setObjectName("stationCommandState")
         self.station_command_state_label.setWordWrap(False)
         self.station_command_state_label.setMinimumWidth(0)
-        self.station_command_state_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        command_layout.addWidget(self.station_command_state_label, 0, 3)
+        self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.station_command_next_label = QLabel("Next: none")
         self.station_command_next_label.setObjectName("stationCommandNext")
         self.station_command_next_label.setWordWrap(False)
         self.station_command_next_label.setMinimumWidth(0)
-        self.station_command_next_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        command_layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)
+        self.station_command_next_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.station_command_qsy_btn = QPushButton("QSY...")
         self.station_command_qsy_btn.setObjectName("stationCommandQsy")
         self.station_command_hold_btn = QPushButton("Hold")
@@ -549,10 +543,7 @@ class MainWindow(QMainWindow):
             btn.setEnabled(False)
             btn.setToolTip("Station command wiring is not enabled yet.")
             btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        command_layout.addWidget(self.station_command_qsy_btn, 1, 5)
-        command_layout.addWidget(self.station_command_hold_btn, 1, 6)
-        command_layout.addWidget(self.station_command_suspend_btn, 1, 7)
-        command_layout.addWidget(self.station_command_resume_btn, 1, 8)
+        self._apply_station_command_bar_layout(force=True)
         right_layout.addWidget(self.station_command_bar, 0)
 
         right_layout.addWidget(self.stack, stretch=1)
@@ -2452,6 +2443,10 @@ class MainWindow(QMainWindow):
             pass
         super().resizeEvent(event)
         try:
+            self._apply_station_command_bar_layout()
+        except Exception:
+            pass
+        try:
             self._auto_collapse_inactive_nav_groups()
         except Exception:
             pass
@@ -2940,6 +2935,64 @@ class MainWindow(QMainWindow):
         ):
             if btn is not None:
                 btn.setStyleSheet(button_style("muted", theme) + f" color: {muted};")
+
+    def _station_command_layout_mode_for_width(self, width: int) -> str:
+        try:
+            return "compact" if int(width) < 1100 else "wide"
+        except Exception:
+            return "wide"
+
+    def _apply_station_command_bar_layout(self, *, force: bool = False) -> None:
+        if not hasattr(self, "station_command_layout"):
+            return
+        width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0)
+        mode = self._station_command_layout_mode_for_width(width)
+        if not force and mode == getattr(self, "_station_command_layout_mode", ""):
+            return
+        self._station_command_layout_mode = mode
+        layout = self.station_command_layout
+        for widget in (
+            self.station_command_radio_label,
+            self.station_command_radio_combo,
+            self.station_command_now_label,
+            self.station_command_state_label,
+            self.station_command_next_label,
+            self.station_command_qsy_btn,
+            self.station_command_hold_btn,
+            self.station_command_suspend_btn,
+            self.station_command_resume_btn,
+        ):
+            layout.removeWidget(widget)
+        for col in range(10):
+            layout.setColumnStretch(col, 0)
+
+        if mode == "compact":
+            self.station_command_now_label.setWordWrap(False)
+            self.station_command_state_label.setWordWrap(False)
+            self.station_command_next_label.setWordWrap(False)
+            layout.addWidget(self.station_command_radio_label, 0, 0)
+            layout.addWidget(self.station_command_radio_combo, 0, 1, 1, 3)
+            layout.addWidget(self.station_command_now_label, 1, 0, 1, 2)
+            layout.addWidget(self.station_command_state_label, 1, 2, 1, 2)
+            layout.addWidget(self.station_command_next_label, 2, 0, 1, 4)
+            layout.addWidget(self.station_command_qsy_btn, 3, 0)
+            layout.addWidget(self.station_command_hold_btn, 3, 1)
+            layout.addWidget(self.station_command_suspend_btn, 3, 2)
+            layout.addWidget(self.station_command_resume_btn, 3, 3)
+            layout.setColumnStretch(3, 1)
+        else:
+            layout.addWidget(self.station_command_radio_label, 0, 0)
+            layout.addWidget(self.station_command_radio_combo, 0, 1)
+            layout.addWidget(self.station_command_now_label, 0, 2)
+            layout.addWidget(self.station_command_state_label, 0, 3)
+            layout.addWidget(self.station_command_next_label, 1, 0, 1, 5)
+            layout.addWidget(self.station_command_qsy_btn, 1, 5)
+            layout.addWidget(self.station_command_hold_btn, 1, 6)
+            layout.addWidget(self.station_command_suspend_btn, 1, 7)
+            layout.addWidget(self.station_command_resume_btn, 1, 8)
+            layout.setColumnStretch(2, 1)
+            layout.setColumnStretch(3, 1)
+            layout.setColumnStretch(4, 2)
 
     def _apply_app_theme(self):
         app = QApplication.instance()
