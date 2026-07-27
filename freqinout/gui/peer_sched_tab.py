@@ -463,8 +463,6 @@ class PeerSchedTab(QWidget):
         self.tz_toggle_btn.setToolTip("Switch the table between UTC and local time display.")
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open HF Peers help.")
-        header.addWidget(self.refresh_btn)
-        header.addWidget(self.tz_toggle_btn)
         header.addWidget(self.help_btn)
         layout.addLayout(header)
 
@@ -476,6 +474,7 @@ class PeerSchedTab(QWidget):
         self.import_btn.setToolTip("Import a peer schedule JSON file.")
         action_row.addWidget(self.add_btn)
         action_row.addWidget(self.import_btn)
+        action_row.addWidget(self.refresh_btn)
         action_row.addSpacing(20)
         action_row.addWidget(QLabel("Selected Row:"))
         self.edit_btn = QPushButton("View/Edit Selected Row")
@@ -528,6 +527,7 @@ class PeerSchedTab(QWidget):
         filter_row.addWidget(self.search_edit, stretch=1)
         self.clear_filters_btn = QPushButton("Clear Filters")
         filter_row.addWidget(self.clear_filters_btn)
+        filter_row.addWidget(self.tz_toggle_btn)
         filter_row.addStretch()
         layout.addLayout(filter_row)
 

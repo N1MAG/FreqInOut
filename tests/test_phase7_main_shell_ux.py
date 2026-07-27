@@ -252,6 +252,20 @@ def test_phase7_hf_peers_uses_view_edit_selected_row_wording() -> None:
     assert 'self.edit_btn = QPushButton("Edit Selected Row")' not in source
 
 
+def test_phase7_hf_peers_keeps_times_in_filter_row_not_title_header() -> None:
+    source = Path("freqinout/gui/peer_sched_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("# Table")]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("action_row = QHBoxLayout()")]
+    action_block = build_block[build_block.index("action_row = QHBoxLayout()") : build_block.index("cleanup_row = QHBoxLayout()")]
+    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+
+    assert "header.addWidget(self.help_btn)" in header_block
+    assert "header.addWidget(self.refresh_btn)" not in header_block
+    assert "header.addWidget(self.tz_toggle_btn)" not in header_block
+    assert "action_row.addWidget(self.refresh_btn)" in action_block
+    assert "filter_row.addWidget(self.tz_toggle_btn)" in filter_block
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
