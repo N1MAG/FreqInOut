@@ -22,22 +22,54 @@ def test_phase7_main_window_has_global_ledge_clock() -> None:
 def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
-    assert '("Station", "Station Overview")' in source
+    assert '("Control Center", "Station Overview")' in source
     assert '("Health Details", "Station Health")' in source
-    assert '("FreqPlanner", "FreqPlanner")' in source
+    assert '("Overview", "FreqPlanner")' in source
     assert '("HF Daily", "HF Schedule")' in source
     assert '("HF Nets", "Net Schedule")' in source
     assert '("HF Peers", "Peer Schedules")' in source
     assert 'self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators"]' in source
-    assert 'if screen == "Station Health":' in source
+    assert 'defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False}' in source
+    assert 'defaults["Station"] = True' in source
+    assert 'defaults["FreqPlanner"] = True' in source
+    assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
-    assert 'if screen in {"HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
+    assert 'if screen in {"FreqPlanner", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
     assert 'return "FreqPlanner"' in source
     assert '("Station Health", "Station Health")' not in source
     assert '"Schedules": False' not in source
+    assert "def _expand_nav_group_for_screen" in source
+    assert "self._expand_nav_group_for_screen(label)" in source
+    assert "if changed:\n            self._persist_nav_group_states()" not in source
     assert 'if key == "Station" and not expanded:' in source
     assert "self._station_health_alert_counts()" in source
     assert "Expand Station or open Health Details." in source
+
+
+def test_phase7_primary_nav_groups_recover_from_persisted_collapsed_state() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeSettings:
+        def get(self, key: str, default=None):
+            if key == "main_nav_group_states":
+                return {
+                    "Station": False,
+                    "FreqPlanner": False,
+                    "Schedules": False,
+                    "NCS": True,
+                    "Operators": True,
+                }
+            return default
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+
+    states = MainWindow._load_nav_group_states(window)
+
+    assert states["Station"] is True
+    assert states["FreqPlanner"] is True
+    assert states["NCS"] is True
+    assert states["Operators"] is True
 
 
 def test_phase7_station_workspace_decisions_are_specified() -> None:

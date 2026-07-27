@@ -225,9 +225,9 @@ class MainWindow(QMainWindow):
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
             ("ControlFreq", "ControlFreq"),
-            ("Station", "Station Overview"),
+            ("Control Center", "Station Overview"),
             ("Health Details", "Station Health"),
-            ("FreqPlanner", "FreqPlanner"),
+            ("Overview", "FreqPlanner"),
             ("Messages", "Messages"),
             ("Map", "Map"),
             ("FLDigi / SSB", "NCS-FLDigi/SSB"),
@@ -3951,8 +3951,9 @@ class MainWindow(QMainWindow):
         self.logo_label.setPixmap(pix)
 
     def _load_nav_group_states(self) -> dict[str, bool]:
-        # Default to collapsed sections for first-run clarity on smaller windows.
-        defaults = {"Station": False, "FreqPlanner": False, "NCS": False, "Operators": False}
+        # Station and FreqPlanner are primary workspaces; keep their children
+        # discoverable on startup. NCS/Operators remain compact by default.
+        defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False}
         try:
             raw = self.settings.get("main_nav_group_states", {}) or {}
         except Exception:
@@ -3966,6 +3967,10 @@ class MainWindow(QMainWindow):
             for key in defaults:
                 if key in raw:
                     defaults[key] = bool(raw.get(key))
+            # Older 7A builds could persist auto-collapsed primary workspaces.
+            # Reset those so schedules and Station details do not vanish after restart.
+            defaults["Station"] = True
+            defaults["FreqPlanner"] = True
         return defaults
 
     def _persist_nav_group_states(self) -> None:
@@ -3979,9 +3984,9 @@ class MainWindow(QMainWindow):
         screen = str(screen_label or "").strip()
         if screen in {"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}:
             return "NCS"
-        if screen == "Station Health":
+        if screen in {"Station Overview", "Station Health"}:
             return "Station"
-        if screen in {"HF Schedule", "Net Schedule", "Peer Schedules"}:
+        if screen in {"FreqPlanner", "HF Schedule", "Net Schedule", "Peer Schedules"}:
             return "FreqPlanner"
         if screen in {"HF Operators", "Local Operators"}:
             return "Operators"
@@ -3993,6 +3998,26 @@ class MainWindow(QMainWindow):
         if txt.startswith("Operators -"):
             return "Operators"
         return ""
+
+    def _nav_group_for_screen_label(self, screen_label: str) -> str:
+        return self._nav_group_for_label("", screen_label)
+
+    def _expand_nav_group_for_screen(self, screen_label: str) -> None:
+        key = self._nav_group_for_screen_label(screen_label)
+        if not key:
+            return
+        body = self._nav_group_bodies.get(key)
+        header = self._nav_group_headers.get(key)
+        if body is not None:
+            body.setVisible(True)
+        if header is not None and not header.isChecked():
+            header.blockSignals(True)
+            try:
+                header.setChecked(True)
+            finally:
+                header.blockSignals(False)
+            self._set_nav_group_header_visual_state(header, True)
+        self._nav_group_states[key] = True
 
     def _ensure_nav_group_layout(self, group_key: str, nav_layout: QVBoxLayout) -> QVBoxLayout:
         key = str(group_key or "").strip()
@@ -4161,7 +4186,6 @@ class MainWindow(QMainWindow):
                 pass
             required_h = logo_h + status_h + min_nav_zone_h + (spacing * 2)
         if changed:
-            self._persist_nav_group_states()
             try:
                 self._update_nav_group_header_styles(resolve_theme(self.settings))
             except Exception:
@@ -4460,6 +4484,7 @@ class MainWindow(QMainWindow):
                     return
                 try:
                     nav_idx = self._nav_screen_index_map.get(index)
+                    self._expand_nav_group_for_screen(label)
                     if nav_idx is not None and 0 <= nav_idx < len(self.nav_buttons):
                         btn = self.nav_buttons[nav_idx]
                         if not btn.isChecked():
