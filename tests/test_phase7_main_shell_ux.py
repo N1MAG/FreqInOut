@@ -286,6 +286,22 @@ def test_phase7_map_hides_legacy_visible_plan_context_prose() -> None:
     assert "layout.addWidget(self.plan_context_label)" in build_block
 
 
+def test_phase7_logs_use_header_and_inline_filter_row_search() -> None:
+    source = Path("freqinout/gui/log_viewer.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("def _update_font")]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QHBoxLayout()")]
+    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+    search_block = source[source.index("def _search") :]
+
+    assert 'title = QLabel("Logs / Diagnostics")' in header_block
+    assert "header.addWidget(self.refresh_btn" not in header_block
+    assert "filter_row.addWidget(self.refresh_btn)" in filter_block
+    assert "self.search_input = QLineEdit()" in filter_block
+    assert "self.search_input.returnPressed.connect(self._search)" in filter_block
+    assert "QInputDialog.getText" not in search_block
+    assert "QMessageBox.information" not in search_block
+
+
 def test_phase7_station_command_bar_is_global_context_not_command_execution() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")

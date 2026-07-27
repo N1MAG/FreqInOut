@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QComboBox,
+    QLineEdit,
     QSpinBox,
     QMessageBox,
-    QInputDialog,
 )
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QTextCursor
@@ -40,19 +40,37 @@ class LogViewerTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        toolbar = QHBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Logs / Diagnostics")
+        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        header.addWidget(title, 1)
+        layout.addLayout(header)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
 
         self.refresh_btn = QPushButton("Refresh")
         self.clear_btn = QPushButton("Clear")
         self.search_btn = QPushButton("Search")
         self.open_btn = QPushButton("Open Log")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search log text...")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumWidth(180)
 
-        toolbar.addWidget(self.refresh_btn)
-        toolbar.addWidget(self.clear_btn)
-        toolbar.addWidget(self.search_btn)
-        toolbar.addWidget(self.open_btn)
+        filter_row.addWidget(self.refresh_btn)
+        filter_row.addWidget(self.clear_btn)
+        filter_row.addWidget(self.open_btn)
 
-        toolbar.addSpacing(20)
+        filter_row.addSpacing(12)
+        filter_row.addWidget(QLabel("Search:"))
+        filter_row.addWidget(self.search_input, 1)
+        filter_row.addWidget(self.search_btn)
+
+        filter_row.addSpacing(12)
         font_group = QWidget()
         font_layout = QHBoxLayout(font_group)
         font_layout.setContentsMargins(0, 0, 0, 0)
@@ -62,9 +80,9 @@ class LogViewerTab(QWidget):
         self.font_spin.setRange(8, 20)
         self.font_spin.setValue(10)
         font_layout.addWidget(self.font_spin)
-        toolbar.addWidget(font_group)
+        filter_row.addWidget(font_group)
 
-        toolbar.addSpacing(20)
+        filter_row.addSpacing(12)
         level_group = QWidget()
         level_layout = QHBoxLayout(level_group)
         level_layout.setContentsMargins(0, 0, 0, 0)
@@ -73,9 +91,9 @@ class LogViewerTab(QWidget):
         self.level_combo = QComboBox()
         self.level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG", "ALL"])
         level_layout.addWidget(self.level_combo)
-        toolbar.addWidget(level_group)
+        filter_row.addWidget(level_group)
 
-        layout.addLayout(toolbar)
+        layout.addLayout(filter_row)
 
         self.text = QTextEdit()
         self.text.setReadOnly(True)
@@ -89,6 +107,8 @@ class LogViewerTab(QWidget):
         self.clear_btn.clicked.connect(lambda: self.text.clear())
         self.search_btn.clicked.connect(self._search)
         self.open_btn.clicked.connect(self._open_file)
+        self.search_input.returnPressed.connect(self._search)
+        self.search_input.textChanged.connect(lambda _text: self._refresh())
         self.font_spin.valueChanged.connect(self._update_font)
         self.level_combo.currentTextChanged.connect(self._on_level_changed)
 
@@ -142,10 +162,16 @@ class LogViewerTab(QWidget):
     def _filter_lines(self, lines):
         level = self.level_combo.currentText()
         if level == "ALL":
-            return lines
-        token1 = f"[{level}]"
-        token2 = f" {level} "
-        return [l for l in lines if (token1 in l or token2 in l)]
+            filtered = list(lines)
+        else:
+            token1 = f"[{level}]"
+            token2 = f" {level} "
+            filtered = [l for l in lines if (token1 in l or token2 in l)]
+        term = self.search_input.text().strip() if hasattr(self, "search_input") else ""
+        if term:
+            term_l = term.lower()
+            filtered = [l for l in filtered if term_l in l.lower()]
+        return filtered
 
     def _color_for_line(self, line: str) -> str:
         theme = getattr(self, "_theme", resolve_theme(self.settings))
@@ -176,6 +202,11 @@ class LogViewerTab(QWidget):
             html_line = f'<span style="color:{color}">{line.rstrip()}</span>'
             self.text.append(html_line)
         self.text.moveCursor(QTextCursor.End)
+        term = self.search_input.text().strip() if hasattr(self, "search_input") else ""
+        if term and not lines:
+            self.status_label.setText(f"No matches for '{term}'. Log file: {self.log_file}")
+        else:
+            self.status_label.setText(f"Log file: {self.log_file}")
 
     def _on_level_changed(self, level: str):
         level = (level or "").upper()
@@ -192,20 +223,7 @@ class LogViewerTab(QWidget):
         self._refresh()
 
     def _search(self):
-        term, ok = QInputDialog.getText(self, "Search Logs", "Enter keyword:")
-        if not ok or not term:
-            return
-        lines = self._read_log_tail(1000)
-        matches = [l for l in lines if term.lower() in l.lower()]
-        if not matches:
-            QMessageBox.information(self, "Search", f"No matches for '{term}'.")
-            return
-        self.text.clear()
-        for line in matches:
-            color = self._color_for_line(line)
-            html_line = f'<span style="color:{color}">{line.rstrip()}</span>'
-            self.text.append(html_line)
-        self.text.moveCursor(QTextCursor.End)
+        self._refresh()
 
     def _open_file(self):
         try:
