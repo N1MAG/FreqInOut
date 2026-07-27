@@ -140,6 +140,10 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self._refresh_station_command_bar(force=False)" in source
     assert "btn.setEnabled(False)" in source
     assert "Command target:" in source
+    assert "self.station_command_qsy_btn.clicked.connect" not in source
+    assert "self.station_command_hold_btn.clicked.connect" not in source
+    assert "self.station_command_suspend_btn.clicked.connect" not in source
+    assert "self.station_command_resume_btn.clicked.connect" not in source
 
 
 def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -> None:
@@ -212,6 +216,113 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
 
     assert window._station_command_selected_profile_id == 1
     assert window.station_command_now_label.text() == "Now: 7.078 MHz 40M"
+
+    for widget in (
+        window.station_command_radio_combo,
+        window.station_command_now_label,
+        window.station_command_state_label,
+        window.station_command_next_label,
+        window.station_command_qsy_btn,
+        window.station_command_hold_btn,
+        window.station_command_suspend_btn,
+        window.station_command_resume_btn,
+    ):
+        widget.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_command_bar_handles_no_active_radio(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeManager:
+        def get_runtime_snapshots(self, *, force: bool = False):
+            return []
+
+    window = MainWindow.__new__(MainWindow)
+    window.station_runtime_manager = FakeManager()
+    window._station_command_selected_profile_id = 88
+    window._station_command_bar_loading = False
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_now_label = QLabel()
+    window.station_command_state_label = QLabel()
+    window.station_command_next_label = QLabel()
+    window.station_command_qsy_btn = QPushButton("QSY...")
+    window.station_command_hold_btn = QPushButton("Hold")
+    window.station_command_suspend_btn = QPushButton("Suspend")
+    window.station_command_resume_btn = QPushButton("Resume")
+
+    MainWindow._refresh_station_command_bar(window, force=True)
+
+    assert window._station_command_selected_profile_id is None
+    assert window.station_command_radio_combo.currentText() == "No active radios"
+    assert window.station_command_now_label.text() == "Now: unavailable"
+    assert window.station_command_state_label.text() == "State: no active radio"
+    assert window.station_command_next_label.text() == "Next: none"
+    assert window.station_command_qsy_btn.isEnabled() is False
+    assert window.station_command_qsy_btn.toolTip() == "No active radio is available for station commands."
+
+    for widget in (
+        window.station_command_radio_combo,
+        window.station_command_now_label,
+        window.station_command_state_label,
+        window.station_command_next_label,
+        window.station_command_qsy_btn,
+        window.station_command_hold_btn,
+        window.station_command_suspend_btn,
+        window.station_command_resume_btn,
+    ):
+        widget.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_command_bar_renders_observer_context(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    snapshot = SimpleNamespace(
+        device_profile_id=3,
+        name="KiwiSDR",
+        device_class="observer",
+        runtime_primary=True,
+        current_frequency_label="14.230 MHz",
+        current_band="20M",
+        scheduler_enabled=False,
+        status_summary="",
+        overall_state="ok",
+        ptt_active=False,
+        shared_ptt_blocked=False,
+        assigned_operating_profile_name="",
+        observer_follow_summary="Following icom",
+    )
+
+    class FakeManager:
+        def get_runtime_snapshots(self, *, force: bool = False):
+            return [snapshot]
+
+    window = MainWindow.__new__(MainWindow)
+    window.station_runtime_manager = FakeManager()
+    window._station_command_selected_profile_id = None
+    window._station_command_bar_loading = False
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_now_label = QLabel()
+    window.station_command_state_label = QLabel()
+    window.station_command_next_label = QLabel()
+    window.station_command_qsy_btn = QPushButton("QSY...")
+    window.station_command_hold_btn = QPushButton("Hold")
+    window.station_command_suspend_btn = QPushButton("Suspend")
+    window.station_command_resume_btn = QPushButton("Resume")
+
+    MainWindow._refresh_station_command_bar(window, force=True)
+
+    assert window.station_command_radio_combo.currentText() == "KiwiSDR (SDR)"
+    assert window.station_command_state_label.text() == "State: Monitor"
+    assert window.station_command_next_label.text() == "Next: Following icom"
+    assert window.station_command_qsy_btn.isEnabled() is False
 
     for widget in (
         window.station_command_radio_combo,
