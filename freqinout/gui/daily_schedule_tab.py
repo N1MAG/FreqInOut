@@ -193,6 +193,19 @@ class DailyScheduleTab(QWidget):
     COL_AUTOTUNE = 9
     COL_TARGET_SCOPE = 10
     COL_TARGET = 11
+    COMPACT_VISIBLE_COLUMNS = frozenset(
+        {
+            COL_SELECT,
+            COL_DAY,
+            COL_GROUP,
+            COL_MODE,
+            COL_BAND,
+            COL_FREQ,
+            COL_START,
+            COL_END,
+            COL_TARGET,
+        }
+    )
 
     # Resource table column indices
     RES_COL_SELECT = 0
@@ -556,6 +569,9 @@ class DailyScheduleTab(QWidget):
         btn_row = QHBoxLayout()
         self.add_row_btn = QPushButton("Add Row")
         self.del_row_btn = QPushButton("Delete Selected")
+        self.view_edit_btn = QPushButton("View/Edit")
+        self.view_edit_btn.setCheckable(True)
+        self.view_edit_btn.setToolTip("Show or hide the full editable HF schedule fields.")
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.resources_resolve_btn = QPushButton("Resolve Conflicts")
         self.save_btn = QPushButton("Save HF Schedule")
@@ -569,6 +585,7 @@ class DailyScheduleTab(QWidget):
         self.import_export_btn.setMenu(self.import_export_menu)
         btn_row.addWidget(self.add_row_btn)
         btn_row.addWidget(self.del_row_btn)
+        btn_row.addWidget(self.view_edit_btn)
         btn_row.addWidget(self.move_to_resources_btn)
         btn_row.addWidget(self.resources_resolve_btn)
         btn_row.addStretch()
@@ -650,6 +667,7 @@ class DailyScheduleTab(QWidget):
         # Signals
         self.add_row_btn.clicked.connect(self._add_row)
         self.del_row_btn.clicked.connect(self._delete_selected_rows)
+        self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
         self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
         self.save_btn.clicked.connect(self._save_schedule)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
@@ -676,6 +694,7 @@ class DailyScheduleTab(QWidget):
         self._update_effective_source_label()
         self._update_suspend_state()
         self._apply_theme(refresh_dynamic=False)
+        self._apply_compact_schedule_view(False)
         self._update_delete_button_state()
         self._update_resource_action_state()
 
@@ -4097,6 +4116,26 @@ class DailyScheduleTab(QWidget):
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
+    def _apply_compact_schedule_view(self, show_all: bool | None = None) -> None:
+        if not hasattr(self, "table"):
+            return
+        if show_all is None:
+            show_all = bool(getattr(self, "view_edit_btn", None) and self.view_edit_btn.isChecked())
+        for col in range(self.table.columnCount()):
+            self.table.setColumnHidden(col, not show_all and col not in self.COMPACT_VISIBLE_COLUMNS)
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setToolTip(
+                "Hide advanced HF schedule fields for normal scanning."
+                if show_all
+                else "Show all editable fields for the active HF schedule rows."
+            )
+            try:
+                self.view_edit_btn.setStyleSheet(
+                    button_style("info" if show_all else "muted", resolve_theme(self.settings))
+                )
+            except Exception:
+                pass
+
     def _day_offset(self, day_name: str) -> int:
         """
         Return 0-6 offset for canonical day names (Sunday=0). Defaults to 0 on unknown.
@@ -4472,6 +4511,7 @@ class DailyScheduleTab(QWidget):
         src = "DB" if loaded_from_db else "settings"
         log.info("HF Frequency Schedule loaded from %s: %d rows", src, self.table.rowCount())
         self._set_headers()
+        self._apply_compact_schedule_view()
         self._update_clock_labels()
         self._saved_rows_signature = self._rows_signature(self._raw_schedule)
         self._set_dirty(False)
@@ -5420,6 +5460,7 @@ class DailyScheduleTab(QWidget):
         finally:
             self._suspend_dirty_tracking = False
         self._set_headers()
+        self._apply_compact_schedule_view()
         self._update_clock_labels()
         self.table.clearSelection()
         self._invalidate_active_schedule_views()
@@ -5662,6 +5703,8 @@ class DailyScheduleTab(QWidget):
             "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
         )
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
+        if hasattr(self, "view_edit_btn"):
+            self.view_edit_btn.setStyleSheet(button_style("info" if self.view_edit_btn.isChecked() else "muted", theme))
         self._refresh_save_button_state(theme)
         menu_font_css = font_css(self.add_row_btn.font())
         self.import_export_btn.setStyleSheet(button_style("info", theme) + menu_font_css)
