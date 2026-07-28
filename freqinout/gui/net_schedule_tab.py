@@ -227,7 +227,6 @@ class NetScheduleTab(QWidget):
             COL_START,
             COL_END,
             COL_NETNAME,
-            COL_TARGET,
         }
     )
 
@@ -618,7 +617,7 @@ class NetScheduleTab(QWidget):
                     self.COL_START,
                     self.COL_END,
                 },
-                {self.COL_GROUP, self.COL_NETNAME, self.COL_TARGET},
+                {self.COL_GROUP, self.COL_NETNAME},
             )
         else:
             self._set_table_resize_modes(

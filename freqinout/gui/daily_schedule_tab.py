@@ -205,7 +205,6 @@ class DailyScheduleTab(QWidget):
             COL_FREQ,
             COL_START,
             COL_END,
-            COL_TARGET,
         }
     )
 
@@ -603,6 +602,13 @@ class DailyScheduleTab(QWidget):
         resources_header.addWidget(QLabel("<h3>Schedule Resources</h3>"))
         resources_header.addStretch()
         layout.addLayout(resources_header)
+        self.resources_empty_label = QLabel(
+            "No HF schedule resources configured. Add an active row, import resources, or create SOP frequency layers to populate this section."
+        )
+        self.resources_empty_label.setObjectName("dailyScheduleResourcesEmptyState")
+        self.resources_empty_label.setWordWrap(True)
+        self.resources_empty_label.setVisible(False)
+        layout.addWidget(self.resources_empty_label)
 
         self.resources_set_label = QLabel("Set:")
         self.resources_set_combo = QComboBox()
@@ -819,7 +825,7 @@ class DailyScheduleTab(QWidget):
                     self.COL_START,
                     self.COL_END,
                 },
-                {self.COL_GROUP, self.COL_TARGET},
+                {self.COL_GROUP},
             )
         else:
             self._set_table_resize_modes(
@@ -2657,7 +2663,27 @@ class DailyScheduleTab(QWidget):
                 self.resources_table.setItem(r, c, item)
         self.resources_table.setSortingEnabled(True)
         self._schedule_resource_view_token = view_token
+        self._update_schedule_resources_empty_state()
         self._update_resource_action_state()
+
+    def _update_schedule_resources_empty_state(self) -> None:
+        if not hasattr(self, "resources_empty_label") or not hasattr(self, "resources_table"):
+            return
+        has_rows = bool(getattr(self, "_resource_view_rows", []))
+        has_any_resource = bool(getattr(self, "_schedule_resource_rows", []))
+        text_filter = str(self.resources_group_filter.text() or "").strip()
+        set_filter = str(self.resources_set_combo.currentData() or "All").strip()
+        filtered = has_any_resource and not has_rows
+        if filtered:
+            self.resources_empty_label.setText(
+                f"No HF schedule resources match the current filters ({set_filter}, {text_filter or 'no search text'})."
+            )
+        else:
+            self.resources_empty_label.setText(
+                "No HF schedule resources configured. Add an active row, import resources, or create SOP frequency layers to populate this section."
+            )
+        self.resources_empty_label.setVisible(not has_rows)
+        self.resources_table.setVisible(has_rows)
 
     def _update_resource_action_state(
         self,

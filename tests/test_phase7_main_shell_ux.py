@@ -174,7 +174,7 @@ def test_phase7_hf_nets_view_edit_toggles_advanced_columns(monkeypatch, tmp_path
         assert tab.table.isColumnHidden(tab.COL_START) is False
         assert tab.table.isColumnHidden(tab.COL_END) is False
         assert tab.table.isColumnHidden(tab.COL_FREQ) is False
-        assert tab.table.isColumnHidden(tab.COL_TARGET) is False
+        assert tab.table.isColumnHidden(tab.COL_TARGET) is True
 
         tab.view_edit_btn.setChecked(True)
         app.processEvents()
@@ -187,6 +187,7 @@ def test_phase7_hf_nets_view_edit_toggles_advanced_columns(monkeypatch, tmp_path
 
         assert tab.table.isColumnHidden(tab.COL_RECURRENCE) is True
         assert tab.table.isColumnHidden(tab.COL_NETNAME) is False
+        assert tab.table.isColumnHidden(tab.COL_TARGET) is True
         assert "Show all editable" in tab.view_edit_btn.toolTip()
     finally:
         tab.deleteLater()
@@ -280,7 +281,7 @@ def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_pat
         assert tab.table.isColumnHidden(tab.COL_START) is False
         assert tab.table.isColumnHidden(tab.COL_END) is False
         assert tab.table.isColumnHidden(tab.COL_FREQ) is False
-        assert tab.table.isColumnHidden(tab.COL_TARGET) is False
+        assert tab.table.isColumnHidden(tab.COL_TARGET) is True
 
         tab.view_edit_btn.setChecked(True)
         app.processEvents()
@@ -293,6 +294,7 @@ def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_pat
 
         assert tab.table.isColumnHidden(tab.COL_SOURCE) is True
         assert tab.table.isColumnHidden(tab.COL_GROUP) is False
+        assert tab.table.isColumnHidden(tab.COL_TARGET) is True
         assert "Show all editable" in tab.view_edit_btn.toolTip()
     finally:
         tab.deleteLater()
@@ -324,7 +326,6 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         assert tab._daily_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
         assert tab.daily_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
-        assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_TARGET) == QHeaderView.Stretch
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_FREQ) == QHeaderView.ResizeToContents
 
         tab.resize(1400, 900)
@@ -334,6 +335,57 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         assert tab._responsive_layout_mode == "wide"
         assert tab._daily_action_layout.itemAtPosition(0, 4).widget() is tab.move_to_resources_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_hf_daily_resources_use_empty_state_instead_of_blank_table(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import daily_schedule_tab as daily_mod
+
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_sop_panel_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_load_schedule", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_profiles_panel", lambda self, **_kwargs: None)
+
+    tab = daily_mod.DailyScheduleTab()
+    try:
+        tab._schedule_resource_rows = []
+        tab._schedule_resource_token = ("empty",)
+        tab._schedule_resource_view_token = None
+        tab._populate_schedule_resources_table()
+        app.processEvents()
+
+        assert tab.resources_empty_label.isHidden() is False
+        assert "No HF schedule resources configured" in tab.resources_empty_label.text()
+        assert tab.resources_table.isHidden() is True
+
+        tab._schedule_resource_rows = [
+            {
+                "resource_set": "Custom",
+                "day_utc": "ALL",
+                "group_name": "MAGNET",
+                "mode": "Digi",
+                "band": "20M",
+                "frequency": "14.115",
+                "start_utc": "",
+                "end_utc": "",
+                "source": "manual",
+            }
+        ]
+        tab._schedule_resource_token = ("one-row",)
+        tab._schedule_resource_view_token = None
+        tab._populate_schedule_resources_table()
+        app.processEvents()
+
+        assert tab.resources_empty_label.isHidden() is True
+        assert tab.resources_table.isHidden() is False
+        assert tab.resources_table.rowCount() == 1
     finally:
         tab.deleteLater()
         app.processEvents()
