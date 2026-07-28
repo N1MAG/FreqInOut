@@ -692,7 +692,7 @@ def test_radio_profile_dashboard_sections_visual_geometry_and_collapse_defaults(
             (tab.radio_profile_optional_section, False),
             (tab.radio_profile_inventory_section, False),
             (tab.radio_profile_readiness_section, True),
-            (tab.radio_profile_actions_section, False),
+            (tab.radio_profile_actions_section, True),
         ]
 
         assert tab.radio_profile_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
@@ -3269,7 +3269,7 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert 'self.radio_profile_readiness_section = _make_radio_profile_dashboard_section(' in profile_block
     assert '"Readiness"' in profile_block
     assert 'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Radio Actions"' in profile_block
+    assert '"Add / Manage Radios"' in profile_block
     assert (
         'self.radio_profile_stack_guidance_section = _make_radio_profile_dashboard_section(\n'
         '            "Stack Guidance",\n'
@@ -3307,9 +3307,9 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     ) in profile_block
     assert (
         'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(\n'
-        '            "Radio Actions",\n'
+        '            "Add / Manage Radios",\n'
         '            radio_profile_actions_content,\n'
-        '            checked=False,\n'
+        '            checked=True,\n'
         '        )'
     ) in profile_block
     assert "device_layout.addWidget(self.radio_profile_identity_section)" in profile_block
@@ -3319,8 +3319,11 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert "device_layout.addWidget(self.radio_profile_frequency_section)" in profile_block
     assert "device_layout.addWidget(self.radio_profile_optional_section)" in profile_block
     assert "device_layout.addWidget(self.radio_profile_inventory_section)" in profile_block
-    assert "device_layout.addWidget(self.radio_profile_readiness_section)" in profile_block
     assert "device_layout.addWidget(self.radio_profile_actions_section)" in profile_block
+    assert "device_layout.addWidget(self.radio_profile_readiness_section)" in profile_block
+    assert profile_block.index("device_layout.addWidget(self.radio_profile_actions_section)") < profile_block.index(
+        "device_layout.addWidget(self.radio_profile_readiness_section)"
+    )
 
 
 def test_radio_profile_connection_details_summarize_selected_profile() -> None:

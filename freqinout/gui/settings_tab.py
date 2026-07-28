@@ -2824,15 +2824,15 @@ class SettingsTab(QWidget):
         device_actions.addWidget(self.restore_radio_schedule_btn, 2, 2)
         device_actions.addWidget(self.delete_device_profile_btn, 2, 3)
         device_actions.setColumnStretch(4, 1)
-        device_layout.addWidget(self.radio_profile_readiness_section)
         radio_profile_actions_content = QWidget()
         radio_profile_actions_content.setLayout(device_actions)
         self.radio_profile_actions_section = _make_radio_profile_dashboard_section(
-            "Radio Actions",
+            "Add / Manage Radios",
             radio_profile_actions_content,
-            checked=False,
+            checked=True,
         )
         device_layout.addWidget(self.radio_profile_actions_section)
+        device_layout.addWidget(self.radio_profile_readiness_section)
 
         self.device_profiles_table = QTableWidget(0, 15)
         self.device_profiles_table.setHorizontalHeaderLabels(
