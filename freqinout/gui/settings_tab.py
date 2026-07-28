@@ -60,7 +60,11 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema, get_all_
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
 from freqinout.core.config_autodiscovery import build_autoconfig_proposal
-from freqinout.core.config_migration_preview import build_single_rig_upgrade_preview
+from freqinout.core.config_backup import create_config_backup
+from freqinout.core.config_migration_preview import (
+    build_single_rig_upgrade_apply_plan,
+    build_single_rig_upgrade_preview,
+)
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.launch_orchestrator import (
@@ -12042,28 +12046,140 @@ class SettingsTab(QWidget):
             return
 
         roles = tuple(sorted(role for role, chk in role_checks.items() if chk.isChecked()))
+        migration_settings = self._settings_values_for_migration()
+        self._run_backup_backed_multi_rig_setup_apply(
+            migration_settings=migration_settings,
+            radio_name=name_edit.text().strip(),
+            radio_manufacturer=manufacturer_edit.text().strip(),
+            radio_model=model_edit.text().strip(),
+            operating_plan_name=plan_edit.text().strip(),
+            enabled_software_roles=roles,
+        )
+
+    def _set_multi_rig_setup_preview_text(self, text: str, tooltip: str = "") -> None:
+        if not hasattr(self, "multi_rig_autoconfig_preview_label"):
+            return
+        self.multi_rig_autoconfig_preview_label.setText(text)
+        self.multi_rig_autoconfig_preview_label.setToolTip(tooltip or text)
+        self.multi_rig_autoconfig_preview_label.setVisible(bool(text.strip()))
+
+    def _run_backup_backed_multi_rig_setup_apply(
+        self,
+        *,
+        migration_settings: Mapping[str, Any],
+        radio_name: str,
+        radio_manufacturer: str,
+        radio_model: str,
+        operating_plan_name: str,
+        enabled_software_roles: Sequence[str],
+    ) -> bool:
+        apply_plan = build_single_rig_upgrade_apply_plan(
+            migration_settings,
+            radio_name=radio_name,
+            operating_plan_name=operating_plan_name,
+            config_dir=get_config_dir(),
+        )
+        if not apply_plan.can_apply:
+            detail = "\n".join(apply_plan.blockers)
+            self._set_multi_rig_setup_preview_text(
+                f"Multi-Rig setup is blocked until backup readiness is resolved.\n{detail}".strip(),
+                detail,
+            )
+            self._publish_settings_action_feedback(
+                status="blocked",
+                summary="Multi-Rig setup blocked: backup readiness needs review.",
+                detail=detail,
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.apply",
+            )
+            return False
+        try:
+            backup_result = create_config_backup(apply_plan.backup_paths, reason=apply_plan.backup_reason)
+        except Exception as exc:
+            log.exception("Failed creating Multi-Rig migration backup.")
+            detail = str(exc) or exc.__class__.__name__
+            self._set_multi_rig_setup_preview_text(
+                f"Multi-Rig setup is blocked because the backup could not be created.\n{detail}".strip(),
+                detail,
+            )
+            self._publish_settings_action_feedback(
+                status="failed",
+                summary="Multi-Rig setup blocked: backup could not be created.",
+                detail=detail,
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.apply",
+            )
+            return False
+        failed_backup_items = tuple(item for item in backup_result.items if item.status == "failed")
+        primary_backup_ok = bool(backup_result.items and backup_result.items[0].status == "backed_up")
+        if failed_backup_items or not primary_backup_ok:
+            detail_parts = [f"{item.original_path}: {item.error or item.status}" for item in failed_backup_items]
+            if not primary_backup_ok:
+                detail_parts.insert(0, "Primary FIO configuration backup did not complete.")
+            detail = "\n".join(detail_parts)
+            self._set_multi_rig_setup_preview_text(
+                f"Multi-Rig setup is blocked because the backup did not complete.\n{detail}".strip(),
+                detail,
+            )
+            self._publish_settings_action_feedback(
+                status="blocked",
+                summary="Multi-Rig setup blocked: backup did not complete.",
+                detail=detail,
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.apply",
+            )
+            return False
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary="Multi-Rig setup backup created.",
+            detail=f"Backup saved to {backup_result.backup_dir}",
+            action_type="configure_automatically",
+            source_surface="settings.configure_automatically.multirig.apply",
+        )
         try:
             with self.multi_radio_store.connect() as conn:
                 result = ensure_multi_rig_migration(
                     conn,
-                    self._settings_values_for_migration(),
-                    radio_name=name_edit.text().strip(),
-                    radio_manufacturer=manufacturer_edit.text().strip(),
-                    radio_model=model_edit.text().strip(),
-                    operating_plan_name=plan_edit.text().strip(),
-                    enabled_software_roles=roles,
+                    migration_settings,
+                    radio_name=radio_name,
+                    radio_manufacturer=radio_manufacturer,
+                    radio_model=radio_model,
+                    operating_plan_name=operating_plan_name,
+                    enabled_software_roles=enabled_software_roles,
                 )
         except Exception as exc:
             log.exception("Failed running multi-rig migration.")
+            detail = str(exc) or exc.__class__.__name__
+            self._set_multi_rig_setup_preview_text(
+                f"Multi-Rig setup could not be completed after backup.\n{detail}".strip(),
+                detail,
+            )
+            self._publish_settings_action_feedback(
+                status="failed",
+                summary="Multi-Rig setup failed after backup.",
+                detail=detail,
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.apply",
+            )
             QMessageBox.warning(self, "Multi-Rig Setup", f"Unable to complete Multi-Rig setup:\n{exc}")
-            return
+            return False
         if not result.applied and not result.already_current:
+            self._set_multi_rig_setup_preview_text(
+                "Multi-Rig setup could not be completed. Your current settings were left unchanged."
+            )
+            self._publish_settings_action_feedback(
+                status="failed",
+                summary="Multi-Rig setup failed after backup.",
+                detail="FIO could not complete Multi-Rig setup. Your current settings were left unchanged.",
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.apply",
+            )
             QMessageBox.warning(
                 self,
                 "Multi-Rig Setup",
                 "FIO could not complete Multi-Rig setup. Your current settings were left unchanged.",
             )
-            return
+            return False
         self._refresh_multi_radio_tables(refresh_section_titles=False)
         self._refresh_cached_multi_rig_runtime_status()
         self._emit_device_profiles_changed()
@@ -12071,12 +12187,18 @@ class SettingsTab(QWidget):
             self.settings_saved.emit()
         except Exception:
             pass
-        QMessageBox.information(
-            self,
-            "Multi-Rig Setup",
-            "Multi-Rig setup is ready. FIO created your first runtime radio.",
+        self._set_multi_rig_setup_preview_text(
+            f"Multi-Rig setup is ready. Backup saved to {backup_result.backup_dir}",
+            f"Backup manifest: {backup_result.manifest_path}",
         )
-
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary="Multi-Rig setup is ready.",
+            detail=f"FIO created the first runtime radio after backing up settings to {backup_result.backup_dir}",
+            action_type="configure_automatically",
+            source_surface="settings.configure_automatically.multirig.apply",
+        )
+        return True
     def _update_device_profile_readiness_detail(
         self,
         readiness_report: Any | None = None,

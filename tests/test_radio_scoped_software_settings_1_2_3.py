@@ -1168,6 +1168,155 @@ def test_settings_multirig_autoconfig_preview_button_updates_label_and_feedback(
         app.processEvents()
 
 
+def test_settings_multirig_setup_apply_is_backup_backed_before_migration() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    setup_block = source[
+        source.index("def _start_multi_rig_setup")
+        : source.index("def _update_device_profile_readiness_detail(")
+    ]
+
+    assert "build_single_rig_upgrade_apply_plan(" in setup_block
+    assert "create_config_backup(apply_plan.backup_paths, reason=apply_plan.backup_reason)" in setup_block
+    assert setup_block.index("create_config_backup(") < setup_block.index("ensure_multi_rig_migration(")
+    assert "if not apply_plan.can_apply:" in setup_block
+    assert "Primary FIO configuration backup did not complete." in setup_block
+    assert 'source_surface="settings.configure_automatically.multirig.apply"' in setup_block
+    post_migration_block = setup_block[setup_block.index("ensure_multi_rig_migration(") :]
+    assert "QMessageBox.information(" not in post_migration_block
+
+
+def test_settings_multirig_setup_apply_blocks_when_backup_item_fails(monkeypatch) -> None:
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.gui.settings_tab import SettingsTab
+
+    QApplication.instance() or QApplication([])
+    service = ActionFeedbackService()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.action_feedback_service = service
+    tab._last_action_feedback_event = None
+    tab._selected_settings_feedback_target = lambda: (None, "Settings")
+    tab._set_settings_action_feedback_status = lambda *_args: None
+    tab.multi_rig_autoconfig_preview_label = QLabel("")
+
+    monkeypatch.setattr(
+        settings_tab_module,
+        "build_single_rig_upgrade_apply_plan",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            can_apply=True,
+            backup_paths=("/tmp/fio-settings.json",),
+            backup_reason="pre-multirig",
+            blockers=(),
+        ),
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "create_config_backup",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            items=(
+                types.SimpleNamespace(
+                    status="failed",
+                    original_path="/tmp/fio-settings.json",
+                    error="copy failed",
+                ),
+            ),
+            backup_dir="/tmp/fio-backup",
+            manifest_path="/tmp/fio-backup/manifest.json",
+        ),
+    )
+
+    migration_called = False
+
+    def _fail_if_migrated(*_args, **_kwargs):
+        nonlocal migration_called
+        migration_called = True
+        raise AssertionError("migration should not run when the primary backup fails")
+
+    monkeypatch.setattr(settings_tab_module, "ensure_multi_rig_migration", _fail_if_migrated)
+
+    result = tab._run_backup_backed_multi_rig_setup_apply(
+        migration_settings={"control_via": "FLRig"},
+        radio_name="Default Radio",
+        radio_manufacturer="Lab",
+        radio_model="Radio A",
+        operating_plan_name="All Features",
+        enabled_software_roles=("flrig",),
+    )
+
+    events = service.recent(scope="settings")
+    assert result is False
+    assert migration_called is False
+    assert events[0].status == "blocked"
+    assert events[0].summary == "Multi-Rig setup blocked: backup did not complete."
+    assert events[0].source_surface == "settings.configure_automatically.multirig.apply"
+    assert "Primary FIO configuration backup did not complete." in events[0].detail
+    assert "copy failed" in tab.multi_rig_autoconfig_preview_label.text()
+
+
+def test_settings_multirig_setup_apply_publishes_failed_feedback_when_migration_fails(monkeypatch) -> None:
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.gui.settings_tab import SettingsTab
+
+    QApplication.instance() or QApplication([])
+    service = ActionFeedbackService()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.action_feedback_service = service
+    tab._last_action_feedback_event = None
+    tab._selected_settings_feedback_target = lambda: (None, "Settings")
+    tab._set_settings_action_feedback_status = lambda *_args: None
+    tab.multi_rig_autoconfig_preview_label = QLabel("")
+
+    class _Connection:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    tab.multi_radio_store = types.SimpleNamespace(connect=lambda: _Connection())
+    monkeypatch.setattr(
+        settings_tab_module,
+        "build_single_rig_upgrade_apply_plan",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            can_apply=True,
+            backup_paths=("/tmp/fio-settings.json",),
+            backup_reason="pre-multirig",
+            blockers=(),
+        ),
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "create_config_backup",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            items=(types.SimpleNamespace(status="backed_up", original_path="/tmp/fio-settings.json", error=""),),
+            backup_dir="/tmp/fio-backup",
+            manifest_path="/tmp/fio-backup/manifest.json",
+        ),
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "ensure_multi_rig_migration",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database locked")),
+    )
+    monkeypatch.setattr(settings_tab_module.QMessageBox, "warning", lambda *_args, **_kwargs: None)
+
+    result = tab._run_backup_backed_multi_rig_setup_apply(
+        migration_settings={"control_via": "FLRig"},
+        radio_name="Default Radio",
+        radio_manufacturer="Lab",
+        radio_model="Radio A",
+        operating_plan_name="All Features",
+        enabled_software_roles=("flrig",),
+    )
+
+    events = service.recent(scope="settings")
+    assert result is False
+    assert events[0].status == "failed"
+    assert events[0].summary == "Multi-Rig setup failed after backup."
+    assert events[0].detail == "database locked"
+    assert events[0].source_surface == "settings.configure_automatically.multirig.apply"
+    assert "database locked" in tab.multi_rig_autoconfig_preview_label.text()
+
+
 def test_settings_autofill_feedback_status_and_labels_are_clear() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 
