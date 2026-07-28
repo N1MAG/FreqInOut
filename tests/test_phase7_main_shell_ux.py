@@ -564,6 +564,47 @@ def test_phase7_js8_ncs_uses_empty_state_instead_of_blank_checkins_table(monkeyp
         app.processEvents()
 
 
+def test_phase7_fldigi_ncs_uses_empty_state_instead_of_blank_roster(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.fldigi_net_control_tab import FldigiNetControlTab
+
+    monkeypatch.setattr(FldigiNetControlTab, "_load_known_operators", lambda self: None)
+    monkeypatch.setattr(FldigiNetControlTab, "_apply_theme", lambda self: None)
+    monkeypatch.setattr(FldigiNetControlTab, "_setup_timers", lambda self: None)
+    monkeypatch.setattr(FldigiNetControlTab, "_refresh_qsy_options", lambda self, *args, **kwargs: None)
+
+    tab = FldigiNetControlTab()
+    try:
+        assert tab.roster_empty_label.isHidden() is False
+        assert "No roster entries yet" in tab.roster_empty_label.text()
+        assert tab.roster_table.isHidden() is True
+
+        tab._roster_append_row("N1MAG", "Bill", "CO", "1RR", "TFC", "Local")
+        app.processEvents()
+
+        assert tab.roster_empty_label.isHidden() is True
+        assert tab.roster_table.isHidden() is False
+        assert tab.roster_table.rowCount() == 1
+
+        tab._roster_clear()
+        app.processEvents()
+
+        assert tab.roster_empty_label.isHidden() is False
+        assert tab.roster_table.isHidden() is True
+
+        tab._roster_rebuild_rows([])
+        app.processEvents()
+
+        assert tab.roster_empty_label.isHidden() is False
+        assert tab.roster_table.isHidden() is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def set_scope_resolver")]

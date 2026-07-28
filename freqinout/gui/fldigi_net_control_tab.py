@@ -635,7 +635,15 @@ class FldigiNetControlTab(QWidget):
         self.roster_table.setStyleSheet(self._roster_table_style(resolve_theme(self.settings)))
         self.roster_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.roster_table.setMinimumHeight(300)
+        self.roster_empty_label = QLabel(
+            "No roster entries yet. Start a net, add an operator, or paste/import check-ins when traffic begins."
+        )
+        self.roster_empty_label.setObjectName("fldigiRosterEmptyState")
+        self.roster_empty_label.setWordWrap(True)
+        self.roster_empty_label.setVisible(False)
+        roster_layout.addWidget(self.roster_empty_label)
         roster_layout.addWidget(self.roster_table)
+        self._update_roster_empty_state()
 
         self.roster_compare_splitter.addWidget(self.roster_frame)
 
@@ -1475,6 +1483,7 @@ class FldigiNetControlTab(QWidget):
             self.roster_table.setSortingEnabled(was_sorting)
         finally:
             self._roster_syncing = False
+            self._update_roster_empty_state()
         return True
 
     def _roster_rebuild_rows(self, rows: List[Dict[str, str]]) -> None:
@@ -1498,6 +1507,7 @@ class FldigiNetControlTab(QWidget):
                 keyword=entry.get("keyword", ""),
                 checkin_seq=entry.get("checkin_seq", ""),
             )
+        self._update_roster_empty_state()
 
     def _sort_roster_table_by_column(self, column: int) -> None:
         if self._roster_syncing or not hasattr(self, "roster_table"):
@@ -1704,6 +1714,7 @@ class FldigiNetControlTab(QWidget):
     def _roster_clear(self) -> None:
         self.roster_table.setRowCount(0)
         self._next_roster_seq = 1
+        self._update_roster_empty_state()
         self._mark_roster_dirty()
 
     def _roster_find_row(self, callsign: str) -> int:
@@ -1729,6 +1740,7 @@ class FldigiNetControlTab(QWidget):
         row = self._roster_find_row(callsign)
         if row >= 0:
             self.roster_table.removeRow(row)
+            self._update_roster_empty_state()
             self._mark_roster_dirty()
 
     def _roster_text_columns(self) -> tuple[int, ...]:
@@ -1752,6 +1764,14 @@ class FldigiNetControlTab(QWidget):
         self._roster_configure_tfc_status_cell(row)
         self._roster_configure_side_editor(row, self.COL_HEARD)
         self._roster_configure_side_editor(row, self.COL_ACKED)
+        self._update_roster_empty_state()
+
+    def _update_roster_empty_state(self) -> None:
+        if not hasattr(self, "roster_empty_label") or not hasattr(self, "roster_table"):
+            return
+        has_rows = self.roster_table.rowCount() > 0
+        self.roster_empty_label.setVisible(not has_rows)
+        self.roster_table.setVisible(has_rows)
 
     def _roster_set_category(self, row: int, category: str) -> None:
         widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
@@ -2233,6 +2253,7 @@ class FldigiNetControlTab(QWidget):
             self.roster_table.setSortingEnabled(was_sorting)
         finally:
             self._roster_syncing = False
+            self._update_roster_empty_state()
         self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers(write_files=False)
         self._mark_roster_dirty()
