@@ -1037,6 +1037,16 @@ def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -
     assert 'source_surface="settings.configure_automatically.multirig.preview"' in preview_block
 
 
+def test_settings_setup_ui_does_not_expose_lab_or_test_radio_actions() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert "Use Lab Preset" not in source
+    assert "Create Test Radios" not in source
+    assert "Create Lab Radios" not in source
+    assert "Add Radio" in source
+    assert "SDR" in source
+
+
 def test_settings_multirig_autoconfig_preview_text_is_compact() -> None:
     from dataclasses import dataclass
 
