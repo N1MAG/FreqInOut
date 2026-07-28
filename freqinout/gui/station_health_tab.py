@@ -102,7 +102,13 @@ class StationHealthTab(QWidget):
         header_view.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        self.health_empty_label = QLabel("No station health dependency issues are currently being tracked.")
+        self.health_empty_label.setObjectName("stationHealthEmptyState")
+        self.health_empty_label.setWordWrap(True)
+        self.health_empty_label.setVisible(False)
+        layout.addWidget(self.health_empty_label, 0)
         layout.addWidget(self.table, 1)
+        self._update_health_table_empty_state()
 
         recent_label = QLabel("Latest Scheduler Success and Issue Log")
         recent_label.setStyleSheet("font-size: 14px; font-weight: 700;")
@@ -125,7 +131,13 @@ class StationHealthTab(QWidget):
         sched_header.setSectionResizeMode(3, QHeaderView.Stretch)
         sched_header.setSectionResizeMode(4, QHeaderView.Stretch)
         sched_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.scheduler_empty_label = QLabel("No scheduler success or issue events have been recorded yet.")
+        self.scheduler_empty_label.setObjectName("stationHealthSchedulerEmptyState")
+        self.scheduler_empty_label.setWordWrap(True)
+        self.scheduler_empty_label.setVisible(False)
+        layout.addWidget(self.scheduler_empty_label, 0)
         layout.addWidget(self.scheduler_table, 1)
+        self._update_scheduler_table_empty_state()
         self.apply_theme()
 
     def set_scope_resolver(self, resolver: Optional[ScopeResolver]) -> None:
@@ -232,7 +244,15 @@ class StationHealthTab(QWidget):
             for col, value in enumerate(values):
                 self.table.setItem(row, col, self._item(value, severity=severity if col == 2 else ""))
         self.table.resizeRowsToContents()
+        self._update_health_table_empty_state()
         self._apply_pending_focus_scope()
+
+    def _update_health_table_empty_state(self) -> None:
+        if not hasattr(self, "health_empty_label") or not hasattr(self, "table"):
+            return
+        has_rows = self.table.rowCount() > 0
+        self.health_empty_label.setVisible(not has_rows)
+        self.table.setVisible(has_rows)
 
     def _apply_pending_focus_scope(self) -> None:
         scope_name = str(getattr(self, "_pending_focus_scope", "") or "").strip()
@@ -320,3 +340,11 @@ class StationHealthTab(QWidget):
             for col, value in enumerate(values):
                 self.scheduler_table.setItem(row, col, self._item(value, severity=severity if col == 1 else ""))
         self.scheduler_table.resizeRowsToContents()
+        self._update_scheduler_table_empty_state()
+
+    def _update_scheduler_table_empty_state(self) -> None:
+        if not hasattr(self, "scheduler_empty_label") or not hasattr(self, "scheduler_table"):
+            return
+        has_rows = self.scheduler_table.rowCount() > 0
+        self.scheduler_empty_label.setVisible(not has_rows)
+        self.scheduler_table.setVisible(has_rows)

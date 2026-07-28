@@ -681,6 +681,76 @@ def test_phase7_station_overview_uses_empty_state_for_empty_control_center(monke
         app.processEvents()
 
 
+def test_phase7_station_health_uses_empty_states_for_blank_tables(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.station_health_tab import StationHealthTab
+
+    tab = StationHealthTab()
+    try:
+        tab._last_summary = {
+            "issue_count": 0,
+            "severity": "ok",
+            "items": [],
+            "recent_scheduler_events": [],
+        }
+        tab._render_table()
+        tab._render_scheduler_events()
+        app.processEvents()
+
+        assert tab.health_empty_label.isHidden() is False
+        assert tab.table.isHidden() is True
+        assert tab.scheduler_empty_label.isHidden() is False
+        assert tab.scheduler_table.isHidden() is True
+
+        tab._last_summary = {
+            "issue_count": 1,
+            "severity": "warning",
+            "items": [
+                {
+                    "scope": "icom",
+                    "dependency": "FLRig",
+                    "state": "warn",
+                    "action": "Backing off",
+                    "last_issue": "timeout",
+                    "issue_since": "21:00Z",
+                    "cooldown": "30s",
+                    "last_check": "21:01Z",
+                    "last_duration": "2.1s",
+                    "severity": "warning",
+                }
+            ],
+            "recent_scheduler_events": [
+                {
+                    "ts_utc": "2026-07-27T21:00:00Z",
+                    "code": "applied",
+                    "source": "icom",
+                    "action": "QSY",
+                    "detail": "Applied scheduled frequency",
+                    "frequency_hz": 14115000,
+                    "band": "20M",
+                    "_station_health_kind": "latest_success",
+                }
+            ],
+        }
+        tab._render_table()
+        tab._render_scheduler_events()
+        app.processEvents()
+
+        assert tab.health_empty_label.isHidden() is True
+        assert tab.table.isHidden() is False
+        assert tab.table.rowCount() == 1
+        assert tab.scheduler_empty_label.isHidden() is True
+        assert tab.scheduler_table.isHidden() is False
+        assert tab.scheduler_table.rowCount() == 1
+    finally:
+        tab._refresh_timer.stop()
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def set_scope_resolver")]
