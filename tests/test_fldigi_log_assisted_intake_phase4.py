@@ -29,6 +29,32 @@ class FakeSettings:
         self._data[key] = value
 
 
+class FakeCheckbox:
+    def __init__(self, checked: bool = False):
+        self._checked = checked
+
+    def isChecked(self):
+        return self._checked
+
+
+class FakeTimer:
+    def __init__(self):
+        self.started = 0
+        self.stopped = 0
+        self.active = False
+
+    def isActive(self):
+        return self.active
+
+    def start(self):
+        self.started += 1
+        self.active = True
+
+    def stop(self):
+        self.stopped += 1
+        self.active = False
+
+
 
 def test_rx_only_log_parses_high_confidence_tfc_and_qru(tmp_path, monkeypatch):
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
@@ -43,6 +69,64 @@ def test_rx_only_log_parses_high_confidence_tfc_and_qru(tmp_path, monkeypatch):
     assert qru is not None
     assert qru.bucket == "QRU"
     assert qru.traffic == "QRU"
+
+
+def test_log_assisted_toggle_starts_and_stops_session_timer(monkeypatch):
+    tab = FldigiNetControlTab.__new__(FldigiNetControlTab)
+    tab.LOG_ASSISTED_INTAKE_VISIBLE = True
+    tab.log_assisted_enable_chk = FakeCheckbox(True)
+    tab._log_assisted_timer = FakeTimer()
+    tab._net_in_progress = True
+    captured = []
+
+    monkeypatch.setattr(tab, "_capture_log_assisted_session", lambda: captured.append("captured"))
+
+    FldigiNetControlTab._on_log_assisted_toggled(tab, True)
+
+    assert captured == ["captured"]
+    assert tab._log_assisted_timer.started == 1
+    assert tab._log_assisted_timer.isActive()
+
+    tab.log_assisted_enable_chk = FakeCheckbox(False)
+    FldigiNetControlTab._on_log_assisted_toggled(tab, False)
+
+    assert tab._log_assisted_timer.stopped == 1
+    assert not tab._log_assisted_timer.isActive()
+
+
+def test_end_net_pauses_log_assisted_timer_before_save_and_restarts_on_cancel(monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    import freqinout.gui.fldigi_net_control_tab as fldigi_tab_module
+
+    tab = FldigiNetControlTab.__new__(FldigiNetControlTab)
+    tab.LOG_ASSISTED_INTAKE_VISIBLE = True
+    tab.log_assisted_enable_chk = FakeCheckbox(True)
+    tab._log_assisted_timer = FakeTimer()
+    tab._log_assisted_timer.start()
+    tab._net_in_progress = True
+    prompts = [QMessageBox.Yes, QMessageBox.No]
+    observed = []
+
+    def fake_question(*args, **kwargs):
+        return prompts.pop(0)
+
+    def fake_save_checkins():
+        observed.append(("save", tab._log_assisted_timer.isActive()))
+
+    monkeypatch.setattr(fldigi_tab_module.QMessageBox, "question", fake_question)
+    tab._save_checkins = fake_save_checkins
+    tab._checkin_file_paths = lambda: ("main", "qru", "late")
+    tab._roster_table_text = lambda bucket=None: ""
+    tab._read_file = lambda path: ""
+    tab._archive_checkin_files = lambda: observed.append(("archive", True))
+
+    FldigiNetControlTab._end_net(tab)
+
+    assert observed == [("save", False)]
+    assert tab._log_assisted_timer.stopped == 1
+    assert tab._log_assisted_timer.started == 2
+    assert tab._log_assisted_timer.isActive()
 
 
 
