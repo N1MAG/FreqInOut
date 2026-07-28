@@ -235,6 +235,13 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
     assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
     assert "self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in nav_build_block
+    assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in nav_build_block
+    assert "new radio or SDR" in nav_build_block
+    assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in nav_build_block
+    assert "nav_panel_layout.addWidget(self.add_device_profile_btn)" in nav_build_block
+    assert nav_build_block.index("nav_panel_layout.addWidget(self.add_device_profile_btn)") < nav_build_block.index(
+        "nav_panel_layout.addWidget(self.global_settings_toggle_btn)"
+    )
     assert 'btn.setAccessibleName(f"Settings navigation: {title}")' in add_section_block
     assert "btn.setStyleSheet(self._settings_nav_button_style(role, theme))" in style_block
     assert "self._settings_nav_group_toggle_role(\"global\")" in style_block
@@ -3105,6 +3112,7 @@ def test_radio_profile_advanced_edit_wording_keeps_software_settings_inline() ->
     assert 'self.edit_device_profile_btn = QPushButton("Advanced Radio Edit")' in source
     assert "identity, role, hardware, and core connection details" in source
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in source
+    assert "Start guided setup for a new radio or SDR" in source
     assert 'self.edit_device_profile_btn.setAccessibleName("Advanced Radio Edit")' in source
     assert "def _device_profile_dialog_title" in source
     assert "def _device_profile_dialog_intro" in source
@@ -3279,7 +3287,9 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert 'self.radio_profile_readiness_section = _make_radio_profile_dashboard_section(' in profile_block
     assert '"Readiness"' in profile_block
     assert 'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Add / Manage Radios"' in profile_block
+    assert '"Selected Radio Actions"' in profile_block
+    assert '"Selected Radio:"' in profile_block
+    assert "device_actions.addWidget(self.add_device_profile_btn" not in profile_block
     assert (
         'self.radio_profile_stack_guidance_section = _make_radio_profile_dashboard_section(\n'
         '            "Stack Guidance",\n'
@@ -3317,7 +3327,7 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     ) in profile_block
     assert (
         'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(\n'
-        '            "Add / Manage Radios",\n'
+        '            "Selected Radio Actions",\n'
         '            radio_profile_actions_content,\n'
         '            checked=True,\n'
         '        )'

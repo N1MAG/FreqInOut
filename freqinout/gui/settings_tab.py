@@ -2330,6 +2330,13 @@ class SettingsTab(QWidget):
         nav_panel_layout = QVBoxLayout(nav_panel)
         nav_panel_layout.setContentsMargins(0, 0, 0, 0)
         nav_panel_layout.setSpacing(6)
+        self.add_device_profile_btn = QPushButton("Add Radio")
+        self.add_device_profile_btn.setToolTip(
+            "Start guided setup for a new radio or SDR: identity, software used, connection, and readiness."
+        )
+        self.add_device_profile_btn.setAccessibleName("Guided Add Radio")
+        self.add_device_profile_btn.clicked.connect(self._add_device_profile)
+        nav_panel_layout.addWidget(self.add_device_profile_btn)
         self.global_settings_toggle_btn = QToolButton()
         self.global_settings_toggle_btn.setCheckable(True)
         self.global_settings_toggle_btn.setChecked(False)
@@ -2790,12 +2797,6 @@ class SettingsTab(QWidget):
         device_actions = QGridLayout()
         device_actions.setHorizontalSpacing(8)
         device_actions.setVerticalSpacing(6)
-        self.add_device_profile_btn = QPushButton("Add Radio")
-        self.add_device_profile_btn.setToolTip(
-            "Start guided setup for a new radio: identity, software used, connection, and readiness."
-        )
-        self.add_device_profile_btn.setAccessibleName("Guided Add Radio")
-        self.add_device_profile_btn.clicked.connect(self._add_device_profile)
         self.edit_device_profile_btn = QPushButton("Advanced Radio Edit")
         self.edit_device_profile_btn.setToolTip("Edit selected-radio identity, role, hardware, and core connection details.")
         self.edit_device_profile_btn.setAccessibleName("Advanced Radio Edit")
@@ -2812,9 +2813,8 @@ class SettingsTab(QWidget):
         self.set_active_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
         self.delete_device_profile_btn = QPushButton("Delete Selected")
         self.delete_device_profile_btn.clicked.connect(self._delete_device_profiles)
-        device_actions.addWidget(QLabel("Radio:"), 0, 0)
-        device_actions.addWidget(self.add_device_profile_btn, 0, 1)
-        device_actions.addWidget(self.edit_device_profile_btn, 0, 2)
+        device_actions.addWidget(QLabel("Selected Radio:"), 0, 0)
+        device_actions.addWidget(self.edit_device_profile_btn, 0, 1)
         device_actions.addWidget(QLabel("Use:"), 1, 0)
         device_actions.addWidget(self.activate_device_profile_btn, 1, 1)
         device_actions.addWidget(self.deactivate_device_profile_btn, 1, 2)
@@ -2827,7 +2827,7 @@ class SettingsTab(QWidget):
         radio_profile_actions_content = QWidget()
         radio_profile_actions_content.setLayout(device_actions)
         self.radio_profile_actions_section = _make_radio_profile_dashboard_section(
-            "Add / Manage Radios",
+            "Selected Radio Actions",
             radio_profile_actions_content,
             checked=True,
         )
