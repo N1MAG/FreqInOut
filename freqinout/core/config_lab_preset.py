@@ -9,6 +9,14 @@ from freqinout.core.config_autodiscovery import (
     RadioInstanceProposal,
     build_lab_radio_proposals,
 )
+from freqinout.core.config_js8_managed import (
+    build_js8call_managed_profile_plans,
+    create_js8call_managed_directories,
+)
+from freqinout.core.config_managed_profiles import (
+    build_flrig_fldigi_managed_profile_plans,
+    create_managed_profile_directories,
+)
 from freqinout.core.multi_radio_store import (
     DEFAULT_DEVICE_SYSTEM_KEY,
     DEFAULT_FAST_LIGHT_SYSTEM_KEY,
@@ -29,6 +37,7 @@ class LabRadioApplyResult:
     radio_names: Tuple[str, ...]
     summary: str
     warnings: Tuple[str, ...] = ()
+    managed_paths: Tuple[Path, ...] = ()
 
 
 def build_lab_radio_profile_values(
@@ -111,6 +120,12 @@ def apply_lab_radio_preset_to_store(
     )
     if not proposals:
         return LabRadioApplyResult(radio_profile_ids=(), radio_names=(), summary="No lab radios were requested.")
+
+    managed_paths = _prepare_lab_managed_paths(
+        proposals,
+        config_root=config_root,
+        app_paths=app_paths,
+    )
 
     with store.connect() as conn:
         ensure_multi_rig_migration(
@@ -196,6 +211,7 @@ def apply_lab_radio_preset_to_store(
         radio_profile_ids=tuple(saved_ids),
         radio_names=tuple(saved_names),
         summary=f"Created or updated {len(saved_ids)} lab radio profile(s).",
+        managed_paths=managed_paths,
     )
 
 
@@ -207,6 +223,42 @@ def _existing_id_by_system_key(store: MultiRadioStore, table_name: str, system_k
     with store.connect() as conn:
         row = conn.execute(f"SELECT id FROM {table_name} WHERE system_key=? LIMIT 1", (system_key,)).fetchone()
         return int(row[0]) if row is not None else None
+
+
+def _prepare_lab_managed_paths(
+    proposals: Sequence[RadioInstanceProposal],
+    *,
+    config_root: Path | None,
+    app_paths: Mapping[str, str] | None,
+) -> Tuple[Path, ...]:
+    if config_root is None:
+        return ()
+    prepared = []
+    seen = set()
+    for proposal in proposals:
+        for path in create_managed_profile_directories(
+            build_flrig_fldigi_managed_profile_plans(
+                proposal,
+                config_root=config_root,
+                app_paths=app_paths,
+            )
+        ):
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                prepared.append(path)
+    for path in create_js8call_managed_directories(
+        build_js8call_managed_profile_plans(
+            proposals,
+            config_root=config_root,
+            js8call_path=(app_paths or {}).get("js8call", ""),
+        )
+    ):
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            prepared.append(path)
+    return tuple(prepared)
 
 
 def _ports_by_service(proposal: RadioInstanceProposal) -> Mapping[str, int]:

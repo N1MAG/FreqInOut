@@ -80,6 +80,11 @@ def test_apply_lab_radio_preset_creates_three_idempotent_runtime_radios(tmp_path
 
     assert first.summary == "Created or updated 3 lab radio profile(s)."
     assert second.radio_profile_ids == first.radio_profile_ids
+    assert first.managed_paths == second.managed_paths
+    assert all(path.is_dir() for path in first.managed_paths)
+    assert tmp_path / "fio-config" / "managed-instances" / "fio-a" / "flrig" in first.managed_paths
+    assert tmp_path / "fio-config" / "managed-instances" / "fio-b" / "fldigi" / "logs" in first.managed_paths
+    assert tmp_path / "fio-config" / "managed-instances" / "fio-c" / "js8call" / "save" in first.managed_paths
     assert set(by_key) == {"lab_radio_a", "lab_radio_b", "lab_radio_c"}
     assert [by_key[key]["name"] for key in ("lab_radio_a", "lab_radio_b", "lab_radio_c")] == [
         "Radio A",
