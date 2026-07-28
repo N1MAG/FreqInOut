@@ -153,6 +153,14 @@ class LocalNCSTab(QWidget):
         filter_row.addWidget(self.status_filter_combo)
         layout.addLayout(filter_row)
 
+        self.empty_table_label = QLabel(
+            "No local check-ins yet. Use Operator Lookup/Add to add a station when the net starts."
+        )
+        self.empty_table_label.setObjectName("localNcsEmptyState")
+        self.empty_table_label.setWordWrap(True)
+        self.empty_table_label.setVisible(False)
+        layout.addWidget(self.empty_table_label)
+
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             ["Check-in UTC", "Callsign", "Name", "City", "State", "Category", "SitRep", "Notes"]
@@ -756,7 +764,9 @@ class LocalNCSTab(QWidget):
                 self._set_editor_enabled(False)
                 self._editing_entry_id = None
                 self.editor_target_label.setText("Selected Check-in: none")
+                self._update_empty_table_state(rows)
                 return
+            self._update_empty_table_state(rows)
 
             row_to_select = 0
             if target_id:
@@ -769,6 +779,24 @@ class LocalNCSTab(QWidget):
         finally:
             self._binding_selection = False
         self._on_table_selection_changed()
+
+    def _update_empty_table_state(self, rows: List[Dict[str, Any]]) -> None:
+        if not hasattr(self, "empty_table_label") or not hasattr(self, "table"):
+            return
+        has_rows = bool(rows)
+        has_any_checkins = bool(getattr(self, "_rows", []))
+        query = self.search_edit.text().strip() if hasattr(self, "search_edit") else ""
+        status_filter = self.status_filter_combo.currentText().strip() if hasattr(self, "status_filter_combo") else "All"
+        if has_any_checkins and not has_rows:
+            self.empty_table_label.setText(
+                f"No local check-ins match the current filters ({status_filter}, {query or 'no search text'})."
+            )
+        else:
+            self.empty_table_label.setText(
+                "No local check-ins yet. Use Operator Lookup/Add to add a station when the net starts."
+            )
+        self.empty_table_label.setVisible(not has_rows)
+        self.table.setVisible(has_rows)
 
     def _selected_entry_id(self) -> Optional[int]:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []

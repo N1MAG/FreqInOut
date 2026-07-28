@@ -458,6 +458,60 @@ def test_phase7_hf_peers_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         app.processEvents()
 
 
+def test_phase7_local_ncs_uses_empty_state_instead_of_blank_table(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.local_ncs_tab import LocalNCSTab
+
+    monkeypatch.setattr(LocalNCSTab, "_restore_context", lambda self: None)
+    monkeypatch.setattr(LocalNCSTab, "reload_operator_lookup", lambda self: None)
+    monkeypatch.setattr(LocalNCSTab, "_load_checkins", lambda self: None)
+    monkeypatch.setattr(LocalNCSTab, "_setup_timers", lambda self: None)
+
+    tab = LocalNCSTab()
+    try:
+        tab._rows = []
+        tab._populate_table([], target_id=None)
+        app.processEvents()
+
+        assert tab.empty_table_label.isHidden() is False
+        assert "No local check-ins yet" in tab.empty_table_label.text()
+        assert tab.table.isHidden() is True
+
+        tab._rows = [
+            {
+                "id": 1,
+                "checkin_utc": "2026-07-27T18:00:00Z",
+                "callsign": "N1MAG",
+                "name": "Bill",
+                "city": "Denver",
+                "state": "CO",
+                "category": "Operator",
+                "sitrep_status": "GREEN",
+                "notes": "",
+            }
+        ]
+        tab._populate_table(tab._rows, target_id=None)
+        app.processEvents()
+
+        assert tab.empty_table_label.isHidden() is True
+        assert tab.table.isHidden() is False
+        assert tab.table.rowCount() == 1
+
+        tab.status_filter_combo.setCurrentText("RED")
+        tab._apply_filters()
+        app.processEvents()
+
+        assert tab.empty_table_label.isHidden() is False
+        assert "No local check-ins match the current filters" in tab.empty_table_label.text()
+        assert tab.table.isHidden() is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def set_scope_resolver")]
