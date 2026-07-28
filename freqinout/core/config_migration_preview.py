@@ -25,6 +25,15 @@ class SingleRigUpgradePreview:
     warnings: Tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class SingleRigUpgradeApplyPlan:
+    preview: SingleRigUpgradePreview
+    backup_reason: str
+    backup_paths: Tuple[str, ...]
+    can_apply: bool
+    blockers: Tuple[str, ...] = field(default_factory=tuple)
+
+
 def build_single_rig_upgrade_preview(
     settings_values: Mapping[str, Any],
     *,
@@ -71,6 +80,38 @@ def build_single_rig_upgrade_preview(
         referenced_paths_not_backed_up=referenced_paths,
         summary=_preview_summary(radio_profile, roles),
         warnings=warnings,
+    )
+
+
+def build_single_rig_upgrade_apply_plan(
+    settings_values: Mapping[str, Any],
+    *,
+    radio_name: str = "",
+    operating_plan_name: str = "",
+    config_dir: Optional[Path] = None,
+    extra_backup_paths: Iterable[Path] = (),
+    backup_reason: str = "pre-multirig",
+) -> SingleRigUpgradeApplyPlan:
+    preview = build_single_rig_upgrade_preview(
+        settings_values,
+        radio_name=radio_name,
+        operating_plan_name=operating_plan_name,
+        config_dir=config_dir,
+        extra_backup_paths=extra_backup_paths,
+    )
+    blockers = []
+    if not preview.backup_paths:
+        blockers.append("No FIO configuration path is available to back up before migration.")
+    elif not Path(preview.backup_paths[0]).exists():
+        blockers.append("FIO configuration path does not exist, so it cannot be backed up before migration.")
+    if not str(preview.radio_profile.get("name", "") or "").strip():
+        blockers.append("A first radio name is required before migration.")
+    return SingleRigUpgradeApplyPlan(
+        preview=preview,
+        backup_reason=str(backup_reason or "pre-multirig").strip() or "pre-multirig",
+        backup_paths=preview.backup_paths,
+        can_apply=not blockers,
+        blockers=tuple(blockers),
     )
 
 

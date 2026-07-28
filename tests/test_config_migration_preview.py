@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from freqinout.core.config_migration_preview import (
+    build_single_rig_upgrade_apply_plan,
     build_single_rig_upgrade_preview,
     collect_referenced_data_paths_not_backed_up,
     collect_single_rig_upgrade_backup_paths,
@@ -115,3 +116,42 @@ def test_single_rig_upgrade_preview_reports_referenced_data_paths_not_backed_up(
     )
     assert preview.referenced_paths_not_backed_up == collect_referenced_data_paths_not_backed_up(settings)
     assert "referenced but not backed up" in " ".join(preview.warnings)
+
+
+def test_single_rig_upgrade_apply_plan_requires_backup_path_before_apply(tmp_path) -> None:
+    config_dir = tmp_path / "fio-config"
+    config_dir.mkdir()
+    plan = build_single_rig_upgrade_apply_plan(
+        {"control_via": "FLRig"},
+        radio_name="Icom",
+        config_dir=config_dir,
+    )
+
+    assert plan.can_apply is True
+    assert plan.backup_reason == "pre-multirig"
+    assert plan.backup_paths == (str(config_dir),)
+    assert plan.blockers == ()
+
+
+def test_single_rig_upgrade_apply_plan_blocks_missing_config_path(tmp_path) -> None:
+    missing_config_dir = tmp_path / "missing-fio-config"
+
+    plan = build_single_rig_upgrade_apply_plan(
+        {"control_via": "FLRig"},
+        radio_name="Icom",
+        config_dir=missing_config_dir,
+    )
+
+    assert plan.can_apply is False
+    assert "does not exist" in plan.blockers[0]
+
+
+def test_single_rig_upgrade_apply_plan_blocks_without_backup_path(monkeypatch) -> None:
+    import freqinout.core.config_migration_preview as preview_module
+
+    monkeypatch.setattr(preview_module, "collect_single_rig_upgrade_backup_paths", lambda *_args, **_kwargs: ())
+
+    plan = build_single_rig_upgrade_apply_plan({"control_via": "FLRig"}, radio_name="Icom")
+
+    assert plan.can_apply is False
+    assert "No FIO configuration path is available" in plan.blockers[0]
