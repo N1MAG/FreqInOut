@@ -100,7 +100,15 @@ class StationOverviewTab(QWidget):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.control_center_empty_label = QLabel(
+            "No active station runtimes. Activate one or more device profiles in Settings to populate Station Control Center."
+        )
+        self.control_center_empty_label.setObjectName("stationControlCenterEmptyState")
+        self.control_center_empty_label.setWordWrap(True)
+        self.control_center_empty_label.setVisible(False)
+        layout.addWidget(self.control_center_empty_label, 0)
         layout.addWidget(self.control_center_table, 0)
+        self._update_control_center_empty_state()
 
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
@@ -374,6 +382,14 @@ class StationOverviewTab(QWidget):
                     item.setToolTip("Open Health Details for this radio or SDR.")
                 table.setItem(row_idx, col_idx, item)
         table.resizeRowsToContents()
+        self._update_control_center_empty_state()
+
+    def _update_control_center_empty_state(self) -> None:
+        if not hasattr(self, "control_center_empty_label") or not hasattr(self, "control_center_table"):
+            return
+        has_rows = self.control_center_table.rowCount() > 0
+        self.control_center_empty_label.setVisible(not has_rows)
+        self.control_center_table.setVisible(has_rows)
 
     def _on_control_center_cell_clicked(self, row: int, column: int) -> None:
         if int(column) == self.CONTROL_CENTER_HEALTH_COLUMN:

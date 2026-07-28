@@ -605,6 +605,82 @@ def test_phase7_fldigi_ncs_uses_empty_state_instead_of_blank_roster(monkeypatch,
         app.processEvents()
 
 
+def test_phase7_station_overview_uses_empty_state_for_empty_control_center(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.station_runtime_manager import DeviceRuntimeSnapshot
+    from freqinout.gui.station_overview_tab import StationOverviewTab
+
+    tab = StationOverviewTab()
+    try:
+        tab._refresh_control_center_table([])
+        app.processEvents()
+
+        assert tab.control_center_empty_label.isHidden() is False
+        assert "No active station runtimes" in tab.control_center_empty_label.text()
+        assert tab.control_center_table.isHidden() is True
+
+        snapshot = DeviceRuntimeSnapshot(
+            device_profile_id=1,
+            name="icom",
+            device_class="radio",
+            control_backend="flrig",
+            deployment_mode="local",
+            runtime_active=True,
+            runtime_primary=True,
+            scheduler_owner=True,
+            endpoint_summary="FLRig",
+            ptt_group="",
+            assigned_operating_profile_id=1,
+            assigned_operating_profile_name="All Features",
+            assignment_state="assigned",
+            scheduler_enabled=True,
+            use_messages=True,
+            use_map=True,
+            use_background_ingest=True,
+            use_launch_control=False,
+            use_net_control_tabs=True,
+            control_ready=True,
+            overall_state="ok",
+            status_summary="Ready",
+            warning_text="",
+            ptt_active=False,
+            shared_ptt_blocked=False,
+            shared_ptt_owner_device_id=None,
+            shared_ptt_owner_name="",
+            shared_ptt_status_text="",
+            observer_follow_source_device_id=None,
+            observer_follow_source_name="",
+            observer_follow_summary="",
+            varac_cluster_name="",
+            varac_cluster_id="",
+            varac_instance_number=None,
+            varac_gateway_handler=False,
+            varac_gateway_handler_name="",
+            varac_cluster_summary="",
+            current_frequency_hz=14115000,
+            current_frequency_label="14.115 MHz",
+            current_band="20M",
+            antenna_group="",
+            frontend_group="",
+            amplifier_group="",
+            swap_role="",
+            swap_summary="",
+            service_states={"FLRig": {"state": "ok", "tooltip": "FLRig ready"}},
+        )
+        tab._refresh_control_center_table([snapshot])
+        app.processEvents()
+
+        assert tab.control_center_empty_label.isHidden() is True
+        assert tab.control_center_table.isHidden() is False
+        assert tab.control_center_table.rowCount() == 1
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def set_scope_resolver")]
