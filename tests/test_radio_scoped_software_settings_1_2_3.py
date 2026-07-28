@@ -1016,6 +1016,158 @@ def test_settings_autofill_feedback_helper_publishes_configure_event() -> None:
     assert events[0].source_surface == "settings.configure_automatically.js8.result"
 
 
+def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    build_block = source[
+        source.index("self.multi_rig_status_card = QFrame()")
+        : source.index("self.device_profile_detail_card = QFrame()")
+    ]
+    preview_block = source[
+        source.index("def _preview_multi_rig_autoconfiguration")
+        : source.index("def _multi_rig_radio_catalog")
+    ]
+
+    assert 'self.multi_rig_preview_autoconfig_btn = QPushButton("Preview Configure Automatically")' in build_block
+    assert 'self.multi_rig_autoconfig_preview_label.setObjectName("multiRigAutoconfigPreview")' in build_block
+    assert "build_single_rig_upgrade_preview(" in preview_block
+    assert "build_autoconfig_proposal(" in preview_block
+    assert "extra_app_paths=self._multi_rig_autoconfig_extra_app_paths(settings_values)" in preview_block
+    assert "ensure_multi_rig_migration(" not in preview_block
+    assert "create_config_backup(" not in preview_block
+    assert 'source_surface="settings.configure_automatically.multirig.preview"' in preview_block
+
+
+def test_settings_multirig_autoconfig_preview_text_is_compact() -> None:
+    from dataclasses import dataclass
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    @dataclass(frozen=True)
+    class FakeAssignment:
+        service: str
+        assigned_port: int
+        protocol: str = "tcp"
+
+    @dataclass(frozen=True)
+    class FakeRadio:
+        ports: tuple
+
+    @dataclass(frozen=True)
+    class FakeCandidate:
+        display_name: str
+        executable: bool = True
+
+    @dataclass(frozen=True)
+    class FakeUpgradePreview:
+        summary: str
+        backup_paths: tuple
+        referenced_paths_not_backed_up: tuple
+        warnings: tuple
+
+    @dataclass(frozen=True)
+    class FakeDiscoveryProposal:
+        candidates: tuple
+        radios: tuple
+        warnings: tuple
+
+    summary, detail = SettingsTab._multi_rig_autoconfig_preview_text(
+        FakeUpgradePreview(
+            summary="FIO will create first radio 'Default Radio' using FLRig.",
+            backup_paths=("/tmp/fio",),
+            referenced_paths_not_backed_up=("/tmp/messages",),
+            warnings=("VarAC will remain disabled unless the operator enables it.",),
+        ),
+        FakeDiscoveryProposal(
+            candidates=(FakeCandidate("FLRig"), FakeCandidate("JS8Call"), FakeCandidate("Broken", False)),
+            radios=(FakeRadio((FakeAssignment("flrig", 12345), FakeAssignment("js8call_udp", 2242, "udp"))),),
+            warnings=("FIO could not find FLDigi.",),
+        ),
+    )
+
+    assert summary == "FIO will create first radio 'Default Radio' using FLRig."
+    assert "Apps found: FLRig, JS8Call." in detail
+    assert "Suggested ports: FLRIG 12345." in detail
+    assert "Backup preview: 1 config path(s)." in detail
+    assert "Referenced data folders not copied by upgrade backup: 1." in detail
+    assert "Review: VarAC will remain disabled" in detail
+
+
+def test_settings_multirig_autoconfig_preview_uses_current_path_hints() -> None:
+    from pathlib import Path
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    hints = SettingsTab._multi_rig_autoconfig_extra_app_paths(
+        {
+            "path_flrig": "/Applications/Custom/FLRig.app",
+            "path_fldigi": "",
+            "path_js8call": "/opt/js8call/js8call",
+            "varac_path": "/Users/example/.wine/drive_c/VarAC",
+        }
+    )
+
+    assert hints == (
+        Path("/Applications/Custom/FLRig.app"),
+        Path("/opt/js8call/js8call"),
+        Path("/Users/example/.wine/drive_c/VarAC"),
+    )
+
+
+def test_settings_multirig_autoconfig_preview_button_updates_label_and_feedback(monkeypatch, tmp_path) -> None:
+    import types
+
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+    monkeypatch.setattr(SettingsTab, "_settings_snapshot_for_readiness", lambda self: {"control_via": "FLRig"})
+    monkeypatch.setattr(
+        settings_tab_module,
+        "build_single_rig_upgrade_preview",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            summary="FIO will create first radio 'Default Radio' using FLRig.",
+            backup_paths=("/tmp/fio",),
+            referenced_paths_not_backed_up=(),
+            warnings=(),
+        ),
+    )
+    monkeypatch.setattr(
+        settings_tab_module,
+        "build_autoconfig_proposal",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            candidates=(types.SimpleNamespace(display_name="FLRig", executable=True),),
+            radios=(
+                types.SimpleNamespace(
+                    ports=(
+                        types.SimpleNamespace(service="flrig", assigned_port=12345, protocol="tcp"),
+                    )
+                ),
+            ),
+            warnings=(),
+            missing_apps=(),
+        ),
+    )
+
+    app = QApplication.instance() or QApplication([])
+    tab = SettingsTab()
+    try:
+        tab.multi_rig_preview_autoconfig_btn.click()
+        app.processEvents()
+
+        assert tab.multi_rig_autoconfig_preview_label.isHidden() is False
+        assert "FIO will create first radio" in tab.multi_rig_autoconfig_preview_label.text()
+        assert "Apps found: FLRig." in tab.multi_rig_autoconfig_preview_label.text()
+        events = tab.action_feedback_service.recent(scope="settings")
+        assert events[0].action_type == "configure_automatically"
+        assert events[0].status == "succeeded"
+        assert events[0].source_surface == "settings.configure_automatically.multirig.preview"
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_settings_autofill_feedback_status_and_labels_are_clear() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 

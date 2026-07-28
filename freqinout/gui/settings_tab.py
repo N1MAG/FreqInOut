@@ -59,6 +59,8 @@ from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema, get_all_operators as get_shared_operators
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
+from freqinout.core.config_autodiscovery import build_autoconfig_proposal
+from freqinout.core.config_migration_preview import build_single_rig_upgrade_preview
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.launch_orchestrator import (
@@ -2457,16 +2459,27 @@ class SettingsTab(QWidget):
         self.multi_rig_status_detail_label = QLabel()
         self.multi_rig_status_detail_label.setWordWrap(True)
         multi_rig_status_layout.addWidget(self.multi_rig_status_detail_label)
+        self.multi_rig_autoconfig_preview_label = QLabel()
+        self.multi_rig_autoconfig_preview_label.setObjectName("multiRigAutoconfigPreview")
+        self.multi_rig_autoconfig_preview_label.setWordWrap(True)
+        self.multi_rig_autoconfig_preview_label.setVisible(False)
+        multi_rig_status_layout.addWidget(self.multi_rig_autoconfig_preview_label)
         self.multi_rig_status_actions_widget = QWidget()
         multi_rig_status_actions = QHBoxLayout(self.multi_rig_status_actions_widget)
         multi_rig_status_actions.setContentsMargins(0, 0, 0, 0)
         multi_rig_status_actions.setSpacing(8)
+        self.multi_rig_preview_autoconfig_btn = QPushButton("Preview Configure Automatically")
+        self.multi_rig_preview_autoconfig_btn.setToolTip(
+            "Scan for installed apps and show what FIO would configure before changing anything."
+        )
+        self.multi_rig_preview_autoconfig_btn.clicked.connect(self._preview_multi_rig_autoconfiguration)
         self.multi_rig_setup_btn = QPushButton("Set up Multi-Rig")
         self.multi_rig_setup_btn.clicked.connect(self._start_multi_rig_setup)
         self.multi_rig_not_now_btn = QPushButton("Not Now")
         self.multi_rig_not_now_btn.clicked.connect(self._defer_multi_rig_setup)
         self.multi_rig_copy_summary_btn = QPushButton("Copy Summary")
         self.multi_rig_copy_summary_btn.clicked.connect(self._copy_multi_rig_status_summary)
+        multi_rig_status_actions.addWidget(self.multi_rig_preview_autoconfig_btn)
         multi_rig_status_actions.addWidget(self.multi_rig_setup_btn)
         multi_rig_status_actions.addWidget(self.multi_rig_not_now_btn)
         multi_rig_status_actions.addWidget(self.multi_rig_copy_summary_btn)
@@ -11644,7 +11657,9 @@ class SettingsTab(QWidget):
             "}"
             f" QLabel {{ color: {text_color}; border: none; background: transparent; }}"
             f" QLabel#multiRigStatusDetail {{ color: {muted_color}; }}"
+            f" QLabel#multiRigAutoconfigPreview {{ color: {text_color}; }}"
         )
+        self.multi_rig_preview_autoconfig_btn.setStyleSheet(button_style("secondary", theme))
         self.multi_rig_setup_btn.setStyleSheet(button_style("primary", theme))
         self.multi_rig_not_now_btn.setStyleSheet(button_style("muted", theme))
         self.multi_rig_copy_summary_btn.setStyleSheet(button_style("secondary", theme))
@@ -11663,12 +11678,14 @@ class SettingsTab(QWidget):
             STARTUP_DEFERRED,
             STARTUP_MIGRATION_ERROR,
         }
+        self.multi_rig_preview_autoconfig_btn.setVisible(setup_available)
         self.multi_rig_setup_btn.setVisible(setup_available)
         self.multi_rig_setup_btn.setText("Continue Multi-Rig Setup" if status.startup_mode == STARTUP_DEFERRED else "Set up Multi-Rig")
         self.multi_rig_not_now_btn.setVisible(status.startup_mode == STARTUP_EXISTING_UNMIGRATED)
         self.multi_rig_copy_summary_btn.setVisible(setup_available)
         self.multi_rig_status_actions_widget.setVisible(
-            self.multi_rig_setup_btn.isVisible()
+            self.multi_rig_preview_autoconfig_btn.isVisible()
+            or self.multi_rig_setup_btn.isVisible()
             or self.multi_rig_not_now_btn.isVisible()
             or self.multi_rig_copy_summary_btn.isVisible()
         )
@@ -11679,6 +11696,108 @@ class SettingsTab(QWidget):
             return dict(self.settings.all())
         except Exception:
             return {}
+
+    @staticmethod
+    def _multi_rig_autoconfig_preview_text(upgrade_preview: Any, discovery_proposal: Any) -> tuple[str, str]:
+        app_labels = [
+            str(getattr(candidate, "display_name", "") or "").strip()
+            for candidate in getattr(discovery_proposal, "candidates", ()) or ()
+            if bool(getattr(candidate, "executable", False))
+        ]
+        app_text = ", ".join(sorted(set(app_labels))) if app_labels else "No launchable radio apps found yet"
+        first_radio = next(iter(getattr(discovery_proposal, "radios", ()) or ()), None)
+        port_text = ""
+        if first_radio is not None:
+            port_parts = []
+            for assignment in getattr(first_radio, "ports", ()) or ():
+                if str(getattr(assignment, "protocol", "tcp") or "tcp").lower() != "tcp":
+                    continue
+                service = str(getattr(assignment, "service", "") or "").strip()
+                if service in {"flrig", "fldigi", "js8call"}:
+                    port_parts.append(f"{service.upper()} {getattr(assignment, 'assigned_port', '')}")
+            port_text = ", ".join(port_parts)
+        backup_count = len(getattr(upgrade_preview, "backup_paths", ()) or ())
+        referenced_count = len(getattr(upgrade_preview, "referenced_paths_not_backed_up", ()) or ())
+        warnings = tuple(getattr(upgrade_preview, "warnings", ()) or ()) + tuple(
+            getattr(discovery_proposal, "warnings", ()) or ()
+        )
+        summary = str(getattr(upgrade_preview, "summary", "") or "FIO can preview Multi-Rig setup.").strip()
+        lines = [
+            f"Apps found: {app_text}.",
+            f"Suggested ports: {port_text or 'default local ports; no active radio apps found to validate yet'}.",
+            f"Backup preview: {backup_count} config path(s).",
+        ]
+        if referenced_count:
+            lines.append(f"Referenced data folders not copied by upgrade backup: {referenced_count}.")
+        if warnings:
+            lines.append("Review: " + " | ".join(str(warn) for warn in warnings[:3] if str(warn).strip()))
+        return summary, "\n".join(line for line in lines if line.strip())
+
+    @staticmethod
+    def _multi_rig_autoconfig_extra_app_paths(settings_values: Mapping[str, Any]) -> tuple[Path, ...]:
+        paths: List[Path] = []
+        for key in (
+            "path_flrig",
+            "path_fldigi",
+            "path_flmsg",
+            "path_flamp",
+            "path_js8call",
+            "path_js8spotter",
+            "path_commstat",
+            "varac_path",
+        ):
+            value = str(settings_values.get(key, "") or "").strip()
+            if value:
+                paths.append(Path(value))
+        return tuple(paths)
+
+    def _preview_multi_rig_autoconfiguration(self) -> None:
+        self._publish_settings_action_feedback(
+            status="in_progress",
+            summary="Scanning current station setup for Configure Automatically preview.",
+            action_type="configure_automatically",
+            source_surface="settings.configure_automatically.multirig.preview",
+        )
+        try:
+            settings_values = self._settings_snapshot_for_readiness()
+            upgrade_preview = build_single_rig_upgrade_preview(
+                settings_values,
+                config_dir=get_config_dir(),
+            )
+            discovery_proposal = build_autoconfig_proposal(
+                radio_count=1,
+                home=Path.home(),
+                extra_app_paths=self._multi_rig_autoconfig_extra_app_paths(settings_values),
+            )
+            summary, detail = self._multi_rig_autoconfig_preview_text(upgrade_preview, discovery_proposal)
+            if hasattr(self, "multi_rig_autoconfig_preview_label"):
+                self.multi_rig_autoconfig_preview_label.setText(f"{summary}\n{detail}".strip())
+                self.multi_rig_autoconfig_preview_label.setToolTip(detail)
+                self.multi_rig_autoconfig_preview_label.setVisible(True)
+            status = "partial" if getattr(discovery_proposal, "missing_apps", ()) else "succeeded"
+            self._publish_settings_action_feedback(
+                status=status,
+                summary="Configure Automatically preview is ready.",
+                detail=f"{summary}\n{detail}".strip(),
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.preview",
+            )
+        except Exception as exc:
+            log.exception("Failed building Multi-Rig Configure Automatically preview.")
+            detail = str(exc) or exc.__class__.__name__
+            if hasattr(self, "multi_rig_autoconfig_preview_label"):
+                self.multi_rig_autoconfig_preview_label.setText(
+                    "Configure Automatically preview could not be built. Your settings were not changed."
+                )
+                self.multi_rig_autoconfig_preview_label.setToolTip(detail)
+                self.multi_rig_autoconfig_preview_label.setVisible(True)
+            self._publish_settings_action_feedback(
+                status="failed",
+                summary="Configure Automatically preview failed.",
+                detail=detail,
+                action_type="configure_automatically",
+                source_surface="settings.configure_automatically.multirig.preview",
+            )
 
     def _multi_rig_radio_catalog(self) -> Dict[str, Any]:
         if self._multi_rig_radio_catalog_payload is None:
