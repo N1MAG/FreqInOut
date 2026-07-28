@@ -512,6 +512,58 @@ def test_phase7_local_ncs_uses_empty_state_instead_of_blank_table(monkeypatch, t
         app.processEvents()
 
 
+def test_phase7_js8_ncs_uses_empty_state_instead_of_blank_checkins_table(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.js8call_net_control_tab import JS8CallNetControlTab
+
+    monkeypatch.setattr(JS8CallNetControlTab, "_load_settings", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_setup_timer", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_setup_js8_rx_timer", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_update_suspend_state", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_refresh_auto_query_flags", lambda self: None)
+    monkeypatch.setattr(JS8CallNetControlTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(
+        JS8CallNetControlTab,
+        "_lookup_operator_meta",
+        lambda self, callsign: {"name": "Bill", "state": "CO", "grid": "DM79", "region": "R08"},
+    )
+
+    tab = JS8CallNetControlTab()
+    try:
+        assert tab.checkin_empty_label.isHidden() is False
+        assert tab.checkin_table.isHidden() is True
+
+        tab._checkins = {}
+        tab._rebuild_checkin_table()
+        app.processEvents()
+
+        assert tab.checkin_empty_label.isHidden() is False
+        assert "No JS8 check-ins yet" in tab.checkin_empty_label.text()
+        assert tab.checkin_table.isHidden() is True
+
+        tab._upsert_checkin("N1MAG", status="NEW", mode="JS8", snr=-8, offset=1200)
+        app.processEvents()
+
+        assert tab.checkin_empty_label.isHidden() is True
+        assert tab.checkin_table.isHidden() is False
+        assert tab.checkin_table.rowCount() == 1
+
+        tab._checkins.clear()
+        tab._checkin_rows.clear()
+        tab._clear_table()
+        app.processEvents()
+
+        assert tab.checkin_empty_label.isHidden() is False
+        assert tab.checkin_table.isHidden() is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def set_scope_resolver")]

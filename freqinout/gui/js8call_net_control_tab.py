@@ -315,8 +315,16 @@ class JS8CallNetControlTab(QWidget):
         self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
         self.checkin_table.horizontalHeader().setStretchLastSection(True)
+        self.checkin_empty_label = QLabel(
+            "No JS8 check-ins yet. Start the net and accept mapped JS8Spotter forms as stations check in."
+        )
+        self.checkin_empty_label.setObjectName("js8NcsCheckinEmptyState")
+        self.checkin_empty_label.setWordWrap(True)
+        self.checkin_empty_label.setVisible(False)
+        table_layout.addWidget(self.checkin_empty_label)
         table_layout.addWidget(self.checkin_table)
         layout.addLayout(table_layout)
+        self._update_checkin_empty_state()
 
         # Buttons row
         btn_row = QHBoxLayout()
@@ -1212,12 +1220,21 @@ class JS8CallNetControlTab(QWidget):
 
     def _clear_table(self) -> None:
         self.checkin_table.setRowCount(0)
+        self._update_checkin_empty_state()
 
     def _rebuild_checkin_table(self) -> None:
         self._checkin_rows = {}
         self._clear_table()
         for cs, data in self._checkins.items():
             self._update_row(cs, data)
+        self._update_checkin_empty_state()
+
+    def _update_checkin_empty_state(self) -> None:
+        if not hasattr(self, "checkin_empty_label") or not hasattr(self, "checkin_table"):
+            return
+        has_rows = self.checkin_table.rowCount() > 0
+        self.checkin_empty_label.setVisible(not has_rows)
+        self.checkin_table.setVisible(has_rows)
 
     def _checkin_filter_mode(self) -> str:
         if hasattr(self, "checkin_filter_combo"):
@@ -1419,6 +1436,7 @@ class JS8CallNetControlTab(QWidget):
                     item.setBackground(bg)
                 else:
                     item.setBackground(QColor(theme["surface_alt"]))
+        self._update_checkin_empty_state()
 
     def _upsert_checkin(
         self,
