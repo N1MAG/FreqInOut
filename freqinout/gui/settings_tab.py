@@ -2387,10 +2387,12 @@ class SettingsTab(QWidget):
         sections_row.addWidget(self.settings_section_nav_scroll, 0)
 
         self.sections_stack = QStackedWidget()
+        self.sections_stack.setMinimumWidth(0)
+        self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.sections_scroll = QScrollArea()
         self.sections_scroll.setWidgetResizable(True)
         self.sections_scroll.setFrameShape(QFrame.NoFrame)
-        self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sections_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())
         self.sections_scroll.setWidget(self.sections_stack)

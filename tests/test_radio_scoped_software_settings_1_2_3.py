@@ -215,6 +215,10 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
         source.index("nav_panel = QWidget()")
         : source.index("self.sections_stack = QStackedWidget()")
     ]
+    sections_scroll_block = source[
+        source.index("self.sections_stack = QStackedWidget()")
+        : source.index("main_layout.addLayout(sections_row, 1)")
+    ]
     add_section_block = source[
         source.index("def _add_settings_section")
         : source.index("def _select_settings_section_group")
@@ -235,6 +239,9 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
     assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
     assert "self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in nav_build_block
+    assert "self.sections_stack.setMinimumWidth(0)" in sections_scroll_block
+    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)" in sections_scroll_block
+    assert "self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in sections_scroll_block
     assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in nav_build_block
     assert "new radio or SDR" in nav_build_block
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in nav_build_block
@@ -277,7 +284,7 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         assert tab.settings_section_nav_scroll.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
         assert tab.settings_section_nav_scroll.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
         assert tab.settings_section_nav_scroll.maximumWidth() <= 250
-        assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
 
         tab.resize(720, 420)
         app.processEvents()
@@ -704,6 +711,9 @@ def test_radio_profile_dashboard_sections_visual_geometry_and_collapse_defaults(
 
         assert tab.radio_profile_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
         assert tab.sections_scroll.widgetResizable() is True
+        assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.sections_stack.minimumWidth() == 0
+        assert tab.sections_stack.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
 
         for section, checked_by_default in sections:
             content = section.layout().itemAt(0).widget()
