@@ -234,6 +234,88 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
         app.processEvents()
 
 
+def test_phase7_hf_nets_time_toggle_preserves_canonical_utc_without_dirtying(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui import net_schedule_tab as net_mod
+
+    settings = SettingsManager()
+    settings.set("timezone", "America/Denver")
+    settings.set("display_time_mode", "LOCAL")
+    settings.set(
+        "net_schedule",
+        [
+            {
+                "day_utc": "Wednesday",
+                "recurrence": "Weekly",
+                "group_name": "MAGNET",
+                "mode": "Digi",
+                "band": "20M",
+                "frequency": "14.115",
+                "start_utc": "20:00",
+                "end_utc": "21:00",
+                "early_checkin": "0",
+                "net_name": "UTC Safety Net",
+                "auto_tune": False,
+            }
+        ],
+    )
+
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_bootstrap_net_resources", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_load_resources_from_db", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resource_set_combo", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resources_table", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_schedule_net_sop_conflict_refresh", lambda self, **_kwargs: None)
+
+    tab = net_mod.NetScheduleTab()
+    try:
+        assert tab._show_local is True
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_combo_value(0, tab.COL_START) == "14:00"
+        assert tab._get_combo_value(0, tab.COL_END) == "15:00"
+        assert tab._collect_rows()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_rows()[0]["start_utc"] == "20:00"
+        assert tab._collect_rows()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is False
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_combo_value(0, tab.COL_START) == "20:00"
+        assert tab._get_combo_value(0, tab.COL_END) == "21:00"
+        assert tab._raw_rows[0]["day_utc"] == "Wednesday"
+        assert tab._raw_rows[0]["start_utc"] == "20:00"
+        assert tab._raw_rows[0]["end_utc"] == "21:00"
+        assert tab._collect_rows()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_rows()[0]["start_utc"] == "20:00"
+        assert tab._collect_rows()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is True
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_combo_value(0, tab.COL_START) == "14:00"
+        assert tab._get_combo_value(0, tab.COL_END) == "15:00"
+        assert tab._raw_rows[0]["day_utc"] == "Wednesday"
+        assert tab._raw_rows[0]["start_utc"] == "20:00"
+        assert tab._raw_rows[0]["end_utc"] == "21:00"
+        assert tab._collect_rows()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_rows()[0]["start_utc"] == "20:00"
+        assert tab._collect_rows()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_hf_daily_uses_compact_default_with_view_edit_details() -> None:
     source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
 
@@ -335,6 +417,203 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
         assert tab._responsive_layout_mode == "wide"
         assert tab._daily_action_layout.itemAtPosition(0, 4).widget() is tab.move_to_resources_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_hf_daily_time_toggle_preserves_canonical_utc_without_dirtying(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import daily_schedule_tab as daily_mod
+
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_sop_panel_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_load_schedule", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_profiles_panel", lambda self, **_kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_populate_schedule_resources_table", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_populate_schedule_issues_table", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_update_suspend_state", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_highlight_time_conflicts", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_update_resource_action_state", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_overlay_rows_in_table", lambda self, *args, **kwargs: None)
+
+    tab = daily_mod.DailyScheduleTab()
+    try:
+        tab.settings.set("timezone", "America/Denver")
+        tab.settings.set("display_time_mode", "LOCAL")
+        tab._show_local = True
+        tab.operating_groups = [
+            {"group": "MAGNET", "band": "20M", "mode": "Digi", "frequency": "14.115"}
+        ]
+        tab._raw_schedule = [
+            {
+                "day_utc": "Wednesday",
+                "group_name": "MAGNET",
+                "mode": "Digi",
+                "band": "20M",
+                "frequency": "14.115",
+                "start_utc": "20:00",
+                "end_utc": "21:00",
+                "auto_tune": False,
+            }
+        ]
+        tab._saved_rows_signature = tab._hf_rows_signature(tab._raw_schedule)
+        tab._rebuild_from_raw()
+        tab._set_dirty(False)
+
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_text_value(0, tab.COL_START) == "14:00"
+        assert tab._get_text_value(0, tab.COL_END) == "15:00"
+        assert tab._collect_current_hf_rows_utc()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_current_hf_rows_utc()[0]["start_utc"] == "20:00"
+        assert tab._collect_current_hf_rows_utc()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is False
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_text_value(0, tab.COL_START) == "20:00"
+        assert tab._get_text_value(0, tab.COL_END) == "21:00"
+        assert tab._raw_schedule[0]["day_utc"] == "Wednesday"
+        assert tab._raw_schedule[0]["start_utc"] == "20:00"
+        assert tab._raw_schedule[0]["end_utc"] == "21:00"
+        assert tab._collect_current_hf_rows_utc()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_current_hf_rows_utc()[0]["start_utc"] == "20:00"
+        assert tab._collect_current_hf_rows_utc()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is True
+        assert tab._get_combo_value(0, tab.COL_DAY) == "Wednesday"
+        assert tab._get_text_value(0, tab.COL_START) == "14:00"
+        assert tab._get_text_value(0, tab.COL_END) == "15:00"
+        assert tab._raw_schedule[0]["day_utc"] == "Wednesday"
+        assert tab._raw_schedule[0]["start_utc"] == "20:00"
+        assert tab._raw_schedule[0]["end_utc"] == "21:00"
+        assert tab._collect_current_hf_rows_utc()[0]["day_utc"] == "Wednesday"
+        assert tab._collect_current_hf_rows_utc()[0]["start_utc"] == "20:00"
+        assert tab._collect_current_hf_rows_utc()[0]["end_utc"] == "21:00"
+        assert tab._dirty is False
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_schedule_time_conversion_handles_local_day_boundaries(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import daily_schedule_tab as daily_mod
+    from freqinout.gui import net_schedule_tab as net_mod
+
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_bootstrap_net_resources", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_load_resources_from_db", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resource_set_combo", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resources_table", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_schedule_net_sop_conflict_refresh", lambda self, **_kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_sop_panel_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_load_schedule", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_profiles_panel", lambda self, **_kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_populate_schedule_resources_table", lambda self: None)
+
+    net_tab = net_mod.NetScheduleTab()
+    daily_tab = daily_mod.DailyScheduleTab()
+    try:
+        for tab in (net_tab, daily_tab):
+            tab.settings.set("timezone", "America/Denver")
+            assert tab._convert_day_time("Wednesday", "02:00", to_local=True) == ("Tuesday", "20:00")
+            assert tab._convert_day_time("Tuesday", "20:00", to_local=False) == ("Wednesday", "02:00")
+    finally:
+        net_tab.deleteLater()
+        daily_tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_hf_nets_dirty_invalid_time_toggle_preserves_visible_edits(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import net_schedule_tab as net_mod
+
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_bootstrap_net_resources", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_load_resources_from_db", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resource_set_combo", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_refresh_resources_table", lambda self: None)
+    monkeypatch.setattr(net_mod.NetScheduleTab, "_schedule_net_sop_conflict_refresh", lambda self, **_kwargs: None)
+
+    tab = net_mod.NetScheduleTab()
+    try:
+        tab._add_row(
+            {
+                "day_utc": "Wednesday",
+                "group_name": "MAGNET",
+                "mode": "Digi",
+                "band": "20M",
+                "start_utc": "bad",
+                "end_utc": "21:00",
+                "net_name": "Partial Net",
+            }
+        )
+        tab._set_dirty(True)
+        before_show_local = tab._show_local
+        before_rows = tab.table.rowCount()
+        before_start = tab._get_combo_value(0, tab.COL_START)
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is before_show_local
+        assert tab.table.rowCount() == before_rows
+        assert tab._get_combo_value(0, tab.COL_START) == before_start
+        assert tab._dirty is True
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_hf_daily_dirty_partial_time_toggle_preserves_visible_edits(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import daily_schedule_tab as daily_mod
+
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_setup_sop_panel_timer", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_qsy_options", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_load_schedule", lambda self: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_refresh_sop_profiles_panel", lambda self, **_kwargs: None)
+    monkeypatch.setattr(daily_mod.DailyScheduleTab, "_populate_schedule_resources_table", lambda self: None)
+
+    tab = daily_mod.DailyScheduleTab()
+    try:
+        tab._add_row()
+        tab._set_dirty(True)
+        before_show_local = tab._show_local
+        before_rows = tab.table.rowCount()
+        before_start = tab._get_text_value(0, tab.COL_START)
+
+        tab._toggle_time_view()
+        app.processEvents()
+
+        assert tab._show_local is before_show_local
+        assert tab.table.rowCount() == before_rows
+        assert tab._get_text_value(0, tab.COL_START) == before_start
+        assert tab._dirty is True
     finally:
         tab.deleteLater()
         app.processEvents()

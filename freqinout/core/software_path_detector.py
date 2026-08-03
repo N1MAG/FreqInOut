@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
 
+from freqinout.core.config_autodiscovery import discover_js8call_file_profiles, select_js8call_file_profile
+
 
 @dataclass(frozen=True)
 class PathDetectionResult:
@@ -284,6 +286,24 @@ class SoftwarePathDetector:
         return self._not_found("message_paths.flamp", "FLAmp message path", "No NBEMS FLAMP directory found", "directory")
 
     def _detect_js8_directed_path(self) -> PathDetectionResult:
+        file_profiles = discover_js8call_file_profiles(platform=self.system, home=self.home)
+        selected_profile = select_js8call_file_profile(file_profiles)
+        if selected_profile is not None:
+            return self._result(
+                "js8_directed_path",
+                "JS8Call DIRECTED.TXT path",
+                Path(selected_profile.directed_path),
+                selected_profile.confidence,
+                selected_profile.reason,
+                "file",
+            )
+        if sum(1 for profile in file_profiles if profile.directed_path) > 1:
+            return self._not_found(
+                "js8_directed_path",
+                "JS8Call DIRECTED.TXT path",
+                "Multiple JS8Call profiles have DIRECTED.TXT; select a radio/profile before Auto-Fill.",
+                "file",
+            )
         for base in self._js8_data_roots():
             directed = base / "DIRECTED.TXT"
             if directed.is_file():
@@ -543,12 +563,22 @@ class SoftwarePathDetector:
 
     def _macos_bundle_candidates(self, app_name: str) -> List[Path]:
         normalized = app_name if app_name.lower().endswith(".app") else f"{app_name}.app"
-        return self._unique_paths(
-            [
-                Path("/Applications") / normalized,
-                self.home / "Applications" / normalized,
-            ]
-        )
+        roots = [
+            Path("/Applications"),
+            Path("/Applications") / "RadioApps",
+            self.home / "Applications",
+            self.home / "Applications" / "RadioApps",
+            self.home / "RadioTools" / "Programs",
+        ]
+        candidates: List[Path] = [root / normalized for root in roots]
+        stem = Path(normalized).stem
+        for root in roots:
+            if not root.is_dir():
+                continue
+            candidates.extend(sorted(root.glob(f"{stem}-*.app")))
+            candidates.extend(sorted(root.glob(f"{stem.upper()}-*.app")))
+            candidates.extend(sorted(root.glob(f"{stem.lower()}-*.app")))
+        return self._unique_paths(candidates)
 
     def _macos_bundle_executable(self, bundle: Path, names: Sequence[str]) -> Path | None:
         candidates: List[Path] = []

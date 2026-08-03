@@ -188,7 +188,7 @@ def test_settings_tab_refresh_running_status_uses_unsaved_flrig_port(monkeypatch
         captured.update(kwargs)
         return {}
 
-    monkeypatch.setattr(tab._status_service, "status_snapshot", fake_snapshot)
+    monkeypatch.setattr(tab._software_status_probe, "status_snapshot", fake_snapshot)
 
     try:
         tab.flrig_port_edit.setText("24567")
@@ -221,7 +221,7 @@ def test_settings_tab_refresh_running_status_uses_unsaved_fldigi_endpoint(monkey
         captured.update(kwargs)
         return {}
 
-    monkeypatch.setattr(tab._status_service, "status_snapshot", fake_snapshot)
+    monkeypatch.setattr(tab._software_status_probe, "status_snapshot", fake_snapshot)
 
     try:
         tab.fldigi_host_edit.setText("10.1.1.7")
@@ -233,3 +233,98 @@ def test_settings_tab_refresh_running_status_uses_unsaved_fldigi_endpoint(monkey
 
     assert captured.get("fldigi_host_override") == "10.1.1.7"
     assert captured.get("fldigi_port_override") == 7364
+
+
+def test_settings_tab_selected_radio_status_uses_js8_edit_endpoint() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class Edit:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def text(self) -> str:
+            return self._value
+
+    class Probe:
+        def __init__(self) -> None:
+            self.captured: dict[str, object] = {}
+
+        def status_snapshot(self, **kwargs):
+            self.captured.update(kwargs)
+            return {
+                "JS8Call_API": {
+                    "state": "warn",
+                    "tooltip": "Process running, configured TCP API unreachable at 127.0.0.1:2242",
+                }
+            }
+
+    probe = Probe()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._software_status_probe = probe
+    tab.js8_host_edit = Edit("127.0.0.1")
+    tab.js8_port_edit = Edit("2242")
+    tab.flrig_port_edit = Edit("12345")
+    tab.fldigi_host_edit = Edit("127.0.0.1")
+    tab.fldigi_port_edit = Edit("7362")
+
+    snapshot = tab._selected_radio_status_snapshot(force=True)
+
+    assert probe.captured["host_override"] == "127.0.0.1"
+    assert probe.captured["port_override"] == 2242
+    assert snapshot["JS8Call_API"]["tooltip"].endswith("127.0.0.1:2242")
+
+
+def test_settings_tab_status_refresh_not_throttled_when_endpoint_changes() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class Edit:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def text(self) -> str:
+            return self._value
+
+    class Label:
+        def __init__(self) -> None:
+            self.tooltip = ""
+
+        def setStyleSheet(self, _style: str) -> None:
+            pass
+
+        def setToolTip(self, value: str) -> None:
+            self.tooltip = value
+
+    class Probe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def status_snapshot(self, **_kwargs):
+            self.calls += 1
+            return {
+                "JS8Call_API": {
+                    "state": "warn",
+                    "tooltip": "Process running, configured TCP API unreachable at 127.0.0.1:2242",
+                }
+            }
+
+    probe = Probe()
+    label = Label()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.settings = DummySettings({})
+    tab.status_labels = {"JS8Call_API": label}
+    tab._current_visible_status_items = lambda: [("JS8Call_API", "JS8")]
+    tab._software_status_probe = probe
+    tab._status_service = None
+    tab._last_running_status_refresh_ts = 9_999_999_999.0
+    tab._running_status_refresh_interval_sec = 10.0
+    tab._last_running_status_sig = (("JS8Call_API",), ("127.0.0.1", 2442, 12345, "127.0.0.1", 7362))
+    tab.js8_host_edit = Edit("127.0.0.1")
+    tab.js8_port_edit = Edit("2242")
+    tab.flrig_port_edit = Edit("12345")
+    tab.fldigi_host_edit = Edit("127.0.0.1")
+    tab.fldigi_port_edit = Edit("7362")
+
+    tab._refresh_running_status(force=False)
+
+    assert probe.calls == 1
+    assert label.tooltip.endswith("127.0.0.1:2242")

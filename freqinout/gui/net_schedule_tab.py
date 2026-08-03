@@ -1259,13 +1259,18 @@ class NetScheduleTab(QWidget):
 
     def _toggle_time_view(self):
         """
-        Flip between UTC and Local view, converting current table contents back to UTC first.
+        Flip between UTC and Local view without changing canonical schedule semantics.
         """
-        try:
-            # Normalize current table to UTC before flipping
-            rows_utc = self._collect_rows()
-        except Exception:
-            rows_utc = self._raw_rows or []
+        was_dirty = bool(self._dirty)
+        if was_dirty:
+            try:
+                # Preserve in-progress user edits by normalizing the current view to UTC before flipping.
+                rows_utc = self._collect_rows()
+            except Exception as e:
+                self._publish_time_toggle_blocked_feedback(str(e))
+                return
+        else:
+            rows_utc = [dict(row) for row in (self._raw_rows or [])]
         self._raw_rows = rows_utc
         self._show_local = not self._show_local
         self._set_headers()
@@ -1278,8 +1283,34 @@ class NetScheduleTab(QWidget):
             self._suspend_dirty_tracking = False
         self._update_clock_labels()
         self._resize_table_columns()
-        self._mark_dirty()
+        self._set_dirty(was_dirty)
         self._schedule_net_sop_conflict_refresh(force=True)
+
+    def _publish_time_toggle_blocked_feedback(self, detail: str = "") -> None:
+        summary = "Finish the current Net Schedule row before changing the time view."
+        win = self.window()
+        service = getattr(win, "action_feedback_service", None) if win is not None else None
+        if service is not None and hasattr(service, "publish"):
+            try:
+                service.publish(
+                    scope="scheduler",
+                    action_type="time_view",
+                    status="blocked",
+                    summary=summary,
+                    detail=str(detail or "").strip(),
+                    source_surface="net_schedule_tab",
+                )
+                return
+            except Exception as e:
+                log.debug("Net Schedule: failed publishing time toggle feedback: %s", e)
+        try:
+            status_bar = win.statusBar() if win is not None and hasattr(win, "statusBar") else None
+            if status_bar is not None:
+                status_bar.showMessage(summary, 6000)
+                return
+        except Exception:
+            pass
+        log.info("Net Schedule: time view change blocked; %s", detail)
 
 
     # --------- row widgets --------- #

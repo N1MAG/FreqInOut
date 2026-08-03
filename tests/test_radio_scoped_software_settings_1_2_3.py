@@ -28,6 +28,7 @@ from freqinout.gui.settings_tab import _coerce_json_mapping
 from freqinout.core.multi_radio_store import (
     MultiRadioStore,
     _legacy_settings_projection_from_device,
+    ensure_default_multi_radio_records,
     settings_db_path,
 )
 from freqinout.core.settings_manager import SettingsManager
@@ -85,7 +86,8 @@ def test_device_profile_persists_radio_owned_software_fields(monkeypatch, tmp_pa
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
-    SettingsManager()
+    settings = SettingsManager()
+    ensure_default_multi_radio_records(settings._conn, settings.all())  # type: ignore[arg-type]
     store = MultiRadioStore(settings_db_path())
     primary = next(row for row in store.list_device_profiles() if int(row.get("runtime_primary", 0) or 0) == 1)
 
@@ -123,6 +125,20 @@ def test_device_profile_persists_radio_owned_software_fields(monkeypatch, tmp_pa
     assert saved["varac_bbs_dir"] == "/varac/bbs"
     assert saved["varac_bbs_archive_dir"] == "/varac/archive"
     assert int(saved["varac_bbs_auto_archive_days"]) == 30
+
+
+def test_settings_add_radio_marks_first_radio_active_before_projection() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    persist_block = source[
+        source.index("    def _persist_device_profile")
+        : source.index("    def _add_device_profile")
+    ]
+
+    assert "first_radio = not bool(self.multi_radio_store.list_device_profiles())" in persist_block
+    assert 'payload["runtime_active"] = 1' in persist_block
+    assert 'payload["runtime_primary"] = 1' in persist_block
+    assert 'if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:' in persist_block
+    assert "sync_runtime_active_device_to_legacy_settings" in persist_block
 
 
 def test_coerce_json_mapping_accepts_stored_json_text() -> None:
@@ -235,21 +251,28 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.global_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert "self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert 'nav_panel.setObjectName("settingsSectionNavPanel")' in nav_build_block
+    assert 'self.settings_compact_header.setObjectName("settingsCompactHeaderBar")' in nav_build_block
+    assert 'self.settings_section_combo.setObjectName("settingsSectionCombo")' in nav_build_block
+    assert 'self.settings_section_combo.setAccessibleName("Settings section selector")' in nav_build_block
+    assert "self.settings_section_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in nav_build_block
     assert 'self.settings_section_nav_scroll.setObjectName("settingsSectionNavScroll")' in nav_build_block
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
     assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
     assert "self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in nav_build_block
+    assert "self.settings_section_nav_scroll.hide()" in nav_build_block
+    assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" not in nav_build_block
     assert "self.sections_stack.setMinimumWidth(0)" in sections_scroll_block
     assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)" in sections_scroll_block
     assert "self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in sections_scroll_block
     assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in nav_build_block
     assert "new radio or SDR" in nav_build_block
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in nav_build_block
-    assert "nav_panel_layout.addWidget(self.add_device_profile_btn)" in nav_build_block
-    assert nav_build_block.index("nav_panel_layout.addWidget(self.add_device_profile_btn)") < nav_build_block.index(
-        "nav_panel_layout.addWidget(self.global_settings_toggle_btn)"
+    assert "settings_header_layout.addWidget(self.add_device_profile_btn, 0, 0)" in nav_build_block
+    assert nav_build_block.index("settings_header_layout.addWidget(self.add_device_profile_btn, 0, 0)") < nav_build_block.index(
+        "self.global_settings_toggle_btn = QToolButton()"
     )
     assert 'btn.setAccessibleName(f"Settings navigation: {title}")' in add_section_block
+    assert 'self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)' in add_section_block
     assert "btn.setStyleSheet(self._settings_nav_button_style(role, theme))" in style_block
     assert "self._settings_nav_group_toggle_role(\"global\")" in style_block
     assert "self._settings_nav_group_toggle_role(\"radio\")" in style_block
@@ -278,6 +301,9 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         tab.show()
         app.processEvents()
 
+        assert tab.settings_compact_header.isVisible() is True
+        assert tab.settings_section_combo.isVisible() is True
+        assert tab.settings_section_combo.count() > 0
         assert tab.settings_section_nav_scroll.widgetResizable() is True
         assert tab.settings_section_nav_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.settings_section_nav_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
@@ -289,9 +315,9 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         tab.resize(720, 420)
         app.processEvents()
 
-        assert tab.settings_section_nav_scroll.isVisible() is True
-        assert tab.settings_section_nav_scroll.width() <= tab.settings_section_nav_scroll.maximumWidth()
-        assert tab.settings_section_nav_scroll.height() > 0
+        assert tab.settings_section_nav_scroll.isVisible() is False
+        assert tab.settings_compact_header.isVisible() is True
+        assert tab.settings_section_combo.width() > 0
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -1064,6 +1090,169 @@ def test_settings_setup_ui_does_not_expose_lab_or_test_radio_actions() -> None:
     assert "SDR" in source
 
 
+def test_guided_add_radio_configure_automatically_is_user_facing_and_conservative() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    planner_source = Path("freqinout/core/guided_radio_autofill.py").read_text(encoding="utf-8")
+    dialog_block = source[
+        source.index("def _open_device_profile_dialog")
+        : source.index("def _apply_runtime_projection_widgets")
+    ]
+
+    assert 'configure_auto_btn = QPushButton("Configure Automatically")' in dialog_block
+    assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
+    assert "Kept existing:" in dialog_block
+    assert "Review before Save" in dialog_block
+    assert 'app_choice_group = QGroupBox("Choose Detected Apps")' in dialog_block
+    assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
+    assert 'js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")' in dialog_block
+    assert "Which JS8Call profile belongs to this radio?" in dialog_block
+    assert 'port_prompt_group = QGroupBox("Enter App Ports")' in dialog_block
+    assert 'prompt_edit.setObjectName(f"guidedAutoPortPrompt_{field_key}")' in dialog_block
+    assert "What port does this radio's FLRig use?" in dialog_block
+    assert "What port does this radio's FLDigi use?" in dialog_block
+    assert "What port does this radio's JS8Call use?" in dialog_block
+    assert "This is the number the app uses to talk to FIO." in dialog_block
+    assert 'app_setup_plan_group = QGroupBox("Planned App Setup")' in dialog_block
+    assert 'app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")' in dialog_block
+    assert "build_guided_external_app_config_plan(" in dialog_block
+    assert "Backup required before FIO writes app profiles." in dialog_block
+    assert "_update_guided_app_setup_plan_review()" in dialog_block
+    assert "if not enabled_apps and not varac_selected:" in dialog_block
+    assert "include_varac=varac_selected" in dialog_block
+    assert "_update_detected_app_choices(install_candidates)" in dialog_block
+    assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
+    assert "_update_port_prompt_visibility()" in dialog_block
+    assert "for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:" in dialog_block
+    assert "widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())" in dialog_block
+    assert "js8_port_edit.setText(port)" in dialog_block
+    assert "js8_profile_edit.setText(profile_path)" in dialog_block
+    assert "js8_directed_edit.setText(directed_path)" in dialog_block
+    app_choice_apply_block = dialog_block[
+        dialog_block.index("def _apply_detected_app_choice")
+        : dialog_block.index("def _apply_js8_profile_choice")
+    ]
+    assert "if target.text().strip():" in app_choice_apply_block
+    assert "Kept existing {label} app path" in app_choice_apply_block
+    js8_choice_apply_block = dialog_block[
+        dialog_block.index("def _apply_js8_profile_choice")
+        : dialog_block.index("def _update_app_choice_visibility")
+    ]
+    assert "if port and not js8_port_edit.text().strip():" in js8_choice_apply_block
+    assert "if profile_path and not js8_profile_edit.text().strip():" in js8_choice_apply_block
+    assert "if directed_path and not js8_directed_edit.text().strip():" in js8_choice_apply_block
+    assert "Kept existing JS8Call profile fields" in js8_choice_apply_block
+    assert "_update_app_choice_visibility()" in js8_choice_apply_block
+    assert "js8_profile_details_present" in dialog_block
+    assert "not (js8_port_has_one_match and js8_profile_details_present)" in dialog_block
+    assert "for widget in [js8_port_edit, js8_profile_edit, js8_directed_edit]:" in dialog_block
+    helper_block = source[
+        source.index("def _guided_radio_autofill_suggestions")
+        : source.index("def _detect_migration_roles")
+    ]
+    assert 'sum(1 for profile in js8_file_profiles or () if str(getattr(profile, "directed_path", "") or "").strip()) <= 1' in planner_source
+    assert "def guided_port_prompt_keys" in planner_source
+    assert "return guided_radio_autofill_suggestions(" in helper_block
+    assert '"js8call": js8_install_edit' in dialog_block
+    assert '"varac": varac_install_edit' in dialog_block
+    assert "_guided_radio_autofill_suggestions(" in dialog_block
+    assert "flmsg_path_edit = QLineEdit" in dialog_block
+    assert "flamp_path_edit = QLineEdit" in dialog_block
+    assert '"flmsg_path": (flmsg_path_edit, "FLMsg app")' in dialog_block
+    assert '"flamp_path": (flamp_path_edit, "FLAmp app")' in dialog_block
+    assert "build_autoconfig_proposal(" in dialog_block
+    assert "visible_review = " in dialog_block
+    assert "select_js8call_file_profile(" in planner_source
+    assert "tcp_port=initial_js8_port" in planner_source
+    assert 'guided_single_install_path(install_candidates, "flmsg", fast_results, "path_flmsg", "FLMsg", review)' in planner_source
+    assert 'guided_single_install_path(install_candidates, "flamp", fast_results, "path_flamp", "FLAmp", review)' in planner_source
+    assert "Multiple {label} installs found. Choose the correct app path manually." in planner_source
+    assert 'getattr(selected_js8_profile, "tcp_server_port", "")' in planner_source
+    assert '_suggest("js8_profile_path", getattr(selected_js8_profile, "save_dir", ""))' in planner_source
+    assert "guided_js8_profile_review_text(" in planner_source
+    assert '"flmsg_path": flmsg_path_edit.text().strip()' in dialog_block
+    assert '"flamp_path": flamp_path_edit.text().strip()' in dialog_block
+    assert "VarAC database and cluster membership were not changed" in planner_source
+    assert 'Path(varac_install_edit.text().strip()) / "VarAC.db"' not in dialog_block
+
+
+def test_settings_js8_directed_path_has_field_level_autofill() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    js8_block = source[
+        source.index("self.js8call_path_edit = QLineEdit()")
+        : source.index("self.commstat_path_edit = QLineEdit()")
+    ]
+
+    assert '"js8_directed_log"' in js8_block
+    assert '"Find JS8Call DIRECTED.TXT from JS8Call settings and profile save folders' in js8_block
+    assert '["js8_directed_path"]' in js8_block
+    assert "js8_directed_autofill_btn" in js8_block
+    assert "build_js8_path_row(" in js8_block
+
+
+def test_settings_js8_autofill_uses_selected_radio_port_for_directed_path(monkeypatch, tmp_path) -> None:
+    from freqinout.core.config_autodiscovery import JS8CallFileProfile
+    from freqinout.core.software_path_detector import PathDetectionResult
+    import freqinout.gui.settings_tab as settings_tab_module
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class Edit:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def text(self) -> str:
+            return self.value
+
+    path_a = tmp_path / "fio-a" / "DIRECTED.TXT"
+    path_c = tmp_path / "fio-c" / "DIRECTED.TXT"
+    path_a.parent.mkdir()
+    path_c.parent.mkdir()
+    path_a.write_text("a\n", encoding="utf-8")
+    path_c.write_text("c\n", encoding="utf-8")
+    profiles = (
+        JS8CallFileProfile(
+            name="FIO-A",
+            ini_path="/tmp/JS8Call.ini",
+            save_dir=str(path_a.parent),
+            tcp_server_port="2442",
+            directed_path=str(path_a),
+            all_path="",
+            confidence="verified",
+            reason="A",
+        ),
+        JS8CallFileProfile(
+            name="FIO-C",
+            ini_path="/tmp/JS8Call.ini",
+            save_dir=str(path_c.parent),
+            tcp_server_port="2444",
+            directed_path=str(path_c),
+            all_path="",
+            confidence="verified",
+            reason="C",
+        ),
+    )
+    monkeypatch.setattr(settings_tab_module, "discover_js8call_file_profiles", lambda: profiles)
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.js8_port_edit = Edit("2444")
+    tab._selected_settings_feedback_target = lambda: ("3", "FIO-C")
+    original = {
+        "js8_directed_path": PathDetectionResult(
+            key="js8_directed_path",
+            label="JS8Call DIRECTED.TXT path",
+            path=str(path_a),
+            confidence="verified",
+            reason="First profile would be wrong",
+            exists=True,
+            target_type="file",
+        )
+    }
+
+    scoped = tab._radio_scoped_js8_autofill_results(original)
+
+    assert scoped["js8_directed_path"].path == str(path_c)
+    assert scoped["js8_directed_path"].reason == "C"
+
+
 def test_settings_multirig_autoconfig_preview_text_is_compact() -> None:
     from dataclasses import dataclass
 
@@ -1773,10 +1962,14 @@ def test_settings_guardrail_conflict_focus_selects_radio_and_target_section() ->
 def test_settings_contextual_autofill_publishes_scan_and_result_feedback() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     attempt_block = source[source.index("def _attempt_scoped_autofill") : source.index("def _refresh_contextual_autofill_buttons")]
+    section_attempt_block = source[source.index("def _attempt_fast_light_autofill") : source.index("def _apply_autofill_results")]
     apply_block = source[source.index("def _apply_autofill_results") : source.index("def _set_autofill_status")]
 
     assert "_publish_autofill_feedback(" in attempt_block
     assert 'summary=f"Auto-fill scanning {section_label}."' in attempt_block
+    assert 'self._apply_autofill_results("fast_light", self._detect_autofill_results("fast_light"))' in section_attempt_block
+    assert 'self._apply_autofill_results("js8", self._detect_autofill_results("js8"))' in section_attempt_block
+    assert 'self._apply_autofill_results("varac", self._detect_autofill_results("varac"))' in section_attempt_block
     assert "_publish_autofill_feedback(" in apply_block
     assert "_autofill_feedback_status(" in apply_block
     assert "_autofill_visible_review_text(summary, detail_lines)" in apply_block
@@ -1788,6 +1981,18 @@ def test_settings_contextual_autofill_publishes_scan_and_result_feedback() -> No
     assert 'action_type="configure_automatically"' in source
     assert "QMessageBox" not in attempt_block
     assert "QMessageBox" not in apply_block
+
+
+def test_settings_contextual_autofill_highlight_tracks_primary_field_only() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    button_block = source[
+        source.index("def _make_contextual_autofill_button")
+        : source.index("def _attempt_fast_light_autofill")
+    ]
+
+    assert '"primary_key": str(keys[0]) if keys else ""' in button_block
+    assert 'primary_edit = self._autofill_target_edit(primary_key) if primary_key else None' in button_block
+    assert "missing_target = not primary_edit.text().strip()" in button_block
 
 
 def test_settings_autofill_full_review_toggle_is_in_panel() -> None:

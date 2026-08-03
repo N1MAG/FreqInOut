@@ -49,7 +49,12 @@ def _insert_kv(db_path: Path, values: dict[str, object]) -> None:
         conn.close()
 
 
-def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path):
+def _seed_default_runtime(settings: SettingsManager) -> None:
+    ensure_default_multi_radio_records(settings._conn, settings.all())  # type: ignore[arg-type]
+    settings.reload()
+
+
+def test_settings_manager_starts_fresh_install_with_no_radios(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
@@ -62,35 +67,19 @@ def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path)
 
     assert settings.db_path == settings_db_path()
     assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
-    assert len(devices) == 1
-    assert devices[0]["system_key"] == "default_device"
-    assert devices[0]["name"] == "Default Radio"
-    assert devices[0]["needs_operator_name"] == 1
-    assert devices[0]["control_backend"] == "flrig"
-    assert devices[0]["runtime_active"] == 1
-    assert devices[0]["runtime_primary"] == 1
-    assert devices[0]["launch_enabled"] == 0
-    assert devices[0]["flrig_port"] == 12345
-    assert devices[0]["js8_port"] == 2442
-    assert devices[0]["schedule_hold_minutes_default"] == 30
-    assert len(operating) == 1
-    assert operating[0]["system_key"] == "default_operating"
-    assert operating[0]["scheduler_enabled"] == 1
-    assert operating[0]["use_launch_control"] == 0
-    assert len(assignments) == 1
-    assert assignments[0]["assignment_state"] == "active"
-    assert assignments[0]["device_profile_id"] == devices[0]["id"]
-    assert assignments[0]["operating_profile_id"] == operating[0]["id"]
+    assert settings.get(f"{MULTI_RIG_MIGRATION_SUMMARY_PREFIX}{CURRENT_MULTI_RIG_MIGRATION_VERSION}")[
+        "fresh_install_blank_slate"
+    ] is True
+    assert devices == []
+    assert operating == []
+    assert assignments == []
 
     js8_instances = store.list_js8_instances()
     fast_light_configs = store.list_fast_light_configs()
     varac_nodes = store.list_varac_nodes()
-    assert len(js8_instances) == 1
-    assert len(fast_light_configs) == 1
-    assert len(varac_nodes) == 1
-    assert devices[0]["js8_instance_id"] == js8_instances[0]["id"]
-    assert devices[0]["fast_light_config_id"] == fast_light_configs[0]["id"]
-    assert devices[0]["varac_node_id"] == varac_nodes[0]["id"]
+    assert js8_instances == []
+    assert fast_light_configs == []
+    assert varac_nodes == []
 
 
 def test_existing_legacy_settings_wait_for_explicit_migration(monkeypatch, tmp_path):
@@ -166,7 +155,7 @@ def test_deferred_legacy_writes_do_not_create_multi_rig_records(monkeypatch, tmp
     assert store.list_varac_nodes() == []
 
 
-def test_timezone_only_settings_do_not_block_fresh_install_defaults(monkeypatch, tmp_path):
+def test_timezone_only_settings_do_not_block_fresh_install_blank_slate(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
@@ -177,11 +166,11 @@ def test_timezone_only_settings_do_not_block_fresh_install_defaults(monkeypatch,
     store = MultiRadioStore(settings_db_path())
 
     assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
-    assert len(store.list_device_profiles()) == 1
-    assert len(store.list_operating_profiles()) == 1
+    assert store.list_device_profiles() == []
+    assert store.list_operating_profiles() == []
 
 
-def test_corrupt_legacy_config_does_not_leave_schema_only_limbo(monkeypatch, tmp_path):
+def test_corrupt_legacy_config_starts_blank_without_schema_limbo(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
@@ -193,8 +182,40 @@ def test_corrupt_legacy_config_does_not_leave_schema_only_limbo(monkeypatch, tmp
     store = MultiRadioStore(settings_db_path())
 
     assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
-    assert len(store.list_device_profiles()) == 1
-    assert len(store.list_operating_profiles()) == 1
+    assert store.list_device_profiles() == []
+    assert store.list_operating_profiles() == []
+
+
+def test_empty_legacy_config_json_starts_blank_slate(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert store.list_device_profiles() == []
+    assert store.list_operating_profiles() == []
+
+
+def test_ignored_only_legacy_config_json_starts_blank_slate(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(json.dumps({"timezone": "America/Denver"}), encoding="utf-8")
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert store.list_device_profiles() == []
+    assert store.list_operating_profiles() == []
 
 
 def test_explicit_migration_writes_key_map_columns(monkeypatch, tmp_path):
@@ -345,7 +366,8 @@ def test_operating_profile_save_defaults_launch_control_off(monkeypatch, tmp_pat
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
-    SettingsManager()
+    settings = SettingsManager()
+    _seed_default_runtime(settings)
     store = MultiRadioStore(settings_db_path())
     profile = store.save_operating_profile({"name": "Operator Plan"})
 
@@ -357,6 +379,7 @@ def test_mirror_legacy_settings_without_launch_key_keeps_launch_control_off(monk
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
     settings = SettingsManager()
+    _seed_default_runtime(settings)
     store = MultiRadioStore(settings_db_path())
     active = store.get_runtime_active_device_profile()
     assert active is not None
@@ -385,6 +408,7 @@ def test_v2_migration_disables_existing_launch_enabled_rows(monkeypatch, tmp_pat
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
     settings = SettingsManager()
+    _seed_default_runtime(settings)
     store = MultiRadioStore(settings_db_path())
     device = store.list_device_profiles()[0]
     operating = store.list_operating_profiles()[0]
@@ -422,7 +446,8 @@ def test_radio_rename_clears_needs_operator_name(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
-    SettingsManager()
+    settings = SettingsManager()
+    _seed_default_runtime(settings)
     store = MultiRadioStore(settings_db_path())
     device = store.list_device_profiles()[0]
 
@@ -441,6 +466,7 @@ def test_rerunning_migration_does_not_overwrite_custom_operating_plan_name(monke
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
     settings = SettingsManager()
+    _seed_default_runtime(settings)
     store = MultiRadioStore(settings_db_path())
     operating = store.list_operating_profiles()[0]
     store.save_operating_profile({"id": int(operating["id"]), "name": "My Custom Plan", "use_launch_control": 0})
@@ -637,6 +663,7 @@ def test_timer_policy_mirrors_between_legacy_settings_and_active_device(monkeypa
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
     settings = SettingsManager()
+    _seed_default_runtime(settings)
     settings.set("use_scheduler", False)
     settings.set("schedule_hold_minutes_default", 90)
     settings.set("freq_enforcement_mode", "Prompt")
@@ -835,6 +862,7 @@ def test_settings_manager_mirrors_flat_settings_into_runtime_active_device(monke
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
     settings = SettingsManager()
+    _seed_default_runtime(settings)
     settings.set_many(
         {
             "control_via": "JS8Call",
@@ -984,6 +1012,17 @@ def test_linked_records_project_and_mirror(monkeypatch, tmp_path):
     assert varac_after["install_path"] == "C:/VarAC"
     assert varac_after["db_path"] == "C:/VarAC/VarAC.db"
     assert varac_after["incoming_path"] == "C:/VarAC/incoming"
+
+
+def test_js8_instance_update_without_offset_preserves_existing_offset(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    store = MultiRadioStore(settings_db_path())
+    js8 = store.save_js8_instance({"name": "Offset Guard", "offset_hz": 2050})
+    updated = store.save_js8_instance({"id": int(js8["id"]), "name": "Offset Guard Updated", "port": 2444})
+
+    assert updated["offset_hz"] == 2050
 
 
 def test_store_delete_guards_and_rigctld_activation(monkeypatch, tmp_path):

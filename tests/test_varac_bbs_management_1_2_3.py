@@ -6,6 +6,7 @@ from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.varac_bbs_config import (
     get_varac_ini_sync_state,
     load_varac_bbs_config,
+    varac_path_to_host_path,
     varac_ini_sync_state_matches,
     varac_ini_sync_state_to_json,
     write_varac_bbs_config,
@@ -49,6 +50,25 @@ def test_load_varac_bbs_config_handles_case_variant_keys(tmp_path: Path) -> None
     assert cfg["limit_access"] is True
     assert cfg["allowed_callsigns"] == ["KG5RKW", "W8UFO"]
     assert cfg["announce"] is True
+
+
+def test_varac_path_to_host_path_resolves_windows_bbs_path_with_wineprefix(tmp_path: Path, monkeypatch) -> None:
+    wineprefix = tmp_path / ".wine"
+    monkeypatch.setenv("WINEPREFIX", str(wineprefix))
+
+    resolved = varac_path_to_host_path(r"C:\users\bill\Desktop\VaraFiles\BBS")
+
+    assert resolved == str(wineprefix / "drive_c" / "users" / "bill" / "Desktop" / "VaraFiles" / "BBS")
+
+
+def test_varac_path_to_host_path_infers_wineprefix_from_ini_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("WINEPREFIX", raising=False)
+    wineprefix = tmp_path / "custom-prefix"
+    ini_path = wineprefix / "drive_c" / "VarAC" / "VarAC.ini"
+
+    resolved = varac_path_to_host_path(r"C:\users\bill\Desktop\VaraFiles\BBS", ini_path=ini_path)
+
+    assert resolved == str(wineprefix / "drive_c" / "users" / "bill" / "Desktop" / "VaraFiles" / "BBS")
 
 
 def test_multi_radio_store_persists_and_projects_varac_bbs_access_fields(tmp_path: Path) -> None:

@@ -116,6 +116,82 @@ Stop emulators:
 .venv/bin/python tools/multirig_test_lab.py lab stop
 ```
 
+## GUI App Lab
+
+Use this when you need the real macOS app windows instead of the lightweight
+mock FLRig, FLDigi, and JS8Call endpoints. This is useful for testing app
+configuration persistence, especially JS8Call settings that may only be written
+after a graceful JS8Call exit.
+
+The GUI launcher starts:
+
+| Radio | FLRig XML-RPC | FLDigi XML-RPC | JS8Call TCP | JS8Call profile | JS8Call app |
+|---|---:|---:|---:|---|---|
+| `FIO-A` | `12345` | `7362` | `2242` | `fio-a` | `2.5.2` |
+| `FIO-B` | `12346` | `7363` | `2243` | `fio-b` | `3.0.3` |
+| `FIO-C` | `12347` | `7364` | `2244` | `fio-c` | `3.0.3` |
+
+It also starts the rigctld CAT emulators on `4532`, `4533`, and `4534`.
+
+Start the full three-radio GUI lab:
+
+```bash
+cd /Users/bill/RadioCode/FreqInOut-multi-rig
+tools/start_multirig_gui_lab.sh start
+```
+
+The launcher is instance-aware. If a lab app is already running with the
+expected profile arguments, it reuses that process and only starts the missing
+parts of the stack. For example, if you close `fio-b` FLRig and leave the
+`fio-b` JS8Call window open, running `start` again should start only the missing
+FLRig side for that profile.
+
+Preview exactly what it will launch:
+
+```bash
+tools/start_multirig_gui_lab.sh start --dry-run
+```
+
+Check tracked process status:
+
+```bash
+tools/start_multirig_gui_lab.sh status
+```
+
+Stop the GUI lab:
+
+```bash
+tools/start_multirig_gui_lab.sh stop
+```
+
+If you changed JS8Call settings during a test, quit each JS8Call window from
+the JS8Call UI before using `stop`. That gives JS8Call the best chance to
+persist settings cleanly.
+
+Run only a subset:
+
+```bash
+tools/start_multirig_gui_lab.sh start --profiles a,b
+```
+
+Override app locations:
+
+```bash
+tools/start_multirig_gui_lab.sh start \
+  --flrig-bin /Applications/RadioApps/flrig-2.0.10.app/Contents/MacOS/flrig \
+  --fldigi-bin /Applications/RadioApps/fldigi-4.2.11.app/Contents/MacOS/fldigi \
+  --js8call-bin /Applications/RadioApps/JS8Call.app/Contents/MacOS/JS8Call
+```
+
+Override JS8Call per profile:
+
+```bash
+tools/start_multirig_gui_lab.sh start \
+  --js8call-bin-a /Applications/RadioApps/JS8Call.app/Contents/MacOS/JS8Call \
+  --js8call-bin-b "/Applications/RadioApps/JS8Call 2.app/Contents/MacOS/JS8Call" \
+  --js8call-bin-c "/Applications/RadioApps/JS8Call 2.app/Contents/MacOS/JS8Call"
+```
+
 ## Production-Copy Walkthrough
 
 Use this when you want to rehearse the exact operator flow from your current single-rig setup.

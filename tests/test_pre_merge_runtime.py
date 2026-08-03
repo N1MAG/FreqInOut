@@ -164,6 +164,7 @@ def test_settings_tab_uses_timezone_aware_utc_for_default_js8_offset(monkeypatch
             raise AssertionError("datetime.utcnow() should not be used")
 
     monkeypatch.setattr(settings_tab_module.datetime, "datetime", FakeDateTime)
+    monkeypatch.setattr(settings_tab_module, "coerce_js8_offset_hz", lambda _value: 2225)
     monkeypatch.setattr(settings_tab_module.SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
 
     from PySide6.QtWidgets import QApplication
@@ -171,7 +172,7 @@ def test_settings_tab_uses_timezone_aware_utc_for_default_js8_offset(monkeypatch
     app = QApplication.instance() or QApplication([])
     tab = settings_tab_module.SettingsTab()
     try:
-        assert tab.js8_offset_edit.text() == "2150"
+        assert tab.js8_offset_edit.text() == "2225"
     finally:
         tab.deleteLater()
         app.processEvents()

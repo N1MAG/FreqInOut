@@ -5660,11 +5660,55 @@ class DailyScheduleTab(QWidget):
         self._refresh_sop_overlay_rows_in_table()
 
     def _toggle_time_view(self):
+        was_dirty = bool(self._dirty)
+        if was_dirty:
+            rows_utc = self._collect_current_hf_rows_utc()
+            if len(rows_utc) < self._editable_active_row_count():
+                self._publish_time_toggle_blocked_feedback()
+                return
+            self._raw_schedule = rows_utc
         self._show_local = not self._show_local
         self._rebuild_from_raw()
+        self._set_dirty(was_dirty)
         self._update_suspend_state()
         self._populate_schedule_resources_table()
         self._populate_schedule_issues_table()
+
+    def _editable_active_row_count(self) -> int:
+        count = 0
+        for row in range(self.table.rowCount()):
+            if self._is_sop_overlay_row(row):
+                continue
+            if self._active_row_is_empty(row):
+                continue
+            count += 1
+        return count
+
+    def _publish_time_toggle_blocked_feedback(self, detail: str = "") -> None:
+        summary = "Finish the current HF Schedule row before changing the time view."
+        win = self.window()
+        service = getattr(win, "action_feedback_service", None) if win is not None else None
+        if service is not None and hasattr(service, "publish"):
+            try:
+                service.publish(
+                    scope="scheduler",
+                    action_type="time_view",
+                    status="blocked",
+                    summary=summary,
+                    detail=str(detail or "").strip(),
+                    source_surface="daily_schedule_tab",
+                )
+                return
+            except Exception as e:
+                log.debug("HF Schedule: failed publishing time toggle feedback: %s", e)
+        try:
+            status_bar = win.statusBar() if win is not None and hasattr(win, "statusBar") else None
+            if status_bar is not None:
+                status_bar.showMessage(summary, 6000)
+                return
+        except Exception:
+            pass
+        log.info("HF Schedule: time view change blocked; %s", detail)
 
     # --------- Suspend (shared across tabs) --------- #
 

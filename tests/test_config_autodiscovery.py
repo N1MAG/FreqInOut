@@ -7,9 +7,13 @@ from freqinout.core.config_autodiscovery import (
     build_autoconfig_proposal,
     build_lab_radio_proposals,
     default_app_search_paths,
+    default_js8call_ini_paths,
+    discover_js8call_file_profiles,
     find_app_candidates,
     read_js8call_multisettings,
+    select_js8call_file_profile,
 )
+from freqinout.core.software_path_detector import SoftwarePathDetector
 
 
 def _make_executable(path: Path) -> None:
@@ -42,6 +46,17 @@ def test_default_app_search_paths_are_os_specific_and_bounded(tmp_path) -> None:
     assert tmp_path / "RadioTools" / "Programs" / "JS8Call.app" in mac_paths["js8call"]
     assert Path("/usr/bin/flrig") in linux_paths["flrig"]
     assert all("*" not in str(path) for paths in mac_paths.values() for path in paths)
+
+
+def test_settings_detector_searches_macos_radioapps_folder(tmp_path) -> None:
+    detector = SoftwarePathDetector(settings={})
+    detector.home = tmp_path
+
+    paths = detector._macos_bundle_candidates("fldigi")
+
+    assert Path("/Applications/RadioApps/fldigi.app") in paths
+    assert tmp_path / "Applications" / "RadioApps" / "fldigi.app" in paths
+    assert tmp_path / "RadioTools" / "Programs" / "fldigi.app" in paths
 
 
 def test_lab_radio_proposal_assigns_expected_ports_and_leaves_varac_off() -> None:
@@ -106,6 +121,313 @@ def test_js8call_multisettings_reader_extracts_operator_relevant_keys(tmp_path) 
     assert fio_a["Rig"] == "FLRig FLRig"
     assert fio_a["CATNetworkPort"] == "127.0.0.1:12345"
     assert fio_a["TCPServerPort"] == "2442"
+
+
+def test_js8call_multisettings_reader_handles_qsettings_escaped_keys(tmp_path) -> None:
+    ini_path = tmp_path / "JS8Call.ini"
+    save_dir = tmp_path / "fio-c" / "save"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "Configuration\\MyCall=N1MAG",
+                "Configuration\\MyGrid=DM79",
+                "",
+                "[MultiSettings/fio-c]",
+                "Configuration\\SaveDir=/ignored/default/save",
+                "Rig=FLRig FLRig",
+                "CATNetworkPort=127.0.0.1:12347",
+                "TCPServerPort=2444",
+                f"SaveDir={save_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = read_js8call_multisettings(ini_path)
+
+    assert [profile.name for profile in profiles] == ["Default", "fio-c"]
+    assert profiles[0].settings == {"MyCall": "N1MAG", "MyGrid": "DM79"}
+    fio_c = profiles[1].settings
+    assert fio_c["CATNetworkPort"] == "127.0.0.1:12347"
+    assert fio_c["TCPServerPort"] == "2444"
+    assert fio_c["SaveDir"] == str(save_dir)
+
+
+def test_js8call_multisettings_reader_merges_parseable_qsettings_profiles(tmp_path) -> None:
+    ini_path = tmp_path / "JS8Call.ini"
+    save_dir = tmp_path / "fio-c" / "save"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[Configuration]",
+                "MyCall=N1MAG",
+                "MyGrid=DM79",
+                "",
+                "[MultiSettings/fio-c]",
+                "Configuration\\SaveDir=/ignored/default/save",
+                "Configuration\\TCPServerPort=2444",
+                f"Configuration\\SaveDir={save_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = read_js8call_multisettings(ini_path)
+
+    assert [profile.name for profile in profiles] == ["Default", "fio-c"]
+    fio_c = profiles[1].settings
+    assert fio_c["TCPServerPort"] == "2444"
+    assert fio_c["SaveDir"] == str(save_dir)
+
+
+def test_js8call_file_discovery_reads_profile_savedir_logs(tmp_path) -> None:
+    save_dir = tmp_path / "js8" / "fio-c"
+    save_dir.mkdir(parents=True)
+    directed = save_dir / "DIRECTED.TXT"
+    all_txt = save_dir / "ALL.TXT"
+    directed.write_text("directed traffic\n", encoding="utf-8")
+    all_txt.write_text("all traffic\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-C]",
+                "TCPServerPort=2444",
+                f"SaveDir={save_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+
+    assert len(profiles) == 1
+    assert profiles[0].name == "FIO-C"
+    assert profiles[0].tcp_server_port == "2444"
+    assert profiles[0].directed_path == str(directed)
+    assert profiles[0].all_path == str(all_txt)
+    assert profiles[0].confidence == "verified"
+    assert "SaveDir" in profiles[0].reason
+
+
+def test_js8call_file_discovery_suggests_directed_path_when_save_dir_exists(tmp_path) -> None:
+    save_dir = tmp_path / "js8" / "fio-b"
+    save_dir.mkdir(parents=True)
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-B]",
+                "TCPServerPort=2443",
+                f"SaveDir={save_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    selected = select_js8call_file_profile(profiles, tcp_port="2443")
+
+    assert selected is not None
+    assert selected.confidence == "partial"
+    assert selected.directed_path == str(save_dir / "DIRECTED.TXT")
+
+
+def test_js8call_file_profile_selection_prefers_matching_tcp_port(tmp_path) -> None:
+    save_a = tmp_path / "a"
+    save_c = tmp_path / "c"
+    save_a.mkdir()
+    save_c.mkdir()
+    (save_a / "DIRECTED.TXT").write_text("a\n", encoding="utf-8")
+    (save_c / "DIRECTED.TXT").write_text("c\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-A]",
+                "TCPServerPort=2442",
+                f"SaveDir={save_a}",
+                "",
+                "[MultiSettings/FIO-C]",
+                "TCPServerPort=2444",
+                f"SaveDir={save_c}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    selected = select_js8call_file_profile(profiles, tcp_port="2444")
+
+    assert selected is not None
+    assert selected.name == "FIO-C"
+    assert selected.directed_path == str(save_c / "DIRECTED.TXT")
+    assert select_js8call_file_profile(profiles) is None
+    fallback_selected = select_js8call_file_profile(profiles, tcp_port="2445", profile_name="FIO-C")
+    assert fallback_selected is not None
+    assert fallback_selected.name == "FIO-C"
+
+
+def test_js8call_file_profile_selection_falls_back_to_name_when_port_drifted(tmp_path) -> None:
+    save_b = tmp_path / "fio-b"
+    save_c = tmp_path / "fio-c"
+    save_b.mkdir()
+    save_c.mkdir()
+    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    (save_c / "DIRECTED.TXT").write_text("c\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-B]",
+                "TCPServerPort=2443",
+                f"SaveDir={save_b}",
+                "",
+                "[MultiSettings/FIO-C]",
+                "TCPServerPort=2444",
+                f"SaveDir={save_c}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    selected = select_js8call_file_profile(profiles, tcp_port="2243", profile_name="FIO-B")
+
+    assert selected is not None
+    assert selected.name == "FIO-B"
+    assert selected.directed_path == str(save_b / "DIRECTED.TXT")
+
+
+def test_js8call_file_profile_selection_prefers_exact_name_over_conflicting_port(tmp_path) -> None:
+    save_a = tmp_path / "fio-a"
+    save_b = tmp_path / "fio-b"
+    save_a.mkdir()
+    save_b.mkdir()
+    (save_a / "DIRECTED.TXT").write_text("a\n", encoding="utf-8")
+    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-A]",
+                "TCPServerPort=2442",
+                f"SaveDir={save_a}",
+                "",
+                "[MultiSettings/FIO-B]",
+                "TCPServerPort=2443",
+                f"SaveDir={save_b}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    selected = select_js8call_file_profile(profiles, tcp_port="2443", profile_name="FIO-A")
+
+    assert selected is not None
+    assert selected.name == "FIO-A"
+    assert selected.tcp_server_port == "2442"
+    assert selected.directed_path == str(save_a / "DIRECTED.TXT")
+
+
+def test_js8call_file_profile_selection_does_not_use_partial_name_when_port_drifted(tmp_path) -> None:
+    save_b = tmp_path / "fio-b"
+    save_b.mkdir()
+    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-B]",
+                "TCPServerPort=2443",
+                f"SaveDir={save_b}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+
+    assert select_js8call_file_profile(profiles, tcp_port="2243", profile_name="FIO-B Backup") is None
+
+
+def test_js8call_file_profile_selection_uses_name_when_port_matches_multiple_profiles(tmp_path) -> None:
+    default_save = tmp_path / "default"
+    save_b = tmp_path / "b"
+    default_save.mkdir()
+    save_b.mkdir()
+    (default_save / "DIRECTED.TXT").write_text("default\n", encoding="utf-8")
+    (save_b / "DIRECTED.TXT").write_text("b\n", encoding="utf-8")
+    ini_path = tmp_path / "JS8Call.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[Configuration]",
+                "TCPServerPort=2443",
+                f"SaveDir={default_save}",
+                "",
+                "[MultiSettings/FIO-B]",
+                "TCPServerPort=2443",
+                f"SaveDir={save_b}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = discover_js8call_file_profiles(ini_path=ini_path)
+    selected = select_js8call_file_profile(profiles, tcp_port="2443", profile_name="FIO-B")
+
+    assert selected is not None
+    assert selected.name == "FIO-B"
+    assert selected.directed_path == str(save_b / "DIRECTED.TXT")
+    assert select_js8call_file_profile(profiles, tcp_port="2443") is None
+
+
+def test_default_js8call_ini_paths_are_os_specific_and_bounded(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    mac_paths = default_js8call_ini_paths(platform="Darwin", home=tmp_path)
+    linux_paths = default_js8call_ini_paths(platform="Linux", home=tmp_path)
+    windows_paths = default_js8call_ini_paths(platform="Windows", home=tmp_path)
+
+    assert tmp_path / "Library" / "Preferences" / "JS8Call.ini" in mac_paths
+    assert tmp_path / ".config" / "JS8Call.ini" in linux_paths
+    assert windows_paths == (tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call.ini",)
+    assert all(path.is_absolute() for path in mac_paths + linux_paths + windows_paths)
+    assert all("*" not in str(path) for path in mac_paths + linux_paths + windows_paths)
+
+
+def test_autoconfig_proposal_includes_default_js8_file_profiles(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "empty-bin")]))
+    home = tmp_path / "home"
+    save_dir = home / "Radio" / "JS8Call" / "FIO-C"
+    save_dir.mkdir(parents=True)
+    directed = save_dir / "DIRECTED.TXT"
+    directed.write_text("directed traffic\n", encoding="utf-8")
+    ini_path = home / "Library" / "Preferences" / "JS8Call.ini"
+    ini_path.parent.mkdir(parents=True)
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[MultiSettings/FIO-C]",
+                "TCPServerPort=2444",
+                f"SaveDir={save_dir}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    proposal = build_autoconfig_proposal(
+        radio_count=1,
+        platform="Darwin",
+        home=home,
+        app_search_paths={"flrig": (), "fldigi": (), "js8call": ()},
+        busy_checker=lambda _host, _port: False,
+    )
+
+    assert [profile.name for profile in proposal.js8_file_profiles] == ["FIO-C"]
+    assert proposal.js8_file_profiles[0].directed_path == str(directed)
 
 
 def test_autoconfig_proposal_reports_missing_apps_without_enabling_varac(tmp_path, monkeypatch) -> None:
@@ -181,3 +503,44 @@ def test_broken_known_path_does_not_block_valid_path_command(tmp_path, monkeypat
     assert [candidate.executable for candidate in candidates] == [False, True]
     assert candidates[-1].source == "path"
     assert candidates[-1].path.lower() == str(valid_flrig).lower()
+
+
+def test_valid_known_path_does_not_hide_distinct_path_command(tmp_path, monkeypatch) -> None:
+    known_flrig = tmp_path / "known" / "flrig"
+    path_flrig = tmp_path / "bin" / "flrig"
+    _make_executable(known_flrig)
+    _make_executable(path_flrig)
+    monkeypatch.setenv("PATH", str(path_flrig.parent))
+
+    candidates = find_app_candidates(
+        apps=("flrig",),
+        platform="Linux",
+        home=tmp_path / "home",
+        app_search_paths={"flrig": (known_flrig,)},
+    )
+
+    assert [candidate.source for candidate in candidates] == ["known_path", "path"]
+    assert [candidate.path.lower() for candidate in candidates] == [str(known_flrig).lower(), str(path_flrig).lower()]
+
+
+def test_duplicate_first_command_alias_does_not_hide_distinct_later_alias(tmp_path, monkeypatch) -> None:
+    known_js8 = tmp_path / "known" / "JS8Call"
+    path_js8_upper = tmp_path / "bin" / "JS8Call"
+    path_js8_lower = tmp_path / "bin" / "js8call"
+    _make_executable(known_js8)
+    _make_executable(path_js8_upper)
+    _make_executable(path_js8_lower)
+    monkeypatch.setenv("PATH", str(path_js8_lower.parent))
+
+    candidates = find_app_candidates(
+        apps=("js8call",),
+        platform="Linux",
+        home=tmp_path / "home",
+        app_search_paths={"js8call": (path_js8_upper,)},
+    )
+
+    assert [candidate.source for candidate in candidates] == ["known_path", "path"]
+    assert [candidate.path.lower() for candidate in candidates] == [
+        str(path_js8_upper).lower(),
+        str(path_js8_lower).lower(),
+    ]

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.logger import log
 from freqinout.core.multi_rig_guardrails import (
     collect_multi_rig_guardrail_warnings,
@@ -1823,7 +1824,12 @@ def detect_existing_fio_usage(
     ensure_multi_radio_settings_schema(conn)
     if legacy_config_exists:
         return True
-    meaningful_keys = {str(key) for key in settings_values.keys()} - set(FIO_EXISTING_USE_IGNORED_KEYS)
+    ignored_keys = set(FIO_EXISTING_USE_IGNORED_KEYS) | {MULTI_RIG_MIGRATION_COMPLETED_AT_KEY}
+    meaningful_keys = {
+        str(key)
+        for key in settings_values.keys()
+        if str(key) not in ignored_keys and not str(key).startswith(MULTI_RIG_MIGRATION_SUMMARY_PREFIX)
+    }
     if meaningful_keys:
         return True
     for table in ("device_profiles", "operating_profiles", "js8_instances", "fast_light_configs", "varac_nodes"):
@@ -1900,7 +1906,10 @@ def _save_js8_instance_conn(conn: sqlite3.Connection, values: Mapping[str, Any])
     payload = dict(values)
     payload.setdefault("host", "127.0.0.1")
     payload.setdefault("port", 2442)
-    payload.setdefault("offset_hz", 0)
+    record_id = _coerce_optional_int(payload.get("id"))
+    existing = _record_by_id(conn, "js8_instances", record_id) if record_id is not None else None
+    if "offset_hz" in payload or not existing:
+        payload["offset_hz"] = coerce_js8_offset_hz(payload.get("offset_hz"))
     return _save_simple_record(
         conn,
         "js8_instances",
@@ -2626,7 +2635,7 @@ def _seed_js8_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
         "name": DEFAULT_JS8_INSTANCE_NAME,
         "host": _settings_text(settings_values, "js8_host", "127.0.0.1") or "127.0.0.1",
         "port": _settings_int(settings_values, "js8_port", 2442),
-        "offset_hz": _settings_int(settings_values, "js8_offset_hz", 0),
+        "offset_hz": coerce_js8_offset_hz(_settings_int(settings_values, "js8_offset_hz", 0)),
         "profile_path": _settings_text(settings_values, "js8_profile_path", ""),
         "directed_path": _settings_text(settings_values, "js8_directed_path", ""),
         "forms_path": _settings_text(settings_values, "js8_forms_path", ""),
@@ -3332,7 +3341,7 @@ def mirror_legacy_settings_into_runtime_active_device(
                 "enabled": js8_existing.get("enabled", 1),
                 "host": js8_host,
                 "port": _settings_int(settings_values, "js8_port", 2442),
-                "offset_hz": _settings_int(settings_values, "js8_offset_hz", 0),
+                "offset_hz": coerce_js8_offset_hz(_settings_int(settings_values, "js8_offset_hz", 0)),
                 "profile_path": _settings_text(settings_values, "js8_profile_path", ""),
                 "directed_path": _settings_text(settings_values, "js8_directed_path", ""),
                 "forms_path": _settings_text(settings_values, "js8_forms_path", ""),
@@ -3443,8 +3452,7 @@ class MultiRadioStore:
             if existing_fio_usage is not None:
                 detected_usage = bool(existing_fio_usage)
             elif migration_current:
-                meaningful_keys = {str(key) for key in values.keys()} - set(FIO_EXISTING_USE_IGNORED_KEYS)
-                detected_usage = bool(meaningful_keys)
+                detected_usage = detect_existing_fio_usage(conn, values)
             else:
                 detected_usage = detect_existing_fio_usage(conn, values)
             primary_row: Optional[Dict[str, Any]] = None

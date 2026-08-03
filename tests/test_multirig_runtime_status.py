@@ -40,7 +40,7 @@ def _insert_kv(db_path: Path, values: dict[str, object]) -> None:
         conn.close()
 
 
-def test_fresh_default_ready_status(monkeypatch, tmp_path):
+def test_fresh_blank_slate_status(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
@@ -51,11 +51,13 @@ def test_fresh_default_ready_status(monkeypatch, tmp_path):
     assert status.startup_mode == STARTUP_FRESH_DEFAULT_READY
     assert status.migration_current is True
     assert status.existing_fio_usage_detected is False
-    assert status.primary_device_profile_id is not None
-    assert status.primary_radio_id == f"radio_{status.primary_device_profile_id}"
-    assert status.active_device_profile_ids == (status.primary_device_profile_id,)
-    assert status.messages_scope == SCOPE_ALL_ACTIVE_RUNTIME
-    assert status.background_ingest_scope == SCOPE_ALL_ACTIVE_RUNTIME
+    assert status.fresh_install_default_created is False
+    assert status.primary_device_profile_id is None
+    assert status.primary_radio_id is None
+    assert status.active_device_profile_ids == ()
+    assert status.messages_scope == SCOPE_NONE
+    assert status.background_ingest_scope == SCOPE_NONE
+    assert store.list_device_profiles() == []
 
 
 def test_existing_unmigrated_status_does_not_create_profiles(monkeypatch, tmp_path):

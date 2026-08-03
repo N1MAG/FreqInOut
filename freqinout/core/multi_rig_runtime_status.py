@@ -73,8 +73,22 @@ def device_profile_id_from_radio_id(radio_id: object) -> int:
 
 
 def _has_meaningful_legacy_kv(settings_values: Mapping[str, Any]) -> bool:
-    meaningful = {str(key) for key in settings_values.keys()} - set(FIO_EXISTING_USE_IGNORED_KEYS)
+    ignored = set(FIO_EXISTING_USE_IGNORED_KEYS) | {
+        "multi_rig_migration_completed_at_utc",
+    }
+    meaningful = {
+        str(key)
+        for key in settings_values.keys()
+        if str(key) not in ignored and not str(key).startswith("multi_rig_migration_summary_v")
+    }
     return bool(meaningful)
+
+
+def _has_fresh_blank_slate_marker(settings_values: Mapping[str, Any], migration_version: int) -> bool:
+    summary = settings_values.get(f"multi_rig_migration_summary_v{int(migration_version or 0)}")
+    if not isinstance(summary, Mapping):
+        return False
+    return bool(summary.get("fresh_install_blank_slate"))
 
 
 def _int_id(row: Optional[Mapping[str, Any]]) -> Optional[int]:
@@ -133,8 +147,18 @@ def build_multi_rig_runtime_status(
     migration_current = bool(inputs.get("migration_current", False))
     existing_usage = bool(inputs.get("existing_fio_usage", False))
 
+    raw_primary_row = inputs.get("primary_row") if migration_current else None
+    raw_active_rows = inputs.get("active_rows") if migration_current else ()
+    has_runtime_radios = bool(raw_primary_row) or (
+        isinstance(raw_active_rows, IterableABC)
+        and not isinstance(raw_active_rows, (str, bytes))
+        and any(isinstance(row, Mapping) for row in raw_active_rows)
+    )
+
     if warnings and not migration_current:
         startup_mode: MultiRigStartupMode = STARTUP_MIGRATION_ERROR
+    elif migration_current and not has_runtime_radios and _has_fresh_blank_slate_marker(settings_map, migration_version):
+        startup_mode = STARTUP_FRESH_DEFAULT_READY
     elif migration_current and not _has_meaningful_legacy_kv(settings_map):
         startup_mode = STARTUP_FRESH_DEFAULT_READY
     elif migration_current:
@@ -149,8 +173,6 @@ def build_multi_rig_runtime_status(
     primary_row: Optional[Mapping[str, Any]] = None
     active_rows: tuple[Mapping[str, Any], ...] = ()
     if startup_mode in {STARTUP_MIGRATED, STARTUP_FRESH_DEFAULT_READY}:
-        raw_primary_row = inputs.get("primary_row")
-        raw_active_rows = inputs.get("active_rows")
         primary_row = raw_primary_row if isinstance(raw_primary_row, Mapping) else None
         if isinstance(raw_active_rows, IterableABC) and not isinstance(raw_active_rows, (str, bytes)):
             active_rows = tuple(row for row in raw_active_rows if isinstance(row, Mapping))
@@ -160,7 +182,7 @@ def build_multi_rig_runtime_status(
     primary_radio_id = radio_shared_state_id(primary_device_profile_id) if primary_device_profile_id else None
     active_radio_ids = tuple(radio_shared_state_id(row_id) for row_id in active_device_profile_ids)
 
-    scopes_enabled = startup_mode in {STARTUP_FRESH_DEFAULT_READY, STARTUP_MIGRATED}
+    scopes_enabled = startup_mode in {STARTUP_FRESH_DEFAULT_READY, STARTUP_MIGRATED} and bool(active_device_profile_ids)
     compatibility_allowed = scopes_enabled
     background_scope: RuntimeScope = SCOPE_ALL_ACTIVE_RUNTIME if scopes_enabled else SCOPE_NONE
 
@@ -170,7 +192,7 @@ def build_multi_rig_runtime_status(
         migration_current=migration_current,
         migration_deferred=migration_deferred,
         existing_fio_usage_detected=existing_usage,
-        fresh_install_default_created=startup_mode == STARTUP_FRESH_DEFAULT_READY,
+        fresh_install_default_created=startup_mode == STARTUP_FRESH_DEFAULT_READY and primary_device_profile_id is not None,
         primary_radio_id=primary_radio_id,
         active_radio_ids=active_radio_ids,
         primary_device_profile_id=primary_device_profile_id,

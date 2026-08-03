@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import configparser
 import json
+import os
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Mapping, Optional
 
 
@@ -98,6 +99,37 @@ def _get_section_value(section: configparser.SectionProxy, key: str, default: ob
         if str(existing_key or "").strip().lower() == target:
             return value
     return default
+
+
+def _infer_wine_prefix_from_path(value: object) -> Path:
+    txt = str(value or "").strip()
+    if txt:
+        try:
+            path = Path(txt).expanduser()
+            parts = path.parts
+            for index, part in enumerate(parts):
+                if re.fullmatch(r"drive_[A-Za-z]", part or ""):
+                    prefix_parts = parts[:index]
+                    if prefix_parts:
+                        return Path(*prefix_parts)
+        except Exception:
+            pass
+    return Path(os.environ.get("WINEPREFIX", "~/.wine")).expanduser()
+
+
+def varac_path_to_host_path(value: object, *, ini_path: object = "") -> str:
+    """Translate a VarAC/Wine Windows path to the current host path when needed."""
+    txt = str(value or "").strip()
+    if not txt:
+        return ""
+    win_match = re.match(r"^([A-Za-z]):[\\/](.*)$", txt)
+    if not win_match or os.name == "nt":
+        return str(Path(txt).expanduser()) if txt.startswith("~") else txt
+
+    drive = win_match.group(1).lower()
+    rest_parts = PureWindowsPath(txt).parts[1:]
+    wine_prefix = _infer_wine_prefix_from_path(ini_path)
+    return str(wine_prefix / f"drive_{drive}" / Path(*rest_parts))
 
 
 def load_varac_bbs_config(ini_path: object) -> Mapping[str, object]:

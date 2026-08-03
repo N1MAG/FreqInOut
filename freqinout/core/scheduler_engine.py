@@ -13,6 +13,7 @@ from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 from freqinout.core.logger import log
 from freqinout.core.busy_evidence_service import BusyEvidenceService
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.js8_defaults import random_default_js8_offset_hz
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.ptt_conflict_service import PttConflictService
@@ -755,8 +756,7 @@ class SchedulerEngine(QObject):
             val = None
         if val not in (None, "", 0):
             return
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        offset = 1900 + (now_utc.hour % 7) * 50
+        offset = random_default_js8_offset_hz()
         try:
             if hasattr(self.settings, "set"):
                 self.settings.set("js8_offset_hz", offset)

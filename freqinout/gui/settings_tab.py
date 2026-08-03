@@ -59,7 +59,14 @@ from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema, get_all_operators as get_shared_operators
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
-from freqinout.core.config_autodiscovery import build_autoconfig_proposal
+from freqinout.core.config_autodiscovery import (
+    DEFAULT_PORT_PLAN,
+    PortAssignment,
+    RadioInstanceProposal,
+    build_autoconfig_proposal,
+    discover_js8call_file_profiles,
+    select_js8call_file_profile,
+)
 from freqinout.core.config_backup import create_config_backup
 from freqinout.core.config_migration_preview import (
     build_single_rig_upgrade_apply_plan,
@@ -67,6 +74,7 @@ from freqinout.core.config_migration_preview import (
 )
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
+from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
     LAUNCH_APP_ORDER,
@@ -87,6 +95,18 @@ from freqinout.core.gpg_tools import (
     local_sign_key,
     normalize_fingerprint,
 )
+from freqinout.core.guided_radio_autofill import (
+    guided_app_candidate_choices,
+    guided_app_candidate_identity,
+    guided_detection_path,
+    guided_js8_profile_choices,
+    guided_js8_profile_review_text,
+    guided_port_prompt_keys,
+    guided_radio_autofill_suggestions,
+    guided_single_install_path,
+    next_default_instance_port,
+)
+from freqinout.core.guided_app_config_plan import build_guided_external_app_config_plan
 from freqinout.core.secret_store import (
     credential_store_available,
     delete_gpg_signing_passphrase,
@@ -147,6 +167,7 @@ from freqinout.core.varac_bbs_config import (
     get_varac_ini_sync_state,
     load_varac_bbs_config,
     locate_varac_ini_path,
+    varac_path_to_host_path,
     varac_ini_sync_state_matches,
     varac_ini_sync_state_to_json,
     write_varac_bbs_config,
@@ -590,6 +611,7 @@ class SettingsTab(QWidget):
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
         self._section_nav_buttons: Dict[QGroupBox, QPushButton] = {}
+        self._refreshing_settings_section_combo = False
         self._global_settings_nav_collapsed = True
         self._radio_settings_nav_collapsed = False
         self._context_help_buttons: List[QPushButton] = []
@@ -2330,18 +2352,40 @@ class SettingsTab(QWidget):
         nav_panel_layout = QVBoxLayout(nav_panel)
         nav_panel_layout.setContentsMargins(0, 0, 0, 0)
         nav_panel_layout.setSpacing(6)
+        self.settings_compact_header = QFrame()
+        self.settings_compact_header.setObjectName("settingsCompactHeaderBar")
+        self.settings_compact_header.setFrameShape(QFrame.StyledPanel)
+        self.settings_compact_header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        settings_header_layout = QGridLayout(self.settings_compact_header)
+        settings_header_layout.setContentsMargins(10, 8, 10, 8)
+        settings_header_layout.setHorizontalSpacing(10)
+        settings_header_layout.setVerticalSpacing(6)
         self.add_device_profile_btn = QPushButton("Add Radio")
         self.add_device_profile_btn.setToolTip(
             "Start guided setup for a new radio or SDR: identity, software used, connection, and readiness."
         )
         self.add_device_profile_btn.setAccessibleName("Guided Add Radio")
         self.add_device_profile_btn.clicked.connect(self._add_device_profile)
-        nav_panel_layout.addWidget(self.add_device_profile_btn)
+        self.settings_section_label = QLabel("Settings section")
+        self.settings_section_combo = QComboBox()
+        self.settings_section_combo.setObjectName("settingsSectionCombo")
+        self.settings_section_combo.setAccessibleName("Settings section selector")
+        self.settings_section_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.settings_section_combo.setMinimumContentsLength(26)
+        self.settings_section_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.settings_section_combo.currentIndexChanged.connect(self._on_settings_section_combo_changed)
+        settings_header_layout.addWidget(self.add_device_profile_btn, 0, 0)
+        settings_header_layout.addWidget(self.settings_section_label, 0, 1)
+        settings_header_layout.addWidget(self.settings_section_combo, 0, 2)
+        settings_header_layout.setColumnStretch(2, 1)
+        main_layout.addWidget(self.settings_compact_header)
+        self._global_settings_nav_collapsed = False
+        self._radio_settings_nav_collapsed = False
         self.global_settings_toggle_btn = QToolButton()
         self.global_settings_toggle_btn.setCheckable(True)
-        self.global_settings_toggle_btn.setChecked(False)
+        self.global_settings_toggle_btn.setChecked(True)
         self.global_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.global_settings_toggle_btn.setArrowType(Qt.RightArrow)
+        self.global_settings_toggle_btn.setArrowType(Qt.DownArrow)
         self.global_settings_toggle_btn.setText("Global Settings")
         self.global_settings_toggle_btn.setMinimumHeight(28)
         self.global_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2384,7 +2428,7 @@ class SettingsTab(QWidget):
         self.settings_section_nav_scroll.setMaximumWidth(250)
         self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.settings_section_nav_scroll.setWidget(nav_panel)
-        sections_row.addWidget(self.settings_section_nav_scroll, 0)
+        self.settings_section_nav_scroll.hide()
 
         self.sections_stack = QStackedWidget()
         self.sections_stack.setMinimumWidth(0)
@@ -3458,7 +3502,7 @@ class SettingsTab(QWidget):
         js8_port_row.addWidget(js8_offset_label)
         self.js8_offset_edit = QLineEdit()
         self.js8_offset_edit.setFixedWidth(80)
-        self.js8_offset_edit.setText("0")
+        self.js8_offset_edit.setText(str(coerce_js8_offset_hz(0)))
         js8_port_row.addWidget(self.js8_offset_edit)
         js8_port_row.addStretch()
         js8_v.addLayout(js8_port_row)
@@ -3538,8 +3582,20 @@ class SettingsTab(QWidget):
         )
 
         self.js8_directed_edit = QLineEdit()
+        js8_directed_autofill_btn = self._make_contextual_autofill_button(
+            "js8_directed_log",
+            "Auto-Fill",
+            "js8",
+            ["js8_directed_path"],
+            tooltip="Find JS8Call DIRECTED.TXT from JS8Call settings and profile save folders for the selected radio.",
+        )
         js8_v.addWidget(
-            build_js8_path_row("JS8Call DIRECTED.TXT:", self.js8_directed_edit, self._choose_js8_directed_path)
+            build_js8_path_row(
+                "JS8Call DIRECTED.TXT:",
+                self.js8_directed_edit,
+                self._choose_js8_directed_path,
+                js8_directed_autofill_btn,
+            )
         )
 
         self.commstat_path_edit = QLineEdit()
@@ -5336,6 +5392,8 @@ class SettingsTab(QWidget):
         if target_layout is not None:
             target_layout.addWidget(btn)
         self._section_nav_buttons[group] = btn
+        if hasattr(self, "settings_section_combo"):
+            self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)
         content = meta.get("content")
         header_btn = meta.get("header_btn")
         if isinstance(content, QWidget):
@@ -5367,6 +5425,72 @@ class SettingsTab(QWidget):
         self._sync_current_section_scroll_size()
         self._reset_sections_scroll_to_top()
         self._refresh_settings_nav_button_styles()
+        self._sync_settings_section_combo_to_group(group)
+
+    def _settings_section_combo_label(self, group: QGroupBox) -> str:
+        meta = self._section_meta.get(group, {})
+        title = str(meta.get("title", group.title() if hasattr(group, "title") else "Section")).strip() or "Section"
+        scope = str(meta.get("scope", "radio") or "radio").strip().lower()
+        prefix = "Global" if scope == "global" else "Selected Radio"
+        return f"{prefix}: {title}"
+
+    def _sync_settings_section_combo_to_group(self, group: QGroupBox | None) -> None:
+        combo = getattr(self, "settings_section_combo", None)
+        if combo is None or group is None:
+            return
+        try:
+            stack_index = self.sections_stack.indexOf(group)
+        except Exception:
+            stack_index = -1
+        if stack_index < 0:
+            return
+        self._refreshing_settings_section_combo = True
+        try:
+            for idx in range(combo.count()):
+                try:
+                    if int(combo.itemData(idx) or -1) == stack_index:
+                        combo.setCurrentIndex(idx)
+                        break
+                except Exception:
+                    continue
+        finally:
+            self._refreshing_settings_section_combo = False
+
+    def _refresh_settings_section_combo(self) -> None:
+        combo = getattr(self, "settings_section_combo", None)
+        if combo is None or not hasattr(self, "sections_stack"):
+            return
+        current_widget = self.sections_stack.currentWidget()
+        self._refreshing_settings_section_combo = True
+        try:
+            combo.clear()
+            for group, meta in self._section_meta.items():
+                if not bool(meta.get("section_visible", True)):
+                    continue
+                stack_index = self.sections_stack.indexOf(group)
+                if stack_index < 0:
+                    continue
+                combo.addItem(self._settings_section_combo_label(group), stack_index)
+            if isinstance(current_widget, QGroupBox):
+                self._sync_settings_section_combo_to_group(current_widget)
+        finally:
+            self._refreshing_settings_section_combo = False
+
+    def _on_settings_section_combo_changed(self, index: int) -> None:
+        if bool(getattr(self, "_refreshing_settings_section_combo", False)) or index < 0:
+            return
+        combo = getattr(self, "settings_section_combo", None)
+        if combo is None:
+            return
+        try:
+            stack_index = int(combo.itemData(index) or -1)
+        except Exception:
+            stack_index = -1
+        if stack_index < 0 or stack_index >= self.sections_stack.count():
+            return
+        group = self.sections_stack.widget(stack_index)
+        if isinstance(group, QGroupBox):
+            self._select_settings_section_group(group)
 
     def _on_global_settings_toggle(self, checked: bool) -> None:
         self._global_settings_nav_collapsed = not bool(checked)
@@ -5432,6 +5556,7 @@ class SettingsTab(QWidget):
         ):
             self._select_first_visible_settings_section()
         self._update_sections_nav_size()
+        self._refresh_settings_section_combo()
 
     def _refresh_settings_nav_button_styles(self) -> None:
         theme = resolve_theme(self.settings)
@@ -5502,6 +5627,7 @@ class SettingsTab(QWidget):
             self._select_first_visible_settings_section()
         self._refresh_settings_nav_button_styles()
         self._update_sections_nav_size()
+        self._refresh_settings_section_combo()
 
     def _select_first_visible_settings_section(self) -> None:
         if not hasattr(self, "sections_nav_list"):
@@ -5771,6 +5897,7 @@ class SettingsTab(QWidget):
                         nav_item.setText(base)
                     nav_item.setToolTip(base)
             self._update_sections_nav_size()
+            self._refresh_settings_section_combo()
             self._refresh_section_nav_health()
             return
         for group, meta in self._section_meta.items():
@@ -5794,6 +5921,7 @@ class SettingsTab(QWidget):
                 nav_item.setText(base)
                 nav_item.setToolTip(summary if summary else base)
         self._update_sections_nav_size()
+        self._refresh_settings_section_combo()
         self._refresh_section_nav_health()
 
     def _build_section_health_entry(self, *, engaged: bool, issues: List[str]) -> Dict[str, str]:
@@ -6476,6 +6604,7 @@ class SettingsTab(QWidget):
         self._contextual_autofill_rules[rule_id] = {
             "section": section,
             "keys": list(keys),
+            "primary_key": str(keys[0]) if keys else "",
             "base_edit": base_edit,
             "tooltip": tooltip or "Attempt to fill related settings.",
         }
@@ -6525,10 +6654,52 @@ class SettingsTab(QWidget):
         if normalized == "fast_light":
             return self.software_path_detector.detect_fast_light()
         if normalized == "js8":
-            return self.software_path_detector.detect_js8()
+            return self._radio_scoped_js8_autofill_results(self.software_path_detector.detect_js8())
         if normalized == "varac":
             return self.software_path_detector.detect_varac()
         return {}
+
+    def _radio_scoped_js8_autofill_results(
+        self, results: Dict[str, PathDetectionResult]
+    ) -> Dict[str, PathDetectionResult]:
+        scoped = dict(results)
+        file_profiles = discover_js8call_file_profiles()
+        port_txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+        profile_name = ""
+        try:
+            _radio_id, profile_name = self._selected_settings_feedback_target()
+        except Exception:
+            profile_name = ""
+        selected_profile = select_js8call_file_profile(
+            file_profiles,
+            tcp_port=port_txt,
+            profile_name=profile_name,
+        )
+        if selected_profile is not None:
+            scoped["js8_directed_path"] = PathDetectionResult(
+                key="js8_directed_path",
+                label="JS8Call DIRECTED.TXT path",
+                path=selected_profile.directed_path,
+                confidence=selected_profile.confidence,
+                reason=selected_profile.reason,
+                exists=Path(selected_profile.directed_path).is_file(),
+                target_type="file",
+            )
+            return scoped
+        if sum(1 for profile in file_profiles if profile.directed_path) > 1:
+            scoped["js8_directed_path"] = PathDetectionResult(
+                key="js8_directed_path",
+                label="JS8Call DIRECTED.TXT path",
+                path="",
+                confidence="not_found",
+                reason=(
+                    "Multiple JS8Call profiles have DIRECTED.TXT, but none matched the selected radio's "
+                    f"JS8 TCP port {port_txt or '--'}."
+                ),
+                exists=False,
+                target_type="file",
+            )
+        return scoped
 
     def _attempt_scoped_autofill(self, section: str, keys: List[str]) -> None:
         section_label = self._autofill_section_label(section)
@@ -6570,7 +6741,12 @@ class SettingsTab(QWidget):
                     for edit in [self._autofill_target_edit(key)]
                     if isinstance(edit, QLineEdit)
                 ]
-            missing_target = any(not edit.text().strip() for edit in target_edits)
+            primary_key = str(rule.get("primary_key") or "").strip()
+            primary_edit = self._autofill_target_edit(primary_key) if primary_key else None
+            if isinstance(primary_edit, QLineEdit):
+                missing_target = not primary_edit.text().strip()
+            else:
+                missing_target = any(not edit.text().strip() for edit in target_edits)
             role = "eligible_warning" if base_ready and missing_target else "secondary"
             btn.setStyleSheet(button_style(role, theme))
             base_tip = str(rule.get("tooltip") or "Attempt to fill related settings.").strip()
@@ -6587,7 +6763,7 @@ class SettingsTab(QWidget):
             section="fast_light",
             operation="scan",
         )
-        self._apply_autofill_results("fast_light", self.software_path_detector.detect_fast_light())
+        self._apply_autofill_results("fast_light", self._detect_autofill_results("fast_light"))
 
     def _attempt_js8_autofill(self) -> None:
         self._publish_autofill_feedback(
@@ -6597,7 +6773,7 @@ class SettingsTab(QWidget):
             section="js8",
             operation="scan",
         )
-        self._apply_autofill_results("js8", self.software_path_detector.detect_js8())
+        self._apply_autofill_results("js8", self._detect_autofill_results("js8"))
 
     def _attempt_varac_autofill(self) -> None:
         self._publish_autofill_feedback(
@@ -6607,7 +6783,7 @@ class SettingsTab(QWidget):
             section="varac",
             operation="scan",
         )
-        self._apply_autofill_results("varac", self.software_path_detector.detect_varac())
+        self._apply_autofill_results("varac", self._detect_autofill_results("varac"))
 
     def _apply_autofill_results(self, section: str, results: Dict[str, PathDetectionResult]) -> None:
         filled: List[str] = []
@@ -7130,7 +7306,7 @@ class SettingsTab(QWidget):
         except Exception:
             offset_int = 0
         if offset_int <= 0:
-            offset_int = 1900 + (datetime.datetime.now(datetime.timezone.utc).hour % 7) * 50
+            offset_int = coerce_js8_offset_hz(offset_int)
             if hasattr(self.settings, "set"):
                 self.settings.set("js8_offset_hz", offset_int)
             else:
@@ -7553,8 +7729,11 @@ class SettingsTab(QWidget):
         try:
             offset_val = int(self.js8_offset_edit.text().strip() or "0")
         except ValueError:
-            offset_val = 0
-            self.js8_offset_edit.setText("0")
+            offset_val = coerce_js8_offset_hz(0)
+            self.js8_offset_edit.setText(str(offset_val))
+        if offset_val <= 0:
+            offset_val = coerce_js8_offset_hz(offset_val)
+            self.js8_offset_edit.setText(str(offset_val))
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
@@ -9280,6 +9459,7 @@ class SettingsTab(QWidget):
         else:
             text = "Selected Radio"
         self.radio_settings_toggle_btn.setText(text)
+        self._refresh_settings_section_combo()
 
     @staticmethod
     def _fit_table_height_to_rows(table: QTableWidget, *, min_rows: int = 1, max_rows: int = 8, extra_rows: int = 1) -> None:
@@ -11117,7 +11297,7 @@ class SettingsTab(QWidget):
         try:
             self.js8_host_edit.setText(str(state.get("js8_host", "") or "").strip() or "127.0.0.1")
             self.js8_port_edit.setText(str(state.get("js8_port", "") or "2442"))
-            self.js8_offset_edit.setText(str(state.get("js8_offset_hz", "") or "0"))
+            self.js8_offset_edit.setText(str(coerce_js8_offset_hz(state.get("js8_offset_hz", ""))))
             self.js8_directed_edit.setText(str(state.get("js8_directed_path", "") or ""))
             self.js8_forms_edit.setText(str(state.get("js8_forms_path", "") or ""))
             self._refresh_spotter_form_mapper()
@@ -11376,7 +11556,7 @@ class SettingsTab(QWidget):
                     "name": f"{radio_name} JS8",
                     "host": _txt("js8_host", "127.0.0.1") or "127.0.0.1",
                     "port": _num("js8_port", 2442),
-                    "offset_hz": _num("js8_offset_hz", 0),
+                    "offset_hz": _num("js8_offset_hz", coerce_js8_offset_hz(0)),
                     "profile_path": str(profile.get("js8_profile_path", "") or "").strip(),
                     "directed_path": _txt("js8_directed_path"),
                     "forms_path": _txt("js8_forms_path"),
@@ -11608,8 +11788,8 @@ class SettingsTab(QWidget):
         if mode == STARTUP_FRESH_DEFAULT_READY:
             return (
                 "Multi-Rig Setup",
-                "FIO is ready with one default radio.",
-                "You can rename the radio and add more radios when needed.",
+                "No radios are configured yet.",
+                "Use Add Radio or Configure Automatically to set up the first radio.",
                 "success",
             )
         if mode == STARTUP_MIGRATED:
@@ -11871,6 +12051,90 @@ class SettingsTab(QWidget):
         except Exception:
             value = ""
         return str(value or "").strip()
+
+    @staticmethod
+    def _next_default_instance_port(
+        service: str,
+        profiles: Sequence[Mapping[str, Any]],
+        *,
+        existing_profile_id: int = 0,
+    ) -> str:
+        return next_default_instance_port(service, profiles, existing_profile_id=existing_profile_id)
+
+    @staticmethod
+    def _guided_js8_profile_review_text(
+        profiles: Sequence[Any],
+        *,
+        tcp_port: str = "",
+        profile_name: str = "",
+    ) -> str:
+        return guided_js8_profile_review_text(profiles, tcp_port=tcp_port, profile_name=profile_name)
+
+    @staticmethod
+    def _guided_detection_path(results: Mapping[str, PathDetectionResult], key: str) -> str:
+        return guided_detection_path(results, key)
+
+    @staticmethod
+    def _guided_single_install_path(
+        candidates: Sequence[Any],
+        app_id: str,
+        fallback_results: Mapping[str, PathDetectionResult],
+        result_key: str,
+        label: str,
+        review: List[str],
+    ) -> str:
+        return guided_single_install_path(candidates, app_id, fallback_results, result_key, label, review)
+
+    @staticmethod
+    def _guided_app_candidate_identity(candidate: Any) -> Tuple[str, str]:
+        return guided_app_candidate_identity(candidate)
+
+    @staticmethod
+    def _guided_app_candidate_choices(candidates: Sequence[Any], app_id: str) -> Tuple[Tuple[str, str], ...]:
+        return guided_app_candidate_choices(candidates, app_id)
+
+    @staticmethod
+    def _guided_js8_profile_choices(profiles: Sequence[Any]) -> Tuple[Tuple[str, Dict[str, str]], ...]:
+        return guided_js8_profile_choices(profiles)
+
+    @staticmethod
+    def _guided_port_prompt_keys(
+        *,
+        current: Mapping[str, str],
+        selected: Mapping[str, bool],
+        backend: str,
+        observer_mode: bool,
+    ) -> Tuple[str, ...]:
+        return guided_port_prompt_keys(current=current, selected=selected, backend=backend, observer_mode=observer_mode)
+
+    @staticmethod
+    def _guided_radio_autofill_suggestions(
+        *,
+        current: Mapping[str, str],
+        selected: Mapping[str, bool],
+        backend: str,
+        observer_mode: bool,
+        install_candidates: Sequence[Any],
+        fast_results: Mapping[str, PathDetectionResult],
+        js8_results: Mapping[str, PathDetectionResult],
+        varac_results: Mapping[str, PathDetectionResult],
+        js8_file_profiles: Sequence[Any],
+        default_ports: Mapping[str, str],
+        profile_name: str = "",
+    ) -> Tuple[Dict[str, str], Tuple[str, ...]]:
+        return guided_radio_autofill_suggestions(
+            current=current,
+            selected=selected,
+            backend=backend,
+            observer_mode=observer_mode,
+            install_candidates=install_candidates,
+            fast_results=fast_results,
+            js8_results=js8_results,
+            varac_results=varac_results,
+            js8_file_profiles=js8_file_profiles,
+            default_ports=default_ports,
+            profile_name=profile_name,
+        )
 
     def _detect_migration_roles(self) -> set[str]:
         roles: set[str] = set()
@@ -14533,6 +14797,72 @@ class SettingsTab(QWidget):
         software_hint_label.setWordWrap(True)
         _add_full_width_row(software_form, software_hint_label)
 
+        configure_auto_wrap = QWidget()
+        configure_auto_row = QHBoxLayout(configure_auto_wrap)
+        configure_auto_row.setContentsMargins(0, 0, 0, 0)
+        configure_auto_row.setSpacing(8)
+        configure_auto_btn = QPushButton("Configure Automatically")
+        configure_auto_btn.setToolTip(
+            "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
+        )
+        configure_auto_status = QLabel("Choose the software this radio uses, then let FIO fill what it can.")
+        configure_auto_status.setWordWrap(True)
+        configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        configure_auto_row.addWidget(configure_auto_btn)
+        configure_auto_row.addWidget(configure_auto_status, 1)
+        _add_full_width_row(software_form, configure_auto_wrap)
+
+        app_setup_plan_group = QGroupBox("Planned App Setup")
+        app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")
+        app_setup_plan_group.setVisible(False)
+        app_setup_plan_layout = QVBoxLayout(app_setup_plan_group)
+        app_setup_plan_layout.setContentsMargins(10, 8, 10, 8)
+        app_setup_plan_label = QLabel()
+        app_setup_plan_label.setWordWrap(True)
+        app_setup_plan_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        app_setup_plan_layout.addWidget(app_setup_plan_label)
+        _add_full_width_row(software_form, app_setup_plan_group)
+
+        app_choice_group = QGroupBox("Choose Detected Apps")
+        app_choice_group.setVisible(False)
+        app_choice_layout = QFormLayout(app_choice_group)
+        app_choice_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        app_choice_combos: Dict[str, QComboBox] = {}
+        app_choice_specs = [
+            ("flrig", "Which FLRig controls this radio?"),
+            ("fldigi", "Which FLDigi belongs to this radio?"),
+            ("flmsg", "Which FLMsg belongs to this radio?"),
+            ("flamp", "Which FLAmp belongs to this radio?"),
+            ("js8call", "Which JS8Call belongs to this radio?"),
+            ("js8spotter", "Which JS8Spotter belongs to this radio?"),
+            ("commstat", "Which CommStat belongs to this radio?"),
+            ("varac", "Which VarAC belongs to this radio?"),
+        ]
+        for app_id, prompt_text in app_choice_specs:
+            combo = QComboBox()
+            combo.setObjectName(f"guidedAutoAppChoice_{app_id}")
+            combo.setVisible(False)
+            combo.setToolTip("FIO found more than one installed app. Choose the one this radio should use.")
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+            app_choice_combos[app_id] = combo
+            label_widget = _make_help_label(prompt_text, "Choose the installed app path that belongs to this radio.")
+            label_widget.setVisible(False)
+            row_labels[combo] = label_widget
+            app_choice_layout.addRow(label_widget, combo)
+        js8_profile_choice_combo = QComboBox()
+        js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")
+        js8_profile_choice_combo.setVisible(False)
+        js8_profile_choice_combo.setToolTip("FIO found more than one JS8Call profile. Choose the profile this radio uses.")
+        js8_profile_choice_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        js8_profile_choice_label = _make_help_label(
+            "Which JS8Call profile belongs to this radio?",
+            "Choose the JS8Call profile/port pair that belongs to this radio. FIO will fill the TCP port, profile folder, and DIRECTED.TXT path.",
+        )
+        js8_profile_choice_label.setVisible(False)
+        row_labels[js8_profile_choice_combo] = js8_profile_choice_label
+        app_choice_layout.addRow(js8_profile_choice_label, js8_profile_choice_combo)
+        _add_full_width_row(software_form, app_choice_group)
+
         role_hint_label = QLabel()
         role_hint_label.setWordWrap(True)
         setup_guidance_heading = _make_help_label(
@@ -14580,6 +14910,12 @@ class SettingsTab(QWidget):
 
         fldigi_path_edit = QLineEdit(str((existing or {}).get("fldigi_path", "") or ""))
         _add_form_row(connection_form, "FLDigi App:", fldigi_path_edit, "Optional FLDigi executable or app path associated with this radio.")
+
+        flmsg_path_edit = QLineEdit(str((existing or {}).get("flmsg_path", "") or ""))
+        _add_form_row(connection_form, "FLMsg App:", flmsg_path_edit, "Optional FLMsg executable or app path associated with this radio.")
+
+        flamp_path_edit = QLineEdit(str((existing or {}).get("flamp_path", "") or ""))
+        _add_form_row(connection_form, "FLAmp App:", flamp_path_edit, "Optional FLAmp executable or app path associated with this radio.")
 
         js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or ""))
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
@@ -14654,6 +14990,40 @@ class SettingsTab(QWidget):
         sdr_wrap.setLayout(sdr_row)
         _add_form_row(connection_form, "Observer SDR:", sdr_wrap, "Observer SDR endpoint used when this radio is an observer.")
 
+        port_prompt_group = QGroupBox("Enter App Ports")
+        port_prompt_group.setVisible(False)
+        port_prompt_layout = QFormLayout(port_prompt_group)
+        port_prompt_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        port_prompt_specs = {
+            "flrig_port": ("What port does this radio's FLRig use?", flrig_port_edit),
+            "fldigi_port": ("What port does this radio's FLDigi use?", fldigi_port_edit),
+            "js8_port": ("What port does this radio's JS8Call use?", js8_port_edit),
+        }
+        port_prompt_fields: Dict[str, QLineEdit] = {}
+        for field_key, (prompt_text, target_edit) in port_prompt_specs.items():
+            prompt_edit = QLineEdit()
+            prompt_edit.setObjectName(f"guidedAutoPortPrompt_{field_key}")
+            prompt_edit.setValidator(QIntValidator(1, 65535, prompt_edit))
+            prompt_edit.setPlaceholderText("Port number")
+            prompt_edit.setVisible(False)
+            prompt_edit.setToolTip("This is the number the app uses to talk to FIO.")
+            port_prompt_fields[field_key] = prompt_edit
+            label_widget = _make_help_label(prompt_text, "Enter the port number configured in that app for this radio.")
+            label_widget.setVisible(False)
+            row_labels[prompt_edit] = label_widget
+            port_prompt_layout.addRow(label_widget, prompt_edit)
+            prompt_edit.textChanged.connect(
+                lambda text, target=target_edit: target.setText(str(text or "").strip())
+                if target.text().strip() != str(text or "").strip()
+                else None
+            )
+            target_edit.textChanged.connect(
+                lambda text, prompt=prompt_edit: prompt.setText(str(text or "").strip())
+                if prompt.text().strip() != str(text or "").strip()
+                else None
+            )
+        _add_full_width_row(software_form, port_prompt_group)
+
         optional_toggle = QToolButton(dlg)
         optional_toggle.setText("Optional Groups and Notes")
         optional_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -14704,8 +15074,182 @@ class SettingsTab(QWidget):
         ]
         observer_field_widgets = [sdr_wrap]
         fldigi_field_widgets = [fldigi_wrap, fldigi_path_edit]
+        flmsg_field_widgets = [flmsg_path_edit]
+        flamp_field_widgets = [flamp_path_edit]
         varac_field_widgets = [varac_install_edit, varac_db_edit, varac_ini_edit, varac_incoming_edit, varac_launch_cmd_edit]
         optional_field_widgets = [ptt_group_edit, antenna_group_edit, frontend_group_edit, amplifier_group_edit, notes_edit]
+        app_choice_targets: Dict[str, QLineEdit] = {
+            "flrig": flrig_path_edit,
+            "fldigi": fldigi_path_edit,
+            "flmsg": flmsg_path_edit,
+            "flamp": flamp_path_edit,
+            "js8call": js8_install_edit,
+            "js8spotter": js8spotter_launch_edit,
+            "commstat": commstat_launch_edit,
+            "varac": varac_install_edit,
+        }
+
+        def _app_choice_app_selected(app_id: str) -> bool:
+            key = str(app_id or "").strip().lower()
+            backend = str(backend_combo.currentData() or "").strip().lower()
+            selected_by_app = {
+                "flrig": use_flrig_chk.isChecked() or backend == "flrig",
+                "fldigi": use_fldigi_chk.isChecked(),
+                "flmsg": use_flmsg_chk.isChecked(),
+                "flamp": use_flamp_chk.isChecked(),
+                "js8call": use_js8call_chk.isChecked() or backend == "js8call",
+                "js8spotter": use_js8spotter_chk.isChecked(),
+                "commstat": use_commstat_chk.isChecked(),
+                "varac": use_varac_chk.isChecked(),
+            }
+            return bool(selected_by_app.get(key, False))
+
+        def _js8_app_selected() -> bool:
+            return _app_choice_app_selected("js8call")
+
+        def _apply_detected_app_choice(app_id: str) -> None:
+            combo = app_choice_combos.get(app_id)
+            target = app_choice_targets.get(app_id)
+            if combo is None or target is None:
+                return
+            path_text = str(combo.currentData() or "").strip()
+            if not path_text:
+                return
+            app_labels = {
+                "flrig": "FLRig",
+                "fldigi": "FLDigi",
+                "flmsg": "FLMsg",
+                "flamp": "FLAmp",
+                "js8call": "JS8Call",
+                "js8spotter": "JS8Spotter",
+                "commstat": "CommStat",
+                "varac": "VarAC",
+            }
+            label = app_labels.get(app_id, app_id)
+            if target.text().strip():
+                configure_auto_status.setText(f"Kept existing {label} app path. Clear the field first to use the selected app.")
+            else:
+                target.setText(path_text)
+                configure_auto_status.setText(f"Using selected {label} app for this radio.")
+            _update_dialog_readiness()
+
+        def _apply_js8_profile_choice() -> None:
+            payload = js8_profile_choice_combo.currentData()
+            if not isinstance(payload, Mapping):
+                return
+            port = str(payload.get("port", "") or "").strip()
+            profile_path = str(payload.get("profile_path", "") or "").strip()
+            directed_path = str(payload.get("directed_path", "") or "").strip()
+            if not any((port, profile_path, directed_path)):
+                return
+            filled: List[str] = []
+            preserved: List[str] = []
+            if port and not js8_port_edit.text().strip():
+                js8_port_edit.setText(port)
+                filled.append("JS8Call port")
+            elif port:
+                preserved.append("JS8Call port")
+            if profile_path and not js8_profile_edit.text().strip():
+                js8_profile_edit.setText(profile_path)
+                filled.append("JS8 profile folder")
+            elif profile_path:
+                preserved.append("JS8 profile folder")
+            if directed_path and not js8_directed_edit.text().strip():
+                js8_directed_edit.setText(directed_path)
+                filled.append("JS8Call DIRECTED.TXT")
+            elif directed_path:
+                preserved.append("JS8Call DIRECTED.TXT")
+            if filled:
+                configure_auto_status.setText("Using selected JS8Call profile for this radio. Filled: " + ", ".join(filled) + ".")
+            elif preserved:
+                configure_auto_status.setText(
+                    "Kept existing JS8Call profile fields. Clear a field first to use that value from the selected profile."
+                )
+            _update_app_choice_visibility()
+            _update_dialog_readiness()
+
+        def _update_app_choice_visibility() -> None:
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            any_visible = False
+            for app_id, combo in app_choice_combos.items():
+                visible = (
+                    not observer_mode
+                    and _app_choice_app_selected(app_id)
+                    and combo.count() > 2
+                )
+                _set_row_visible(combo, visible)
+                any_visible = any_visible or visible
+            js8_port_text = js8_port_edit.text().strip()
+            js8_port_has_one_match = False
+            if js8_port_text:
+                js8_port_matches = 0
+                for idx in range(1, js8_profile_choice_combo.count()):
+                    payload = js8_profile_choice_combo.itemData(idx)
+                    if isinstance(payload, Mapping) and str(payload.get("port", "") or "").strip() == js8_port_text:
+                        js8_port_matches += 1
+                js8_port_has_one_match = js8_port_matches == 1
+            js8_profile_details_present = bool(js8_profile_edit.text().strip() and js8_directed_edit.text().strip())
+            js8_profile_visible = (
+                not observer_mode
+                and _js8_app_selected()
+                and js8_profile_choice_combo.count() > 2
+                and not (js8_port_has_one_match and js8_profile_details_present)
+            )
+            _set_row_visible(js8_profile_choice_combo, js8_profile_visible)
+            any_visible = any_visible or js8_profile_visible
+            app_choice_group.setVisible(any_visible)
+
+        def _update_detected_app_choices(candidates: Sequence[Any]) -> None:
+            for app_id, combo in app_choice_combos.items():
+                choices = self._guided_app_candidate_choices(candidates, app_id)
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItem("Choose detected app...", "")
+                for label_text, path_text in choices:
+                    combo.addItem(label_text, path_text)
+                combo.blockSignals(False)
+                _configure_combo_width(combo, minimum=360)
+            _update_app_choice_visibility()
+
+        def _update_js8_profile_choices(profiles: Sequence[Any]) -> None:
+            choices = self._guided_js8_profile_choices(profiles)
+            js8_profile_choice_combo.blockSignals(True)
+            js8_profile_choice_combo.clear()
+            js8_profile_choice_combo.addItem("Choose JS8Call profile...", {})
+            for label_text, payload in choices:
+                js8_profile_choice_combo.addItem(label_text, payload)
+            js8_profile_choice_combo.blockSignals(False)
+            _configure_combo_width(js8_profile_choice_combo, minimum=420)
+            _update_app_choice_visibility()
+
+        def _update_port_prompt_visibility() -> None:
+            current_ports = {
+                "flrig_port": flrig_port_edit.text().strip(),
+                "fldigi_port": fldigi_port_edit.text().strip(),
+                "js8_port": js8_port_edit.text().strip(),
+            }
+            missing_keys = set(
+                self._guided_port_prompt_keys(
+                    current=current_ports,
+                    selected={
+                        "flrig": use_flrig_chk.isChecked(),
+                        "fldigi": use_fldigi_chk.isChecked(),
+                        "js8call": use_js8call_chk.isChecked(),
+                    },
+                    backend=str(backend_combo.currentData() or ""),
+                    observer_mode=str(device_class_combo.currentData() or "").strip().lower() == "observer",
+                )
+            )
+            any_visible = False
+            for field_key, prompt_edit in port_prompt_fields.items():
+                visible = field_key in missing_keys
+                _set_row_visible(prompt_edit, visible)
+                any_visible = any_visible or visible
+            port_prompt_group.setVisible(any_visible)
+
+        for app_id, combo in app_choice_combos.items():
+            combo.currentIndexChanged.connect(lambda _idx, key=app_id: _apply_detected_app_choice(key))
+        js8_profile_choice_combo.currentIndexChanged.connect(lambda _idx: _apply_js8_profile_choice())
 
         def _populate_radio_model_combo(entries: List[Dict[str, Any]], *, selected_text: str = "") -> None:
             current_text = selected_text or radio_model_combo.currentText().strip()
@@ -14891,6 +15435,8 @@ class SettingsTab(QWidget):
                 "fldigi_host": fldigi_host_edit.text().strip(),
                 "fldigi_port": fldigi_port_edit.text().strip(),
                 "fldigi_path": fldigi_path_edit.text().strip(),
+                "flmsg_path": flmsg_path_edit.text().strip(),
+                "flamp_path": flamp_path_edit.text().strip(),
                 "js8_host": js8_host_edit.text().strip(),
                 "js8_port": js8_port_edit.text().strip(),
                 "js8_install_path": js8_install_edit.text().strip(),
@@ -14914,6 +15460,216 @@ class SettingsTab(QWidget):
                 "amplifier_group": amplifier_group_edit.text().strip(),
                 "notes": notes_edit.toPlainText().strip(),
             }
+
+        def _default_instance_port(service: str) -> str:
+            try:
+                profiles = list(self.device_profiles)
+            except Exception:
+                profiles = []
+            return self._next_default_instance_port(
+                service,
+                profiles,
+                existing_profile_id=int((existing or {}).get("id", 0) or 0),
+            )
+
+        def _fill_blank(edit: QLineEdit, value: object, label: str, filled: List[str], preserved: List[str]) -> None:
+            current = edit.text().strip()
+            text = str(value or "").strip()
+            if not text:
+                return
+            if current:
+                preserved.append(label)
+                return
+            edit.setText(text)
+            filled.append(label)
+
+        def _guided_plan_instance_name() -> str:
+            model_choice = _current_radio_model_payload()
+            raw_name = (
+                name_edit.text().strip()
+                or str(model_choice.get("display_name", "") or "").strip()
+                or str((existing or {}).get("name", "") or "").strip()
+                or "radio"
+            )
+            slug = re.sub(r"[^a-z0-9]+", "-", raw_name.strip().lower()).strip("-")
+            return slug or "radio"
+
+        def _guided_plan_port_assignment(service: str, port_text: str) -> PortAssignment:
+            defaults = DEFAULT_PORT_PLAN.get(service, ())
+            preferred = int(defaults[0]) if defaults else 0
+            try:
+                assigned = int(str(port_text or "").strip() or preferred)
+            except Exception:
+                assigned = preferred
+            return PortAssignment(
+                service=service,
+                host="127.0.0.1",
+                preferred_port=preferred,
+                assigned_port=assigned,
+                conflict=False,
+                conflict_checked=False,
+                note="Draft Guided Add Radio plan; live conflicts are checked before external app writes.",
+            )
+
+        def _guided_plan_enabled_apps() -> Tuple[str, ...]:
+            backend = str(backend_combo.currentData() or "").strip().lower()
+            apps: List[str] = []
+            if use_flrig_chk.isChecked() or backend == "flrig":
+                apps.append("flrig")
+            if use_fldigi_chk.isChecked():
+                apps.append("fldigi")
+            if use_js8call_chk.isChecked() or backend == "js8call":
+                apps.append("js8call")
+            return tuple(apps)
+
+        def _update_guided_app_setup_plan_review() -> None:
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                app_setup_plan_group.setVisible(False)
+                app_setup_plan_label.setText("")
+                return
+            enabled_apps = _guided_plan_enabled_apps()
+            varac_selected = use_varac_chk.isChecked()
+            if not enabled_apps and not varac_selected:
+                app_setup_plan_group.setVisible(False)
+                app_setup_plan_label.setText("")
+                return
+            proposal = RadioInstanceProposal(
+                name=name_edit.text().strip() or "Radio",
+                instance_name=_guided_plan_instance_name(),
+                index=0,
+                enabled_apps=enabled_apps,
+                ports=(
+                    _guided_plan_port_assignment("flrig", flrig_port_edit.text()),
+                    _guided_plan_port_assignment("fldigi", fldigi_port_edit.text()),
+                    _guided_plan_port_assignment("js8call", js8_port_edit.text()),
+                ),
+                varac_enabled=varac_selected,
+            )
+            app_paths = {
+                "flrig": flrig_path_edit.text().strip(),
+                "fldigi": fldigi_path_edit.text().strip(),
+                "js8call": js8_install_edit.text().strip(),
+            }
+            plan = build_guided_external_app_config_plan(
+                (proposal,),
+                config_root=get_config_dir(),
+                app_paths=app_paths,
+                include_varac=varac_selected,
+            )
+            write_actions = [action for action in plan.actions if action.writes_external_config]
+            lines: List[str] = []
+            if plan.backup_required:
+                lines.append("Backup required before FIO writes app profiles.")
+            for action in write_actions[:4]:
+                lines.append("- " + action.summary)
+            if len(write_actions) > 4:
+                lines.append(f"- {len(write_actions) - 4} more app setup action(s).")
+            for item in plan.review_items[:2]:
+                lines.append("- " + item)
+            app_setup_plan_label.setText("\n".join(lines))
+            app_setup_plan_group.setVisible(bool(lines))
+
+        def _apply_dialog_autoconfigure() -> None:
+            filled: List[str] = []
+            preserved: List[str] = []
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            install_candidates: Sequence[Any] = ()
+            fast_results: Dict[str, PathDetectionResult] = {}
+            js8_results: Dict[str, PathDetectionResult] = {}
+            varac_results: Dict[str, PathDetectionResult] = {}
+            js8_file_profiles: Sequence[Any] = ()
+            if not observer_mode:
+                try:
+                    install_candidates = build_autoconfig_proposal(
+                        radio_count=1,
+                        home=Path.home(),
+                        busy_checker=lambda _host, _port: False,
+                    ).candidates
+                except Exception:
+                    install_candidates = ()
+                fast_results = self.software_path_detector.detect_fast_light()
+                js8_results = self.software_path_detector.detect_js8()
+                varac_results = self.software_path_detector.detect_varac()
+                js8_file_profiles = discover_js8call_file_profiles()
+            _update_detected_app_choices(install_candidates)
+            _update_js8_profile_choices(js8_file_profiles)
+            suggestions, review_items = self._guided_radio_autofill_suggestions(
+                current={
+                    "js8_port": js8_port_edit.text().strip(),
+                },
+                selected={
+                    "flrig": use_flrig_chk.isChecked(),
+                    "fldigi": use_fldigi_chk.isChecked(),
+                    "flmsg": use_flmsg_chk.isChecked(),
+                    "flamp": use_flamp_chk.isChecked(),
+                    "js8call": use_js8call_chk.isChecked(),
+                    "js8spotter": use_js8spotter_chk.isChecked(),
+                    "commstat": use_commstat_chk.isChecked(),
+                    "varac": use_varac_chk.isChecked(),
+                },
+                backend=str(backend_combo.currentData() or ""),
+                observer_mode=observer_mode,
+                install_candidates=install_candidates,
+                fast_results=fast_results,
+                js8_results=js8_results,
+                varac_results=varac_results,
+                js8_file_profiles=js8_file_profiles,
+                default_ports={
+                    "flrig": _default_instance_port("flrig"),
+                    "fldigi": _default_instance_port("fldigi"),
+                    "js8call": _default_instance_port("js8call"),
+                },
+                profile_name=name_edit.text().strip(),
+            )
+            field_targets: Dict[str, Tuple[QLineEdit, str]] = {
+                "sdr_host": (sdr_host_edit, "Observer SDR host"),
+                "flrig_host": (flrig_host_edit, "FLRig host"),
+                "flrig_port": (flrig_port_edit, "FLRig port"),
+                "flrig_path": (flrig_path_edit, "FLRig app"),
+                "fldigi_host": (fldigi_host_edit, "FLDigi host"),
+                "fldigi_port": (fldigi_port_edit, "FLDigi port"),
+                "fldigi_path": (fldigi_path_edit, "FLDigi app"),
+                "flmsg_path": (flmsg_path_edit, "FLMsg app"),
+                "flamp_path": (flamp_path_edit, "FLAmp app"),
+                "js8_host": (js8_host_edit, "JS8Call host"),
+                "js8_port": (js8_port_edit, "JS8Call port"),
+                "js8_install_path": (js8_install_edit, "JS8Call app"),
+                "js8_directed_path": (js8_directed_edit, "JS8Call DIRECTED.TXT"),
+                "js8_profile_path": (js8_profile_edit, "JS8 profile folder"),
+                "spotter_launch_path": (js8spotter_launch_edit, "JS8Spotter app"),
+                "commstat_launch_path": (commstat_launch_edit, "CommStat app"),
+                "varac_install_path": (varac_install_edit, "VarAC install"),
+                "varac_ini_path": (varac_ini_edit, "VarAC INI"),
+                "varac_incoming_path": (varac_incoming_edit, "VarAC incoming"),
+            }
+            for field_key, value in suggestions.items():
+                target = field_targets.get(field_key)
+                if target is None:
+                    continue
+                edit, label = target
+                _fill_blank(edit, value, label, filled, preserved)
+            review = list(review_items)
+            if filled:
+                review.insert(0, "Filled: " + ", ".join(filled[:8]) + ("..." if len(filled) > 8 else ""))
+            if preserved:
+                review.append("Kept existing: " + ", ".join(preserved[:6]) + ("..." if len(preserved) > 6 else ""))
+            if not review:
+                review.append("No blank fields could be filled from the current scan.")
+            status = (
+                f"Configure Automatically filled {len(filled)} field(s). Review before Save."
+                if filled
+                else "Configure Automatically did not find new blank fields to fill."
+            )
+            visible_review = "\n".join(review[:4])
+            if len(review) > 4:
+                visible_review += f"\n{len(review) - 4} more review item(s)."
+            configure_auto_status.setText(f"{status}\n{visible_review}" if visible_review else status)
+            configure_auto_status.setToolTip("\n".join(review))
+            _update_guided_app_setup_plan_review()
+            _update_port_prompt_visibility()
+            _update_dialog_visibility()
+
+        configure_auto_btn.clicked.connect(_apply_dialog_autoconfigure)
 
         def _update_dialog_readiness() -> None:
             def _set_readiness_card_style(level: str) -> None:
@@ -15023,6 +15779,10 @@ class SettingsTab(QWidget):
                 _set_row_visible(widget, observer_mode)
             for widget in fldigi_field_widgets:
                 _set_row_visible(widget, not observer_mode and use_fldigi)
+            for widget in flmsg_field_widgets:
+                _set_row_visible(widget, not observer_mode and bool(use_flmsg_chk.isChecked()))
+            for widget in flamp_field_widgets:
+                _set_row_visible(widget, not observer_mode and bool(use_flamp_chk.isChecked()))
             for widget in varac_field_widgets:
                 _set_row_visible(widget, not observer_mode and use_varac)
             for widget in optional_field_widgets:
@@ -15031,6 +15791,8 @@ class SettingsTab(QWidget):
             if observer_mode:
                 _set_row_visible(software_wrap, False)
                 _set_row_visible(software_hint_label, False)
+                app_setup_plan_group.setVisible(False)
+                app_setup_plan_label.setText("")
             else:
                 _set_row_visible(software_wrap, True)
                 _set_row_visible(software_hint_label, True)
@@ -15060,6 +15822,8 @@ class SettingsTab(QWidget):
                     + ", ".join(software_parts)
                     + ". Hidden sections stay unchanged unless you edit their values."
                 )
+                if app_setup_plan_group.isVisible():
+                    _update_guided_app_setup_plan_review()
 
             if observer_mode:
                 role_hint_label.setText(
@@ -15084,6 +15848,8 @@ class SettingsTab(QWidget):
                 )
             optional_body.setVisible(bool(optional_toggle.isChecked()))
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
+            _update_app_choice_visibility()
+            _update_port_prompt_visibility()
             _update_dialog_readiness()
 
         backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
@@ -15133,6 +15899,8 @@ class SettingsTab(QWidget):
             fldigi_host_edit,
             fldigi_port_edit,
             fldigi_path_edit,
+            flmsg_path_edit,
+            flamp_path_edit,
             js8_host_edit,
             js8_port_edit,
             js8_install_edit,
@@ -15155,6 +15923,10 @@ class SettingsTab(QWidget):
             amplifier_group_edit,
         ]:
             widget.textChanged.connect(lambda _text: _update_dialog_readiness())
+        for widget in [js8_port_edit, js8_profile_edit, js8_directed_edit]:
+            widget.textChanged.connect(lambda _text: _update_app_choice_visibility())
+        for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:
+            widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())
         notes_edit.textChanged.connect(_update_dialog_readiness)
         launch_enabled_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
@@ -15214,6 +15986,8 @@ class SettingsTab(QWidget):
                     "fldigi_host": fldigi_host_edit.text().strip(),
                     "fldigi_port": fldigi_port_edit.text().strip(),
                     "fldigi_path": fldigi_path_edit.text().strip(),
+                    "flmsg_path": flmsg_path_edit.text().strip(),
+                    "flamp_path": flamp_path_edit.text().strip(),
                     "js8_host": js8_host_edit.text().strip(),
                     "js8_port": js8_port_edit.text().strip(),
                     "js8_install_path": js8_install_edit.text().strip(),
@@ -15389,6 +16163,10 @@ class SettingsTab(QWidget):
                 varac_saved = self.multi_radio_store.save_varac_node(varac_values)
                 payload["varac_node_id"] = int(varac_saved.get("id", 0) or 0)
 
+            first_radio = not bool(self.multi_radio_store.list_device_profiles())
+            if first_radio:
+                payload["runtime_active"] = 1
+                payload["runtime_primary"] = 1
             saved = self.multi_radio_store.save_device_profile(payload)
         except ValueError as exc:
             QMessageBox.warning(self, "Radio Profiles", str(exc))
@@ -15398,7 +16176,7 @@ class SettingsTab(QWidget):
             QMessageBox.warning(self, "Radio Profiles", "Unable to save the radio profile.")
             return
 
-        if is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
+        if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
             try:
                 self.multi_radio_store.sync_runtime_active_device_to_legacy_settings(int(saved.get("id", 0) or 0))
             except ValueError as exc:
@@ -16697,7 +17475,7 @@ class SettingsTab(QWidget):
         visible_keys = [key for key, _label in self._current_visible_status_items()]
         if visible_keys != list(self.status_labels.keys()):
             self._rebuild_status_indicators()
-        status_sig: Tuple[object, ...] = (tuple(visible_keys),)
+        status_sig: Tuple[object, ...] = (tuple(visible_keys), self._selected_radio_status_endpoint_sig())
         now_ts = time.time()
         if (
             not force
@@ -16706,7 +17484,9 @@ class SettingsTab(QWidget):
             < float(self._running_status_refresh_interval_sec)
         ):
             return
-        snapshot = self._status_service.software_status_snapshot()
+        snapshot = self._selected_radio_status_snapshot(force=force)
+        if not snapshot:
+            snapshot = self._status_service.software_status_snapshot()
         self._last_running_status_sig = status_sig
         self._last_running_status_refresh_ts = now_ts
         for program_name, lbl in self.status_labels.items():
@@ -16726,6 +17506,43 @@ class SettingsTab(QWidget):
             settings=self.settings,
             min_ms=5.0,
         )
+
+    @staticmethod
+    def _int_override_from_text(text: str) -> Optional[int]:
+        try:
+            value = int(str(text or "").strip())
+        except Exception:
+            return None
+        return value if value > 0 else None
+
+    def _selected_radio_status_endpoint_sig(self) -> Tuple[str, Optional[int], Optional[int], str, Optional[int]]:
+        try:
+            js8_host = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+            js8_port = self._int_override_from_text(self.js8_port_edit.text()) if hasattr(self, "js8_port_edit") else None
+            flrig_port = (
+                self._int_override_from_text(self.flrig_port_edit.text()) if hasattr(self, "flrig_port_edit") else None
+            )
+            fldigi_host = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
+            fldigi_port = (
+                self._int_override_from_text(self.fldigi_port_edit.text()) if hasattr(self, "fldigi_port_edit") else None
+            )
+            return (js8_host, js8_port, flrig_port, fldigi_host, fldigi_port)
+        except Exception:
+            return ("", None, None, "", None)
+
+    def _selected_radio_status_snapshot(self, force: bool = False) -> Dict[str, Dict[str, object]]:
+        try:
+            js8_host, js8_port, flrig_port, fldigi_host, fldigi_port = self._selected_radio_status_endpoint_sig()
+            return self._software_status_probe.status_snapshot(
+                force=force,
+                host_override=js8_host or None,
+                port_override=js8_port,
+                flrig_port_override=flrig_port,
+                fldigi_host_override=fldigi_host or None,
+                fldigi_port_override=fldigi_port,
+            )
+        except Exception:
+            return {}
 
     def apply_theme(self):
         try:
@@ -18693,7 +19510,7 @@ class SettingsTab(QWidget):
             self.varac_bbs_announce_chk.setChecked(bool(bbs_cfg.get("announce", False)))
         if hasattr(self, "varac_bbs_callsigns_list"):
             self._set_varac_bbs_allowed_callsigns(bbs_cfg.get("allowed_callsigns", []))
-        bbs_dir = str(bbs_cfg.get("bbs_directory", "") or "").strip()
+        bbs_dir = varac_path_to_host_path(bbs_cfg.get("bbs_directory", ""), ini_path=ini_path)
         bbs_dir_changed = False
         if bbs_dir and hasattr(self, "varac_bbs_dir_edit"):
             current_bbs_dir = self.varac_bbs_dir_edit.text().strip()

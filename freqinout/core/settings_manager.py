@@ -17,6 +17,8 @@ from freqinout.core.multi_radio_store import (
     ensure_multi_radio_settings_schema,
     is_multi_rig_migration_current,
     mirror_legacy_settings_into_runtime_active_device,
+    set_multi_rig_migration_deferred,
+    set_multi_rig_migration_version,
 )
 
 APP_NAME = "FreqInOut"
@@ -57,11 +59,18 @@ class SettingsManager:
                 "SettingsManager: existing FIO configuration detected; multi-rig migration remains deferred."
             )
         else:
-            result = ensure_multi_rig_migration(self._conn, self._data)
+            set_multi_rig_migration_deferred(self._conn, False)
+            set_multi_rig_migration_version(
+                self._conn,
+                summary={
+                    "fresh_install_blank_slate": True,
+                    "created_device_profile_id": None,
+                    "created_operating_profile_id": None,
+                    "note": "Fresh multi-rig installs start with no radios; use Add Radio / Configure Automatically.",
+                },
+            )
             log.info(
-                "SettingsManager: initialized fresh multi-rig defaults (applied=%s, warnings=%s).",
-                result.applied,
-                ", ".join(result.warnings) if result.warnings else "none",
+                "SettingsManager: initialized fresh multi-rig blank slate; no default radio was created."
             )
             self.reload()
         self._sync_system_timezone(force=True)
@@ -85,9 +94,11 @@ class SettingsManager:
             return False
         try:
             data = json.loads(legacy.read_text(encoding="utf-8") or "{}")
+            if not isinstance(data, dict):
+                return False
             self._bulk_write(data)
             log.info("SettingsManager: migrated legacy config.json into %s", self.db_path)
-            return True
+            return detect_existing_fio_usage(self._conn, data, legacy_config_exists=False)
         except Exception as e:
             log.error("SettingsManager: migration from config.json failed: %s", e)
             return False

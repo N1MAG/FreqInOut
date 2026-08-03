@@ -78,6 +78,18 @@ class JS8CallConfigProfile:
 
 
 @dataclass(frozen=True)
+class JS8CallFileProfile:
+    name: str
+    ini_path: str
+    save_dir: str
+    tcp_server_port: str
+    directed_path: str
+    all_path: str
+    confidence: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class AutoconfigProposal:
     platform: str
     candidates: Tuple[AppCandidate, ...]
@@ -85,6 +97,7 @@ class AutoconfigProposal:
     warnings: Tuple[str, ...]
     missing_apps: Tuple[str, ...]
     js8_profiles: Tuple[JS8CallConfigProfile, ...] = field(default_factory=tuple)
+    js8_file_profiles: Tuple[JS8CallFileProfile, ...] = field(default_factory=tuple)
 
 
 def normalize_platform(value: Optional[str] = None) -> str:
@@ -230,14 +243,14 @@ def find_app_candidates(
             if candidate.exists:
                 candidates.append(candidate)
 
-        if any(candidate.app_id == normalized_app and candidate.executable for candidate in candidates):
-            continue
-
         for command in _command_names(normalized_app):
             resolved = shutil.which(command)
             if not resolved:
                 continue
             candidate = _candidate_from_path(normalized_app, Path(resolved), system=system, source="path")
+            key = os.path.normcase(os.path.normpath(candidate.path))
+            if key in seen_paths:
+                continue
             candidates.append(candidate)
             break
 
@@ -321,12 +334,12 @@ def read_js8call_multisettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ..
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
+    profiles = []
     try:
         parser.read(path, encoding="utf-8")
     except configparser.Error:
-        return ()
+        return _read_js8call_qsettings(path)
 
-    profiles = []
     root_settings = _selected_js8_settings(parser.defaults())
     if parser.has_section("Configuration"):
         root_settings.update(_selected_js8_settings(dict(parser.items("Configuration"))))
@@ -341,7 +354,211 @@ def read_js8call_multisettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ..
         settings = _selected_js8_settings(dict(parser.items(section)))
         if settings:
             profiles.append(JS8CallConfigProfile(name=name, settings=settings))
+    qsettings_profiles = _read_js8call_qsettings(path)
+    if not profiles:
+        return qsettings_profiles
+    merged = {profile.name.strip().casefold(): profile for profile in profiles}
+    ordered = list(profiles)
+    for qprofile in qsettings_profiles:
+        key = qprofile.name.strip().casefold()
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = qprofile
+            ordered.append(qprofile)
+            continue
+        combined = dict(existing.settings)
+        combined.update({k: v for k, v in qprofile.settings.items() if str(v).strip()})
+        replacement = JS8CallConfigProfile(name=existing.name, settings=combined)
+        merged[key] = replacement
+        for index, current in enumerate(ordered):
+            if current.name.strip().casefold() == key:
+                ordered[index] = replacement
+                break
+    return tuple(ordered)
+
+
+def _read_js8call_qsettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ...]:
+    try:
+        lines = Path(ini_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return ()
+
+    grouped: Dict[str, Dict[str, str]] = {}
+    current_section = ""
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        raw_key, value = line.split("=", 1)
+        raw_key = raw_key.strip()
+        if not raw_key:
+            continue
+        group = current_section
+        key = raw_key
+        if "\\" in raw_key:
+            prefix, key = raw_key.rsplit("\\", 1)
+            if current_section.lower().startswith("multisettings/") and prefix.strip().lower() == "configuration":
+                group = current_section
+            else:
+                group = prefix.strip()
+            key = key.strip()
+        if not group:
+            continue
+        grouped.setdefault(group, {})[key] = value.strip()
+
+    profiles = []
+    root_settings = _selected_js8_settings(grouped.get("Configuration", {}))
+    if root_settings:
+        profiles.append(JS8CallConfigProfile(name="Default", settings=root_settings))
+    for group, settings_map in grouped.items():
+        normalized = group.strip()
+        if not normalized.lower().startswith("multisettings/"):
+            continue
+        name = normalized.split("/", 1)[1].strip() or normalized
+        settings = _selected_js8_settings(settings_map)
+        if settings:
+            profiles.append(JS8CallConfigProfile(name=name, settings=settings))
     return tuple(profiles)
+
+
+def default_js8call_ini_paths(
+    *,
+    platform: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> Tuple[Path, ...]:
+    system = normalize_platform(platform)
+    user_home = Path(home) if home is not None else Path.home()
+    if system == "Darwin":
+        return _unique_paths(
+            (
+                user_home / "Library" / "Preferences" / "JS8Call.ini",
+                user_home / "Library" / "Application Support" / "JS8Call" / "JS8Call.ini",
+            )
+        )
+    if system == "Windows":
+        env_paths = []
+        for env_key in ("LOCALAPPDATA", "APPDATA"):
+            raw = str(os.environ.get(env_key, "") or "").strip()
+            if raw:
+                env_paths.append(Path(raw) / "JS8Call" / "JS8Call.ini")
+        env_paths.append(user_home / "AppData" / "Local" / "JS8Call" / "JS8Call.ini")
+        return _unique_paths(env_paths)
+    return _unique_paths(
+        (
+            user_home / ".config" / "JS8Call.ini",
+            user_home / ".config" / "JS8Call" / "JS8Call.ini",
+            user_home / ".local" / "share" / "JS8Call" / "JS8Call.ini",
+            user_home / ".var" / "app" / "org.js8call.JS8Call" / "config" / "JS8Call.ini",
+        )
+    )
+
+
+def discover_js8call_file_profiles(
+    *,
+    ini_path: Optional[Path] = None,
+    platform: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> Tuple[JS8CallFileProfile, ...]:
+    ini_paths = (Path(ini_path),) if ini_path is not None else default_js8call_ini_paths(platform=platform, home=home)
+    discovered = []
+    for candidate_ini in _unique_paths(ini_paths):
+        profiles = read_js8call_multisettings(candidate_ini)
+        if not profiles:
+            continue
+        for profile in profiles:
+            save_dir_text = str(profile.settings.get("SaveDir", "") or "").strip()
+            tcp_server_port = str(profile.settings.get("TCPServerPort", "") or "").strip()
+            if not save_dir_text:
+                discovered.append(
+                    JS8CallFileProfile(
+                        name=profile.name,
+                        ini_path=str(candidate_ini),
+                        save_dir="",
+                        tcp_server_port=tcp_server_port,
+                        directed_path="",
+                        all_path="",
+                        confidence="not_found",
+                        reason="JS8Call profile does not define SaveDir.",
+                    )
+                )
+                continue
+            save_dir = Path(os.path.expandvars(os.path.expanduser(save_dir_text)))
+            directed = save_dir / "DIRECTED.TXT"
+            all_txt = save_dir / "ALL.TXT"
+            has_directed = directed.is_file()
+            has_save_dir = save_dir.is_dir()
+            confidence = "verified" if has_directed else "partial" if has_save_dir else "not_found"
+            reason = (
+                f"Found DIRECTED.TXT from JS8Call profile '{profile.name}' SaveDir."
+                if has_directed
+                else f"JS8Call profile '{profile.name}' SaveDir exists, but DIRECTED.TXT was not found."
+                if has_save_dir
+                else f"JS8Call profile '{profile.name}' SaveDir does not exist."
+            )
+            discovered.append(
+                JS8CallFileProfile(
+                    name=profile.name,
+                    ini_path=str(candidate_ini),
+                    save_dir=str(save_dir),
+                    tcp_server_port=tcp_server_port,
+                    directed_path=str(directed) if has_directed or has_save_dir else "",
+                    all_path=str(all_txt) if all_txt.is_file() else "",
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
+    return tuple(discovered)
+
+
+def select_js8call_file_profile(
+    profiles: Sequence[JS8CallFileProfile],
+    *,
+    tcp_port: str = "",
+    profile_name: str = "",
+) -> Optional[JS8CallFileProfile]:
+    usable = [profile for profile in profiles if profile.directed_path]
+    if not usable:
+        return None
+
+    port_txt = str(tcp_port or "").strip()
+    name_hint = _profile_name_match_key(profile_name)
+    name_matches: List[JS8CallFileProfile] = []
+    if name_hint:
+        name_matches = [
+            profile
+            for profile in usable
+            if _profile_name_match_key(profile.name) == name_hint
+        ]
+        if len(name_matches) == 1:
+            return name_matches[0]
+    if port_txt:
+        port_matches = [profile for profile in usable if str(profile.tcp_server_port or "").strip() == port_txt]
+        if len(port_matches) == 1:
+            return port_matches[0]
+        if name_hint:
+            named_port_matches = [
+                profile
+                for profile in port_matches
+                if _profile_name_match_key(profile.name) == name_hint
+            ]
+            if len(named_port_matches) == 1:
+                return named_port_matches[0]
+        if not port_matches and len(name_matches) == 1:
+            return name_matches[0]
+        return None
+
+    if len(usable) == 1:
+        return usable[0]
+    return None
+
+
+def _profile_name_match_key(value: str) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
 
 
 def build_autoconfig_proposal(
@@ -378,6 +595,11 @@ def build_autoconfig_proposal(
         busy_checker=busy_checker,
     )
     js8_profiles = read_js8call_multisettings(js8_ini_path) if js8_ini_path is not None else ()
+    js8_file_profiles = discover_js8call_file_profiles(
+        ini_path=js8_ini_path,
+        platform=system,
+        home=home,
+    )
     return AutoconfigProposal(
         platform=system,
         candidates=candidates,
@@ -385,6 +607,7 @@ def build_autoconfig_proposal(
         warnings=tuple(warnings),
         missing_apps=missing_apps,
         js8_profiles=js8_profiles,
+        js8_file_profiles=js8_file_profiles,
     )
 
 
