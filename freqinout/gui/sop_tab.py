@@ -4110,6 +4110,37 @@ class _LegacySOPTab(QWidget):
             return False
         return False
 
+    def focus_source_segment(self, segment: Any) -> bool:
+        raw = getattr(segment, "raw", {}) if segment is not None else {}
+        try:
+            profile_id = int(raw.get("sop_profile_id") or getattr(segment, "raw", {}).get("profile_id") or 0)
+        except Exception:
+            profile_id = 0
+        if profile_id > 0 and not self.select_profile(profile_id):
+            return False
+        try:
+            target_layer_id = int(raw.get("sop_layer_id") or raw.get("source_row_id") or raw.get("id") or 0)
+        except Exception:
+            target_layer_id = 0
+        if target_layer_id > 0:
+            for row in range(self.layer_table.rowCount()):
+                day_combo = self.layer_table.cellWidget(row, self.LAYER_COL_DAY)
+                try:
+                    layer_id = int(day_combo.property("layer_id") or 0) if isinstance(day_combo, QWidget) else 0
+                except Exception:
+                    layer_id = 0
+                if layer_id != target_layer_id:
+                    continue
+                self.layer_table.selectRow(row)
+                widget = self.layer_table.cellWidget(row, self.LAYER_COL_START)
+                if isinstance(widget, QLineEdit):
+                    widget.setFocus(Qt.TabFocusReason)
+                    widget.selectAll()
+                else:
+                    self.layer_table.setFocus(Qt.TabFocusReason)
+                return True
+        return False
+
     def apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
@@ -8060,6 +8091,16 @@ class SOPTab(_LegacySOPTab):
             return False
         self._reload_profiles(select_id=target)
         return int(self._selected_profile_id or 0) == target
+
+    def focus_source_segment(self, segment: Any) -> bool:
+        raw = getattr(segment, "raw", {}) if segment is not None else {}
+        try:
+            profile_id = int(raw.get("sop_profile_id") or raw.get("profile_id") or 0)
+        except Exception:
+            profile_id = 0
+        if profile_id > 0:
+            self.select_profile(profile_id)
+        return False
 
     def _import_profile(self) -> None:
         timer = getattr(self, "_realtime_conflict_timer", None)

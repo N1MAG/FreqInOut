@@ -120,13 +120,18 @@ def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     assert "self.frequency_plan_combo = QComboBox()" in planner_source
     assert 'self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")' in planner_source
     assert 'self.save_plan_btn = QPushButton("Save Plan")' in planner_source
+    assert 'self.save_sop_plan_btn = QPushButton("Save SOP Plan")' in planner_source
     assert 'self.assign_plan_btn = QPushButton("Assign Plan")' in planner_source
     assert 'self.make_active_plan_btn = QPushButton("Make Active")' in planner_source
     assert 'self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")' in planner_source
-    assert "Frequency Plan workspace action placeholder" in planner_source
+    assert "self.save_plan_btn.clicked.connect(self._on_save_plan_clicked)" in planner_source
+    assert "self.save_sop_plan_btn.clicked.connect(self._on_save_sop_plan_clicked)" in planner_source
+    assert "self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)" in planner_source
+    assert "Review the blended HF Daily + HF Nets + SOP projection" in planner_source
+    assert "Settings > Radio Profiles > Schedule Assignment" in planner_source
     assert 'self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")' in planner_source
     assert 'self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")' in planner_source
-    assert "Plan editing actions arrive in a later update." in planner_source
+    assert "Save Plan captures the reviewed HF Daily + HF Nets + SOP projection as a named Frequency Plan." in planner_source
     assert "def _refresh_plan_workspace_header(self) -> None:" in planner_source
     assert "self._refresh_plan_workspace_header()" in planner_source
 

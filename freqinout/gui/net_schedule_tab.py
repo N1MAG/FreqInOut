@@ -1331,6 +1331,12 @@ class NetScheduleTab(QWidget):
         sel_layout.addWidget(sel_chk)
         if row_data.get("_resource_id") is not None:
             sel_wrap.setProperty("resource_id", int(row_data.get("_resource_id")))
+        try:
+            sel_wrap.setProperty("source_row_id", int(row_data.get("source_row_id") or row_data.get("_source_row_id") or 0))
+        except Exception:
+            sel_wrap.setProperty("source_row_id", 0)
+        sel_wrap.setProperty("source_key", str(row_data.get("source_key") or row_data.get("_source_key") or "").strip())
+        sel_wrap.setProperty("source_table", str(row_data.get("source_table") or "net_schedule_tab"))
         if row_data.get("_resource_set"):
             sel_wrap.setProperty("resource_set", str(row_data.get("_resource_set")))
         fld_mode = str(row_data.get("fldigi_mode") or "").strip()
@@ -2183,6 +2189,7 @@ class NetScheduleTab(QWidget):
                     cur = conn.execute(
                         """
                         SELECT
+                            id,
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
@@ -2209,6 +2216,7 @@ class NetScheduleTab(QWidget):
                         """
                     )
                     for (
+                        row_id,
                         day_utc,
                         recurrence,
                         biweekly_offset_weeks,
@@ -2253,6 +2261,9 @@ class NetScheduleTab(QWidget):
                                     "group_name": group_name or "",
                                     "fldigi_mode": fldigi_mode or "",
                                     "fldigi_offset": fldigi_offset or "",
+                                    "source_table": "net_schedule_tab",
+                                    "source_row_id": int(row_id or 0),
+                                    "source_key": f"NET:{int(row_id or 0)}" if int(row_id or 0) > 0 else "",
                                     "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
                                     "target_scope": target_scope,
                                     "target_device_profile_id": target_device_profile_id,
@@ -2618,8 +2629,7 @@ class NetScheduleTab(QWidget):
         except Exception:
             pass
 
-        self._saved_rows_signature = self._rows_signature(self._raw_rows)
-        self._set_dirty(False)
+        self._load()
         self._schedule_net_sop_conflict_refresh(force=True)
         QMessageBox.information(self, "Saved", "Net Schedule saved.")
 
@@ -4912,6 +4922,49 @@ class NetScheduleTab(QWidget):
         end = end_item.text().strip() if end_item else ""
         net_name = net_edit.text().strip() if isinstance(net_edit, QLineEdit) else ""
         return not (day or band or freq or start or end or net_name)
+
+    def focus_source_segment(self, segment: Any) -> bool:
+        raw = getattr(segment, "raw", {}) if segment is not None else {}
+        try:
+            target_row_id = int(raw.get("source_row_id") or 0)
+        except Exception:
+            target_row_id = 0
+        target_key = str(raw.get("source_key") or "").strip()
+        target_resource_id = raw.get("resource_id")
+        try:
+            target_resource_id_int = int(target_resource_id or 0)
+        except Exception:
+            target_resource_id_int = 0
+        for r in range(self.table.rowCount()):
+            select_widget = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(select_widget, QWidget):
+                try:
+                    row_id = int(select_widget.property("source_row_id") or 0)
+                except Exception:
+                    row_id = 0
+                row_key = str(select_widget.property("source_key") or "").strip()
+                try:
+                    resource_id = int(select_widget.property("resource_id") or 0)
+                except Exception:
+                    resource_id = 0
+                if (
+                    (target_row_id > 0 and row_id == target_row_id)
+                    or (target_key and row_key == target_key)
+                    or (target_resource_id_int > 0 and resource_id == target_resource_id_int)
+                ):
+                    self.table.selectRow(r)
+                    widget = self.table.cellWidget(r, self.COL_NETNAME)
+                    item = self.table.item(r, self.COL_FREQ)
+                    if item is not None:
+                        self.table.scrollToItem(item)
+                        self.table.setCurrentItem(item)
+                    if isinstance(widget, QLineEdit):
+                        widget.setFocus(Qt.TabFocusReason)
+                        widget.selectAll()
+                    else:
+                        self.table.setFocus(Qt.TabFocusReason)
+                    return True
+        return False
 
     def _collect_rows_by_ui_index(
         self,

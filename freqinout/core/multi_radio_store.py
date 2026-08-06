@@ -44,7 +44,9 @@ SUPPORTED_DEPLOYMENT_MODES = frozenset({"full", "minimal"})
 SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "scheduled", "inactive", "superseded"})
 EFFECTIVE_ASSIGNMENT_STATES = frozenset({"active", "temporary_override"})
 SUPPORTED_SCHEDULER_MODES = frozenset({"full", "simple"})
-SUPPORTED_FREQUENCY_PLAN_CATEGORIES = frozenset({"normal", "event", "portable", "exercise", "emergency", "ad_hoc", "rx_watch"})
+SUPPORTED_FREQUENCY_PLAN_CATEGORIES = frozenset(
+    {"normal", "event", "portable", "exercise", "emergency", "ad_hoc", "rx_watch", "sop_schedule"}
+)
 SUPPORTED_FREQUENCY_PLAN_STATUSES = frozenset({"draft", "saved", "archived"})
 DEFAULT_TIMER_ENFORCEMENT_MODE = "On Schedule Change"
 DEFAULT_TIMER_PROMPT_INTERVAL = "Hourly"
@@ -1274,7 +1276,37 @@ def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
 
 
 def _coerce_ref_list_json_text(value: Any) -> str:
-    return json.dumps(_parse_ref_list(value), sort_keys=True)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            parsed: List[Any] = []
+        else:
+            try:
+                loaded = json.loads(text)
+                parsed = list(loaded) if isinstance(loaded, list) else []
+            except Exception:
+                parsed = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = []
+    out: List[Any] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if item in (None, ""):
+            continue
+        if isinstance(item, Mapping):
+            clean_item = {str(k): v for k, v in item.items() if v not in (None, "")}
+        else:
+            clean_item = _coerce_text(item, "").strip()
+        if clean_item in ({}, ""):
+            continue
+        key = json.dumps(clean_item, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean_item)
+    return json.dumps(out, sort_keys=True, default=str)
 
 
 def _normalize_varac_cluster_id(value: Any, fallback: str = "CLUSTER") -> str:
@@ -1319,6 +1351,10 @@ def _frequency_plan_bands(frequency_plan: Mapping[str, Any]) -> List[str]:
                 bands.extend(_extract_band_tokens_from_text(item))
         else:
             bands.extend(_extract_band_tokens_from_text(value))
+    for freq_hz in _frequency_plan_frequency_hz_values(frequency_plan):
+        inferred = _band_from_frequency_hz(freq_hz)
+        if inferred:
+            bands.append(inferred)
     return list(dict.fromkeys(_normalize_band_token(band) for band in bands if _normalize_band_token(band)))
 
 
@@ -1462,6 +1498,12 @@ def _schedule_window_from_mapping(item: Mapping[str, Any]) -> Optional[Frequency
     for value in band_values:
         bands.extend(_extract_band_tokens_from_text(value))
     band = _normalize_band_token(bands[0]) if bands else ""
+    if not band:
+        for value in (item.get("frequency_hz"), item.get("freq_hz"), item.get("frequency"), item.get("freq")):
+            inferred = _band_from_frequency_hz(_parse_frequency_hz_value(value))
+            if inferred:
+                band = _normalize_band_token(inferred)
+                break
     start = _parse_hhmm_minutes(
         item.get("start_utc", item.get("start_local", item.get("start", item.get("begin", item.get("time", "")))))
     )
@@ -1481,7 +1523,10 @@ def _schedule_window_from_text(value: Any) -> Optional[FrequencyPlanScheduleWind
     if not text:
         return None
     bands = _extract_band_tokens_from_text(text)
-    if not bands:
+    band = _normalize_band_token(bands[0]) if bands else ""
+    if not band:
+        band = _normalize_band_token(_band_from_frequency_hz(_parse_frequency_hz_value(text)))
+    if not band:
         return None
     start_text = _extract_schedule_field(text, "start_utc", "start_local", "start", "begin")
     end_text = _extract_schedule_field(text, "end_utc", "end_local", "end", "stop")
@@ -1503,7 +1548,7 @@ def _schedule_window_from_text(value: Any) -> Optional[FrequencyPlanScheduleWind
         )
         day_text = day_match.group(1) if day_match else "ALL"
     return FrequencyPlanScheduleWindow(
-        band=_normalize_band_token(bands[0]),
+        band=band,
         day=_parse_schedule_day(day_text),
         start_minute=start,
         end_minute=end,
@@ -1633,6 +1678,8 @@ def _schedule_assignment_validation_status_conn(
     conn: sqlite3.Connection,
     device: Mapping[str, Any],
     frequency_plan: Mapping[str, Any],
+    *,
+    emit_events: bool = True,
 ) -> Dict[str, Any]:
     plan_bands = _frequency_plan_bands(frequency_plan)
     supported_bands = _device_supported_bands(device)
@@ -1775,8 +1822,9 @@ def _schedule_assignment_validation_status_conn(
                     )
                     break
 
-    for event in events:
-        _rf_guard_event_conn(conn, **event)
+    if emit_events:
+        for event in events:
+            _rf_guard_event_conn(conn, **event)
 
     if blocked:
         state = "blocked"
@@ -5127,6 +5175,18 @@ class MultiRadioStore:
                 ends_utc=ends_utc,
                 created_by=created_by,
             )
+
+    def validate_frequency_plan_for_device(
+        self,
+        device_profile_id: int,
+        frequency_plan: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        with self._connect() as conn:
+            device = _record_by_id(conn, "device_profiles", int(device_profile_id))
+            if not device:
+                raise KeyError(f"Unknown device profile id: {device_profile_id}")
+            _validate_schedule_assignment_compatibility(device, frequency_plan)
+            return _schedule_assignment_validation_status_conn(conn, device, frequency_plan, emit_events=False)
 
     def list_assignments(self) -> List[Dict[str, Any]]:
         with self._connect() as conn:

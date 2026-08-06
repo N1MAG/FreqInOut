@@ -4249,6 +4249,39 @@ class DailyScheduleTab(QWidget):
             self.table.selectRow(0)
             self.table.setFocus(Qt.TabFocusReason)
 
+    def focus_source_segment(self, segment: Any) -> bool:
+        raw = getattr(segment, "raw", {}) if segment is not None else {}
+        try:
+            target_row_id = int(raw.get("source_row_id") or 0)
+        except Exception:
+            target_row_id = 0
+        target_key = str(raw.get("source_key") or "").strip()
+        for r in range(self.table.rowCount()):
+            if self._is_sop_overlay_row(r):
+                continue
+            select_widget = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(select_widget, QWidget):
+                try:
+                    row_id = int(select_widget.property("source_row_id") or 0)
+                except Exception:
+                    row_id = 0
+                row_key = str(select_widget.property("source_key") or "").strip()
+                if (target_row_id > 0 and row_id == target_row_id) or (target_key and row_key == target_key):
+                    self.table.selectRow(r)
+                    item = self.table.item(r, self.COL_FREQ)
+                    if item is not None:
+                        self.table.scrollToItem(item)
+                        self.table.setCurrentItem(item)
+                        self.table.editItem(item)
+                    self.table.setFocus(Qt.TabFocusReason)
+                    return True
+        self._focus_daily_row(
+            str(getattr(segment, "group_name", "") or ""),
+            str(getattr(segment, "band", "") or ""),
+            str(getattr(segment, "frequency", "") or ""),
+        )
+        return False
+
     def _navigate_to_tab(self, tab_label: str) -> None:
         label_target = str(tab_label or "").strip().upper()
         if not label_target:
@@ -4425,6 +4458,7 @@ class DailyScheduleTab(QWidget):
                     (
                         """
                         SELECT
+                            id,
                             day_utc,
                             band,
                             mode,
@@ -4442,6 +4476,7 @@ class DailyScheduleTab(QWidget):
                         if has_target_cols
                         else """
                         SELECT
+                            id,
                             day_utc,
                             band,
                             mode,
@@ -4458,6 +4493,7 @@ class DailyScheduleTab(QWidget):
                 rows: List[Dict] = []
                 for fetched in cur.fetchall():
                     (
+                        row_id,
                         day_utc,
                         band,
                         mode,
@@ -4485,6 +4521,9 @@ class DailyScheduleTab(QWidget):
                                 "js8_offset": "",
                                 "primary_js8call_group": "",
                                 "comment": "",
+                                "source_table": "daily_schedule_tab",
+                                "source_row_id": int(row_id or 0),
+                                "source_key": f"HF:{int(row_id or 0)}" if int(row_id or 0) > 0 else "",
                                 "target_scope": target_meta[0] if len(target_meta) > 0 else TARGET_SCOPE_STATION,
                                 "target_device_profile_id": target_meta[1] if len(target_meta) > 1 else None,
                                 "target_operating_profile_id": target_meta[2] if len(target_meta) > 2 else None,
@@ -4499,6 +4538,7 @@ class DailyScheduleTab(QWidget):
             cur = conn.execute(
                 """
                 SELECT
+                    id,
                     day_utc,
                     band,
                     mode,
@@ -4517,6 +4557,7 @@ class DailyScheduleTab(QWidget):
             )
             rows: List[Dict] = []
             for (
+                row_id,
                 day_utc,
                 band,
                 mode,
@@ -4547,6 +4588,9 @@ class DailyScheduleTab(QWidget):
                             "group_name": group_name or "",
                             "comment": "",
                             "auto_tune": bool(auto_tune),
+                            "source_table": "daily_schedule_tab",
+                            "source_row_id": int(row_id or 0),
+                            "source_key": f"HF:{int(row_id or 0)}" if int(row_id or 0) > 0 else "",
                         }
                     )
                 )
@@ -5369,12 +5413,7 @@ class DailyScheduleTab(QWidget):
                 "Some SOP rows could not be updated:\n" + "\n".join(sop_failures[:12]),
             )
 
-        if self.table.rowCount() > 1:
-            self._sort_active_schedule_by_time()
-
-        self._raw_schedule = self._collect_current_hf_rows_utc()
-        self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
-        self._set_dirty(False)
+        self._load_schedule()
         log.info("HF Frequency Schedule saved: %d HF rows, %d SOP rows updated", len(hf_rows), sop_changed)
         QMessageBox.information(
             self,
@@ -6110,6 +6149,12 @@ class DailyScheduleTab(QWidget):
             sel_wrap.setProperty("resource_id", int(entry.get("_resource_id") or 0))
         except Exception:
             sel_wrap.setProperty("resource_id", 0)
+        try:
+            sel_wrap.setProperty("source_row_id", int(entry.get("source_row_id") or entry.get("_source_row_id") or 0))
+        except Exception:
+            sel_wrap.setProperty("source_row_id", 0)
+        sel_wrap.setProperty("source_key", str(entry.get("source_key") or entry.get("_source_key") or "").strip())
+        sel_wrap.setProperty("source_table", str(entry.get("source_table") or "daily_schedule_tab"))
         sel_wrap.setProperty("resource_set", str(entry.get("_resource_set") or ""))
         sel_wrap.setProperty("sop_overlay", is_sop_overlay)
         sel_wrap.setProperty("sop_profile_name", overlay_profile)

@@ -4,6 +4,7 @@ import datetime
 import json
 import time
 import sqlite3
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, QTimer
@@ -19,6 +20,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QColorDialog,
     QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QInputDialog,
+    QMessageBox,
+    QLineEdit,
 )
 
 from pathlib import Path
@@ -28,6 +34,18 @@ from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.schedule_projection import (
+    BlendedScheduleProjection,
+    ProjectionCell,
+    ScheduleSegment,
+    build_blended_schedule_projection,
+)
+from freqinout.core.operational_projection import (
+    OperationalCell,
+    OperationalDayProjection,
+    build_operational_day_projection,
+    build_operational_day_projection_from_refs,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.plan_context_label import PLAN_CONTEXT_FALLBACK_TEXT, PlanContextLabel
 from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
@@ -81,6 +99,8 @@ class FreqPlannerTab(QWidget):
         self._show_band = True
         self._band_colors: Dict[str, str] = {}
         self._visible_bands: List[str] = []
+        self._selected_projection_cell: Optional[ProjectionCell] = None
+        self._selected_operational_cell: Optional[OperationalCell] = None
         self._clock_timer: QTimer | None = None
         self._last_snapshot: str = ""
         self._last_rebuild_check_ts: float = 0.0
@@ -130,28 +150,72 @@ class FreqPlannerTab(QWidget):
         plan_workspace.addWidget(self.frequency_plan_combo, 1)
         plan_workspace.addWidget(self.time_toggle_btn)
         self.save_plan_btn = QPushButton("Save Plan")
+        self.save_sop_plan_btn = QPushButton("Save SOP Plan")
         self.assign_plan_btn = QPushButton("Assign Plan")
         self.make_active_plan_btn = QPushButton("Make Active")
         self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")
-        for btn in (
-            self.save_plan_btn,
-            self.assign_plan_btn,
-            self.make_active_plan_btn,
-            self.use_ad_hoc_plan_btn,
-        ):
+        self.save_plan_btn.clicked.connect(self._on_save_plan_clicked)
+        self.save_plan_btn.setToolTip("Review the blended HF Daily + HF Nets + SOP projection and save it as a named Frequency Plan.")
+        plan_workspace.addWidget(self.save_plan_btn)
+        self.save_sop_plan_btn.clicked.connect(self._on_save_sop_plan_clicked)
+        self.save_sop_plan_btn.setToolTip("Review side-by-side SOP, HF Daily, HF Net, and Net Resource lanes and save them as an SOP Schedule Plan.")
+        plan_workspace.addWidget(self.save_sop_plan_btn)
+        self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)
+        self.assign_plan_btn.setEnabled(False)
+        self.assign_plan_btn.setToolTip("Select or save a Frequency Plan, then assign it to radios in Settings > Schedule Assignment.")
+        plan_workspace.addWidget(self.assign_plan_btn)
+        for btn in (self.make_active_plan_btn, self.use_ad_hoc_plan_btn):
             btn.setEnabled(False)
-            btn.setToolTip("Frequency Plan workspace action placeholder; editing and assignment flows arrive in a later Phase 5 slice.")
+            btn.setToolTip("Frequency Plan assignment and activation flows remain in Settings for this slice.")
             plan_workspace.addWidget(btn)
         layout.addLayout(plan_workspace)
+
+        view_workspace = QHBoxLayout()
+        view_workspace.setSpacing(8)
+        view_workspace.addWidget(QLabel("View:"))
+        self.planner_view_combo = QComboBox()
+        self.planner_view_combo.setObjectName("freqPlannerViewCombo")
+        self.planner_view_combo.addItem("Blended Week", "blended")
+        self.planner_view_combo.addItem("SOP Lanes", "operational")
+        self.planner_view_combo.currentIndexChanged.connect(self._on_planner_view_changed)
+        view_workspace.addWidget(self.planner_view_combo)
+        view_workspace.addWidget(QLabel("Day:"))
+        self.operational_day_combo = QComboBox()
+        self.operational_day_combo.setObjectName("freqPlannerOperationalDayCombo")
+        for day in DAY_NAMES:
+            self.operational_day_combo.addItem(day, day)
+        self.operational_day_combo.currentIndexChanged.connect(self._on_planner_view_changed)
+        self.operational_day_combo.setEnabled(False)
+        view_workspace.addWidget(self.operational_day_combo)
+        view_workspace.addStretch()
+        layout.addLayout(view_workspace)
 
         self.frequency_plan_summary_label = QLabel("")
         self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")
         self.frequency_plan_summary_label.setWordWrap(True)
         layout.addWidget(self.frequency_plan_summary_label)
-        self.frequency_plan_action_hint_label = QLabel("Plan editing actions arrive in a later update.")
+        self.frequency_plan_action_hint_label = QLabel("Save Plan captures the reviewed HF Daily + HF Nets + SOP projection as a named Frequency Plan.")
         self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")
         self.frequency_plan_action_hint_label.setWordWrap(True)
         layout.addWidget(self.frequency_plan_action_hint_label)
+        self.cell_inspector_label = QLabel("Select a schedule cell to review the blended HF Daily, HF Nets, and SOP sources.")
+        self.cell_inspector_label.setObjectName("freqPlannerCellInspector")
+        self.cell_inspector_label.setWordWrap(True)
+        layout.addWidget(self.cell_inspector_label)
+        inspector_actions = QHBoxLayout()
+        self.edit_hf_daily_btn = QPushButton("Edit HF Daily")
+        self.edit_hf_net_btn = QPushButton("Edit HF Net")
+        self.open_sop_builder_btn = QPushButton("Open SOP Builder")
+        self.edit_sop_plan_entry_btn = QPushButton("Edit Plan Entry")
+        self.edit_hf_daily_btn.clicked.connect(self._on_edit_hf_daily_clicked)
+        self.edit_hf_net_btn.clicked.connect(self._on_edit_hf_net_clicked)
+        self.open_sop_builder_btn.clicked.connect(self._on_open_sop_builder_clicked)
+        self.edit_sop_plan_entry_btn.clicked.connect(self._on_edit_sop_plan_entry_clicked)
+        for btn in (self.edit_hf_daily_btn, self.edit_hf_net_btn, self.open_sop_builder_btn, self.edit_sop_plan_entry_btn):
+            btn.setEnabled(False)
+            inspector_actions.addWidget(btn)
+        inspector_actions.addStretch()
+        layout.addLayout(inspector_actions)
         self._refresh_plan_workspace_header()
 
         self.band_legend = QWidget()
@@ -167,6 +231,7 @@ class FreqPlannerTab(QWidget):
         self.table = QTableWidget()
         self.table.setRowCount(24)
         self.table.setColumnCount(9)  # UTC, Local, Sun..Sat
+        self.table.cellClicked.connect(self._on_schedule_cell_clicked)
 
         # Set headers with local TZ name in Local column
         tz_name, tz_abbr = self._current_timezone_label()
@@ -197,6 +262,11 @@ class FreqPlannerTab(QWidget):
         self._load_band_colors()
         self._render_band_legend()
 
+    def _on_planner_view_changed(self) -> None:
+        if hasattr(self, "operational_day_combo"):
+            self.operational_day_combo.setEnabled(self._planner_view_mode() == "operational")
+        self.rebuild_table()
+
     # ------------- helpers ------------- #
 
     def _current_timezone(self) -> tuple[str, datetime.tzinfo]:
@@ -219,6 +289,18 @@ class FreqPlannerTab(QWidget):
         if abbr and len(abbr) > 5:
             abbr = self._ui_tz_abbr(tz_name, abbr)
         return tz_name, abbr
+
+    def _planner_view_mode(self) -> str:
+        if not hasattr(self, "planner_view_combo"):
+            return "blended"
+        mode = str(self.planner_view_combo.currentData() or "").strip().lower()
+        return mode if mode in {"blended", "operational"} else "blended"
+
+    def _selected_operational_day(self) -> str:
+        if not hasattr(self, "operational_day_combo"):
+            return DAY_NAMES[0]
+        day = str(self.operational_day_combo.currentData() or self.operational_day_combo.currentText() or "").strip()
+        return day if day in DAY_NAMES else DAY_NAMES[0]
 
     @staticmethod
     def _normalize_condition_levels(value: Any) -> str:
@@ -306,7 +388,7 @@ class FreqPlannerTab(QWidget):
             return
         selected_id = self.frequency_plan_combo.currentData()
         try:
-            plans = list(self.plan_context_service.store.list_operating_profiles())
+            plans = list(self.plan_context_service.store.list_frequency_plans())
         except Exception:
             plans = []
         context = self.plan_context_service.context_for_tab("freqplanner", refresh=True)
@@ -332,6 +414,8 @@ class FreqPlannerTab(QWidget):
                 self.frequency_plan_combo.setCurrentIndex(idx)
         self.frequency_plan_combo.blockSignals(False)
         self._update_frequency_plan_summary()
+        if hasattr(self, "assign_plan_btn"):
+            self.assign_plan_btn.setEnabled(self._selected_frequency_plan_row() is not None)
 
     def _selected_frequency_plan_row(self) -> Optional[Dict[str, Any]]:
         if not hasattr(self, "frequency_plan_combo"):
@@ -340,7 +424,7 @@ class FreqPlannerTab(QWidget):
         if selected_id <= 0:
             return None
         try:
-            return self.plan_context_service.store.get_operating_profile(selected_id)
+            return self.plan_context_service.store.get_frequency_plan(selected_id)
         except Exception:
             return None
 
@@ -351,6 +435,687 @@ class FreqPlannerTab(QWidget):
 
     def _on_frequency_plan_selected(self, *_args: Any) -> None:
         self._update_frequency_plan_summary()
+        if hasattr(self, "assign_plan_btn"):
+            self.assign_plan_btn.setEnabled(self._selected_frequency_plan_row() is not None)
+        if self._planner_view_mode() == "operational":
+            self.rebuild_table()
+
+    def _on_assign_plan_clicked(self) -> None:
+        plan = self._selected_frequency_plan_row()
+        if not plan:
+            self.frequency_plan_action_hint_label.setText("Select or save a Frequency Plan before assigning it to radios.")
+            return
+        self.frequency_plan_action_hint_label.setText(
+            f"Assign '{str(plan.get('name') or 'Frequency Plan')}' from Settings > Radio Profiles > Schedule Assignment. "
+            "RF Safety Guard checks run before the assignment is saved."
+        )
+
+    def _build_blended_projection(self) -> BlendedScheduleProjection:
+        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        week_sunday = self._week_start_sunday_utc(now_utc)
+        return build_blended_schedule_projection(
+            hf_sched,
+            net_sched,
+            sop_sched,
+            policy_rows,
+            week_start_utc=week_sunday,
+        )
+
+    def _build_operational_projection(self) -> OperationalDayProjection:
+        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        net_resources = self._load_net_resources_from_db() or []
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        week_sunday = self._week_start_sunday_utc(now_utc)
+        return build_operational_day_projection(
+            hf_sched,
+            net_sched,
+            sop_sched,
+            net_resources,
+            policy_rows,
+            week_start_utc=week_sunday,
+        )
+
+    def _selected_sop_schedule_plan_row(self) -> Optional[Dict[str, Any]]:
+        plan = self._selected_frequency_plan_row()
+        if not isinstance(plan, dict):
+            return None
+        category = str(plan.get("category") or "").strip().lower()
+        return plan if category == "sop_schedule" else None
+
+    def _schedule_refs_from_plan_row(self, plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        raw = plan.get("schedule_refs_json", plan.get("schedule_refs", "[]"))
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = []
+        else:
+            parsed = raw
+        refs: List[Dict[str, Any]] = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    refs.append(dict(item))
+        return refs
+
+    def _build_selected_sop_plan_projection(self, week_sunday: datetime.date) -> Optional[OperationalDayProjection]:
+        plan = self._selected_sop_schedule_plan_row()
+        if not plan:
+            return None
+        refs = self._schedule_refs_from_plan_row(plan)
+        return build_operational_day_projection_from_refs(refs, week_start_utc=week_sunday)
+
+    @staticmethod
+    def _plan_context_radio_id(context: Any) -> int:
+        raw = getattr(context, "radio_profile_id", "") if context is not None else ""
+        try:
+            return int(str(raw).split("_")[-1])
+        except Exception:
+            return 0
+
+    def _default_save_plan_name(self, projection: BlendedScheduleProjection) -> str:
+        source_bits = []
+        counts = projection.source_counts
+        if counts.get("HF", 0):
+            source_bits.append("HF Daily")
+        if counts.get("NET", 0):
+            source_bits.append("HF Nets")
+        if counts.get("SOP", 0):
+            source_bits.append("SOP")
+        source_text = " + ".join(source_bits) if source_bits else "Schedule"
+        return f"{source_text} Plan {datetime.datetime.now().strftime('%Y-%m-%d')}"
+
+    def _projection_review_text(self, projection: BlendedScheduleProjection) -> str:
+        counts = projection.source_counts
+        effective_count = len(projection.effective_segments)
+        lines = [
+            "Review blended schedule before saving:",
+            f"HF Daily rows considered: {counts.get('HF', 0)}",
+            f"HF Net rows considered: {counts.get('NET', 0)}",
+            f"SOP rows considered: {counts.get('SOP', 0)}",
+            f"Effective windows to save: {effective_count}",
+        ]
+        preview = projection.effective_segments[:8]
+        if preview:
+            lines.append("")
+            lines.append("First saved windows:")
+            for segment in preview:
+                label = segment.net_name or segment.group_name or segment.profile_name or segment.band or segment.source
+                band_freq = f"{segment.band} {segment.frequency}".strip()
+                lines.append(
+                    f"- {segment.day_utc} {segment.start_utc}-{segment.end_utc} "
+                    f"{segment.source} {label} {band_freq}".strip()
+                )
+            if len(projection.effective_segments) > len(preview):
+                lines.append(f"- +{len(projection.effective_segments) - len(preview)} more")
+        return "\n".join(lines)
+
+    def _operational_projection_review_text(self, projection: OperationalDayProjection) -> str:
+        counts = projection.source_counts
+        refs = projection.schedule_refs()
+        lines = [
+            "Review SOP Schedule Plan before saving:",
+            f"Operational lanes: {len(projection.lanes)}",
+            f"HF Daily entries: {counts.get('HF', 0)}",
+            f"HF Net entries: {counts.get('NET', 0)}",
+            f"Net Resource entries: {counts.get('NET_RESOURCE', 0)}",
+            f"SOP entries: {counts.get('SOP', 0)}",
+            f"Saved operational entries: {len(refs)}",
+        ]
+        lanes = projection.lanes[:8]
+        if lanes:
+            lines.append("")
+            lines.append("Lanes:")
+            for lane in lanes:
+                lines.append(f"- {lane.lane_label}: {len(lane.entries)} entr{'y' if len(lane.entries) == 1 else 'ies'}")
+            if len(projection.lanes) > len(lanes):
+                lines.append(f"- +{len(projection.lanes) - len(lanes)} more lane(s)")
+        preview = refs[:8]
+        if preview:
+            lines.append("")
+            lines.append("First saved entries:")
+            for row in preview:
+                label = str(row.get("action_label") or row.get("net_name") or row.get("profile_name") or row.get("group_name") or row.get("source") or "").strip()
+                band_freq = f"{str(row.get('band') or '').strip()} {str(row.get('frequency') or '').strip()}".strip()
+                lines.append(
+                    f"- {row.get('lane_label')} | {row.get('day_utc')} {row.get('start_utc')}-{row.get('end_utc')} "
+                    f"{row.get('source')} {label} {band_freq}".strip()
+                )
+            if len(refs) > len(preview):
+                lines.append(f"- +{len(refs) - len(preview)} more")
+        return "\n".join(lines)
+
+    def _rf_guard_preflight_for_plan(self, plan_payload: Dict[str, Any]) -> Dict[str, Any]:
+        radio_lane_ids = self._radio_lane_ids_for_plan(plan_payload)
+        if radio_lane_ids:
+            validations: List[Dict[str, Any]] = []
+            for radio_id in radio_lane_ids:
+                subset_payload = self._plan_payload_for_radio_lane(plan_payload, radio_id)
+                validation = self.plan_context_service.store.validate_frequency_plan_for_device(radio_id, subset_payload)
+                validations.append(validation)
+            sibling_validation = self._sibling_radio_lane_guard_validation(plan_payload, radio_lane_ids)
+            if sibling_validation:
+                validations.append(sibling_validation)
+            return self._merge_rf_guard_validations(validations)
+        context = self.plan_context_service.context_for_tab("freqplanner", refresh=True)
+        radio_id = self._plan_context_radio_id(context)
+        if radio_id <= 0:
+            return {
+                "state": "off",
+                "rf_guard_validation": "not_enforced",
+                "messages": ["RF Guard preflight skipped because no radio context is selected."],
+            }
+        return self.plan_context_service.store.validate_frequency_plan_for_device(radio_id, plan_payload)
+
+    def _radio_lane_ids_for_plan(self, plan_payload: Dict[str, Any]) -> List[int]:
+        ids: List[int] = []
+        for ref in self._schedule_ref_mappings(plan_payload):
+            lane_key = str(ref.get("lane_key") or "").strip()
+            radio_id = 0
+            if lane_key.startswith("radio:"):
+                try:
+                    radio_id = int(lane_key.split(":", 1)[1] or 0)
+                except Exception:
+                    radio_id = 0
+            if radio_id <= 0:
+                try:
+                    radio_id = int(
+                        ref.get("radio_id")
+                        or ref.get("device_profile_id")
+                        or ref.get("target_device_profile_id")
+                        or 0
+                    )
+                except Exception:
+                    radio_id = 0
+            if radio_id > 0:
+                ids.append(radio_id)
+        return sorted(set(ids))
+
+    def _schedule_ref_mappings(self, plan_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw = plan_payload.get("schedule_refs", plan_payload.get("schedule_refs_json", []))
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = []
+        refs: List[Dict[str, Any]] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    refs.append(dict(item))
+        return refs
+
+    def _plan_payload_for_radio_lane(self, plan_payload: Dict[str, Any], radio_id: int) -> Dict[str, Any]:
+        lane_key = f"radio:{int(radio_id)}"
+        refs = [
+            ref
+            for ref in self._schedule_ref_mappings(plan_payload)
+            if str(ref.get("lane_key") or "").strip() == lane_key
+            or self._coerce_positive_int(
+                ref.get("radio_id") or ref.get("device_profile_id") or ref.get("target_device_profile_id")
+            ) == int(radio_id)
+        ]
+        subset = dict(plan_payload)
+        subset["name"] = f"{str(plan_payload.get('name') or 'SOP Schedule Plan').strip()} / Radio {radio_id}"
+        subset["schedule_refs"] = refs
+        subset["schedule_refs_json"] = json.dumps(refs)
+        subset["frequency_refs"] = self._frequency_refs_for_schedule_refs(refs)
+        subset["frequency_refs_json"] = json.dumps(subset["frequency_refs"])
+        subset["group_refs"] = list(
+            dict.fromkeys(str(ref.get("group_name") or "").strip().upper() for ref in refs if str(ref.get("group_name") or "").strip())
+        )
+        subset["group_refs_json"] = json.dumps(subset["group_refs"])
+        return subset
+
+    def _frequency_refs_for_schedule_refs(self, refs: List[Dict[str, Any]]) -> List[str]:
+        out: List[str] = []
+        for ref in refs:
+            band = str(ref.get("band") or "").strip().upper()
+            freq = str(ref.get("frequency") or ref.get("freq") or "").strip()
+            if band and freq:
+                out.append(f"{band}:{freq}")
+            elif band:
+                out.append(band)
+            elif freq:
+                out.append(freq)
+        return list(dict.fromkeys(out))
+
+    def _coerce_positive_int(self, value: Any) -> int:
+        try:
+            number = int(value or 0)
+        except Exception:
+            number = 0
+        return number if number > 0 else 0
+
+    def _sibling_radio_lane_guard_validation(
+        self,
+        plan_payload: Dict[str, Any],
+        radio_lane_ids: List[int],
+    ) -> Optional[Dict[str, Any]]:
+        if len(radio_lane_ids) < 2:
+            return None
+        store = self.plan_context_service.store
+        devices = {
+            int(radio_id): store.get_device_profile(int(radio_id))
+            for radio_id in radio_lane_ids
+            if int(radio_id) > 0
+        }
+        lane_payloads = {
+            int(radio_id): self._plan_payload_for_radio_lane(plan_payload, int(radio_id))
+            for radio_id in radio_lane_ids
+            if int(radio_id) > 0
+        }
+        warnings: List[str] = []
+        blocked: List[str] = []
+        ids = sorted(lane_payloads)
+        for left_index, left_id in enumerate(ids):
+            left_device = devices.get(left_id) or {}
+            left_payload = lane_payloads[left_id]
+            for right_id in ids[left_index + 1 :]:
+                right_device = devices.get(right_id) or {}
+                right_payload = lane_payloads[right_id]
+                for band in self._sibling_overlap_bands(left_payload, right_payload):
+                    group = self._normalized_group(left_device.get("band_overlap_guard_group"))
+                    if not group or group != self._normalized_group(right_device.get("band_overlap_guard_group")):
+                        continue
+                    mode = self._stricter_guard_mode(
+                        left_device.get("band_overlap_guard_mode"),
+                        right_device.get("band_overlap_guard_mode"),
+                    )
+                    message = (
+                        f"{left_device.get('name') or f'Radio {left_id}'} and "
+                        f"{right_device.get('name') or f'Radio {right_id}'} both have SOP Schedule Plan lanes "
+                        f"on {band} in Prevent Band Overlap group {group}."
+                    )
+                    (blocked if mode == "block" else warnings).append(message)
+                close_frequency_message = self._sibling_close_frequency_message(
+                    left_device,
+                    right_device,
+                    left_payload,
+                    right_payload,
+                    left_id,
+                    right_id,
+                )
+                if close_frequency_message:
+                    mode, message = close_frequency_message
+                    (blocked if mode == "block" else warnings).append(message)
+        if not warnings and not blocked:
+            return None
+        return {
+            "state": "blocked" if blocked else "warning",
+            "rf_guard_validation": "enforced",
+            "messages": warnings + blocked,
+            "warnings": warnings,
+            "blocked": blocked,
+        }
+
+    def _sibling_close_frequency_message(
+        self,
+        left_device: Dict[str, Any],
+        right_device: Dict[str, Any],
+        left_payload: Dict[str, Any],
+        right_payload: Dict[str, Any],
+        left_id: int,
+        right_id: int,
+    ) -> Optional[Tuple[str, str]]:
+        group = self._normalized_group(left_device.get("advanced_frequency_guard_group"))
+        if not group or group != self._normalized_group(right_device.get("advanced_frequency_guard_group")):
+            return None
+        left_window = self._coerce_nonnegative_int(left_device.get("advanced_frequency_guard_window_hz"))
+        right_window = self._coerce_nonnegative_int(right_device.get("advanced_frequency_guard_window_hz"))
+        threshold = max(left_window, right_window)
+        if threshold <= 0 or not self._schedule_refs_overlap(left_payload, right_payload):
+            return None
+        left_freqs = self._frequency_hz_values_for_plan(left_payload)
+        right_freqs = self._frequency_hz_values_for_plan(right_payload)
+        for left_freq in left_freqs:
+            for right_freq in right_freqs:
+                if abs(left_freq - right_freq) <= threshold:
+                    mode = self._stricter_guard_mode(
+                        left_device.get("advanced_frequency_guard_mode"),
+                        right_device.get("advanced_frequency_guard_mode"),
+                    )
+                    return (
+                        mode,
+                        f"{left_device.get('name') or f'Radio {left_id}'} and "
+                        f"{right_device.get('name') or f'Radio {right_id}'} have SOP Schedule Plan lanes "
+                        f"within {threshold} Hz in Advanced Guard group {group} "
+                        f"({left_freq} Hz vs {right_freq} Hz).",
+                    )
+        return None
+
+    def _sibling_overlap_bands(self, left_payload: Dict[str, Any], right_payload: Dict[str, Any]) -> List[str]:
+        bands: List[str] = []
+        for left_ref in self._schedule_ref_mappings(left_payload):
+            for right_ref in self._schedule_ref_mappings(right_payload):
+                left_band = str(left_ref.get("band") or "").strip().upper()
+                right_band = str(right_ref.get("band") or "").strip().upper()
+                if left_band and left_band == right_band and self._schedule_refs_overlap({"schedule_refs": [left_ref]}, {"schedule_refs": [right_ref]}):
+                    bands.append(left_band)
+        return sorted(set(bands))
+
+    def _schedule_refs_overlap(self, left_payload: Dict[str, Any], right_payload: Dict[str, Any]) -> bool:
+        for left_ref in self._schedule_ref_mappings(left_payload):
+            for right_ref in self._schedule_ref_mappings(right_payload):
+                if self._single_schedule_ref_overlap(left_ref, right_ref):
+                    return True
+        return False
+
+    def _single_schedule_ref_overlap(self, left_ref: Dict[str, Any], right_ref: Dict[str, Any]) -> bool:
+        left_start = self._parse_guard_hhmm(left_ref.get("start_utc") or left_ref.get("start"))
+        left_end = self._parse_guard_hhmm(left_ref.get("end_utc") or left_ref.get("end"))
+        right_start = self._parse_guard_hhmm(right_ref.get("start_utc") or right_ref.get("start"))
+        right_end = self._parse_guard_hhmm(right_ref.get("end_utc") or right_ref.get("end"))
+        if None in (left_start, left_end, right_start, right_end):
+            return True
+        left_segments = self._weekly_ref_segments(
+            self._schedule_day_token(left_ref.get("day_utc") or left_ref.get("day")),
+            int(left_start),
+            int(left_end),
+        )
+        right_segments = self._weekly_ref_segments(
+            self._schedule_day_token(right_ref.get("day_utc") or right_ref.get("day")),
+            int(right_start),
+            int(right_end),
+        )
+        for left_segment in left_segments:
+            for right_segment in right_segments:
+                if left_segment[0] == right_segment[0] and left_segment[1] < right_segment[2] and right_segment[1] < left_segment[2]:
+                    return True
+        return False
+
+    def _weekly_ref_segments(self, day_token: str, start_minute: int, end_minute: int) -> List[Tuple[int, int, int]]:
+        day_indices = range(7) if day_token == "ALL" else [self._day_index(day_token)]
+        segments: List[Tuple[int, int, int]] = []
+        for day_index in day_indices:
+            if day_index < 0:
+                continue
+            if end_minute <= start_minute:
+                segments.append((day_index, start_minute, 24 * 60))
+                segments.append(((day_index + 1) % 7, 0, end_minute))
+            else:
+                segments.append((day_index, start_minute, end_minute))
+        return segments
+
+    def _day_index(self, day_token: str) -> int:
+        normalized = str(day_token or "").strip().upper()
+        for idx, day in enumerate(DAY_NAMES):
+            if normalized == day.upper():
+                return idx
+        return -1
+
+    def _frequency_hz_values_for_plan(self, plan_payload: Dict[str, Any]) -> List[int]:
+        values: List[int] = []
+        for ref in self._schedule_ref_mappings(plan_payload):
+            for key in ("frequency_hz", "freq_hz", "frequency", "freq"):
+                parsed = self._parse_frequency_hz(ref.get(key))
+                if parsed:
+                    values.append(parsed)
+        return list(dict.fromkeys(values))
+
+    def _parse_frequency_hz(self, value: Any) -> Optional[int]:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if number <= 0:
+                return None
+            if number < 1000:
+                return int(round(number * 1_000_000))
+            if number < 1_000_000:
+                return int(round(number * 1000))
+            return int(round(number))
+        text = str(value or "").strip().upper().replace(" ", "")
+        if not text:
+            return None
+        match = re.search(r"(\d{1,3}\.\d+|\d+(?:\.\d+)?)(MHZ|KHZ|HZ)?", text)
+        if not match:
+            return None
+        try:
+            number = float(match.group(1))
+        except Exception:
+            return None
+        suffix = match.group(2) or ""
+        if suffix == "HZ":
+            return int(round(number))
+        if suffix == "KHZ":
+            return int(round(number * 1000))
+        if suffix == "MHZ" or number < 1000:
+            return int(round(number * 1_000_000))
+        return None
+
+    def _parse_guard_hhmm(self, value: Any) -> Optional[int]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            hour_text, minute_text = text.split(":", 1)
+            hour = int(hour_text)
+            minute = int(minute_text)
+        except Exception:
+            return None
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+        return None
+
+    def _schedule_day_token(self, value: Any) -> str:
+        text = re.sub(r"[^A-Z]", "", str(value or "ALL").strip().upper())
+        if not text or text in {"ALL", "DAILY", "EVERYDAY"}:
+            return "ALL"
+        for day in DAY_NAMES:
+            if text.startswith(day[:3].upper()):
+                return day.upper()
+        return text
+
+    def _normalized_group(self, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        return re.sub(r"\s+", " ", text)
+
+    def _guard_mode(self, value: Any) -> str:
+        text = str(value or "warn").strip().lower().replace("_", "-").replace(" ", "-")
+        aliases = {"warn-only": "warn", "warning": "warn", "blocked": "block", "confirmation": "confirm"}
+        text = aliases.get(text, text)
+        return text if text in {"warn", "confirm", "block"} else "warn"
+
+    def _stricter_guard_mode(self, left: Any, right: Any) -> str:
+        order = {"warn": 0, "confirm": 1, "block": 2}
+        left_mode = self._guard_mode(left)
+        right_mode = self._guard_mode(right)
+        return left_mode if order[left_mode] >= order[right_mode] else right_mode
+
+    def _coerce_nonnegative_int(self, value: Any) -> int:
+        try:
+            parsed = int(float(str(value).strip()))
+        except Exception:
+            parsed = 0
+        return max(0, parsed)
+
+    def _merge_rf_guard_validations(self, validations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not validations:
+            return {"state": "ok", "rf_guard_validation": "enforced", "messages": ["RF guard validation completed."]}
+        messages: List[str] = []
+        warnings: List[str] = []
+        blocked: List[str] = []
+        for validation in validations:
+            radio_id = int(validation.get("device_profile_id") or 0)
+            prefix = f"Radio {radio_id}: " if radio_id > 0 else ""
+            for item in validation.get("warnings", []) or []:
+                warnings.append(prefix + str(item))
+            for item in validation.get("blocked", []) or []:
+                blocked.append(prefix + str(item))
+            for item in validation.get("messages", []) or []:
+                text = str(item or "").strip()
+                if text and text not in warnings and text not in blocked:
+                    messages.append(prefix + text)
+        state = "blocked" if blocked else "warning" if warnings else "ok"
+        return {
+            "state": state,
+            "rf_guard_validation": "enforced",
+            "messages": messages + warnings + blocked,
+            "warnings": warnings,
+            "blocked": blocked,
+            "radio_lane_ids": [int(v.get("device_profile_id") or 0) for v in validations if int(v.get("device_profile_id") or 0) > 0],
+        }
+
+    def _save_plan_payload_with_guard(
+        self,
+        plan_payload: Dict[str, Any],
+        *,
+        schedule_count: int,
+        success_kind: str = "Frequency Plan",
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            validation = self._rf_guard_preflight_for_plan(plan_payload)
+        except ValueError as exc:
+            self.frequency_plan_action_hint_label.setText(f"RF Guard blocked this plan before save: {exc}")
+            return None
+        except Exception as exc:
+            log.exception("FreqPlanner: RF Guard preflight failed.")
+            validation = {
+                "state": "warning",
+                "messages": [f"RF Guard preflight could not complete: {exc}"],
+            }
+        state = str(validation.get("state") or "").strip().lower()
+        messages = [str(item) for item in validation.get("messages", []) if str(item or "").strip()]
+        if state == "blocked":
+            self.frequency_plan_action_hint_label.setText(
+                "RF Guard blocked this Frequency Plan before save. " + (messages[0] if messages else "")
+            )
+            return None
+        if state == "warning":
+            response = QMessageBox.question(
+                self,
+                "RF Guard Warning",
+                "RF Guard found warnings for the selected radio context.\n\n"
+                + "\n".join(messages[:5])
+                + "\n\nSave the Frequency Plan anyway?",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response != QMessageBox.Save:
+                return None
+        if state in {"off", "not_enforced"} or str(validation.get("rf_guard_validation") or "").strip().lower() == "not_enforced":
+            response = QMessageBox.question(
+                self,
+                "RF Guard Preflight Skipped",
+                "No radio context is selected, so FreqPlanner could not run assignment-specific RF Safety Guard checks.\n\n"
+                "Save this Frequency Plan anyway? RF Safety Guard will run when the plan is assigned to a radio.",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response != QMessageBox.Save:
+                return None
+        try:
+            saved = self.plan_context_service.store.save_frequency_plan(plan_payload)
+        except Exception as exc:
+            log.exception("FreqPlanner: failed saving Frequency Plan.")
+            self.frequency_plan_action_hint_label.setText(f"Unable to save Frequency Plan: {exc}")
+            return None
+        self.plan_context_service.invalidate()
+        self._refresh_plan_workspace_header()
+        saved_id = int(saved.get("id", 0) or 0)
+        if saved_id:
+            idx = self.frequency_plan_combo.findData(saved_id)
+            if idx >= 0:
+                self.frequency_plan_combo.setCurrentIndex(idx)
+        if state in {"", "ok"}:
+            guard_text = "RF Guard preflight passed."
+        elif state in {"off", "not_enforced"} or str(validation.get("rf_guard_validation") or "").strip().lower() == "not_enforced":
+            guard_text = "RF Guard preflight skipped; assignment checks still required."
+        else:
+            guard_text = "RF Guard warning accepted."
+        self.frequency_plan_action_hint_label.setText(
+            f"Saved {success_kind} '{str(saved.get('name') or plan_payload.get('name') or 'Plan')}' "
+            f"with {schedule_count} effective window(s). {guard_text}"
+        )
+        return saved
+
+    def _on_save_plan_clicked(self) -> None:
+        try:
+            projection = self._build_blended_projection()
+        except Exception as exc:
+            log.exception("FreqPlanner: failed building blended projection.")
+            self.frequency_plan_action_hint_label.setText(f"Unable to build the blended schedule projection: {exc}")
+            return
+        if not projection.effective_segments:
+            self.frequency_plan_action_hint_label.setText(
+                "No effective HF Daily, HF Nets, or SOP windows are available to save."
+            )
+            return
+        default_name = self._default_save_plan_name(projection)
+        name, ok = QInputDialog.getText(self, "Save Frequency Plan", "Plan name:", text=default_name)
+        if not ok:
+            return
+        name = str(name or "").strip()
+        if not name:
+            self.frequency_plan_action_hint_label.setText("Enter a clear Frequency Plan name before saving.")
+            return
+        review_text = self._projection_review_text(projection)
+        response = QMessageBox.question(
+            self,
+            "Review Blended Schedule",
+            review_text,
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if response != QMessageBox.Save:
+            return
+        schedule_refs = projection.schedule_refs()
+        plan_payload: Dict[str, Any] = {
+            "name": name,
+            "status": "saved",
+            "category": "normal",
+            "description": "Saved from FreqPlanner blended HF Daily + HF Nets + SOP projection.",
+            "source_refs": projection.source_refs(),
+            "schedule_refs": schedule_refs,
+            "frequency_refs": projection.frequency_refs(),
+            "group_refs": projection.group_refs(),
+            "notes": f"FreqPlanner blended projection saved {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
+        }
+        self._save_plan_payload_with_guard(
+            plan_payload,
+            schedule_count=len(schedule_refs),
+            success_kind="Frequency Plan",
+        )
+
+    def _on_save_sop_plan_clicked(self) -> None:
+        try:
+            projection = self._build_operational_projection()
+        except Exception as exc:
+            log.exception("FreqPlanner: failed building SOP Schedule Plan projection.")
+            self.frequency_plan_action_hint_label.setText(f"Unable to build the SOP Schedule Plan projection: {exc}")
+            return
+        refs = projection.schedule_refs()
+        if not refs:
+            self.frequency_plan_action_hint_label.setText(
+                "No HF Daily, HF Nets, Net Resources, or SOP entries are available to save as an SOP Schedule Plan."
+            )
+            return
+        default_name = f"SOP Schedule Plan {datetime.datetime.now().strftime('%Y-%m-%d')}"
+        name, ok = QInputDialog.getText(self, "Save SOP Schedule Plan", "Plan name:", text=default_name)
+        if not ok:
+            return
+        name = str(name or "").strip()
+        if not name:
+            self.frequency_plan_action_hint_label.setText("Enter a clear SOP Schedule Plan name before saving.")
+            return
+        response = QMessageBox.question(
+            self,
+            "Review SOP Schedule Plan",
+            self._operational_projection_review_text(projection),
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if response != QMessageBox.Save:
+            return
+        plan_payload = projection.to_frequency_plan_payload(
+            name,
+            description="Saved from FreqPlanner operational SOP Schedule Plan projection.",
+        )
+        self._save_plan_payload_with_guard(
+            plan_payload,
+            schedule_count=len(refs),
+            success_kind="SOP Schedule Plan",
+        )
 
     @classmethod
     def _condition_level_match(cls, condition_levels: str, group_level: Optional[int]) -> bool:
@@ -597,16 +1362,19 @@ class FreqPlannerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT day_utc, band, mode, vfo, frequency, start_utc, end_utc, group_name, auto_tune
+                SELECT id, day_utc, band, mode, vfo, frequency, start_utc, end_utc, group_name, auto_tune
                 FROM daily_schedule_tab
                 """
             )
             rows = cur.fetchall()
             conn.close()
             out = []
-            for day_utc, band, mode, vfo, freq, start_utc, end_utc, group_name, auto_tune in rows:
+            for row_id, day_utc, band, mode, vfo, freq, start_utc, end_utc, group_name, auto_tune in rows:
                 out.append(
                     {
+                        "id": int(row_id or 0),
+                        "source_row_id": int(row_id or 0),
+                        "source_table": "daily_schedule_tab",
                         "day_utc": day_utc or "ALL",
                         "band": band or "",
                         "mode": mode or "",
@@ -636,20 +1404,75 @@ class FreqPlannerTab(QWidget):
             try:
                 cur.execute(
                     """
+                    SELECT id, day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency,
+                           start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name, group_name,
+                           resource_id, target_scope, target_device_profile_id, target_operating_profile_id
+                    FROM net_schedule_tab
+                    """
+                )
+                rows = [("net_schedule_tab", *row) for row in cur.fetchall()]
+            except Exception:
+                rows = []
+            # Fallback for older table shape created before row ids/resource targeting were loaded by FreqPlanner.
+            if not rows:
+                try:
+                    cur.execute(
+                        """
                     SELECT day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency,
                            start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name, group_name
                     FROM net_schedule_tab
                     """
-                )
-                rows = cur.fetchall()
-            except Exception:
-                rows = []
+                    )
+                    rows = [
+                        (
+                            "net_schedule_tab",
+                            None,
+                            day_utc,
+                            recurrence,
+                            biweekly_offset_weeks,
+                            month_weeks,
+                            band,
+                            mode,
+                            vfo,
+                            freq,
+                            start_utc,
+                            end_utc,
+                            early_checkin,
+                            primary_js8call_group,
+                            comment,
+                            net_name,
+                            group_name,
+                            None,
+                            "station",
+                            None,
+                            None,
+                        )
+                        for (
+                            day_utc,
+                            recurrence,
+                            biweekly_offset_weeks,
+                            month_weeks,
+                            band,
+                            mode,
+                            vfo,
+                            freq,
+                            start_utc,
+                            end_utc,
+                            early_checkin,
+                            primary_js8call_group,
+                            comment,
+                            net_name,
+                            group_name,
+                        ) in cur.fetchall()
+                    ]
+                except Exception:
+                    rows = []
             # Fallback to legacy table if the richer table is empty/missing
             if not rows:
                 try:
                     cur.execute(
                         """
-                        SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, frequency,
+                        SELECT id, day_utc, recurrence, biweekly_offset_weeks, band, mode, frequency,
                                start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
                         FROM net_schedule
                         """
@@ -658,6 +1481,8 @@ class FreqPlannerTab(QWidget):
                     # Pad legacy rows to align with expected tuple positions (insert vfo=None, group_name='')
                     rows = [
                         (
+                            "net_schedule",
+                            row_id,
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
@@ -673,8 +1498,13 @@ class FreqPlannerTab(QWidget):
                              comment,
                              net_name,
                              "",
+                             None,
+                             "station",
+                             None,
+                             None,
                          )
                          for (
+                             row_id,
                              day_utc,
                              recurrence,
                             biweekly_offset_weeks,
@@ -694,6 +1524,8 @@ class FreqPlannerTab(QWidget):
             conn.close()
             out = []
             for (
+                source_table,
+                row_id,
                 day_utc,
                 recurrence,
                 biweekly_offset_weeks,
@@ -709,9 +1541,17 @@ class FreqPlannerTab(QWidget):
                 comment,
                 net_name,
                 group_name,
+                resource_id,
+                target_scope,
+                target_device_profile_id,
+                target_operating_profile_id,
             ) in rows:
                 out.append(
                     {
+                        "id": int(row_id or 0),
+                        "source_row_id": int(row_id or 0),
+                        "source_table": str(source_table or "net_schedule_tab"),
+                        "resource_id": int(resource_id) if resource_id not in (None, "") else None,
                         "day_utc": day_utc or "ALL",
                         "recurrence": recurrence or "Weekly",
                         "biweekly_offset_weeks": biweekly_offset_weeks or 0,
@@ -727,11 +1567,83 @@ class FreqPlannerTab(QWidget):
                         "comment": comment or "",
                         "net_name": net_name or "",
                         "group_name": group_name or primary_js8call_group or "",
+                        "target_scope": target_scope or "station",
+                        "target_device_profile_id": target_device_profile_id,
+                        "target_operating_profile_id": target_operating_profile_id,
                     }
                 )
             return out
         except Exception:
             return None
+
+    def _load_net_resources_from_db(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Load known net resources from config/freqinout_nets.db.
+        These may be included in SOP Schedule Plans even when they are not folded into HF Nets.
+        """
+        conn: sqlite3.Connection | None = None
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            exists = cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='net_resources'"
+            ).fetchone()
+            if not exists:
+                return []
+            cur.execute(
+                """
+                SELECT
+                    id, resource_set, source_type, source_ref, readonly, day_utc, recurrence,
+                    biweekly_offset_weeks, month_weeks, group_name, band, mode, frequency,
+                    start_utc, end_utc, early_checkin, primary_js8call_group, coverage, comment, net_name,
+                    fldigi_mode, fldigi_offset, updated_utc
+                  FROM net_resources
+                """
+            )
+            out: List[Dict[str, Any]] = []
+            for row in cur.fetchall():
+                out.append(
+                    {
+                        "id": int(row[0] or 0),
+                        "resource_id": int(row[0] or 0),
+                        "source_table": "net_resources",
+                        "source_key": f"NET_RESOURCE:{int(row[0] or 0)}" if int(row[0] or 0) > 0 else "",
+                        "resource_set": row[1] or "Custom",
+                        "source_type": row[2] or "manual",
+                        "source_ref": row[3] or "",
+                        "readonly": int(row[4] or 0),
+                        "day_utc": row[5] or "ALL",
+                        "recurrence": row[6] or "Weekly",
+                        "biweekly_offset_weeks": int(row[7] or 0),
+                        "month_weeks": row[8] or "",
+                        "group_name": row[9] or row[16] or "",
+                        "band": row[10] or "",
+                        "mode": row[11] or "",
+                        "frequency": str(row[12] or ""),
+                        "start_utc": row[13] or "",
+                        "end_utc": row[14] or "",
+                        "early_checkin": str(row[15] if row[15] is not None else 0),
+                        "primary_js8call_group": row[16] or "",
+                        "coverage": row[17] or "",
+                        "comment": row[18] or "",
+                        "net_name": row[19] or "",
+                        "fldigi_mode": row[20] or "",
+                        "fldigi_offset": row[21] or "",
+                        "updated_utc": row[22] or "",
+                    }
+                )
+            return out
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _load_sop_layer_from_db(self) -> Optional[List[Dict[str, Any]]]:
         """
@@ -831,6 +1743,8 @@ class FreqPlannerTab(QWidget):
                 out.append(
                     {
                         "id": int(layer_id or 0),
+                        "source_row_id": int(layer_id or 0),
+                        "source_table": "sop_schedule_layer",
                         "sop_layer_id": int(layer_id or 0),
                         "sop_profile_id": int(profile_id or 0),
                         "day_utc": day_utc or "ALL",
@@ -1004,6 +1918,766 @@ class FreqPlannerTab(QWidget):
         start_date = (now_local - datetime.timedelta(days=days_to_sunday)).date()
         return datetime.datetime.combine(start_date, datetime.time(0, 0)).replace(tzinfo=tz)
 
+    def _projection_cells_by_utc_key(self, projection: BlendedScheduleProjection) -> Dict[Tuple[str, int], ProjectionCell]:
+        return {(cell.day_utc, int(cell.hour_utc)): cell for cell in projection.cells}
+
+    def _projection_cell_text(self, cell: Optional[ProjectionCell]) -> str:
+        if cell is None or not cell.effective_source:
+            return ""
+        if cell.effective_source == "HF" and not self._show_band:
+            return cell.frequency or cell.band or cell.display_label
+        return cell.display_label or cell.band or cell.frequency
+
+    def _projection_cell_tooltip(self, cell: Optional[ProjectionCell]) -> str:
+        if cell is None:
+            return ""
+        lines = [
+            f"{cell.day_utc} {cell.start_utc.strftime('%H:%M')}-{cell.end_utc.strftime('%H:%M')} UTC",
+            f"Effective source: {cell.effective_source or 'None'}",
+        ]
+        if cell.band or cell.frequency:
+            lines.append(f"Band/Frequency: {cell.band or '--'} {cell.frequency or ''}".strip())
+        lines.append(
+            f"Sources: HF {len(cell.hf_segments)}, Net {len(cell.net_segments)}, SOP {len(cell.sop_segments)}"
+        )
+        return "\n".join(lines)
+
+    def _operational_cell_text(self, cell: Optional[OperationalCell]) -> str:
+        if cell is None or not cell.entries:
+            return ""
+        label = cell.display_label
+        return f"! {label}" if cell.has_contention and label else label
+
+    def _operational_cell_tooltip(self, cell: Optional[OperationalCell]) -> str:
+        if cell is None:
+            return ""
+        lines = [
+            f"{cell.day_utc} {cell.start_utc.strftime('%H:%M')}-{cell.end_utc.strftime('%H:%M')} UTC",
+            f"Entries: {len(cell.entries)}",
+        ]
+        for entry in cell.entries[:5]:
+            band_freq = f"{entry.band} {entry.frequency}".strip()
+            label = entry.action_label or entry.net_name or entry.group_name or entry.profile_name or entry.source
+            lines.append(f"- {entry.source} {entry.start_utc}-{entry.end_utc} {label} {band_freq}".strip())
+        if len(cell.entries) > 5:
+            lines.append(f"- +{len(cell.entries) - 5} more")
+        return "\n".join(lines)
+
+    def _set_operational_inspector(self, cell: Optional[OperationalCell]) -> None:
+        self._selected_projection_cell = None
+        self._selected_operational_cell = cell
+        self._update_inspector_action_buttons(None)
+        if hasattr(self, "edit_sop_plan_entry_btn"):
+            can_edit = bool(cell is not None and cell.entries and self._selected_sop_schedule_plan_row())
+            self.edit_sop_plan_entry_btn.setEnabled(can_edit)
+            self.edit_sop_plan_entry_btn.setToolTip(
+                "Edit the selected saved SOP Schedule Plan entry only."
+                if can_edit
+                else "Select a saved SOP Schedule Plan entry in SOP Lanes view to edit it locally."
+            )
+        if not hasattr(self, "cell_inspector_label"):
+            return
+        if cell is None:
+            self.cell_inspector_label.setText("Select an SOP lane cell to review where to be, when to be there, and what to do.")
+            return
+        lines = [
+            f"{cell.day_utc} {cell.start_utc.strftime('%H:%M')}-{cell.end_utc.strftime('%H:%M')} UTC",
+            f"Lane: {cell.lane_key}",
+            "Contention: yes" if cell.has_contention else "Contention: no",
+        ]
+        if not cell.entries:
+            lines.append("No scheduled operational entry.")
+        for entry in cell.entries[:6]:
+            band_freq = f"{entry.band} {entry.frequency}".strip()
+            label = entry.action_label or entry.net_name or entry.group_name or entry.profile_name or entry.source
+            lines.append(
+                f"{entry.source}: {entry.start_utc}-{entry.end_utc} {label} {band_freq}".strip()
+            )
+        if len(cell.entries) > 6:
+            lines.append(f"+{len(cell.entries) - 6} more")
+        self.cell_inspector_label.setText("\n".join(lines))
+
+    def _choose_operational_entry_for_edit(self) -> Optional[Any]:
+        cell = self._selected_operational_cell
+        if cell is None or not cell.entries:
+            return None
+        if len(cell.entries) == 1:
+            return cell.entries[0]
+        labels = []
+        for idx, entry in enumerate(cell.entries):
+            labels.append(
+                f"{idx + 1}. {entry.source} {entry.start_utc}-{entry.end_utc} "
+                f"{entry.action_label or entry.net_name or entry.group_name or entry.profile_name or entry.source}"
+            )
+        selected, ok = QInputDialog.getItem(
+            self,
+            "Choose SOP Plan Entry",
+            "Multiple entries are active in this cell. Choose the plan-local entry to edit:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        try:
+            return cell.entries[labels.index(str(selected))]
+        except ValueError:
+            return None
+
+    def _edit_plan_entry_dialog(self, entry: Any) -> Optional[Dict[str, Any]]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit SOP Schedule Plan Entry")
+        layout = QVBoxLayout(dialog)
+        note = QLabel("These changes update the selected SOP Schedule Plan. Resource-backed entries can optionally update the master Net Resource after the plan save passes RF Guard.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        day_combo = QComboBox()
+        for day in DAY_NAMES:
+            day_combo.addItem(day, day)
+        day_idx = day_combo.findData(str(entry.day_utc or ""))
+        if day_idx >= 0:
+            day_combo.setCurrentIndex(day_idx)
+        start_edit = QLineEdit(str(entry.start_utc or ""))
+        end_edit = QLineEdit(str(entry.end_utc or ""))
+        band_edit = QLineEdit(str(entry.band or ""))
+        frequency_edit = QLineEdit(str(entry.frequency or ""))
+        mode_edit = QLineEdit(str(entry.mode or ""))
+        group_edit = QLineEdit(str(entry.group_name or ""))
+        net_edit = QLineEdit(str(entry.net_name or ""))
+        action_edit = QLineEdit(str(entry.action_label or ""))
+        lane_label_edit = QLineEdit(str(entry.lane_label or ""))
+        for label, widget in (
+            ("Day", day_combo),
+            ("Start UTC", start_edit),
+            ("End UTC", end_edit),
+            ("Band", band_edit),
+            ("Frequency", frequency_edit),
+            ("Mode", mode_edit),
+            ("Group", group_edit),
+            ("Net name", net_edit),
+            ("Action", action_edit),
+            ("Lane label", lane_label_edit),
+        ):
+            form.addRow(label, widget)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        updates = {
+            "day_utc": str(day_combo.currentData() or day_combo.currentText() or "").strip(),
+            "start_utc": start_edit.text().strip(),
+            "end_utc": end_edit.text().strip(),
+            "band": band_edit.text().strip().upper(),
+            "frequency": frequency_edit.text().strip(),
+            "mode": mode_edit.text().strip(),
+            "group_name": group_edit.text().strip().upper(),
+            "net_name": net_edit.text().strip(),
+            "action_label": action_edit.text().strip(),
+            "lane_label": lane_label_edit.text().strip(),
+        }
+        if self._parse_guard_hhmm(updates["start_utc"]) is None or self._parse_guard_hhmm(updates["end_utc"]) is None:
+            self.frequency_plan_action_hint_label.setText("Enter valid UTC times as HH:MM before saving the plan-local edit.")
+            return None
+        if not updates["band"] and not updates["frequency"]:
+            self.frequency_plan_action_hint_label.setText("Enter at least a band or frequency before saving the plan-local edit.")
+            return None
+        return updates
+
+    def _updated_sop_plan_payload_for_entry(self, plan: Dict[str, Any], entry: Any, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        refs = self._schedule_refs_from_plan_row(plan)
+        try:
+            index = int((entry.raw or {}).get("plan_ref_index"))
+        except Exception:
+            index = -1
+        if index < 0 or index >= len(refs):
+            return None
+        updated_ref = dict(refs[index])
+        updated_ref.update(updates)
+        updated_ref.setdefault("source", entry.source)
+        if entry.radio_id and not updated_ref.get("radio_id"):
+            updated_ref["radio_id"] = entry.radio_id
+        self._normalize_plan_local_lane_identity(updated_ref)
+        refs[index] = updated_ref
+        projection = build_operational_day_projection_from_refs(refs)
+        payload = dict(plan)
+        payload.update(
+            {
+                "id": int(plan.get("id") or 0),
+                "name": str(plan.get("name") or "SOP Schedule Plan"),
+                "category": "sop_schedule",
+                "source_refs": projection.source_refs(),
+                "schedule_refs": refs,
+                "frequency_refs": projection.frequency_refs(),
+                "group_refs": projection.group_refs(),
+                "notes": str(plan.get("notes") or ""),
+            }
+        )
+        return payload
+
+    def _resource_id_for_operational_entry(self, entry: Any) -> int:
+        raw = getattr(entry, "raw", {}) or {}
+        return self._coerce_positive_int(raw.get("resource_id") or raw.get("_resource_id"))
+
+    def _resource_update_payload_from_plan_ref(self, ref: Mapping[str, Any], updates: Mapping[str, Any]) -> Dict[str, Any]:
+        row = dict(ref)
+        row.update(dict(updates))
+        group = str(row.get("group_name") or "").strip().upper()
+        return {
+            "day_utc": str(row.get("day_utc") or "ALL").strip() or "ALL",
+            "recurrence": str(row.get("recurrence") or "Weekly").strip() or "Weekly",
+            "biweekly_offset_weeks": self._coerce_positive_int(row.get("biweekly_offset_weeks")),
+            "month_weeks": str(row.get("month_weeks") or "").strip(),
+            "group_name": group,
+            "band": str(row.get("band") or "").strip().upper(),
+            "mode": str(row.get("mode") or "").strip(),
+            "frequency": str(row.get("frequency") or row.get("freq") or "").strip(),
+            "start_utc": str(row.get("start_utc") or "").strip(),
+            "end_utc": str(row.get("end_utc") or "").strip(),
+            "early_checkin": self._coerce_positive_int(row.get("early_checkin")),
+            "primary_js8call_group": str(row.get("primary_js8call_group") or group).strip().upper(),
+            "comment": str(row.get("comment") or "").strip(),
+            "net_name": str(row.get("net_name") or "").strip(),
+            "fldigi_mode": str(row.get("fldigi_mode") or "").strip(),
+            "fldigi_offset": str(row.get("fldigi_offset") or "").strip(),
+        }
+
+    def _update_master_net_resource_from_plan_ref(
+        self,
+        resource_id: int,
+        ref: Mapping[str, Any],
+        updates: Mapping[str, Any],
+    ) -> bool:
+        rid = int(resource_id or 0)
+        if rid <= 0:
+            return False
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        if not db_path.exists():
+            raise FileNotFoundError(f"Net Resources database not found: {db_path}")
+        payload = self._resource_update_payload_from_plan_ref(ref, updates)
+        with sqlite3.connect(db_path) as conn:
+            exists = conn.execute(
+                "SELECT id FROM net_resources WHERE id=?",
+                (rid,),
+            ).fetchone()
+            if not exists:
+                raise KeyError(f"Unknown Net Resource id: {rid}")
+            conn.execute(
+                """
+                UPDATE net_resources
+                   SET source_type='manual',
+                       source_ref='updated_from_sop_schedule_plan',
+                       day_utc=?,
+                       recurrence=?,
+                       biweekly_offset_weeks=?,
+                       month_weeks=?,
+                       group_name=?,
+                       band=?,
+                       mode=?,
+                       frequency=?,
+                       start_utc=?,
+                       end_utc=?,
+                       early_checkin=?,
+                       primary_js8call_group=?,
+                       comment=?,
+                       net_name=?,
+                       fldigi_mode=?,
+                       fldigi_offset=?,
+                       updated_utc=?
+                 WHERE id=?
+                """,
+                (
+                    payload["day_utc"],
+                    payload["recurrence"],
+                    int(payload["biweekly_offset_weeks"]),
+                    payload["month_weeks"],
+                    payload["group_name"],
+                    payload["band"],
+                    payload["mode"],
+                    payload["frequency"],
+                    payload["start_utc"],
+                    payload["end_utc"],
+                    int(payload["early_checkin"]),
+                    payload["primary_js8call_group"],
+                    payload["comment"],
+                    payload["net_name"],
+                    payload["fldigi_mode"],
+                    payload["fldigi_offset"],
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    rid,
+                ),
+            )
+            conn.commit()
+        return True
+
+    def _preflight_master_net_resource_update(self, resource_id: int) -> None:
+        rid = int(resource_id or 0)
+        if rid <= 0:
+            raise ValueError("No Net Resource id is linked to this entry.")
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        if not db_path.exists():
+            raise FileNotFoundError(f"Net Resources database not found: {db_path}")
+        with sqlite3.connect(db_path) as conn:
+            exists = conn.execute("SELECT id FROM net_resources WHERE id=?", (rid,)).fetchone()
+        if not exists:
+            raise KeyError(f"Unknown Net Resource id: {rid}")
+
+    def _prompt_master_resource_update(self, resource_id: int) -> Optional[bool]:
+        if int(resource_id or 0) <= 0:
+            return False
+        response = QMessageBox.question(
+            self,
+            "Update Master Net Resource?",
+            f"This entry is linked to Net Resource #{int(resource_id)}.\n\n"
+            "Save the SOP Schedule Plan edit only, or also update the master Net Resource so future schedules use the change?\n\n"
+            "Choose Yes to update both. Choose No to update this plan only.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No,
+        )
+        if response == QMessageBox.Cancel:
+            return None
+        return response == QMessageBox.Yes
+
+    def _normalize_plan_local_lane_identity(self, ref: Dict[str, Any]) -> None:
+        radio_id = self._coerce_positive_int(
+            ref.get("radio_id") or ref.get("device_profile_id") or ref.get("target_device_profile_id")
+        )
+        if radio_id > 0:
+            ref["lane_key"] = f"radio:{radio_id}"
+            ref.setdefault("lane_label", f"Radio {radio_id}")
+            return
+        source = str(ref.get("source") or "").strip().upper()
+        if source == "SOP":
+            sop_id = self._coerce_positive_int(ref.get("sop_profile_id") or ref.get("profile_id"))
+            if sop_id > 0:
+                ref["lane_key"] = f"sop:{sop_id}"
+                ref.setdefault("lane_label", str(ref.get("profile_name") or f"SOP {sop_id}"))
+                return
+        group = str(ref.get("group_name") or "").strip().upper()
+        if group:
+            ref["lane_key"] = f"group:{group}"
+            ref["lane_label"] = group
+            return
+        ref["lane_key"] = "station"
+        if not str(ref.get("lane_label") or "").strip():
+            ref["lane_label"] = "Station"
+
+    def _on_edit_sop_plan_entry_clicked(self) -> None:
+        plan = self._selected_sop_schedule_plan_row()
+        if not plan:
+            self.frequency_plan_action_hint_label.setText("Select a saved SOP Schedule Plan before editing plan-local entries.")
+            return
+        entry = self._choose_operational_entry_for_edit()
+        if entry is None:
+            self.frequency_plan_action_hint_label.setText("Select an SOP Lanes cell with a plan entry to edit.")
+            return
+        updates = self._edit_plan_entry_dialog(entry)
+        if updates is None:
+            return
+        payload = self._updated_sop_plan_payload_for_entry(plan, entry, updates)
+        if payload is None:
+            self.frequency_plan_action_hint_label.setText("Unable to locate the selected entry in the saved SOP Schedule Plan.")
+            return
+        resource_id = self._resource_id_for_operational_entry(entry)
+        update_master_resource = self._prompt_master_resource_update(resource_id) if resource_id > 0 else False
+        if update_master_resource is None:
+            return
+        if update_master_resource:
+            try:
+                self._preflight_master_net_resource_update(resource_id)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Master Net Resource Unavailable",
+                    f"Net Resource #{resource_id} cannot be updated, so this combined save was not started.\n\n{exc}",
+                )
+                self.frequency_plan_action_hint_label.setText(
+                    f"Could not update Net Resource #{resource_id}; no SOP Schedule Plan edit was saved."
+                )
+                return
+        if update_master_resource:
+            confirm_text = (
+                f"Save this change to the selected SOP Schedule Plan and update Net Resource #{resource_id}?\n\n"
+                "This will change the saved plan after RF Guard preflight and then update the master Net Resource record."
+            )
+        else:
+            confirm_text = (
+                "Save this change to the selected SOP Schedule Plan only?\n\n"
+                "HF Daily, HF Nets, SOP Builder, and master Net Resources will not be changed."
+            )
+        response = QMessageBox.question(
+            self,
+            "Save Plan-Local Edit",
+            confirm_text,
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if response != QMessageBox.Save:
+            return
+        saved = self._save_plan_payload_with_guard(
+            payload,
+            schedule_count=len(payload.get("schedule_refs") or []),
+            success_kind="SOP Schedule Plan",
+        )
+        if saved:
+            followup_message = ""
+            if update_master_resource:
+                try:
+                    index = int((entry.raw or {}).get("plan_ref_index"))
+                    updated_ref = (payload.get("schedule_refs") or [])[index]
+                    self._update_master_net_resource_from_plan_ref(resource_id, updated_ref, updates)
+                    followup_message = (
+                        f"Saved SOP Schedule Plan '{str(saved.get('name') or plan.get('name') or 'Plan')}' "
+                        f"and updated Net Resource #{resource_id}."
+                    )
+                except Exception as exc:
+                    log.exception("FreqPlanner: failed updating master Net Resource from SOP Schedule Plan edit.")
+                    QMessageBox.warning(
+                        self,
+                        "Master Net Resource Update Failed",
+                        f"The SOP Schedule Plan was saved, but Net Resource #{resource_id} could not be updated.\n\n{exc}",
+                    )
+                    followup_message = (
+                        f"Saved the SOP Schedule Plan, but could not update Net Resource #{resource_id}: {exc}"
+                    )
+            self.rebuild_table()
+            if followup_message:
+                self.frequency_plan_action_hint_label.setText(followup_message)
+
+    def _format_segment_for_inspector(self, segment: ScheduleSegment) -> str:
+        label = segment.net_name or segment.group_name or segment.profile_name or segment.band or segment.source
+        band_freq = f"{segment.band} {segment.frequency}".strip()
+        return f"{segment.source} {segment.start_utc}-{segment.end_utc} {label} {band_freq}".strip()
+
+    @staticmethod
+    def _segments_for_source(cell: Optional[ProjectionCell], source: str) -> Tuple[ScheduleSegment, ...]:
+        if not isinstance(cell, ProjectionCell):
+            return ()
+        key = str(source or "").strip().upper()
+        if key == "HF":
+            return cell.hf_segments
+        if key == "NET":
+            return cell.net_segments
+        if key == "SOP":
+            return cell.sop_segments
+        return ()
+
+    @staticmethod
+    def _source_button_state(
+        segments: Tuple[ScheduleSegment, ...],
+        open_text: str,
+        none_text: str,
+        multiple_text: str,
+    ) -> Tuple[bool, str]:
+        if len(segments) == 1:
+            return True, open_text
+        if len(segments) > 1:
+            return True, multiple_text
+        return False, none_text
+
+    def _update_inspector_action_buttons(self, cell: Optional[ProjectionCell]) -> None:
+        hf_segments = self._segments_for_source(cell, "HF")
+        net_segments = self._segments_for_source(cell, "NET")
+        sop_segments = self._segments_for_source(cell, "SOP")
+        if hasattr(self, "edit_hf_daily_btn"):
+            enabled, tooltip = self._source_button_state(
+                hf_segments,
+                "Open HF Daily and focus the underlying source row.",
+                "No HF Daily source row for this cell.",
+                "Multiple HF Daily source rows match this cell; open HF Daily and choose the row to edit.",
+            )
+            self.edit_hf_daily_btn.setEnabled(enabled)
+            self.edit_hf_daily_btn.setToolTip(tooltip)
+        if hasattr(self, "edit_hf_net_btn"):
+            enabled, tooltip = self._source_button_state(
+                net_segments,
+                "Open HF Nets and focus the underlying source row.",
+                "No HF Net source row for this cell.",
+                "Multiple HF Net source rows match this cell; open HF Nets and choose the row to edit.",
+            )
+            self.edit_hf_net_btn.setEnabled(enabled)
+            self.edit_hf_net_btn.setToolTip(tooltip)
+        if hasattr(self, "open_sop_builder_btn"):
+            enabled, tooltip = self._source_button_state(
+                sop_segments,
+                "Open SOP Builder and select the underlying SOP profile.",
+                "No SOP source row for this cell.",
+                "Multiple SOP source rows match this cell; open SOP Builder and choose the source to edit.",
+            )
+            self.open_sop_builder_btn.setEnabled(enabled)
+            self.open_sop_builder_btn.setToolTip(tooltip)
+
+    def _set_projection_inspector(self, cell: Optional[ProjectionCell]) -> None:
+        self._selected_projection_cell = cell
+        self._selected_operational_cell = None
+        self._update_inspector_action_buttons(cell)
+        if not hasattr(self, "cell_inspector_label"):
+            return
+        if cell is None:
+            self.cell_inspector_label.setText("Select a schedule cell to review the blended HF Daily, HF Nets, and SOP sources.")
+            return
+        lines = [
+            f"{cell.day_utc} {cell.start_utc.strftime('%H:%M')}-{cell.end_utc.strftime('%H:%M')} UTC",
+            f"Effective: {cell.effective_source or 'None'} {cell.display_label}".strip(),
+        ]
+        for title, segments in (
+            ("HF Daily", cell.hf_segments),
+            ("HF Nets", cell.net_segments),
+            ("SOP", cell.sop_segments),
+        ):
+            if not segments:
+                lines.append(f"{title}: none")
+                continue
+            detail = "; ".join(self._format_segment_for_inspector(segment) for segment in segments[:3])
+            if len(segments) > 3:
+                detail += f"; +{len(segments) - 3} more"
+            lines.append(f"{title}: {detail}")
+        self.cell_inspector_label.setText("\n".join(lines))
+
+    def _on_schedule_cell_clicked(self, row: int, col: int) -> None:
+        if col < self.COL_DAY_OFFSET:
+            if self._planner_view_mode() == "operational":
+                self._set_operational_inspector(None)
+            else:
+                self._set_projection_inspector(None)
+            return
+        item = self.table.item(row, col)
+        cell = item.data(Qt.UserRole) if item is not None else None
+        if isinstance(cell, OperationalCell):
+            self._set_operational_inspector(cell)
+            return
+        self._set_projection_inspector(cell if isinstance(cell, ProjectionCell) else None)
+
+    def _selected_source_segment(self, source: str) -> Optional[ScheduleSegment]:
+        cell = self._selected_projection_cell
+        segments = self._segments_for_source(cell, source)
+        return segments[0] if len(segments) == 1 else None
+
+    def _segment_choice_label(self, segment: ScheduleSegment, index: int) -> str:
+        identity = str(segment.raw.get("source_key") or "").strip()
+        source_row_id = segment.raw.get("source_row_id")
+        resource_id = segment.raw.get("resource_id")
+        if source_row_id not in (None, "", 0):
+            identity = f"row {source_row_id}"
+        elif resource_id not in (None, "", 0):
+            identity = f"resource {resource_id}"
+        elif not identity:
+            identity = f"candidate {index + 1}"
+        return f"{index + 1}. {self._format_segment_for_inspector(segment)} [{identity}]"
+
+    def _choose_source_segment(self, source: str, title: str) -> Optional[ScheduleSegment]:
+        cell = self._selected_projection_cell
+        segments = self._segments_for_source(cell, source)
+        if len(segments) == 1:
+            return segments[0]
+        if len(segments) <= 0:
+            return None
+        labels = [self._segment_choice_label(segment, idx) for idx, segment in enumerate(segments)]
+        selected, ok = QInputDialog.getItem(
+            self,
+            f"Choose {title} Source",
+            "Multiple source rows match this cell. Choose the row to review:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        try:
+            return segments[labels.index(str(selected))]
+        except ValueError:
+            return None
+
+    def _navigate_to_tab(self, tab_label: str) -> None:
+        target = str(tab_label or "").strip().upper()
+        if not target:
+            return
+        win = self.window()
+        try:
+            if hasattr(win, "_screens") and hasattr(win, "_set_screen"):
+                for idx, (label, _widget) in enumerate(win._screens):
+                    if str(label or "").strip().upper() == target:
+                        win._set_screen(idx)
+                        return
+        except Exception as exc:
+            log.debug("FreqPlanner: failed navigating to %s: %s", tab_label, exc)
+
+    @staticmethod
+    def _normalize_freq_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return f"{float(text):.3f}"
+        except Exception:
+            return text
+
+    @staticmethod
+    def _widget_text(widget: Any) -> str:
+        if widget is None:
+            return ""
+        if hasattr(widget, "currentText"):
+            try:
+                return str(widget.currentText() or "").strip()
+            except Exception:
+                return ""
+        if isinstance(widget, QLineEdit) or hasattr(widget, "text"):
+            try:
+                return str(widget.text() or "").strip()
+            except Exception:
+                return ""
+        return ""
+
+    def _focus_tab_row_for_segment(self, tab: Any, segment: ScheduleSegment, *, source: str) -> bool:
+        table = getattr(tab, "table", None)
+        if table is None:
+            return False
+        col_day = getattr(tab, "COL_DAY", None)
+        col_group = getattr(tab, "COL_GROUP", None)
+        col_band = getattr(tab, "COL_BAND", None)
+        col_freq = getattr(tab, "COL_FREQ", None)
+        col_start = getattr(tab, "COL_START", None)
+        col_end = getattr(tab, "COL_END", None)
+        col_net = getattr(tab, "COL_NETNAME", None)
+        target_day = str(segment.day_utc or "").strip().upper()
+        target_group = str(segment.group_name or "").strip().upper()
+        target_band = str(segment.band or "").strip().upper()
+        target_freq = self._normalize_freq_text(segment.frequency)
+        target_start = str(segment.start_utc or "").strip()
+        target_end = str(segment.end_utc or "").strip()
+        target_net = str(segment.net_name or "").strip().upper()
+        for row in range(table.rowCount()):
+            def combo_value(col: Optional[int]) -> str:
+                if col is None:
+                    return ""
+                if hasattr(tab, "_get_combo_value"):
+                    try:
+                        return str(tab._get_combo_value(row, col, "") or "").strip()
+                    except Exception:
+                        pass
+                return self._widget_text(table.cellWidget(row, col))
+
+            def item_value(col: Optional[int]) -> str:
+                if col is None:
+                    return ""
+                item = table.item(row, col)
+                return str(item.text() if item is not None else "").strip()
+
+            day_val = combo_value(col_day).upper()
+            group_val = combo_value(col_group).upper()
+            band_val = combo_value(col_band).upper()
+            freq_val = self._normalize_freq_text(item_value(col_freq))
+            start_val = item_value(col_start)
+            end_val = item_value(col_end)
+            net_val = self._widget_text(table.cellWidget(row, col_net)).upper() if col_net is not None else ""
+            if target_day and day_val and day_val != target_day:
+                continue
+            if target_group and group_val and group_val != target_group:
+                continue
+            if target_band and band_val and band_val != target_band:
+                continue
+            if target_freq and freq_val and freq_val != target_freq:
+                continue
+            if target_start and start_val and start_val != target_start:
+                continue
+            if target_end and end_val and end_val != target_end:
+                continue
+            if source.upper() == "NET" and target_net and net_val and net_val != target_net:
+                continue
+            table.selectRow(row)
+            focus_col = col_net if source.upper() == "NET" and col_net is not None else col_freq
+            if focus_col is not None and table.item(row, focus_col) is not None:
+                table.scrollToItem(table.item(row, focus_col))
+            table.setFocus(Qt.TabFocusReason)
+            return True
+        return False
+
+    def _on_edit_hf_daily_clicked(self) -> None:
+        segment = self._choose_source_segment("HF", "HF Daily")
+        if segment is None:
+            self.frequency_plan_action_hint_label.setText("Select a cell with an HF Daily source row first.")
+            return
+        self._navigate_to_tab("HF Schedule")
+        tab = getattr(self.window(), "hf_schedule_tab", None)
+        focused = False
+        if tab is not None and hasattr(tab, "focus_source_segment"):
+            try:
+                focused = bool(tab.focus_source_segment(segment))
+            except Exception:
+                focused = False
+        if not focused and tab is not None and hasattr(tab, "_focus_daily_row"):
+            try:
+                tab._focus_daily_row(segment.group_name, segment.band, segment.frequency)
+                focused = True
+            except Exception:
+                focused = False
+        if not focused and tab is not None:
+            focused = self._focus_tab_row_for_segment(tab, segment, source="HF")
+        self.frequency_plan_action_hint_label.setText(
+            "Opened HF Daily source row for review." if focused else "Opened HF Daily. Review the matching source row before editing."
+        )
+
+    def _on_edit_hf_net_clicked(self) -> None:
+        segment = self._choose_source_segment("NET", "HF Net")
+        if segment is None:
+            self.frequency_plan_action_hint_label.setText("Select a cell with an HF Net source row first.")
+            return
+        self._navigate_to_tab("Net Schedule")
+        tab = getattr(self.window(), "net_tab", None)
+        focused = False
+        if tab is not None and hasattr(tab, "focus_source_segment"):
+            try:
+                focused = bool(tab.focus_source_segment(segment))
+            except Exception:
+                focused = False
+        if not focused:
+            focused = self._focus_tab_row_for_segment(tab, segment, source="NET") if tab is not None else False
+        self.frequency_plan_action_hint_label.setText(
+            "Opened HF Net source row for review." if focused else "Opened HF Nets. Review the matching source row before editing."
+        )
+
+    def _on_open_sop_builder_clicked(self) -> None:
+        segment = self._choose_source_segment("SOP", "SOP")
+        if segment is None:
+            self.frequency_plan_action_hint_label.setText("Select a cell with an SOP source row first.")
+            return
+        self._navigate_to_tab("SOP")
+        profile_id = int(segment.raw.get("sop_profile_id") or 0)
+        tab = getattr(self.window(), "sop_tab", None)
+        selected = False
+        focused = False
+        if tab is not None and hasattr(tab, "focus_source_segment"):
+            try:
+                focused = bool(tab.focus_source_segment(segment))
+                selected = focused
+            except Exception as exc:
+                log.debug("FreqPlanner: failed focusing SOP layer source: %s", exc)
+                focused = False
+        if not focused and tab is not None and profile_id > 0:
+            try:
+                if hasattr(tab, "select_profile"):
+                    selected = bool(tab.select_profile(profile_id))
+                elif hasattr(tab, "profile_combo"):
+                    for idx in range(tab.profile_combo.count()):
+                        if int(tab.profile_combo.itemData(idx) or 0) == profile_id:
+                            tab.profile_combo.setCurrentIndex(idx)
+                            selected = True
+                            break
+            except Exception as exc:
+                log.debug("FreqPlanner: failed selecting SOP profile %s: %s", profile_id, exc)
+        self.frequency_plan_action_hint_label.setText(
+            "Opened SOP Builder source row for review."
+            if focused
+            else (
+                "Opened SOP Builder source profile for review."
+                if selected
+                else "Opened SOP Builder. Review the matching SOP source before editing."
+            )
+        )
+
     def mark_schedule_dirty(self) -> None:
         self._pending_rebuild = True
 
@@ -1014,6 +2688,93 @@ class FreqPlannerTab(QWidget):
         self.rebuild_table()
 
     # ------------- core rebuild ------------- #
+
+    def _rebuild_operational_lane_table(
+        self,
+        hf_sched: List[Dict],
+        net_sched: List[Dict],
+        sop_sched: List[Dict],
+        policy_rows: List[Dict[str, Any]],
+        week_sunday: datetime.date,
+        theme: Dict[str, Any],
+    ) -> None:
+        selected_plan = self._selected_sop_schedule_plan_row()
+        projection = self._build_selected_sop_plan_projection(week_sunday) if selected_plan else None
+        source_text = f"saved plan '{str(selected_plan.get('name') or 'SOP Schedule Plan')}'" if selected_plan else "live projection"
+        if projection is None:
+            projection = build_operational_day_projection(
+                hf_sched,
+                net_sched,
+                sop_sched,
+                self._load_net_resources_from_db(),
+                policy_rows,
+                week_start_utc=week_sunday,
+            )
+        selected_day = self._selected_operational_day()
+        lanes = list(projection.lanes)
+        column_count = max(self.COL_DAY_OFFSET + len(lanes), self.COL_DAY_OFFSET + 1)
+        self.table.setColumnCount(column_count)
+        tz_name, tz_abbr = self._current_timezone_label()
+        headers = ["UTC Hour", f"Local Time ({tz_abbr})"]
+        headers.extend(lane.lane_label for lane in lanes)
+        if not lanes:
+            headers.append("SOP Lanes")
+        self.table.setHorizontalHeaderLabels(headers)
+        hv = self.table.horizontalHeader()
+        hv.setSectionResizeMode(self.COL_UTC, QHeaderView.ResizeToContents)
+        hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.ResizeToContents)
+        for col in range(self.COL_DAY_OFFSET, column_count):
+            hv.setSectionResizeMode(col, QHeaderView.Stretch)
+        tz_name_cfg, tz = self._current_timezone()
+        try:
+            day_index = DAY_NAMES.index(selected_day)
+        except ValueError:
+            day_index = 0
+        date_value = week_sunday + datetime.timedelta(days=day_index)
+        visible_bands: set[str] = set()
+        for hour in range(24):
+            utc_dt = datetime.datetime.combine(date_value, datetime.time(hour=hour), tzinfo=datetime.timezone.utc)
+            local_dt = utc_dt.astimezone(tz)
+            utc_item = QTableWidgetItem(f"{hour:02d}:00")
+            utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(hour, self.COL_UTC, utc_item)
+            local_item = QTableWidgetItem(f"{local_dt.hour:02d}:00")
+            local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(hour, self.COL_LOCAL, local_item)
+            if not lanes:
+                item = QTableWidgetItem("")
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(hour, self.COL_DAY_OFFSET, item)
+                continue
+            for lane_index, lane in enumerate(lanes):
+                col = self.COL_DAY_OFFSET + lane_index
+                cell = projection.cell_for(lane.lane_key, selected_day, hour)
+                item = QTableWidgetItem(self._operational_cell_text(cell))
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if cell is not None:
+                    item.setData(Qt.UserRole, cell)
+                    tooltip = self._operational_cell_tooltip(cell)
+                    if tooltip:
+                        item.setToolTip(tooltip)
+                    if cell.has_contention:
+                        item.setBackground(qcolor(theme["surface_alt"]))
+                    elif cell.entries:
+                        primary_band = str(cell.entries[0].band or "").split("/")[0].strip()
+                        if primary_band:
+                            visible_bands.add(primary_band.lower())
+                            colors = self._band_cell_colors(primary_band, theme)
+                            if colors:
+                                item.setBackground(qcolor(colors["bg"]))
+                                item.setForeground(qcolor(colors["fg"]))
+                self.table.setItem(hour, col, item)
+        self._visible_bands = sorted(visible_bands)
+        self._render_band_legend()
+        self._set_operational_inspector(None)
+        counts = projection.source_counts
+        self.frequency_plan_action_hint_label.setText(
+            f"SOP Lanes view from {source_text}: {selected_day}, {len(projection.lanes)} lane(s), "
+            f"{sum(counts.values())} operational entr{'y' if sum(counts.values()) == 1 else 'ies'}."
+        )
 
     def rebuild_table(self):
         """
@@ -1059,234 +2820,53 @@ class FreqPlannerTab(QWidget):
         self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         week_sunday = self._week_start_sunday_utc(now_utc)
+        if self._planner_view_mode() == "operational":
+            self._rebuild_operational_lane_table(hf_sched, net_sched, sop_sched, policy_rows, week_sunday, theme)
+            self._update_clock_labels()
+            emit_span(
+                "freqplanner.rebuild_table",
+                (time.perf_counter() - perf_start) * 1000.0,
+                settings=self.settings,
+                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "operational"},
+                min_ms=5.0,
+            )
+            log.info("FreqPlanner table rebuilt from operational day projection.")
+            return
+        self.table.setColumnCount(9)
+        hv = self.table.horizontalHeader()
+        hv.setSectionResizeMode(self.COL_UTC, QHeaderView.Stretch)
+        hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.Stretch)
+        for col in range(self.COL_DAY_OFFSET, 9):
+            hv.setSectionResizeMode(col, QHeaderView.Stretch)
+        projection = build_blended_schedule_projection(
+            hf_sched,
+            net_sched,
+            sop_sched,
+            policy_rows,
+            week_start_utc=week_sunday,
+        )
+        projection_cells = self._projection_cells_by_utc_key(projection)
 
-        # Precompute net schedule coverage by (day, hour) with boundary-aware logic.
-        # Slice tuple: (start_minute, end_minute, label, net_row_signature)
-        net_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
-
-        def add_net_slice(
-            day_name: str,
-            hour: int,
-            start_minute: int,
-            end_minute: int,
-            name: str,
-            row_sig: str,
-        ) -> None:
-            if start_minute >= end_minute:
-                return
-            net_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, name, row_sig))
-
-        for row in net_sched:
-            try:
-                day = row.get("day_utc", "")
-                smin = self._parse_hhmm(row.get("start_utc", ""))
-                emin = self._parse_hhmm(row.get("end_utc", ""))
-                if smin is None or emin is None:
-                    continue
-                name = (row.get("net_name") or "Net").strip()
-                row_sig = self._net_row_signature(row)
-                recurrence = (row.get("recurrence") or "Weekly").strip()
-                day_txt = (day or "ALL").strip().upper()
-                if recurrence == "Daily":
-                    day_txt = "ALL"
-                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
-                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
-                ]
-                if not self._net_row_applies_this_week(row, targets, week_sunday):
-                    continue
-                overnight = smin > emin
-                intervals: List[Tuple[str, int, int]] = []
-                if not overnight:
-                    for dname in targets:
-                        intervals.append((dname, smin, emin))
-                else:
-                    for dname in targets:
-                        intervals.append((dname, smin, 24 * 60))
-                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
-                        next_day = DAY_NAMES[next_idx]
-                        intervals.append((next_day, 0, emin))
-                for dname, seg_start, seg_end in intervals:
-                    start_hour = seg_start // 60
-                    end_hour = (seg_end - 1) // 60
-                    for hour in range(start_hour, end_hour + 1):
-                        hour_start_min = hour * 60
-                        hour_end_min = hour * 60 + 60
-                        overlap_start = max(seg_start, hour_start_min)
-                        overlap_end = min(seg_end, hour_end_min)
-                        add_net_slice(
-                            dname,
-                            hour % 24,
-                            overlap_start - hour_start_min,
-                            overlap_end - hour_start_min,
-                            name,
-                            row_sig,
-                        )
-            except Exception:
-                continue
-
-        # Precompute active SOP layer coverage by (day, hour).
-        # Slice tuple: (start_minute, end_minute, label, sop_row_signature)
-        sop_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
-
-        def add_sop_slice(
-            day_name: str,
-            hour: int,
-            start_minute: int,
-            end_minute: int,
-            label: str,
-            row_sig: str,
-        ) -> None:
-            if start_minute >= end_minute:
-                return
-            sop_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, label, row_sig))
-
-        for row in sop_sched:
-            try:
-                day = row.get("day_utc", "")
-                smin = self._parse_hhmm(row.get("start_utc", ""))
-                emin = self._parse_hhmm(row.get("end_utc", ""))
-                if smin is None or emin is None:
-                    continue
-                row_sig = self._sop_row_signature(row)
-                recurrence = (row.get("recurrence") or "Weekly").strip()
-                day_txt = (day or "ALL").strip().upper()
-                if recurrence.upper() == "DAILY":
-                    day_txt = "ALL"
-                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
-                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
-                ]
-                if not self._net_row_applies_this_week(row, targets, week_sunday):
-                    continue
-                group_name = str(row.get("group_name") or row.get("profile_name") or "").strip()
-                label = f"SOP:{group_name}" if group_name else "SOP"
-                overnight = smin > emin
-                intervals: List[Tuple[str, int, int]] = []
-                if not overnight:
-                    for dname in targets:
-                        intervals.append((dname, smin, emin))
-                else:
-                    for dname in targets:
-                        intervals.append((dname, smin, 24 * 60))
-                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
-                        next_day = DAY_NAMES[next_idx]
-                        intervals.append((next_day, 0, emin))
-                for dname, seg_start, seg_end in intervals:
-                    start_hour = seg_start // 60
-                    end_hour = (seg_end - 1) // 60
-                    for hour in range(start_hour, end_hour + 1):
-                        hour_start_min = hour * 60
-                        hour_end_min = hour * 60 + 60
-                        overlap_start = max(seg_start, hour_start_min)
-                        overlap_end = min(seg_end, hour_end_min)
-                        add_sop_slice(
-                            dname,
-                            hour % 24,
-                            overlap_start - hour_start_min,
-                            overlap_end - hour_start_min,
-                            label,
-                            row_sig,
-                        )
-            except Exception:
-                continue
-
-        # Precompute HF schedule coverage by (day, hour) with minute-level slices
-        hf_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
-
-        def add_slice(
-            day_name: str, hour: int, start_minute: int, end_minute: int, band: str, freq: str
-        ) -> None:
-            if start_minute >= end_minute:
-                return
-            hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band, freq))
-
-        # Collect start minutes per day to resolve boundary ownership
-        starts_by_day: Dict[str, set[int]] = {d: set() for d in DAY_NAMES}
-        for row in hf_sched:
-            try:
-                smin = self._parse_hhmm(row.get("start_utc", ""))
-                if smin is None:
-                    continue
-                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
-                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
-                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
-                ]
-                for dname in targets:
-                    starts_by_day[dname].add(smin)
-            except Exception:
-                continue
-
-        for row in hf_sched:
-            try:
-                smin = self._parse_hhmm(row.get("start_utc", ""))
-                emin = self._parse_hhmm(row.get("end_utc", ""))
-                if smin is None or emin is None:
-                    continue
-                band = (row.get("band") or "").strip()
-                if not band:
-                    continue
-                freq = (row.get("frequency") or "").strip()
-                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
-                # Expand into day/hour slices with minute precision
-                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
-                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
-                ]
-                overnight = smin > emin
-                intervals: List[Tuple[str, int, int]] = []
-                for dname in targets:
-                    if not overnight:
-                        intervals.append((dname, smin, emin))
-                    else:
-                        # segment 1: start -> 24h on current day
-                        intervals.append((dname, smin, 24 * 60))
-                        # segment 2: 0 -> end on next day
-                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
-                        next_day = DAY_NAMES[next_idx]
-                        intervals.append((next_day, 0, emin))
-                for dname, seg_start, seg_end in intervals:
-                    # If this segment ends exactly on an hour boundary, extend to cover that hour
-                    # unless another HF row starts at that exact minute on the same day.
-                    if seg_end % 60 == 0 and (seg_end % (24 * 60)) not in starts_by_day.get(dname, set()):
-                        seg_end = min(seg_end + 60, 24 * 60)
-                    start_hour = seg_start // 60
-                    end_hour = (seg_end - 1) // 60  # inclusive end minute
-                    for hour in range(start_hour, end_hour + 1):
-                        hour_start_min = hour * 60
-                        hour_end_min = hour * 60 + 60
-                        overlap_start = max(seg_start, hour_start_min)
-                        overlap_end = min(seg_end, hour_end_min)
-                        add_slice(
-                            dname,
-                            hour % 24,
-                            overlap_start - hour_start_min,
-                            overlap_end - hour_start_min,
-                            band,
-                            freq,
-                        )
-            except Exception:
-                continue
-
-        # Timezone for local conversion
         tz_name_cfg, tz = self._current_timezone()
-
-        # Current UTC day for highlighting
         now_local = datetime.datetime.now(tz)
         now_plus_24 = now_utc + datetime.timedelta(hours=24)
-
-        # Fill rows
         today_utc = now_utc.replace(minute=0, second=0, microsecond=0)
         week_start_local = self._start_of_week_local(tz)
-        visible_bands: set[str] = set()
+        visible_bands: set[str] = {
+            band.strip().lower()
+            for segment in projection.effective_segments
+            for band in str(segment.band or "").split("/")
+            if band.strip()
+        }
 
         for hour in range(24):
             if not self._show_local:
-                # Column 0: UTC hour "HH:00"
                 utc_item = QTableWidgetItem(f"{hour:02d}:00")
                 utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if hour == now_utc.hour:
                     utc_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_UTC, utc_item)
 
-                # Column 1: Local time using configured timezone
                 utc_dt = datetime.datetime(
                     year=today_utc.year,
                     month=today_utc.month,
@@ -1297,15 +2877,12 @@ class FreqPlannerTab(QWidget):
                     tzinfo=datetime.timezone.utc,
                 )
                 local_dt = utc_dt.astimezone(tz)
-                local_hour_24 = local_dt.hour
-                local_str = f"{local_hour_24:02d}:00"
-                local_item = QTableWidgetItem(local_str)
+                local_item = QTableWidgetItem(f"{local_dt.hour:02d}:00")
                 local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                if local_hour_24 == now_local.hour:
+                if local_dt.hour == now_local.hour:
                     local_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_LOCAL, local_item)
             else:
-                # Local hour as primary
                 local_dt = week_start_local + datetime.timedelta(hours=hour)
                 utc_dt = local_dt.astimezone(datetime.timezone.utc)
 
@@ -1321,150 +2898,37 @@ class FreqPlannerTab(QWidget):
                     utc_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_LOCAL, utc_item)
 
-            # Day columns 2..8
             for col in range(self.COL_DAY_OFFSET, 9):
-                day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
                 if not self._show_local:
-                    lookup_day = day_name
+                    lookup_day = DAY_NAMES[col - self.COL_DAY_OFFSET]
                     lookup_hour = hour
-                    cell_utc_start = datetime.datetime.combine(
-                        week_sunday + datetime.timedelta(days=(col - self.COL_DAY_OFFSET)),
-                        datetime.time(hour=hour, minute=0),
-                    ).replace(tzinfo=datetime.timezone.utc)
                 else:
-                    # Local day/hour mapped to UTC day/hour for lookup
                     cell_local_dt = week_start_local + datetime.timedelta(days=(col - self.COL_DAY_OFFSET), hours=hour)
                     cell_dt_utc = cell_local_dt.astimezone(datetime.timezone.utc)
                     lookup_day = cell_dt_utc.strftime("%A")
                     lookup_hour = cell_dt_utc.hour
-                    cell_utc_start = cell_dt_utc.replace(minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
-                cell_utc_end = cell_utc_start + datetime.timedelta(hours=1)
 
-                net_slices = net_cover.get((lookup_day, lookup_hour), [])
-                sop_slices = sop_cover.get((lookup_day, lookup_hour), [])
-                hf_slices = hf_cover.get((lookup_day, lookup_hour), [])
-                band_label = ""
-                freq_label = ""
-                if hf_slices:
-                    # Order by start minute and compress consecutive identical bands
-                    hf_slices = sorted(hf_slices, key=lambda x: x[0])
-                    bands_in_order: List[str] = []
-                    freqs_in_order: List[str] = []
-                    last_band = None
-                    last_freq = None
-                    for start_m, end_m, b, f in hf_slices:
-                        if end_m <= start_m:
-                            continue
-                        if b:
-                            visible_bands.add(b.lower())
-                        if b != last_band:
-                            bands_in_order.append(b)
-                            last_band = b
-                        if f != last_freq and f:
-                            freqs_in_order.append(f)
-                            last_freq = f
-                    if len(bands_in_order) == 1:
-                        band_label = bands_in_order[0]
-                    else:
-                        band_label = "/".join(bands_in_order)
-                    if len(freqs_in_order) == 1:
-                        freq_label = freqs_in_order[0]
-                    elif freqs_in_order:
-                        freq_label = "/".join(freqs_in_order)
-
-                net_label = ""
-                if net_slices:
-                    net_slices = sorted(net_slices, key=lambda x: x[0])
-                    net_names = []
-                    last_net = None
-                    for start_m, end_m, name, _sig in net_slices:
-                        if end_m <= start_m:
-                            continue
-                        if name != last_net:
-                            net_names.append(name)
-                            last_net = name
-                    if net_names:
-                        net_label = " / ".join(net_names)
-
-                sop_label = ""
-                if sop_slices:
-                    sop_slices = sorted(sop_slices, key=lambda x: x[0])
-                    sop_names: List[str] = []
-                    seen_sop_names: set[str] = set()
-                    for start_m, end_m, label, _sig in sop_slices:
-                        if end_m <= start_m:
-                            continue
-                        raw = str(label or "").strip()
-                        if raw.upper().startswith("SOP:"):
-                            raw = raw[4:].strip()
-                        name = raw or "SOP"
-                        key = name.upper()
-                        if key in seen_sop_names:
-                            continue
-                        seen_sop_names.add(key)
-                        sop_names.append(name)
-                    if sop_names:
-                        sop_label = f"SOP:{'/'.join(sop_names)}"
-
-                policy_pref = ""
-                if net_label and sop_label:
-                    policy_pref = self._effective_net_sop_policy_for_window(
-                        cell_start_utc=cell_utc_start,
-                        cell_end_utc=cell_utc_end,
-                        net_slices=net_slices,
-                        sop_slices=sop_slices,
-                        policy_rows=policy_rows,
-                    )
-
-                cell_text = ""
-                if net_label and sop_label:
-                    # Display precedence with policy-aware Net/SOP arbitration.
-                    cell_text = sop_label if policy_pref == "SOP_PRIORITY" else net_label
-                elif net_label:
-                    cell_text = net_label
-                elif sop_label:
-                    cell_text = sop_label
-                else:
-                    cell_text = band_label if self._show_band else (freq_label or band_label)
-
+                cell = projection_cells.get((lookup_day, lookup_hour))
+                cell_text = self._projection_cell_text(cell)
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                if cell_text:
-                    item.setToolTip(cell_text)
-
-                if band_label and not net_label and not sop_label:
-                    primary_band = band_label.split("/")[0].strip()
+                if cell is not None:
+                    item.setData(Qt.UserRole, cell)
+                    tooltip = self._projection_cell_tooltip(cell)
+                    if tooltip:
+                        item.setToolTip(tooltip)
+                if cell and cell.effective_source == "HF" and cell.band:
+                    primary_band = cell.band.split("/")[0].strip()
                     colors = self._band_cell_colors(primary_band, theme)
                     if colors:
                         item.setBackground(qcolor(colors["bg"]))
                         item.setForeground(qcolor(colors["fg"]))
-
-                # Highlight: net window overlaps now or starts within next 24h
-                highlight = False
-                if net_slices:
-                    for start_m, end_m, _name, _sig in net_slices:
-                        # Compute absolute times for this day/hour slice
-                        try:
-                            day_idx = DAY_NAMES.index(lookup_day)
-                        except ValueError:
-                            continue
-                        now_idx = now_utc.weekday()
-                        now_day_sun0 = (now_idx + 1) % 7
-                        offset = (day_idx - now_day_sun0) % 7
-                        base_date = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(
-                            days=offset
-                        )
-                        start_dt = base_date + datetime.timedelta(minutes=start_m + lookup_hour * 60)
-                        end_dt = base_date + datetime.timedelta(minutes=end_m + lookup_hour * 60)
-                        if start_dt <= now_utc <= end_dt or (now_utc <= start_dt <= now_plus_24):
-                            highlight = True
-                            break
-                if highlight:
+                if cell and cell.net_segments and (
+                    cell.start_utc <= now_utc <= cell.end_utc or now_utc <= cell.start_utc <= now_plus_24
+                ):
                     item.setBackground(qcolor(theme["surface_alt"]))
-
                 self.table.setItem(hour, col, item)
 
-        # Update clock labels
         self._update_clock_labels()
         self._visible_bands = sorted(visible_bands)
         self._render_band_legend()
@@ -1472,10 +2936,11 @@ class FreqPlannerTab(QWidget):
             "freqplanner.rebuild_table",
             (time.perf_counter() - perf_start) * 1000.0,
             settings=self.settings,
-            meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band)},
+            meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "shared"},
             min_ms=5.0,
         )
-        log.info("FreqPlanner table rebuilt.")
+        log.info("FreqPlanner table rebuilt from shared schedule projection.")
+        return
 
     def _snapshot(
         self,
