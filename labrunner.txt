@@ -1,0 +1,12 @@
+
+cd /Users/bill/RadioCode/FreqInOut-multi-rig
+tools/multirig_upgrade_lab.sh copy
+tools/multirig_upgrade_lab.sh start-single
+tools/multirig_upgrade_lab.sh check
+tools/multirig_upgrade_lab.sh run
+
+After completing Multi-Rig Setup in FIO:
+tools/multirig_upgrade_lab.sh start-multi
+tools/multirig_upgrade_lab.sh seed-extra
+tools/multirig_upgrade_lab.sh run
+

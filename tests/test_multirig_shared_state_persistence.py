@@ -15,23 +15,38 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
     store = _store(tmp_path)
     with store._connect() as conn:
         set_multi_rig_migration_version(conn)
-    primary_plan = store.save_operating_profile(
+    primary_model = store.save_operating_profile(
         {
             "system_key": "home_hf",
-            "name": "Home HF Daily",
-            "description": "Daily HF operating plan",
+            "name": "All FIO Features",
             "scheduler_enabled": 1,
             "use_messages": 1,
             "use_map": 1,
         }
     )
-    observer_plan = store.save_operating_profile(
+    observer_model = store.save_operating_profile(
         {
             "system_key": "rx_watch",
-            "name": "RX Watch",
+            "name": "Observer Workflow",
             "scheduler_enabled": 0,
             "use_messages": 1,
             "use_map": 1,
+            "receive_only": 1,
+        }
+    )
+    primary_plan = store.save_frequency_plan(
+        {
+            "system_key": "home_hf_daily",
+            "name": "Home HF Daily",
+            "description": "Daily HF schedule plan",
+            "source_refs": ["src_hf_daily"],
+        }
+    )
+    observer_plan = store.save_frequency_plan(
+        {
+            "system_key": "rx_watch_schedule",
+            "name": "RX Watch",
+            "category": "rx_watch",
             "receive_only": 1,
         }
     )
@@ -54,8 +69,10 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
             "runtime_active": 0,
         }
     )
-    store.set_device_operating_profile(primary["id"], primary_plan["id"])
-    store.set_device_operating_profile(observer["id"], observer_plan["id"])
+    store.set_device_operating_profile(primary["id"], primary_model["id"])
+    store.set_device_operating_profile(observer["id"], observer_model["id"])
+    store.set_assigned_plan(primary["id"], primary_plan["id"])
+    store.set_assigned_plan(observer["id"], observer_plan["id"])
     store.set_device_profile_runtime_active(observer["id"], True)
     store.set_runtime_primary_device_profile(primary["id"])
 
@@ -63,7 +80,7 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
 
     assert snapshot.schema_version == SHARED_STATE_BRIDGE_VERSION
     assert {profile.name for profile in snapshot.radio_profiles} == {"Radio A", "Radio B"}
-    assert {plan.name for plan in snapshot.frequency_plans} >= {"Home HF Daily", "RX Watch"}
+    assert {plan.name for plan in snapshot.frequency_plans} == {"Home HF Daily", "RX Watch"}
     assert snapshot.selection_state.primary_runtime_radio_id == f"radio_{primary['id']}"
     assert snapshot.selection_state.active_runtime_radio_ids == (
         f"radio_{primary['id']}",
@@ -82,6 +99,11 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
     }
     assert receive_only[(f"radio_{primary['id']}", f"plan_{primary_plan['id']}")] is False
     assert receive_only[(f"radio_{observer['id']}", f"plan_{observer_plan['id']}")] is True
+    enforcement = {
+        (assignment.radio_profile_id, assignment.frequency_plan_id): assignment.scheduler_enforcement
+        for assignment in snapshot.assigned_plans
+    }
+    assert enforcement[(f"radio_{primary['id']}", f"plan_{primary_plan['id']}")] == "enabled"
 
 
 def test_radio_profile_projection_populates_canonical_software_flags(tmp_path):
@@ -206,7 +228,7 @@ def test_operating_profile_projection_keeps_description_out_of_notes(tmp_path):
     store = _store(tmp_path)
     with store._connect() as conn:
         set_multi_rig_migration_version(conn)
-    plan = store.save_operating_profile(
+    plan = store.save_frequency_plan(
         {
             "system_key": "described_plan",
             "name": "Described Plan",
@@ -225,7 +247,7 @@ def test_frequency_plan_projection_preserves_source_and_provenance_refs(tmp_path
     store = _store(tmp_path)
     with store._connect() as conn:
         set_multi_rig_migration_version(conn)
-    plan = store.save_operating_profile(
+    plan = store.save_frequency_plan(
         {
             "system_key": "provenance_plan",
             "name": "Provenance Plan",

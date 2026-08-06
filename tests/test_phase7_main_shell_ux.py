@@ -4,7 +4,18 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QGridLayout, QHeaderView, QLabel, QPushButton, QTableWidgetItem
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableWidgetItem,
+    QWidget,
+)
 
 
 def test_phase7_main_window_has_global_ledge_clock() -> None:
@@ -29,14 +40,27 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '("HF Daily", "HF Schedule")' in source
     assert '("HF Nets", "Net Schedule")' in source
     assert '("HF Peers", "Peer Schedules")' in source
-    assert 'self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators"]' in source
-    assert 'defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False}' in source
+    assert '("Main", "Settings")' in source
+    assert '("Radios", "Settings")' in source
+    assert 'self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators", "Settings"]' in source
+    assert 'defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False, "Settings": True}' in source
     assert 'defaults["Station"] = True' in source
     assert 'defaults["FreqPlanner"] = True' in source
     assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
     assert 'if screen in {"FreqPlanner", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
     assert 'return "FreqPlanner"' in source
+    assert 'if screen == "Settings":' in source
+    assert 'return "Settings"' in source
+    assert 'self._settings_nav_context = "main"' in source
+    assert "self._settings_nav_button_indices: dict[str, int] = {}" in source
+    assert 'btn.clicked.connect(lambda _=False: self.open_settings_section("operator_info", settings_nav_context="main"))' in source
+    assert 'btn.clicked.connect(lambda _=False: self.open_settings_section("radio_profiles", settings_nav_context="radios"))' in source
+    assert 'self._settings_nav_button_indices["main"] = btn_idx' in source
+    assert 'self._settings_nav_button_indices["radios"] = btn_idx' in source
+    assert 'if label == "Settings":' in source
+    assert 'nav_idx = self._settings_nav_button_indices.get(' in source
+    assert '("Settings", "Settings")' not in source
     assert '("Station Health", "Station Health")' not in source
     assert '"Schedules": False' not in source
     assert "def _expand_nav_group_for_screen" in source
@@ -1263,10 +1287,14 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "layout.addWidget(self.station_command_now_label, 0, 2, 1, 2)" in source
     assert "layout.addWidget(self.station_command_duration_combo, 0, 4)" in source
     assert "layout.addWidget(self.station_command_qsy_btn, 0, 5)" in source
-    assert "layout.addWidget(self.station_command_state_label, 1, 0, 1, 2)" in source
+    assert "layout.addWidget(self.station_command_health_label, 1, 0)" in source
+    assert "layout.addWidget(self.station_command_health_widget, 1, 1)" in source
     assert "layout.addWidget(self.station_command_next_label, 1, 2, 1, 5)" in source
     assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
+    assert 'self.station_command_health_label = QLabel("Health:")' in source
+    assert 'label_text="Healthy"' in source
+    assert 'summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"' in source
     assert "self._apply_station_command_bar_layout(force=True)" in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
@@ -1312,6 +1340,9 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
     window.station_command_now_label = QLabel("Now: unavailable")
     window.station_command_state_label = QLabel("State: On Schedule")
     window.station_command_next_label = QLabel("Next: No assigned plan")
+    window.station_command_health_label = QLabel("Health:")
+    window.station_command_health_widget = QWidget()
+    window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
     window.station_command_duration_combo = QComboBox()
     window.station_command_qsy_btn = QPushButton("QSY...")
     window.station_command_hold_btn = QPushButton("Hold")
@@ -1328,7 +1359,8 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_duration_combo
         assert window.station_command_layout.itemAtPosition(1, 1).widget() is window.station_command_qsy_btn
         assert window.station_command_layout.itemAtPosition(1, 4).widget() is window.station_command_resume_btn
-        assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_state_label
+        assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_health_label
+        assert window.station_command_layout.itemAtPosition(2, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(2, 2).widget() is window.station_command_next_label
 
         window.station_command_bar.resize(1300, 120)
@@ -1339,10 +1371,96 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(0, 2).widget() is window.station_command_now_label
         assert window.station_command_layout.itemAtPosition(0, 4).widget() is window.station_command_duration_combo
         assert window.station_command_layout.itemAtPosition(0, 5).widget() is window.station_command_qsy_btn
-        assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_state_label
+        assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_health_label
+        assert window.station_command_layout.itemAtPosition(1, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(1, 2).widget() is window.station_command_next_label
     finally:
         window.station_command_bar.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_station_command_health_collapses_all_green(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SettingsManager()
+    window.station_command_health_widget = QWidget()
+    window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
+    window.station_command_health_label = QLabel("Health:")
+    window.station_command_health_leds = {}
+    window.station_command_health_text_labels = {}
+    window.dependency_status_service = SimpleNamespace(
+        software_status_snapshot=lambda: {
+            "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+            "FLDigi": {"state": "ok", "tooltip": "FLDigi OK"},
+        }
+    )
+    monkeypatch.setattr(
+        MainWindow,
+        "_station_command_health_items",
+        lambda self, profile: [("FLRig", "FLRig"), ("FLDigi", "FLDigi")],
+    )
+
+    try:
+        MainWindow._refresh_station_command_health(window, {"id": 1}, 1)
+        app.processEvents()
+
+        assert set(window.station_command_health_text_labels) == {"__summary__"}
+        assert window.station_command_health_text_labels["__summary__"].text() == "Healthy"
+    finally:
+        window.station_command_health_widget.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SettingsManager()
+    window.station_command_health_widget = QWidget()
+    window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
+    window.station_command_health_label = QLabel("Health:")
+    window.station_command_health_leds = {}
+    window.station_command_health_text_labels = {}
+    window.dependency_status_service = SimpleNamespace(
+        software_status_snapshot=lambda: {
+            "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+            "FLDigi": {"state": "warn", "tooltip": "FLDigi not reachable"},
+            "JS8Call_API": {"state": "error", "tooltip": "JS8 TCP failed"},
+        }
+    )
+    monkeypatch.setattr(
+        MainWindow,
+        "_station_command_health_items",
+        lambda self, profile: [
+            ("FLRig", "FLRig"),
+            ("FLDigi", "FLDigi"),
+            ("JS8Call_API", "JS8"),
+        ],
+    )
+
+    try:
+        MainWindow._refresh_station_command_health(window, {"id": 1}, 1)
+        app.processEvents()
+
+        labels = {key: label.text() for key, label in window.station_command_health_text_labels.items()}
+        assert labels == {
+            "__summary__": "Unhealthy",
+            "FLDigi": "FLDigi",
+            "JS8Call_API": "JS8",
+        }
+    finally:
+        window.station_command_health_widget.deleteLater()
         app.processEvents()
 
 
@@ -1356,6 +1474,15 @@ def test_phase7_sidebar_schedule_actions_removed_from_ledge() -> None:
     assert "self._hide_sidebar_schedule_controls()" in source
     assert 'QPushButton("Suspend", self.scheduler_status_container)' in source
     assert 'QPushButton("Resume Schedule", self.scheduler_status_container)' in source
+
+
+def test_phase7_controlfreq_body_operating_status_is_retired() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.status_group = QGroupBox("Operating Status")' in source
+    assert "updated_row.addWidget(self.status_group)" not in source
+    assert "the global Station Command Bar owns status visibility" in source
+    assert "self.status_group.setVisible(True)" not in source
 
 
 def test_phase7_dropdown_checklist_summarizes_multi_select(monkeypatch) -> None:
@@ -1884,10 +2011,13 @@ def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
     assert "logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
     assert "self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
     assert "self.operating_profiles_section_group = operating_group" in source
-    assert 'self._make_collapsible_group(\n            "Frequency Plans",' in source
+    assert 'self._make_collapsible_group(\n            "Operating Models",' in source
     assert "fit_content_in_stack=True" in source
     assert "self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())" in source
-    assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" in source
+    assert "self.sections_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)" in source
+    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)" in source
+    assert "group.setMaximumHeight(target_height)" in source
+    assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" not in source
     assert 'self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))' in source
     assert "self.trusted_hash_table.setMaximumHeight(240)" in source
     assert "self.gpg_keys_table.setMaximumHeight(300)" in source

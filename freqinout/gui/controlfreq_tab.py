@@ -350,7 +350,7 @@ class ControlFreqTab(QWidget):
         self.status_layout = QHBoxLayout()
         self.status_group.setLayout(self.status_layout)
         self._rebuild_status_indicators()
-        updated_row.addWidget(self.status_group)
+        self.status_group.setVisible(False)
         right_status_col = QVBoxLayout()
         right_status_col.setContentsMargins(0, 0, 0, 0)
         right_status_col.setSpacing(6)
@@ -858,8 +858,8 @@ class ControlFreqTab(QWidget):
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
         except Exception:
             pass
-        # Legacy compatibility only; visibility is controlled by the View bar.
-        self.status_group.setVisible(True)
+        # Retired from the ControlFreq body; the global Station Command Bar owns status visibility.
+        self.status_group.setVisible(False)
         self.inbox_box.setVisible(True)
         self._sync_view_controls_from_state()
         self._apply_view_state(animated=False)
@@ -1512,7 +1512,7 @@ class ControlFreqTab(QWidget):
         self._status_text_labels = {}
         theme = self._theme()
         visible_items = self._current_visible_status_items()
-        self.status_group.setVisible(bool(visible_items))
+        self.status_group.setVisible(False)
         for key, label in visible_items:
             led = QLabel()
             led.setFixedSize(14, 14)
@@ -2651,8 +2651,6 @@ class ControlFreqTab(QWidget):
         return rows_out
 
     def _refresh_activity(self) -> None:
-        if not bool(self._view_cards.get("activity", True)):
-            return
         window_minutes = int(self.activity_window_combo.currentData() or 120)
         search = (self.search_edit.text() or "").strip().upper()
         group_filter = self.group_combo.currentData() or ""
@@ -3579,8 +3577,7 @@ class ControlFreqTab(QWidget):
         try:
             sched = getattr(self.window(), "scheduler", None)
             if sched and hasattr(sched, "resume_schedule"):
-                resume_schedule_hold(self.window(), self.settings)
-                resumed = True
+                resumed = bool(resume_schedule_hold(self.window(), self.settings))
             elif sched:
                 sched.apply_current_entry(
                     force=True,

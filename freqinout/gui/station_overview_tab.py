@@ -447,7 +447,7 @@ class StationOverviewTab(QWidget):
             f"Control: {snapshot.endpoint_summary or snapshot.control_backend.upper()} | "
             f"Deployment: {snapshot.deployment_mode.upper()} | "
             f"PTT Group: {snapshot.ptt_group or 'None'} | "
-            f"Assigned Plan: {snapshot.assigned_operating_profile_name or 'Unassigned'} | "
+            f"Operating Model: {snapshot.assigned_operating_profile_name or 'Unassigned'} | "
             f"Assignment: {snapshot.assignment_state.replace('_', ' ').title() or 'Unassigned'}"
         )
         meta.setWordWrap(True)

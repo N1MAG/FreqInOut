@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -11,34 +12,52 @@ from freqinout.core.settings_manager import SettingsManager
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def test_settings_source_exposes_radio_first_schedule_assignment_controls() -> None:
+def _create_primary_radio(store: MultiRadioStore, name: str = "Primary Radio") -> dict:
+    return store.save_device_profile(
+        {
+            "name": name,
+            "enabled": 1,
+            "runtime_active": 1,
+            "runtime_primary": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+        }
+    )
+
+
+def test_settings_source_exposes_radio_first_operating_model_assignment_controls() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 
-    assert "Assigned Plan" in source
-    assert 'QPushButton("Assign Plan...")' in source
-    assert 'QPushButton("Restore Plan")' in source
-    assert "Frequency Plans" in source
-    assert "Assigned Plans" in source
-    assert "Restore Default Plan" in source
-    assert "Assign a frequency plan if this radio should participate in Station Default schedule workflows." in source
+    assert "Operating Model Assignment" in source
+    assert 'QPushButton("Assign Model")' in source
+    assert 'QPushButton("Restore Model")' in source
+    assert 'QPushButton("Assign Schedule")' in source
+    assert 'self.schedule_assignments_table = QTableWidget(0, 8)' in source
+    assert "def _save_schedule_assignment_editor(self) -> None:" in source
+    assert 'self.schedule_assignment_state_combo.addItem("Inactive", "inactive")' not in source
+    assert "No schedule assignments were changed." in source
+    assert "self.multi_radio_store.set_assigned_plan(" in source
+    assert "Operating Models" in source
+    assert "Schedule Assignment" in source
+    assert "Restore Default Model" in source
+    assert "Assign an operating model if this radio should participate in Station Default workflows." in source
     assert "Schedule Profiles" not in source
-    assert "Radio Schedule Assignments" not in source
 
 
-def test_phase5_temporary_swap_uses_assigned_plan_language() -> None:
+def test_phase5_temporary_swap_uses_assigned_model_language() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 
-    assert 'QPushButton("Temporary Plan Swap...")' in source
-    assert "Temporary Plan Swap" in source
-    assert "Allow assigned plan swap coordination" in source
-    assert "Primary Assigned Plan:" in source
-    assert "Target Assigned Plan:" in source
-    assert "Use target radio assigned plan (Recommended)" in source
-    assert "Carry current Station Default assigned plan" in source
-    assert "Current Station Default Assigned Plan" in source
-    assert "Unable to start the temporary plan swap." in source
-    assert "Unable to restore the temporary plan swap." in source
-    assert "No temporary plan swap is currently active." in source
+    assert 'QPushButton("Temporary Model Swap...")' in source
+    assert "Temporary Model Swap" in source
+    assert "Allow assignment swap coordination" in source
+    assert "Primary Assigned Model:" in source
+    assert "Target Assigned Model:" in source
+    assert "Use target radio assigned model (Recommended)" in source
+    assert "Carry current Station Default assigned model" in source
+    assert "Current Station Default Assigned Model" in source
+    assert "Unable to start the temporary model swap." in source
+    assert "Unable to restore the temporary model swap." in source
+    assert "No temporary model swap is currently active." in source
     assert "Temporary Profile Swap" not in source
     assert "Temporary Swap" not in source
     assert "Primary Profile:" not in source
@@ -57,12 +76,12 @@ def test_phase5_runtime_surfaces_use_frequency_plan_language() -> None:
 
     assert "def _refresh_running_status_compat(self, force: bool = False) -> None:" in settings_source
     assert "except TypeError:" in settings_source
-    assert "Assigned Plan:" in overview_source
+    assert "Operating Model:" in overview_source
     assert "Operating Profile:" not in overview_source
-    assert "Launch Control is disabled by the primary frequency plan." in main_source
-    assert 'operating_txt = operating_name or "assigned frequency plan"' in main_source
+    assert "Launch Control is disabled by the primary operating model." in main_source
+    assert 'operating_txt = operating_name or "assigned operating model"' in main_source
     assert "Launch Control is disabled by the primary operating profile." not in main_source
-    assert 'operating_txt = operating_name or "assigned operating profile"' not in main_source
+    assert 'operating_txt = operating_name or "assigned frequency plan"' not in main_source
 
 
 def test_phase5_observer_plan_assignment_source_guardrails() -> None:
@@ -71,10 +90,12 @@ def test_phase5_observer_plan_assignment_source_guardrails() -> None:
 
     assert "receive_only INTEGER NOT NULL DEFAULT 0" in store_source
     assert "def _validate_assignment_plan_compatibility" in store_source
-    assert "Observer / SDR radios can only be assigned receive-only frequency plans." in store_source
-    assert 'QCheckBox("Receive-only plan (observer / SDR compatible)")' in settings_source
+    assert "Observer / SDR radios can only be assigned receive-only operating models." in store_source
+    assert 'QCheckBox("Receive-only model (observer / SDR compatible)")' in settings_source
+    assert 'QCheckBox("Receive-only plan (observer / SDR compatible)")' not in settings_source
+    assert 'QCheckBox("Allow assigned plan swap coordination")' not in settings_source
     assert '"Receive-only"' in settings_source
-    assert "Observer / SDR radios can only be assigned receive-only frequency plans." in settings_source
+    assert "Observer / SDR radios can only be assigned receive-only operating models." in settings_source
 
 
 def test_phase5_frequency_plan_source_provenance_source_wiring() -> None:
@@ -219,17 +240,24 @@ def test_sop_builder_active_widget_renders_operating_plan_inputs_summary(monkeyp
     app = QApplication.instance() or QApplication([])
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    plan = store.save_operating_profile(
+    primary_radio = _create_primary_radio(store, "SOP Primary")
+    model = store.save_operating_profile(
+        {
+            "name": "RX Watch SOP Model",
+            "scheduler_enabled": 0,
+            "receive_only": 1,
+        }
+    )
+    plan = store.save_frequency_plan(
         {
             "name": "RX Watch SOP Plan",
-            "scheduler_enabled": 0,
             "receive_only": 1,
             "source_refs": ["src_hf", "src_net"],
             "schedule_refs": ["hf:mon:1900"],
         }
     )
-    primary_radio = next(row for row in store.list_device_profiles() if int(row.get("runtime_primary", 0) or 0) == 1)
-    store.set_device_operating_profile(int(primary_radio["id"]), int(plan["id"]))
+    store.set_device_operating_profile(int(primary_radio["id"]), int(model["id"]))
+    store.set_assigned_plan(int(primary_radio["id"]), int(plan["id"]))
     store.set_device_profile_runtime_active(int(primary_radio["id"]), True)
 
     tab = SOPTab(plan_context_service=PlanContextService(store))
@@ -311,7 +339,7 @@ def test_multi_radio_store_round_trips_schedule_assignment_for_radio(monkeypatch
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
 
-    primary_radio = next(row for row in store.list_device_profiles() if int(row.get("runtime_primary", 0) or 0) == 1)
+    primary_radio = _create_primary_radio(store)
     created_profile = store.save_operating_profile(
         {
             "name": "Night Net Schedule",
@@ -379,6 +407,603 @@ def test_multi_radio_store_round_trips_frequency_plan_provenance_fields(monkeypa
     assert loaded["notes"] == "Reviewed by operator."
 
 
+def test_multi_radio_store_round_trips_durable_schedule_assignment_foundation(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = _create_primary_radio(store, "Schedule Radio")
+    plan = store.save_frequency_plan(
+        {
+            "name": "Night Net Schedule",
+            "description": "Built schedule that can be assigned independently from an Operating Model.",
+            "source_refs": ["freqplanner:overview"],
+            "schedule_refs": ["hf_nets:night"],
+            "frequency_refs": ["40m:7.078"],
+        }
+    )
+
+    assigned = store.set_assigned_plan(
+        int(radio["id"]),
+        int(plan["id"]),
+        reason="Schedule assignment foundation coverage",
+    )
+
+    assert int(assigned["device_profile_id"]) == int(radio["id"])
+    assert int(assigned["frequency_plan_id"]) == int(plan["id"])
+    assert str(assigned["assignment_state"]) == "active"
+
+    effective = store.get_effective_assigned_plan_for_device(int(radio["id"]))
+    assert effective is not None
+    assert int(effective["frequency_plan_id"]) == int(plan["id"])
+
+    validation = json.loads(str(effective["validation_status_json"]))
+    assert validation["rf_guard_validation"] == "enforced"
+    assert validation["state"] == "ok"
+
+
+def test_multi_radio_store_requires_receive_only_schedule_plan_for_observer_radio(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    observer_radio = store.save_device_profile(
+        {
+            "name": "RX Observer SDR",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "observer",
+            "control_backend": "manual",
+        }
+    )
+    tx_plan = store.save_frequency_plan({"name": "Transmit Schedule", "receive_only": 0})
+    rx_plan = store.save_frequency_plan({"name": "Receive-only Schedule", "receive_only": 1})
+
+    with pytest.raises(ValueError, match="receive-only schedule plans"):
+        store.set_assigned_plan(int(observer_radio["id"]), int(tx_plan["id"]))
+
+    assigned = store.set_assigned_plan(int(observer_radio["id"]), int(rx_plan["id"]))
+
+    assert int(assigned["device_profile_id"]) == int(observer_radio["id"])
+    assert int(assigned["frequency_plan_id"]) == int(rx_plan["id"])
+
+
+def test_multi_radio_store_blocks_receive_only_schedule_plan_edit_when_assigned_to_observer(
+    monkeypatch, tmp_path
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    observer_radio = store.save_device_profile(
+        {
+            "name": "RX Watch",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "observer",
+            "control_backend": "manual",
+        }
+    )
+    rx_plan = store.save_frequency_plan({"name": "Observer Watch Schedule", "receive_only": 1})
+    store.set_assigned_plan(int(observer_radio["id"]), int(rx_plan["id"]))
+
+    with pytest.raises(ValueError, match="keep the plan receive-only"):
+        store.save_frequency_plan({"id": int(rx_plan["id"]), "name": "Observer Watch Schedule", "receive_only": 0})
+
+    saved = store.get_frequency_plan(int(rx_plan["id"]))
+    assert saved is not None
+    assert int(saved["receive_only"]) == 1
+
+
+def test_schedule_assignment_warns_for_unsupported_antenna_band(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "Band Limited Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["20M"],
+            "antenna_band_guard_mode": "warn",
+        }
+    )
+    plan = store.save_frequency_plan({"name": "Forty Meter Schedule", "frequency_refs": ["40M:7.078"]})
+
+    assigned = store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+    validation = json.loads(str(assigned["validation_status_json"]))
+
+    assert validation["state"] == "warning"
+    assert validation["rf_guard_validation"] == "enforced"
+    assert "40M" in validation["plan_bands"]
+    assert "20M" in validation["supported_bands"]
+    assert "does not include 40M" in validation["warnings"][0]
+
+
+def test_schedule_assignment_blocks_unsupported_antenna_band(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "Blocked Band Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["20M"],
+            "antenna_band_guard_mode": "block",
+        }
+    )
+    plan = store.save_frequency_plan({"name": "Forty Meter Schedule", "frequency_refs": ["40M:7.078"]})
+
+    with pytest.raises(ValueError, match="does not include 40M"):
+        store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(radio["id"])) is None
+    with store.connect() as conn:
+        events = conn.execute("SELECT event_type, decision, band FROM rf_guard_events").fetchall()
+    assert [(row[0], row[1], row[2]) for row in events] == [("antenna_band_support", "blocked", "40M")]
+
+
+def test_schedule_assignment_warns_for_prevent_band_overlap(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Left Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Right Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    left_plan = store.save_frequency_plan({"name": "Left 40M", "frequency_refs": ["40M:7.078"]})
+    right_plan = store.save_frequency_plan({"name": "Right 40M", "frequency_refs": ["40M:7.110"]})
+
+    store.set_assigned_plan(int(left["id"]), int(left_plan["id"]))
+    assigned = store.set_assigned_plan(int(right["id"]), int(right_plan["id"]))
+    validation = json.loads(str(assigned["validation_status_json"]))
+
+    assert validation["state"] == "warning"
+    assert any("Prevent Band Overlap group NORTH MAST" in warning for warning in validation["warnings"])
+
+
+def test_schedule_assignment_blocks_prevent_band_overlap(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Left Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Right Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    left_plan = store.save_frequency_plan({"name": "Left 40M", "frequency_refs": ["40M:7.078"]})
+    right_plan = store.save_frequency_plan({"name": "Right 40M", "frequency_refs": ["40M:7.110"]})
+
+    store.set_assigned_plan(int(left["id"]), int(left_plan["id"]))
+    with pytest.raises(ValueError, match="would both be assigned on 40M"):
+        store.set_assigned_plan(int(right["id"]), int(right_plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(right["id"])) is None
+
+
+def test_schedule_assignment_blocks_prevent_band_overlap_when_peer_requires_block(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    protected = store.save_device_profile(
+        {
+            "name": "Protected Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    candidate = store.save_device_profile(
+        {
+            "name": "Candidate Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    protected_plan = store.save_frequency_plan({"name": "Protected 40M", "frequency_refs": ["40M:7.078"]})
+    candidate_plan = store.save_frequency_plan({"name": "Candidate 40M", "frequency_refs": ["40M:7.110"]})
+
+    store.set_assigned_plan(int(protected["id"]), int(protected_plan["id"]))
+    with pytest.raises(ValueError, match="would both be assigned on 40M"):
+        store.set_assigned_plan(int(candidate["id"]), int(candidate_plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(candidate["id"])) is None
+    with store.connect() as conn:
+        events = conn.execute(
+            """
+            SELECT event_type, guard_mode, decision, band
+              FROM rf_guard_events
+             WHERE event_type='prevent_band_overlap'
+            """
+        ).fetchall()
+    assert [(row[0], row[1], row[2], row[3]) for row in events] == [
+        ("prevent_band_overlap", "block", "blocked", "40M")
+    ]
+
+
+def test_schedule_assignment_blocks_advanced_close_frequency_guard(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    protected = store.save_device_profile(
+        {
+            "name": "Protected Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    candidate = store.save_device_profile(
+        {
+            "name": "Candidate SDR",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "warn",
+            "advanced_frequency_guard_window_hz": 1500,
+        }
+    )
+    protected_plan = store.save_frequency_plan({"name": "Protected 40M", "frequency_refs": ["40M:7.078"]})
+    candidate_plan = store.save_frequency_plan({"name": "Candidate 40M", "frequency_refs": ["40M:7.0795"]})
+
+    store.set_assigned_plan(int(protected["id"]), int(protected_plan["id"]))
+    with pytest.raises(ValueError, match="Advanced Guard group RX FRONTEND"):
+        store.set_assigned_plan(int(candidate["id"]), int(candidate_plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(candidate["id"])) is None
+    with store.connect() as conn:
+        events = conn.execute(
+            """
+            SELECT event_type, guard_mode, decision, band, frequency
+              FROM rf_guard_events
+             WHERE event_type='advanced_frequency_guard'
+            """
+        ).fetchall()
+    assert [(row[0], row[1], row[2], row[3], row[4]) for row in events] == [
+        ("advanced_frequency_guard", "block", "blocked", "40M", "7079500")
+    ]
+
+
+def test_schedule_assignment_allows_advanced_guard_when_schedule_has_times_without_frequency(
+    monkeypatch, tmp_path
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Left Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Right Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    left_plan = store.save_frequency_plan(
+        {"name": "Timed 40M Left", "schedule_refs": ["day=MON band=40M start=14:00 end=15:00"]}
+    )
+    right_plan = store.save_frequency_plan(
+        {"name": "Timed 40M Right", "schedule_refs": ["day=MON band=40M start=14:30 end=15:30"]}
+    )
+
+    store.set_assigned_plan(int(left["id"]), int(left_plan["id"]))
+    assigned = store.set_assigned_plan(int(right["id"]), int(right_plan["id"]))
+    validation = json.loads(str(assigned["validation_status_json"]))
+
+    assert validation["state"] == "ok"
+    with store.connect() as conn:
+        events = conn.execute("SELECT event_type FROM rf_guard_events").fetchall()
+    assert [row[0] for row in events] == []
+
+
+def test_schedule_assignment_allows_advanced_close_frequency_guard_when_times_do_not_overlap(
+    monkeypatch, tmp_path
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Morning Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Afternoon Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    morning_plan = store.save_frequency_plan(
+        {
+            "name": "Morning Close Frequency",
+            "frequency_refs": ["40M:7.078"],
+            "schedule_refs": ["day=MON band=40M start=14:00 end=15:00"],
+        }
+    )
+    afternoon_plan = store.save_frequency_plan(
+        {
+            "name": "Afternoon Close Frequency",
+            "frequency_refs": ["40M:7.079"],
+            "schedule_refs": ["day=MON band=40M start=16:00 end=17:00"],
+        }
+    )
+
+    store.set_assigned_plan(int(left["id"]), int(morning_plan["id"]))
+    assigned = store.set_assigned_plan(int(right["id"]), int(afternoon_plan["id"]))
+    validation = json.loads(str(assigned["validation_status_json"]))
+
+    assert validation["state"] == "ok"
+    assert validation["blocked"] == []
+
+
+def test_schedule_assignment_blocks_advanced_close_frequency_guard_when_times_overlap(
+    monkeypatch, tmp_path
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Morning Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Second Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "warn",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    first_plan = store.save_frequency_plan(
+        {
+            "name": "First Close Frequency",
+            "frequency_refs": ["40M:7.078"],
+            "schedule_refs": ["day=MON band=40M start=14:00 end=15:00"],
+        }
+    )
+    second_plan = store.save_frequency_plan(
+        {
+            "name": "Second Close Frequency",
+            "frequency_refs": ["40M:7.079"],
+            "schedule_refs": ["day=MON band=40M start=14:30 end=15:30"],
+        }
+    )
+
+    store.set_assigned_plan(int(left["id"]), int(first_plan["id"]))
+    with pytest.raises(ValueError, match="Advanced Guard group RX FRONTEND"):
+        store.set_assigned_plan(int(right["id"]), int(second_plan["id"]))
+
+
+def test_schedule_assignment_allows_non_overlapping_same_band_schedule_windows(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    morning = store.save_device_profile(
+        {
+            "name": "Morning Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    afternoon = store.save_device_profile(
+        {
+            "name": "Afternoon Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    morning_plan = store.save_frequency_plan(
+        {"name": "Morning 40M", "schedule_refs": ["day=MON band=40M start=14:00 end=15:00"]}
+    )
+    afternoon_plan = store.save_frequency_plan(
+        {"name": "Afternoon 40M", "schedule_refs": ["day=MON band=40M start=16:00 end=17:00"]}
+    )
+
+    store.set_assigned_plan(int(morning["id"]), int(morning_plan["id"]))
+    assigned = store.set_assigned_plan(int(afternoon["id"]), int(afternoon_plan["id"]))
+    validation = json.loads(str(assigned["validation_status_json"]))
+
+    assert validation["state"] == "ok"
+    assert validation["blocked"] == []
+    assert validation["warnings"] == []
+
+
+def test_schedule_assignment_blocks_overlapping_same_band_schedule_windows(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Left Window Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Right Window Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    left_plan = store.save_frequency_plan(
+        {"name": "Left 40M Window", "schedule_refs": ["day=MON band=40M start=14:00 end=15:30"]}
+    )
+    right_plan = store.save_frequency_plan(
+        {"name": "Right 40M Window", "schedule_refs": ["day=MON band=40M start=15:00 end=16:00"]}
+    )
+
+    store.set_assigned_plan(int(left["id"]), int(left_plan["id"]))
+    with pytest.raises(ValueError, match="would both be assigned on 40M"):
+        store.set_assigned_plan(int(right["id"]), int(right_plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(right["id"])) is None
+
+
+def test_schedule_assignment_keeps_conservative_guard_for_mixed_window_and_broad_refs(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Mixed Left Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Mixed Right Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    left_plan = store.save_frequency_plan(
+        {
+            "name": "Mixed Left",
+            "schedule_refs": ["day=MON band=20M start=14:00 end=15:00"],
+            "frequency_refs": ["40M:7.078"],
+        }
+    )
+    right_plan = store.save_frequency_plan(
+        {
+            "name": "Mixed Right",
+            "schedule_refs": ["day=MON band=80M start=14:00 end=15:00"],
+            "frequency_refs": ["40M:7.110"],
+        }
+    )
+
+    store.set_assigned_plan(int(left["id"]), int(left_plan["id"]))
+    with pytest.raises(ValueError, match="would both be assigned on 40M"):
+        store.set_assigned_plan(int(right["id"]), int(right_plan["id"]))
+
+    assert store.get_effective_assigned_plan_for_device(int(right["id"])) is None
+
+
 def test_multi_radio_store_requires_receive_only_plan_for_observer_radio(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -415,7 +1040,7 @@ def test_multi_radio_store_requires_receive_only_plan_for_observer_radio(monkeyp
         }
     )
 
-    with pytest.raises(ValueError, match="receive-only frequency plans"):
+    with pytest.raises(ValueError, match="receive-only operating models"):
         store.set_device_operating_profile(int(observer_radio["id"]), int(tx_plan["id"]))
 
     assigned = store.set_device_operating_profile(int(observer_radio["id"]), int(rx_plan["id"]))
@@ -451,7 +1076,7 @@ def test_multi_radio_store_blocks_receive_only_plan_edit_when_assigned_to_observ
     )
     store.set_device_operating_profile(int(observer_radio["id"]), int(rx_plan["id"]))
 
-    with pytest.raises(ValueError, match="keep the plan receive-only"):
+    with pytest.raises(ValueError, match="keep the model receive-only"):
         store.save_operating_profile({"id": int(rx_plan["id"]), "name": "Observer Watch Plan", "receive_only": 0})
 
     saved = store.get_operating_profile(int(rx_plan["id"]))
@@ -466,6 +1091,7 @@ def test_multi_radio_store_blocks_observer_class_edit_with_transmit_plan(monkeyp
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
 
+    _create_primary_radio(store)
     radio = store.save_device_profile(
         {
             "name": "Secondary TX",
@@ -485,7 +1111,7 @@ def test_multi_radio_store_blocks_observer_class_edit_with_transmit_plan(monkeyp
     )
     store.set_device_operating_profile(int(radio["id"]), int(tx_plan["id"]))
 
-    with pytest.raises(ValueError, match="receive-only frequency plans"):
+    with pytest.raises(ValueError, match="receive-only operating models"):
         store.save_device_profile({"id": int(radio["id"]), "name": "Secondary TX", "device_class": "observer"})
 
     saved = store.get_device_profile(int(radio["id"]))
@@ -500,6 +1126,7 @@ def test_multi_radio_store_does_not_auto_assign_default_plan_to_unassigned_obser
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
 
+    _create_primary_radio(store)
     observer_radio = store.save_device_profile(
         {
             "name": "Unassigned RX Watch",
@@ -511,10 +1138,32 @@ def test_multi_radio_store_does_not_auto_assign_default_plan_to_unassigned_obser
         }
     )
 
-    with pytest.raises(ValueError, match="receive-only frequency plans"):
+    with pytest.raises(ValueError, match="receive-only operating models"):
         store.set_device_profile_runtime_active(int(observer_radio["id"]), True)
 
     assert store.get_effective_assignment_for_device(int(observer_radio["id"])) is None
     refreshed = store.get_device_profile(int(observer_radio["id"]))
     assert refreshed is not None
     assert int(refreshed["runtime_active"]) == 0
+
+
+def test_multi_radio_store_rejects_blank_slate_active_observer_without_persisting(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    with pytest.raises(ValueError, match="compatibility runtime device"):
+        store.save_device_profile(
+            {
+                "name": "First SDR",
+                "enabled": 1,
+                "runtime_active": 1,
+                "runtime_primary": 1,
+                "device_class": "observer",
+                "control_backend": "manual",
+            }
+        )
+
+    assert store.list_device_profiles() == []

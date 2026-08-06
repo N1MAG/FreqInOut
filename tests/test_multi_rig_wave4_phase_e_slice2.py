@@ -81,6 +81,142 @@ def test_store_derives_rf_conflict_policies_from_shared_resources(monkeypatch, t
     assert store.list_station_coordination_policies("rf_conflict") == []
 
 
+def test_store_derives_blocking_band_overlap_policy_for_observer(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    tx = store.save_device_profile(
+        {
+            "name": "TX-A",
+            "control_backend": "flrig",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    observer = store.save_device_profile(
+        {
+            "name": "SDR-A",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "band_overlap_guard_group": "north mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+
+    policies = store.list_station_coordination_policies("rf_conflict")
+
+    assert len(policies) == 1
+    policy = policies[0]
+    assert int(policy["source_device_id"]) == min(int(tx["id"]), int(observer["id"]))
+    assert int(policy["target_device_id"]) == max(int(tx["id"]), int(observer["id"]))
+    assert policy["trigger"]["band_overlap_groups"] == ["NORTH MAST"]
+    assert policy["safety_mode"] == "block"
+    assert policy["action"]["guard_mode"] == "block"
+
+
+def test_store_does_not_create_self_rf_policy_for_radio_with_both_overlap_guards(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    store.save_device_profile(
+        {
+            "name": "Protected Radio",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+
+    assert store.list_station_coordination_policies("rf_conflict") == []
+
+
+def test_store_derives_one_rf_policy_for_two_radios_with_both_overlap_guards(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    left = store.save_device_profile(
+        {
+            "name": "Left Radio",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    right = store.save_device_profile(
+        {
+            "name": "Right Radio",
+            "control_backend": "manual",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "warn",
+            "advanced_frequency_guard_window_hz": 1500,
+        }
+    )
+
+    policies = store.list_station_coordination_policies("rf_conflict")
+
+    assert len(policies) == 1
+    policy = policies[0]
+    assert int(policy["source_device_id"]) == min(int(left["id"]), int(right["id"]))
+    assert int(policy["target_device_id"]) == max(int(left["id"]), int(right["id"]))
+    assert int(policy["source_device_id"]) != int(policy["target_device_id"])
+    assert policy["trigger"]["band_overlap_groups"] == ["NORTH MAST"]
+    assert policy["trigger"]["advanced_frequency_groups"] == ["RX FRONTEND"]
+    assert policy["trigger"]["advanced_frequency_windows_hz"] == {
+        str(left["id"]): 3000,
+        str(right["id"]): 1500,
+    }
+    assert policy["safety_mode"] == "block"
+
+
+def test_store_derives_warn_band_overlap_policy_when_both_radios_warn(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    first = store.save_device_profile(
+        {
+            "name": "TX-A",
+            "control_backend": "flrig",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    second = store.save_device_profile(
+        {
+            "name": "SDR-A",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "band_overlap_guard_group": "north mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+
+    policies = store.list_station_coordination_policies("rf_conflict")
+
+    assert len(policies) == 1
+    policy = policies[0]
+    assert int(policy["source_device_id"]) == min(int(first["id"]), int(second["id"]))
+    assert int(policy["target_device_id"]) == max(int(first["id"]), int(second["id"]))
+    assert policy["trigger"]["band_overlap_groups"] == ["NORTH MAST"]
+    assert policy["safety_mode"] == "warn"
+    assert policy["action"]["guard_mode"] == "warn"
+
+
 def test_station_runtime_manager_reports_rf_conflict_context(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -114,7 +250,7 @@ def test_station_runtime_manager_reports_rf_conflict_context(monkeypatch, tmp_pa
     default_primary = next(
         row for row in store.list_device_profiles() if str(row.get("system_key", "") or "") == "default_device"
     )
-    if int(default_primary.get("runtime_active", 0) or 0) == 1:
+    if int(default_primary.get("id", 0) or 0) != int(primary["id"]) and int(default_primary.get("runtime_active", 0) or 0) == 1:
         store.set_device_profile_runtime_active(int(default_primary["id"]), False)
 
     monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
@@ -148,6 +284,151 @@ def test_station_runtime_manager_reports_rf_conflict_context(monkeypatch, tmp_pa
     assert conflict.same_frequency is False
     assert conflict.shared_antenna_groups == ["ANT-1"]
     assert "RF conflict" in conflict.summary
+
+
+def test_station_runtime_manager_marks_band_overlap_conflict_blocked(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    receive_only = store.save_operating_profile({"name": "Observer Model", "receive_only": 1})
+    secondary = store.save_device_profile(
+        {
+            "name": "Observer SDR",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_device_operating_profile(int(secondary["id"]), int(receive_only["id"]))
+    store.set_device_profile_runtime_active(int(secondary["id"]), True)
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: 7_074_000 if int(self.profile.get("id", 0) or 0) == int(secondary["id"]) else 14_070_000,
+    )
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(target_band="40M", target_frequency_hz=7_078_000, source="HF", force=True)
+
+    assert conflict is not None
+    assert conflict.blocked is True
+    assert conflict.guard_mode == "block"
+    assert conflict.shared_band_overlap_groups == ["NORTH MAST"]
+    assert "band-overlap guard NORTH MAST" in conflict.summary
+
+
+def test_station_runtime_manager_preserves_warn_band_overlap_conflict(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    receive_only = store.save_operating_profile({"name": "Observer Model", "receive_only": 1})
+    secondary = store.save_device_profile(
+        {
+            "name": "Observer SDR",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_device_operating_profile(int(secondary["id"]), int(receive_only["id"]))
+    store.set_device_profile_runtime_active(int(secondary["id"]), True)
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: 7_074_000 if int(self.profile.get("id", 0) or 0) == int(secondary["id"]) else 14_070_000,
+    )
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(target_band="40M", target_frequency_hz=7_078_000, source="HF", force=True)
+
+    assert conflict is not None
+    assert conflict.blocked is False
+    assert conflict.guard_mode == "warn"
+    assert conflict.shared_band_overlap_groups == ["NORTH MAST"]
+
+
+def test_station_runtime_manager_blocks_advanced_close_frequency_guard(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
+        }
+    )
+    receive_only = store.save_operating_profile({"name": "Observer Model", "receive_only": 1})
+    secondary = store.save_device_profile(
+        {
+            "name": "Observer SDR",
+            "control_backend": "manual",
+            "device_class": "observer",
+            "advanced_frequency_guard_group": "RX Frontend",
+            "advanced_frequency_guard_mode": "warn",
+            "advanced_frequency_guard_window_hz": 1500,
+        }
+    )
+    store.set_device_operating_profile(int(secondary["id"]), int(receive_only["id"]))
+    store.set_device_profile_runtime_active(int(secondary["id"]), True)
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: 7_078_000 if int(self.profile.get("id", 0) or 0) == int(secondary["id"]) else 14_070_000,
+    )
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(target_band="40M", target_frequency_hz=7_079_500, source="QSY", force=True)
+
+    assert conflict is not None
+    assert conflict.blocked is True
+    assert conflict.guard_mode == "block"
+    assert conflict.shared_advanced_frequency_groups == ["RX FRONTEND"]
+    assert conflict.advanced_frequency_window_hz == 3000
+    assert conflict.frequency_delta_hz == 1500
+    assert "within 1500 Hz" in conflict.summary
+    assert "advanced guard RX FRONTEND within 3000 Hz" in conflict.detail
 
 
 def test_settings_tab_persists_rf_resource_groups(monkeypatch, tmp_path):

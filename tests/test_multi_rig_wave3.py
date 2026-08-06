@@ -1098,9 +1098,473 @@ def test_qsy_helper_rf_conflict_cancel_publishes_blocked_override_feedback(monke
     assert len(events) == 1
     assert events[0].action_type == "qsy_override"
     assert events[0].status == "blocked"
-    assert events[0].summary == "QSY cancelled: RF conflict warning."
-    assert events[0].detail == "Target 7.268 MHz overlaps Remote Rig."
+    assert events[0].summary == "QSY cancelled: RF Safety Guard warning."
+    assert events[0].detail == "RF Safety Guard mode: Require confirmation. Target 7.268 MHz overlaps Remote Rig."
     assert events[0].source_surface == "qsy_helper_conflict"
+
+
+def test_qsy_helper_rf_safety_block_stops_without_override_prompt(monkeypatch) -> None:
+    service = ActionFeedbackService()
+
+    class _Scheduler:
+        def evaluate_coordination_conflict(self, entry, source="QSY"):
+            return {
+                "warning": True,
+                "blocked": True,
+                "summary": "RF Safety Guard: DX10 antenna is not configured for 40M.",
+                "detail": "Antenna Supports These Bands: 20M. Target band: 40M.",
+            }
+
+        def get_status_summary(self):
+            return {"shared_ptt_blocked": False}
+
+        def apply_manual_qsy(self, entry, ignore_coordination_prompt=False):
+            raise AssertionError("Blocked QSY should not proceed")
+
+    class _FailIfShownMessageBox:
+        def __init__(self, parent=None):
+            raise AssertionError("Blocked QSY should not show an override prompt")
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FailIfShownMessageBox)
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268, "band": "40M", "mode": "LSB"})
+
+    events = service.recent(scope="radio")
+    assert result is False
+    assert len(events) == 1
+    assert events[0].action_type == "qsy"
+    assert events[0].status == "blocked"
+    assert events[0].summary == "RF Safety Guard: DX10 antenna is not configured for 40M."
+    assert events[0].detail == "Antenna Supports These Bands: 20M. Target band: 40M."
+
+
+def test_qsy_helper_rf_safety_warn_only_continues_without_override_prompt(monkeypatch) -> None:
+    service = ActionFeedbackService()
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.apply_calls = []
+
+        def evaluate_coordination_conflict(self, entry, source="QSY"):
+            return {
+                "warning": True,
+                "guard_mode": "warn",
+                "summary": "RF Safety Guard: DX10 may overlap Remote Rig.",
+                "detail": "Both radios are using Prevent Band Overlap group NORTH MAST.",
+            }
+
+        def get_status_summary(self):
+            return {"shared_ptt_blocked": False}
+
+        def apply_manual_qsy(self, entry, ignore_coordination_prompt=False):
+            self.apply_calls.append(bool(ignore_coordination_prompt))
+
+    class _FailIfShownMessageBox:
+        def __init__(self, parent=None):
+            raise AssertionError("Warn-only QSY should not show an override prompt")
+
+    scheduler = _Scheduler()
+    window = types.SimpleNamespace(
+        scheduler=scheduler,
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FailIfShownMessageBox)
+
+    result = qsy_helper.perform_qsy(window, {"freq": 7.268, "band": "40M", "mode": "LSB"})
+
+    events = service.recent(scope="radio")
+    assert result is True
+    assert scheduler.apply_calls == [True]
+    assert len(events) == 1
+    assert events[0].action_type == "qsy"
+    assert events[0].status == "partial"
+    assert events[0].summary == "RF Safety Guard: DX10 may overlap Remote Rig."
+    assert events[0].source_surface == "qsy_helper_warning"
+
+
+def test_resume_schedule_hold_rf_safety_block_keeps_hold_active(monkeypatch) -> None:
+    qsy_helper._RESUME_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        def set(self, key, value):
+            raise AssertionError("Blocked resume should not clear suspend state")
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def evaluate_coordination_conflict(self, entry, source="RESUME", force=False):
+            return {
+                "warning": True,
+                "blocked": True,
+                "guard_mode": "block",
+                "summary": "RF Safety Guard: Protected Receiver blocks same-band overlap.",
+                "detail": "Prevent Band Overlap group NORTH MAST is blocking this resume.",
+            }
+
+        def resume_schedule(self, **kwargs):
+            raise AssertionError("Blocked resume should not call scheduler.resume_schedule")
+
+    class _FailIfShownMessageBox:
+        def __init__(self, parent=None):
+            raise AssertionError("Blocked resume should not show an override prompt")
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FailIfShownMessageBox)
+
+    result = qsy_helper.resume_schedule_hold(window, _Settings())
+
+    events = service.recent(scope="scheduler")
+    assert result is False
+    assert len(events) == 1
+    assert events[0].action_type == "resume_schedule"
+    assert events[0].status == "blocked"
+    assert events[0].summary == "RF Safety Guard: Protected Receiver blocks same-band overlap."
+    assert events[0].detail == "RF Safety Guard mode: Block. Prevent Band Overlap group NORTH MAST is blocking this resume."
+
+
+def test_suspend_schedule_hold_warns_when_rf_conflict_remains(monkeypatch) -> None:
+    qsy_helper._SUSPEND_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def __init__(self) -> None:
+            self.suspend_minutes = []
+            self.evaluate_calls = []
+
+        def evaluate_coordination_conflict(self, entry, source="SUSPEND", force=False):
+            self.evaluate_calls.append((source, bool(force)))
+            return {
+                "warning": True,
+                "blocked": True,
+                "guard_mode": "block",
+                "signature": "suspend|north-mast|40m",
+                "summary": "RF Safety Guard: Protected Receiver blocks same-band overlap.",
+                "detail": "Prevent Band Overlap group NORTH MAST is active.",
+            }
+
+        def suspend_schedule(self, minutes):
+            self.suspend_minutes.append(minutes)
+
+    scheduler = _Scheduler()
+    window = types.SimpleNamespace(
+        scheduler=scheduler,
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+
+    result = qsy_helper.suspend_schedule_hold(window, _Settings(), 30)
+
+    events = service.recent(scope="scheduler")
+    assert result == 30
+    assert scheduler.suspend_minutes == [30]
+    assert scheduler.evaluate_calls == [("SUSPEND", True)]
+    assert len(events) == 1
+    assert events[0].action_type == "suspend_schedule"
+    assert events[0].status == "partial"
+    assert events[0].summary == "RF Safety Guard: Protected Receiver blocks same-band overlap."
+    assert "condition remains in place" in events[0].detail
+
+
+def test_suspend_schedule_hold_rf_warning_does_not_repeat_for_same_conflict(monkeypatch) -> None:
+    qsy_helper._SUSPEND_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def evaluate_coordination_conflict(self, entry, source="SUSPEND", force=False):
+            return {
+                "warning": True,
+                "blocked": False,
+                "guard_mode": "warn",
+                "signature": "suspend|north-mast|40m",
+                "summary": "RF Safety Guard: DX10 may overlap Remote Rig.",
+                "detail": "Both radios are using Prevent Band Overlap group NORTH MAST.",
+            }
+
+        def suspend_schedule(self, minutes):
+            pass
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+
+    first = qsy_helper.suspend_schedule_hold(window, _Settings(), 30)
+    second = qsy_helper.suspend_schedule_hold(window, _Settings(), 30)
+
+    events = service.recent(scope="scheduler")
+    assert first == 30
+    assert second == 30
+    assert len(events) == 1
+    assert events[0].summary == "RF Safety Guard: DX10 may overlap Remote Rig."
+
+
+def test_resume_schedule_hold_rf_safety_warn_only_resumes_without_prompt(monkeypatch) -> None:
+    qsy_helper._RESUME_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def __init__(self) -> None:
+            self.resume_kwargs = []
+
+        def evaluate_coordination_conflict(self, entry, source="RESUME", force=False):
+            return {
+                "warning": True,
+                "blocked": False,
+                "guard_mode": "warn",
+                "summary": "RF Safety Guard: DX10 may overlap Remote Rig.",
+                "detail": "Warn only should not block resume.",
+            }
+
+        def resume_schedule(self, **kwargs):
+            self.resume_kwargs.append(dict(kwargs))
+
+    class _FailIfShownMessageBox:
+        def __init__(self, parent=None):
+            raise AssertionError("Warn-only resume should not show an override prompt")
+
+    scheduler = _Scheduler()
+    window = types.SimpleNamespace(
+        scheduler=scheduler,
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FailIfShownMessageBox)
+
+    result = qsy_helper.resume_schedule_hold(window, _Settings())
+
+    events = service.recent(scope="scheduler")
+    assert result is True
+    assert scheduler.resume_kwargs == [{"ignore_coordination_prompt": True}]
+    assert len(events) == 1
+    assert events[0].action_type == "resume_schedule"
+    assert events[0].status == "partial"
+    assert events[0].summary == "RF Safety Guard: DX10 may overlap Remote Rig."
+    assert events[0].detail == "RF Safety Guard mode: Warn only. Warn only should not block resume."
+
+
+def test_resume_schedule_hold_rf_safety_confirm_cancel_keeps_hold_active(monkeypatch) -> None:
+    qsy_helper._RESUME_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def evaluate_coordination_conflict(self, entry, source="RESUME", force=False):
+            return {
+                "warning": True,
+                "blocked": False,
+                "guard_mode": "confirm",
+                "summary": "RF Safety Guard: resume needs review.",
+                "detail": "Confirm before returning to this schedule.",
+            }
+
+        def resume_schedule(self, **kwargs):
+            raise AssertionError("Cancelled resume should not call scheduler.resume_schedule")
+
+    class _CancelMessageBox:
+        AcceptRole = 0
+        RejectRole = 1
+
+        def __init__(self, parent=None):
+            self._cancel = None
+            self._clicked = None
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def setText(self, text):
+            self.text = text
+
+        def setInformativeText(self, text):
+            self.detail = text
+
+        def addButton(self, label, role):
+            button = object()
+            if label == "Cancel":
+                self._cancel = button
+            return button
+
+        def exec(self):
+            self._clicked = self._cancel
+
+        def clickedButton(self):
+            return self._clicked
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _CancelMessageBox)
+
+    result = qsy_helper.resume_schedule_hold(window, _Settings())
+
+    events = service.recent(scope="scheduler")
+    assert result is False
+    assert len(events) == 1
+    assert events[0].action_type == "resume_schedule"
+    assert events[0].status == "blocked"
+    assert events[0].summary == "Resume cancelled: RF Safety Guard warning."
+    assert events[0].detail == "RF Safety Guard mode: Require confirmation. Confirm before returning to this schedule."
+
+
+def test_perform_qsy_with_hold_does_not_duplicate_suspend_rf_warning(monkeypatch) -> None:
+    qsy_helper._SUSPEND_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def __init__(self) -> None:
+            self.apply_calls = []
+            self.suspend_minutes = []
+
+        def evaluate_coordination_conflict(self, entry, source="QSY", force=False):
+            return {
+                "warning": True,
+                "blocked": False,
+                "guard_mode": "warn",
+                "summary": "RF Safety Guard: DX10 may overlap Remote Rig.",
+                "detail": "Warn only should not block QSY.",
+            }
+
+        def get_status_summary(self):
+            return {"shared_ptt_blocked": False}
+
+        def apply_manual_qsy(self, entry, ignore_coordination_prompt=False):
+            self.apply_calls.append(bool(ignore_coordination_prompt))
+
+        def suspend_schedule(self, minutes):
+            self.suspend_minutes.append(minutes)
+
+    class _FailIfShownMessageBox:
+        def __init__(self, parent=None):
+            raise AssertionError("Warn-only QSY+Hold should not show an override prompt")
+
+    scheduler = _Scheduler()
+    window = types.SimpleNamespace(
+        scheduler=scheduler,
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _FailIfShownMessageBox)
+
+    result = qsy_helper.perform_qsy_with_hold(window, _Settings(), {"freq": 7.268, "band": "40M"}, 30)
+
+    radio_events = service.recent(scope="radio")
+    scheduler_events = service.recent(scope="scheduler")
+    assert result == 30
+    assert scheduler.apply_calls == [True]
+    assert scheduler.suspend_minutes == [30]
+    assert len(radio_events) == 1
+    assert radio_events[0].action_type == "qsy"
+    assert radio_events[0].detail == "RF Safety Guard mode: Warn only. Warn only should not block QSY."
+    assert scheduler_events == []
+
+
+def test_resume_schedule_hold_rf_safety_confirm_cancel_does_not_repeat_prompt(monkeypatch) -> None:
+    qsy_helper._RESUME_GUARD_FEEDBACK_CACHE.clear()
+    service = ActionFeedbackService()
+
+    class _Settings:
+        pass
+
+    class _Scheduler:
+        current_schedule_entry = {"frequency": "7.078", "band": "40M", "mode": "Digi"}
+
+        def evaluate_coordination_conflict(self, entry, source="RESUME", force=False):
+            return {
+                "warning": True,
+                "blocked": False,
+                "guard_mode": "confirm",
+                "signature": "resume|north-mast|40m",
+                "summary": "RF Safety Guard: resume needs review.",
+                "detail": "Confirm before returning to this schedule.",
+            }
+
+        def resume_schedule(self, **kwargs):
+            raise AssertionError("Cancelled resume should not call scheduler.resume_schedule")
+
+    class _CancelMessageBox:
+        AcceptRole = 0
+        RejectRole = 1
+        shown = 0
+
+        def __init__(self, parent=None):
+            type(self).shown += 1
+            self._cancel = None
+            self._clicked = None
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def setText(self, text):
+            self.text = text
+
+        def setInformativeText(self, text):
+            self.detail = text
+
+        def addButton(self, label, role):
+            button = object()
+            if label == "Cancel":
+                self._cancel = button
+            return button
+
+        def exec(self):
+            self._clicked = self._cancel
+
+        def clickedButton(self):
+            return self._clicked
+
+    window = types.SimpleNamespace(
+        scheduler=_Scheduler(),
+        action_feedback_service=service,
+        _active_runtime_profile={"id": 7, "name": "DX10"},
+    )
+    monkeypatch.setattr(qsy_helper, "QMessageBox", _CancelMessageBox)
+
+    first = qsy_helper.resume_schedule_hold(window, _Settings())
+    second = qsy_helper.resume_schedule_hold(window, _Settings())
+
+    events = service.recent(scope="scheduler")
+    assert first is False
+    assert second is False
+    assert _CancelMessageBox.shown == 1
+    assert len(events) == 1
+    assert events[0].summary == "Resume cancelled: RF Safety Guard warning."
 
 
 def test_qsy_helper_rf_conflict_proceed_publishes_override_feedback(monkeypatch) -> None:
@@ -1168,8 +1632,8 @@ def test_qsy_helper_rf_conflict_proceed_publishes_override_feedback(monkeypatch)
     assert len(events) == 1
     assert events[0].action_type == "qsy_override"
     assert events[0].status == "succeeded"
-    assert events[0].summary == "QSY override accepted: RF conflict warning acknowledged."
-    assert events[0].detail == "Target 7.268 MHz overlaps Remote Rig."
+    assert events[0].summary == "QSY allowed: RF Safety Guard warning acknowledged."
+    assert events[0].detail == "RF Safety Guard mode: Require confirmation. Target 7.268 MHz overlaps Remote Rig."
     assert events[0].source_surface == "qsy_helper_conflict"
 
 

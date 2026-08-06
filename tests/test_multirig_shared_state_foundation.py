@@ -93,7 +93,7 @@ def test_assigned_plan_links_one_plan_to_multiple_radios() -> None:
     assert right_assignment.frequency_plan_id == plan.id
     assert assignments.for_radio(left.id) == left_assignment
     assert assignments.for_radio(right.id) == right_assignment
-    assert left_assignment.scheduler_mode == "full_fio_workflow"
+    assert left_assignment.scheduler_mode == "full"
     assert left_assignment.is_active is True
     assert left_assignment.is_default is False
 

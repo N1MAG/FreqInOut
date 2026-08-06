@@ -48,6 +48,7 @@ from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.dependency_status_service import get_dependency_status_service
+from freqinout.core.station_readiness import visible_status_programs
 from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.utils.timezones import get_timezone
@@ -96,7 +97,7 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style, fit_child_combo_boxes
+from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style, fit_child_combo_boxes, led_style
 
 
 class MainWindow(QMainWindow):
@@ -225,6 +226,8 @@ class MainWindow(QMainWindow):
         self._hold_state_signature: tuple[object, ...] | None = None
         self._station_command_selected_profile_id: int | None = None
         self._station_command_bar_loading = False
+        self._settings_nav_context = "main"
+        self._settings_nav_button_indices: dict[str, int] = {}
         # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
@@ -243,7 +246,8 @@ class MainWindow(QMainWindow):
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("SOP Builder", "SOP"),
-            ("Settings", "Settings"),
+            ("Main", "Settings"),
+            ("Radios", "Settings"),
             ("Help", "Help"),
         ]
         self._nav_screen_index_map: dict[int, int] = {}
@@ -310,7 +314,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators"]
+        self._nav_group_order: list[str] = ["Station", "FreqPlanner", "NCS", "Operators", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
 
         for nav_idx, (button_label, screen_label) in enumerate(self._nav_specs):
@@ -326,11 +330,25 @@ class MainWindow(QMainWindow):
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setMinimumWidth(120)
             btn.setStyleSheet(self._nav_button_alignment_style())
-            btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
-            self.button_group.addButton(btn, screen_idx)
+            if screen_label == "Settings" and button_label == "Main":
+                btn.clicked.connect(lambda _=False: self.open_settings_section("operator_info", settings_nav_context="main"))
+            elif screen_label == "Settings" and button_label == "Radios":
+                btn.clicked.connect(lambda _=False: self.open_settings_section("radio_profiles", settings_nav_context="radios"))
+            else:
+                btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
+            if screen_label == "Settings":
+                self.button_group.addButton(btn)
+            else:
+                self.button_group.addButton(btn, screen_idx)
             self.nav_buttons.append(btn)
             btn_idx = len(self.nav_buttons) - 1
-            self._nav_screen_index_map[screen_idx] = btn_idx
+            if screen_label == "Settings" and button_label == "Main":
+                self._settings_nav_button_indices["main"] = btn_idx
+                self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
+            elif screen_label == "Settings" and button_label == "Radios":
+                self._settings_nav_button_indices["radios"] = btn_idx
+            else:
+                self._nav_screen_index_map[screen_idx] = btn_idx
             self._nav_base_labels.append(button_label)
             target_layout.addWidget(btn)
             if screen_label == "Map":
@@ -527,6 +545,16 @@ class MainWindow(QMainWindow):
         self.station_command_next_label.setWordWrap(False)
         self.station_command_next_label.setMinimumWidth(0)
         self.station_command_next_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.station_command_health_label = QLabel("Health:")
+        self.station_command_health_label.setObjectName("stationCommandHealthLabel")
+        self.station_command_health_widget = QWidget(self.station_command_bar)
+        self.station_command_health_widget.setObjectName("stationCommandHealth")
+        self.station_command_health_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.station_command_health_layout = QHBoxLayout(self.station_command_health_widget)
+        self.station_command_health_layout.setContentsMargins(0, 0, 0, 0)
+        self.station_command_health_layout.setSpacing(6)
+        self.station_command_health_leds: dict[str, QLabel] = {}
+        self.station_command_health_text_labels: dict[str, QLabel] = {}
         self.station_command_duration_combo = QComboBox(self.station_command_bar)
         self.station_command_duration_combo.setObjectName("stationCommandDuration")
         self.station_command_duration_combo.addItems(["30 min", "15 min", "1 hr", "2 hr", "Manual"])
@@ -553,6 +581,10 @@ class MainWindow(QMainWindow):
             btn.setToolTip("Station command wiring is not enabled yet.")
             btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._apply_station_command_bar_layout(force=True)
+        try:
+            self.dependency_status_service.snapshot_changed.connect(lambda _snapshot: self._refresh_station_command_bar(force=True))
+        except Exception:
+            pass
         right_layout.addWidget(self.station_command_bar, 0)
 
         right_layout.addWidget(self.stack, stretch=1)
@@ -651,7 +683,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
                 self.launch_orchestrator.set_runtime_launch_enabled(
                     self._runtime_launch_enabled(self._active_runtime_profile, startup_policy),
-                    reason="Launch Control is disabled by the primary frequency plan.",
+                    reason="Launch Control is disabled by the primary operating model.",
                 )
             self._launch_startup_suppressed = not self._runtime_launch_enabled(self._active_runtime_profile, startup_policy)
         except Exception:
@@ -1677,8 +1709,9 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "scheduler"):
                 if hasattr(self.scheduler, "resume_schedule"):
-                    resume_schedule_hold(self, self.settings)
-                    resumed = True
+                    resumed = bool(resume_schedule_hold(self, self.settings))
+                    if not resumed:
+                        return
                 else:
                     try:
                         set_suspend_until(self.scheduler.settings, None)
@@ -1715,8 +1748,8 @@ class MainWindow(QMainWindow):
             self._publish_schedule_control_feedback(
                 action_type="resume_schedule",
                 status="blocked",
-                summary="Resume blocked: scheduler is unavailable.",
-                detail="Schedule control could not resume because the scheduler is unavailable.",
+                summary="Resume blocked: schedule control did not return to plan.",
+                detail="The scheduler was unavailable or RF Safety Guard blocked the resume.",
             )
             return
         _radio_id, target_label = self._schedule_feedback_target()
@@ -2887,12 +2920,41 @@ class MainWindow(QMainWindow):
         self._help_dialog_settle_until = time.time() + 0.35
         log.info("UI_LIFECYCLE|context_help_closed settle_ms=350")
 
-    def open_settings_section(self, health_key: str = "freqinout", radio_id: int | None = None) -> None:
+    def open_settings_section(
+        self,
+        health_key: str = "freqinout",
+        radio_id: int | None = None,
+        *,
+        settings_nav_context: str | None = None,
+    ) -> None:
         idx = self._screen_index_by_label.get("Settings", -1)
         if idx < 0:
             return
+        context = str(settings_nav_context or "").strip().lower()
+        if not context:
+            target = str(health_key or "").strip().lower()
+            main_targets = {
+                "operator_info",
+                "freqinout",
+                "operating_groups",
+                "local_comms",
+                "message_auth",
+                "sop_export",
+                "logging",
+            }
+            context = "main" if target in main_targets else "radios"
+        self._settings_nav_context = "main" if context == "main" else "radios"
         self._set_screen(idx)
-        if hasattr(self.settings_tab, "focus_section_by_health_key"):
+        if hasattr(self.settings_tab, "show_settings_context"):
+            QTimer.singleShot(
+                0,
+                lambda key=str(health_key or "freqinout"), ident=radio_id, ctx=self._settings_nav_context: self.settings_tab.show_settings_context(
+                    ctx,
+                    health_key=key,
+                    radio_id=ident,
+                ),
+            )
+        elif hasattr(self.settings_tab, "focus_section_by_health_key"):
             QTimer.singleShot(
                 0,
                 lambda key=str(health_key or "freqinout"), ident=radio_id: self.settings_tab.focus_section_by_health_key(
@@ -2930,11 +2992,16 @@ class MainWindow(QMainWindow):
         )
         for label in (
             getattr(self, "station_command_radio_label", None),
-            getattr(self, "station_command_state_label", None),
             getattr(self, "station_command_next_label", None),
+            getattr(self, "station_command_health_label", None),
         ):
             if label is not None:
                 label.setStyleSheet(f"background: transparent; color: {text}; font-weight: 600;")
+        for label in getattr(self, "station_command_health_text_labels", {}).values():
+            try:
+                label.setStyleSheet(f"background: transparent; color: {text};")
+            except Exception:
+                pass
         if getattr(self, "station_command_now_label", None) is not None:
             self.station_command_now_label.setStyleSheet(
                 "QLabel#stationCommandNow {"
@@ -2972,15 +3039,17 @@ class MainWindow(QMainWindow):
             self.station_command_radio_label,
             self.station_command_radio_combo,
             self.station_command_now_label,
-            self.station_command_state_label,
             self.station_command_next_label,
+            getattr(self, "station_command_health_label", None),
+            getattr(self, "station_command_health_widget", None),
             self.station_command_duration_combo,
             self.station_command_qsy_btn,
             self.station_command_hold_btn,
             self.station_command_suspend_btn,
             self.station_command_resume_btn,
         ):
-            layout.removeWidget(widget)
+            if widget is not None:
+                layout.removeWidget(widget)
         for col in range(10):
             layout.setColumnStretch(col, 0)
 
@@ -2996,7 +3065,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_hold_btn, 1, 2)
             layout.addWidget(self.station_command_suspend_btn, 1, 3)
             layout.addWidget(self.station_command_resume_btn, 1, 4)
-            layout.addWidget(self.station_command_state_label, 2, 0, 1, 2)
+            if hasattr(self, "station_command_health_label") and hasattr(self, "station_command_health_widget"):
+                layout.addWidget(self.station_command_health_label, 2, 0)
+                layout.addWidget(self.station_command_health_widget, 2, 1)
             layout.addWidget(self.station_command_next_label, 2, 2, 1, 3)
             layout.setColumnStretch(4, 1)
         else:
@@ -3008,7 +3079,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_hold_btn, 0, 6)
             layout.addWidget(self.station_command_suspend_btn, 0, 7)
             layout.addWidget(self.station_command_resume_btn, 0, 8)
-            layout.addWidget(self.station_command_state_label, 1, 0, 1, 2)
+            if hasattr(self, "station_command_health_label") and hasattr(self, "station_command_health_widget"):
+                layout.addWidget(self.station_command_health_label, 1, 0)
+                layout.addWidget(self.station_command_health_widget, 1, 1)
             layout.addWidget(self.station_command_next_label, 1, 2, 1, 5)
             layout.setColumnStretch(3, 1)
             layout.setColumnStretch(9, 2)
@@ -3138,7 +3211,13 @@ class MainWindow(QMainWindow):
             idx = self._active_tab_index
             if idx is None:
                 return
-            nav_idx = self._nav_screen_index_map.get(idx)
+            label = self._screens[idx][0] if 0 <= idx < len(self._screens) else ""
+            if label == "Settings":
+                nav_idx = self._settings_nav_button_indices.get(
+                    str(getattr(self, "_settings_nav_context", "main") or "main")
+                )
+            else:
+                nav_idx = self._nav_screen_index_map.get(idx)
             if nav_idx is None or not (0 <= nav_idx < len(self.nav_buttons)):
                 return
             btn = self.nav_buttons[nav_idx]
@@ -3610,7 +3689,7 @@ class MainWindow(QMainWindow):
             restrictions.append("launch control off")
         if not restrictions:
             return swap_summary
-        operating_txt = operating_name or "assigned frequency plan"
+        operating_txt = operating_name or "assigned operating model"
         state_txt = "temporary override" if assignment_state == "temporary_override" else "active policy"
         detail = f"{profile_label}{backend_txt} is running under {operating_txt} ({state_txt}): {'; '.join(restrictions)}."
         if swap_summary:
@@ -3670,7 +3749,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
                 self.launch_orchestrator.set_runtime_launch_enabled(
                     not self._launch_startup_suppressed,
-                    reason="Launch Control is disabled by the primary frequency plan.",
+                    reason="Launch Control is disabled by the primary operating model.",
                 )
         except Exception:
             pass
@@ -3870,6 +3949,141 @@ class MainWindow(QMainWindow):
             return "none"
 
     @staticmethod
+    def _clear_station_command_health_layout(layout: QHBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _station_command_health_profile(self, selected: object | None, selected_id: int) -> dict | None:
+        try:
+            for profile in self.multi_radio_store.list_device_profiles():
+                if self._station_command_snapshot_id(profile) == int(selected_id or 0):
+                    return dict(profile)
+        except Exception:
+            pass
+        return dict(selected) if isinstance(selected, Mapping) else None
+
+    def _station_command_health_items(self, profile: dict | None) -> list[tuple[str, str]]:
+        if not isinstance(profile, dict):
+            return []
+        try:
+            return visible_status_programs(dict(self.settings.all()), device_profiles=[profile])
+        except Exception:
+            return []
+
+    @staticmethod
+    def _station_command_health_state(info: Mapping[str, object]) -> str:
+        state = str(info.get("state", "idle") or "idle").strip().lower()
+        if state == "ok":
+            return "ok"
+        if state == "error":
+            return "error"
+        return "warn"
+
+    @staticmethod
+    def _station_command_health_summary_state(issue_states: list[str]) -> str:
+        if not issue_states:
+            return "ok"
+        if any(state == "error" for state in issue_states):
+            return "error"
+        return "warn"
+
+    def _add_station_command_health_item(
+        self,
+        *,
+        key: str,
+        label_text: str,
+        state: str,
+        tooltip: str,
+        theme: dict,
+    ) -> None:
+        led = QLabel(self.station_command_health_widget)
+        led.setFixedSize(14, 14)
+        led.setStyleSheet(led_style(state, theme))
+        led.setToolTip(tooltip)
+        text_label = QLabel(label_text, self.station_command_health_widget)
+        text_label.setToolTip(tooltip)
+        text_label.setStyleSheet(
+            f"background: transparent; color: {theme.get('station_control_text', theme.get('text', '#222222'))};"
+        )
+        self.station_command_health_leds[key] = led
+        self.station_command_health_text_labels[key] = text_label
+        self.station_command_health_layout.addWidget(led)
+        self.station_command_health_layout.addWidget(text_label)
+
+    def _refresh_station_command_health(self, selected: object | None, selected_id: int) -> None:
+        if not hasattr(self, "station_command_health_layout"):
+            return
+        layout = self.station_command_health_layout
+        self._clear_station_command_health_layout(layout)
+        self.station_command_health_leds = {}
+        self.station_command_health_text_labels = {}
+        profile = self._station_command_health_profile(selected, selected_id)
+        items = self._station_command_health_items(profile)
+        theme = resolve_theme(self.settings)
+        try:
+            snapshot = self.dependency_status_service.software_status_snapshot()
+        except Exception:
+            snapshot = {}
+
+        issue_items: list[tuple[str, str, str, str]] = []
+        for key, label_text in items:
+            info = snapshot.get(key, {})
+            state = self._station_command_health_state(info)
+            tooltip = str(info.get("tooltip", "Not running"))
+            if state != "ok":
+                issue_items.append((key, label_text, state, tooltip))
+
+        if not issue_items and items:
+            healthy_tooltip = "All configured components for this radio are healthy."
+            self._add_station_command_health_item(
+                key="__summary__",
+                label_text="Healthy",
+                state="ok",
+                tooltip=healthy_tooltip,
+                theme=theme,
+            )
+        else:
+            visible_items = issue_items[:5]
+            issue_states = [state for _key, _label, state, _tooltip in issue_items]
+            summary_state = self._station_command_health_summary_state(issue_states)
+            summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"
+            summary_tooltip = (
+                "; ".join(f"{label}: {tooltip}" for _key, label, _state, tooltip in issue_items)
+                if issue_items
+                else "No configured software health items for this radio."
+            )
+            self._add_station_command_health_item(
+                key="__summary__",
+                label_text=summary_label,
+                state=summary_state,
+                tooltip=summary_tooltip,
+                theme=theme,
+            )
+            for key, label_text, state, tooltip in visible_items:
+                self._add_station_command_health_item(
+                    key=key,
+                    label_text=label_text,
+                    state=state,
+                    tooltip=tooltip,
+                    theme=theme,
+                )
+            overflow = max(0, len(issue_items) - len(visible_items))
+            if overflow:
+                more_label = QLabel(f"+{overflow}", self.station_command_health_widget)
+                more_label.setToolTip(", ".join(label for _key, label, _state, _tooltip in issue_items[5:]))
+                more_label.setStyleSheet(
+                    f"background: transparent; color: {theme.get('station_control_muted', theme.get('text_muted', '#666666'))}; font-weight: 600;"
+                )
+                layout.addWidget(more_label)
+        layout.addStretch(1)
+        has_items = bool(items)
+        self.station_command_health_label.setVisible(has_items)
+        self.station_command_health_widget.setVisible(has_items)
+
+    @staticmethod
     def _station_command_is_controllable_profile(profile: object) -> bool:
         device_class = str(MainWindow._station_command_value(profile, "device_class", "tx_rx") or "tx_rx").strip().lower()
         if device_class == "observer":
@@ -3974,6 +4188,7 @@ class MainWindow(QMainWindow):
             self.station_command_state_label.setText("State: no configured radio")
             self.station_command_next_label.setText("Next: none")
             tooltip = "No configured radio is available for station commands."
+        self._refresh_station_command_health(selected, selected_id)
         for btn in (
             self.station_command_qsy_btn,
             self.station_command_hold_btn,
@@ -4380,7 +4595,7 @@ class MainWindow(QMainWindow):
     def _load_nav_group_states(self) -> dict[str, bool]:
         # Station and FreqPlanner are primary workspaces; keep their children
         # discoverable on startup. NCS/Operators remain compact by default.
-        defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False}
+        defaults = {"Station": True, "FreqPlanner": True, "NCS": False, "Operators": False, "Settings": True}
         try:
             raw = self.settings.get("main_nav_group_states", {}) or {}
         except Exception:
@@ -4417,6 +4632,8 @@ class MainWindow(QMainWindow):
             return "FreqPlanner"
         if screen in {"HF Operators", "Local Operators"}:
             return "Operators"
+        if screen == "Settings":
+            return "Settings"
         txt = str(button_label or "").strip()
         if txt.startswith("NCS -"):
             return "NCS"
@@ -4910,7 +5127,12 @@ class MainWindow(QMainWindow):
                 if label == "Map" and self._queue_map_switch_after_webengine_warmup(index):
                     return
                 try:
-                    nav_idx = self._nav_screen_index_map.get(index)
+                    if label == "Settings":
+                        nav_idx = self._settings_nav_button_indices.get(
+                            str(getattr(self, "_settings_nav_context", "main") or "main")
+                        )
+                    else:
+                        nav_idx = self._nav_screen_index_map.get(index)
                     self._expand_nav_group_for_screen(label)
                     if nav_idx is not None and 0 <= nav_idx < len(self.nav_buttons):
                         btn = self.nav_buttons[nav_idx]

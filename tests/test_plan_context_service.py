@@ -51,22 +51,38 @@ def _radio(
     return store.get_device_profile(int(radio["id"])) or radio
 
 
+def _assign_behavior_and_schedule(
+    store: MultiRadioStore,
+    radio_id: int,
+    *,
+    model_values: dict,
+    plan_values: dict,
+) -> tuple[dict, dict]:
+    model = store.save_operating_profile(model_values)
+    plan = store.save_frequency_plan(plan_values)
+    store.set_device_operating_profile(int(radio_id), int(model["id"]))
+    store.set_assigned_plan(int(radio_id), int(plan["id"]))
+    return model, plan
+
+
 def test_plan_context_joins_primary_radio_to_assigned_frequency_plan(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    plan = store.save_operating_profile(
-        {
-            "system_key": "field_ops",
-            "name": "Field Ops",
+    radio = _radio(store, "radio_a", "Radio A", active=True, primary=True)
+    radio_id = radio_shared_state_id(radio["id"])
+    _, plan = _assign_behavior_and_schedule(
+        store,
+        int(radio["id"]),
+        model_values={
+            "system_key": "field_ops_model",
+            "name": "Field Ops Model",
             "scheduler_enabled": 1,
             "use_messages": 1,
             "use_map": 1,
             "use_launch_control": 1,
             "use_net_control_tabs": 1,
-        }
+        },
+        plan_values={"system_key": "field_ops_schedule", "name": "Field Ops"},
     )
-    radio = _radio(store, "radio_a", "Radio A", active=True, primary=True)
-    radio_id = radio_shared_state_id(radio["id"])
-    store.set_device_operating_profile(int(radio["id"]), int(plan["id"]))
     store.save_device_profile({"id": int(radio["id"]), "launch_enabled": 1})
 
     context = PlanContextService(store).primary_context()
@@ -89,14 +105,20 @@ def test_plan_context_joins_primary_radio_to_assigned_frequency_plan(tmp_path: P
 
 def test_plan_context_active_contexts_preserve_runtime_selection_order(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    first_plan = store.save_operating_profile({"system_key": "home", "name": "Home Plan"})
-    second_plan = store.save_operating_profile(
-        {"system_key": "watch", "name": "Watch Plan", "scheduler_enabled": 0, "receive_only": 1}
-    )
     first = _radio(store, "radio_a", "Radio A", active=True, primary=True, display_order=1)
     second = _radio(store, "radio_b", "Radio B", active=False, display_order=2, device_class="observer")
-    store.set_device_operating_profile(int(first["id"]), int(first_plan["id"]))
-    store.set_device_operating_profile(int(second["id"]), int(second_plan["id"]))
+    _assign_behavior_and_schedule(
+        store,
+        int(first["id"]),
+        model_values={"system_key": "home_model", "name": "Home Model"},
+        plan_values={"system_key": "home_plan", "name": "Home Plan"},
+    )
+    _assign_behavior_and_schedule(
+        store,
+        int(second["id"]),
+        model_values={"system_key": "watch_model", "name": "Watch Model", "scheduler_enabled": 0, "receive_only": 1},
+        plan_values={"system_key": "watch_plan", "name": "Watch Plan", "receive_only": 1},
+    )
     store.set_device_profile_runtime_active(int(second["id"]), True)
 
     snapshot = PlanContextService(store).snapshot()
@@ -113,14 +135,22 @@ def test_plan_context_active_contexts_preserve_runtime_selection_order(tmp_path:
 
 def test_plan_context_tab_selection_uses_injected_selection_service(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    first_plan = store.save_operating_profile({"system_key": "primary", "name": "Primary Plan"})
-    second_plan = store.save_operating_profile({"system_key": "map", "name": "Map Plan"})
     first = _radio(store, "radio_a", "Radio A", active=True, primary=True, display_order=1)
     second = _radio(store, "radio_b", "Radio B", active=True, display_order=2)
     first_id = radio_shared_state_id(first["id"])
     second_id = radio_shared_state_id(second["id"])
-    store.set_device_operating_profile(int(first["id"]), int(first_plan["id"]))
-    store.set_device_operating_profile(int(second["id"]), int(second_plan["id"]))
+    _assign_behavior_and_schedule(
+        store,
+        int(first["id"]),
+        model_values={"system_key": "primary_model", "name": "Primary Model"},
+        plan_values={"system_key": "primary_plan", "name": "Primary Plan"},
+    )
+    _assign_behavior_and_schedule(
+        store,
+        int(second["id"]),
+        model_values={"system_key": "map_model", "name": "Map Model"},
+        plan_values={"system_key": "map_plan", "name": "Map Plan"},
+    )
     policy_store = DurableRuntimePolicyStore(store)
     selection = DurableRuntimeSelectionService(store, policy_store=policy_store)
     selection.set_tab_radio("map", second_id, source_tab_id="map")
@@ -136,10 +166,14 @@ def test_plan_context_tab_selection_uses_injected_selection_service(tmp_path: Pa
 
 def test_plan_context_marks_operator_suppressed_radio_as_blocked(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    plan = store.save_operating_profile({"system_key": "quiet", "name": "Quiet Plan"})
     radio = _radio(store, "radio_a", "Radio A", active=True, primary=True)
     radio_id = radio_shared_state_id(radio["id"])
-    store.set_device_operating_profile(int(radio["id"]), int(plan["id"]))
+    _assign_behavior_and_schedule(
+        store,
+        int(radio["id"]),
+        model_values={"system_key": "quiet_model", "name": "Quiet Model"},
+        plan_values={"system_key": "quiet_plan", "name": "Quiet Plan"},
+    )
     DurableRuntimePolicyStore(store).set_operator_suppressed(radio_id, True, source=SOURCE_SETTINGS)
 
     context = PlanContextService(store).context_for_radio(radio_id)
@@ -152,9 +186,13 @@ def test_plan_context_marks_operator_suppressed_radio_as_blocked(tmp_path: Path)
 
 def test_freqplanner_context_text_formats_current_radio_and_plan(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    plan = store.save_operating_profile({"system_key": "field", "name": "Field Plan", "use_messages": 1, "use_map": 0})
     radio = _radio(store, "radio_a", "Radio A", active=True, primary=True)
-    store.set_device_operating_profile(int(radio["id"]), int(plan["id"]))
+    _assign_behavior_and_schedule(
+        store,
+        int(radio["id"]),
+        model_values={"system_key": "field_model", "name": "Field Model", "use_messages": 1, "use_map": 0},
+        plan_values={"system_key": "field_plan", "name": "Field Plan"},
+    )
 
     context = PlanContextService(store).primary_context()
 
@@ -170,11 +208,13 @@ def test_freqplanner_context_text_formats_current_radio_and_plan(tmp_path: Path)
 
 def test_plan_context_text_marks_receive_only_assigned_plan(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    plan = store.save_operating_profile(
-        {"system_key": "rx_watch", "name": "RX Watch", "scheduler_enabled": 0, "receive_only": 1}
-    )
     radio = _radio(store, "radio_rx", "RX Observer", active=False, device_class="observer")
-    store.set_device_operating_profile(int(radio["id"]), int(plan["id"]))
+    _assign_behavior_and_schedule(
+        store,
+        int(radio["id"]),
+        model_values={"system_key": "rx_watch_model", "name": "RX Watch Model", "scheduler_enabled": 0, "receive_only": 1},
+        plan_values={"system_key": "rx_watch_plan", "name": "RX Watch", "receive_only": 1},
+    )
     store.set_device_profile_runtime_active(int(radio["id"]), True)
 
     context = PlanContextService(store).context_for_radio(radio_shared_state_id(radio["id"]))
@@ -186,18 +226,20 @@ def test_plan_context_text_marks_receive_only_assigned_plan(tmp_path: Path) -> N
 
 def test_plan_context_text_summarizes_frequency_plan_provenance_refs(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    plan = store.save_operating_profile(
-        {
+    radio = _radio(store, "radio_source", "Source Radio", active=True, primary=True)
+    _assign_behavior_and_schedule(
+        store,
+        int(radio["id"]),
+        model_values={"system_key": "source_model", "name": "Source Model"},
+        plan_values={
             "system_key": "source_rich",
             "name": "Source Rich Plan",
             "source_refs": ["src_hf", "src_net"],
             "schedule_refs": ["hf:mon:1900"],
             "frequency_refs": ["freq_40m", "freq_80m"],
             "group_refs": ["ARES"],
-        }
+        },
     )
-    radio = _radio(store, "radio_source", "Source Radio", active=True, primary=True)
-    store.set_device_operating_profile(int(radio["id"]), int(plan["id"]))
 
     context = PlanContextService(store).primary_context()
 

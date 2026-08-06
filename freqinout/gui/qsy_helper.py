@@ -7,7 +7,11 @@ import time
 from PySide6.QtWidgets import QComboBox, QMessageBox
 from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode
-from freqinout.core.multi_radio_store import DEFAULT_HOLD_DURATION_MINUTES, SUPPORTED_HOLD_DURATION_MINUTES
+from freqinout.core.multi_radio_store import (
+    DEFAULT_HOLD_DURATION_MINUTES,
+    SUPPORTED_HOLD_DURATION_MINUTES,
+    normalize_rf_guard_mode,
+)
 
 
 HOLD_DURATION_PRESETS: tuple[int, ...] = tuple(sorted(SUPPORTED_HOLD_DURATION_MINUTES))
@@ -16,6 +20,10 @@ HOLD_WARNING_SECONDS = 10 * 60
 HOLD_CRITICAL_SECONDS = 2 * 60
 _HOLD_DURATION_DEFAULT_CACHE: Dict[str, Optional[int]] = {"minutes": None}
 _SCHEDULER_ENABLED_OVERRIDE: Dict[str, Optional[bool]] = {"enabled": None}
+_RESUME_GUARD_FEEDBACK_CACHE: Dict[str, float] = {}
+_SUSPEND_GUARD_FEEDBACK_CACHE: Dict[str, float] = {}
+RESUME_GUARD_FEEDBACK_SUPPRESS_SECONDS = 30.0
+SUSPEND_GUARD_FEEDBACK_SUPPRESS_SECONDS = 30.0
 
 
 def load_operating_groups(settings) -> List[Dict]:
@@ -141,14 +149,25 @@ def _shared_ptt_block_reason(scheduler) -> str:
     return "Shared PTT interlock is active."
 
 
-def _coordination_conflict_warning(scheduler, entry: Dict) -> Dict[str, object]:
+def _coordination_conflict_warning(
+    scheduler,
+    entry: Dict,
+    *,
+    source: str = "QSY",
+    force: bool = False,
+) -> Dict[str, object]:
     if scheduler is None or not hasattr(scheduler, "evaluate_coordination_conflict"):
         return {}
     try:
-        payload = scheduler.evaluate_coordination_conflict(entry, source="QSY")
+        payload = scheduler.evaluate_coordination_conflict(entry, source=source, force=force)
     except TypeError:
         try:
-            payload = scheduler.evaluate_coordination_conflict(entry)
+            payload = scheduler.evaluate_coordination_conflict(entry, source=source)
+        except TypeError:
+            try:
+                payload = scheduler.evaluate_coordination_conflict(entry)
+            except Exception:
+                return {}
         except Exception:
             return {}
     except Exception:
@@ -227,6 +246,225 @@ def _publish_qsy_override_feedback(
         return False
 
 
+def _publish_qsy_warning_feedback(window, summary: str, detail: str = "") -> bool:
+    try:
+        service = getattr(window, "action_feedback_service", None) if window is not None else None
+    except Exception:
+        service = None
+    if service is None or not hasattr(service, "publish"):
+        return False
+    radio_profile_id, target_label = _qsy_feedback_target(window)
+    try:
+        service.publish(
+            scope="radio",
+            action_type="qsy",
+            status="partial",
+            summary=str(summary or "").strip(),
+            radio_profile_id=radio_profile_id,
+            target_label=target_label,
+            detail=str(detail or "").strip(),
+            source_surface="qsy_helper_warning",
+        )
+        return True
+    except Exception as e:
+        log.debug("QSY helper: failed to publish RF safety warning feedback: %s", e)
+        return False
+
+
+def _publish_schedule_control_feedback(
+    window,
+    *,
+    action_type: str,
+    status: str,
+    summary: str,
+    detail: str = "",
+    source_surface: str = "qsy_helper_schedule_control",
+) -> bool:
+    try:
+        service = getattr(window, "action_feedback_service", None) if window is not None else None
+    except Exception:
+        service = None
+    if service is None or not hasattr(service, "publish"):
+        return False
+    radio_profile_id, target_label = _qsy_feedback_target(window)
+    try:
+        service.publish(
+            scope="scheduler",
+            action_type=action_type,
+            status=status,
+            summary=str(summary or "").strip(),
+            radio_profile_id=radio_profile_id,
+            target_label=target_label,
+            detail=str(detail or "").strip(),
+            source_surface=source_surface,
+        )
+        return True
+    except Exception as e:
+        log.debug("QSY helper: failed to publish schedule control feedback: %s", e)
+        return False
+
+
+def _rf_guard_warning_detail(detail: str, *, mode_label: str) -> str:
+    clean_detail = str(detail or "").strip()
+    prefix = f"RF Safety Guard mode: {mode_label}."
+    if clean_detail:
+        return f"{prefix} {clean_detail}"
+    return prefix
+
+
+def _resume_coordination_conflict(scheduler) -> Dict[str, object]:
+    try:
+        entry = getattr(scheduler, "current_schedule_entry", {}) if scheduler is not None else {}
+    except Exception:
+        entry = {}
+    if not isinstance(entry, dict) or not entry:
+        return {}
+    return _coordination_conflict_warning(scheduler, entry, source="RESUME", force=True)
+
+
+def _current_entry_coordination_conflict(scheduler, *, source: str, force: bool = False) -> Dict[str, object]:
+    try:
+        entry = getattr(scheduler, "current_schedule_entry", {}) if scheduler is not None else {}
+    except Exception:
+        entry = {}
+    if not isinstance(entry, dict) or not entry:
+        return {}
+    return _coordination_conflict_warning(scheduler, entry, source=source, force=force)
+
+
+def _resume_guard_signature(conflict: Dict[str, object]) -> str:
+    signature = str(conflict.get("signature") or "").strip()
+    if signature:
+        return signature
+    return "|".join(
+        part
+        for part in (
+            str(conflict.get("summary") or "").strip(),
+            str(conflict.get("detail") or "").strip(),
+            str(conflict.get("guard_mode") or "").strip(),
+        )
+        if part
+    )
+
+
+def _guard_feedback_recent(
+    cache: Dict[str, float],
+    signature: str,
+    *,
+    mark: bool = False,
+    suppress_seconds: float = 30.0,
+) -> bool:
+    sig = str(signature or "").strip()
+    if not sig:
+        return False
+    now = time.time()
+    expired = [
+        key for key, ts in cache.items()
+        if now - float(ts or 0.0) > suppress_seconds
+    ]
+    for key in expired:
+        cache.pop(key, None)
+    recent = sig in cache
+    if mark:
+        cache[sig] = now
+    return recent
+
+
+def _resume_guard_feedback_recent(signature: str, *, mark: bool = False) -> bool:
+    return _guard_feedback_recent(
+        _RESUME_GUARD_FEEDBACK_CACHE,
+        signature,
+        mark=mark,
+        suppress_seconds=RESUME_GUARD_FEEDBACK_SUPPRESS_SECONDS,
+    )
+
+
+def _suspend_guard_feedback_recent(signature: str, *, mark: bool = False) -> bool:
+    return _guard_feedback_recent(
+        _SUSPEND_GUARD_FEEDBACK_CACHE,
+        signature,
+        mark=mark,
+        suppress_seconds=SUSPEND_GUARD_FEEDBACK_SUPPRESS_SECONDS,
+    )
+
+
+def _warn_if_suspend_leaves_rf_conflict(window, scheduler) -> None:
+    conflict = _current_entry_coordination_conflict(scheduler, source="SUSPEND", force=True)
+    if not bool(conflict.get("warning")):
+        return
+    signature = _resume_guard_signature(conflict)
+    if _suspend_guard_feedback_recent(signature):
+        return
+    summary = str(conflict.get("summary") or "RF Safety Guard warning while schedule is paused.").strip()
+    detail = str(conflict.get("detail") or summary).strip()
+    published = _publish_schedule_control_feedback(
+        window,
+        action_type="suspend_schedule",
+        status="partial",
+        summary=summary,
+        detail=f"Schedule control is paused; this RF guard condition remains in place. {detail}".strip(),
+    )
+    if published:
+        _suspend_guard_feedback_recent(signature, mark=True)
+
+
+def _resume_allowed_by_rf_guard(window, scheduler) -> tuple[bool, bool]:
+    conflict = _resume_coordination_conflict(scheduler)
+    if not bool(conflict.get("warning")):
+        return True, False
+    summary = str(conflict.get("summary") or "Resume blocked by RF Safety Guard.").strip()
+    detail = str(conflict.get("detail") or summary).strip()
+    guard_mode = normalize_rf_guard_mode(conflict.get("guard_mode", "confirm"), "confirm")
+    signature = _resume_guard_signature(conflict)
+    if bool(conflict.get("blocked")) or guard_mode == "block":
+        if not _resume_guard_feedback_recent(signature, mark=True):
+            _publish_schedule_control_feedback(
+                window,
+                action_type="resume_schedule",
+                status="blocked",
+                summary=summary,
+                detail=_rf_guard_warning_detail(detail, mode_label="Block"),
+            )
+        return False, False
+    if guard_mode == "warn":
+        _publish_schedule_control_feedback(
+            window,
+            action_type="resume_schedule",
+            status="partial",
+            summary=summary,
+            detail=_rf_guard_warning_detail(detail, mode_label="Warn only"),
+        )
+        return True, True
+    if _resume_guard_feedback_recent(signature):
+        return False, False
+    msg = QMessageBox(window)
+    msg.setWindowTitle("RF Conflict Warning")
+    msg.setText(summary or "RF conflict detected.")
+    if detail:
+        msg.setInformativeText(detail)
+    proceed_btn = msg.addButton("Resume Anyway", QMessageBox.AcceptRole)
+    msg.addButton("Cancel", QMessageBox.RejectRole)
+    msg.exec()
+    if msg.clickedButton() != proceed_btn:
+        _resume_guard_feedback_recent(signature, mark=True)
+        _publish_schedule_control_feedback(
+            window,
+            action_type="resume_schedule",
+            status="blocked",
+            summary="Resume cancelled: RF Safety Guard warning.",
+            detail=_rf_guard_warning_detail(detail or summary, mode_label="Require confirmation"),
+        )
+        return False, False
+    _publish_schedule_control_feedback(
+        window,
+        action_type="resume_schedule",
+        status="succeeded",
+        summary="Resume allowed: RF Safety Guard warning acknowledged.",
+        detail=_rf_guard_warning_detail(detail or summary, mode_label="Require confirmation"),
+    )
+    return True, True
+
+
 def perform_qsy(window, meta: Dict) -> bool:
     try:
         scheduler = getattr(window, "scheduler", None)
@@ -278,7 +516,23 @@ def perform_qsy(window, meta: Dict) -> bool:
             QMessageBox.warning(window, "QSY Blocked", block_reason)
         return False
     conflict = _coordination_conflict_warning(scheduler, entry)
+    if bool(conflict.get("blocked")):
+        summary = str(conflict.get("summary") or "QSY blocked by RF Safety Guard.").strip()
+        detail = str(conflict.get("detail") or summary).strip()
+        if not _publish_qsy_blocked_feedback(window, summary, detail):
+            QMessageBox.warning(window, "QSY Blocked", detail or summary)
+        return False
     if bool(conflict.get("warning")):
+        guard_mode = normalize_rf_guard_mode(conflict.get("guard_mode", "confirm"), "confirm")
+        if guard_mode == "warn":
+            summary = str(conflict.get("summary") or "RF Safety Guard warning.").strip()
+            detail = str(conflict.get("detail") or summary).strip()
+            _publish_qsy_warning_feedback(window, summary, _rf_guard_warning_detail(detail, mode_label="Warn only"))
+            try:
+                scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
+            except TypeError:
+                scheduler.apply_manual_qsy(entry)
+            return True
         msg = QMessageBox(window)
         msg.setWindowTitle("RF Conflict Warning")
         msg.setText(str(conflict.get("summary") or "RF conflict detected.").strip() or "RF conflict detected.")
@@ -292,15 +546,21 @@ def perform_qsy(window, meta: Dict) -> bool:
             _publish_qsy_override_feedback(
                 window,
                 status="blocked",
-                summary="QSY cancelled: RF conflict warning.",
-                detail=detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+                summary="QSY cancelled: RF Safety Guard warning.",
+                detail=_rf_guard_warning_detail(
+                    detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+                    mode_label="Require confirmation",
+                ),
             )
             return False
         _publish_qsy_override_feedback(
             window,
             status="succeeded",
-            summary="QSY override accepted: RF conflict warning acknowledged.",
-            detail=detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+            summary="QSY allowed: RF Safety Guard warning acknowledged.",
+            detail=_rf_guard_warning_detail(
+                detail or str(conflict.get("summary") or "RF conflict detected.").strip(),
+                mode_label="Require confirmation",
+            ),
         )
         try:
             scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
@@ -488,7 +748,20 @@ def set_active_hold_duration(
     return mins
 
 
-def suspend_schedule_hold(window, settings, minutes: Optional[int] = None) -> int:
+def suspend_schedule_hold(
+    window,
+    settings,
+    minutes: Optional[int] = None,
+    *,
+    warn_rf_conflict: bool = True,
+) -> int:
+    if warn_rf_conflict:
+        try:
+            scheduler = getattr(window, "scheduler", None)
+        except Exception:
+            scheduler = None
+        if scheduler is not None:
+            _warn_if_suspend_leaves_rf_conflict(window, scheduler)
     mins = set_active_hold_duration(window, settings, minutes=minutes, notify=False)
     notify_hold_state_changed(window, force_reload=False)
     return mins
@@ -500,7 +773,17 @@ def resume_schedule_hold(window, settings) -> bool:
     except Exception:
         scheduler = None
     if scheduler and hasattr(scheduler, "resume_schedule"):
-        scheduler.resume_schedule()
+        allowed, acknowledged = _resume_allowed_by_rf_guard(window, scheduler)
+        if not allowed:
+            notify_hold_state_changed(window, force_reload=False)
+            return False
+        try:
+            result = scheduler.resume_schedule(ignore_coordination_prompt=acknowledged)
+        except TypeError:
+            result = scheduler.resume_schedule()
+        if result is False:
+            notify_hold_state_changed(window, force_reload=False)
+            return False
         _SUSPEND_CACHE["ts"] = 0
         _SUSPEND_CACHE["loaded_at"] = time.time()
         notify_hold_state_changed(window, force_reload=False)
@@ -513,7 +796,7 @@ def resume_schedule_hold(window, settings) -> bool:
 def perform_qsy_with_hold(window, settings, meta: Dict, minutes: Optional[int] = None) -> int:
     if not perform_qsy(window, meta):
         return 0
-    return suspend_schedule_hold(window, settings, minutes=minutes)
+    return suspend_schedule_hold(window, settings, minutes=minutes, warn_rf_conflict=False)
 
 
 # Suspend helpers (shared across tabs)

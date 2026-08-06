@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +16,7 @@ from freqinout.core.busy_evidence_service import BusyEvidenceService
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.js8_defaults import random_default_js8_offset_hz
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
-from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.multi_radio_store import MultiRadioStore, normalize_rf_guard_mode, settings_db_path
 from freqinout.core.ptt_conflict_service import PttConflictService
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.scheduler_events import record_scheduler_event
@@ -34,6 +35,33 @@ from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
+
+def _hz_to_amateur_band(freq_hz: Optional[float]) -> str:
+    if not freq_hz:
+        return ""
+    try:
+        mhz = float(freq_hz) / 1_000_000.0
+    except Exception:
+        return ""
+    bands = [
+        ("160M", 1.8, 2.0),
+        ("80M", 3.5, 4.0),
+        ("60M", 5.0, 5.5),
+        ("40M", 7.0, 7.3),
+        ("30M", 10.1, 10.15),
+        ("20M", 14.0, 14.35),
+        ("17M", 18.068, 18.168),
+        ("15M", 21.0, 21.45),
+        ("12M", 24.89, 24.99),
+        ("10M", 28.0, 29.7),
+        ("6M", 50.0, 54.0),
+        ("2M", 144.0, 148.0),
+    ]
+    for name, lo, hi in bands:
+        if lo <= mhz <= hi:
+            return name
+    return ""
 
 
 @dataclass
@@ -2417,7 +2445,29 @@ class SchedulerEngine(QObject):
         elif action == "suspend":
             self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
 
-    def resume_schedule(self) -> None:
+    def resume_schedule(self, *, ignore_coordination_prompt: bool = False) -> bool:
+        entry = self.current_schedule_entry or {}
+        coordination_conflict = (
+            self._coordination_conflict_status(entry, source="RESUME", force=True)
+            if isinstance(entry, dict) and entry
+            else {}
+        )
+        coordination_signature = self._coordination_conflict_signature(coordination_conflict)
+        if bool(coordination_conflict.get("blocked")):
+            self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "blocked",
+                "rf_safety_guard_block",
+                source="RESUME",
+                entry=entry,
+                action="Blocked resume by RF Safety Guard",
+                detail=str(coordination_conflict.get("detail") or coordination_conflict.get("summary") or ""),
+                throttle_sec=30.0,
+                signature=coordination_signature,
+                guard_mode=str(coordination_conflict.get("guard_mode") or ""),
+            )
+            self.active_entry_changed.emit(entry, "RESUME")
+            return False
         try:
             if hasattr(self.settings, "set"):
                 self.settings.set("schedule_suspend_until", 0)
@@ -2454,6 +2504,7 @@ class SchedulerEngine(QObject):
         self.apply_current_entry(
             force=True,
             ignore_wait_prompt=True,
+            ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_suspend=True,
             ignore_net_suppression=True,
             ignore_js8_busy=True,
@@ -2464,6 +2515,7 @@ class SchedulerEngine(QObject):
         self._maybe_apply_fldigi()
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
+        return True
 
     def suspend_schedule(self, minutes: Optional[int] = None) -> None:
         """
@@ -5223,41 +5275,214 @@ class SchedulerEngine(QObject):
         row = entry or {}
         if not row:
             return {}
-        manager = getattr(self, "station_runtime_manager", None)
-        if manager is None or not hasattr(manager, "evaluate_primary_rf_conflict"):
-            return {}
         freq_hz = self._parse_freq_hz((row.get("frequency") or "").strip())
         band = (row.get("band") or "").strip().upper()
+        if not band:
+            band = _hz_to_amateur_band(freq_hz)
         if not band and freq_hz is None:
             return {}
-        try:
-            snapshot = manager.evaluate_primary_rf_conflict(
-                target_band=band,
-                target_frequency_hz=freq_hz,
-                source=source,
-                force=force,
+        guard_status = self._antenna_supported_band_guard_status(
+            row,
+            source=source,
+            target_band=band,
+            target_frequency_hz=freq_hz,
+        )
+        runtime_status: Dict[str, object] = {}
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is None or not hasattr(manager, "evaluate_primary_rf_conflict"):
+            return guard_status
+        else:
+            try:
+                snapshot = manager.evaluate_primary_rf_conflict(
+                    target_band=band,
+                    target_frequency_hz=freq_hz,
+                    source=source,
+                    force=force,
+                )
+            except Exception as exc:
+                log.debug("SchedulerEngine: RF conflict status lookup failed: %s", exc)
+                return guard_status
+            if snapshot is not None:
+                runtime_status = {
+                    "warning": True,
+                    "summary": str(getattr(snapshot, "summary", "") or "").strip(),
+                    "detail": str(getattr(snapshot, "detail", "") or "").strip(),
+                    "signature": str(getattr(snapshot, "signature", "") or "").strip(),
+                    "peer_device_id": getattr(snapshot, "peer_device_profile_id", None),
+                    "peer_name": str(getattr(snapshot, "peer_name", "") or "").strip(),
+                    "peer_band": str(getattr(snapshot, "peer_band", "") or "").strip(),
+                    "peer_frequency_hz": getattr(snapshot, "peer_frequency_hz", None),
+                    "target_band": str(getattr(snapshot, "target_band", "") or "").strip(),
+                    "target_frequency_hz": getattr(snapshot, "target_frequency_hz", None),
+                    "same_band": bool(getattr(snapshot, "same_band", False)),
+                    "same_frequency": bool(getattr(snapshot, "same_frequency", False)),
+                    "shared_antenna_groups": list(getattr(snapshot, "shared_antenna_groups", []) or []),
+                    "shared_amplifier_groups": list(getattr(snapshot, "shared_amplifier_groups", []) or []),
+                    "shared_frontend_groups": list(getattr(snapshot, "shared_frontend_groups", []) or []),
+                    "shared_band_overlap_groups": list(getattr(snapshot, "shared_band_overlap_groups", []) or []),
+                    "shared_advanced_frequency_groups": list(
+                        getattr(snapshot, "shared_advanced_frequency_groups", []) or []
+                    ),
+                    "advanced_frequency_window_hz": getattr(snapshot, "advanced_frequency_window_hz", 0),
+                    "frequency_delta_hz": getattr(snapshot, "frequency_delta_hz", None),
+                    "guard_mode": str(getattr(snapshot, "guard_mode", "") or "prompt").strip().lower() or "prompt",
+                    "blocked": bool(getattr(snapshot, "blocked", False)),
+                }
+        return self._strictest_coordination_conflict_status(guard_status, runtime_status)
+
+    @staticmethod
+    def _coordination_guard_rank(status: Mapping[str, object]) -> int:
+        if not status:
+            return -1
+        if bool(status.get("blocked")):
+            return 3
+        mode = normalize_rf_guard_mode(status.get("guard_mode", "confirm"), "confirm")
+        return {"warn": 1, "confirm": 2, "block": 3}.get(mode, 2)
+
+    @staticmethod
+    def _coordination_conflict_signature(status: Mapping[str, object]) -> str:
+        if not status:
+            return ""
+        explicit = str(status.get("signature", "") or "").strip()
+        if explicit:
+            return explicit
+        parts = [
+            str(status.get("summary") or "").strip(),
+            str(status.get("detail") or "").strip(),
+            str(status.get("guard_mode") or "").strip(),
+            str(status.get("peer_device_id") or "").strip(),
+            str(status.get("peer_name") or "").strip(),
+            str(status.get("target_band") or "").strip(),
+            str(status.get("target_frequency_hz") or "").strip(),
+            str(status.get("advanced_frequency_window_hz") or "").strip(),
+            str(status.get("frequency_delta_hz") or "").strip(),
+        ]
+        return "|".join(part for part in parts if part)
+
+    @classmethod
+    def _strictest_coordination_conflict_status(
+        cls,
+        first: Mapping[str, object],
+        second: Mapping[str, object],
+    ) -> Dict[str, object]:
+        first_status = dict(first or {})
+        second_status = dict(second or {})
+        if not first_status:
+            return second_status
+        if not second_status:
+            return first_status
+        preferred, other = (
+            (first_status, second_status)
+            if cls._coordination_guard_rank(first_status) >= cls._coordination_guard_rank(second_status)
+            else (second_status, first_status)
+        )
+        detail_parts = [
+            str(preferred.get("detail") or preferred.get("summary") or "").strip(),
+            str(other.get("detail") or other.get("summary") or "").strip(),
+        ]
+        combined = dict(preferred)
+        combined["warning"] = True
+        combined["detail"] = " ".join(part for part in detail_parts if part).strip()
+        combined["signature"] = "||".join(
+            part
+            for part in (
+                cls._coordination_conflict_signature(preferred),
+                cls._coordination_conflict_signature(other),
             )
-        except Exception as exc:
-            log.debug("SchedulerEngine: RF conflict status lookup failed: %s", exc)
+            if part
+        )
+        combined["blocked"] = cls._coordination_guard_rank(preferred) >= 3
+        return combined
+
+    @staticmethod
+    def _profile_supported_bands(profile: Mapping[str, object]) -> List[str]:
+        raw = profile.get("antenna_supported_bands_json", "[]") if isinstance(profile, Mapping) else "[]"
+        parsed: object
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = [part.strip() for part in raw.split(",") if part.strip()]
+        elif isinstance(raw, (list, tuple, set)):
+            parsed = list(raw)
+        else:
+            parsed = []
+        out: List[str] = []
+        items = parsed if isinstance(parsed, list) else []
+        for item in items:
+            token = str(item or "").strip().upper().replace(" ", "")
+            if token and token not in out:
+                out.append(token)
+        return out
+
+    def _primary_runtime_profile_for_guard(self) -> Dict[str, object]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is not None and hasattr(manager, "get_primary_runtime"):
+            try:
+                runtime = manager.get_primary_runtime()
+                if runtime is not None and isinstance(getattr(runtime, "profile", None), dict):
+                    return dict(runtime.profile)
+            except Exception:
+                pass
+        try:
+            store = MultiRadioStore(settings_db_path())
+            profile = store.get_runtime_primary_device_profile()
+            return dict(profile or {})
+        except Exception:
             return {}
-        if snapshot is None:
+
+    def _antenna_supported_band_guard_status(
+        self,
+        entry: Mapping[str, object],
+        *,
+        source: str,
+        target_band: str,
+        target_frequency_hz: Optional[int],
+    ) -> Dict[str, object]:
+        profile = self._primary_runtime_profile_for_guard()
+        if not profile:
             return {}
+        supported = self._profile_supported_bands(profile)
+        if not supported:
+            return {}
+        band = str(target_band or "").strip().upper()
+        if not band:
+            return {}
+        if band in supported:
+            return {}
+        mode = normalize_rf_guard_mode(profile.get("antenna_band_guard_mode", "warn"))
+        radio_name = str(profile.get("name", "") or "Radio").strip() or "Radio"
+        summary = f"RF Safety Guard: {radio_name} antenna is not configured for {band}."
+        detail = f"Antenna Supports These Bands: {', '.join(supported)}. Target band: {band}."
+        signature = "|".join(
+            [
+                str(profile.get("id", "") or ""),
+                "ANTENNA_BAND_SUPPORT",
+                str(source or "").strip().upper(),
+                band,
+                str(int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else 0),
+                mode,
+            ]
+        )
         return {
             "warning": True,
-            "summary": str(getattr(snapshot, "summary", "") or "").strip(),
-            "detail": str(getattr(snapshot, "detail", "") or "").strip(),
-            "signature": str(getattr(snapshot, "signature", "") or "").strip(),
-            "peer_device_id": getattr(snapshot, "peer_device_profile_id", None),
-            "peer_name": str(getattr(snapshot, "peer_name", "") or "").strip(),
-            "peer_band": str(getattr(snapshot, "peer_band", "") or "").strip(),
-            "peer_frequency_hz": getattr(snapshot, "peer_frequency_hz", None),
-            "target_band": str(getattr(snapshot, "target_band", "") or "").strip(),
-            "target_frequency_hz": getattr(snapshot, "target_frequency_hz", None),
-            "same_band": bool(getattr(snapshot, "same_band", False)),
-            "same_frequency": bool(getattr(snapshot, "same_frequency", False)),
-            "shared_antenna_groups": list(getattr(snapshot, "shared_antenna_groups", []) or []),
-            "shared_amplifier_groups": list(getattr(snapshot, "shared_amplifier_groups", []) or []),
-            "shared_frontend_groups": list(getattr(snapshot, "shared_frontend_groups", []) or []),
+            "summary": summary,
+            "detail": detail,
+            "signature": signature,
+            "peer_device_id": None,
+            "peer_name": "",
+            "peer_band": "",
+            "peer_frequency_hz": None,
+            "target_band": band,
+            "target_frequency_hz": target_frequency_hz,
+            "same_band": False,
+            "same_frequency": False,
+            "shared_antenna_groups": [],
+            "shared_amplifier_groups": [],
+            "shared_frontend_groups": [],
+            "shared_band_overlap_groups": [],
+            "guard_mode": mode,
+            "blocked": mode == "block",
         }
 
     def evaluate_coordination_conflict(
@@ -5726,18 +5951,51 @@ class SchedulerEngine(QObject):
             return
 
         coordination_conflict = self._coordination_conflict_status(effective_entry, source=source, force=bool(force))
-        coordination_signature = str(coordination_conflict.get("signature", "") or "").strip()
+        coordination_signature = self._coordination_conflict_signature(coordination_conflict)
+        if bool(coordination_conflict.get("blocked")):
+            self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "blocked",
+                "rf_safety_guard_block",
+                source=source,
+                entry=effective_entry,
+                action="Blocked schedule change by RF Safety Guard",
+                detail=str(coordination_conflict.get("detail") or coordination_conflict.get("summary") or ""),
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
+                signature=coordination_signature,
+                guard_mode=str(coordination_conflict.get("guard_mode") or ""),
+            )
+            self.active_entry_changed.emit(effective_entry, source)
+            return
         suppressed_signature = str(self._coordination_prompt_suppressed_signature or "").strip()
         if suppressed_signature and suppressed_signature != coordination_signature:
             self._coordination_prompt_suppressed_signature = None
             suppressed_signature = ""
         if not coordination_signature:
             self._coordination_prompt_suppressed_signature = None
-        should_prompt_coordination = bool(
-            coordination_signature
-            and not ignore_coordination_prompt
-            and coordination_signature != suppressed_signature
-        )
+        coordination_guard_mode = normalize_rf_guard_mode(coordination_conflict.get("guard_mode", "confirm"), "confirm")
+        if coordination_signature and coordination_guard_mode == "warn":
+            self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "warning",
+                "rf_safety_guard_warning",
+                source=source,
+                entry=effective_entry,
+                action="Continuing schedule change after RF Safety Guard warn-only notice",
+                detail=str(coordination_conflict.get("detail") or coordination_conflict.get("summary") or ""),
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
+                signature=coordination_signature,
+                guard_mode=coordination_guard_mode,
+            )
+            should_prompt_coordination = False
+        else:
+            should_prompt_coordination = bool(
+                coordination_signature
+                and not ignore_coordination_prompt
+                and coordination_signature != suppressed_signature
+            )
         if self._coordination_prompt_active:
             active_signature = str(self._coordination_prompt_signature or "").strip()
             if (not should_prompt_coordination) or active_signature != coordination_signature:
@@ -5753,8 +6011,8 @@ class SchedulerEngine(QObject):
                 "coordination_conflict",
                 source=source,
                 entry=effective_entry,
-                action="Holding schedule change for multi-rig coordination review",
-                detail=str(coordination_conflict.get("summary") or coordination_conflict.get("detail") or ""),
+                action="Holding schedule change for RF Safety Guard operator review",
+                detail=str(coordination_conflict.get("detail") or coordination_conflict.get("summary") or ""),
                 frequency_hz=freq_hz,
                 throttle_sec=30.0,
                 signature=coordination_signature,

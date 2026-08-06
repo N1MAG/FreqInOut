@@ -204,6 +204,160 @@ def test_net_schedule_tab_collects_target_scope_from_row_widgets(monkeypatch, tm
         app.processEvents()
 
 
+def test_net_schedule_save_auto_creates_manual_resource_for_new_manual_net(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    net_mod = importlib.reload(net_mod)
+    SettingsManager()
+    dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    dummy.settings = SettingsManager()
+
+    rows = [
+        {
+            "day_utc": "Monday",
+            "recurrence": "Weekly",
+            "group_name": "OPS-A",
+            "mode": "Digi",
+            "band": "40M",
+            "frequency": "7.110",
+            "start_utc": "01:00",
+            "end_utc": "02:00",
+            "early_checkin": "5",
+            "net_name": "Night Net",
+            "fldigi_mode": "USB",
+            "fldigi_offset": "1500",
+            "target_scope": "station",
+        }
+    ]
+
+    dummy._save_to_db(rows)
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        resources = conn.execute(
+            """
+            SELECT id, resource_set, source_type, source_ref, day_utc, net_name, frequency
+              FROM net_resources
+            """
+        ).fetchall()
+        schedule = conn.execute("SELECT resource_id FROM net_schedule_tab").fetchall()
+    finally:
+        conn.close()
+
+    assert len(resources) == 1
+    resource_id, resource_set, source_type, source_ref, day, net_name, frequency = resources[0]
+    assert resource_set == "Custom"
+    assert source_type == "manual"
+    assert source_ref == "auto_from_schedule"
+    assert day == "Monday"
+    assert net_name == "Night Net"
+    assert frequency == "7.110"
+    assert schedule == [(resource_id,)]
+
+
+def test_net_schedule_save_links_existing_resource_without_duplicate(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    net_mod = importlib.reload(net_mod)
+    SettingsManager()
+    dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    dummy.settings = SettingsManager()
+
+    rows = [
+        {
+            "day_utc": "Tuesday",
+            "recurrence": "Weekly",
+            "group_name": "OPS-B",
+            "mode": "Digi",
+            "band": "80M",
+            "frequency": "3.590",
+            "start_utc": "03:00",
+            "end_utc": "04:00",
+            "early_checkin": "0",
+            "net_name": "Early Net",
+            "fldigi_mode": "",
+            "fldigi_offset": "",
+            "target_scope": "station",
+        }
+    ]
+
+    dummy._save_to_db(rows)
+    dummy._save_to_db(rows)
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        resource_count = conn.execute("SELECT COUNT(*) FROM net_resources").fetchone()[0]
+        resource_id = conn.execute("SELECT id FROM net_resources").fetchone()[0]
+        schedule = conn.execute("SELECT resource_id FROM net_schedule_tab").fetchall()
+    finally:
+        conn.close()
+
+    assert resource_count == 1
+    assert schedule == [(resource_id,)]
+
+
+def test_net_schedule_save_unlinks_edited_resource_row_without_updating_master(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    net_mod = importlib.reload(net_mod)
+    SettingsManager()
+    dummy = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    dummy.settings = SettingsManager()
+
+    original = {
+        "day_utc": "Wednesday",
+        "recurrence": "Weekly",
+        "group_name": "OPS-C",
+        "mode": "Digi",
+        "band": "40M",
+        "frequency": "7.115",
+        "start_utc": "05:00",
+        "end_utc": "06:00",
+        "early_checkin": "0",
+        "net_name": "Resource Net",
+        "fldigi_mode": "",
+        "fldigi_offset": "",
+        "target_scope": "station",
+    }
+
+    dummy._save_to_db([original])
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        resource_id = conn.execute("SELECT id FROM net_resources").fetchone()[0]
+    finally:
+        conn.close()
+
+    edited = dict(original)
+    edited["_resource_id"] = resource_id
+    edited["_resource_set"] = "Custom"
+    edited["net_name"] = "Local Override Net"
+    edited["start_utc"] = "05:30"
+
+    dummy._save_to_db([edited])
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        resource_count = conn.execute("SELECT COUNT(*) FROM net_resources").fetchone()[0]
+        master = conn.execute("SELECT net_name, start_utc FROM net_resources WHERE id = ?", (resource_id,)).fetchone()
+        schedule = conn.execute("SELECT net_name, start_utc, resource_id FROM net_schedule_tab").fetchall()
+    finally:
+        conn.close()
+
+    assert resource_count == 1
+    assert master == ("Resource Net", "05:00")
+    assert schedule == [("Local Override Net", "05:30", None)]
+
+
 def test_net_row_signature_includes_target_scope_metadata() -> None:
     base_row = {
         "day_utc": "Monday",

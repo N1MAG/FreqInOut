@@ -75,6 +75,18 @@ def _json_string_tuple(value: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in items if item))
 
 
+def _json_object(value: object) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    try:
+        loaded = json.loads(str(value))
+    except Exception:
+        return {}
+    return dict(loaded) if isinstance(loaded, Mapping) else {}
+
+
 def radio_profile_from_device_row(row: Mapping[str, Any]) -> RadioProfile:
     device_class = _text(row.get("device_class"), "tx_rx").lower() or "tx_rx"
     control_backend = _text(row.get("control_backend"), "manual").lower() or "manual"
@@ -104,11 +116,11 @@ def radio_profile_from_device_row(row: Mapping[str, Any]) -> RadioProfile:
     )
 
 
-def frequency_plan_from_operating_row(row: Mapping[str, Any]) -> FrequencyPlan:
+def frequency_plan_from_plan_row(row: Mapping[str, Any]) -> FrequencyPlan:
     status = _text(row.get("status"), "saved").lower() or "saved"
     return FrequencyPlan(
         id=_id("plan", row.get("id")),
-        name=_text(row.get("name"), "Operating Plan") or "Operating Plan",
+        name=_text(row.get("name"), "Frequency Plan") or "Frequency Plan",
         description=_text(row.get("description")),
         category=_text(row.get("category"), "normal").lower() or "normal",
         status=status,
@@ -124,23 +136,31 @@ def frequency_plan_from_operating_row(row: Mapping[str, Any]) -> FrequencyPlan:
     )
 
 
-def assigned_plan_from_assignment_row(
+def assigned_plan_from_schedule_assignment_row(
     row: Mapping[str, Any],
-    operating_row: Optional[Mapping[str, Any]] = None,
+    plan_row: Optional[Mapping[str, Any]] = None,
 ) -> AssignedPlan:
     state = _text(row.get("assignment_state"), "active").lower() or "active"
+    validation_status = _json_object(row.get("validation_status_json"))
+    scheduler_enforcement = "enabled"
+    if _text(validation_status.get("rf_guard_validation")).lower() == "not_enforced":
+        scheduler_enforcement = "rf_guard_not_enforced"
+    elif _text(validation_status.get("state")).lower() == "warning":
+        scheduler_enforcement = "rf_guard_warning"
+    elif _text(validation_status.get("state")).lower() == "blocked":
+        scheduler_enforcement = "rf_guard_blocked"
     return AssignedPlan(
         id=_id("assignment", row.get("id")),
         radio_profile_id=_id("radio", row.get("device_profile_id")),
-        frequency_plan_id=_id("plan", row.get("operating_profile_id")),
-        assignment_category="temporary" if state == "temporary_override" else "normal",
+        frequency_plan_id=_id("plan", row.get("frequency_plan_id")),
+        assignment_category=_text(row.get("assignment_category"), "normal") or "normal",
         active=state in {"active", "temporary_override"},
         default=False,
         temporary_override=state == "temporary_override",
-        temporary_override_until_utc=_text(row.get("temporary_override_until_utc")) or None,
-        receive_only=_boolish((operating_row or {}).get("receive_only"), False),
-        scheduler_enforcement="enabled",
-        scheduler_mode=_text(row.get("scheduler_mode"), "full_fio_workflow") or "full_fio_workflow",
+        temporary_override_until_utc=_text(row.get("ends_utc")) or None,
+        receive_only=_boolish((plan_row or {}).get("receive_only"), False),
+        scheduler_enforcement=scheduler_enforcement,
+        scheduler_mode=_text(row.get("scheduler_mode"), "full") or "full",
         created_utc=_text(row.get("created_utc")) or _utc_now_iso(),
         updated_utc=_text(row.get("updated_utc")) or _utc_now_iso(),
     )
@@ -155,20 +175,20 @@ class SharedStatePersistenceAdapter:
         policy_store = DurableRuntimePolicyStore(self.store)
         selection_service = DurableRuntimeSelectionService(self.store, policy_store=policy_store)
         device_rows = self.store.list_device_profiles()
-        operating_rows = self.store.list_operating_profiles()
-        assignment_rows = self.store.list_effective_assignments()
-        operating_by_id = {int(row.get("id", 0) or 0): row for row in operating_rows}
+        plan_rows = self.store.list_frequency_plans()
+        assignment_rows = self.store.list_effective_assigned_plans()
+        plans_by_id = {int(row.get("id", 0) or 0): row for row in plan_rows}
 
         policies = list(policy_store.list_policies(runtime_status=runtime_status))
         selection = selection_service.state(runtime_status=runtime_status)
 
         return SharedStateSnapshot(
             radio_profiles=tuple(radio_profile_from_device_row(row) for row in device_rows),
-            frequency_plans=tuple(frequency_plan_from_operating_row(row) for row in operating_rows),
+            frequency_plans=tuple(frequency_plan_from_plan_row(row) for row in plan_rows),
             assigned_plans=tuple(
-                assigned_plan_from_assignment_row(
+                assigned_plan_from_schedule_assignment_row(
                     row,
-                    operating_by_id.get(int(row.get("operating_profile_id", 0) or 0)),
+                    plans_by_id.get(int(row.get("frequency_plan_id", 0) or 0)),
                 )
                 for row in assignment_rows
             ),

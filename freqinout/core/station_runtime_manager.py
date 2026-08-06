@@ -7,7 +7,13 @@ import time
 from typing import Any, Dict, List, Mapping, Optional
 
 from freqinout.core.logger import log
-from freqinout.core.multi_radio_store import MultiRadioStore, normalize_ptt_group, normalize_resource_group
+from freqinout.core.multi_radio_store import (
+    MultiRadioStore,
+    normalize_ptt_group,
+    normalize_resource_group,
+    normalize_rf_guard_mode,
+    stricter_rf_guard_mode,
+)
 from freqinout.core.multi_rig_runtime_status import (
     STARTUP_FRESH_DEFAULT_READY,
     STARTUP_MIGRATED,
@@ -331,6 +337,12 @@ class RfConflictSnapshot:
     shared_antenna_groups: List[str]
     shared_amplifier_groups: List[str]
     shared_frontend_groups: List[str]
+    shared_band_overlap_groups: List[str]
+    shared_advanced_frequency_groups: List[str]
+    advanced_frequency_window_hz: int
+    frequency_delta_hz: Optional[int]
+    guard_mode: str
+    blocked: bool
     same_band: bool
     same_frequency: bool
     summary: str
@@ -1265,14 +1277,57 @@ class StationRuntimeManager:
                 and abs(int(target_frequency_hz) - peer_frequency_hz) <= 5
             )
             same_band = bool(normalized_band and peer_band and normalized_band == peer_band)
-            if not same_frequency and not same_band:
-                continue
             trigger = dict(policy.get("trigger") or {})
             antenna_groups = _normalize_group_list(trigger.get("antenna_groups"))
             amplifier_groups = _normalize_group_list(trigger.get("amplifier_groups"))
             frontend_groups = _normalize_group_list(trigger.get("frontend_groups"))
-            if not (antenna_groups or amplifier_groups or frontend_groups):
+            band_overlap_groups = _normalize_group_list(trigger.get("band_overlap_groups"))
+            advanced_frequency_groups = _normalize_group_list(trigger.get("advanced_frequency_groups"))
+            advanced_windows = dict(trigger.get("advanced_frequency_windows_hz") or {})
+            advanced_window_hz = 0
+            if advanced_frequency_groups:
+                try:
+                    target_window = int(advanced_windows.get(str(primary_id), 0) or 0)
+                except Exception:
+                    target_window = 0
+                try:
+                    peer_window = int(advanced_windows.get(str(peer_id), 0) or 0)
+                except Exception:
+                    peer_window = 0
+                advanced_window_hz = max(0, target_window, peer_window)
+            frequency_delta_hz = (
+                abs(int(target_frequency_hz) - int(peer_frequency_hz))
+                if isinstance(target_frequency_hz, (int, float))
+                else None
+            )
+            advanced_frequency_close = (
+                bool(advanced_frequency_groups)
+                and advanced_window_hz > 0
+                and isinstance(frequency_delta_hz, int)
+                and frequency_delta_hz <= advanced_window_hz
+            )
+            if not (
+                antenna_groups
+                or amplifier_groups
+                or frontend_groups
+                or band_overlap_groups
+                or advanced_frequency_groups
+            ):
                 continue
+            if band_overlap_groups and not (same_frequency or same_band):
+                continue
+            if advanced_frequency_groups and not advanced_frequency_close and not (
+                antenna_groups or amplifier_groups or frontend_groups or band_overlap_groups
+            ):
+                continue
+            if not advanced_frequency_close and not same_frequency and not same_band:
+                continue
+            guard_mode = str(policy.get("safety_mode") or "").strip().lower()
+            if guard_mode not in {"block", "prompt", "warn"}:
+                action = dict(policy.get("action") or {})
+                guard_mode = str(action.get("guard_mode") or "prompt").strip().lower()
+            if guard_mode not in {"block", "prompt", "warn"}:
+                guard_mode = "prompt"
             peer_name = str(peer_runtime.profile.get("name", "") or "").strip() or f"Device {peer_id}"
             candidates.append(
                 {
@@ -1285,7 +1340,19 @@ class StationRuntimeManager:
                     "shared_antenna_groups": antenna_groups,
                     "shared_amplifier_groups": amplifier_groups,
                     "shared_frontend_groups": frontend_groups,
-                    "shared_count": len(antenna_groups) + len(amplifier_groups) + len(frontend_groups),
+                    "shared_band_overlap_groups": band_overlap_groups,
+                    "shared_advanced_frequency_groups": advanced_frequency_groups if advanced_frequency_close else [],
+                    "advanced_frequency_window_hz": int(advanced_window_hz) if advanced_frequency_close else 0,
+                    "frequency_delta_hz": frequency_delta_hz if advanced_frequency_close else None,
+                    "guard_mode": guard_mode,
+                    "blocked": guard_mode == "block",
+                    "shared_count": (
+                        len(antenna_groups)
+                        + len(amplifier_groups)
+                        + len(frontend_groups)
+                        + len(band_overlap_groups)
+                        + len(advanced_frequency_groups if advanced_frequency_close else [])
+                    ),
                 }
             )
         if not candidates:
@@ -1305,6 +1372,21 @@ class StationRuntimeManager:
         antenna_groups = sorted({group for item in candidates for group in item.get("shared_antenna_groups", [])})
         amplifier_groups = sorted({group for item in candidates for group in item.get("shared_amplifier_groups", [])})
         frontend_groups = sorted({group for item in candidates for group in item.get("shared_frontend_groups", [])})
+        band_overlap_groups = sorted({group for item in candidates for group in item.get("shared_band_overlap_groups", [])})
+        advanced_frequency_groups = sorted(
+            {group for item in candidates for group in item.get("shared_advanced_frequency_groups", [])}
+        )
+        advanced_window_hz = max(int(item.get("advanced_frequency_window_hz", 0) or 0) for item in candidates)
+        frequency_deltas = [
+            int(item["frequency_delta_hz"])
+            for item in candidates
+            if isinstance(item.get("frequency_delta_hz"), int)
+        ]
+        frequency_delta_hz = min(frequency_deltas) if frequency_deltas else None
+        guard_mode = "warn"
+        for item in candidates:
+            guard_mode = stricter_rf_guard_mode(guard_mode, normalize_rf_guard_mode(item.get("guard_mode"), "confirm"))
+        blocked = guard_mode == "block"
 
         resource_parts: List[str] = []
         if antenna_groups:
@@ -1313,16 +1395,25 @@ class StationRuntimeManager:
             resource_parts.append("amplifier " + ", ".join(amplifier_groups))
         if frontend_groups:
             resource_parts.append("front-end " + ", ".join(frontend_groups))
+        if band_overlap_groups:
+            resource_parts.append("band-overlap guard " + ", ".join(band_overlap_groups))
+        if advanced_frequency_groups:
+            resource_parts.append(
+                f"advanced guard {', '.join(advanced_frequency_groups)} within {advanced_window_hz} Hz"
+            )
         resource_text = "; ".join(resource_parts) if resource_parts else "shared RF resources"
 
         normalized_target_hz = int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else None
         target_frequency_label = _format_frequency_label(normalized_target_hz)
         peer_frequency_label = _format_frequency_label(int(primary_candidate["peer_frequency_hz"]))
-        overlap_text = (
-            f"same frequency {target_frequency_label}"
-            if primary_candidate["same_frequency"] and target_frequency_label
-            else f"same band {normalized_band or str(primary_candidate.get('peer_band', '') or '').strip()}"
-        )
+        if advanced_frequency_groups and isinstance(frequency_delta_hz, int):
+            overlap_text = f"within {frequency_delta_hz} Hz of {peer_frequency_label or 'the peer frequency'}"
+        else:
+            overlap_text = (
+                f"same frequency {target_frequency_label}"
+                if primary_candidate["same_frequency"] and target_frequency_label
+                else f"same band {normalized_band or str(primary_candidate.get('peer_band', '') or '').strip()}"
+            )
         extra_count = max(0, len(peer_names) - 1)
         extra_text = f" (+{extra_count} more)" if extra_count else ""
         summary = f"RF conflict: {primary_candidate['peer_name']}{extra_text} on {overlap_text} via {resource_text}."
@@ -1349,6 +1440,11 @@ class StationRuntimeManager:
                 ",".join(antenna_groups),
                 ",".join(amplifier_groups),
                 ",".join(frontend_groups),
+                ",".join(band_overlap_groups),
+                ",".join(advanced_frequency_groups),
+                str(advanced_window_hz),
+                str(frequency_delta_hz if isinstance(frequency_delta_hz, int) else ""),
+                guard_mode,
             ]
         )
         return RfConflictSnapshot(
@@ -1365,6 +1461,12 @@ class StationRuntimeManager:
             shared_antenna_groups=antenna_groups,
             shared_amplifier_groups=amplifier_groups,
             shared_frontend_groups=frontend_groups,
+            shared_band_overlap_groups=band_overlap_groups,
+            shared_advanced_frequency_groups=advanced_frequency_groups,
+            advanced_frequency_window_hz=advanced_window_hz,
+            frequency_delta_hz=frequency_delta_hz,
+            guard_mode=guard_mode,
+            blocked=blocked,
             same_band=bool(primary_candidate["same_band"]),
             same_frequency=bool(primary_candidate["same_frequency"]),
             summary=summary,

@@ -231,6 +231,10 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
         source.index("nav_panel = QWidget()")
         : source.index("self.sections_stack = QStackedWidget()")
     ]
+    configured_radios_block = source[
+        source.index('configured_radios_group = QGroupBox("Configured Radios")')
+        : source.index("sections_row = QHBoxLayout()")
+    ]
     sections_scroll_block = source[
         source.index("self.sections_stack = QStackedWidget()")
         : source.index("main_layout.addLayout(sections_row, 1)")
@@ -239,9 +243,25 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
         source.index("def _add_settings_section")
         : source.index("def _select_settings_section_group")
     ]
+    task_nav_block = source[
+        source.index("def _settings_section_short_label")
+        : source.index("def _settings_section_combo_label")
+    ]
+    mode_visibility_block = source[
+        source.index("def _current_settings_section_scope")
+        : source.index("def _apply_settings_nav_scope_visibility")
+    ]
     style_block = source[
         source.index("def _refresh_settings_nav_button_styles")
         : source.index("def _set_settings_section_visible")
+    ]
+    visibility_block = source[
+        source.index("def _set_settings_section_visible")
+        : source.index("def _select_first_visible_settings_section")
+    ]
+    sync_scroll_block = source[
+        source.index("def _sync_current_section_scroll_size")
+        : source.index("def _on_section_toggled")
     ]
 
     assert "self.global_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in nav_build_block
@@ -252,9 +272,19 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert 'nav_panel.setObjectName("settingsSectionNavPanel")' in nav_build_block
     assert 'self.settings_compact_header.setObjectName("settingsCompactHeaderBar")' in nav_build_block
+    assert 'self.settings_task_title_label = QLabel("Settings Tasks")' in nav_build_block
+    assert "Highlighted tasks need review" in nav_build_block
+    assert "self.settings_global_tasks_layout = QGridLayout(self.settings_global_tasks_widget)" in nav_build_block
+    assert "self.settings_radio_tasks_layout = QGridLayout(self.settings_radio_tasks_widget)" in nav_build_block
+    assert "main_layout.addWidget(configured_radios_group)" in nav_build_block
+    assert "main_layout.addWidget(self.settings_compact_header)" in nav_build_block
+    assert nav_build_block.index("main_layout.addWidget(configured_radios_group)") < nav_build_block.index(
+        "main_layout.addWidget(self.settings_compact_header)"
+    )
     assert 'self.settings_section_combo.setObjectName("settingsSectionCombo")' in nav_build_block
     assert 'self.settings_section_combo.setAccessibleName("Settings section selector")' in nav_build_block
     assert "self.settings_section_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in nav_build_block
+    assert "self.settings_section_combo.setVisible(False)" in nav_build_block
     assert 'self.settings_section_nav_scroll.setObjectName("settingsSectionNavScroll")' in nav_build_block
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
     assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
@@ -262,17 +292,28 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.settings_section_nav_scroll.hide()" in nav_build_block
     assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" not in nav_build_block
     assert "self.sections_stack.setMinimumWidth(0)" in sections_scroll_block
-    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)" in sections_scroll_block
+    assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)" in sections_scroll_block
+    assert "self.sections_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)" in sections_scroll_block
     assert "self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in sections_scroll_block
-    assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in nav_build_block
-    assert "new radio or SDR" in nav_build_block
-    assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in nav_build_block
-    assert "settings_header_layout.addWidget(self.add_device_profile_btn, 0, 0)" in nav_build_block
-    assert nav_build_block.index("settings_header_layout.addWidget(self.add_device_profile_btn, 0, 0)") < nav_build_block.index(
-        "self.global_settings_toggle_btn = QToolButton()"
-    )
+    assert 'self.add_device_profile_btn = QPushButton("Add Radio")' in configured_radios_block
+    assert "new radio or SDR" in configured_radios_block
+    assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in configured_radios_block
+    assert "configured_title_row.addWidget(self.add_device_profile_btn)" in configured_radios_block
+    assert "settings_header_layout.addWidget(self.add_device_profile_btn" not in nav_build_block
     assert 'btn.setAccessibleName(f"Settings navigation: {title}")' in add_section_block
+    assert "item.setData(self.SECTION_HEALTH_KEY_ROLE" in add_section_block
+    assert "self._add_settings_task_button(group, normalized_scope)" in add_section_block
     assert 'self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)' in add_section_block
+    assert "def _settings_section_short_label" in task_nav_block
+    assert '"Operating Models": "Operating Models"' in task_nav_block
+    assert '"Operating Model Assignment": "Assign Model"' in task_nav_block
+    assert '"Schedule Assignment": "Assign Schedule"' in task_nav_block
+    assert "def _refresh_settings_task_buttons" in task_nav_block
+    assert "def _refresh_settings_mode_visibility" in mode_visibility_block
+    assert "self.configured_radios_group.setVisible(radio_mode)" in mode_visibility_block
+    assert 'self.settings_task_title_label.setText("Radio Settings" if radio_mode else "Global Settings")' in mode_visibility_block
+    assert "eligible_warning" in task_nav_block
+    assert "success_muted" in task_nav_block
     assert "btn.setStyleSheet(self._settings_nav_button_style(role, theme))" in style_block
     assert "self._settings_nav_group_toggle_role(\"global\")" in style_block
     assert "self._settings_nav_group_toggle_role(\"radio\")" in style_block
@@ -284,6 +325,9 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert '" QToolButton {"' in style_block
     assert '" padding-left: 8px;"' in style_block
     assert '" padding-right: 10px;"' in style_block
+    assert 'stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.indexOf(group) >= 0' in visibility_block
+    assert "if not stacked_mode:\n            group.setVisible(bool(visible))" in visibility_block
+    assert "self.sections_stack.setMaximumHeight(target_h)" in sync_scroll_block
 
 
 def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(monkeypatch, tmp_path) -> None:
@@ -302,7 +346,12 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         app.processEvents()
 
         assert tab.settings_compact_header.isVisible() is True
-        assert tab.settings_section_combo.isVisible() is True
+        assert tab.settings_task_title_label.isVisible() is True
+        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_radio_tasks_widget.isVisible() is False
+        assert tab.configured_radios_group.isVisible() is False
+        assert len(tab._settings_section_task_buttons) > 0
+        assert tab.settings_section_combo.isVisible() is False
         assert tab.settings_section_combo.count() > 0
         assert tab.settings_section_nav_scroll.widgetResizable() is True
         assert tab.settings_section_nav_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
@@ -317,10 +366,145 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
 
         assert tab.settings_section_nav_scroll.isVisible() is False
         assert tab.settings_compact_header.isVisible() is True
-        assert tab.settings_section_combo.width() > 0
+        assert tab.settings_global_tasks_widget.width() > 0
+        assert tab.settings_radio_tasks_widget.width() > 0
     finally:
         tab.deleteLater()
         app.processEvents()
+
+
+def test_settings_global_sections_hide_radio_context(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        tab.show()
+        app.processEvents()
+
+        tab._select_settings_section_group(tab.operator_information_section_group)
+        app.processEvents()
+
+        assert tab.configured_radios_group.isVisible() is False
+        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_radio_tasks_widget.isVisible() is False
+        assert tab.add_device_profile_btn.isVisible() is False
+        assert tab.settings_task_title_label.text() == "Global Settings"
+
+        tab._select_settings_section_group(tab.radio_profile_section_group)
+        app.processEvents()
+
+        assert tab.configured_radios_group.isVisible() is True
+        assert tab.settings_global_tasks_widget.isVisible() is False
+        assert tab.settings_radio_tasks_widget.isVisible() is True
+        assert tab.add_device_profile_btn.isVisible() is True
+        assert tab.settings_task_title_label.text() == "Radio Settings"
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_settings_context_switch_from_main_to_radio_refreshes_task_header(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        tab.show()
+        app.processEvents()
+
+        assert tab.show_settings_context("main", health_key="operator_info") is True
+        app.processEvents()
+        assert tab.settings_task_title_label.text() == "Global Settings"
+        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_radio_tasks_widget.isVisible() is False
+        assert tab.configured_radios_group.isVisible() is False
+
+        assert tab.show_settings_context("radios", health_key="radio_profiles") is True
+        app.processEvents()
+        assert tab.settings_task_title_label.text() == "Radio Settings"
+        assert tab.settings_global_tasks_widget.isVisible() is False
+        assert tab.settings_radio_tasks_widget.isVisible() is True
+        assert tab.configured_radios_group.isVisible() is True
+        assert tab.status_group.isVisible() is False
+        assert tab.sections_stack.currentWidget() is tab.radio_profile_section_group
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_settings_operating_model_assignment_section_fits_content_in_stack() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    assignments_block = source[
+        source.index('assignments_group = self._make_collapsible_group(\n            "Operating Model Assignment"')
+        : source.index("self._add_settings_section(assignments_group, scope=\"radio\")")
+    ]
+
+    assert "fit_content=True" in assignments_block
+    assert "fit_content_in_stack=True" in assignments_block
+    assert "assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in assignments_block
+
+
+def test_settings_operating_model_assignment_uses_in_panel_editor_not_popup() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    build_block = source[
+        source.index("self.assignment_editor_rows: List[Dict[str, Any]] = []")
+        : source.index("self.device_assignments_table = QTableWidget(0, 8)")
+    ]
+    assignment_block = source[
+        source.index("def _assignment_editor_selected_profile")
+        : source.index("def _restore_default_operating_profile_for_selected_devices")
+    ]
+
+    assert 'self.assignment_editor_panel.setObjectName("operatingModelAssignmentEditorPanel")' in build_block
+    assert 'self.assignment_editor_panel.setVisible(False)' in build_block
+    assert 'self.assignment_editor_save_btn = QPushButton("Save Assignment")' in build_block
+    assert 'self.assign_device_operating_profile_btn = QPushButton("Assign Model")' in build_block
+    assert 'self._set_section_health_key(assignments_group, "operating_model_assignments")' in source
+    assert "def _open_assignment_dialog" not in source
+    assert 'dlg.setWindowTitle("Assign Frequency Plan")' not in source
+    assert "QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)" not in assignment_block
+    assert "self._show_assignment_editor(selected)" in assignment_block
+    assert 'self.show_settings_context("radios", health_key="operating_model_assignments")' in source
+    assert "def _save_assignment_editor" in assignment_block
+    assert 'status="succeeded"' in assignment_block
+    assert 'status="success"' not in assignment_block
+    assert 'self.assignment_editor_panel.setVisible(False)' in assignment_block
+    assert 'self._refresh_fit_content_section_height(getattr(self, "device_assignments_section_group", None))' in assignment_block
+    assert "self.assignment_editor_save_btn.clicked.connect(self._save_assignment_editor)" in build_block
+    assert "Review the assignment details in this panel" in assignment_block
+    assert "QMessageBox.information(self, \"Schedule Assignment\", \"Select one or more radios to assign.\")" not in source
+    assert "QMessageBox.information(self, \"Restore Plan\"" not in source
+    assert "QMessageBox.warning(self, \"Restore Plan\"" not in source
+
+
+def test_settings_fit_content_applies_in_stacked_mode_by_default() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    collapsed_block = source[
+        source.index("def _apply_collapsed_state")
+        : source.index("def _refresh_fit_content_section_height")
+    ]
+
+    assert 'fit_content = bool(meta.get("fit_content", False))' in collapsed_block
+    assert 'not bool(meta.get("fit_content_in_stack", False))' not in collapsed_block
+    fit_content_branch = collapsed_block[
+        collapsed_block.index("if fit_content:") : collapsed_block.index("else:\n                group.setMinimumHeight(0)")
+    ]
+    assert "group.setMaximumHeight(target_height)" in fit_content_branch
+    assert "group.setMaximumHeight(16777215)" not in fit_content_branch
+    assert "QSizePolicy.Preferred if stacked_mode else QSizePolicy.Fixed" in fit_content_branch
 
 
 def test_settings_nav_group_toggle_role_distinguishes_expanded_groups() -> None:
@@ -437,11 +621,11 @@ def test_settings_group_tables_use_compact_height_policy() -> None:
     assert "self._refresh_fit_content_section_height(getattr(self, \"local_net_section_group\", None))" in local_refresh_block
 
 
-def test_settings_frequency_plan_and_spotter_tables_own_their_scroll_geometry() -> None:
+def test_settings_operating_model_and_spotter_tables_own_their_scroll_geometry() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     frequency_build_block = source[
         source.index("self.operating_profiles_table = QTableWidget(0, 6)")
-        : source.index("assignments_group = QGroupBox(\"Assigned Plans\")")
+        : source.index("assignments_group = QGroupBox(\"Operating Model Assignment\")")
     ]
     frequency_refresh_block = source[
         source.index("def _refresh_operating_profiles_table")
@@ -683,7 +867,7 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
             (tab.local_net_section_group, tab.local_net_table),
         ):
             assert group.minimumHeight() == expanded_heights[group]
-            assert group.maximumHeight() == 16777215
+            assert group.maximumHeight() == expanded_heights[group]
             assert expanded_heights[group] >= table.maximumHeight()
             assert table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
             assert table.maximumHeight() < table.horizontalHeader().height() + (table.rowCount() * max(table.rowHeight(0), 24))
@@ -704,7 +888,7 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
 
             assert content.isHidden() is False
             assert group.minimumHeight() == expanded_heights[group]
-            assert group.maximumHeight() == 16777215
+            assert group.maximumHeight() == expanded_heights[group]
             assert group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
     finally:
         tab.deleteLater()
@@ -724,17 +908,32 @@ def test_radio_profile_dashboard_sections_visual_geometry_and_collapse_defaults(
     tab = SettingsTab()
     try:
         sections = [
-            (tab.radio_profile_identity_section, True),
-            (tab.radio_profile_software_stack_section, True),
+            (tab.radio_profile_identity_section, False),
+            (tab.radio_profile_software_stack_section, False),
             (tab.radio_profile_stack_guidance_section, False),
             (tab.radio_profile_connection_section, False),
+            (tab.radio_profile_connections_section, False),
             (tab.radio_profile_frequency_section, False),
             (tab.radio_profile_optional_section, False),
             (tab.radio_profile_inventory_section, False),
             (tab.radio_profile_readiness_section, True),
-            (tab.radio_profile_actions_section, True),
+            (tab.radio_profile_actions_section, False),
         ]
 
+        assert tab.radio_profile_guided_task_key == "review"
+        assert set(tab.radio_profile_guided_task_buttons) == {
+            "radio",
+            "control",
+            "apps",
+            "connections",
+            "plans",
+            "launch",
+            "review",
+            "advanced",
+        }
+        assert tab.radio_profile_guided_task_buttons["radio"].text() == "Radio: Select Radio"
+        assert tab.radio_profile_guided_task_buttons["advanced"].text() == "Advanced Guard: Select Radio"
+        assert "close-frequency protection" in tab.radio_profile_guided_task_buttons["advanced"].toolTip()
         assert tab.radio_profile_section_group.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
         assert tab.sections_scroll.widgetResizable() is True
         assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
@@ -756,11 +955,12 @@ def test_radio_profile_dashboard_sections_visual_geometry_and_collapse_defaults(
 
         assert tab.device_profile_detail_card.frameShape() == QFrame.StyledPanel
         assert tab.device_profile_readiness_card.frameShape() == QFrame.StyledPanel
-        assert not [
-            frame
-            for frame in tab.radio_profile_connection_section.findChildren(QFrame)
-            if frame.frameShape() == QFrame.StyledPanel
-        ]
+        assert tab.radio_profile_connection_section.title() == "Rig Control"
+        assert tab.radio_profile_identity_name_edit.placeholderText()
+        assert tab.radio_profile_identity_deploy_combo.currentData() == "full"
+        assert tab.radio_profile_control_backend_combo.currentData() == "flrig"
+        assert tab.radio_profile_advanced_notes_edit.placeholderText()
+        assert tab.radio_profile_connections_section.title() == "App Connections"
 
         collapsed = tab.radio_profile_connection_section
         collapsed_content = collapsed.layout().itemAt(0).widget()
@@ -3191,11 +3391,12 @@ def test_radio_profile_stack_guidance_panel_is_wired_to_readiness_refresh() -> N
     assert "def _stack_guidance_issue_role" in source
     assert '"external_manual": "info"' in source
     assert '"not_enabled": "muted"' in source
-    assert "self.radio_profile_stack_guidance_section.setVisible(bool(items))" in guidance_block
-    assert "self.radio_profile_stack_guidance_section.setChecked(bool(items))" in guidance_block
+    assert 'current_task in {"apps", "review"}' in guidance_block
+    assert "self.radio_profile_stack_guidance_section.setVisible(bool(items) and task_allows_guidance)" in guidance_block
+    assert "self.radio_profile_stack_guidance_section.setChecked(bool(items) and task_allows_guidance)" in guidance_block
     assert "label.setAccessibleName(f\"Stack guidance: {message}\")" in guidance_block
     assert 'return (message, "Enable Software Options", "radio_profile_software_stack_section", "warning")' in source
-    assert "btn.clicked.connect(lambda _checked=False, g=target_group: self._select_settings_section_group(g))" in guidance_block
+    assert "btn.clicked.connect(lambda _checked=False, g=target_group: self._select_radio_profile_guided_target(g))" in guidance_block
     assert "self._refresh_radio_profile_stack_guidance(readiness_report, None, None)" in readiness_block
     assert "self._refresh_radio_profile_stack_guidance(readiness_report, int(focused_radio_id), profile)" in readiness_block
 
@@ -3215,7 +3416,7 @@ def test_radio_profile_no_software_guidance_opens_software_stack_section() -> No
     tab.radio_profile_stack_guidance_widget = QWidget()
     tab.radio_profile_software_stack_section = target_group
     selected = []
-    tab._select_settings_section_group = lambda group: selected.append(group)
+    tab._select_radio_profile_guided_target = lambda group: selected.append(group)
 
     try:
         SettingsTab._refresh_radio_profile_stack_guidance(
@@ -3243,6 +3444,205 @@ def test_radio_profile_no_software_guidance_opens_software_stack_section() -> No
     finally:
         rows_widget.deleteLater()
         target_group.deleteLater()
+        app.processEvents()
+
+
+def test_radio_profile_guided_task_switching_uses_focused_sections(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        tab.show()
+        app.processEvents()
+
+        tab._select_settings_section_group(tab.radio_profile_section_group)
+        tab._select_radio_profile_guided_task("radio")
+        app.processEvents()
+
+        assert tab.radio_profile_guided_task_key == "radio"
+        assert tab.radio_profile_identity_section.isVisible() is True
+        assert tab.radio_profile_readiness_section.isVisible() is False
+        assert tab.radio_profile_connection_section.isVisible() is False
+
+        tab._select_radio_profile_guided_task("connections")
+        app.processEvents()
+
+        assert tab.radio_profile_guided_task_key == "connections"
+        assert tab.radio_profile_connections_section.isVisible() is True
+        assert tab.radio_profile_connection_section.isVisible() is False
+
+        tab._select_radio_profile_guided_task("plans")
+        app.processEvents()
+
+        assert tab.radio_profile_guided_task_key == "plans"
+        assert tab.radio_profile_frequency_section.isVisible() is True
+        assert tab.radio_profile_identity_section.isVisible() is False
+        assert tab.radio_profile_guided_task_buttons["plans"].text().startswith("Schedule Control:")
+        assert tab.device_profiles_advanced_group.isVisible() is False
+
+        tab._select_radio_profile_guided_task("advanced")
+        app.processEvents()
+
+        assert tab.radio_profile_optional_section.title() == "Advanced RF Guards"
+        assert tab.radio_profile_optional_section.isVisible() is True
+        assert tab.radio_profile_inventory_section.isVisible() is True
+        assert tab.radio_profile_actions_section.isVisible() is True
+        assert tab.device_profiles_advanced_group.title() == "Full Radio Inventory (Advanced)"
+        assert tab.device_profiles_advanced_group.isVisible() is True
+        assert tab.device_profiles_advanced_group.isChecked() is False
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_radio_profile_guided_target_resolver_selects_nested_task() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    profile_group = QGroupBox("Radio Profiles")
+    software_group = QGroupBox("Software Stack")
+    js8_group = QGroupBox("JS8Call Settings")
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.radio_profile_section_group = profile_group
+    tab.radio_profile_software_stack_section = software_group
+    tab.js8_section_group = js8_group
+    tab.radio_profile_guided_task_targets = {
+        "apps": ("radio_profile_software_stack_section",),
+    }
+    selected_sections = []
+    selected_tasks = []
+    tab._select_settings_section_group = lambda group: selected_sections.append(group)
+    tab._select_radio_profile_guided_task = lambda key: selected_tasks.append(key)
+
+    try:
+        SettingsTab._select_radio_profile_guided_target(tab, software_group)
+
+        assert selected_sections == [profile_group]
+        assert selected_tasks == ["apps"]
+
+        SettingsTab._select_radio_profile_guided_target(tab, js8_group)
+
+        assert selected_sections == [profile_group, js8_group]
+        assert selected_tasks == ["apps"]
+    finally:
+        profile_group.deleteLater()
+        software_group.deleteLater()
+        js8_group.deleteLater()
+
+
+def test_radio_profile_guided_inline_save_payloads(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    try:
+        profile = {
+            "id": 7,
+            "name": "Old Radio",
+            "enabled": 1,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+            "device_class": "tx_rx",
+            "deployment_mode": "full",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "rig_host": "127.0.0.1",
+            "rig_port": 4532,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2242,
+            "ptt_group": "",
+            "antenna_group": "",
+            "frontend_group": "",
+            "amplifier_group": "",
+            "notes": "",
+        }
+        tab.device_profiles = [dict(profile)]
+        tab._settings_radio_focus_id = 7
+        tab._update_device_profile_readiness_detail()
+        app.processEvents()
+
+        saved_payloads = []
+
+        def fake_persist(self, payload, *, existing=None):
+            saved_payloads.append((dict(payload), dict(existing or {})))
+            self.device_profiles = [dict(payload)]
+            return True
+
+        monkeypatch.setattr(tab, "_persist_device_profile", types.MethodType(fake_persist, tab))
+        monkeypatch.setattr(tab, "_update_device_profile_readiness_detail", lambda *args, **kwargs: None)
+
+        tab.radio_profile_identity_name_edit.setText("FIO-A")
+        tab.radio_profile_identity_manufacturer_edit.setText("Yaesu")
+        tab.radio_profile_identity_model_edit.setText("FT-DX10")
+        tab._set_combo_current_data(tab.radio_profile_identity_role_combo, "observer")
+        tab._set_combo_current_data(tab.radio_profile_identity_deploy_combo, "minimal")
+        tab.radio_profile_identity_enabled_chk.setChecked(False)
+        tab._save_radio_profile_identity_from_inline()
+
+        identity_payload = saved_payloads[-1][0]
+        assert identity_payload["name"] == "FIO-A"
+        assert identity_payload["radio_manufacturer"] == "Yaesu"
+        assert identity_payload["radio_model"] == "FT-DX10"
+        assert identity_payload["device_class"] == "observer"
+        assert identity_payload["deployment_mode"] == "minimal"
+        assert identity_payload["enabled"] == 0
+
+        tab.radio_profile_control_backend_combo.setCurrentIndex(tab.radio_profile_control_backend_combo.findData("js8call"))
+        tab.radio_profile_control_flrig_port_edit.setText("12346")
+        tab.radio_profile_control_rigctld_port_edit.setText("4533")
+        tab.radio_profile_control_js8_port_edit.setText("2244")
+        tab._save_radio_profile_control_from_inline()
+
+        control_payload = saved_payloads[-1][0]
+        assert control_payload["control_backend"] == "js8call"
+        assert control_payload["flrig_port"] == "12346"
+        assert control_payload["rig_port"] == "4533"
+        assert control_payload["js8_port"] == "2244"
+        assert control_payload["use_js8call"] is True
+
+        tab.radio_profile_advanced_ptt_edit.setText("PTT-A")
+        tab.radio_profile_advanced_antenna_edit.setText("North Mast")
+        tab.radio_profile_advanced_band_checks["20M"].setChecked(True)
+        tab.radio_profile_advanced_band_checks["40M"].setChecked(True)
+        tab._set_combo_current_data(tab.radio_profile_advanced_antenna_band_mode_combo, "block")
+        tab.radio_profile_advanced_band_overlap_edit.setText("RX Close Pair")
+        tab._set_combo_current_data(tab.radio_profile_advanced_band_overlap_mode_combo, "confirm")
+        tab.radio_profile_advanced_frequency_group_edit.setText("RX Frontend")
+        tab._set_combo_current_data(tab.radio_profile_advanced_frequency_mode_combo, "block")
+        tab.radio_profile_advanced_frequency_window_spin.setValue(3000)
+        tab.radio_profile_advanced_frontend_edit.setText("RX Protect")
+        tab.radio_profile_advanced_amplifier_edit.setText("Amp 1")
+        tab.radio_profile_advanced_notes_edit.setPlainText("Keep 40m clear during tests.")
+        tab._save_radio_profile_advanced_from_inline()
+
+        advanced_payload = saved_payloads[-1][0]
+        assert advanced_payload["ptt_group"] == "PTT-A"
+        assert advanced_payload["antenna_group"] == "North Mast"
+        assert advanced_payload["antenna_supported_bands"] == ["40M", "20M"]
+        assert advanced_payload["antenna_band_guard_mode"] == "block"
+        assert advanced_payload["band_overlap_guard_group"] == "RX Close Pair"
+        assert advanced_payload["band_overlap_guard_mode"] == "confirm"
+        assert advanced_payload["advanced_frequency_guard_group"] == "RX Frontend"
+        assert advanced_payload["advanced_frequency_guard_mode"] == "block"
+        assert advanced_payload["advanced_frequency_guard_window_hz"] == 3000
+        assert advanced_payload["frontend_group"] == "RX Protect"
+        assert advanced_payload["amplifier_group"] == "Amp 1"
+        assert advanced_payload["notes"] == "Keep 40m clear during tests."
+    finally:
+        tab.deleteLater()
         app.processEvents()
 
 
@@ -3324,17 +3724,17 @@ def test_launch_control_defaults_are_explicit_opt_in() -> None:
 def test_radio_profile_advanced_edit_wording_keeps_software_settings_inline() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 
-    assert 'self.edit_device_profile_btn = QPushButton("Advanced Radio Edit")' in source
-    assert "identity, role, hardware, and core connection details" in source
+    assert 'self.edit_device_profile_btn = QPushButton("Edit Full Radio Form...")' in source
+    assert "Backstop editor for radio details while the guided in-page settings are being completed." in source
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in source
     assert "Start guided setup for a new radio or SDR" in source
-    assert 'self.edit_device_profile_btn.setAccessibleName("Advanced Radio Edit")' in source
+    assert 'self.edit_device_profile_btn.setAccessibleName("Edit Full Radio Form")' in source
     assert "def _device_profile_dialog_title" in source
     assert "def _device_profile_dialog_intro" in source
     assert "def _device_profile_dialog_save_text" in source
     assert "dlg.setWindowTitle(dlg_title)" in source
-    assert 'QMessageBox.information(self, "Advanced Radio Edit", "Select one radio to edit.")' in source
-    assert 'QMessageBox.warning(self, "Advanced Radio Edit", "Please select only one radio to edit.")' in source
+    assert 'QMessageBox.information(self, "Full Radio Form", "Select one radio to edit.")' in source
+    assert 'QMessageBox.warning(self, "Full Radio Form", "Please select only one radio to edit.")' in source
     assert "Enable at least one software option above" in source
     assert "Use Edit Radio Details to choose the software" not in source
 
@@ -3343,13 +3743,13 @@ def test_radio_profile_guided_add_dialog_copy_is_distinct_from_advanced_edit() -
     from freqinout.gui.settings_tab import SettingsTab
 
     assert SettingsTab._device_profile_dialog_title(None) == "Guided Add Radio"
-    assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Advanced Radio Edit"
+    assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Full Radio Form"
     assert SettingsTab._device_profile_dialog_save_text(None) == "Save Radio"
     assert SettingsTab._device_profile_dialog_save_text({"id": 7}) == "Save Changes"
     assert "one step at a time" in SettingsTab._device_profile_dialog_intro(None)
     assert "software used by that radio" in SettingsTab._device_profile_dialog_intro(None)
     assert "readiness before saving" in SettingsTab._device_profile_dialog_intro(None)
-    assert "selected-radio Settings sections" in SettingsTab._device_profile_dialog_intro({"id": 7})
+    assert "guided in-page settings" in SettingsTab._device_profile_dialog_intro({"id": 7})
 
 
 def test_radio_profile_software_flag_helpers_define_inline_stack_choices() -> None:
@@ -3484,6 +3884,13 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert 'section.setToolTip(f"Show or hide the {title} section.")' in profile_block
     assert 'section.setAccessibleName(f"{title} section")' in profile_block
     assert "section.toggled.connect(content.setVisible)" in profile_block
+    assert "def _style_radio_profile_form(form: QFormLayout) -> None:" in profile_block
+    assert "form.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)" in profile_block
+    assert "form.setLabelAlignment(Qt.AlignTop | Qt.AlignLeft)" in profile_block
+    assert "def _make_radio_profile_detail_grid() -> Tuple[QWidget, QGridLayout]:" in profile_block
+    assert "layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)" in profile_block
+    assert "def _add_radio_profile_detail_row(layout: QGridLayout, row: int, label_text: str, value_label: QLabel) -> None:" in profile_block
+    assert "value_label.setMinimumHeight(max(value_label.sizeHint().height(), value_label.fontMetrics().lineSpacing() + 6))" in profile_block
     assert 'self.radio_profile_identity_section = _make_radio_profile_dashboard_section(' in profile_block
     assert '"Radio Identity"' in profile_block
     assert 'self.radio_profile_software_stack_section = _make_radio_profile_dashboard_section(' in profile_block
@@ -3492,17 +3899,34 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert '"Stack Guidance"' in profile_block
     assert "self.radio_profile_stack_guidance_section.setVisible(False)" in profile_block
     assert 'self.radio_profile_connection_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Connection Details"' in profile_block
+    assert '"Rig Control"' in profile_block
+    assert 'self.radio_profile_connections_section = _make_radio_profile_dashboard_section(' in profile_block
+    assert '"App Connections"' in profile_block
+    assert "self.radio_profile_identity_name_edit = QLineEdit()" in profile_block
+    assert "self.radio_profile_identity_deploy_combo = QComboBox()" in profile_block
+    assert "self.save_radio_identity_btn = QPushButton(\"Save Radio\")" in profile_block
+    assert "self.radio_profile_control_backend_combo = QComboBox()" in profile_block
+    assert "self.save_radio_control_btn = QPushButton(\"Save Rig Control\")" in profile_block
+    assert "radio_profile_connection_summary, radio_profile_connection_summary_layout = _make_radio_profile_detail_grid()" in profile_block
+    assert '_add_radio_profile_detail_row(radio_profile_connection_summary_layout, 1, "Endpoint:", self.radio_profile_connection_endpoint_label)' in profile_block
+    assert "self.radio_profile_connection_shortcuts_layout = QGridLayout" in profile_block
     assert 'self.radio_profile_frequency_section = _make_radio_profile_dashboard_section(' in profile_block
     assert '"Frequency / Timer Behavior"' in profile_block
     assert 'self.radio_profile_optional_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Optional Groups and Notes"' in profile_block
+    assert '"Advanced RF Guards"' in profile_block
+    assert "self.radio_profile_advanced_ptt_edit = QLineEdit()" in profile_block
+    assert "self.radio_profile_advanced_band_checks" in profile_block
+    assert "self.radio_profile_advanced_antenna_band_mode_combo = QComboBox()" in profile_block
+    assert "self.radio_profile_advanced_band_overlap_edit = QLineEdit()" in profile_block
+    assert "self.radio_profile_advanced_band_overlap_mode_combo = QComboBox()" in profile_block
+    assert "self.radio_profile_advanced_notes_edit = QPlainTextEdit()" in profile_block
+    assert "self.save_radio_advanced_btn = QPushButton(\"Save Advanced\")" in profile_block
     assert 'self.radio_profile_inventory_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Advanced Inventory"' in profile_block
+    assert '"Advanced"' in profile_block
     assert 'self.radio_profile_readiness_section = _make_radio_profile_dashboard_section(' in profile_block
     assert '"Readiness"' in profile_block
     assert 'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(' in profile_block
-    assert '"Selected Radio Actions"' in profile_block
+    assert '"Radio Actions"' in profile_block
     assert '"Selected Radio:"' in profile_block
     assert "device_actions.addWidget(self.add_device_profile_btn" not in profile_block
     assert (
@@ -3514,8 +3938,15 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     ) in profile_block
     assert (
         'self.radio_profile_connection_section = _make_radio_profile_dashboard_section(\n'
-        '            "Connection Details",\n'
+        '            "Rig Control",\n'
         '            radio_profile_connection_content,\n'
+        '            checked=False,\n'
+        '        )'
+    ) in profile_block
+    assert (
+        'self.radio_profile_connections_section = _make_radio_profile_dashboard_section(\n'
+        '            "App Connections",\n'
+        '            radio_profile_connections_content,\n'
         '            checked=False,\n'
         '        )'
     ) in profile_block
@@ -3528,23 +3959,23 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     ) in profile_block
     assert (
         'self.radio_profile_optional_section = _make_radio_profile_dashboard_section(\n'
-        '            "Optional Groups and Notes",\n'
+        '            "Advanced RF Guards",\n'
         '            radio_profile_optional_content,\n'
         '            checked=False,\n'
         '        )'
     ) in profile_block
     assert (
         'self.radio_profile_inventory_section = _make_radio_profile_dashboard_section(\n'
-        '            "Advanced Inventory",\n'
+        '            "Advanced",\n'
         '            radio_profile_inventory_content,\n'
         '            checked=False,\n'
         '        )'
     ) in profile_block
     assert (
         'self.radio_profile_actions_section = _make_radio_profile_dashboard_section(\n'
-        '            "Selected Radio Actions",\n'
+        '            "Radio Actions",\n'
         '            radio_profile_actions_content,\n'
-        '            checked=True,\n'
+        '            checked=False,\n'
         '        )'
     ) in profile_block
     assert "device_layout.addWidget(self.radio_profile_identity_section)" in profile_block
@@ -3556,9 +3987,9 @@ def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> Non
     assert "device_layout.addWidget(self.radio_profile_inventory_section)" in profile_block
     assert "device_layout.addWidget(self.radio_profile_actions_section)" in profile_block
     assert "device_layout.addWidget(self.radio_profile_readiness_section)" in profile_block
-    assert profile_block.index("device_layout.addWidget(self.radio_profile_actions_section)") < profile_block.index(
-        "device_layout.addWidget(self.radio_profile_readiness_section)"
-    )
+    assert 'self._add_radio_profile_guided_task_button(\n            "radio",' in profile_block
+    assert 'self._add_radio_profile_guided_task_button(\n            "advanced",' in profile_block
+    assert 'self._select_radio_profile_guided_task("review", scroll=False)' in profile_block
 
 
 def test_radio_profile_connection_details_summarize_selected_profile() -> None:
@@ -3616,15 +4047,19 @@ def test_radio_profile_connection_details_are_wired_to_readiness_refresh() -> No
         : source.index("def _set_guidance_card_state")
     ]
 
-    assert "radio_profile_connection_layout = QFormLayout(radio_profile_connection_content)" in profile_block
+    assert "radio_profile_connection_outer_layout = QVBoxLayout(radio_profile_connection_content)" in profile_block
+    assert "radio_profile_connection_summary, radio_profile_connection_summary_layout = _make_radio_profile_detail_grid()" in profile_block
+    assert "radio_profile_connection_layout = QFormLayout()" in profile_block
+    assert "_style_radio_profile_form(radio_profile_connection_layout)" in profile_block
     assert "self.radio_profile_connection_backend_label = QLabel(\"--\")" in profile_block
-    assert "radio_profile_connection_layout.addRow(\"Control:\", self.radio_profile_connection_backend_label)" in profile_block
-    assert "radio_profile_connection_layout.addRow(\"Endpoint:\", self.radio_profile_connection_endpoint_label)" in profile_block
-    assert "radio_profile_connection_layout.addRow(\"PTT group:\", self.radio_profile_connection_ptt_label)" in profile_block
-    assert "radio_profile_connection_layout.addRow(\"Launch:\", self.radio_profile_connection_launch_label)" in profile_block
+    assert '_add_radio_profile_detail_row(radio_profile_connection_summary_layout, 0, "Control:", self.radio_profile_connection_backend_label)' in profile_block
+    assert '_add_radio_profile_detail_row(radio_profile_connection_summary_layout, 1, "Endpoint:", self.radio_profile_connection_endpoint_label)' in profile_block
+    assert '_add_radio_profile_detail_row(radio_profile_connection_summary_layout, 2, "PTT Guard Group:", self.radio_profile_connection_ptt_label)' in profile_block
+    assert '_add_radio_profile_detail_row(radio_profile_connection_summary_layout, 3, "Launch:", self.radio_profile_connection_launch_label)' in profile_block
+    assert "radio_profile_connection_outer_layout.addLayout(radio_profile_connection_layout)" in profile_block
     assert "def _selected_radio_connection_detail_rows" in source
     assert "def _refresh_radio_profile_connection_details" in source
-    assert "self._set_form_detail_label(label, rows.get(key, \"--\"), f\"Selected radio {key}\")" in refresh_block
+    assert "label.setMinimumHeight(max(label.sizeHint().height(), label.fontMetrics().lineSpacing() + 6))" in refresh_block
     assert "self._refresh_radio_profile_connection_details(None)" in readiness_block
     assert "self._refresh_radio_profile_connection_details(profile)" in readiness_block
 
@@ -3671,7 +4106,7 @@ def test_radio_profile_frequency_timer_details_summarize_selected_profile() -> N
         },
     ) == (
         ("schedule", "Evening Net (Active)"),
-        ("scheduler", "Enabled / Simple"),
+        ("scheduler", "Enabled / Basic frequency control"),
         ("js8_offset", "1750 Hz"),
         (
             "timer_source",
@@ -3846,6 +4281,10 @@ def test_radio_profile_optional_groups_summarize_selected_profile() -> None:
         ("antenna", "--"),
         ("frontend", "--"),
         ("amplifier", "--"),
+        ("supported_bands", "--"),
+        ("antenna_band_mode", "--"),
+        ("band_overlap", "--"),
+        ("advanced_frequency", "--"),
         ("notes", "--"),
     )
     assert SettingsTab._selected_radio_optional_group_rows(
@@ -3855,6 +4294,13 @@ def test_radio_profile_optional_groups_summarize_selected_profile() -> None:
             "antenna_group": "ANT-1",
             "frontend_group": "RX-Chain",
             "amplifier_group": "AMP-MAIN",
+            "antenna_supported_bands_json": '["40M", "20M"]',
+            "antenna_band_guard_mode": "block",
+            "band_overlap_guard_group": "NORTH-MAST",
+            "band_overlap_guard_mode": "confirm",
+            "advanced_frequency_guard_group": "RX-FRONTEND",
+            "advanced_frequency_guard_mode": "block",
+            "advanced_frequency_guard_window_hz": 3000,
             "notes": "Desk radio near tuner.",
         },
     ) == (
@@ -3862,6 +4308,10 @@ def test_radio_profile_optional_groups_summarize_selected_profile() -> None:
         ("antenna", "ANT-1"),
         ("frontend", "RX-Chain"),
         ("amplifier", "AMP-MAIN"),
+        ("supported_bands", "40M, 20M"),
+        ("antenna_band_mode", "Block"),
+        ("band_overlap", "NORTH-MAST - Require confirmation"),
+        ("advanced_frequency", "RX-FRONTEND - 3000 Hz - Block"),
         ("notes", "Desk radio near tuner."),
     )
 
@@ -3883,15 +4333,16 @@ def test_radio_profile_optional_groups_are_wired_to_readiness_refresh() -> None:
 
     assert "radio_profile_optional_layout = QFormLayout(radio_profile_optional_content)" in profile_block
     assert "self.radio_profile_optional_ptt_label = QLabel(\"--\")" in profile_block
-    assert "radio_profile_optional_layout.addRow(\"PTT group:\", self.radio_profile_optional_ptt_label)" in profile_block
-    assert "radio_profile_optional_layout.addRow(\"Antenna group:\", self.radio_profile_optional_antenna_label)" in profile_block
-    assert "radio_profile_optional_layout.addRow(\"Front-end group:\", self.radio_profile_optional_frontend_label)" in profile_block
-    assert "radio_profile_optional_layout.addRow(\"Amplifier group:\", self.radio_profile_optional_amplifier_label)" in profile_block
+    assert "radio_profile_optional_layout.addRow(\"PTT Guard Group:\", self.radio_profile_optional_ptt_label)" in profile_block
+    assert "radio_profile_optional_layout.addRow(\"Antenna Guard Group:\", self.radio_profile_optional_antenna_label)" in profile_block
+    assert "radio_profile_optional_layout.addRow(\"Front-End Guard Group:\", self.radio_profile_optional_frontend_label)" in profile_block
+    assert "radio_profile_optional_layout.addRow(\"Amplifier Guard Group:\", self.radio_profile_optional_amplifier_label)" in profile_block
+    assert "radio_profile_optional_layout.addRow(\"Advanced Guard:\", self.radio_profile_optional_advanced_frequency_label)" in profile_block
     assert "radio_profile_optional_layout.addRow(\"Notes:\", self.radio_profile_optional_notes_label)" in profile_block
     assert "def _selected_radio_optional_group_rows" in source
     assert "def _refresh_radio_profile_optional_groups" in source
     assert "def _set_form_detail_label" in source
-    assert "hide_empty=key in {\"antenna\", \"frontend\", \"amplifier\", \"notes\"}" in refresh_block
+    assert "hide_empty=key in {\"antenna\", \"frontend\", \"amplifier\", \"advanced_frequency\", \"notes\"}" in refresh_block
     assert "self._refresh_radio_profile_optional_groups(None)" in readiness_block
     assert "self._refresh_radio_profile_optional_groups(profile)" in readiness_block
 

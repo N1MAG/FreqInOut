@@ -21,6 +21,8 @@ DEFAULT_DEVICE_SYSTEM_KEY = "default_device"
 DEFAULT_DEVICE_NAME = "Default Radio"
 DEFAULT_OPERATING_SYSTEM_KEY = "default_operating"
 DEFAULT_OPERATING_NAME = "Default Operating Profile"
+DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY = "default_frequency_plan"
+DEFAULT_FREQUENCY_PLAN_NAME = "Default Frequency Plan"
 DEFAULT_JS8_INSTANCE_SYSTEM_KEY = "default_js8_instance"
 DEFAULT_JS8_INSTANCE_NAME = "Primary JS8"
 DEFAULT_FAST_LIGHT_SYSTEM_KEY = "default_fast_light"
@@ -249,6 +251,13 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             antenna_group TEXT,
             frontend_group TEXT,
             amplifier_group TEXT,
+            antenna_supported_bands_json TEXT NOT NULL DEFAULT '[]',
+            antenna_band_guard_mode TEXT NOT NULL DEFAULT 'warn',
+            band_overlap_guard_group TEXT,
+            band_overlap_guard_mode TEXT NOT NULL DEFAULT 'warn',
+            advanced_frequency_guard_group TEXT,
+            advanced_frequency_guard_mode TEXT NOT NULL DEFAULT 'warn',
+            advanced_frequency_guard_window_hz INTEGER NOT NULL DEFAULT 0,
             sdr_host TEXT,
             sdr_port INTEGER,
             notes TEXT,
@@ -342,6 +351,13 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "antenna_group": "TEXT",
             "frontend_group": "TEXT",
             "amplifier_group": "TEXT",
+            "antenna_supported_bands_json": "TEXT NOT NULL DEFAULT '[]'",
+            "antenna_band_guard_mode": "TEXT NOT NULL DEFAULT 'warn'",
+            "band_overlap_guard_group": "TEXT",
+            "band_overlap_guard_mode": "TEXT NOT NULL DEFAULT 'warn'",
+            "advanced_frequency_guard_group": "TEXT",
+            "advanced_frequency_guard_mode": "TEXT NOT NULL DEFAULT 'warn'",
+            "advanced_frequency_guard_window_hz": "INTEGER NOT NULL DEFAULT 0",
             "sdr_host": "TEXT",
             "sdr_port": "INTEGER",
             "notes": "TEXT",
@@ -689,6 +705,120 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "CREATE INDEX IF NOT EXISTS idx_assignments_operating_state ON operating_profile_assignments(operating_profile_id, assignment_state)",
         ),
     },
+    "frequency_plans": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS frequency_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system_key TEXT UNIQUE,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            description TEXT,
+            category TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'saved',
+            receive_only INTEGER NOT NULL DEFAULT 0,
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            schedule_refs_json TEXT NOT NULL DEFAULT '[]',
+            frequency_refs_json TEXT NOT NULL DEFAULT '[]',
+            group_refs_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        )
+        """,
+        "columns": {
+            "system_key": "TEXT",
+            "name": "TEXT NOT NULL",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "description": "TEXT",
+            "category": "TEXT NOT NULL DEFAULT 'normal'",
+            "status": "TEXT NOT NULL DEFAULT 'saved'",
+            "receive_only": "INTEGER NOT NULL DEFAULT 0",
+            "source_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "schedule_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "frequency_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "group_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "notes": "TEXT",
+            "created_utc": "TEXT NOT NULL",
+            "updated_utc": "TEXT NOT NULL",
+        },
+        "indexes": (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_frequency_plans_system_key ON frequency_plans(system_key)",
+        ),
+    },
+    "assigned_plans": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS assigned_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_profile_id INTEGER NOT NULL,
+            frequency_plan_id INTEGER NOT NULL,
+            assignment_state TEXT NOT NULL DEFAULT 'active',
+            assignment_category TEXT NOT NULL DEFAULT 'normal',
+            scheduler_mode TEXT NOT NULL DEFAULT 'full',
+            starts_utc TEXT,
+            ends_utc TEXT,
+            reason TEXT,
+            created_by TEXT,
+            validation_status_json TEXT NOT NULL DEFAULT '{}',
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        )
+        """,
+        "columns": {
+            "device_profile_id": "INTEGER NOT NULL",
+            "frequency_plan_id": "INTEGER NOT NULL",
+            "assignment_state": "TEXT NOT NULL DEFAULT 'active'",
+            "assignment_category": "TEXT NOT NULL DEFAULT 'normal'",
+            "scheduler_mode": "TEXT NOT NULL DEFAULT 'full'",
+            "starts_utc": "TEXT",
+            "ends_utc": "TEXT",
+            "reason": "TEXT",
+            "created_by": "TEXT",
+            "validation_status_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_utc": "TEXT NOT NULL",
+            "updated_utc": "TEXT NOT NULL",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_assigned_plans_device_state ON assigned_plans(device_profile_id, assignment_state)",
+            "CREATE INDEX IF NOT EXISTS idx_assigned_plans_plan_state ON assigned_plans(frequency_plan_id, assignment_state)",
+        ),
+    },
+    "rf_guard_events": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS rf_guard_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            guard_name TEXT,
+            guard_mode TEXT,
+            device_profile_id INTEGER,
+            peer_device_profile_id INTEGER,
+            frequency_plan_id INTEGER,
+            band TEXT,
+            frequency TEXT,
+            action_source TEXT,
+            decision TEXT,
+            message TEXT,
+            created_utc TEXT NOT NULL
+        )
+        """,
+        "columns": {
+            "event_type": "TEXT NOT NULL",
+            "guard_name": "TEXT",
+            "guard_mode": "TEXT",
+            "device_profile_id": "INTEGER",
+            "peer_device_profile_id": "INTEGER",
+            "frequency_plan_id": "INTEGER",
+            "band": "TEXT",
+            "frequency": "TEXT",
+            "action_source": "TEXT",
+            "decision": "TEXT",
+            "message": "TEXT",
+            "created_utc": "TEXT NOT NULL",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_rf_guard_events_created ON rf_guard_events(created_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_rf_guard_events_device ON rf_guard_events(device_profile_id)",
+        ),
+    },
     "station_coordination_policies": {
         "ddl": """
         CREATE TABLE IF NOT EXISTS station_coordination_policies (
@@ -959,8 +1089,104 @@ def normalize_resource_group(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip().upper()
 
 
+def normalize_rf_guard_mode(value: Any, default: str = "warn") -> str:
+    text = _coerce_text(value, default).strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "warn-only": "warn",
+        "warning": "warn",
+        "require-confirmation": "confirm",
+        "confirmation": "confirm",
+        "confirm": "confirm",
+        "block": "block",
+        "blocked": "block",
+    }
+    return aliases.get(text, text if text in {"warn", "confirm", "block"} else default)
+
+
+def rf_guard_mode_label(value: Any) -> str:
+    labels = {
+        "warn": "Warn only",
+        "confirm": "Require confirmation",
+        "block": "Block",
+    }
+    return labels.get(normalize_rf_guard_mode(value), "Warn only")
+
+
+def stricter_rf_guard_mode(left: Any, right: Any) -> str:
+    order = {"warn": 0, "confirm": 1, "block": 2}
+    left_mode = normalize_rf_guard_mode(left, "warn")
+    right_mode = normalize_rf_guard_mode(right, "warn")
+    return left_mode if order.get(left_mode, 0) >= order.get(right_mode, 0) else right_mode
+
+
 def _normalize_band_token(value: Any) -> str:
     return re.sub(r"\s+", "", _coerce_text(value, "").upper())
+
+
+COMMON_AMATEUR_BANDS = (
+    "160M",
+    "80M",
+    "60M",
+    "40M",
+    "30M",
+    "20M",
+    "17M",
+    "15M",
+    "12M",
+    "10M",
+    "6M",
+    "2M",
+    "1.25M",
+    "70CM",
+    "33CM",
+    "23CM",
+)
+
+WEEKDAY_ALIASES = {
+    "MON": "MON",
+    "MONDAY": "MON",
+    "TUE": "TUE",
+    "TUES": "TUE",
+    "TUESDAY": "TUE",
+    "WED": "WED",
+    "WEDNESDAY": "WED",
+    "THU": "THU",
+    "THUR": "THU",
+    "THURS": "THU",
+    "THURSDAY": "THU",
+    "FRI": "FRI",
+    "FRIDAY": "FRI",
+    "SAT": "SAT",
+    "SATURDAY": "SAT",
+    "SUN": "SUN",
+    "SUNDAY": "SUN",
+    "ALL": "ALL",
+    "DAILY": "ALL",
+    "EVERYDAY": "ALL",
+}
+WEEKDAY_ORDER = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+WEEK_MINUTES = 7 * 24 * 60
+
+
+@dataclass(frozen=True)
+class FrequencyPlanScheduleWindow:
+    band: str
+    day: str
+    start_minute: int
+    end_minute: int
+    source: str = ""
+
+
+def _extract_band_tokens_from_text(value: Any) -> List[str]:
+    text = _coerce_text(value, "").upper()
+    if not text:
+        return []
+    out: List[str] = []
+    for band in COMMON_AMATEUR_BANDS:
+        pattern = re.escape(band).replace(r"\.", r"[\.\s]?")
+        if re.search(rf"(?<![A-Z0-9]){pattern}(?![A-Z0-9])", text):
+            out.append(band)
+    return list(dict.fromkeys(out))
 
 
 def _parse_string_list(value: Any) -> List[str]:
@@ -1021,6 +1247,32 @@ def _parse_ref_list(value: Any) -> List[str]:
     return list(dict.fromkeys(ref for ref in refs if ref))
 
 
+def _parse_ref_items(value: Any) -> List[Any]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = []
+    if isinstance(parsed, list):
+        return [item for item in parsed if item not in (None, "")]
+    return []
+
+
+def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(float(str(value).strip()))
+    except Exception:
+        parsed = int(default)
+    return max(0, parsed)
+
+
 def _coerce_ref_list_json_text(value: Any) -> str:
     return json.dumps(_parse_ref_list(value), sort_keys=True)
 
@@ -1043,9 +1295,507 @@ def _is_receive_only_operating_profile(value: Any) -> bool:
     return bool(_coerce_bool_int(raw, False))
 
 
+def _is_receive_only_frequency_plan(value: Any) -> bool:
+    raw = value.get("receive_only", 0) if isinstance(value, Mapping) else value
+    return bool(_coerce_bool_int(raw, False))
+
+
 def _validate_assignment_plan_compatibility(device: Mapping[str, Any], operating: Mapping[str, Any]) -> None:
     if _is_observer_device_class(device) and not _is_receive_only_operating_profile(operating):
-        raise ValueError("Observer / SDR radios can only be assigned receive-only frequency plans.")
+        raise ValueError("Observer / SDR radios can only be assigned receive-only operating models.")
+
+
+def _validate_schedule_assignment_compatibility(device: Mapping[str, Any], frequency_plan: Mapping[str, Any]) -> None:
+    if _is_observer_device_class(device) and not _is_receive_only_frequency_plan(frequency_plan):
+        raise ValueError("Observer / SDR radios can only be assigned receive-only schedule plans.")
+
+
+def _frequency_plan_bands(frequency_plan: Mapping[str, Any]) -> List[str]:
+    bands: List[str] = []
+    for key in ("frequency_refs_json", "schedule_refs_json", "group_refs_json", "source_refs_json", "notes", "description", "name"):
+        value = frequency_plan.get(key, "") if isinstance(frequency_plan, Mapping) else ""
+        if str(key).endswith("_json"):
+            for item in _parse_ref_list(value):
+                bands.extend(_extract_band_tokens_from_text(item))
+        else:
+            bands.extend(_extract_band_tokens_from_text(value))
+    return list(dict.fromkeys(_normalize_band_token(band) for band in bands if _normalize_band_token(band)))
+
+
+def _parse_frequency_hz_value(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if number <= 0:
+            return None
+        if number < 1000:
+            return int(round(number * 1_000_000))
+        if number < 1_000_000:
+            return int(round(number * 1000))
+        return int(round(number))
+    text = _coerce_text(value, "").strip()
+    if not text:
+        return None
+    matches = re.findall(
+        r"(?<![\d.])(\d{1,3}\.\d+|\d+(?:\.\d+)?\s*(?:MHZ|KHZ|HZ))(?![\d.])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not matches:
+        return None
+    preferred = [match for match in matches if "." in str(match)]
+    raw_text = str(preferred[-1] if preferred else matches[-1]).strip().upper().replace(" ", "")
+    suffix = ""
+    for candidate_suffix in ("MHZ", "KHZ", "HZ"):
+        if raw_text.endswith(candidate_suffix):
+            suffix = candidate_suffix
+            raw_text = raw_text[: -len(candidate_suffix)]
+            break
+    try:
+        number = float(raw_text)
+    except Exception:
+        return None
+    if number <= 0:
+        return None
+    if suffix == "HZ":
+        return int(round(number))
+    if suffix == "KHZ":
+        return int(round(number * 1000))
+    if suffix == "MHZ" or number < 1000:
+        return int(round(number * 1_000_000))
+    return None
+
+
+def _frequency_plan_frequency_hz_values(frequency_plan: Mapping[str, Any]) -> List[int]:
+    values: List[int] = []
+    if not isinstance(frequency_plan, Mapping):
+        return values
+    for key in ("frequency_refs_json", "schedule_refs_json"):
+        for item in _parse_ref_items(frequency_plan.get(key, "[]")):
+            if isinstance(item, Mapping):
+                candidates = (
+                    item.get("frequency_hz"),
+                    item.get("freq_hz"),
+                    item.get("frequency"),
+                    item.get("freq"),
+                    item.get("name"),
+                )
+                for candidate in candidates:
+                    parsed = _parse_frequency_hz_value(candidate)
+                    if parsed:
+                        values.append(parsed)
+            else:
+                parsed = _parse_frequency_hz_value(item)
+                if parsed:
+                    values.append(parsed)
+    return list(dict.fromkeys(values))
+
+
+def _band_from_frequency_hz(freq_hz: Optional[int]) -> str:
+    if not freq_hz:
+        return ""
+    try:
+        mhz = float(freq_hz) / 1_000_000.0
+    except Exception:
+        return ""
+    bands = [
+        ("160M", 1.8, 2.0),
+        ("80M", 3.5, 4.0),
+        ("60M", 5.0, 5.5),
+        ("40M", 7.0, 7.3),
+        ("30M", 10.1, 10.15),
+        ("20M", 14.0, 14.35),
+        ("17M", 18.068, 18.168),
+        ("15M", 21.0, 21.45),
+        ("12M", 24.89, 24.99),
+        ("10M", 28.0, 29.7),
+        ("6M", 50.0, 54.0),
+        ("2M", 144.0, 148.0),
+    ]
+    for name, lo, hi in bands:
+        if lo <= mhz <= hi:
+            return name
+    return ""
+
+
+def _parse_schedule_day(value: Any) -> str:
+    text = _coerce_text(value, "").strip().upper()
+    if not text:
+        return "ALL"
+    return WEEKDAY_ALIASES.get(re.sub(r"[^A-Z]", "", text), text)
+
+
+def _parse_hhmm_minutes(value: Any) -> Optional[int]:
+    text = _coerce_text(value, "").strip()
+    if not text:
+        return None
+    match = re.search(r"\b([0-2]?\d):([0-5]\d)\b", text)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        return hour * 60 + minute if hour < 24 else None
+    match = re.search(r"\b([0-2]\d)([0-5]\d)\b", text)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        return hour * 60 + minute if hour < 24 else None
+    return None
+
+
+def _extract_schedule_field(text: str, *names: str) -> str:
+    for name in names:
+        match = re.search(rf"\b{name}\s*[:=]\s*([A-Za-z0-9:._+-]+)", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _schedule_window_from_mapping(item: Mapping[str, Any]) -> Optional[FrequencyPlanScheduleWindow]:
+    band_values = (
+        item.get("band"),
+        item.get("amateur_band"),
+        item.get("band_name"),
+        item.get("freq"),
+        item.get("frequency"),
+        item.get("name"),
+    )
+    bands: List[str] = []
+    for value in band_values:
+        bands.extend(_extract_band_tokens_from_text(value))
+    band = _normalize_band_token(bands[0]) if bands else ""
+    start = _parse_hhmm_minutes(
+        item.get("start_utc", item.get("start_local", item.get("start", item.get("begin", item.get("time", "")))))
+    )
+    end = _parse_hhmm_minutes(item.get("end_utc", item.get("end_local", item.get("end", item.get("stop", "")))))
+    if end is None and start is not None:
+        duration = _coerce_optional_int(item.get("duration_minutes", item.get("duration_min", item.get("duration", ""))))
+        if duration:
+            end = (start + int(duration)) % (24 * 60)
+    if not band or start is None or end is None:
+        return None
+    day = _parse_schedule_day(item.get("day_utc", item.get("day_local", item.get("day", item.get("weekday", "ALL")))))
+    return FrequencyPlanScheduleWindow(band=band, day=day, start_minute=start, end_minute=end, source=_coerce_text(item, ""))
+
+
+def _schedule_window_from_text(value: Any) -> Optional[FrequencyPlanScheduleWindow]:
+    text = _coerce_text(value, "").strip()
+    if not text:
+        return None
+    bands = _extract_band_tokens_from_text(text)
+    if not bands:
+        return None
+    start_text = _extract_schedule_field(text, "start_utc", "start_local", "start", "begin")
+    end_text = _extract_schedule_field(text, "end_utc", "end_local", "end", "stop")
+    start = _parse_hhmm_minutes(start_text)
+    end = _parse_hhmm_minutes(end_text)
+    if start is None or end is None:
+        time_matches = re.findall(r"\b(?:[0-2]?\d:[0-5]\d|[0-2]\d[0-5]\d)\b", text)
+        if len(time_matches) >= 2:
+            start = _parse_hhmm_minutes(time_matches[0])
+            end = _parse_hhmm_minutes(time_matches[1])
+    if start is None or end is None:
+        return None
+    day_text = _extract_schedule_field(text, "day_utc", "day_local", "day", "weekday")
+    if not day_text:
+        day_match = re.search(
+            r"\b(MON(?:DAY)?|TUE(?:S|SDAY)?|WED(?:NESDAY)?|THU(?:R|RS|RSDAY)?|FRI(?:DAY)?|SAT(?:URDAY)?|SUN(?:DAY)?|ALL|DAILY|EVERYDAY)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        day_text = day_match.group(1) if day_match else "ALL"
+    return FrequencyPlanScheduleWindow(
+        band=_normalize_band_token(bands[0]),
+        day=_parse_schedule_day(day_text),
+        start_minute=start,
+        end_minute=end,
+        source=text,
+    )
+
+
+def _frequency_plan_schedule_windows(frequency_plan: Mapping[str, Any]) -> List[FrequencyPlanScheduleWindow]:
+    windows: List[FrequencyPlanScheduleWindow] = []
+    if not isinstance(frequency_plan, Mapping):
+        return windows
+    for key in ("schedule_refs_json", "frequency_refs_json"):
+        for item in _parse_ref_items(frequency_plan.get(key, "[]")):
+            window = _schedule_window_from_mapping(item) if isinstance(item, Mapping) else _schedule_window_from_text(item)
+            if window is not None:
+                windows.append(window)
+    unique: Dict[tuple[str, str, int, int], FrequencyPlanScheduleWindow] = {}
+    for window in windows:
+        unique.setdefault((window.band, window.day, window.start_minute, window.end_minute), window)
+    return list(unique.values())
+
+
+def _weekly_segments(window: FrequencyPlanScheduleWindow) -> List[tuple[int, int]]:
+    days = range(7) if window.day == "ALL" else (WEEKDAY_ORDER.index(window.day),) if window.day in WEEKDAY_ORDER else range(7)
+    segments: List[tuple[int, int]] = []
+    for day_index in days:
+        start = day_index * 24 * 60 + window.start_minute
+        end = day_index * 24 * 60 + window.end_minute
+        if window.end_minute <= window.start_minute:
+            end += 24 * 60
+        segments.append((start, end))
+    return segments
+
+
+def _schedule_windows_overlap(left: FrequencyPlanScheduleWindow, right: FrequencyPlanScheduleWindow) -> bool:
+    for left_start, left_end in _weekly_segments(left):
+        for right_start, right_end in _weekly_segments(right):
+            for offset in (-WEEK_MINUTES, 0, WEEK_MINUTES):
+                shifted_start = right_start + offset
+                shifted_end = right_end + offset
+                if left_start < shifted_end and shifted_start < left_end:
+                    return True
+    return False
+
+
+def _frequency_plan_overlapping_bands(left: Mapping[str, Any], right: Mapping[str, Any]) -> List[str]:
+    broad_overlap = set(_frequency_plan_bands(left)).intersection(_frequency_plan_bands(right))
+    left_windows = _frequency_plan_schedule_windows(left)
+    right_windows = _frequency_plan_schedule_windows(right)
+    if left_windows and right_windows:
+        bands = {
+            left_window.band
+            for left_window in left_windows
+            for right_window in right_windows
+            if left_window.band == right_window.band and _schedule_windows_overlap(left_window, right_window)
+        }
+        left_window_bands = set(window.band for window in left_windows)
+        right_window_bands = set(window.band for window in right_windows)
+        unresolved_bands = {
+            band
+            for band in broad_overlap
+            if band not in left_window_bands or band not in right_window_bands
+        }
+        return sorted(bands.union(unresolved_bands))
+    return sorted(broad_overlap)
+
+
+def _frequency_plan_schedule_times_overlap(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_windows = _frequency_plan_schedule_windows(left)
+    right_windows = _frequency_plan_schedule_windows(right)
+    if not left_windows or not right_windows:
+        return True
+    return any(
+        _schedule_windows_overlap(left_window, right_window)
+        for left_window in left_windows
+        for right_window in right_windows
+    )
+
+
+def _device_supported_bands(device: Mapping[str, Any]) -> List[str]:
+    if not isinstance(device, Mapping):
+        return []
+    return _parse_string_list(device.get("antenna_supported_bands_json", "[]"))
+
+
+def _rf_guard_event_conn(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    guard_name: str = "",
+    guard_mode: str = "",
+    device_profile_id: Optional[int] = None,
+    peer_device_profile_id: Optional[int] = None,
+    frequency_plan_id: Optional[int] = None,
+    band: str = "",
+    frequency: str = "",
+    action_source: str = "schedule_assignment",
+    decision: str = "",
+    message: str = "",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO rf_guard_events (
+            event_type, guard_name, guard_mode, device_profile_id, peer_device_profile_id,
+            frequency_plan_id, band, frequency, action_source, decision, message, created_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _coerce_text(event_type, "rf_guard"),
+            _coerce_text(guard_name, ""),
+            normalize_rf_guard_mode(guard_mode, "warn"),
+            int(device_profile_id) if device_profile_id not in (None, "") else None,
+            int(peer_device_profile_id) if peer_device_profile_id not in (None, "") else None,
+            int(frequency_plan_id) if frequency_plan_id not in (None, "") else None,
+            _normalize_band_token(band),
+            _coerce_text(frequency, ""),
+            _coerce_text(action_source, "schedule_assignment") or "schedule_assignment",
+            _coerce_text(decision, ""),
+            _coerce_text(message, ""),
+            _utc_now_iso(),
+        ),
+    )
+
+
+def _schedule_assignment_validation_status_conn(
+    conn: sqlite3.Connection,
+    device: Mapping[str, Any],
+    frequency_plan: Mapping[str, Any],
+) -> Dict[str, Any]:
+    plan_bands = _frequency_plan_bands(frequency_plan)
+    supported_bands = _device_supported_bands(device)
+    messages: List[str] = []
+    warnings: List[str] = []
+    blocked: List[str] = []
+    events: List[Dict[str, Any]] = []
+    device_id = int(device.get("id", 0) or 0)
+    plan_id = int(frequency_plan.get("id", 0) or 0)
+
+    antenna_mode = normalize_rf_guard_mode(device.get("antenna_band_guard_mode", "warn"))
+    unsupported = [band for band in plan_bands if supported_bands and band not in supported_bands]
+    for band in unsupported:
+        message = (
+            f"{str(device.get('name', '') or 'Radio')} antenna support does not include {band} "
+            f"for {str(frequency_plan.get('name', '') or 'Frequency Plan')}."
+        )
+        target = blocked if antenna_mode == "block" else warnings
+        target.append(message)
+        events.append(
+            {
+                "event_type": "antenna_band_support",
+                "guard_name": "Antenna Supports These Bands",
+                "guard_mode": antenna_mode,
+                "device_profile_id": device_id,
+                "frequency_plan_id": plan_id,
+                "band": band,
+                "decision": "blocked" if antenna_mode == "block" else "warning",
+                "message": message,
+            }
+        )
+
+    overlap_group = normalize_resource_group(device.get("band_overlap_guard_group", ""))
+    overlap_mode = normalize_rf_guard_mode(device.get("band_overlap_guard_mode", "warn"))
+    if overlap_group and plan_bands:
+        placeholders = ", ".join(["?"] * len(EFFECTIVE_ASSIGNMENT_STATES))
+        rows = _fetchall_dicts(
+            conn,
+            f"""
+            SELECT devices.*, assigned_plans.frequency_plan_id AS assigned_frequency_plan_id
+              FROM assigned_plans
+              JOIN device_profiles AS devices
+                ON devices.id = assigned_plans.device_profile_id
+             WHERE assigned_plans.device_profile_id<>?
+               AND assigned_plans.assignment_state IN ({placeholders})
+               AND COALESCE(devices.enabled, 1)=1
+               AND UPPER(COALESCE(devices.band_overlap_guard_group, ''))=?
+            """,
+            (device_id, *tuple(EFFECTIVE_ASSIGNMENT_STATES), overlap_group),
+        )
+        for peer in rows:
+            peer_plan = _record_by_id(conn, "frequency_plans", int(peer.get("assigned_frequency_plan_id", 0) or 0))
+            if not peer_plan:
+                continue
+            peer_overlap_mode = normalize_rf_guard_mode(peer.get("band_overlap_guard_mode", "warn"))
+            effective_overlap_mode = stricter_rf_guard_mode(overlap_mode, peer_overlap_mode)
+            for band in _frequency_plan_overlapping_bands(frequency_plan, peer_plan):
+                message = (
+                    f"{str(device.get('name', '') or 'Radio')} and {str(peer.get('name', '') or 'another radio')} "
+                    f"would both be assigned on {band} in Prevent Band Overlap group {overlap_group}."
+                )
+                target = blocked if effective_overlap_mode == "block" else warnings
+                target.append(message)
+                events.append(
+                    {
+                        "event_type": "prevent_band_overlap",
+                        "guard_name": overlap_group,
+                        "guard_mode": effective_overlap_mode,
+                        "device_profile_id": device_id,
+                        "peer_device_profile_id": int(peer.get("id", 0) or 0),
+                        "frequency_plan_id": plan_id,
+                        "band": band,
+                        "decision": "blocked" if effective_overlap_mode == "block" else "warning",
+                        "message": message,
+                    }
+                )
+
+    advanced_group = normalize_resource_group(device.get("advanced_frequency_guard_group", ""))
+    advanced_window_hz = _coerce_nonnegative_int(device.get("advanced_frequency_guard_window_hz", 0))
+    advanced_mode = normalize_rf_guard_mode(device.get("advanced_frequency_guard_mode", "warn"))
+    plan_frequencies = _frequency_plan_frequency_hz_values(frequency_plan)
+    if advanced_group and advanced_window_hz > 0 and plan_frequencies:
+        placeholders = ", ".join(["?"] * len(EFFECTIVE_ASSIGNMENT_STATES))
+        rows = _fetchall_dicts(
+            conn,
+            f"""
+            SELECT devices.*, assigned_plans.frequency_plan_id AS assigned_frequency_plan_id
+              FROM assigned_plans
+              JOIN device_profiles AS devices
+                ON devices.id = assigned_plans.device_profile_id
+             WHERE assigned_plans.device_profile_id<>?
+               AND assigned_plans.assignment_state IN ({placeholders})
+               AND COALESCE(devices.enabled, 1)=1
+               AND UPPER(COALESCE(devices.advanced_frequency_guard_group, ''))=?
+               AND COALESCE(devices.advanced_frequency_guard_window_hz, 0)>0
+            """,
+            (device_id, *tuple(EFFECTIVE_ASSIGNMENT_STATES), advanced_group),
+        )
+        for peer in rows:
+            peer_plan = _record_by_id(conn, "frequency_plans", int(peer.get("assigned_frequency_plan_id", 0) or 0))
+            if not peer_plan:
+                continue
+            peer_frequencies = _frequency_plan_frequency_hz_values(peer_plan)
+            if not peer_frequencies:
+                continue
+            if not _frequency_plan_schedule_times_overlap(frequency_plan, peer_plan):
+                continue
+            peer_window_hz = _coerce_nonnegative_int(peer.get("advanced_frequency_guard_window_hz", 0))
+            threshold_hz = max(advanced_window_hz, peer_window_hz)
+            if threshold_hz <= 0:
+                continue
+            peer_mode = normalize_rf_guard_mode(peer.get("advanced_frequency_guard_mode", "warn"))
+            effective_mode = stricter_rf_guard_mode(advanced_mode, peer_mode)
+            for freq_hz in plan_frequencies:
+                for peer_freq_hz in peer_frequencies:
+                    delta_hz = abs(int(freq_hz) - int(peer_freq_hz))
+                    if delta_hz > threshold_hz:
+                        continue
+                    band = _normalize_band_token(_band_from_frequency_hz(freq_hz))
+                    message = (
+                        f"{str(device.get('name', '') or 'Radio')} and {str(peer.get('name', '') or 'another radio')} "
+                        f"would be within {threshold_hz} Hz in Advanced Guard group {advanced_group} "
+                        f"({freq_hz} Hz vs {peer_freq_hz} Hz)."
+                    )
+                    target = blocked if effective_mode == "block" else warnings
+                    target.append(message)
+                    events.append(
+                        {
+                            "event_type": "advanced_frequency_guard",
+                            "guard_name": advanced_group,
+                            "guard_mode": effective_mode,
+                            "device_profile_id": device_id,
+                            "peer_device_profile_id": int(peer.get("id", 0) or 0),
+                            "frequency_plan_id": plan_id,
+                            "band": band,
+                            "frequency": str(freq_hz),
+                            "decision": "blocked" if effective_mode == "block" else "warning",
+                            "message": message,
+                        }
+                    )
+                    break
+
+    for event in events:
+        _rf_guard_event_conn(conn, **event)
+
+    if blocked:
+        state = "blocked"
+    elif warnings:
+        state = "warning"
+    else:
+        state = "ok"
+        messages.append("RF guard validation completed.")
+    return {
+        "state": state,
+        "rf_guard_validation": "enforced",
+        "plan_bands": plan_bands,
+        "supported_bands": supported_bands,
+        "warnings": warnings,
+        "blocked": blocked,
+        "messages": messages + warnings + blocked,
+        "device_profile_id": device_id,
+        "frequency_plan_id": plan_id,
+    }
 
 
 def _operating_profile_has_observer_assignments(conn: sqlite3.Connection, operating_profile_id: int) -> bool:
@@ -1062,6 +1812,24 @@ def _operating_profile_has_observer_assignments(conn: sqlite3.Connection, operat
          LIMIT 1
         """,
         (int(operating_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
+    ).fetchone()
+    return row is not None
+
+
+def _frequency_plan_has_observer_assignments(conn: sqlite3.Connection, frequency_plan_id: int) -> bool:
+    placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
+    row = conn.execute(
+        f"""
+        SELECT assignments.id
+          FROM assigned_plans AS assignments
+          JOIN device_profiles AS devices
+            ON devices.id = assignments.device_profile_id
+         WHERE assignments.frequency_plan_id=?
+           AND assignments.assignment_state IN ({placeholders})
+           AND LOWER(COALESCE(devices.device_class, 'tx_rx'))='observer'
+         LIMIT 1
+        """,
+        (int(frequency_plan_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
     ).fetchone()
     return row is not None
 
@@ -1506,40 +2274,67 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
     rows = _fetchall_dicts(
         conn,
         """
-        SELECT id, name, enabled, device_class, antenna_group, frontend_group, amplifier_group
+        SELECT id, name, enabled, device_class, antenna_group, frontend_group, amplifier_group,
+               band_overlap_guard_group, band_overlap_guard_mode,
+               advanced_frequency_guard_group, advanced_frequency_guard_mode,
+               advanced_frequency_guard_window_hz
           FROM device_profiles
          WHERE enabled=1
       ORDER BY id ASC
         """,
     )
     devices: List[Dict[str, Any]] = []
+    overlap_devices_by_id: Dict[int, Dict[str, Any]] = {}
     for row in rows:
         device = dict(row)
-        if _coerce_text(device.get("device_class", "tx_rx"), "tx_rx").lower() == "observer":
-            continue
         device["name"] = _coerce_text(device.get("name", f"Device {int(device.get('id', 0) or 0)}"))
         device["antenna_group"] = normalize_resource_group(device.get("antenna_group", ""))
         device["frontend_group"] = normalize_resource_group(device.get("frontend_group", ""))
         device["amplifier_group"] = normalize_resource_group(device.get("amplifier_group", ""))
-        devices.append(device)
+        device["band_overlap_guard_group"] = normalize_resource_group(device.get("band_overlap_guard_group", ""))
+        device["band_overlap_guard_mode"] = normalize_rf_guard_mode(device.get("band_overlap_guard_mode", "warn"))
+        device["advanced_frequency_guard_group"] = normalize_resource_group(device.get("advanced_frequency_guard_group", ""))
+        device["advanced_frequency_guard_mode"] = normalize_rf_guard_mode(
+            device.get("advanced_frequency_guard_mode", "warn")
+        )
+        device["advanced_frequency_guard_window_hz"] = _coerce_nonnegative_int(
+            device.get("advanced_frequency_guard_window_hz", 0)
+        )
+        if device["band_overlap_guard_group"] or (
+            device["advanced_frequency_guard_group"] and device["advanced_frequency_guard_window_hz"] > 0
+        ):
+            overlap_devices_by_id[int(device.get("id", 0) or 0)] = device
+        if _coerce_text(device.get("device_class", "tx_rx"), "tx_rx").lower() != "observer":
+            devices.append(device)
 
     groups_by_field: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
         "antenna_group": {},
         "frontend_group": {},
         "amplifier_group": {},
+        "band_overlap_guard_group": {},
+        "advanced_frequency_guard_group": {},
     }
     for device in devices:
-        for field_name in groups_by_field.keys():
+        for field_name in ("antenna_group", "frontend_group", "amplifier_group"):
             group_value = str(device.get(field_name, "") or "").strip()
             if not group_value:
                 continue
             groups_by_field[field_name].setdefault(group_value, []).append(device)
+    for device in overlap_devices_by_id.values():
+        group_value = str(device.get("band_overlap_guard_group", "") or "").strip()
+        if group_value:
+            groups_by_field["band_overlap_guard_group"].setdefault(group_value, []).append(device)
+        advanced_group_value = str(device.get("advanced_frequency_guard_group", "") or "").strip()
+        if advanced_group_value and int(device.get("advanced_frequency_guard_window_hz", 0) or 0) > 0:
+            groups_by_field["advanced_frequency_guard_group"].setdefault(advanced_group_value, []).append(device)
 
     pair_map: Dict[tuple[int, int], Dict[str, Any]] = {}
     group_columns = (
         ("antenna_group", "antenna_groups"),
         ("amplifier_group", "amplifier_groups"),
         ("frontend_group", "frontend_groups"),
+        ("band_overlap_guard_group", "band_overlap_groups"),
+        ("advanced_frequency_guard_group", "advanced_frequency_groups"),
     )
     for field_name, trigger_key in group_columns:
         for group_name, members in groups_by_field[field_name].items():
@@ -1568,9 +2363,25 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
                             "antenna_groups": set(),
                             "frontend_groups": set(),
                             "amplifier_groups": set(),
+                            "band_overlap_groups": set(),
+                            "advanced_frequency_groups": set(),
+                            "guard_modes": set(),
+                            "advanced_frequency_windows_hz": {},
                         },
                     )
                     pair_entry[str(trigger_key)].add(group_name)
+                    if field_name == "band_overlap_guard_group":
+                        pair_entry["guard_modes"].add(left.get("band_overlap_guard_mode", "warn"))
+                        pair_entry["guard_modes"].add(right.get("band_overlap_guard_mode", "warn"))
+                    if field_name == "advanced_frequency_guard_group":
+                        pair_entry["guard_modes"].add(left.get("advanced_frequency_guard_mode", "warn"))
+                        pair_entry["guard_modes"].add(right.get("advanced_frequency_guard_mode", "warn"))
+                        pair_entry["advanced_frequency_windows_hz"][str(left_id)] = _coerce_nonnegative_int(
+                            left.get("advanced_frequency_guard_window_hz", 0)
+                        )
+                        pair_entry["advanced_frequency_windows_hz"][str(right_id)] = _coerce_nonnegative_int(
+                            right.get("advanced_frequency_guard_window_hz", 0)
+                        )
 
     expected: Dict[tuple[int, int], Dict[str, Any]] = {}
     for pair, info in pair_map.items():
@@ -1578,9 +2389,24 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
             "antenna_groups": sorted(str(group) for group in info["antenna_groups"]),
             "frontend_groups": sorted(str(group) for group in info["frontend_groups"]),
             "amplifier_groups": sorted(str(group) for group in info["amplifier_groups"]),
+            "band_overlap_groups": sorted(str(group) for group in info["band_overlap_groups"]),
+            "advanced_frequency_groups": sorted(str(group) for group in info["advanced_frequency_groups"]),
+            "advanced_frequency_windows_hz": {
+                str(key): int(value)
+                for key, value in sorted(dict(info.get("advanced_frequency_windows_hz", {})).items())
+                if int(value or 0) > 0
+            },
+            "guard_modes": sorted(str(mode) for mode in info["guard_modes"]),
         }
-        if not any(trigger.values()):
+        if not any(value for key, value in trigger.items() if key not in {"guard_modes", "advanced_frequency_windows_hz"}):
             continue
+        guard_modes = {normalize_rf_guard_mode(mode) for mode in trigger.get("guard_modes", [])}
+        if trigger.get("band_overlap_groups") or trigger.get("advanced_frequency_groups"):
+            safety_mode = "warn"
+            for mode in guard_modes:
+                safety_mode = stricter_rf_guard_mode(safety_mode, mode)
+        else:
+            safety_mode = "prompt"
         expected[pair] = {
             "name": f"RF Conflict: {info['source_name']} <-> {info['target_name']}",
             "enabled": 1,
@@ -1590,9 +2416,9 @@ def _sync_rf_conflict_policies_conn(conn: sqlite3.Connection) -> List[Dict[str, 
             "priority": RF_CONFLICT_POLICY_PRIORITY,
             "trigger_json": _coerce_json_object_text(trigger),
             "action_json": _coerce_json_object_text(
-                {"warning": "primary_runtime_rf_overlap", "scope": "primary_runtime"}
+                {"warning": "primary_runtime_rf_overlap", "scope": "primary_runtime", "guard_mode": safety_mode}
             ),
-            "safety_mode": "prompt",
+            "safety_mode": safety_mode,
         }
     return _sync_pair_coordination_policies_conn(
         conn,
@@ -2038,6 +2864,151 @@ def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, 
     return _record_by_system_key(conn, "operating_profiles", system_key) or {}
 
 
+def _save_frequency_plan_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = dict(values)
+    record_id = _coerce_optional_int(payload.get("id"))
+    existing = _record_by_id(conn, "frequency_plans", record_id) if record_id is not None else None
+    now_iso = _utc_now_iso()
+    system_key = _next_system_key(
+        conn,
+        "frequency_plans",
+        payload.get("system_key", (existing or {}).get("system_key", DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY)),
+        exclude_id=record_id,
+    )
+    record = {
+        "system_key": system_key,
+        "name": _coerce_text(
+            payload.get("name", (existing or {}).get("name", DEFAULT_FREQUENCY_PLAN_NAME)),
+            DEFAULT_FREQUENCY_PLAN_NAME,
+        )
+        or DEFAULT_FREQUENCY_PLAN_NAME,
+        "enabled": _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True),
+        "description": _coerce_text(payload.get("description", (existing or {}).get("description", "")), ""),
+        "category": _normalize_frequency_plan_category(payload.get("category", (existing or {}).get("category", "normal"))),
+        "status": _normalize_frequency_plan_status(payload.get("status", (existing or {}).get("status", "saved"))),
+        "receive_only": _coerce_bool_int(payload.get("receive_only", (existing or {}).get("receive_only", 0)), False),
+        "source_refs_json": _coerce_ref_list_json_text(
+            payload.get("source_refs", payload.get("source_refs_json", (existing or {}).get("source_refs_json", "[]")))
+        ),
+        "schedule_refs_json": _coerce_ref_list_json_text(
+            payload.get("schedule_refs", payload.get("schedule_refs_json", (existing or {}).get("schedule_refs_json", "[]")))
+        ),
+        "frequency_refs_json": _coerce_ref_list_json_text(
+            payload.get("frequency_refs", payload.get("frequency_refs_json", (existing or {}).get("frequency_refs_json", "[]")))
+        ),
+        "group_refs_json": _coerce_ref_list_json_text(
+            payload.get("group_refs", payload.get("group_refs_json", (existing or {}).get("group_refs_json", "[]")))
+        ),
+        "notes": _coerce_text(payload.get("notes", (existing or {}).get("notes", "")), ""),
+        "created_utc": (existing or {}).get("created_utc", now_iso),
+        "updated_utc": now_iso,
+    }
+    columns = list(record.keys())
+    if existing:
+        assignments = ", ".join(f"{name}=?" for name in columns)
+        conn.execute(
+            f"UPDATE frequency_plans SET {assignments} WHERE id=?",
+            [record[name] for name in columns] + [int(record_id)],
+        )
+        conn.commit()
+        return _record_by_id(conn, "frequency_plans", int(record_id)) or {}
+    conn.execute(
+        f"INSERT INTO frequency_plans ({', '.join(columns)}) VALUES ({', '.join(['?'] * len(columns))})",
+        [record[name] for name in columns],
+    )
+    conn.commit()
+    return _record_by_system_key(conn, "frequency_plans", system_key) or {}
+
+
+def _set_assigned_plan_conn(
+    conn: sqlite3.Connection,
+    device_profile_id: int,
+    frequency_plan_id: int,
+    *,
+    assignment_state: str = "active",
+    assignment_category: str = "normal",
+    scheduler_mode: str = "full",
+    reason: str = "",
+    starts_utc: str = "",
+    ends_utc: str = "",
+    created_by: str = "settings_ui",
+) -> Dict[str, Any]:
+    device = _record_by_id(conn, "device_profiles", int(device_profile_id))
+    if not device:
+        raise KeyError(f"Unknown device profile id: {device_profile_id}")
+    frequency_plan = _record_by_id(conn, "frequency_plans", int(frequency_plan_id))
+    if not frequency_plan:
+        raise KeyError(f"Unknown Frequency Plan id: {frequency_plan_id}")
+    if int(frequency_plan.get("enabled", 1) or 0) != 1:
+        raise ValueError("Cannot assign a disabled Frequency Plan.")
+    _validate_schedule_assignment_compatibility(device, frequency_plan)
+    validation = _schedule_assignment_validation_status_conn(conn, device, frequency_plan)
+    if validation.get("state") == "blocked":
+        conn.commit()
+        messages = validation.get("blocked") or validation.get("messages") or ["RF Safety Guard blocked this assignment."]
+        raise ValueError(str(messages[0]))
+    state = _normalize_assignment_state(assignment_state)
+    scheduler_mode_value = _coerce_text(scheduler_mode, "full").lower() or "full"
+    if scheduler_mode_value not in SUPPORTED_SCHEDULER_MODES:
+        scheduler_mode_value = "full"
+    if state in EFFECTIVE_ASSIGNMENT_STATES:
+        placeholders = ", ".join(["?"] * len(EFFECTIVE_ASSIGNMENT_STATES))
+        conn.execute(
+            f"""
+            UPDATE assigned_plans
+               SET assignment_state='superseded', updated_utc=?
+             WHERE device_profile_id=?
+               AND assignment_state IN ({placeholders})
+            """,
+            (_utc_now_iso(), int(device_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
+        )
+    now_iso = _utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO assigned_plans (
+            device_profile_id, frequency_plan_id, assignment_state, assignment_category,
+            scheduler_mode, starts_utc, ends_utc, reason, created_by, validation_status_json,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(device_profile_id),
+            int(frequency_plan_id),
+            state,
+            _coerce_text(assignment_category, "normal") or "normal",
+            scheduler_mode_value,
+            _coerce_text(starts_utc, ""),
+            _coerce_text(ends_utc, ""),
+            _coerce_text(reason, ""),
+            _coerce_text(created_by, "settings_ui") or "settings_ui",
+            json.dumps(validation, sort_keys=True),
+            now_iso,
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM assigned_plans WHERE id=last_insert_rowid()").fetchone())
+
+
+def _effective_assigned_plan_for_device(conn: sqlite3.Connection, device_profile_id: int) -> Optional[Dict[str, Any]]:
+    if int(device_profile_id or 0) <= 0:
+        return None
+    placeholders = ", ".join(["?"] * len(EFFECTIVE_ASSIGNMENT_STATES))
+    cur = conn.execute(
+        f"""
+        SELECT *
+          FROM assigned_plans
+         WHERE device_profile_id=?
+           AND assignment_state IN ({placeholders})
+      ORDER BY id ASC
+         LIMIT 1
+        """,
+        (int(device_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
+    )
+    return _fetchone_dict(cur)
+
+
 def _effective_assignment_for_device(conn: sqlite3.Connection, device_profile_id: int) -> Optional[Dict[str, Any]]:
     if int(device_profile_id or 0) <= 0:
         return None
@@ -2077,9 +3048,9 @@ def _set_device_operating_profile_conn(
         raise KeyError(f"Unknown device profile id: {device_profile_id}")
     operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
     if not operating:
-        raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
+        raise KeyError(f"Unknown Operating Model id: {operating_profile_id}")
     if int(operating.get("enabled", 1) or 0) != 1:
-        raise ValueError("Cannot assign a disabled Frequency Plan.")
+        raise ValueError("Cannot assign a disabled Operating Model.")
     _validate_assignment_plan_compatibility(device, operating)
     active_swap = _active_profile_swap_policy_conn(conn)
     if active_swap is not None and not allow_active_swap_edit:
@@ -2171,7 +3142,7 @@ def _restore_default_operating_profile_conn(
     conn: sqlite3.Connection,
     device_profile_id: int,
     *,
-    reason: str = "Restored default Frequency Plan.",
+    reason: str = "Restored default Operating Model.",
     created_by: str = "settings_ui",
     allow_active_swap_edit: bool = False,
 ) -> Dict[str, Any]:
@@ -2194,7 +3165,7 @@ def _restore_assignment_snapshot_conn(
     device_profile_id: int,
     snapshot: Optional[Mapping[str, Any]],
     *,
-    fallback_reason: str = "Restored previous Frequency Plan after Temporary Plan Swap.",
+    fallback_reason: str = "Restored previous Operating Model after Temporary Model Swap.",
     created_by: str = "settings_ui",
     allow_active_swap_edit: bool = False,
 ) -> Dict[str, Any]:
@@ -2257,7 +3228,7 @@ def _ensure_default_assignment(conn: sqlite3.Connection, device_id: int, operati
         raise KeyError(f"Unknown device profile id: {device_id}")
     operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
     if not operating:
-        raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
+        raise KeyError(f"Unknown Operating Model id: {operating_profile_id}")
     _validate_assignment_plan_compatibility(device, operating)
     row = conn.execute(
         """
@@ -3821,20 +4792,62 @@ class MultiRadioStore:
             "antenna_group": normalize_resource_group(payload.get("antenna_group", (existing or {}).get("antenna_group", ""))),
             "frontend_group": normalize_resource_group(payload.get("frontend_group", (existing or {}).get("frontend_group", ""))),
             "amplifier_group": normalize_resource_group(payload.get("amplifier_group", (existing or {}).get("amplifier_group", ""))),
+            "antenna_supported_bands_json": _coerce_json_array_text(
+                payload.get(
+                    "antenna_supported_bands",
+                    payload.get(
+                        "antenna_supported_bands_json",
+                        (existing or {}).get("antenna_supported_bands_json", "[]"),
+                    ),
+                )
+            ),
+            "antenna_band_guard_mode": normalize_rf_guard_mode(
+                payload.get("antenna_band_guard_mode", (existing or {}).get("antenna_band_guard_mode", "warn"))
+            ),
+            "band_overlap_guard_group": normalize_resource_group(
+                payload.get("band_overlap_guard_group", (existing or {}).get("band_overlap_guard_group", ""))
+            ),
+            "band_overlap_guard_mode": normalize_rf_guard_mode(
+                payload.get("band_overlap_guard_mode", (existing or {}).get("band_overlap_guard_mode", "warn"))
+            ),
+            "advanced_frequency_guard_group": normalize_resource_group(
+                payload.get(
+                    "advanced_frequency_guard_group",
+                    (existing or {}).get("advanced_frequency_guard_group", ""),
+                )
+            ),
+            "advanced_frequency_guard_mode": normalize_rf_guard_mode(
+                payload.get(
+                    "advanced_frequency_guard_mode",
+                    (existing or {}).get("advanced_frequency_guard_mode", "warn"),
+                )
+            ),
+            "advanced_frequency_guard_window_hz": _coerce_nonnegative_int(
+                payload.get(
+                    "advanced_frequency_guard_window_hz",
+                    (existing or {}).get("advanced_frequency_guard_window_hz", 0),
+                )
+            ),
             "sdr_host": _coerce_text(payload.get("sdr_host", (existing or {}).get("sdr_host", "")), ""),
             "sdr_port": _coerce_optional_int(payload.get("sdr_port", (existing or {}).get("sdr_port"))),
             "notes": _coerce_text(payload.get("notes", (existing or {}).get("notes", "")), ""),
             "created_utc": (existing or {}).get("created_utc", now_iso),
             "updated_utc": now_iso,
         }
-        if device_class == "observer" and requested_id is not None:
-            assignment = _effective_assignment_for_device(conn, int(requested_id))
-            if assignment:
-                operating = _record_by_id(conn, "operating_profiles", int(assignment.get("operating_profile_id", 0) or 0))
-                if operating:
-                    _validate_assignment_plan_compatibility(record, operating)
-            elif record["runtime_active"]:
-                raise ValueError("Observer / SDR radios require a receive-only assigned Frequency Plan before activation.")
+        if device_class == "observer":
+            if record["runtime_primary"]:
+                raise ValueError("Observer / SDR device profiles cannot become the compatibility runtime device.")
+            if requested_id is None:
+                if record["runtime_active"]:
+                    raise ValueError("Observer / SDR radios require receive-only operating models before activation.")
+            else:
+                assignment = _effective_assignment_for_device(conn, int(requested_id))
+                if assignment:
+                    operating = _record_by_id(conn, "operating_profiles", int(assignment.get("operating_profile_id", 0) or 0))
+                    if operating:
+                        _validate_assignment_plan_compatibility(record, operating)
+                elif record["runtime_active"]:
+                    raise ValueError("Observer / SDR radios require receive-only operating models before activation.")
         columns = list(record.keys())
         if existing:
             assignments = ", ".join(f"{name}=?" for name in columns)
@@ -3958,7 +4971,7 @@ class MultiRadioStore:
             active_swap = _active_profile_swap_policy_conn(conn)
             enabled = _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True)
             if existing and str(existing.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY and enabled != 1:
-                raise ValueError("Cannot disable the default Frequency Plan.")
+                raise ValueError("Cannot disable the default Operating Model.")
             receive_only = _coerce_bool_int(payload.get("receive_only", (existing or {}).get("receive_only", 0)), False)
             if (
                 existing
@@ -3966,7 +4979,7 @@ class MultiRadioStore:
                 and _operating_profile_has_observer_assignments(conn, int(requested_id))
             ):
                 raise ValueError(
-                    "This Frequency Plan is assigned to observer / SDR radios. Remove those assignments or keep the plan receive-only."
+                    "This Operating Model is assigned to observer / SDR radios. Remove those assignments or keep the model receive-only."
                 )
             if existing and enabled != 1:
                 placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
@@ -3981,13 +4994,13 @@ class MultiRadioStore:
                     (int(requested_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
                 ).fetchone()
                 if assigned is not None:
-                    raise ValueError("Cannot disable a Frequency Plan while it is assigned to a radio.")
+                    raise ValueError("Cannot disable an Operating Model while it is assigned to a radio.")
                 if active_swap is not None:
                     restore_target = dict((active_swap.get("action") or {}).get("restore_target_assignment") or {})
                     restore_target_id = restore_target.get("operating_profile_id")
                     if restore_target_id not in (None, "") and int(restore_target_id) == int(requested_id):
                         raise ValueError(
-                            "Cannot disable this Frequency Plan while it is captured as the restore target for an active Temporary Plan Swap."
+                            "Cannot disable this Operating Model while it is captured as the restore target for an active Temporary Model Swap."
                         )
             return _save_operating_profile_conn(conn, payload)
 
@@ -3995,16 +5008,16 @@ class MultiRadioStore:
         with self._connect() as conn:
             operating = _record_by_id(conn, "operating_profiles", int(operating_profile_id))
             if not operating:
-                raise KeyError(f"Unknown Frequency Plan id: {operating_profile_id}")
+                raise KeyError(f"Unknown Operating Model id: {operating_profile_id}")
             if str(operating.get("system_key", "") or "").strip() == DEFAULT_OPERATING_SYSTEM_KEY:
-                raise ValueError("Cannot delete the default Frequency Plan.")
+                raise ValueError("Cannot delete the default Operating Model.")
             active_swap = _active_profile_swap_policy_conn(conn)
             if active_swap is not None:
                 restore_target = dict((active_swap.get("action") or {}).get("restore_target_assignment") or {})
                 restore_target_id = restore_target.get("operating_profile_id")
                 if restore_target_id not in (None, "") and int(restore_target_id) == int(operating_profile_id):
                     raise ValueError(
-                        "Cannot delete this Frequency Plan while it is captured as the restore target for an active Temporary Plan Swap."
+                        "Cannot delete this Operating Model while it is captured as the restore target for an active Temporary Model Swap."
                     )
             placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
             assigned = conn.execute(
@@ -4018,10 +5031,102 @@ class MultiRadioStore:
                 (int(operating_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
             ).fetchone()
             if assigned is not None:
-                raise ValueError("Cannot delete a Frequency Plan while it is assigned to a radio.")
+                raise ValueError("Cannot delete an Operating Model while it is assigned to a radio.")
             conn.execute("DELETE FROM operating_profile_assignments WHERE operating_profile_id=?", (int(operating_profile_id),))
             conn.execute("DELETE FROM operating_profiles WHERE id=?", (int(operating_profile_id),))
             conn.commit()
+
+    def list_frequency_plans(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM frequency_plans ORDER BY id ASC").fetchall()
+            return [dict(row) for row in rows]
+
+    def get_frequency_plan(self, frequency_plan_id: int) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            return _record_by_id(conn, "frequency_plans", int(frequency_plan_id))
+
+    def save_frequency_plan(self, values: Mapping[str, Any]) -> Dict[str, Any]:
+        with self._connect() as conn:
+            payload = dict(values)
+            record_id = _coerce_optional_int(payload.get("id"))
+            if record_id is not None:
+                existing = _record_by_id(conn, "frequency_plans", int(record_id))
+                if existing and not _is_receive_only_frequency_plan(
+                    payload.get("receive_only", existing.get("receive_only", 0))
+                ):
+                    if _frequency_plan_has_observer_assignments(conn, int(record_id)):
+                        raise ValueError(
+                            "This Frequency Plan is assigned to observer / SDR radios. Remove those assignments or keep the plan receive-only."
+                        )
+            return _save_frequency_plan_conn(conn, payload)
+
+    def delete_frequency_plan(self, frequency_plan_id: int) -> None:
+        with self._connect() as conn:
+            plan = _record_by_id(conn, "frequency_plans", int(frequency_plan_id))
+            if not plan:
+                raise KeyError(f"Unknown Frequency Plan id: {frequency_plan_id}")
+            placeholders = ", ".join("?" for _ in EFFECTIVE_ASSIGNMENT_STATES)
+            assigned = conn.execute(
+                f"""
+                SELECT id
+                  FROM assigned_plans
+                 WHERE frequency_plan_id=?
+                   AND assignment_state IN ({placeholders})
+                 LIMIT 1
+                """,
+                (int(frequency_plan_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
+            ).fetchone()
+            if assigned is not None:
+                raise ValueError("Cannot delete a Frequency Plan while it is assigned to a radio.")
+            conn.execute("DELETE FROM assigned_plans WHERE frequency_plan_id=?", (int(frequency_plan_id),))
+            conn.execute("DELETE FROM frequency_plans WHERE id=?", (int(frequency_plan_id),))
+            conn.commit()
+
+    def list_assigned_plans(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM assigned_plans ORDER BY device_profile_id ASC, id ASC").fetchall()
+            return [dict(row) for row in rows]
+
+    def list_effective_assigned_plans(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id FROM device_profiles ORDER BY display_order ASC, id ASC").fetchall()
+            assignments: List[Dict[str, Any]] = []
+            for row in rows:
+                assignment = _effective_assigned_plan_for_device(conn, int(row[0]))
+                if assignment:
+                    assignments.append(dict(assignment))
+            return assignments
+
+    def get_effective_assigned_plan_for_device(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            return _effective_assigned_plan_for_device(conn, int(device_profile_id))
+
+    def set_assigned_plan(
+        self,
+        device_profile_id: int,
+        frequency_plan_id: int,
+        *,
+        assignment_state: str = "active",
+        assignment_category: str = "normal",
+        scheduler_mode: str = "full",
+        reason: str = "",
+        starts_utc: str = "",
+        ends_utc: str = "",
+        created_by: str = "settings_ui",
+    ) -> Dict[str, Any]:
+        with self._connect() as conn:
+            return _set_assigned_plan_conn(
+                conn,
+                int(device_profile_id),
+                int(frequency_plan_id),
+                assignment_state=assignment_state,
+                assignment_category=assignment_category,
+                scheduler_mode=scheduler_mode,
+                reason=reason,
+                starts_utc=starts_utc,
+                ends_utc=ends_utc,
+                created_by=created_by,
+            )
 
     def list_assignments(self) -> List[Dict[str, Any]]:
         with self._connect() as conn:
@@ -4072,7 +5177,7 @@ class MultiRadioStore:
         self,
         device_profile_id: int,
         *,
-        reason: str = "Restored default Frequency Plan.",
+        reason: str = "Restored default Operating Model.",
         created_by: str = "settings_ui",
     ) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -4123,7 +5228,7 @@ class MultiRadioStore:
             source_assignment = _ensure_effective_assignment_for_device(conn, source_id)
             target_assignment = _ensure_effective_assignment_for_device(conn, int(target_device_profile_id))
             if not source_assignment:
-                raise ValueError("The current primary radio does not have an assigned Frequency Plan.")
+                raise ValueError("The current primary radio does not have an assigned Operating Model.")
 
             mode_value = _normalize_profile_swap_mode(mode, "use_target_profile")
             reason_value = _coerce_text(reason, "")
@@ -4145,9 +5250,9 @@ class MultiRadioStore:
                     int(source_assignment.get("operating_profile_id", 0) or 0),
                 )
                 if not source_operating_profile:
-                    raise ValueError("The current primary radio does not have a valid Frequency Plan to carry.")
+                    raise ValueError("The current primary radio does not have a valid Operating Model to carry.")
                 if int(source_operating_profile.get("allow_profile_swap", 0) or 0) != 1:
-                    raise ValueError("The current primary Frequency Plan does not allow Temporary Plan Swap coordination.")
+                    raise ValueError("The current primary Operating Model does not allow Temporary Model Swap coordination.")
                 applied_target = _set_device_operating_profile_conn(
                     conn,
                     int(target_device_profile_id),
@@ -4701,6 +5806,17 @@ class MultiRadioStore:
                 backend = _coerce_text(device.get("control_backend", "manual"), "manual").lower()
                 if backend not in SUPPORTED_RUNTIME_CONTROL_BACKENDS:
                     raise ValueError(f"Cannot activate backend until runtime support exists: {backend}")
+                if _coerce_text(device.get("device_class", "tx_rx"), "tx_rx").lower() == "observer":
+                    assignment = _effective_assignment_for_device(conn, int(device_profile_id))
+                    if not assignment:
+                        raise ValueError("Observer / SDR radios require receive-only operating models before activation.")
+                    operating = _record_by_id(
+                        conn,
+                        "operating_profiles",
+                        int(assignment.get("operating_profile_id", 0) or 0),
+                    )
+                    if operating:
+                        _validate_assignment_plan_compatibility(device, operating)
                 conn.execute("UPDATE device_profiles SET runtime_active=1 WHERE id=?", (int(device_profile_id),))
                 assignment = _effective_assignment_for_device(conn, int(device_profile_id))
                 if not assignment:

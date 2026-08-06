@@ -3238,10 +3238,17 @@ class NetScheduleTab(QWidget):
         try:
             self._create_tables(conn)
             self._ensure_columns_with_recreate(conn)
+            linked_rows, created_resources, linked_resources = self._ensure_manual_schedule_resources(conn, rows)
             conn.execute("DELETE FROM net_schedule_tab")
             conn.execute("DELETE FROM net_schedule")
-            self._insert_rows(conn, rows)
+            self._insert_rows(conn, linked_rows)
             conn.commit()
+            if created_resources or linked_resources:
+                log.info(
+                    "NetSchedule: linked %d net schedule row(s) to resources; created %d manual resource(s).",
+                    linked_resources,
+                    created_resources,
+                )
             log.info("Net schedule mirrored to DB at %s (%d entries).", db_path, len(rows))
         finally:
             conn.close()
@@ -3561,6 +3568,136 @@ class NetScheduleTab(QWidget):
             )
 
     # --------- Net resources --------- #
+
+    def _find_resource_match_for_schedule_row(
+        self,
+        conn: sqlite3.Connection,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        normalized = self._strip_internal_row(row)
+        recurrence = str(normalized.get("recurrence") or "Weekly").strip()
+        if recurrence == "Monthly":
+            recurrence = "Periodic"
+        if recurrence == "Bi-Weekly":
+            recurrence = "Weekly"
+        if recurrence not in ("Weekly", "Daily", "Periodic"):
+            recurrence = "Weekly"
+        month_weeks = self._format_month_weeks(str(normalized.get("month_weeks") or ""))
+        if recurrence != "Periodic":
+            month_weeks = ""
+        freq_key = self._normalize_freq_key(normalized.get("frequency"))
+        try:
+            freq_num = float(freq_key)
+        except Exception:
+            freq_num = None
+        found = conn.execute(
+            """
+            SELECT id, resource_set
+            FROM net_resources
+            WHERE TRIM(day_utc)=TRIM(?)
+              AND TRIM(COALESCE(recurrence,''))=TRIM(?)
+              AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
+              AND UPPER(TRIM(COALESCE(group_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
+              AND TRIM(start_utc)=TRIM(?)
+              AND TRIM(end_utc)=TRIM(?)
+              AND UPPER(TRIM(COALESCE(net_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
+              AND TRIM(COALESCE(fldigi_offset,''))=TRIM(?)
+              AND (
+                    (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
+                    OR TRIM(COALESCE(frequency,''))=TRIM(?)
+                  )
+            ORDER BY
+              CASE LOWER(TRIM(COALESCE(source_type,'')))
+                WHEN 'builtin' THEN 0
+                WHEN 'imported' THEN 1
+                WHEN 'manual' THEN 2
+                ELSE 3
+              END,
+              id ASC
+            LIMIT 1
+            """,
+            (
+                self._normalize_day(str(normalized.get("day_utc") or "")),
+                recurrence,
+                month_weeks,
+                str(normalized.get("group_name") or "").strip(),
+                str(normalized.get("band") or "").strip(),
+                str(normalized.get("mode") or "").strip(),
+                self._normalize_hhmm(str(normalized.get("start_utc") or "")),
+                self._normalize_hhmm(str(normalized.get("end_utc") or "")),
+                str(normalized.get("net_name") or "").strip(),
+                str(normalized.get("fldigi_mode") or "").strip(),
+                str(normalized.get("fldigi_offset") or "").strip(),
+                freq_num if freq_num is not None else None,
+                freq_num if freq_num is not None else None,
+                freq_key,
+            ),
+        ).fetchone()
+        if not found:
+            return None
+        try:
+            rid = int(found[0] or 0)
+        except Exception:
+            rid = 0
+        if rid <= 0:
+            return None
+        return {
+            "id": rid,
+            "resource_set": str(found[1] or "").strip() or "Custom",
+        }
+
+    def _ensure_manual_schedule_resources(
+        self,
+        conn: sqlite3.Connection,
+        rows: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        linked_rows: List[Dict[str, Any]] = []
+        created = 0
+        linked = 0
+        for row in rows:
+            normalized = normalize_schedule_target_fields(dict(row))
+            resource_id = normalized.get("_resource_id")
+            if resource_id not in (None, ""):
+                existing_resource = None
+                try:
+                    existing_resource = self._load_resource_row_by_id(conn, int(resource_id))
+                except Exception:
+                    existing_resource = None
+                if existing_resource and self._schedule_row_matches_resource_row(normalized, existing_resource):
+                    linked_rows.append(normalized)
+                    continue
+                normalized.pop("_resource_id", None)
+                normalized.pop("_resource_set", None)
+                if existing_resource:
+                    linked_rows.append(normalized)
+                    continue
+            match = self._find_resource_match_for_schedule_row(conn, normalized)
+            if match:
+                normalized["_resource_id"] = int(match["id"])
+                normalized["_resource_set"] = str(match.get("resource_set") or "Custom")
+                linked += 1
+                linked_rows.append(normalized)
+                continue
+            rid = self._upsert_resource_row(
+                conn,
+                normalized,
+                resource_set="Custom",
+                source_type="manual",
+                source_ref="auto_from_schedule",
+                readonly=1,
+                resource_id=None,
+                update_existing=False,
+            )
+            if rid:
+                normalized["_resource_id"] = int(rid)
+                normalized["_resource_set"] = "Custom"
+                created += 1
+                linked += 1
+            linked_rows.append(normalized)
+        return linked_rows, created, linked
 
     @staticmethod
     def _resource_source_label(source_type: str) -> str:

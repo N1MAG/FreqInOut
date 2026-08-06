@@ -130,7 +130,7 @@ class AssignedPlan:
     radio_profile_id: str
     frequency_plan_id: str
     assignment_category: str = "normal"
-    scheduler_mode: str = "full_fio_workflow"
+    scheduler_mode: str = "full"
     active: bool = True
     default: bool = False
     temporary_override: bool = False
@@ -170,7 +170,7 @@ class AssignedPlan:
             category = "temporary"
         object.__setattr__(self, "assignment_category", category)
         object.__setattr__(self, "temporary_override", category == "temporary")
-        object.__setattr__(self, "scheduler_mode", str(self.scheduler_mode or "full_fio_workflow").strip() or "full_fio_workflow")
+        object.__setattr__(self, "scheduler_mode", str(self.scheduler_mode or "full").strip() or "full")
 
 
 @dataclass(frozen=True)
