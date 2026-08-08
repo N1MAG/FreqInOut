@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -3867,19 +3868,14 @@ class MessageViewerTab(QWidget):
         self.messages_copy_summary_btn.setToolTip("Copy a concise Messages support summary for the current mode.")
         self.messages_copy_summary_btn.clicked.connect(self._copy_messages_support_summary)
         self.messages_copy_summary_btn.setVisible(False)
-        self.messages_inbox_mode_btn = QPushButton("Inbox")
-        self.messages_inbox_mode_btn.clicked.connect(lambda: self._set_messages_mode("Inbox", save=False))
-        self.messages_compose_mode_btn = QPushButton("Compose")
-        self.messages_compose_mode_btn.clicked.connect(lambda: self._set_messages_mode("Compose", save=False, reset_compose=True))
-
         self.compose_refresh_forms_btn = QPushButton("Refresh")
         self.compose_refresh_forms_btn.setToolTip("Refresh the available FLMsg compose forms.")
         self.compose_refresh_forms_btn.clicked.connect(self._refresh_compose_forms)
         self.compose_reset_btn = QPushButton("Reset")
         self.compose_reset_btn.setToolTip("Reset the current compose draft.")
         self.compose_reset_btn.clicked.connect(lambda: self._reset_compose_draft())
-        self.compose_open_source_btn = QPushButton("Source")
-        self.compose_open_source_btn.setToolTip("Open the folder that contains the selected compose form.")
+        self.compose_open_source_btn = QPushButton("Open Form Folder")
+        self.compose_open_source_btn.setToolTip("Open the folder that contains the selected compose form/template.")
         self.compose_open_source_btn.clicked.connect(self._open_compose_source_folder)
 
         self.scan_combo = QComboBox()
@@ -3971,12 +3967,12 @@ class MessageViewerTab(QWidget):
         self.mark_all_read_btn.clicked.connect(self._mark_all_filtered_read)
         self.mark_all_read_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
 
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
-        mode_row.addWidget(QLabel("Mode:"))
-        mode_row.addWidget(self.messages_inbox_mode_btn)
-        mode_row.addWidget(self.messages_compose_mode_btn)
-        mode_row.addStretch()
+        self.inbox_actions_heading = QLabel("Actions")
+        self.inbox_actions_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_filters_heading = QLabel("Filters")
+        self.inbox_filters_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_bbs_heading = QLabel("BBS")
+        self.inbox_bbs_heading.setStyleSheet("font-weight: bold;")
 
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
@@ -3989,6 +3985,11 @@ class MessageViewerTab(QWidget):
         self.inbox_received_label = QLabel("Received:")
         self.inbox_check_label = QLabel("Check:")
         self.inbox_bbs_label = QLabel("BBS:")
+        self.inbox_message_type_label = QLabel("Type:")
+        self.inbox_status_label = QLabel("Status:")
+        self.inbox_from_label = QLabel("From:")
+        self.inbox_to_label = QLabel("To:")
+        self.inbox_search_label = QLabel("Search:")
         self.export_selected_btn = QPushButton("Export Selected...")
         if self._export_selected_available:
             self.export_selected_btn.clicked.connect(self._export_selected_csv)
@@ -4005,20 +4006,48 @@ class MessageViewerTab(QWidget):
         self._inbox_actions_layout.setSpacing(8)
         inbox_wrap.setLayout(self._inbox_actions_layout)
         self._inbox_actions_row = inbox_wrap
-        self._arrange_inbox_action_controls(compact=False)
 
         header_stack = QVBoxLayout()
         header_stack.setSpacing(6)
-        header_stack.addLayout(mode_row)
         header_stack.addWidget(compose_wrap)
-        header_stack.addWidget(inbox_wrap)
-        layout.addLayout(header_stack)
 
         self.messages_mode_stack = QStackedWidget()
-        layout.addWidget(self.messages_mode_stack, 1)
+
+        content_wrap = QWidget()
+        content_layout = QVBoxLayout(content_wrap)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        content_layout.addLayout(header_stack)
+        content_layout.addWidget(self.messages_mode_stack, 1)
+
+        messages_workspace = QHBoxLayout()
+        messages_workspace.setContentsMargins(0, 0, 0, 0)
+        messages_workspace.setSpacing(10)
+        messages_workspace.addWidget(content_wrap, 1)
+        layout.addLayout(messages_workspace, 1)
         self.inbox_page = QWidget()
-        body = QVBoxLayout(self.inbox_page)
+        inbox_root = QHBoxLayout(self.inbox_page)
+        inbox_root.setContentsMargins(0, 0, 0, 0)
+        inbox_root.setSpacing(10)
+        self.inbox_controls_panel = inbox_wrap
+        self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")
+        self.inbox_controls_panel.setMinimumWidth(220)
+        self.inbox_controls_panel.setMaximumWidth(280)
+        self.inbox_controls_scroll = QScrollArea()
+        self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")
+        self.inbox_controls_scroll.setWidgetResizable(True)
+        self.inbox_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.inbox_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.inbox_controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.inbox_controls_scroll.setMinimumWidth(232)
+        self.inbox_controls_scroll.setMaximumWidth(292)
+        self.inbox_controls_scroll.setWidget(self.inbox_controls_panel)
+        inbox_root.addWidget(self.inbox_controls_scroll, 0)
+        inbox_body = QWidget()
+        body = QVBoxLayout(inbox_body)
         body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(6)
+        inbox_root.addWidget(inbox_body, 1)
         self.messages_mode_stack.addWidget(self.inbox_page)
 
         pending_box = QGroupBox("Pending JS8 MSGs")
@@ -4118,6 +4147,7 @@ class MessageViewerTab(QWidget):
         self.status_filter = QComboBox()
         self.from_filter = QComboBox()
         self.to_filter = QComboBox()
+        self._make_combo_searchable(self.type_filter, "Message Type")
         self._make_combo_searchable(self.from_filter, "From")
         self._make_combo_searchable(self.to_filter, "To")
         self.rcv_search = QLineEdit()
@@ -4146,6 +4176,7 @@ class MessageViewerTab(QWidget):
         self._filter_timer.timeout.connect(self._on_filter_changed)
         self.rcv_search.setPlaceholderText("Search...")
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
+        self._arrange_inbox_action_controls(compact=False)
         self._build_messages_header()
         self._apply_accessibility_width_guards()
         fit_child_combo_boxes(self)
@@ -4186,48 +4217,74 @@ class MessageViewerTab(QWidget):
             return
         while layout.count():
             layout.takeAt(0)
-        for col in range(14):
+        for col in range(4):
             layout.setColumnStretch(col, 0)
-        if compact:
-            placements = [
-                (self.inbox_received_label, 0, 0),
-                (self.received_filter, 0, 1),
-                (self.time_toggle_btn, 0, 2),
-                (self.operating_group_filter, 0, 3),
-                (self.source_filter, 0, 4),
-                (self.inbox_check_label, 1, 0),
-                (self.message_check_combo, 1, 1),
-                (self.refresh_btn, 1, 2),
-                (self.mark_all_read_btn, 1, 3),
-                (self.more_actions_btn, 1, 4),
-                (self.inbox_bbs_label, 2, 0),
-                (self.bbs_status_btn, 2, 1),
-                (self.bbs_manage_btn, 2, 2),
-                (self.message_check_status_label, 2, 3, 1, 2),
-            ]
-        else:
-            placements = [
-                (self.inbox_received_label, 0, 0),
-                (self.received_filter, 0, 1),
-                (self.time_toggle_btn, 0, 2),
-                (self.operating_group_filter, 0, 3),
-                (self.source_filter, 0, 4),
-                (self.inbox_check_label, 0, 5),
-                (self.message_check_combo, 0, 6),
-                (self.refresh_btn, 0, 7),
-                (self.mark_all_read_btn, 0, 8),
-                (self.more_actions_btn, 0, 9),
-                (self.inbox_bbs_label, 0, 10),
-                (self.bbs_status_btn, 0, 11),
-                (self.bbs_manage_btn, 0, 12),
-                (self.message_check_status_label, 0, 13),
-            ]
+        self.message_check_status_label.setWordWrap(True)
+        for widget in (
+            self.refresh_btn,
+            self.mark_all_read_btn,
+            self.more_actions_btn,
+            self.bbs_status_btn,
+            self.bbs_manage_btn,
+            self.time_toggle_btn,
+            self.received_filter,
+            self.message_check_combo,
+            self.operating_group_filter,
+            self.source_filter,
+            self.type_filter,
+            self.status_filter,
+            self.from_filter,
+            self.to_filter,
+            self.rcv_search,
+            self.exclude_types_btn,
+            self.clear_filters_btn,
+        ):
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            try:
+                widget.setMinimumHeight(max(24, int(widget.sizeHint().height())))
+            except Exception:
+                pass
+        placements = [
+            (self.inbox_actions_heading, 0, 0, 1, 2),
+            (self.refresh_btn, 1, 0, 1, 2),
+            (self.mark_all_read_btn, 2, 0, 1, 2),
+            (self.more_actions_btn, 3, 0, 1, 2),
+            (self.inbox_filters_heading, 4, 0, 1, 2),
+            (self.inbox_received_label, 5, 0),
+            (self.received_filter, 5, 1),
+            (self.inbox_message_type_label, 6, 0),
+            (self.type_filter, 6, 1),
+            (self.inbox_status_label, 7, 0),
+            (self.status_filter, 7, 1),
+            (self.inbox_from_label, 8, 0),
+            (self.from_filter, 8, 1),
+            (self.inbox_to_label, 9, 0),
+            (self.to_filter, 9, 1),
+            (self.inbox_search_label, 10, 0),
+            (self.rcv_search, 10, 1),
+            (self.operating_group_filter, 11, 0, 1, 2),
+            (self.source_filter, 12, 0, 1, 2),
+            (self.exclude_types_btn, 13, 0, 1, 2),
+            (self.clear_filters_btn, 14, 0, 1, 2),
+            (self.inbox_check_label, 15, 0),
+            (self.message_check_combo, 15, 1),
+            (self.time_toggle_btn, 16, 0, 1, 2),
+            (self.inbox_bbs_heading, 17, 0, 1, 2),
+            (self.bbs_status_btn, 18, 0, 1, 2),
+            (self.bbs_manage_btn, 19, 0, 1, 2),
+            (self.message_check_status_label, 20, 0, 1, 2),
+        ]
         for item in placements:
             widget, row, col, *span = item
             row_span, col_span = span if span else (1, 1)
             layout.addWidget(widget, row, col, row_span, col_span)
-        layout.setColumnStretch(4, 1)
-        layout.setColumnStretch(13 if not compact else 4, 1)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.setRowStretch(21, 1)
+        try:
+            self.inbox_controls_panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))
+        except Exception:
+            pass
 
     def _setup_clock_timer(self) -> None:
         if self._clock_timer is not None:
@@ -5280,6 +5337,9 @@ class MessageViewerTab(QWidget):
     def show_inbox_from_navigation(self) -> None:
         self._set_messages_mode("Inbox", save=False)
 
+    def show_compose_from_navigation(self) -> None:
+        self._set_messages_mode("Compose", save=False)
+
     def _update_messages_mode_ui(self) -> None:
         if not hasattr(self, "messages_mode_stack"):
             return
@@ -5289,8 +5349,6 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setText("Compose Help" if compose_active else "Inbox Help")
             self.messages_help_btn.setStyleSheet(button_style("secondary", theme))
-        self.messages_inbox_mode_btn.setStyleSheet(button_style("primary" if not compose_active else "muted", theme))
-        self.messages_compose_mode_btn.setStyleSheet(button_style("primary" if compose_active else "muted", theme))
         for widget in (self.messages_bbs_help_btn, self.messages_manage_bbs_btn, self.messages_copy_summary_btn):
             widget.setVisible(False)
         for widget in (self.compose_refresh_forms_btn, self.compose_reset_btn, self.compose_open_source_btn):
@@ -7407,8 +7465,7 @@ class MessageViewerTab(QWidget):
         self._update_mark_all_read_style()
         self._apply_accessibility_width_guards()
         self._update_pending_table()
-        if hasattr(self, "messages_inbox_mode_btn"):
-            self._update_messages_mode_ui()
+        self._update_messages_mode_ui()
         if hasattr(self, "compose_setup_help_btn"):
             self.compose_setup_help_btn.setStyleSheet(button_style("secondary", theme))
         if hasattr(self, "compose_status_label"):
@@ -8977,45 +9034,15 @@ class MessageViewerTab(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._header_cells = []
-        select_hdr = self._make_header_spacer()
-        type_hdr = self._make_filter_cell(self.type_filter)
-        status_hdr = self._make_filter_cell(self.status_filter)
-        from_hdr = self._make_filter_cell(self.from_filter)
-        to_hdr = self._make_filter_cell(self.to_filter)
-        rcv_hdr = self._make_search_filter_cell(self.rcv_search)
-        title_hdr = self._make_header_spacer()
-        self.messages_header_layout.addWidget(select_hdr)
-        self.messages_header_layout.addWidget(type_hdr)
-        self.messages_header_layout.addWidget(status_hdr)
-        self.messages_header_layout.addWidget(from_hdr)
-        self.messages_header_layout.addWidget(to_hdr)
-        self.messages_header_layout.addWidget(rcv_hdr)
-        self.messages_header_layout.addWidget(title_hdr, 1)
-        self._header_cells.extend([select_hdr, type_hdr, status_hdr, from_hdr, to_hdr, rcv_hdr, title_hdr])
-        clear_wrap = QWidget()
-        clear_layout = QHBoxLayout(clear_wrap)
-        clear_layout.setContentsMargins(2, 2, 2, 2)
-        clear_layout.addStretch()
-        clear_layout.addWidget(self.exclude_types_btn)
-        clear_layout.addWidget(self.clear_filters_btn)
-        clear_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        clear_layout.setAlignment(self.clear_filters_btn, Qt.AlignRight | Qt.AlignVCenter)
-        self.messages_header_layout.addWidget(clear_wrap)
-        self._header_cells.append(clear_wrap)
+        self.messages_header.setVisible(False)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
-        self._sync_header_widths()
         header = self.messages_table.horizontalHeader()
         if not self._messages_header_sync_connected:
             header.sectionResized.connect(self._sync_header_widths)
             # Catch first-show geometry recalcs that do not emit sectionResized.
             header.geometriesChanged.connect(self._sync_header_widths)
             self._messages_header_sync_connected = True
-        self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
-        # Perform a few deferred sync passes so first open matches post-resize alignment.
-        QTimer.singleShot(0, self._sync_header_widths)
-        QTimer.singleShot(25, self._sync_header_widths)
-        QTimer.singleShot(100, self._sync_header_widths)
         QTimer.singleShot(0, self._sync_select_all_checkbox)
 
     def _set_initial_splitter_sizes(self) -> None:
@@ -9109,8 +9136,6 @@ class MessageViewerTab(QWidget):
             getattr(self, "messages_help_btn", None),
             getattr(self, "messages_bbs_help_btn", None),
             getattr(self, "messages_manage_bbs_btn", None),
-            getattr(self, "messages_inbox_mode_btn", None),
-            getattr(self, "messages_compose_mode_btn", None),
             getattr(self, "compose_refresh_forms_btn", None),
             getattr(self, "compose_reset_btn", None),
             getattr(self, "compose_open_source_btn", None),

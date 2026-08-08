@@ -26,6 +26,22 @@ RESUME_GUARD_FEEDBACK_SUPPRESS_SECONDS = 30.0
 SUSPEND_GUARD_FEEDBACK_SUPPRESS_SECONDS = 30.0
 
 
+def parse_frequency_mhz(value) -> Optional[float]:
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return None
+    parts = text.split(".")
+    try:
+        if len(parts) == 3 and all(part.strip().isdigit() for part in parts):
+            mhz = int(parts[0])
+            khz = int((parts[1] + "000")[:3])
+            hz = int((parts[2] + "000")[:3])
+            return mhz + ((khz * 1000) + hz) / 1_000_000.0
+        return float(text)
+    except Exception:
+        return None
+
+
 def load_operating_groups(settings) -> List[Dict]:
     """
     Load operating_groups from settings with normalized fields.
@@ -39,10 +55,11 @@ def load_operating_groups(settings) -> List[Dict]:
         if not isinstance(g, dict):
             continue
         g = dict(g)
-        try:
-            g["frequency"] = f"{float(g.get('frequency', 0)):.3f}"
-        except Exception:
+        freq = parse_frequency_mhz(g.get("frequency", 0))
+        if freq is None:
             g["frequency"] = ""
+        else:
+            g["frequency"] = f"{freq:.6f}"
         g["mode"] = normalize_operating_group_mode(g.get("mode", ""), g.get("band", ""))
         g["auto_tune"] = bool(g.get("auto_tune", False))
         cleaned.append(g)
@@ -71,11 +88,10 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
     """
     meta: Dict[str, Dict] = {}
     for g in og_list:
-        try:
-            fval = float(g.get("frequency", 0))
-        except Exception:
+        fval = parse_frequency_mhz(g.get("frequency", 0))
+        if fval is None:
             continue
-        key = f"{fval:.3f}"
+        key = f"{fval:.6f}"
         auto = bool(g.get("auto_tune", False))
         vfo = (g.get("vfo") or "").strip().upper()
         group = (g.get("group") or "").strip().upper()

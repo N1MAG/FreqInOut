@@ -10,12 +10,24 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 from PySide6.QtCore import Qt
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.schedule_projection import ProjectionCell
 from freqinout.core.schedule_projection import build_blended_schedule_projection
+from freqinout.core.schedule_source_sets import (
+    HF_DAILY_SOURCE_CATEGORY,
+    HF_DAILY_SOURCE_SETS_KEY,
+    HF_NET_SOURCE_CATEGORY,
+    HF_NET_SOURCE_SETS_KEY,
+    LIVE_SOURCE_SET_ID,
+    SELECTED_HF_DAILY_SOURCE_SET_KEY,
+    SELECTED_HF_NET_SOURCE_SET_KEY,
+    delete_source_schedule,
+    save_source_schedule,
+    save_source_set,
+)
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 
@@ -311,7 +323,7 @@ def test_freqplanner_save_plan_persists_blended_projection(monkeypatch, tmp_path
         ),
     )
     monkeypatch.setattr(tab, "_rf_guard_preflight_for_plan", lambda _payload: {"state": "ok", "messages": []})
-    monkeypatch.setattr(planner_mod.QInputDialog, "getText", lambda *args, **kwargs: ("Blended Watch", True))
+    monkeypatch.setattr(tab, "_prompt_for_name", lambda *args, **kwargs: ("Blended Watch", True))
     monkeypatch.setattr(planner_mod.QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Save)
 
     tab._on_save_plan_clicked()
@@ -371,7 +383,7 @@ def test_freqplanner_save_plan_requires_confirmation_when_rf_guard_preflight_ski
             "messages": ["RF Guard preflight skipped because no radio context is selected."],
         },
     )
-    monkeypatch.setattr(planner_mod.QInputDialog, "getText", lambda *args, **kwargs: ("No Radio Context", True))
+    monkeypatch.setattr(tab, "_prompt_for_name", lambda *args, **kwargs: ("No Radio Context", True))
     prompts = []
 
     def _capture_question(_parent, title, text, *args, **kwargs):
@@ -383,8 +395,8 @@ def test_freqplanner_save_plan_requires_confirmation_when_rf_guard_preflight_ski
     tab._on_save_plan_clicked()
     app.processEvents()
 
-    assert [title for title, _text in prompts] == ["Review Blended Schedule", "RF Guard Preflight Skipped"]
-    assert "assignment-specific RF Safety Guard checks" in prompts[1][1]
+    assert [title for title, _text in prompts] == ["RF Guard Preflight Skipped"]
+    assert "assignment-specific RF Safety Guard checks" in prompts[0][1]
     assert "RF Guard preflight skipped; assignment checks still required." in tab.frequency_plan_action_hint_label.text()
 
 
@@ -399,6 +411,7 @@ def test_freqplanner_save_sop_schedule_plan_includes_net_resources(monkeypatch, 
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "COUNTY"}, {"group": "AUX"}])
 
     monkeypatch.setattr(
         tab,
@@ -442,7 +455,7 @@ def test_freqplanner_save_sop_schedule_plan_includes_net_resources(monkeypatch, 
         ],
     )
     monkeypatch.setattr(tab, "_rf_guard_preflight_for_plan", lambda _payload: {"state": "ok", "messages": []})
-    monkeypatch.setattr(planner_mod.QInputDialog, "getText", lambda *args, **kwargs: ("County Operational Day", True))
+    monkeypatch.setattr(tab, "_prompt_for_name", lambda *args, **kwargs: ("County Operational Day", True))
     monkeypatch.setattr(planner_mod.QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Save)
 
     tab._on_save_sop_plan_clicked()
@@ -672,6 +685,7 @@ def test_freqplanner_sop_lanes_view_renders_operational_lanes(monkeypatch, tmp_p
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}, {"group": "COUNTY"}])
     monkeypatch.setattr(
         tab,
         "_load_schedules",
@@ -724,6 +738,502 @@ def test_freqplanner_sop_lanes_view_renders_operational_lanes(monkeypatch, tmp_p
     assert "Call NCS" in tab.cell_inspector_label.text()
 
 
+def test_freqplanner_sop_lanes_filters_to_configured_operating_groups(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}])
+    monkeypatch.setattr(
+        tab,
+        "_load_schedules",
+        lambda: (
+            [],
+            [
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "02:00",
+                    "end_utc": "03:00",
+                    "band": "80M",
+                    "frequency": "3.590",
+                    "group_name": "OPS",
+                    "net_name": "Ops Net",
+                },
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "02:00",
+                    "end_utc": "03:00",
+                    "band": "40M",
+                    "frequency": "7.110",
+                    "group_name": "UNCONFIGURED",
+                    "net_name": "Hidden Net",
+                },
+            ],
+            [],
+            [],
+        ),
+    )
+    monkeypatch.setattr(tab, "_load_net_resources_from_db", lambda: [])
+    tab.planner_view_combo.setCurrentIndex(tab.planner_view_combo.findData("operational"))
+    tab.operational_day_combo.setCurrentIndex(tab.operational_day_combo.findData("Monday"))
+    tab.rebuild_table()
+    app.processEvents()
+
+    headers = [tab.table.horizontalHeaderItem(col).text() for col in range(tab.table.columnCount())]
+
+    assert "OPS" in headers
+    assert "UNCONFIGURED" not in headers
+
+
+def test_freqplanner_named_source_sets_drive_blended_projection(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    monkeypatch.setattr(
+        tab,
+        "_load_live_schedules",
+        lambda: (
+            [
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "01:00",
+                    "end_utc": "02:00",
+                    "band": "20M",
+                    "frequency": "14.078",
+                    "group_name": "LIVE",
+                }
+            ],
+            [
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "02:00",
+                    "end_utc": "03:00",
+                    "band": "20M",
+                    "frequency": "14.110",
+                    "group_name": "LIVE",
+                    "net_name": "Live Net",
+                }
+            ],
+            [],
+            [],
+        ),
+    )
+    daily = save_source_set(
+        tab.settings,
+        HF_DAILY_SOURCE_SETS_KEY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Exercise Daily",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+    net = save_source_set(
+        tab.settings,
+        HF_NET_SOURCE_SETS_KEY,
+        SELECTED_HF_NET_SOURCE_SET_KEY,
+        "County Nets",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "02:00",
+                "end_utc": "03:00",
+                "band": "80M",
+                "frequency": "3.590",
+                "group_name": "OPS",
+                "net_name": "County Net",
+            }
+        ],
+    )
+    tab._refresh_source_set_controls()
+    tab.hf_daily_source_combo.setCurrentIndex(tab.hf_daily_source_combo.findData(daily["id"]))
+    tab.hf_net_source_combo.setCurrentIndex(tab.hf_net_source_combo.findData(net["id"]))
+
+    projection = tab._build_blended_projection()
+    app.processEvents()
+
+    refs = projection.schedule_refs()
+    assert [(row["source"], row["band"], row.get("net_name", "")) for row in refs] == [
+        ("HF", "40M", ""),
+        ("NET", "80M", "County Net"),
+    ]
+    assert tab._source_selection_summary() == "HF Daily: Exercise Daily; HF Nets: County Nets"
+
+
+def test_hf_daily_tab_saves_named_freqplanner_source(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+
+    import freqinout.gui.daily_schedule_tab as daily_mod
+
+    daily_mod = importlib.reload(daily_mod)
+    messages = []
+    monkeypatch.setattr(daily_mod.QMessageBox, "information", lambda *args: messages.append(args))
+    monkeypatch.setattr(daily_mod.QMessageBox, "warning", lambda *args: messages.append(args))
+    monkeypatch.setattr(daily_mod.QMessageBox, "critical", lambda *args: messages.append(args))
+    tab = daily_mod.DailyScheduleTab.__new__(daily_mod.DailyScheduleTab)
+    tab.settings = settings
+    tab._source_rows_for_freqplanner_snapshot = lambda: [
+        {
+            "day_utc": "Monday",
+            "start_utc": "01:00",
+            "end_utc": "02:00",
+            "band": "40M",
+            "frequency": "7.078",
+            "group_name": "OPS",
+        }
+    ]
+    tab._prompt_for_freqplanner_source_name = lambda *args, **kwargs: ("Button Daily", True)
+    refreshed = []
+    tab._refresh_freq_planner = lambda: refreshed.append(True)
+
+    daily_mod.DailyScheduleTab._on_save_freqplanner_source_clicked(tab)
+    app.processEvents()
+
+    saved_plans = [
+        row
+        for row in MultiRadioStore().list_frequency_plans()
+        if str(row.get("category") or "") == "hf_daily_schedule"
+    ]
+    assert saved_plans[0]["name"] == "Button Daily"
+    refs = json.loads(saved_plans[0]["schedule_refs_json"])
+    assert refs[0]["frequency"] == "7.078"
+    assert settings.get(SELECTED_HF_DAILY_SOURCE_SET_KEY) == f"plan:{saved_plans[0]['id']}"
+    assert refreshed == [True]
+    assert any("Select it in FreqPlanner Overview" in str(args[-1]) for args in messages)
+
+
+def test_hf_net_tab_saves_named_freqplanner_source(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    net_mod = importlib.reload(net_mod)
+    messages = []
+    monkeypatch.setattr(net_mod.QMessageBox, "information", lambda *args: messages.append(args))
+    monkeypatch.setattr(net_mod.QMessageBox, "warning", lambda *args: messages.append(args))
+    monkeypatch.setattr(net_mod.QMessageBox, "critical", lambda *args: messages.append(args))
+    tab = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    tab.settings = settings
+    tab._source_rows_for_freqplanner_snapshot = lambda: [
+        {
+            "day_utc": "Monday",
+            "start_utc": "02:00",
+            "end_utc": "03:00",
+            "band": "80M",
+            "frequency": "3.590",
+            "group_name": "OPS",
+            "net_name": "Ops Net",
+        }
+    ]
+    tab._prompt_for_freqplanner_source_name = lambda *args, **kwargs: ("Button Nets", True)
+    refreshed = []
+    tab._refresh_freq_planner = lambda: refreshed.append(True)
+
+    net_mod.NetScheduleTab._on_save_freqplanner_source_clicked(tab)
+    app.processEvents()
+
+    saved_plans = [
+        row
+        for row in MultiRadioStore().list_frequency_plans()
+        if str(row.get("category") or "") == "hf_net_schedule"
+    ]
+    assert saved_plans[0]["name"] == "Button Nets"
+    refs = json.loads(saved_plans[0]["schedule_refs_json"])
+    assert refs[0]["net_name"] == "Ops Net"
+    assert settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) == f"plan:{saved_plans[0]['id']}"
+    assert refreshed == [True]
+    assert any("Select it in FreqPlanner Overview" in str(args[-1]) for args in messages)
+
+
+def test_freqplanner_db_named_source_schedules_drive_projection(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    daily = save_source_schedule(
+        settings,
+        "hf_daily_schedule",
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "DB Daily",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+    net = save_source_schedule(
+        settings,
+        "hf_net_schedule",
+        SELECTED_HF_NET_SOURCE_SET_KEY,
+        "DB Nets",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "02:00",
+                "end_utc": "03:00",
+                "band": "80M",
+                "frequency": "3.590",
+                "group_name": "OPS",
+                "net_name": "Ops Net",
+            }
+        ],
+    )
+    tab = planner_mod.FreqPlannerTab()
+    monkeypatch.setattr(tab, "_load_live_schedules", lambda: ([], [], [], []))
+    tab._refresh_source_set_controls()
+
+    assert tab.hf_daily_source_combo.findData(daily["id"]) >= 0
+    assert tab.hf_net_source_combo.findData(net["id"]) >= 0
+    projection = tab._build_blended_projection()
+    app.processEvents()
+
+    assert [(row["source"], row["band"], row.get("net_name", "")) for row in projection.schedule_refs()] == [
+        ("HF", "40M", ""),
+        ("NET", "80M", "Ops Net"),
+    ]
+
+
+def test_freqplanner_edit_bridge_loads_selected_daily_source_schedule(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    saved = save_source_schedule(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "DB Daily",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+    tab = planner_mod.FreqPlannerTab()
+    loaded_rows = []
+    refreshes = []
+
+    class TargetDailyTab:
+        def __init__(self) -> None:
+            self.schedule_source_combo = QComboBox()
+
+        def _refresh_freqplanner_source_combo(self) -> None:
+            refreshes.append(True)
+            self.schedule_source_combo.clear()
+            self.schedule_source_combo.addItem("Live Current", LIVE_SOURCE_SET_ID)
+            self.schedule_source_combo.addItem("DB Daily", saved["id"])
+
+        def _confirm_discard_unsaved_source_load(self) -> bool:
+            return True
+
+        def _load_source_rows_into_table(self, rows) -> None:
+            loaded_rows.extend(rows)
+
+    target = TargetDailyTab()
+    result = tab._load_selected_source_schedule_in_tab(
+        target,
+        selected_key=SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        sets_key=HF_DAILY_SOURCE_SETS_KEY,
+        category=HF_DAILY_SOURCE_CATEGORY,
+        live_loader_name="_load_schedule",
+    )
+    app.processEvents()
+
+    assert result is True
+    assert refreshes == [True]
+    assert target.schedule_source_combo.currentData() == saved["id"]
+    assert loaded_rows[0]["frequency"] == "7.078"
+
+
+def test_freqplanner_edit_bridge_cancels_before_focusing_stale_source(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    saved = save_source_schedule(
+        settings,
+        HF_NET_SOURCE_CATEGORY,
+        SELECTED_HF_NET_SOURCE_SET_KEY,
+        "DB Nets",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "02:00",
+                "end_utc": "03:00",
+                "band": "80M",
+                "frequency": "3.590",
+                "group_name": "OPS",
+                "net_name": "Ops Net",
+            }
+        ],
+    )
+    tab = planner_mod.FreqPlannerTab()
+    loaded_rows = []
+
+    class TargetNetTab:
+        def __init__(self) -> None:
+            self.schedule_source_combo = QComboBox()
+
+        def _refresh_freqplanner_source_combo(self) -> None:
+            self.schedule_source_combo.clear()
+            self.schedule_source_combo.addItem("Live Current", LIVE_SOURCE_SET_ID)
+            self.schedule_source_combo.addItem("DB Nets", saved["id"])
+
+        def _confirm_discard_unsaved_source_load(self) -> bool:
+            return False
+
+        def _load_source_rows_into_table(self, rows) -> None:
+            loaded_rows.extend(rows)
+
+    target = TargetNetTab()
+    result = tab._load_selected_source_schedule_in_tab(
+        target,
+        selected_key=SELECTED_HF_NET_SOURCE_SET_KEY,
+        sets_key=HF_NET_SOURCE_SETS_KEY,
+        category=HF_NET_SOURCE_CATEGORY,
+        live_loader_name="_load",
+    )
+    app.processEvents()
+
+    assert result is None
+    assert target.schedule_source_combo.currentData() == saved["id"]
+    assert loaded_rows == []
+
+
+def test_named_source_set_ids_remain_unique_for_duplicate_names(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+
+    first = save_source_set(
+        settings,
+        HF_DAILY_SOURCE_SETS_KEY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Exercise Daily",
+        [{"day_utc": "Monday", "start_utc": "01:00", "end_utc": "02:00", "band": "40M"}],
+    )
+    second = save_source_set(
+        settings,
+        HF_DAILY_SOURCE_SETS_KEY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Exercise Daily",
+        [{"day_utc": "Monday", "start_utc": "02:00", "end_utc": "03:00", "band": "80M"}],
+    )
+
+    saved_sets = settings.get(HF_DAILY_SOURCE_SETS_KEY)
+    assert first["id"] != second["id"]
+    assert len({row["id"] for row in saved_sets}) == 2
+    assert settings.get(SELECTED_HF_DAILY_SOURCE_SET_KEY) == second["id"]
+
+
+def test_source_schedule_delete_refuses_non_source_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    normal_plan = MultiRadioStore().save_frequency_plan(
+        {
+            "name": "Assignable Plan",
+            "category": "normal",
+            "schedule_refs": [{"day_utc": "Monday", "start_utc": "01:00", "end_utc": "02:00"}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="source schedule"):
+        delete_source_schedule(
+            settings,
+            HF_DAILY_SOURCE_SETS_KEY,
+            SELECTED_HF_DAILY_SOURCE_SET_KEY,
+            f"plan:{normal_plan['id']}",
+        )
+
+    assert MultiRadioStore().get_frequency_plan(int(normal_plan["id"])) is not None
+
+
+def test_daily_and_net_named_source_loads_confirm_before_discarding_dirty_edits(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+
+    import freqinout.gui.daily_schedule_tab as daily_mod
+    import freqinout.gui.net_schedule_tab as net_mod
+
+    daily_mod = importlib.reload(daily_mod)
+    net_mod = importlib.reload(net_mod)
+
+    daily_tab = daily_mod.DailyScheduleTab.__new__(daily_mod.DailyScheduleTab)
+    daily_tab._dirty = True
+    net_tab = net_mod.NetScheduleTab.__new__(net_mod.NetScheduleTab)
+    net_tab._dirty = True
+    prompts = []
+
+    def _cancel_question(_parent, title, text, *args, **kwargs):
+        prompts.append((str(title), str(text)))
+        return QMessageBox.Cancel
+
+    monkeypatch.setattr(daily_mod.QMessageBox, "question", _cancel_question)
+    monkeypatch.setattr(net_mod.QMessageBox, "question", _cancel_question)
+
+    assert daily_mod.DailyScheduleTab._confirm_discard_unsaved_source_load(daily_tab) is False
+    assert net_mod.NetScheduleTab._confirm_discard_unsaved_source_load(net_tab) is False
+    assert len(prompts) == 2
+    assert all("Unsaved edits" in text for _title, text in prompts)
+
+
 def test_freqplanner_sop_lanes_view_renders_selected_saved_plan(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -735,6 +1245,7 @@ def test_freqplanner_sop_lanes_view_renders_selected_saved_plan(monkeypatch, tmp
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "COUNTY"}])
     saved = tab.plan_context_service.store.save_frequency_plan(
         {
             "name": "Saved SOP Day",
@@ -784,6 +1295,7 @@ def test_freqplanner_updates_selected_sop_plan_entry_locally(monkeypatch, tmp_pa
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "COUNTY"}])
     saved = tab.plan_context_service.store.save_frequency_plan(
         {
             "name": "Editable SOP Day",
@@ -846,6 +1358,7 @@ def test_freqplanner_group_plan_local_edit_updates_lane_identity(monkeypatch, tm
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}, {"group": "COUNTY"}])
     saved = tab.plan_context_service.store.save_frequency_plan(
         {
             "name": "Editable Net Day",
@@ -893,6 +1406,65 @@ def test_freqplanner_group_plan_local_edit_updates_lane_identity(monkeypatch, tm
     assert ref["lane_key"] == "group:COUNTY"
     assert ref["lane_label"] == "COUNTY"
     assert payload["group_refs"] == ["COUNTY"]
+
+
+def test_freqplanner_plan_local_edit_rejects_unconfigured_group(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}])
+    saved = tab.plan_context_service.store.save_frequency_plan(
+        {
+            "name": "Editable Net Day",
+            "category": "sop_schedule",
+            "schedule_refs": [
+                {
+                    "source": "NET",
+                    "lane_key": "group:OPS",
+                    "lane_label": "OPS",
+                    "day_utc": "Monday",
+                    "start_utc": "02:00",
+                    "end_utc": "03:00",
+                    "band": "40M",
+                    "frequency": "7.110",
+                    "group_name": "OPS",
+                    "net_name": "Ops Net",
+                }
+            ],
+        }
+    )
+    tab._refresh_plan_workspace_header()
+    tab.frequency_plan_combo.setCurrentIndex(tab.frequency_plan_combo.findData(int(saved["id"])))
+    projection = tab._build_selected_sop_plan_projection(dt.date(2026, 8, 2))
+    entry = projection.cell_for("group:OPS", "Monday", 2).entries[0]
+
+    payload = tab._updated_sop_plan_payload_for_entry(
+        saved,
+        entry,
+        {
+            "day_utc": "Monday",
+            "start_utc": "02:00",
+            "end_utc": "03:00",
+            "band": "40M",
+            "frequency": "7.110",
+            "mode": "",
+            "group_name": "UNCONFIGURED",
+            "net_name": "County Net",
+            "action_label": "",
+            "lane_label": "UNCONFIGURED",
+        },
+    )
+    app.processEvents()
+
+    assert payload is None
+    assert "configured Operating Group" in tab.frequency_plan_action_hint_label.text()
 
 
 def test_freqplanner_plan_local_resource_edit_can_update_master_net_resource(monkeypatch, tmp_path) -> None:
@@ -954,6 +1526,7 @@ def test_freqplanner_plan_local_resource_edit_can_update_master_net_resource(mon
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}, {"group": "COUNTY"}])
     ref = {
         "source": "NET_RESOURCE",
         "resource_id": resource_id,
@@ -1020,6 +1593,7 @@ def test_freqplanner_resource_update_workflow_confirmation_matches_update_both(m
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}])
     saved = tab.plan_context_service.store.save_frequency_plan(
         {
             "name": "Resource Workflow SOP Day",
@@ -1096,6 +1670,7 @@ def test_freqplanner_resource_update_preflight_blocks_plan_save_when_resource_mi
 
     planner_mod = importlib.reload(planner_mod)
     tab = planner_mod.FreqPlannerTab()
+    tab.settings.set("operating_groups", [{"group": "OPS"}])
     saved = tab.plan_context_service.store.save_frequency_plan(
         {
             "name": "Missing Resource SOP Day",

@@ -22,6 +22,12 @@ Sources:
 - `NET_RESOURCE`: known net resources not necessarily folded into HF Nets.
 - `SOP`: SOP schedule layer rows.
 
+HF Daily owns named Daily schedule snapshots. HF Nets owns named Net schedule
+snapshots. FreqPlanner Overview composes from the current live HF Daily / HF Net
+tables or from those named source snapshots. This lets an operator intentionally
+select combinations such as an exercise daily schedule plus county net schedule
+before review, RF Guard preflight, and save.
+
 Lane keys:
 
 - `radio:<id>` when a row is explicitly assigned to a radio.
@@ -31,6 +37,43 @@ Lane keys:
 
 Each lane has hourly cells for the projected day. Cells retain every matching
 entry. More than one entry in a cell is a contention signal, not a hidden overwrite.
+
+SOP Lanes are scoped to Operating Groups configured in Settings. Rows whose group
+is not in the configured Operating Groups list are excluded from the SOP Lanes
+view and SOP Schedule Plan projection, so untrusted or incidental group strings
+do not appear as operational lanes.
+Plan-local edits must keep the entry on a configured Operating Group; unconfigured
+group names are rejected instead of saved and then hidden.
+
+### Known Operating Groups
+
+Settings > HF Operating Groups can seed active Operating Groups from known HF Net
+Resources. The known catalog is derived from the `net_resources` database table
+when present and falls back to bundled SitRepNet resource JSON. The catalog groups
+resource rows by `group_name`, then exposes one selectable group with its associated
+mode/band/frequency configurations.
+
+The bundled catalog also includes built-in digital-mode standards so operators can
+enable common baseline working frequencies without building a net resource first:
+JS8Call Standard, FT8 Standard, WSPR Standard, and FLDigi WEFAX. The FLDigi
+WEFAX preset uses NOAA/NWS HF marine radiofax stations and is selected from the
+operator's Grid 6 when available, then state, then timezone. It stores USB radio
+dial frequencies 1.9 kHz below the published assigned frequencies and starts
+FLDigi in WEFAX576. The auto station choice can be overridden from the Settings
+known-group controls when propagation or mission context favors a different
+coastal broadcast site. AHRN and RATPACK are removed from bundled SitRepNet
+resources because they are no longer active; the catalog loader also filters
+those group names from older local resource databases.
+
+Enabling a known group creates or updates active Operating Group configurations
+without a modal confirmation. The inline preview names the group and the first
+frequencies that will be enabled, with a View Frequencies action for the full list.
+Once enabled, the group is edited through the normal active Operating Groups inline
+editor or removed with Disable Group. Existing active groups are preserved; matching
+group/mode/band configurations are refreshed from the resource selection.
+
+This keeps SOP lanes and schedule assignment anchored to explicitly enabled
+Operating Groups while avoiding manual re-entry of common SitRepNet groups.
 
 ### SOP Schedule Plan
 
@@ -51,6 +94,12 @@ Expected payload fields:
 - `group_refs`: operating groups represented by the plan
 - `notes`: JSON summary for lane counts, source counts, and generated timestamp
 
+Saved Frequency Plan and SOP Schedule Plan review prompts include the selected
+HF Daily and HF Net source names. The plan name prompt uses a dedicated editable
+dialog so naming is explicit and reliable. The saved Frequency Plan or SOP
+Schedule Plan is its own blended object and does not overwrite either named
+source schedule.
+
 ## RF Guard
 
 Saving an SOP Schedule Plan may happen before radio assignment, but assignment must
@@ -70,6 +119,27 @@ the schedule.
 Recurring resources and SOP layers must honor `Weekly`, `Daily`, `Periodic`, and
 `Bi-Weekly` rules for the projected week. Bi-weekly rows use
 `biweekly_offset_weeks` against the ISO week number.
+
+## Station Command Bar And Manual QSY
+
+Schedule assignment and RF Guard review should treat top-bar manual QSY as an
+operator override of the configured schedule. `QSY Now` is not a transient tune
+while schedule automation continues. It commands the selected manual target and
+places the scheduler into manual QSY state. While this state is active, the
+station is intentionally off the configured schedule until `Resume Schedule` is
+used or the scheduler explicitly transitions to a new active schedule entry.
+
+The command bar presents the operator-facing group and band as the primary
+target, with exact frequency/mode in the tooltip. This is intentional: users
+assign and operate by group/band in the center-of-gravity workflow, while RF
+Guard and scheduler internals continue to use exact frequency metadata. If the
+radio cannot yet report the newly commanded frequency, the UI should preserve
+the commanded target and disclose any mismatch in the tooltip rather than
+snapping back to the previous scheduled target.
+
+`Resume Schedule` is the visible recovery action from manual QSY or timed
+suspension. It must be enabled and highlighted when the station is off schedule
+because of manual QSY.
 
 ## UI Direction
 
@@ -105,3 +175,5 @@ RF Guard, and mark the resource as manually updated from an SOP Schedule Plan.
 4. Read-only lane grid in SOP Scheduler/FreqPlanner style.
 5. Cell inspector and plan-local edits.
 6. Optional master-resource update workflow.
+7. Named HF Daily and HF Net source schedule management.
+8. Known Operating Groups seeded from SitRepNet/Net Resources.

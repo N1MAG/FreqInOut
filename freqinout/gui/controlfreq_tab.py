@@ -514,8 +514,8 @@ class ControlFreqTab(QWidget):
         self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.freq_ctrl_box.setMinimumWidth(380)
         self.freq_ctrl_box.setMaximumWidth(540)
+        self.freq_ctrl_box.setVisible(False)
         self.inbox_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.top_overview_row.addWidget(self.freq_ctrl_box, 0)
         self.top_overview_row.addWidget(self.inbox_box, 1)
         root.addLayout(self.top_overview_row)
         self._lock_frequency_control_height()
@@ -679,16 +679,19 @@ class ControlFreqTab(QWidget):
             self.top_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         except Exception:
             pass
+        control_visible = bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)())
         if compact:
-            self.freq_ctrl_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.freq_ctrl_box.setMinimumWidth(0)
-            self.freq_ctrl_box.setMaximumWidth(16777215)
+            if control_visible:
+                self.freq_ctrl_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                self.freq_ctrl_box.setMinimumWidth(0)
+                self.freq_ctrl_box.setMaximumWidth(16777215)
             self.inbox_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self.top_splitter.setSizes([1, 1])
         else:
-            self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-            self.freq_ctrl_box.setMinimumWidth(380)
-            self.freq_ctrl_box.setMaximumWidth(540)
+            if control_visible:
+                self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+                self.freq_ctrl_box.setMinimumWidth(380)
+                self.freq_ctrl_box.setMaximumWidth(540)
         self._rebalance_main_card_layout()
         if not compact:
             self._apply_saved_splitter_sizes()
@@ -696,6 +699,10 @@ class ControlFreqTab(QWidget):
 
     def _lock_frequency_control_height(self) -> None:
         try:
+            if not bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)()):
+                self.inbox_box.setMinimumHeight(0)
+                self.inbox_box.setMaximumHeight(16777215)
+                return
             # Recompute from natural content height, then lock to keep stable size across modes.
             self.freq_ctrl_box.setMinimumHeight(0)
             self.freq_ctrl_box.setMaximumHeight(16777215)
@@ -709,6 +716,17 @@ class ControlFreqTab(QWidget):
 
     def _sync_top_panel_heights(self) -> None:
         try:
+            if not bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)()):
+                self.inbox_box.setMinimumHeight(0)
+                self.inbox_box.setMaximumHeight(16777215)
+                if getattr(self, "_responsive_layout_mode", "wide") == "compact":
+                    for widget, height in (
+                        (self.intersection_box, 130),
+                        (self.schedule_box, 140),
+                    ):
+                        widget.setMinimumHeight(height)
+                        widget.setMaximumHeight(16777215)
+                return
             if getattr(self, "_responsive_layout_mode", "wide") == "compact":
                 freq_h = max(170, int(self.freq_ctrl_box.sizeHint().height()))
                 inbox_h = max(
@@ -1589,6 +1607,9 @@ class ControlFreqTab(QWidget):
         if report.digest != self._readiness_banner_digest:
             self._readiness_banner_digest = report.digest
             self._readiness_banner_dismissed = False
+        if int(getattr(report, "required_count", 0) or 0) <= 0:
+            self.readiness_review_widget.setVisible(False)
+            return
         if not should_show_startup_review(
             report,
             dismissed_digest=self._readiness_dismissed_digest,

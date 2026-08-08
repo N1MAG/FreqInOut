@@ -622,46 +622,6 @@
       "comment": "PrepperNet",
       "fldigi_mode": "Cont-4/250",
       "fldigi_offset": "900"
-    },
-    {
-      "day_utc": "Sunday",
-      "recurrence": "Weekly",
-      "biweekly_offset_weeks": 0,
-      "month_weeks": "",
-      "group_name": "AHRN",
-      "band": "20M",
-      "mode": "Digi",
-      "frequency": "14.115",
-      "start_utc": "22:30",
-      "end_utc": "23:00",
-      "early_checkin": 0,
-      "auto_tune": null,
-      "primary_js8call_group": "",
-      "net_name": "AHRN",
-      "coverage": "Eastern",
-      "comment": "AHRN (AmCon Ham Radio Net)",
-      "fldigi_mode": "",
-      "fldigi_offset": ""
-    },
-    {
-      "day_utc": "Sunday",
-      "recurrence": "Weekly",
-      "biweekly_offset_weeks": 0,
-      "month_weeks": "",
-      "group_name": "AHRN",
-      "band": "40M",
-      "mode": "Digi",
-      "frequency": "7.115",
-      "start_utc": "23:00",
-      "end_utc": "00:00",
-      "early_checkin": 0,
-      "auto_tune": null,
-      "primary_js8call_group": "",
-      "net_name": "AHRN",
-      "coverage": "Eastern",
-      "comment": "AHRN (AmCon Ham Radio Net)",
-      "fldigi_mode": "Cont-4/250",
-      "fldigi_offset": "800"
     }
   ]
 }

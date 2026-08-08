@@ -33,11 +33,24 @@ from PySide6.QtWidgets import (
     QMenu,
     QInputDialog,
     QScrollArea,
+    QDialog,
+    QDialogButtonBox,
 )
 from PySide6.QtGui import QAction, QColor
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.schedule_source_sets import (
+    LIVE_SOURCE_SET_ID,
+    HF_DAILY_SOURCE_CATEGORY,
+    HF_DAILY_SOURCE_SETS_KEY,
+    SELECTED_HF_DAILY_SOURCE_SET_KEY,
+    delete_source_schedule,
+    save_source_schedule,
+    selected_source_set_id,
+    source_set_row_by_id_for_category,
+    source_sets_for_category,
+)
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
@@ -584,7 +597,17 @@ class DailyScheduleTab(QWidget):
         self.view_edit_btn.setToolTip("Show or hide the full editable HF schedule fields.")
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.resources_resolve_btn = QPushButton("Resolve Conflicts")
+        self.schedule_source_label = QLabel("Daily Schedule:")
+        self.schedule_source_combo = QComboBox()
+        self.schedule_source_combo.setObjectName("dailyScheduleSourceCombo")
+        self.schedule_source_combo.setToolTip("Select Live Current or a named HF Daily schedule saved to the database.")
+        self.load_source_btn = QPushButton("Load")
+        self.load_source_btn.setToolTip("Load the selected named HF Daily schedule into the table for review and editing.")
         self.save_btn = QPushButton("Save HF Schedule")
+        self.save_source_btn = QPushButton("Save Daily Source")
+        self.save_source_btn.setToolTip("Save the visible HF Daily rows as the selected named schedule, or create a named source schedule.")
+        self.delete_source_btn = QPushButton("Delete Source")
+        self.delete_source_btn.setToolTip("Delete the selected named HF Daily schedule.")
         self.import_export_btn = QToolButton()
         self.import_export_btn.setText("Import/Export")
         self.import_export_btn.setPopupMode(QToolButton.InstantPopup)
@@ -601,6 +624,9 @@ class DailyScheduleTab(QWidget):
         resources_header = QHBoxLayout()
         resources_header.addWidget(QLabel("<h3>Schedule Resources</h3>"))
         resources_header.addStretch()
+        self.resources_count_label = QLabel("")
+        self.resources_count_label.setObjectName("dailyScheduleResourcesCount")
+        resources_header.addWidget(self.resources_count_label)
         layout.addLayout(resources_header)
         self.resources_empty_label = QLabel(
             "No HF schedule resources configured. Add an active row, import resources, or create SOP frequency layers to populate this section."
@@ -659,6 +685,7 @@ class DailyScheduleTab(QWidget):
         self.resources_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.resources_table.verticalHeader().setVisible(False)
         self.resources_table.setSortingEnabled(True)
+        self.resources_table.setMinimumHeight(220)
         resources_hv = self.resources_table.horizontalHeader()
         resources_hv.setSectionResizeMode(self.RES_COL_SELECT, QHeaderView.ResizeToContents)
         resources_hv.setSectionResizeMode(self.RES_COL_SET, QHeaderView.ResizeToContents)
@@ -679,7 +706,11 @@ class DailyScheduleTab(QWidget):
         self.del_row_btn.clicked.connect(self._delete_selected_rows)
         self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
         self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
+        self.schedule_source_combo.currentIndexChanged.connect(self._on_freqplanner_source_selected)
+        self.load_source_btn.clicked.connect(self._on_load_freqplanner_source_clicked)
         self.save_btn.clicked.connect(self._save_schedule)
+        self.save_source_btn.clicked.connect(self._on_save_freqplanner_source_clicked)
+        self.delete_source_btn.clicked.connect(self._on_delete_freqplanner_source_clicked)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
         self.table.itemChanged.connect(self._on_table_item_changed)
         self.show_sop_overlay_chk.toggled.connect(self._on_toggle_sop_overlay_visibility)
@@ -707,6 +738,7 @@ class DailyScheduleTab(QWidget):
         self._apply_compact_schedule_view(False)
         self._update_delete_button_state()
         self._update_resource_action_state()
+        self._refresh_freqplanner_source_combo()
         self._update_daily_responsive_layout()
 
     def resizeEvent(self, event) -> None:
@@ -750,13 +782,18 @@ class DailyScheduleTab(QWidget):
         if compact:
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
-                (self.add_row_btn, 0, 1),
-                (self.del_row_btn, 0, 2),
-                (self.view_edit_btn, 0, 3),
-                (self.move_to_resources_btn, 1, 0, 1, 2),
-                (self.resources_resolve_btn, 1, 2),
-                (self.import_export_btn, 1, 3),
-                (self.save_btn, 1, 4),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 2),
+                (self.load_source_btn, 0, 4),
+                (self.delete_source_btn, 0, 5),
+                (self.add_row_btn, 1, 0),
+                (self.del_row_btn, 1, 1),
+                (self.view_edit_btn, 1, 2),
+                (self.move_to_resources_btn, 1, 3, 1, 2),
+                (self.resources_resolve_btn, 1, 5),
+                (self.import_export_btn, 2, 0),
+                (self.save_btn, 2, 1),
+                (self.save_source_btn, 2, 2),
             ]
             filter_placements = [
                 (self.resources_set_label, 0, 0),
@@ -770,13 +807,18 @@ class DailyScheduleTab(QWidget):
         else:
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
-                (self.add_row_btn, 0, 1),
-                (self.del_row_btn, 0, 2),
-                (self.view_edit_btn, 0, 3),
-                (self.move_to_resources_btn, 0, 4),
-                (self.resources_resolve_btn, 0, 5),
-                (self.import_export_btn, 0, 6),
-                (self.save_btn, 0, 7),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 3),
+                (self.load_source_btn, 0, 5),
+                (self.delete_source_btn, 0, 6),
+                (self.add_row_btn, 1, 0),
+                (self.del_row_btn, 1, 1),
+                (self.view_edit_btn, 1, 2),
+                (self.move_to_resources_btn, 1, 3),
+                (self.resources_resolve_btn, 1, 4),
+                (self.import_export_btn, 1, 5),
+                (self.save_btn, 1, 6),
+                (self.save_source_btn, 1, 7),
             ]
             filter_placements = [
                 (self.resources_set_label, 0, 0),
@@ -790,8 +832,270 @@ class DailyScheduleTab(QWidget):
 
         self._place_grid_widgets(self._daily_action_layout, action_placements)
         self._place_grid_widgets(self._daily_resource_filter_layout, filter_placements)
-        self._daily_action_layout.setColumnStretch(8 if not compact else 5, 1)
+        self._daily_action_layout.setColumnStretch(8 if not compact else 6, 1)
         self._daily_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
+        self._apply_schedule_table_height_hints()
+
+    def _apply_schedule_table_height_hints(self) -> None:
+        if not hasattr(self, "table") or not hasattr(self, "resources_table"):
+            return
+        try:
+            row_count = max(1, int(self.table.rowCount()))
+            visible_rows = max(4, min(row_count, 10))
+            row_h = int(self.table.verticalHeader().defaultSectionSize() or 32)
+            header_h = int(self.table.horizontalHeader().height() or 32)
+            height = header_h + (visible_rows * row_h) + 22
+            self.table.setMaximumHeight(max(190, min(height, 430)))
+            self.resources_table.setMinimumHeight(240 if self.resources_table.isVisible() else 160)
+        except Exception:
+            pass
+
+    def _refresh_freqplanner_source_combo(self) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        selected = selected_source_set_id(self.settings, SELECTED_HF_DAILY_SOURCE_SET_KEY)
+        self.schedule_source_combo.blockSignals(True)
+        self.schedule_source_combo.clear()
+        self.schedule_source_combo.addItem("Live Current", LIVE_SOURCE_SET_ID)
+        for row in source_sets_for_category(self.settings, HF_DAILY_SOURCE_SETS_KEY, HF_DAILY_SOURCE_CATEGORY):
+            set_id = str(row.get("id") or "").strip()
+            if set_id:
+                self.schedule_source_combo.addItem(str(row.get("name") or set_id), set_id)
+        idx = self.schedule_source_combo.findData(selected)
+        self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.schedule_source_combo.blockSignals(False)
+        self.delete_source_btn.setEnabled(str(self.schedule_source_combo.currentData() or "") != LIVE_SOURCE_SET_ID)
+
+    def _on_freqplanner_source_selected(self, *_args: Any) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        set_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        self.settings.set(SELECTED_HF_DAILY_SOURCE_SET_KEY, set_id)
+        self.delete_source_btn.setEnabled(set_id != LIVE_SOURCE_SET_ID)
+        try:
+            self.settings.save()
+        except Exception:
+            pass
+        self._refresh_freq_planner()
+
+    def _selected_freqplanner_source_row(self) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "schedule_source_combo"):
+            return None
+        set_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        return source_set_row_by_id_for_category(
+            self.settings,
+            HF_DAILY_SOURCE_SETS_KEY,
+            HF_DAILY_SOURCE_CATEGORY,
+            set_id,
+        )
+
+    def _load_source_rows_into_table(self, rows: List[Dict[str, Any]]) -> None:
+        rows = [normalize_schedule_target_fields(dict(row)) for row in rows if isinstance(row, dict)]
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            self._raw_schedule = rows
+            for entry in rows:
+                self._append_entry_row(self._entry_for_display(entry))
+            if self.table.rowCount() == 0:
+                self._add_row()
+        finally:
+            self._suspend_dirty_tracking = False
+        self._set_headers()
+        self._apply_compact_schedule_view()
+        self._update_clock_labels()
+        self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
+        self.table.clearSelection()
+        self._set_dirty(False)
+        self._invalidate_active_schedule_views()
+        self._highlight_time_conflicts()
+        self._update_resource_action_state()
+        self._apply_schedule_table_height_hints()
+
+    def _confirm_discard_unsaved_source_load(self) -> bool:
+        if not bool(getattr(self, "_dirty", False)):
+            return True
+        response = QMessageBox.question(
+            self,
+            "Load Schedule",
+            "Load the selected HF Daily schedule? Unsaved edits in the current table will be discarded.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Yes
+
+    def _on_load_freqplanner_source_clicked(self) -> None:
+        if not self._confirm_discard_unsaved_source_load():
+            return
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            self._load_schedule()
+            return
+        self._load_source_rows_into_table([dict(item) for item in row.get("rows", []) if isinstance(item, dict)])
+
+    def _prompt_for_freqplanner_source_name(self, title: str, label: str, default_name: str) -> Tuple[str, bool]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel(label)
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        name_edit = QLineEdit(str(default_name or "").strip())
+        name_edit.setObjectName("dailyScheduleFreqPlannerSourceNameEdit")
+        name_edit.selectAll()
+        layout.addWidget(name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_edit.setFocus(Qt.OtherFocusReason)
+        if dialog.exec() != QDialog.Accepted:
+            return "", False
+        return name_edit.text().strip(), True
+
+    def _source_rows_for_freqplanner_snapshot(self) -> List[Dict[str, Any]]:
+        fw = QApplication.focusWidget()
+        if fw is not None and self.table.isAncestorOf(fw):
+            fw.clearFocus()
+            QApplication.processEvents()
+
+        hf_rows: List[Dict[str, Any]] = []
+        format_errors: List[str] = []
+        for r in range(self.table.rowCount()):
+            if self._is_sop_overlay_row(r):
+                continue
+            day = self._get_combo_value(r, self.COL_DAY, default="ALL")
+            group_name = self._get_combo_value(r, self.COL_GROUP, default="")
+            mode = self._get_combo_value(r, self.COL_MODE, default="Digi")
+            band = self._get_combo_value(r, self.COL_BAND, default="")
+            freq_text = self._get_text_value(r, self.COL_FREQ)
+            start_val = self._get_text_value(r, self.COL_START)
+            end_val = self._get_text_value(r, self.COL_END)
+            auto_tune = self._get_checkbox_value(r, self.COL_AUTOTUNE)
+            target_scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(r)
+
+            if not group_name or not band or not freq_text or not start_val or not end_val:
+                continue
+            if target_scope == TARGET_SCOPE_DEVICE_PROFILE and target_device_profile_id is None:
+                format_errors.append(f"Row {r+1}: Device-targeted rows require a device profile.")
+                continue
+            if target_scope == TARGET_SCOPE_OPERATING_PROFILE and target_operating_profile_id is None:
+                format_errors.append(f"Row {r+1}: Frequency Plan-targeted rows require a Frequency Plan.")
+                continue
+            if not self._validate_frequency(band, mode, freq_text):
+                return []
+            freq_text = self._format_freq(freq_text)
+            if not self._validate_time(start_val) or not self._validate_time(end_val):
+                format_errors.append(f"Row {r+1}: Start/End must be HH:MM (24h)")
+                continue
+            if self._show_local:
+                day_utc, start_utc = self._convert_day_time(day, start_val, to_local=False)
+                _, end_utc = self._convert_day_time(day, end_val, to_local=False)
+            else:
+                day_utc = day
+                start_utc = start_val
+                end_utc = end_val
+            hf_rows.append(
+                normalize_schedule_target_fields(
+                    {
+                        "day_utc": day_utc,
+                        "band": band,
+                        "mode": mode,
+                        "vfo": "A",
+                        "frequency": freq_text,
+                        "start_utc": start_utc,
+                        "end_utc": end_utc,
+                        "group_name": group_name,
+                        "fldigi_offset": "",
+                        "js8_offset": "",
+                        "primary_js8call_group": "",
+                        "comment": "",
+                        "auto_tune": bool(auto_tune),
+                        "target_scope": target_scope,
+                        "target_device_profile_id": target_device_profile_id,
+                        "target_operating_profile_id": target_operating_profile_id,
+                    }
+                )
+            )
+        if format_errors:
+            raise ValueError("Fix formatting issues before saving:\n" + "\n".join(format_errors))
+        return hf_rows
+
+    def _on_save_freqplanner_source_clicked(self) -> None:
+        try:
+            rows = self._source_rows_for_freqplanner_snapshot()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save Blocked", str(exc))
+            return
+        if not rows:
+            QMessageBox.warning(
+                self,
+                "No HF Daily Rows",
+                "Add at least one HF Daily row before saving a named source schedule.",
+            )
+            return
+        selected = self._selected_freqplanner_source_row()
+        existing_id = int(selected.get("db_id", 0) or 0) if selected else 0
+        if selected:
+            name = str(selected.get("name") or "").strip()
+        else:
+            name, ok = self._prompt_for_freqplanner_source_name(
+                "Save HF Daily Source",
+                "Name this HF Daily source schedule for FreqPlanner Overview:",
+                f"HF Daily {datetime.datetime.now().strftime('%Y-%m-%d')}",
+            )
+            if not ok:
+                return
+            existing_id = 0
+        try:
+            saved = save_source_schedule(
+                self.settings,
+                HF_DAILY_SOURCE_CATEGORY,
+                SELECTED_HF_DAILY_SOURCE_SET_KEY,
+                name,
+                rows,
+                existing_plan_id=existing_id or None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Source Failed", f"Could not save HF Daily source schedule:\n{exc}")
+            return
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
+        verb = "Updated" if existing_id else "Saved"
+        QMessageBox.information(
+            self,
+            f"HF Daily Source {verb}",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Daily row(s). Select it in FreqPlanner Overview.",
+        )
+
+    def _on_delete_freqplanner_source_clicked(self) -> None:
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            return
+        name = str(row.get("name") or "selected HF Daily schedule")
+        response = QMessageBox.question(
+            self,
+            "Delete HF Daily Source",
+            f"Delete '{name}'? This removes the named source schedule but does not change the live HF Daily schedule.",
+            QMessageBox.Delete | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Delete:
+            return
+        try:
+            delete_source_schedule(
+                self.settings,
+                HF_DAILY_SOURCE_SETS_KEY,
+                SELECTED_HF_DAILY_SOURCE_SET_KEY,
+                str(row.get("id") or ""),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete HF Daily source schedule:\n{exc}")
+            return
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
 
     @staticmethod
     def _set_table_resize_modes(
@@ -2665,6 +2969,11 @@ class DailyScheduleTab(QWidget):
         self._schedule_resource_view_token = view_token
         self._update_schedule_resources_empty_state()
         self._update_resource_action_state()
+        if hasattr(self, "resources_count_label"):
+            total = len(getattr(self, "_schedule_resource_rows", []) or [])
+            shown = len(view_rows)
+            self.resources_count_label.setText(f"{shown} shown / {total} total" if total else "0 resources")
+        self._apply_schedule_table_height_hints()
 
     def _update_schedule_resources_empty_state(self) -> None:
         if not hasattr(self, "resources_empty_label") or not hasattr(self, "resources_table"):
@@ -2684,6 +2993,9 @@ class DailyScheduleTab(QWidget):
             )
         self.resources_empty_label.setVisible(not has_rows)
         self.resources_table.setVisible(has_rows)
+        if hasattr(self, "resources_count_label") and not has_rows:
+            total = len(getattr(self, "_schedule_resource_rows", []) or [])
+            self.resources_count_label.setText(f"0 shown / {total} total" if total else "0 resources")
 
     def _update_resource_action_state(
         self,
@@ -4757,6 +5069,7 @@ class DailyScheduleTab(QWidget):
         self._refresh_schedule_resources(force=True)
         self._refresh_schedule_issues(force=True)
         self._refresh_sop_overlay_rows_in_table()
+        self._apply_schedule_table_height_hints()
 
     def _load_active_sop_overlay_rows(self) -> List[Dict[str, Any]]:
         """
@@ -5872,6 +6185,7 @@ class DailyScheduleTab(QWidget):
             self.settings.reload()
         except Exception:
             pass
+        self._refresh_freqplanner_source_combo()
         latest = self._load_operating_groups()
         self.operating_groups = latest
         self._operating_groups_sig = self._snapshot_operating_groups(latest)
@@ -5974,6 +6288,12 @@ class DailyScheduleTab(QWidget):
             "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
         )
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
+        if hasattr(self, "load_source_btn"):
+            self.load_source_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "save_source_btn"):
+            self.save_source_btn.setStyleSheet(button_style("info", theme))
+        if hasattr(self, "delete_source_btn"):
+            self.delete_source_btn.setStyleSheet(button_style("danger", theme))
         if hasattr(self, "view_edit_btn"):
             self.view_edit_btn.setStyleSheet(button_style("info" if self.view_edit_btn.isChecked() else "muted", theme))
         self._refresh_save_button_state(theme)
@@ -6345,6 +6665,7 @@ class DailyScheduleTab(QWidget):
         self._mark_dirty()
         self._highlight_time_conflicts()
         self._update_resource_action_state()
+        self._apply_schedule_table_height_hints()
 
     def _delete_selected_rows(self):
         selected = set()
@@ -6375,6 +6696,7 @@ class DailyScheduleTab(QWidget):
             self._mark_dirty()
         self._highlight_time_conflicts()
         self._update_resource_action_state()
+        self._apply_schedule_table_height_hints()
 
     @staticmethod
     def _sort_day_rank(day_value: str) -> int:

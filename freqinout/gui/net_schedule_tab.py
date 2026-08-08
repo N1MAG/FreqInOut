@@ -49,6 +49,17 @@ from freqinout.core.schedule_targeting import (
     schedule_target_identity_parts,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.schedule_source_sets import (
+    LIVE_SOURCE_SET_ID,
+    HF_NET_SOURCE_CATEGORY,
+    HF_NET_SOURCE_SETS_KEY,
+    SELECTED_HF_NET_SOURCE_SET_KEY,
+    delete_source_schedule,
+    save_source_schedule,
+    selected_source_set_id,
+    source_set_row_by_id_for_category,
+    source_sets_for_category,
+)
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
@@ -366,7 +377,17 @@ class NetScheduleTab(QWidget):
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.export_btn = QPushButton("Export Net Schedule")
         self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
+        self.schedule_source_label = QLabel("Net Schedule:")
+        self.schedule_source_combo = QComboBox()
+        self.schedule_source_combo.setObjectName("netScheduleSourceCombo")
+        self.schedule_source_combo.setToolTip("Select Live Current or a named HF Net schedule saved to the database.")
+        self.load_source_btn = QPushButton("Load")
+        self.load_source_btn.setToolTip("Load the selected named HF Net schedule into the table for review and editing.")
         self.save_btn = QPushButton("Save Net Schedule")
+        self.save_source_btn = QPushButton("Save Net Source")
+        self.save_source_btn.setToolTip("Save the visible HF Net rows as the selected named schedule, or create a named source schedule.")
+        self.delete_source_btn = QPushButton("Delete Source")
+        self.delete_source_btn.setToolTip("Delete the selected named HF Net schedule.")
         self._net_action_layout = QGridLayout()
         self._net_action_layout.setContentsMargins(0, 0, 0, 0)
         self._net_action_layout.setSpacing(8)
@@ -376,6 +397,9 @@ class NetScheduleTab(QWidget):
         res_header = QHBoxLayout()
         res_header.addWidget(QLabel("<h3>Net Resources</h3>"))
         res_header.addStretch()
+        self.resources_count_label = QLabel("")
+        self.resources_count_label.setObjectName("netScheduleResourcesCount")
+        res_header.addWidget(self.resources_count_label)
         self.net_resources_hint = QLabel("Visit SitRepNet.com for more information.")
         self.net_resources_hint.setTextFormat(Qt.PlainText)
         res_header.addWidget(self.net_resources_hint)
@@ -449,6 +473,7 @@ class NetScheduleTab(QWidget):
         self.resources_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.resources_table.setSortingEnabled(True)
         self.resources_table.verticalHeader().setVisible(False)
+        self.resources_table.setMinimumHeight(220)
         res_hv = self.resources_table.horizontalHeader()
         res_hv.setSectionResizeMode(QHeaderView.ResizeToContents)
         res_hv.setStretchLastSection(False)
@@ -460,7 +485,11 @@ class NetScheduleTab(QWidget):
         self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)
         self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
         self.export_btn.clicked.connect(self._export_schedule)
+        self.schedule_source_combo.currentIndexChanged.connect(self._on_freqplanner_source_selected)
+        self.load_source_btn.clicked.connect(self._on_load_freqplanner_source_clicked)
         self.save_btn.clicked.connect(self._save)
+        self.save_source_btn.clicked.connect(self._on_save_freqplanner_source_clicked)
+        self.delete_source_btn.clicked.connect(self._on_delete_freqplanner_source_clicked)
         self.manage_net_sop_policies_btn.clicked.connect(self._open_net_sop_policy_manager)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
         self.table.itemChanged.connect(self._on_table_item_changed)
@@ -483,6 +512,7 @@ class NetScheduleTab(QWidget):
         self._resize_table_columns()
         self._update_delete_button_state()
         self._update_resource_action_state()
+        self._refresh_freqplanner_source_combo()
         self._conflict_refresh_timer = QTimer(self)
         self._conflict_refresh_timer.setSingleShot(True)
         self._conflict_refresh_timer.setInterval(180)
@@ -530,13 +560,18 @@ class NetScheduleTab(QWidget):
         if compact:
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
-                (self.add_btn, 0, 1),
-                (self.del_btn, 0, 2),
-                (self.view_edit_btn, 0, 3),
-                (self.move_to_resources_btn, 1, 0, 1, 2),
-                (self.export_btn, 1, 2),
-                (self.manage_net_sop_policies_btn, 1, 3),
-                (self.save_btn, 1, 4),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 2),
+                (self.load_source_btn, 0, 4),
+                (self.delete_source_btn, 0, 5),
+                (self.add_btn, 1, 0),
+                (self.del_btn, 1, 1),
+                (self.view_edit_btn, 1, 2),
+                (self.move_to_resources_btn, 1, 3, 1, 2),
+                (self.export_btn, 1, 5),
+                (self.manage_net_sop_policies_btn, 2, 0),
+                (self.save_btn, 2, 1),
+                (self.save_source_btn, 2, 2),
             ]
             filter_placements = [
                 (self.resource_set_label, 0, 0),
@@ -551,13 +586,18 @@ class NetScheduleTab(QWidget):
         else:
             action_placements = [
                 (self.time_toggle_btn, 0, 0),
-                (self.add_btn, 0, 1),
-                (self.del_btn, 0, 2),
-                (self.view_edit_btn, 0, 3),
-                (self.move_to_resources_btn, 0, 4),
-                (self.export_btn, 0, 5),
-                (self.manage_net_sop_policies_btn, 0, 6),
-                (self.save_btn, 0, 7),
+                (self.schedule_source_label, 0, 1),
+                (self.schedule_source_combo, 0, 2, 1, 3),
+                (self.load_source_btn, 0, 5),
+                (self.delete_source_btn, 0, 6),
+                (self.add_btn, 1, 0),
+                (self.del_btn, 1, 1),
+                (self.view_edit_btn, 1, 2),
+                (self.move_to_resources_btn, 1, 3),
+                (self.export_btn, 1, 4),
+                (self.manage_net_sop_policies_btn, 1, 5),
+                (self.save_btn, 1, 6),
+                (self.save_source_btn, 1, 7),
             ]
             filter_placements = [
                 (self.resource_set_label, 0, 0),
@@ -572,8 +612,202 @@ class NetScheduleTab(QWidget):
 
         self._place_grid_widgets(self._net_action_layout, action_placements)
         self._place_grid_widgets(self._net_resource_filter_layout, filter_placements)
-        self._net_action_layout.setColumnStretch(8 if not compact else 5, 1)
+        self._net_action_layout.setColumnStretch(8 if not compact else 6, 1)
         self._net_resource_filter_layout.setColumnStretch(3 if not compact else 4, 1)
+        self._apply_schedule_table_height_hints()
+
+    def _apply_schedule_table_height_hints(self) -> None:
+        if not hasattr(self, "table") or not hasattr(self, "resources_table"):
+            return
+        try:
+            row_count = max(1, int(self.table.rowCount()))
+            visible_rows = max(4, min(row_count, 10))
+            row_h = int(self.table.verticalHeader().defaultSectionSize() or 32)
+            header_h = int(self.table.horizontalHeader().height() or 32)
+            height = header_h + (visible_rows * row_h) + 22
+            self.table.setMaximumHeight(max(190, min(height, 430)))
+            self.resources_table.setMinimumHeight(240)
+        except Exception:
+            pass
+
+    def _refresh_freqplanner_source_combo(self) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        selected = selected_source_set_id(self.settings, SELECTED_HF_NET_SOURCE_SET_KEY)
+        self.schedule_source_combo.blockSignals(True)
+        self.schedule_source_combo.clear()
+        self.schedule_source_combo.addItem("Live Current", LIVE_SOURCE_SET_ID)
+        for row in source_sets_for_category(self.settings, HF_NET_SOURCE_SETS_KEY, HF_NET_SOURCE_CATEGORY):
+            set_id = str(row.get("id") or "").strip()
+            if set_id:
+                self.schedule_source_combo.addItem(str(row.get("name") or set_id), set_id)
+        idx = self.schedule_source_combo.findData(selected)
+        self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.schedule_source_combo.blockSignals(False)
+        self.delete_source_btn.setEnabled(str(self.schedule_source_combo.currentData() or "") != LIVE_SOURCE_SET_ID)
+
+    def _on_freqplanner_source_selected(self, *_args: Any) -> None:
+        if not hasattr(self, "schedule_source_combo"):
+            return
+        set_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, set_id)
+        self.delete_source_btn.setEnabled(set_id != LIVE_SOURCE_SET_ID)
+        try:
+            self.settings.save()
+        except Exception:
+            pass
+        self._refresh_freq_planner()
+
+    def _selected_freqplanner_source_row(self) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "schedule_source_combo"):
+            return None
+        set_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
+        return source_set_row_by_id_for_category(
+            self.settings,
+            HF_NET_SOURCE_SETS_KEY,
+            HF_NET_SOURCE_CATEGORY,
+            set_id,
+        )
+
+    def _load_source_rows_into_table(self, rows: List[Dict[str, Any]]) -> None:
+        rows = [normalize_schedule_target_fields(dict(row)) for row in rows if isinstance(row, dict)]
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            self._raw_rows = rows
+            for row in self._raw_rows:
+                self._add_row(self._to_view_row(row))
+            self._net_name_history = sorted(
+                {r.get("net_name", "") for r in rows if isinstance(r, dict) and r.get("net_name")}
+            )
+            self._update_clock_labels()
+            self._resize_table_columns()
+            self._saved_rows_signature = self._rows_signature(self._raw_rows)
+            self._set_dirty(False)
+            self._schedule_net_sop_conflict_refresh(force=True)
+        finally:
+            self._suspend_dirty_tracking = False
+        self._apply_schedule_table_height_hints()
+
+    def _on_load_freqplanner_source_clicked(self) -> None:
+        if not self._confirm_discard_unsaved_source_load():
+            return
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            self._load()
+            return
+        self._load_source_rows_into_table([dict(item) for item in row.get("rows", []) if isinstance(item, dict)])
+
+    def _confirm_discard_unsaved_source_load(self) -> bool:
+        if not bool(getattr(self, "_dirty", False)):
+            return True
+        response = QMessageBox.question(
+            self,
+            "Load Schedule",
+            "Load the selected HF Net schedule? Unsaved edits in the current table will be discarded.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Yes
+
+    def _prompt_for_freqplanner_source_name(self, title: str, label: str, default_name: str) -> Tuple[str, bool]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel(label)
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        name_edit = QLineEdit(str(default_name or "").strip())
+        name_edit.setObjectName("netScheduleFreqPlannerSourceNameEdit")
+        name_edit.selectAll()
+        layout.addWidget(name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_edit.setFocus(Qt.OtherFocusReason)
+        if dialog.exec() != QDialog.Accepted:
+            return "", False
+        return name_edit.text().strip(), True
+
+    def _source_rows_for_freqplanner_snapshot(self) -> List[Dict[str, Any]]:
+        return [self._strip_internal_row(dict(row)) for row in self._collect_rows()]
+
+    def _on_save_freqplanner_source_clicked(self) -> None:
+        try:
+            rows = self._source_rows_for_freqplanner_snapshot()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Net Schedule", str(exc))
+            return
+        if not rows:
+            QMessageBox.warning(
+                self,
+                "No HF Net Rows",
+                "Add at least one HF Net row before saving a named source schedule.",
+            )
+            return
+        selected = self._selected_freqplanner_source_row()
+        existing_id = int(selected.get("db_id", 0) or 0) if selected else 0
+        if selected:
+            name = str(selected.get("name") or "").strip()
+        else:
+            name, ok = self._prompt_for_freqplanner_source_name(
+                "Save HF Net Source",
+                "Name this HF Net source schedule for FreqPlanner Overview:",
+                f"HF Nets {datetime.datetime.now().strftime('%Y-%m-%d')}",
+            )
+            if not ok:
+                return
+            existing_id = 0
+        try:
+            saved = save_source_schedule(
+                self.settings,
+                HF_NET_SOURCE_CATEGORY,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                name,
+                rows,
+                existing_plan_id=existing_id or None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Source Failed", f"Could not save HF Net source schedule:\n{exc}")
+            return
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
+        verb = "Updated" if existing_id else "Saved"
+        QMessageBox.information(
+            self,
+            f"HF Net Source {verb}",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s). Select it in FreqPlanner Overview.",
+        )
+
+    def _on_delete_freqplanner_source_clicked(self) -> None:
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            return
+        name = str(row.get("name") or "selected HF Net schedule")
+        response = QMessageBox.question(
+            self,
+            "Delete HF Net Source",
+            f"Delete '{name}'? This removes the named source schedule but does not change the live HF Net schedule.",
+            QMessageBox.Delete | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Delete:
+            return
+        try:
+            delete_source_schedule(
+                self.settings,
+                HF_NET_SOURCE_SETS_KEY,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                str(row.get("id") or ""),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete HF Net source schedule:\n{exc}")
+            return
+        if hasattr(self, "schedule_source_combo"):
+            self._refresh_freqplanner_source_combo()
+        self._refresh_freq_planner()
 
     def _resize_table_columns(self) -> None:
         try:
@@ -844,6 +1078,13 @@ class NetScheduleTab(QWidget):
         self._refresh_resources_table()
         self._apply_theme()
         self._resize_table_columns()
+        self._refresh_freqplanner_source_combo()
+
+    def _refresh_freq_planner(self) -> None:
+        try:
+            self.schedule_saved.emit()
+        except Exception:
+            pass
 
     def on_sop_data_changed(self) -> None:
         self._bump_net_sop_conflict_scan_epoch()
@@ -871,6 +1112,12 @@ class NetScheduleTab(QWidget):
         self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.add_btn.setStyleSheet(button_style("primary", theme))
         self.del_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "load_source_btn"):
+            self.load_source_btn.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "save_source_btn"):
+            self.save_source_btn.setStyleSheet(button_style("info", theme))
+        if hasattr(self, "delete_source_btn"):
+            self.delete_source_btn.setStyleSheet(button_style("danger", theme))
         if hasattr(self, "view_edit_btn"):
             self.view_edit_btn.setStyleSheet(button_style("info" if self.view_edit_btn.isChecked() else "muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
@@ -1541,6 +1788,7 @@ class NetScheduleTab(QWidget):
                 fldigi_offset_edit.setText(d_offset)
         self._update_delete_button_state()
         self._mark_dirty()
+        self._apply_schedule_table_height_hints()
 
     def _parse_month_weeks(self, txt: str) -> set[int]:
         out: set[int] = set()
@@ -1675,6 +1923,7 @@ class NetScheduleTab(QWidget):
         if selected:
             self._mark_dirty()
             self._schedule_net_sop_conflict_refresh(force=True)
+        self._apply_schedule_table_height_hints()
 
     # --------- Operating group helpers (cascading selections) --------- #
 
@@ -4424,8 +4673,13 @@ class NetScheduleTab(QWidget):
                     item.setData(Qt.UserRole, int(row.get("id") or 0))
                 self.resources_table.setItem(r, c, item)
         self.resources_table.setSortingEnabled(True)
+        if hasattr(self, "resources_count_label"):
+            total = len(getattr(self, "_resource_rows", []) or [])
+            shown = len(rows)
+            self.resources_count_label.setText(f"{shown} shown / {total} total" if total else "0 resources")
         self._update_resource_action_state()
         self._resize_table_columns()
+        self._apply_schedule_table_height_hints()
 
     def _update_resource_action_state(self) -> None:
         selected_rows = {idx.row() for idx in self.resources_table.selectionModel().selectedRows()} if self.resources_table.selectionModel() else set()

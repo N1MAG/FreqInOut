@@ -293,8 +293,17 @@ def test_suggest_field_value_uses_form_context_and_skips_expiration_defaults() -
 
 def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None:
     text = _read("freqinout/gui/message_viewer_tab.py")
-    assert 'QPushButton("Compose")' in text
-    assert 'QPushButton("Inbox")' in text
+    shell = _read("freqinout/gui/main_window.py")
+    assert '("Inbox", "Messages")' in shell
+    assert '("Compose", "Messages")' in shell
+    assert 'self._messages_nav_button_indices["inbox"] = btn_idx' in shell
+    assert 'self._messages_nav_button_indices["compose"] = btn_idx' in shell
+    assert "def open_messages_section(self, mode: str = \"inbox\") -> None:" in shell
+    assert "def show_compose_from_navigation(self) -> None:" in text
+    assert 'self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")' in text
+    assert 'self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")' in text
+    assert 'self._make_combo_searchable(self.type_filter, "Message Type")' in text
+    assert 'QPushButton("Open Form Folder")' in text
     assert "class ComposeRadioTarget" in text
     assert 'radio_row.addWidget(QLabel("Compose For"))' in text
     assert 'self.compose_refresh_radios_btn.clicked.connect(self._refresh_compose_radios_clicked)' in text

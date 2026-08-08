@@ -69,6 +69,25 @@ def test_phase5_temporary_swap_uses_assigned_model_language() -> None:
     assert "current effective schedule" not in source
 
 
+def test_source_only_schedule_cannot_be_assigned_to_radio(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = _create_primary_radio(store, "Assignment Guard Radio")
+    source_plan = store.save_frequency_plan(
+        {
+            "name": "Named Daily Source",
+            "category": "hf_daily_schedule",
+            "schedule_refs": [{"day_utc": "Monday", "start_utc": "01:00", "end_utc": "02:00"}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="blended into a Frequency Plan"):
+        store.set_assigned_plan(int(radio["id"]), int(source_plan["id"]))
+
+
 def test_phase5_runtime_surfaces_use_frequency_plan_language() -> None:
     settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     overview_source = Path("freqinout/gui/station_overview_tab.py").read_text(encoding="utf-8")

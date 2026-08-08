@@ -5,7 +5,7 @@ import json
 import time
 import sqlite3
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -34,6 +34,18 @@ from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.schedule_source_sets import (
+    LIVE_SOURCE_SET_ID,
+    HF_DAILY_SOURCE_CATEGORY,
+    HF_DAILY_SOURCE_SETS_KEY,
+    HF_NET_SOURCE_CATEGORY,
+    HF_NET_SOURCE_SETS_KEY,
+    SELECTED_HF_DAILY_SOURCE_SET_KEY,
+    SELECTED_HF_NET_SOURCE_SET_KEY,
+    selected_source_set_id,
+    source_set_row_by_id_for_category,
+    source_sets_for_category,
+)
 from freqinout.core.schedule_projection import (
     BlendedScheduleProjection,
     ProjectionCell,
@@ -170,6 +182,22 @@ class FreqPlannerTab(QWidget):
             plan_workspace.addWidget(btn)
         layout.addLayout(plan_workspace)
 
+        source_workspace = QHBoxLayout()
+        source_workspace.setSpacing(8)
+        source_workspace.addWidget(QLabel("HF Daily:"))
+        self.hf_daily_source_combo = QComboBox()
+        self.hf_daily_source_combo.setObjectName("freqPlannerHfDailySourceCombo")
+        self.hf_daily_source_combo.setToolTip("Select Live Current or a named HF Daily schedule saved from the HF Daily tab.")
+        self.hf_daily_source_combo.currentIndexChanged.connect(self._on_source_set_selected)
+        source_workspace.addWidget(self.hf_daily_source_combo, 1)
+        source_workspace.addWidget(QLabel("HF Nets:"))
+        self.hf_net_source_combo = QComboBox()
+        self.hf_net_source_combo.setObjectName("freqPlannerHfNetSourceCombo")
+        self.hf_net_source_combo.setToolTip("Select Live Current or a named HF Net schedule saved from the HF Nets tab.")
+        self.hf_net_source_combo.currentIndexChanged.connect(self._on_source_set_selected)
+        source_workspace.addWidget(self.hf_net_source_combo, 1)
+        layout.addLayout(source_workspace)
+
         view_workspace = QHBoxLayout()
         view_workspace.setSpacing(8)
         view_workspace.addWidget(QLabel("View:"))
@@ -260,6 +288,7 @@ class FreqPlannerTab(QWidget):
 
         self._setup_clock_timer()
         self._load_band_colors()
+        self._refresh_source_set_controls()
         self._render_band_legend()
 
     def _on_planner_view_changed(self) -> None:
@@ -301,6 +330,76 @@ class FreqPlannerTab(QWidget):
             return DAY_NAMES[0]
         day = str(self.operational_day_combo.currentData() or self.operational_day_combo.currentText() or "").strip()
         return day if day in DAY_NAMES else DAY_NAMES[0]
+
+    def _prompt_for_name(self, title: str, label: str, default_name: str) -> Tuple[str, bool]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel(label)
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        name_edit = QLineEdit(str(default_name or "").strip())
+        name_edit.setObjectName("freqPlannerNameEdit")
+        name_edit.selectAll()
+        layout.addWidget(name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_edit.setFocus(Qt.OtherFocusReason)
+        if dialog.exec() != QDialog.Accepted:
+            return "", False
+        return name_edit.text().strip(), True
+
+    def _source_sets(self, key: str) -> List[Dict[str, Any]]:
+        category = HF_DAILY_SOURCE_CATEGORY if key == HF_DAILY_SOURCE_SETS_KEY else HF_NET_SOURCE_CATEGORY
+        return source_sets_for_category(self.settings, key, category)
+
+    def _selected_source_set_id(self, settings_key: str) -> str:
+        return selected_source_set_id(self.settings, settings_key)
+
+    def _refresh_source_combo(self, combo: QComboBox, sets_key: str, selected_key: str) -> None:
+        selected = self._selected_source_set_id(selected_key)
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Live Current", LIVE_SOURCE_SET_ID)
+        for row in self._source_sets(sets_key):
+            set_id = str(row.get("id") or "").strip()
+            if not set_id:
+                continue
+            combo.addItem(str(row.get("name") or set_id), set_id)
+        idx = combo.findData(selected)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _refresh_source_set_controls(self) -> None:
+        if not hasattr(self, "hf_daily_source_combo"):
+            return
+        self._refresh_source_combo(self.hf_daily_source_combo, HF_DAILY_SOURCE_SETS_KEY, SELECTED_HF_DAILY_SOURCE_SET_KEY)
+        self._refresh_source_combo(self.hf_net_source_combo, HF_NET_SOURCE_SETS_KEY, SELECTED_HF_NET_SOURCE_SET_KEY)
+
+    def _on_source_set_selected(self, *_args: Any) -> None:
+        if hasattr(self, "hf_daily_source_combo"):
+            self.settings.set(SELECTED_HF_DAILY_SOURCE_SET_KEY, str(self.hf_daily_source_combo.currentData() or LIVE_SOURCE_SET_ID))
+        if hasattr(self, "hf_net_source_combo"):
+            self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, str(self.hf_net_source_combo.currentData() or LIVE_SOURCE_SET_ID))
+        self.rebuild_table()
+
+    def _source_set_row_by_id(self, sets_key: str, set_id: str) -> Optional[Dict[str, Any]]:
+        target = str(set_id or "").strip()
+        if not target or target == LIVE_SOURCE_SET_ID:
+            return None
+        category = HF_DAILY_SOURCE_CATEGORY if sets_key == HF_DAILY_SOURCE_SETS_KEY else HF_NET_SOURCE_CATEGORY
+        return source_set_row_by_id_for_category(self.settings, sets_key, category, target)
+
+    def _source_selection_summary(self) -> str:
+        hf_id = self._selected_source_set_id(SELECTED_HF_DAILY_SOURCE_SET_KEY)
+        net_id = self._selected_source_set_id(SELECTED_HF_NET_SOURCE_SET_KEY)
+        hf_row = self._source_set_row_by_id(HF_DAILY_SOURCE_SETS_KEY, hf_id)
+        net_row = self._source_set_row_by_id(HF_NET_SOURCE_SETS_KEY, net_id)
+        hf_label = str((hf_row or {}).get("name") or "Live Current")
+        net_label = str((net_row or {}).get("name") or "Live Current")
+        return f"HF Daily: {hf_label}; HF Nets: {net_label}"
 
     @staticmethod
     def _normalize_condition_levels(value: Any) -> str:
@@ -348,6 +447,40 @@ class FreqPlannerTab(QWidget):
                 out[group] = level
         return out
 
+    def _configured_operating_group_names(self) -> Set[str]:
+        groups: Set[str] = set()
+        rows = self.settings.get("operating_groups", []) or []
+        if not isinstance(rows, list):
+            return groups
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("group", "name", "group_name"):
+                value = str(row.get(key) or "").strip().upper()
+                if value:
+                    groups.add(value)
+                    break
+        return groups
+
+    def _row_group_name(self, row: Mapping[str, Any]) -> str:
+        return str(row.get("group_name") or row.get("group") or row.get("primary_js8call_group") or "").strip().upper()
+
+    def _filter_rows_to_configured_groups(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        configured = self._configured_operating_group_names()
+        if not configured:
+            return []
+        return [dict(row) for row in rows if self._row_group_name(row) in configured]
+
+    def _group_is_configured(self, group_name: Any) -> bool:
+        group = str(group_name or "").strip().upper()
+        return bool(group and group in self._configured_operating_group_names())
+
+    def _configured_group_help_text(self) -> str:
+        groups = sorted(self._configured_operating_group_names())
+        if not groups:
+            return "No Operating Groups are configured in Settings."
+        return "Configured Operating Groups: " + ", ".join(groups)
+
     @staticmethod
     def _json_ref_count(value: Any) -> int:
         if isinstance(value, (list, tuple, set)):
@@ -391,6 +524,12 @@ class FreqPlannerTab(QWidget):
             plans = list(self.plan_context_service.store.list_frequency_plans())
         except Exception:
             plans = []
+        plans = [
+            plan
+            for plan in plans
+            if str(plan.get("category") or "").strip().lower()
+            not in {HF_DAILY_SOURCE_CATEGORY, HF_NET_SOURCE_CATEGORY}
+        ]
         context = self.plan_context_service.context_for_tab("freqplanner", refresh=True)
         context_plan_id = 0
         if context is not None and context.frequency_plan_id:
@@ -464,7 +603,10 @@ class FreqPlannerTab(QWidget):
 
     def _build_operational_projection(self) -> OperationalDayProjection:
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
-        net_resources = self._load_net_resources_from_db() or []
+        hf_sched = self._filter_rows_to_configured_groups(hf_sched)
+        net_sched = self._filter_rows_to_configured_groups(net_sched)
+        sop_sched = self._filter_rows_to_configured_groups(sop_sched)
+        net_resources = self._filter_rows_to_configured_groups(self._load_net_resources_from_db() or [])
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         week_sunday = self._week_start_sunday_utc(now_utc)
         return build_operational_day_projection(
@@ -503,7 +645,7 @@ class FreqPlannerTab(QWidget):
         plan = self._selected_sop_schedule_plan_row()
         if not plan:
             return None
-        refs = self._schedule_refs_from_plan_row(plan)
+        refs = self._filter_rows_to_configured_groups(self._schedule_refs_from_plan_row(plan))
         return build_operational_day_projection_from_refs(refs, week_start_utc=week_sunday)
 
     @staticmethod
@@ -531,6 +673,7 @@ class FreqPlannerTab(QWidget):
         effective_count = len(projection.effective_segments)
         lines = [
             "Review blended schedule before saving:",
+            self._source_selection_summary(),
             f"HF Daily rows considered: {counts.get('HF', 0)}",
             f"HF Net rows considered: {counts.get('NET', 0)}",
             f"SOP rows considered: {counts.get('SOP', 0)}",
@@ -556,6 +699,7 @@ class FreqPlannerTab(QWidget):
         refs = projection.schedule_refs()
         lines = [
             "Review SOP Schedule Plan before saving:",
+            self._source_selection_summary(),
             f"Operational lanes: {len(projection.lanes)}",
             f"HF Daily entries: {counts.get('HF', 0)}",
             f"HF Net entries: {counts.get('NET', 0)}",
@@ -1042,22 +1186,12 @@ class FreqPlannerTab(QWidget):
             )
             return
         default_name = self._default_save_plan_name(projection)
-        name, ok = QInputDialog.getText(self, "Save Frequency Plan", "Plan name:", text=default_name)
+        name, ok = self._prompt_for_name("Save Frequency Plan", "Name this Frequency Plan:", default_name)
         if not ok:
             return
         name = str(name or "").strip()
         if not name:
             self.frequency_plan_action_hint_label.setText("Enter a clear Frequency Plan name before saving.")
-            return
-        review_text = self._projection_review_text(projection)
-        response = QMessageBox.question(
-            self,
-            "Review Blended Schedule",
-            review_text,
-            QMessageBox.Save | QMessageBox.Cancel,
-            QMessageBox.Save,
-        )
-        if response != QMessageBox.Save:
             return
         schedule_refs = projection.schedule_refs()
         plan_payload: Dict[str, Any] = {
@@ -1069,7 +1203,10 @@ class FreqPlannerTab(QWidget):
             "schedule_refs": schedule_refs,
             "frequency_refs": projection.frequency_refs(),
             "group_refs": projection.group_refs(),
-            "notes": f"FreqPlanner blended projection saved {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
+            "notes": (
+                f"FreqPlanner blended projection saved {datetime.datetime.now(datetime.timezone.utc).isoformat()}; "
+                f"{self._source_selection_summary()}"
+            ),
         }
         self._save_plan_payload_with_guard(
             plan_payload,
@@ -1091,25 +1228,16 @@ class FreqPlannerTab(QWidget):
             )
             return
         default_name = f"SOP Schedule Plan {datetime.datetime.now().strftime('%Y-%m-%d')}"
-        name, ok = QInputDialog.getText(self, "Save SOP Schedule Plan", "Plan name:", text=default_name)
+        name, ok = self._prompt_for_name("Save SOP Schedule Plan", "Name this SOP Schedule Plan:", default_name)
         if not ok:
             return
         name = str(name or "").strip()
         if not name:
             self.frequency_plan_action_hint_label.setText("Enter a clear SOP Schedule Plan name before saving.")
             return
-        response = QMessageBox.question(
-            self,
-            "Review SOP Schedule Plan",
-            self._operational_projection_review_text(projection),
-            QMessageBox.Save | QMessageBox.Cancel,
-            QMessageBox.Save,
-        )
-        if response != QMessageBox.Save:
-            return
         plan_payload = projection.to_frequency_plan_payload(
             name,
-            description="Saved from FreqPlanner operational SOP Schedule Plan projection.",
+            description=f"Saved from FreqPlanner operational SOP Schedule Plan projection. {self._source_selection_summary()}",
         )
         self._save_plan_payload_with_guard(
             plan_payload,
@@ -1139,7 +1267,7 @@ class FreqPlannerTab(QWidget):
             return True
         return int(group_level) in allowed
 
-    def _load_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict[str, Any]]]:
+    def _load_live_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict[str, Any]]]:
         data = self.settings.all()
 
         # Try DB-backed schedules first
@@ -1160,6 +1288,18 @@ class FreqPlannerTab(QWidget):
             sop = []
         if not isinstance(policies, list):
             policies = []
+        return hf, net, sop, policies
+
+    def _load_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict[str, Any]]]:
+        hf, net, sop, policies = self._load_live_schedules()
+        selected_hf = self._selected_source_set_id(SELECTED_HF_DAILY_SOURCE_SET_KEY)
+        selected_net = self._selected_source_set_id(SELECTED_HF_NET_SOURCE_SET_KEY)
+        hf_set = self._source_set_row_by_id(HF_DAILY_SOURCE_SETS_KEY, selected_hf)
+        net_set = self._source_set_row_by_id(HF_NET_SOURCE_SETS_KEY, selected_net)
+        if hf_set is not None:
+            hf = [dict(row) for row in hf_set.get("rows", []) if isinstance(row, dict)]
+        if net_set is not None:
+            net = [dict(row) for row in net_set.get("rows", []) if isinstance(row, dict)]
         return hf, net, sop, policies
 
     @staticmethod
@@ -2085,9 +2225,19 @@ class FreqPlannerTab(QWidget):
         if not updates["band"] and not updates["frequency"]:
             self.frequency_plan_action_hint_label.setText("Enter at least a band or frequency before saving the plan-local edit.")
             return None
+        if not self._group_is_configured(updates["group_name"]):
+            self.frequency_plan_action_hint_label.setText(
+                f"Choose a configured Operating Group before saving the plan-local edit. {self._configured_group_help_text()}"
+            )
+            return None
         return updates
 
     def _updated_sop_plan_payload_for_entry(self, plan: Dict[str, Any], entry: Any, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._group_is_configured(updates.get("group_name")):
+            self.frequency_plan_action_hint_label.setText(
+                f"Choose a configured Operating Group before saving the plan-local edit. {self._configured_group_help_text()}"
+            )
+            return None
         refs = self._schedule_refs_from_plan_row(plan)
         try:
             index = int((entry.raw or {}).get("plan_ref_index"))
@@ -2391,6 +2541,7 @@ class FreqPlannerTab(QWidget):
             )
             self.edit_hf_daily_btn.setEnabled(enabled)
             self.edit_hf_daily_btn.setToolTip(tooltip)
+            self.edit_hf_daily_btn.setStyleSheet(button_style("primary" if enabled else "muted", resolve_theme(self.settings)))
         if hasattr(self, "edit_hf_net_btn"):
             enabled, tooltip = self._source_button_state(
                 net_segments,
@@ -2400,6 +2551,7 @@ class FreqPlannerTab(QWidget):
             )
             self.edit_hf_net_btn.setEnabled(enabled)
             self.edit_hf_net_btn.setToolTip(tooltip)
+            self.edit_hf_net_btn.setStyleSheet(button_style("primary" if enabled else "muted", resolve_theme(self.settings)))
         if hasattr(self, "open_sop_builder_btn"):
             enabled, tooltip = self._source_button_state(
                 sop_segments,
@@ -2409,6 +2561,7 @@ class FreqPlannerTab(QWidget):
             )
             self.open_sop_builder_btn.setEnabled(enabled)
             self.open_sop_builder_btn.setToolTip(tooltip)
+            self.open_sop_builder_btn.setStyleSheet(button_style("primary" if enabled else "muted", resolve_theme(self.settings)))
 
     def _set_projection_inspector(self, cell: Optional[ProjectionCell]) -> None:
         self._selected_projection_cell = cell
@@ -2504,6 +2657,60 @@ class FreqPlannerTab(QWidget):
                         return
         except Exception as exc:
             log.debug("FreqPlanner: failed navigating to %s: %s", tab_label, exc)
+
+    def _load_selected_source_schedule_in_tab(
+        self,
+        tab: Any,
+        *,
+        selected_key: str,
+        sets_key: str,
+        category: str,
+        live_loader_name: str,
+    ) -> Optional[bool]:
+        if tab is None:
+            return False
+        selected_id = self._selected_source_set_id(selected_key)
+        if hasattr(tab, "_refresh_freqplanner_source_combo"):
+            try:
+                tab._refresh_freqplanner_source_combo()
+            except Exception:
+                pass
+        combo = getattr(tab, "schedule_source_combo", None)
+        if combo is not None:
+            try:
+                idx = combo.findData(selected_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            except Exception:
+                pass
+        if hasattr(tab, "_confirm_discard_unsaved_source_load"):
+            try:
+                if not tab._confirm_discard_unsaved_source_load():
+                    return None
+            except Exception:
+                pass
+        if selected_id == LIVE_SOURCE_SET_ID:
+            loader = getattr(tab, live_loader_name, None)
+            if callable(loader):
+                try:
+                    loader()
+                    return True
+                except Exception as exc:
+                    log.debug("FreqPlanner: failed loading live source schedule: %s", exc)
+                    return False
+            return True
+        row = source_set_row_by_id_for_category(self.settings, sets_key, category, selected_id)
+        if row is None:
+            return False
+        loader = getattr(tab, "_load_source_rows_into_table", None)
+        if not callable(loader):
+            return False
+        try:
+            loader([dict(item) for item in row.get("rows", []) if isinstance(item, dict)])
+            return True
+        except Exception as exc:
+            log.debug("FreqPlanner: failed loading selected source schedule %s: %s", selected_id, exc)
+            return False
 
     @staticmethod
     def _normalize_freq_text(value: Any) -> str:
@@ -2602,6 +2809,18 @@ class FreqPlannerTab(QWidget):
             return
         self._navigate_to_tab("HF Schedule")
         tab = getattr(self.window(), "hf_schedule_tab", None)
+        loaded = self._load_selected_source_schedule_in_tab(
+            tab,
+            selected_key=SELECTED_HF_DAILY_SOURCE_SET_KEY,
+            sets_key=HF_DAILY_SOURCE_SETS_KEY,
+            category=HF_DAILY_SOURCE_CATEGORY,
+            live_loader_name="_load_schedule",
+        )
+        if loaded is None:
+            self.frequency_plan_action_hint_label.setText(
+                "HF Daily load was cancelled; the selected source row was not opened."
+            )
+            return
         focused = False
         if tab is not None and hasattr(tab, "focus_source_segment"):
             try:
@@ -2617,7 +2836,15 @@ class FreqPlannerTab(QWidget):
         if not focused and tab is not None:
             focused = self._focus_tab_row_for_segment(tab, segment, source="HF")
         self.frequency_plan_action_hint_label.setText(
-            "Opened HF Daily source row for review." if focused else "Opened HF Daily. Review the matching source row before editing."
+            (
+                "Opened the selected HF Daily schedule and source row for review."
+                if focused and loaded
+                else (
+                    "Opened HF Daily source row for review."
+                    if focused
+                    else "Opened HF Daily. Review the matching source row before editing."
+                )
+            )
         )
 
     def _on_edit_hf_net_clicked(self) -> None:
@@ -2627,6 +2854,18 @@ class FreqPlannerTab(QWidget):
             return
         self._navigate_to_tab("Net Schedule")
         tab = getattr(self.window(), "net_tab", None)
+        loaded = self._load_selected_source_schedule_in_tab(
+            tab,
+            selected_key=SELECTED_HF_NET_SOURCE_SET_KEY,
+            sets_key=HF_NET_SOURCE_SETS_KEY,
+            category=HF_NET_SOURCE_CATEGORY,
+            live_loader_name="_load",
+        )
+        if loaded is None:
+            self.frequency_plan_action_hint_label.setText(
+                "HF Net load was cancelled; the selected source row was not opened."
+            )
+            return
         focused = False
         if tab is not None and hasattr(tab, "focus_source_segment"):
             try:
@@ -2636,7 +2875,15 @@ class FreqPlannerTab(QWidget):
         if not focused:
             focused = self._focus_tab_row_for_segment(tab, segment, source="NET") if tab is not None else False
         self.frequency_plan_action_hint_label.setText(
-            "Opened HF Net source row for review." if focused else "Opened HF Nets. Review the matching source row before editing."
+            (
+                "Opened the selected HF Net schedule and source row for review."
+                if focused and loaded
+                else (
+                    "Opened HF Net source row for review."
+                    if focused
+                    else "Opened HF Nets. Review the matching source row before editing."
+                )
+            )
         )
 
     def _on_open_sop_builder_clicked(self) -> None:
@@ -2702,11 +2949,15 @@ class FreqPlannerTab(QWidget):
         projection = self._build_selected_sop_plan_projection(week_sunday) if selected_plan else None
         source_text = f"saved plan '{str(selected_plan.get('name') or 'SOP Schedule Plan')}'" if selected_plan else "live projection"
         if projection is None:
+            hf_sched = self._filter_rows_to_configured_groups(hf_sched)
+            net_sched = self._filter_rows_to_configured_groups(net_sched)
+            sop_sched = self._filter_rows_to_configured_groups(sop_sched)
+            net_resources = self._filter_rows_to_configured_groups(self._load_net_resources_from_db() or [])
             projection = build_operational_day_projection(
                 hf_sched,
                 net_sched,
                 sop_sched,
-                self._load_net_resources_from_db(),
+                net_resources,
                 policy_rows,
                 week_start_utc=week_sunday,
             )
@@ -2787,6 +3038,7 @@ class FreqPlannerTab(QWidget):
             pass
         self.plan_context_label.refresh_context(refresh=True)
         self._refresh_plan_workspace_header()
+        self._refresh_source_set_controls()
         self.table.clearContents()
         tz_name, tz_abbr = self._current_timezone_label()
         if not self._show_local:

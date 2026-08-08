@@ -76,6 +76,7 @@ from freqinout.core.config_migration_preview import (
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
+from freqinout.core.known_operating_groups import WEFAX_STATIONS, load_known_operating_group_catalog
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
     LAUNCH_APP_ORDER,
@@ -132,6 +133,7 @@ from freqinout.core.multi_radio_store import (
     DEFAULT_HOLD_DURATION_MINUTES,
     DEFAULT_OPERATING_NAME,
     MultiRadioStore,
+    SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES,
     SUPPORTED_HOLD_DURATION_MINUTES,
     SUPPORTED_RUNTIME_CONTROL_BACKENDS,
     COMMON_AMATEUR_BANDS,
@@ -610,6 +612,7 @@ class SettingsTab(QWidget):
         self.varac_cluster_members: List[Dict[str, Any]] = []
         self.active_profile_swap: Optional[Dict[str, Any]] = None
         self.operating_groups: List[Dict[str, str]] = []
+        self.known_operating_group_catalog: List[Dict[str, Any]] = []
         self.local_net_profiles: List[Dict[str, str]] = []
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
@@ -2072,9 +2075,11 @@ class SettingsTab(QWidget):
         self.name_edit.setFixedWidth(200)
         self.state_edit = QLineEdit()
         self.state_edit.setFixedWidth(80)
+        self.state_edit.editingFinished.connect(self._load_known_operating_group_catalog)
         self.grid6_edit = QLineEdit()
         self.grid6_edit.setMaxLength(6)
         self.grid6_edit.setFixedWidth(90)
+        self.grid6_edit.editingFinished.connect(self._load_known_operating_group_catalog)
         operator_grid = QGridLayout()
         operator_grid.setContentsMargins(0, 0, 0, 0)
         operator_grid.setHorizontalSpacing(12)
@@ -2361,12 +2366,16 @@ class SettingsTab(QWidget):
         self.sections_nav_list.currentRowChanged.connect(self._on_section_nav_changed)
         nav_panel = QWidget()
         nav_panel.setObjectName("settingsSectionNavPanel")
-        nav_panel.setMinimumWidth(180)
-        nav_panel.setMaximumWidth(240)
+        nav_panel.setMinimumWidth(220)
+        nav_panel.setMaximumWidth(280)
         nav_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         nav_panel_layout = QVBoxLayout(nav_panel)
         nav_panel_layout.setContentsMargins(0, 0, 0, 0)
         nav_panel_layout.setSpacing(6)
+        self.settings_section_nav_title = QLabel("Settings")
+        self.settings_section_nav_title.setObjectName("settingsSectionNavTitle")
+        self.settings_section_nav_title.setStyleSheet("font-weight: bold;")
+        nav_panel_layout.addWidget(self.settings_section_nav_title)
         self.settings_compact_header = QFrame()
         self.settings_compact_header.setObjectName("settingsCompactHeaderBar")
         self.settings_compact_header.setFrameShape(QFrame.StyledPanel)
@@ -2408,35 +2417,38 @@ class SettingsTab(QWidget):
         settings_header_layout.setColumnStretch(3, 1)
         main_layout.addWidget(configured_radios_group)
         main_layout.addWidget(self.settings_compact_header)
+        self.settings_compact_header.setVisible(False)
         self._global_settings_nav_collapsed = False
-        self._radio_settings_nav_collapsed = False
+        self._radio_settings_nav_collapsed = True
         self.global_settings_toggle_btn = QToolButton()
         self.global_settings_toggle_btn.setCheckable(True)
         self.global_settings_toggle_btn.setChecked(True)
         self.global_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.global_settings_toggle_btn.setArrowType(Qt.DownArrow)
-        self.global_settings_toggle_btn.setText("Global Settings")
+        self.global_settings_toggle_btn.setText("Main Settings")
         self.global_settings_toggle_btn.setMinimumHeight(28)
         self.global_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.global_settings_toggle_btn.setAccessibleName("Settings navigation group: Global Settings")
+        self.global_settings_toggle_btn.setAccessibleName("Settings navigation group: Main Settings")
         self.global_settings_toggle_btn.clicked.connect(self._on_global_settings_toggle)
+        self.global_settings_toggle_btn.setVisible(False)
         nav_panel_layout.addWidget(self.global_settings_toggle_btn)
         self.global_section_buttons_widget = QWidget()
         self.global_section_buttons_layout = QVBoxLayout(self.global_section_buttons_widget)
         self.global_section_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.global_section_buttons_layout.setSpacing(4)
-        self.global_section_buttons_widget.setVisible(False)
+        self.global_section_buttons_widget.setVisible(True)
         nav_panel_layout.addWidget(self.global_section_buttons_widget)
         self.radio_settings_toggle_btn = QToolButton()
         self.radio_settings_toggle_btn.setCheckable(True)
-        self.radio_settings_toggle_btn.setChecked(True)
+        self.radio_settings_toggle_btn.setChecked(False)
         self.radio_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.radio_settings_toggle_btn.setArrowType(Qt.DownArrow)
-        self.radio_settings_toggle_btn.setText("Selected Radio")
+        self.radio_settings_toggle_btn.setArrowType(Qt.RightArrow)
+        self.radio_settings_toggle_btn.setText("Radio Settings")
         self.radio_settings_toggle_btn.setMinimumHeight(28)
         self.radio_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Selected Radio")
+        self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Radio Settings")
         self.radio_settings_toggle_btn.clicked.connect(self._on_radio_settings_toggle)
+        self.radio_settings_toggle_btn.setVisible(False)
         # Keep the legacy attribute name for older helper paths that expect it.
         self.radio_specific_nav_label = self.radio_settings_toggle_btn
         nav_panel_layout.addWidget(self.radio_settings_toggle_btn)
@@ -2444,6 +2456,7 @@ class SettingsTab(QWidget):
         self.radio_section_buttons_layout = QVBoxLayout(self.radio_section_buttons_widget)
         self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.radio_section_buttons_layout.setSpacing(4)
+        self.radio_section_buttons_widget.setVisible(False)
         nav_panel_layout.addWidget(self.radio_section_buttons_widget)
         nav_panel_layout.addStretch()
         self.sections_nav_list.hide()
@@ -2453,11 +2466,11 @@ class SettingsTab(QWidget):
         self.settings_section_nav_scroll.setFrameShape(QFrame.NoFrame)
         self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.settings_section_nav_scroll.setMinimumWidth(188)
-        self.settings_section_nav_scroll.setMaximumWidth(250)
+        self.settings_section_nav_scroll.setMinimumWidth(232)
+        self.settings_section_nav_scroll.setMaximumWidth(292)
         self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.settings_section_nav_scroll.setWidget(nav_panel)
-        self.settings_section_nav_scroll.hide()
+        self.settings_section_nav_scroll.setVisible(True)
 
         self.sections_stack = QStackedWidget()
         self.sections_stack.setMinimumWidth(0)
@@ -2470,6 +2483,7 @@ class SettingsTab(QWidget):
         self.sections_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sections_stack.currentChanged.connect(lambda _idx: self._sync_current_section_scroll_size())
         self.sections_scroll.setWidget(self.sections_stack)
+        sections_row.addWidget(self.settings_section_nav_scroll, 0)
         sections_row.addWidget(self.sections_scroll, 1)
         main_layout.addLayout(sections_row, 1)
 
@@ -3771,21 +3785,92 @@ class SettingsTab(QWidget):
         ops_group.setLayout(ops_layout)
         add_row = QHBoxLayout()
         self.add_group_btn = QPushButton("Add Group")
-        self.add_group_btn.clicked.connect(self._add_operating_group)
-        self.edit_group_btn = QPushButton("Edit Selected")
-        self.edit_group_btn.clicked.connect(self._edit_operating_group)
-        self.delete_group_btn = QPushButton("Delete Selected")
+        self.add_group_btn.clicked.connect(self._add_operating_group_inline)
+        self.edit_group_btn = QPushButton("Focus Editor")
+        self.edit_group_btn.clicked.connect(self._focus_operating_group_editor)
+        self.edit_group_btn.setVisible(False)
+        self.delete_group_btn = QPushButton("Delete Configuration")
         self.delete_group_btn.clicked.connect(self._delete_operating_groups)
         add_row.addStretch()
         add_row.addWidget(self.add_group_btn)
-        add_row.addWidget(self.edit_group_btn)
         add_row.addWidget(self.delete_group_btn)
         ops_layout.addLayout(add_row)
         cond_scope_hint = QLabel(
-            "Condition Levels are group-scoped: changing one row applies to all rows for that Group."
+            "Select one group, then review or edit the frequency configurations associated with it."
         )
         cond_scope_hint.setWordWrap(True)
         ops_layout.addWidget(cond_scope_hint)
+
+        known_group_box = QGroupBox("Known Groups from Net Resources")
+        known_group_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        known_group_layout = QGridLayout(known_group_box)
+        known_group_layout.setContentsMargins(8, 8, 8, 8)
+        known_group_layout.setHorizontalSpacing(8)
+        known_group_layout.setVerticalSpacing(4)
+        self.known_op_group_combo = QComboBox()
+        self.known_op_group_combo.setObjectName("knownOperatingGroupCombo")
+        self.known_op_group_combo.setEditable(True)
+        self.known_op_group_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.known_op_group_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.known_op_group_combo.currentIndexChanged.connect(self._on_known_operating_group_changed)
+        self.wefax_station_label = QLabel("WEFAX Station")
+        self.wefax_station_label.setVisible(False)
+        self.wefax_station_combo = QComboBox()
+        self.wefax_station_combo.setObjectName("wefaxStationOverrideCombo")
+        self.wefax_station_combo.addItem("Auto WEFAX station", "")
+        for station in WEFAX_STATIONS:
+            self.wefax_station_combo.addItem(
+                f"{station.get('name', '')} ({station.get('call', '')})",
+                str(station.get("call", "") or "").upper(),
+            )
+        self.wefax_station_combo.currentIndexChanged.connect(self._on_wefax_station_override_changed)
+        self.wefax_station_combo.setVisible(False)
+        self.view_known_group_freqs_btn = QPushButton("View Frequencies")
+        self.view_known_group_freqs_btn.clicked.connect(self._view_known_operating_group_frequencies)
+        self.enable_known_group_btn = QPushButton("Enable Group")
+        self.enable_known_group_btn.clicked.connect(self._toggle_known_operating_group)
+        self.known_op_group_preview_label = QLabel("Known groups will appear from SitRepNet HF net resources.")
+        self.known_op_group_preview_label.setObjectName("knownOperatingGroupPreview")
+        self.known_op_group_preview_label.setWordWrap(True)
+        known_group_layout.addWidget(QLabel("Known Group"), 0, 0)
+        known_group_layout.addWidget(self.known_op_group_combo, 0, 1)
+        known_group_layout.addWidget(self.view_known_group_freqs_btn, 0, 2)
+        known_group_layout.addWidget(self.enable_known_group_btn, 0, 3)
+        known_group_layout.addWidget(self.wefax_station_label, 1, 0)
+        known_group_layout.addWidget(self.wefax_station_combo, 1, 1, 1, 3)
+        known_group_layout.addWidget(self.known_op_group_preview_label, 2, 0, 1, 4)
+        known_group_layout.setColumnStretch(1, 1)
+        ops_layout.addWidget(known_group_box)
+
+        op_groups_browser_layout = QVBoxLayout()
+        op_groups_browser_layout.setSpacing(10)
+        op_group_list_box = QGroupBox("Groups")
+        op_group_list_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        op_group_list_box.setMaximumHeight(96)
+        op_group_list_layout = QVBoxLayout(op_group_list_box)
+        op_group_list_layout.setContentsMargins(8, 8, 8, 6)
+        self.op_group_list = QListWidget()
+        self.op_group_list.setObjectName("hfOperatingGroupList")
+        self.op_group_list.setFlow(QListWidget.LeftToRight)
+        self.op_group_list.setWrapping(False)
+        self.op_group_list.setResizeMode(QListWidget.Adjust)
+        self.op_group_list.setMovement(QListWidget.Static)
+        self.op_group_list.setUniformItemSizes(False)
+        self.op_group_list.setMinimumHeight(42)
+        self.op_group_list.setMaximumHeight(54)
+        self.op_group_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.op_group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.op_group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.op_group_list.currentRowChanged.connect(lambda _row: self._on_operating_group_selected())
+        self._refresh_op_group_selector_style()
+        op_group_list_layout.addWidget(self.op_group_list)
+        op_groups_browser_layout.addWidget(op_group_list_box)
+
+        op_configs_box = QGroupBox("Group Configurations")
+        op_configs_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        op_configs_layout = QVBoxLayout(op_configs_box)
+        op_configs_layout.setContentsMargins(8, 8, 8, 8)
+        op_configs_layout.setSpacing(6)
         self.op_groups_table = QTableWidget(0, 10)
         self.op_groups_table.setHorizontalHeaderLabels(
             [
@@ -3793,7 +3878,7 @@ class SettingsTab(QWidget):
                 "Group",
                 "Mode",
                 "Band",
-                "Freq (MHz)",
+                "Freq (MHz.kHz.Hz)",
                 "VFO",
                 "FLDigi Starting Mode",
                 "FLDigi Offset",
@@ -3803,6 +3888,10 @@ class SettingsTab(QWidget):
         )
         header = self.op_groups_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.Interactive)
         header.setSectionResizeMode(7, QHeaderView.Interactive)
@@ -3814,11 +3903,92 @@ class SettingsTab(QWidget):
         self.op_groups_table.setColumnWidth(7, 130)
         self.op_groups_table.setColumnWidth(8, 110)
         self.op_groups_table.setColumnWidth(9, 180)
+        for hidden_col in (1, 5, 6, 7, 8, 9):
+            self.op_groups_table.setColumnHidden(hidden_col, True)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.op_groups_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.op_groups_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.op_groups_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        ops_layout.addWidget(self.op_groups_table)
+        self.op_groups_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.op_groups_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.op_groups_table.currentCellChanged.connect(
+            lambda _r, _c, _pr, _pc: self._refresh_op_group_detail_panel()
+        )
+        self.op_groups_table.cellClicked.connect(lambda _r, _c: self._refresh_op_group_detail_panel())
+        op_configs_layout.addWidget(self.op_groups_table)
+
+        self.op_group_detail_card = QGroupBox("Selected Group")
+        self.op_group_detail_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        op_group_detail_layout = QGridLayout(self.op_group_detail_card)
+        op_group_detail_layout.setContentsMargins(10, 8, 10, 10)
+        op_group_detail_layout.setHorizontalSpacing(10)
+        op_group_detail_layout.setVerticalSpacing(3)
+        self.op_group_detail_summary_label = QLabel("Select a configuration row to review VFO, FLDigi, auto-tune, and condition-level details.")
+        self.op_group_detail_summary_label.setWordWrap(True)
+        self.op_group_detail_vfo_label = QLabel("--")
+        self.op_group_detail_vfo_label.setWordWrap(True)
+        self.op_group_detail_fldigi_label = QLabel("--")
+        self.op_group_detail_fldigi_label.setWordWrap(True)
+        self.op_group_detail_auto_label = QLabel("--")
+        self.op_group_detail_auto_label.setWordWrap(True)
+        self.op_group_detail_condition_label = QLabel("--")
+        self.op_group_detail_condition_label.setWordWrap(True)
+        self.op_group_name_edit = QLineEdit()
+        self.op_group_mode_combo = QComboBox()
+        self.op_group_mode_combo.addItems(["Digi", "SSB"])
+        self.op_group_band_combo = QComboBox()
+        self.op_group_band_combo.addItems([
+            "160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M", "2M",
+            "2MHZ", "4MHZ", "6MHZ", "8MHZ", "9MHZ", "10MHZ", "11MHZ", "12MHZ", "13MHZ", "16MHZ", "17MHZ", "23MHZ",
+        ])
+        self.op_group_freq_edit = QLineEdit()
+        self.op_group_freq_edit.setPlaceholderText("e.g., 14.115.000")
+        self.op_group_vfo_combo = QComboBox()
+        self.op_group_vfo_combo.addItems(["A", "B"])
+        self.op_group_fldigi_mode_combo = QComboBox()
+        self.op_group_fldigi_mode_combo.setEditable(True)
+        self.op_group_fldigi_mode_combo.addItems(FLDIGI_MODE_OPTIONS)
+        self.op_group_fldigi_mode_combo.setInsertPolicy(QComboBox.NoInsert)
+        op_fldigi_completer = QCompleter(FLDIGI_MODE_OPTIONS, self.op_group_fldigi_mode_combo)
+        op_fldigi_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        op_fldigi_completer.setFilterMode(Qt.MatchContains)
+        self.op_group_fldigi_mode_combo.setCompleter(op_fldigi_completer)
+        self.op_group_fldigi_offset_edit = QLineEdit()
+        self.op_group_fldigi_offset_edit.setValidator(QIntValidator(0, 99999, self.op_group_fldigi_offset_edit))
+        self.op_group_auto_tune_chk = QCheckBox("Auto-Tune on QSY")
+        self.op_group_condition_levels_chk = QCheckBox("Use Condition Levels")
+        self.op_group_add_config_btn = QPushButton("Add Configuration")
+        self.op_group_add_config_btn.clicked.connect(self._add_operating_group_inline)
+        self.op_group_save_btn = QPushButton("Save Changes")
+        self.op_group_save_btn.clicked.connect(self._save_operating_group_editor)
+        op_group_detail_layout.addWidget(self.op_group_detail_summary_label, 0, 0, 1, 4)
+        op_group_detail_layout.addWidget(QLabel("Group"), 1, 0)
+        op_group_detail_layout.addWidget(self.op_group_name_edit, 1, 1)
+        op_group_detail_layout.addWidget(QLabel("Mode"), 1, 2)
+        op_group_detail_layout.addWidget(self.op_group_mode_combo, 1, 3)
+        op_group_detail_layout.addWidget(QLabel("Band"), 2, 0)
+        op_group_detail_layout.addWidget(self.op_group_band_combo, 2, 1)
+        op_group_detail_layout.addWidget(QLabel("Frequency"), 2, 2)
+        op_group_detail_layout.addWidget(self.op_group_freq_edit, 2, 3)
+        op_group_detail_layout.addWidget(QLabel("VFO"), 3, 0)
+        op_group_detail_layout.addWidget(self.op_group_vfo_combo, 3, 1)
+        op_group_detail_layout.addWidget(QLabel("FLDigi"), 3, 2)
+        op_group_detail_layout.addWidget(self.op_group_fldigi_mode_combo, 3, 3)
+        op_group_detail_layout.addWidget(QLabel("Offset"), 4, 0)
+        op_group_detail_layout.addWidget(self.op_group_fldigi_offset_edit, 4, 1)
+        op_group_detail_layout.addWidget(self.op_group_auto_tune_chk, 4, 2)
+        op_group_detail_layout.addWidget(self.op_group_condition_levels_chk, 4, 3)
+        editor_actions = QHBoxLayout()
+        editor_actions.addStretch()
+        editor_actions.addWidget(self.op_group_add_config_btn)
+        editor_actions.addWidget(self.op_group_save_btn)
+        op_group_detail_layout.addLayout(editor_actions, 5, 0, 1, 4)
+        op_group_detail_layout.setColumnStretch(1, 1)
+        op_group_detail_layout.setColumnStretch(3, 1)
+        op_configs_layout.addWidget(self.op_group_detail_card)
+        op_groups_browser_layout.addWidget(op_configs_box)
+        ops_layout.addLayout(op_groups_browser_layout)
         ops_container = QWidget()
         ops_container.setLayout(ops_layout)
         ops_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -3849,17 +4019,44 @@ class SettingsTab(QWidget):
         local_hint.setWordWrap(True)
         local_layout.addWidget(local_hint)
         local_row = QHBoxLayout()
-        self.add_local_net_btn = QPushButton("Add Profile")
-        self.add_local_net_btn.clicked.connect(self._add_local_net_profile)
-        self.edit_local_net_btn = QPushButton("Edit Selected")
-        self.edit_local_net_btn.clicked.connect(self._edit_local_net_profile)
-        self.delete_local_net_btn = QPushButton("Delete Selected")
+        self.local_net_group_combo = QComboBox()
+        self.local_net_group_combo.setObjectName("localCommsGroupCombo")
+        self.local_net_group_combo.setEditable(True)
+        self.local_net_group_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.local_net_group_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.local_net_group_combo.currentIndexChanged.connect(self._on_local_net_group_combo_changed)
+        self.local_net_group_action_btn = QPushButton("Enable Group")
+        self.local_net_group_action_btn.clicked.connect(self._toggle_local_net_group)
+        self.add_local_net_btn = QPushButton("Add Configuration")
+        self.add_local_net_btn.clicked.connect(self._add_local_net_profile_inline)
+        self.edit_local_net_btn = QPushButton("Focus Editor")
+        self.edit_local_net_btn.clicked.connect(self._focus_local_net_editor)
+        self.edit_local_net_btn.setVisible(False)
+        self.delete_local_net_btn = QPushButton("Delete Configuration")
         self.delete_local_net_btn.clicked.connect(self._delete_local_net_profiles)
-        local_row.addStretch()
+        local_row.addWidget(QLabel("Local Group"))
+        local_row.addWidget(self.local_net_group_combo, 1)
+        local_row.addWidget(self.local_net_group_action_btn)
         local_row.addWidget(self.add_local_net_btn)
-        local_row.addWidget(self.edit_local_net_btn)
         local_row.addWidget(self.delete_local_net_btn)
         local_layout.addLayout(local_row)
+
+        self.local_net_group_list = QListWidget()
+        self.local_net_group_list.setObjectName("localCommsGroupList")
+        self.local_net_group_list.setFlow(QListWidget.LeftToRight)
+        self.local_net_group_list.setWrapping(False)
+        self.local_net_group_list.setResizeMode(QListWidget.Adjust)
+        self.local_net_group_list.setMovement(QListWidget.Static)
+        self.local_net_group_list.setUniformItemSizes(False)
+        self.local_net_group_list.setMinimumHeight(42)
+        self.local_net_group_list.setMaximumHeight(54)
+        self.local_net_group_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.local_net_group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.local_net_group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.local_net_group_list.currentRowChanged.connect(lambda _row: self._on_local_net_group_selected())
+        self._refresh_local_net_group_selector_style()
+        local_layout.addWidget(self.local_net_group_list)
+
         self.local_net_table = QTableWidget(0, 6)
         self.local_net_table.setHorizontalHeaderLabels(
             [
@@ -3880,10 +4077,61 @@ class SettingsTab(QWidget):
         local_header.setSectionResizeMode(5, QHeaderView.Stretch)
         self.local_net_table.verticalHeader().setVisible(False)
         self.local_net_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.local_net_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.local_net_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.local_net_table.currentCellChanged.connect(
+            lambda _r, _c, _pr, _pc: self._refresh_local_net_editor()
+        )
+        self.local_net_table.cellClicked.connect(lambda _r, _c: self._refresh_local_net_editor())
         self.local_net_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         self.local_net_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.local_net_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         local_layout.addWidget(self.local_net_table)
+
+        self.local_net_detail_card = QGroupBox("Selected Local Configuration")
+        self.local_net_detail_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        local_detail_layout = QGridLayout(self.local_net_detail_card)
+        local_detail_layout.setContentsMargins(10, 8, 10, 10)
+        local_detail_layout.setHorizontalSpacing(10)
+        local_detail_layout.setVerticalSpacing(4)
+        self.local_net_summary_label = QLabel("Select or create a local group configuration.")
+        self.local_net_summary_label.setWordWrap(True)
+        self.local_net_group_edit = QLineEdit()
+        self.local_net_resource_combo = QComboBox()
+        self.local_net_resource_combo.setEditable(True)
+        self.local_net_resource_combo.addItems(LOCAL_NET_RESOURCE_OPTIONS)
+        self.local_net_resource_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.local_net_mode_combo = QComboBox()
+        self.local_net_mode_combo.setEditable(True)
+        self.local_net_mode_combo.addItems(["Voice", "Data", "Mixed", "FM", "Digital"])
+        self.local_net_target_edit = QLineEdit()
+        self.local_net_target_edit.setPlaceholderText("e.g., 146.520, Ch 16, repeater pair/tone")
+        self.local_net_notes_edit = QPlainTextEdit()
+        self.local_net_notes_edit.setPlaceholderText("Optional notes for SOP reminder context")
+        self.local_net_notes_edit.setMinimumHeight(88)
+        self.local_net_add_config_btn = QPushButton("Add Configuration")
+        self.local_net_add_config_btn.clicked.connect(self._add_local_net_profile_inline)
+        self.local_net_save_btn = QPushButton("Save Changes")
+        self.local_net_save_btn.clicked.connect(self._save_local_net_editor)
+        local_detail_layout.addWidget(self.local_net_summary_label, 0, 0, 1, 4)
+        local_detail_layout.addWidget(QLabel("Group"), 1, 0)
+        local_detail_layout.addWidget(self.local_net_group_edit, 1, 1)
+        local_detail_layout.addWidget(QLabel("Resource"), 1, 2)
+        local_detail_layout.addWidget(self.local_net_resource_combo, 1, 3)
+        local_detail_layout.addWidget(QLabel("Mode"), 2, 0)
+        local_detail_layout.addWidget(self.local_net_mode_combo, 2, 1)
+        local_detail_layout.addWidget(QLabel("Target"), 2, 2)
+        local_detail_layout.addWidget(self.local_net_target_edit, 2, 3)
+        local_detail_layout.addWidget(QLabel("Notes"), 3, 0, Qt.AlignTop)
+        local_detail_layout.addWidget(self.local_net_notes_edit, 3, 1, 1, 3)
+        local_editor_actions = QHBoxLayout()
+        local_editor_actions.addStretch()
+        local_editor_actions.addWidget(self.local_net_add_config_btn)
+        local_editor_actions.addWidget(self.local_net_save_btn)
+        local_detail_layout.addLayout(local_editor_actions, 4, 0, 1, 4)
+        local_detail_layout.setColumnStretch(1, 1)
+        local_detail_layout.setColumnStretch(3, 1)
+        local_layout.addWidget(self.local_net_detail_card)
         local_container = QWidget()
         local_container.setLayout(local_layout)
         local_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -5817,9 +6065,14 @@ class SettingsTab(QWidget):
         header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         header_btn.setMinimumHeight(28)
         header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
+        page_title_label = QLabel(title)
+        page_title_label.setObjectName("settingsSectionPageTitle")
+        page_title_label.setStyleSheet("font-weight: bold;")
+        page_title_label.setVisible(False)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(page_title_label, 1)
         header_row.addWidget(header_btn, 1)
         if help_context_key:
             header_row.addWidget(
@@ -5843,6 +6096,7 @@ class SettingsTab(QWidget):
             "fit_content_in_stack": bool(fit_content_in_stack),
             "title": title,
             "header_btn": header_btn,
+            "page_title_label": page_title_label,
             "content": content,
             "help_context_key": str(help_context_key or "").strip().lower(),
         }
@@ -5872,6 +6126,8 @@ class SettingsTab(QWidget):
         self._section_meta[group] = meta
         self.sections_stack.addWidget(group)
         btn = QPushButton(title)
+        btn.setObjectName("settingsSectionNavButton")
+        btn.setProperty("settings_scope", normalized_scope)
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn.setMinimumHeight(30)
         btn.setAccessibleName(f"Settings navigation: {title}")
@@ -5891,12 +6147,38 @@ class SettingsTab(QWidget):
             self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)
         content = meta.get("content")
         header_btn = meta.get("header_btn")
+        if isinstance(header_btn, QToolButton):
+            header_btn.setVisible(False)
+            header_btn.setEnabled(False)
+        page_title_label = meta.get("page_title_label")
+        if isinstance(page_title_label, QLabel):
+            page_title_label.setText(title)
+            page_title_label.setVisible(True)
         if isinstance(content, QWidget):
             expanded = bool(header_btn.isChecked()) if header_btn else True
             self._apply_collapsed_state(group, content, expanded)
         self._apply_settings_nav_scope_visibility()
         self._refresh_settings_nav_button_styles()
+        self._refresh_settings_nav_scroll_size()
         self._update_sections_nav_size()
+
+    def _refresh_settings_nav_scroll_size(self) -> None:
+        scroll = getattr(self, "settings_section_nav_scroll", None)
+        panel = scroll.widget() if isinstance(scroll, QScrollArea) else None
+        layout = panel.layout() if panel is not None else None
+
+        for btn in getattr(self, "_section_nav_buttons", {}).values():
+            if isinstance(btn, QPushButton):
+                btn.setMinimumHeight(max(30, int(btn.sizeHint().height())))
+        for btn in (
+            getattr(self, "global_settings_toggle_btn", None),
+            getattr(self, "radio_settings_toggle_btn", None),
+        ):
+            if isinstance(btn, QToolButton):
+                btn.setMinimumHeight(max(30, int(btn.sizeHint().height())))
+
+        if panel is not None and layout is not None:
+            panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))
 
     def _add_radio_profile_guided_task_button(
         self,
@@ -6292,8 +6574,13 @@ class SettingsTab(QWidget):
         self._refreshing_settings_section_combo = True
         try:
             combo.clear()
+            context = str(getattr(self, "_settings_nav_context", "main") or "main").strip().lower()
+            desired_scope = "radio" if context in {"radio", "radios"} else "global"
             for group, meta in self._section_meta.items():
                 if not bool(meta.get("section_visible", True)):
+                    continue
+                scope = str(meta.get("scope", "radio") or "radio").strip().lower()
+                if scope != desired_scope:
                     continue
                 stack_index = self.sections_stack.indexOf(group)
                 if stack_index < 0:
@@ -6334,6 +6621,7 @@ class SettingsTab(QWidget):
             self.global_section_buttons_widget.setVisible(bool(checked))
         self._apply_settings_nav_scope_visibility()
         self._refresh_settings_nav_button_styles()
+        self._refresh_settings_nav_scroll_size()
 
     def _on_radio_settings_toggle(self, checked: bool) -> None:
         self._radio_settings_nav_collapsed = not bool(checked)
@@ -6349,6 +6637,7 @@ class SettingsTab(QWidget):
             self.radio_section_buttons_widget.setVisible(bool(checked))
         self._apply_settings_nav_scope_visibility()
         self._refresh_settings_nav_button_styles()
+        self._refresh_settings_nav_scroll_size()
 
     def _current_settings_section_scope(self) -> str:
         current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
@@ -6364,6 +6653,7 @@ class SettingsTab(QWidget):
         radio_id: int | None = None,
     ) -> bool:
         scope = "global" if str(context or "").strip().lower() in {"main", "global"} else "radio"
+        self._settings_nav_context = "main" if scope == "global" else "radios"
         if scope == "global":
             if hasattr(self, "global_settings_toggle_btn"):
                 self.global_settings_toggle_btn.setChecked(True)
@@ -6413,8 +6703,18 @@ class SettingsTab(QWidget):
     def _apply_settings_nav_scope_visibility(self) -> None:
         if not hasattr(self, "sections_nav_list"):
             return
-        hide_global = bool(self._global_settings_nav_collapsed)
-        hide_radio = bool(self._radio_settings_nav_collapsed)
+        context = str(getattr(self, "_settings_nav_context", "main") or "main").strip().lower()
+        radio_context = context in {"radio", "radios"}
+        hide_global = radio_context
+        hide_radio = not radio_context
+        if hasattr(self, "global_settings_toggle_btn"):
+            self.global_settings_toggle_btn.setVisible(False)
+        if hasattr(self, "radio_settings_toggle_btn"):
+            self.radio_settings_toggle_btn.setVisible(False)
+        if hasattr(self, "global_section_buttons_widget"):
+            self.global_section_buttons_widget.setVisible(not hide_global)
+        if hasattr(self, "radio_section_buttons_widget"):
+            self.radio_section_buttons_widget.setVisible(not hide_radio)
         for group, item in self._section_nav_items.items():
             if item is None:
                 continue
@@ -6445,6 +6745,7 @@ class SettingsTab(QWidget):
             self._select_first_visible_settings_section()
         self._update_sections_nav_size()
         self._refresh_settings_section_combo()
+        self._refresh_settings_nav_scroll_size()
 
     def _refresh_settings_nav_button_styles(self) -> None:
         theme = resolve_theme(self.settings)
@@ -6470,6 +6771,7 @@ class SettingsTab(QWidget):
             self.radio_settings_toggle_btn.setStyleSheet(
                 self._settings_nav_button_style(self._settings_nav_group_toggle_role("radio"), theme)
             )
+        self._refresh_settings_nav_scroll_size()
 
     def _settings_nav_group_toggle_role(self, scope: str) -> str:
         normalized = str(scope or "").strip().lower()
@@ -6796,6 +7098,9 @@ class SettingsTab(QWidget):
                 header_btn = meta.get("header_btn")
                 if header_btn and header_btn.text() != base:
                     header_btn.setText(base)
+                page_title_label = meta.get("page_title_label")
+                if isinstance(page_title_label, QLabel) and page_title_label.text() != base:
+                    page_title_label.setText(base)
                 nav_item = self._section_nav_items.get(group)
                 if nav_item:
                     if nav_item.text() != base:
@@ -8135,6 +8440,7 @@ class SettingsTab(QWidget):
         self.name_edit.setText(data.get("operator_name", "") or "")
         self.state_edit.setText(data.get("operator_state", "") or "")
         self.grid6_edit.setText(data.get("operator_grid6", "") or "")
+        self._set_wefax_station_override_combo(data.get("wefax_station_override", ""))
 
         # Timezone: prefer stored; otherwise detect from system clock
         tz = data.get("timezone")
@@ -8419,6 +8725,7 @@ class SettingsTab(QWidget):
                     )
         except Exception:
             self.operating_groups = []
+        self._load_known_operating_group_catalog()
         self._refresh_operating_groups_table()
 
         # Load local net profiles (SOP local-net reminder metadata only).
@@ -8541,6 +8848,7 @@ class SettingsTab(QWidget):
         data["operator_state"] = self.state_edit.text().strip()
         data["operator_grid6"] = self.grid6_edit.text().strip().upper()
         data["operator_grid6"] = self.grid6_edit.text().strip().upper()
+        data["wefax_station_override"] = self._current_wefax_station_override()
         operator_changed = (
             prev_operator["callsign"] != str(data["operator_callsign"]).strip().upper()
             or prev_operator["name"] != str(data["operator_name"]).strip()
@@ -8963,6 +9271,7 @@ class SettingsTab(QWidget):
                 "operator_name": data["operator_name"],
                 "operator_state": data["operator_state"],
                 "operator_grid6": data["operator_grid6"],
+                "wefax_station_override": data.get("wefax_station_override", ""),
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "log_level": data.get("log_level", "DISABLED"),
@@ -9008,6 +9317,7 @@ class SettingsTab(QWidget):
             self.settings.set("operator_name", data["operator_name"])
             self.settings.set("operator_state", data["operator_state"])
             self.settings.set("operator_grid6", data["operator_grid6"])
+            self.settings.set("wefax_station_override", data.get("wefax_station_override", ""))
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("log_level", data.get("log_level", "DISABLED"))
@@ -10364,9 +10674,10 @@ class SettingsTab(QWidget):
         if isinstance(profile, dict):
             text = f"{self._profile_display_name(profile)} Settings"
         else:
-            text = "Selected Radio"
+            text = "Radio Settings"
         self.radio_settings_toggle_btn.setText(text)
         self._refresh_settings_section_combo()
+        self._refresh_settings_nav_scroll_size()
 
     @staticmethod
     def _fit_table_height_to_rows(table: QTableWidget, *, min_rows: int = 1, max_rows: int = 8, extra_rows: int = 1) -> None:
@@ -15383,7 +15694,11 @@ class SettingsTab(QWidget):
             log.exception("Failed loading frequency plans for schedule assignment editor.")
             self.frequency_plans = []
         enabled_plans = [
-            row for row in self.frequency_plans if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1
+            row
+            for row in self.frequency_plans
+            if isinstance(row, dict)
+            and int(row.get("enabled", 1) or 0) == 1
+            and str(row.get("category") or "").strip().lower() not in SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES
         ]
         if not enabled_plans:
             self._set_schedule_assignment_guidance(
@@ -19539,14 +19854,15 @@ class SettingsTab(QWidget):
 
         band_combo = QComboBox()
         band_combo.addItems([
-            "20M", "40M", "80M", "2M", "6M", "10M", "12M", "15M", "17M", "30M", "60M",
+            "160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M", "2M",
+            "2MHZ", "4MHZ", "6MHZ", "8MHZ", "9MHZ", "10MHZ", "11MHZ", "12MHZ", "13MHZ", "16MHZ", "17MHZ", "23MHZ",
         ])
         band_combo.setMinimumWidth(110)
         band_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         form.addRow("Band:", band_combo)
 
         freq_edit = QLineEdit()
-        freq_edit.setPlaceholderText("e.g., 7.115")
+        freq_edit.setPlaceholderText("e.g., 7.115.000")
         form.addRow("Frequency (MHz):", freq_edit)
 
         vfo_combo = QComboBox()
@@ -19640,7 +19956,10 @@ class SettingsTab(QWidget):
             if not self._validate_band_frequency(band, mode, freq_txt):
                 QMessageBox.warning(self, "Validation", f"Frequency {freq_txt} invalid for {band} {mode}.")
                 return
-            freq_val = float(freq_txt.replace(",", "."))
+            freq_val = self._parse_freq_mhz(freq_txt)
+            if freq_val is None:
+                QMessageBox.warning(self, "Validation", f"Frequency {freq_txt} invalid for {band} {mode}.")
+                return
             offset_txt = fldigi_offset_edit.text().strip()
             if offset_txt:
                 try:
@@ -19654,7 +19973,7 @@ class SettingsTab(QWidget):
                 name,
                 mode,
                 band,
-                f"{freq_val:.3f}",
+                self._format_freq_storage(freq_val),
                 auto_tune=auto_tune_chk.isChecked(),
                 vfo=vfo,
                 fldigi_mode=fldigi_mode,
@@ -19668,9 +19987,8 @@ class SettingsTab(QWidget):
         dlg.exec()
 
     def _validate_band_frequency(self, band: str, mode: str, freq_txt: str) -> bool:
-        try:
-            freq = float(freq_txt.replace(",", "."))
-        except Exception:
+        freq = self._parse_freq_mhz(freq_txt)
+        if freq is None:
             return False
         band = str(band or "").strip().upper()
         mode = normalize_operating_group_mode(mode, band)
@@ -19680,6 +19998,8 @@ class SettingsTab(QWidget):
         limits = {
             ("20M", "Digi"): (14.000, 14.150),
             ("20M", "SSB"): (14.150, 14.350),
+            ("160M", "Digi"): (1.800, 2.000),
+            ("160M", "SSB"): (1.800, 2.000),
             ("40M", "Digi"): (7.000, 7.125),
             ("40M", "SSB"): (7.125, 7.300),
             ("80M", "Digi"): (3.500, 3.600),
@@ -19700,6 +20020,30 @@ class SettingsTab(QWidget):
             ("30M", "SSB"): (10.100, 10.150),
             ("60M", "Digi"): (5.332, 5.405),
             ("60M", "SSB"): (5.332, 5.405),
+            ("2MHZ", "Digi"): (2.000, 2.500),
+            ("2MHZ", "SSB"): (2.000, 2.500),
+            ("4MHZ", "Digi"): (4.000, 4.500),
+            ("4MHZ", "SSB"): (4.000, 4.500),
+            ("6MHZ", "Digi"): (6.000, 6.500),
+            ("6MHZ", "SSB"): (6.000, 6.500),
+            ("8MHZ", "Digi"): (8.000, 8.900),
+            ("8MHZ", "SSB"): (8.000, 8.900),
+            ("9MHZ", "Digi"): (8.000, 10.000),
+            ("9MHZ", "SSB"): (8.000, 10.000),
+            ("10MHZ", "Digi"): (9.000, 10.000),
+            ("10MHZ", "SSB"): (9.000, 10.000),
+            ("11MHZ", "Digi"): (11.000, 11.500),
+            ("11MHZ", "SSB"): (11.000, 11.500),
+            ("12MHZ", "Digi"): (12.000, 13.000),
+            ("12MHZ", "SSB"): (12.000, 13.000),
+            ("13MHZ", "Digi"): (12.000, 13.000),
+            ("13MHZ", "SSB"): (12.000, 13.000),
+            ("16MHZ", "Digi"): (16.000, 16.500),
+            ("16MHZ", "SSB"): (16.000, 16.500),
+            ("17MHZ", "Digi"): (17.000, 17.500),
+            ("17MHZ", "SSB"): (17.000, 17.500),
+            ("23MHZ", "Digi"): (22.000, 23.000),
+            ("23MHZ", "SSB"): (22.000, 23.000),
         }
         key = (band, mode)
         if key not in limits:
@@ -19707,11 +20051,38 @@ class SettingsTab(QWidget):
         lo, hi = limits[key]
         return lo <= freq <= hi
 
-    def _format_freq(self, val) -> str:
+    @staticmethod
+    def _parse_freq_mhz(val) -> float | None:
+        text = str(val or "").strip().replace(",", ".")
+        if not text:
+            return None
+        parts = text.split(".")
         try:
-            return f"{float(val):.3f}"
+            if len(parts) == 3 and all(part.strip().isdigit() for part in parts):
+                mhz = int(parts[0])
+                khz = int((parts[1] + "000")[:3])
+                hz = int((parts[2] + "000")[:3])
+                return mhz + ((khz * 1000) + hz) / 1_000_000.0
+            return float(text)
         except Exception:
+            return None
+
+    def _format_freq(self, val) -> str:
+        freq = self._parse_freq_mhz(val)
+        if freq is None:
             return str(val) if val is not None else ""
+        total_hz = max(0, int(round(freq * 1_000_000)))
+        mhz = total_hz // 1_000_000
+        remainder = total_hz % 1_000_000
+        khz = remainder // 1000
+        hz = remainder % 1000
+        return f"{mhz}.{khz:03d}.{hz:03d}"
+
+    def _format_freq_storage(self, val) -> str:
+        freq = self._parse_freq_mhz(val)
+        if freq is None:
+            return str(val) if val is not None else ""
+        return f"{freq:.6f}"
 
     def _upsert_operating_group(
         self,
@@ -19730,7 +20101,7 @@ class SettingsTab(QWidget):
         name = name.strip().upper()
         band = str(band or "").strip().upper()
         mode = normalize_operating_group_mode(mode, band)
-        freq_display = self._format_freq(freq_mhz)
+        freq_display = self._format_freq_storage(freq_mhz)
         cond_level: int | None
         if condition_level is None:
             cond_level = None
@@ -19788,6 +20159,382 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed to persist Operating Group; will remain in-memory only.")
 
+    def _load_known_operating_group_catalog(self) -> None:
+        try:
+            station_grid6 = ""
+            station_state = ""
+            if hasattr(self, "grid6_edit"):
+                station_grid6 = self.grid6_edit.text().strip().upper()
+            if not station_grid6:
+                station_grid6 = str(self.settings.get("operator_grid6", "") or "").strip().upper()
+            if hasattr(self, "state_edit"):
+                station_state = self.state_edit.text().strip().upper()
+            if not station_state:
+                station_state = str(self.settings.get("operator_state", "") or "").strip().upper()
+            timezone_name = str(self.settings.get("timezone", "") or "").strip()
+            wefax_station_override = self._current_wefax_station_override()
+            self.known_operating_group_catalog = load_known_operating_group_catalog(
+                station_grid6=station_grid6,
+                station_state=station_state,
+                timezone_name=timezone_name,
+                wefax_station_override=wefax_station_override,
+            )
+        except Exception:
+            log.exception("Failed loading known operating groups from net resources.")
+            self.known_operating_group_catalog = []
+        self._refresh_known_operating_group_combo()
+
+    def _current_wefax_station_override(self) -> str:
+        combo = getattr(self, "wefax_station_combo", None)
+        if isinstance(combo, QComboBox):
+            data = combo.currentData()
+            return str(data or "").strip().upper()
+        return str(self.settings.get("wefax_station_override", "") or "").strip().upper()
+
+    def _set_wefax_station_override_combo(self, value: object) -> None:
+        combo = getattr(self, "wefax_station_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        target = str(value or "").strip().upper()
+        combo.blockSignals(True)
+        try:
+            index = combo.findData(target)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_wefax_station_override_changed(self, _idx: int) -> None:
+        override = self._current_wefax_station_override()
+        try:
+            self.settings.set("wefax_station_override", override)
+        except Exception:
+            log.exception("Failed persisting WEFAX station override.")
+        self._load_known_operating_group_catalog()
+
+    def _refresh_known_operating_group_combo(self) -> None:
+        combo = getattr(self, "known_op_group_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        self._known_group_preview_all = False
+        current_group = ""
+        current_data = combo.currentData()
+        if isinstance(current_data, dict):
+            current_group = str(current_data.get("group", "") or "")
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("Select known group", None)
+            for entry in self.known_operating_group_catalog:
+                group = str(entry.get("group", "") or "").strip().upper()
+                configs = entry.get("configs", [])
+                if not group:
+                    continue
+                status = str(entry.get("status", "") or "").strip().lower()
+                if not isinstance(configs, list):
+                    configs = []
+                if status == "planned":
+                    combo.addItem(f"{group} - planned", entry)
+                    continue
+                if not configs:
+                    continue
+                bands = sorted({str(cfg.get("band", "") or "").strip().upper() for cfg in configs if cfg.get("band")})
+                label = f"{group} - {len(configs)} config" + ("" if len(configs) == 1 else "s")
+                if bands:
+                    label += f" ({', '.join(bands[:4])}{'...' if len(bands) > 4 else ''})"
+                source_note = str(entry.get("source_note", "") or "").strip()
+                if source_note.startswith("Built-in"):
+                    label += " - built-in"
+                combo.addItem(label, entry)
+            if combo.isEditable():
+                names = [
+                    str(entry.get("group", "") or "").strip().upper()
+                    for entry in self.known_operating_group_catalog
+                    if str(entry.get("group", "") or "").strip()
+                ]
+                completer = QCompleter(names, combo)
+                completer.setCaseSensitivity(Qt.CaseInsensitive)
+                completer.setFilterMode(Qt.MatchContains)
+                combo.setCompleter(completer)
+            if current_group:
+                selected = False
+                for idx in range(combo.count()):
+                    data = combo.itemData(idx)
+                    if isinstance(data, dict) and str(data.get("group", "") or "") == current_group:
+                        combo.setCurrentIndex(idx)
+                        selected = True
+                        break
+                if not selected and current_group.startswith("FLDIGI WEFAX"):
+                    for idx in range(combo.count()):
+                        data = combo.itemData(idx)
+                        if isinstance(data, dict) and str(data.get("group", "") or "").startswith("FLDIGI WEFAX"):
+                            combo.setCurrentIndex(idx)
+                            break
+        finally:
+            combo.blockSignals(False)
+        self._refresh_known_operating_group_preview()
+
+    def _on_known_operating_group_changed(self, _idx: int) -> None:
+        self._known_group_preview_all = False
+        self._refresh_known_operating_group_preview()
+
+    def _view_known_operating_group_frequencies(self) -> None:
+        self._known_group_preview_all = True
+        self._refresh_known_operating_group_preview()
+
+    def _selected_known_operating_group_entry(self) -> Dict[str, Any] | None:
+        combo = getattr(self, "known_op_group_combo", None)
+        if not isinstance(combo, QComboBox):
+            return None
+        typed = combo.currentText().strip().upper()
+        data = combo.currentData()
+        if isinstance(data, dict):
+            data_group = str(data.get("group", "") or "").strip().upper()
+            if not typed or typed == data_group or data_group in typed:
+                return data
+        if not typed:
+            return None
+        for entry in self.known_operating_group_catalog:
+            group = str(entry.get("group", "") or "").strip().upper()
+            if group == typed or typed in group:
+                return entry
+        return None
+
+    def _is_operating_group_enabled(self, group: object) -> bool:
+        group_name = str(group or "").strip().upper()
+        if not group_name:
+            return False
+        return any(
+            str(g.get("group", "")).strip().upper() == group_name
+            for g in list(self.operating_groups or [])
+        )
+
+    def _select_known_operating_group(self, group: object) -> None:
+        group_name = str(group or "").strip().upper()
+        combo = getattr(self, "known_op_group_combo", None)
+        if not group_name or not isinstance(combo, QComboBox):
+            return
+        for idx in range(combo.count()):
+            data = combo.itemData(idx)
+            if isinstance(data, dict) and str(data.get("group", "") or "").strip().upper() == group_name:
+                if combo.currentIndex() != idx:
+                    combo.setCurrentIndex(idx)
+                else:
+                    self._refresh_known_operating_group_preview()
+                return
+        if combo.isEditable():
+            combo.setCurrentIndex(-1)
+            combo.setCurrentText(group_name)
+            self._refresh_known_operating_group_preview()
+
+    def _refresh_known_operating_group_preview(self) -> None:
+        label = getattr(self, "known_op_group_preview_label", None)
+        button = getattr(self, "enable_known_group_btn", None)
+        view_button = getattr(self, "view_known_group_freqs_btn", None)
+        entry = self._selected_known_operating_group_entry()
+        configs = entry.get("configs", []) if isinstance(entry, dict) else []
+        if not isinstance(configs, list):
+            configs = []
+        status = str(entry.get("status", "") or "").strip().lower() if isinstance(entry, dict) else ""
+        group = str(entry.get("group", "") or "").strip().upper() if isinstance(entry, dict) else ""
+        if not group:
+            combo = getattr(self, "known_op_group_combo", None)
+            if isinstance(combo, QComboBox):
+                group = combo.currentText().strip().upper()
+        show_wefax_override = group.startswith("FLDIGI WEFAX")
+        wefax_label = getattr(self, "wefax_station_label", None)
+        wefax_combo = getattr(self, "wefax_station_combo", None)
+        if isinstance(wefax_label, QLabel):
+            wefax_label.setVisible(show_wefax_override)
+        if isinstance(wefax_combo, QComboBox):
+            wefax_combo.setVisible(show_wefax_override)
+        group_enabled = self._is_operating_group_enabled(group)
+        if isinstance(button, QPushButton):
+            button.setEnabled(bool((entry and configs and status != "planned") or group_enabled))
+            button.setText("Disable Group" if group_enabled else "Enable Group")
+            role = "warning" if button.isEnabled() and group_enabled else ("eligible_info" if button.isEnabled() else "muted")
+            button.setStyleSheet(button_style(role, resolve_theme(self.settings)))
+        if isinstance(view_button, QPushButton):
+            view_button.setEnabled(bool(entry and configs))
+            view_button.setStyleSheet(button_style("info" if entry and configs else "muted", resolve_theme(self.settings)))
+        if not isinstance(label, QLabel):
+            return
+        if entry and status == "planned":
+            source_note = str(entry.get("source_note", "") or "").strip()
+            label.setText(
+                source_note
+                or "This known group is planned. It needs receive-only/non-HF frequency support before it can be enabled."
+            )
+            return
+        if not entry or not configs:
+            if group_enabled and group:
+                label.setText(f"Disable {group}: this active group is enabled but is not a known preset.")
+                return
+            count = len(self.known_operating_group_catalog)
+            label.setText(
+                f"{count} known group(s) available from built-in standards and SitRepNet/net resources."
+                if count
+                else "No known net-resource groups found yet. Import or bootstrap HF Net Resources first."
+            )
+            return
+        preview_all = bool(getattr(self, "_known_group_preview_all", False))
+        shown_configs = configs if preview_all else configs[:5]
+        examples = [
+            f"{cfg.get('band', '')} {self._format_freq(cfg.get('frequency', ''))}"
+            for cfg in shown_configs
+        ]
+        more = f"; +{len(configs) - len(examples)} more" if len(configs) > len(examples) else ""
+        source_note = str(entry.get("source_note", "") or "").strip()
+        prefix = f"{source_note} " if source_note else ""
+        verb = "Disable" if group_enabled else "Enable"
+        label.setText(f"{prefix}{verb} {group}: {', '.join(examples)}{more}.")
+
+    def _toggle_known_operating_group(self) -> None:
+        entry = self._selected_known_operating_group_entry()
+        group = ""
+        combo = getattr(self, "known_op_group_combo", None)
+        if not isinstance(entry, dict):
+            if isinstance(combo, QComboBox):
+                group = combo.currentText().strip().upper()
+        else:
+            group = str(entry.get("group", "") or "").strip().upper()
+        if self._is_operating_group_enabled(group):
+            self._disable_operating_group(group)
+        elif isinstance(entry, dict):
+            self._enable_known_operating_group()
+
+    def _enable_known_operating_group(self) -> None:
+        entry = self._selected_known_operating_group_entry()
+        if not isinstance(entry, dict):
+            return
+        group = str(entry.get("group", "") or "").strip().upper()
+        status = str(entry.get("status", "") or "").strip().lower()
+        configs = entry.get("configs", [])
+        if status == "planned" or not group or not isinstance(configs, list) or not configs:
+            return
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                continue
+            band = str(cfg.get("band", "") or "").strip().upper()
+            mode = normalize_operating_group_mode(cfg.get("mode", ""), band)
+            freq = str(cfg.get("frequency", "") or "").strip()
+            if not self._validate_band_frequency(band, mode, freq):
+                continue
+            self._merge_operating_group_config(
+                group,
+                mode,
+                band,
+                freq,
+                auto_tune=False,
+                vfo=str(cfg.get("vfo", "A") or "A").strip().upper() or "A",
+                fldigi_mode=str(cfg.get("fldigi_mode", "") or "").strip(),
+                fldigi_offset=str(cfg.get("fldigi_offset", "") or "").strip(),
+                use_condition_levels=False,
+            )
+        self._refresh_operating_groups_table()
+        self._select_operating_group(group)
+        self._persist_operating_groups_quiet()
+        self._refresh_known_operating_group_preview()
+
+    def _disable_operating_group(self, group: object) -> None:
+        group_name = str(group or "").strip().upper()
+        if not group_name:
+            return
+        before = len(self.operating_groups)
+        self.operating_groups = [
+            g
+            for g in self.operating_groups
+            if str(g.get("group", "")).strip().upper() != group_name
+        ]
+        if len(self.operating_groups) == before:
+            return
+        self._op_group_editor_original_key = None
+        self._refresh_operating_groups_table()
+        self._persist_operating_groups_quiet()
+        self._refresh_known_operating_group_preview()
+
+    def _disable_selected_operating_group(self) -> None:
+        self._disable_operating_group(self._current_operating_group_name())
+
+    def _merge_operating_group_config(
+        self,
+        name: str,
+        mode: str,
+        band: str,
+        freq_mhz: Any,
+        *,
+        auto_tune: bool = False,
+        vfo: str = "A",
+        fldigi_mode: str = "",
+        fldigi_offset: str = "",
+        use_condition_levels: bool = False,
+        condition_level: int | None = None,
+    ) -> None:
+        name = str(name or "").strip().upper()
+        band = str(band or "").strip().upper()
+        mode = normalize_operating_group_mode(mode, band)
+        freq_display = self._format_freq_storage(freq_mhz)
+        vfo_val = str(vfo or "A").strip().upper()
+        if vfo_val not in ("A", "B"):
+            vfo_val = "A"
+        cond_level = 5 if condition_level is None else int(condition_level or 5)
+        if cond_level < 1 or cond_level > 5:
+            cond_level = 5
+        for g in self.operating_groups:
+            if (
+                str(g.get("group", "")).strip().upper() == name
+                and normalize_operating_group_mode(g.get("mode", ""), g.get("band", "")) == mode
+                and str(g.get("band", "")).strip().upper() == band
+            ):
+                g.update(
+                    {
+                        "frequency": freq_display,
+                        "auto_tune": bool(auto_tune),
+                        "vfo": vfo_val,
+                        "fldigi_mode": fldigi_mode,
+                        "fldigi_offset": fldigi_offset,
+                        "use_condition_levels": bool(use_condition_levels),
+                        "condition_level": cond_level,
+                    }
+                )
+                return
+        self.operating_groups.append(
+            {
+                "group": name,
+                "mode": mode,
+                "band": band,
+                "frequency": freq_display,
+                "vfo": vfo_val,
+                "fldigi_mode": fldigi_mode,
+                "fldigi_offset": fldigi_offset,
+                "auto_tune": bool(auto_tune),
+                "use_condition_levels": bool(use_condition_levels),
+                "condition_level": cond_level,
+            }
+        )
+
+    def _select_operating_group(self, group: str) -> None:
+        group_name = str(group or "").strip().upper()
+        group_list = getattr(self, "op_group_list", None)
+        if not group_name or not isinstance(group_list, QListWidget):
+            return
+        for row in range(group_list.count()):
+            item = group_list.item(row)
+            if item and str(item.data(Qt.UserRole) or item.text() or "").strip().upper() == group_name:
+                group_list.setCurrentRow(row)
+                return
+
+    def _persist_operating_groups_quiet(self) -> None:
+        try:
+            self.settings.set("operating_groups", self._table_to_operating_groups())
+            self._settings_dirty = False
+            self._set_save_button_state("success")
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
+        except Exception:
+            log.exception("Failed to persist Operating Groups.")
+
     def _refresh_operating_groups_table(self):
         _perf_t0 = time.perf_counter()
         # Sort display by Group asc, then Band asc
@@ -19810,18 +20557,71 @@ class SettingsTab(QWidget):
             key=lambda g: (str(g.get("group", "")).lower(), str(g.get("band", "")).lower()),
         )
 
+        group_list = getattr(self, "op_group_list", None)
+        selected_group = self._current_operating_group_name()
+        unique_groups = sorted(
+            {str(g.get("group", "")).strip().upper() for g in self.operating_groups if str(g.get("group", "")).strip()}
+        )
+        if isinstance(group_list, QListWidget):
+            was_blocked = group_list.blockSignals(True)
+            try:
+                group_list.clear()
+                for group_name in unique_groups:
+                    item = QListWidgetItem(group_name)
+                    item.setData(Qt.UserRole, group_name)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setSizeHint(QSize(max(110, 14 * len(group_name)), 34))
+                    group_list.addItem(item)
+                target_group = selected_group if selected_group in unique_groups else (unique_groups[0] if unique_groups else "")
+                if target_group:
+                    for row in range(group_list.count()):
+                        item = group_list.item(row)
+                        if item and str(item.data(Qt.UserRole) or "") == target_group:
+                            group_list.setCurrentRow(row)
+                            break
+            finally:
+                group_list.blockSignals(was_blocked)
+        self._select_known_operating_group(self._current_operating_group_name())
+        self._refresh_operating_group_config_table()
+        self._refresh_fit_content_section_height(getattr(self, "op_groups_section_group", None))
+        self._update_op_group_action_buttons()
+        self._refresh_section_titles()
+        emit_span(
+            "settings.refresh_operating_groups_table",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=5.0,
+        )
+
+    def _current_operating_group_name(self) -> str:
+        group_list = getattr(self, "op_group_list", None)
+        if isinstance(group_list, QListWidget):
+            item = group_list.currentItem()
+            if item is not None:
+                return str(item.data(Qt.UserRole) or item.text() or "").strip().upper()
+        return ""
+
+    def _on_operating_group_selected(self) -> None:
+        self._select_known_operating_group(self._current_operating_group_name())
+        self._refresh_operating_group_config_table()
+
+    def _refresh_operating_group_config_table(self) -> None:
         table = self.op_groups_table
+        selected_group = self._current_operating_group_name()
         table.setRowCount(0)
         self._op_group_rows_by_group = {}
         for g in self.operating_groups:
+            group_key = str(g.get("group", "")).strip().upper()
+            if selected_group and group_key != selected_group:
+                continue
             row = table.rowCount()
             table.insertRow(row)
-            group_key = str(g.get("group", "")).strip().upper()
             if group_key:
                 self._op_group_rows_by_group.setdefault(group_key, []).append(row)
             sel_chk = QCheckBox()
             sel_chk.setFixedWidth(22)
             sel_chk.stateChanged.connect(self._update_op_group_action_buttons)
+            sel_chk.stateChanged.connect(lambda _state: self._refresh_op_group_detail_panel())
             sel_wrap = QWidget()
             sel_layout = QHBoxLayout(sel_wrap)
             sel_layout.setContentsMargins(0, 0, 0, 0)
@@ -19860,23 +20660,232 @@ class SettingsTab(QWidget):
             )
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.Interactive)
         header.setSectionResizeMode(7, QHeaderView.Interactive)
         header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        for hidden_col in (1, 5, 6, 7, 8, 9):
+            table.setColumnHidden(hidden_col, True)
         table.setColumnWidth(6, max(table.columnWidth(6), 185))
         table.setColumnWidth(7, max(table.columnWidth(7), 130))
         # These group tables sit in compact Settings panels; six rows keeps the section scannable.
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=6, extra_rows=1)
-        self._refresh_fit_content_section_height(getattr(self, "op_groups_section_group", None))
+        if table.rowCount() > 0 and table.currentRow() < 0:
+            table.setCurrentCell(0, 1)
+        self._refresh_op_group_detail_panel()
         self._update_op_group_action_buttons()
-        self._refresh_section_titles()
-        emit_span(
-            "settings.refresh_operating_groups_table",
-            (time.perf_counter() - _perf_t0) * 1000.0,
-            settings=self.settings,
-            min_ms=5.0,
+        self._refresh_fit_content_section_height(getattr(self, "op_groups_section_group", None))
+
+    def _refresh_op_group_selector_style(self) -> None:
+        selector = getattr(self, "op_group_list", None)
+        if not isinstance(selector, QListWidget):
+            return
+        theme = resolve_theme(self.settings)
+        selector.setStyleSheet(
+            "QListWidget#hfOperatingGroupList {"
+            f" background-color: {theme.get('surface', '#F0F2F4')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 3px;"
+            " outline: 0;"
+            "}"
+            " QListWidget#hfOperatingGroupList::item {"
+            f" background-color: {theme.get('surface_alt', '#DDE1E6')};"
+            f" color: {theme.get('text', '#1C1F21')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 5px 12px;"
+            " margin: 1px 4px 1px 0;"
+            " font-weight: 600;"
+            "}"
+            " QListWidget#hfOperatingGroupList::item:hover {"
+            f" background-color: {theme.get('accent_hover', '#3B84B4')};"
+            " color: #FFFFFF;"
+            "}"
+            " QListWidget#hfOperatingGroupList::item:selected {"
+            f" background-color: {theme.get('accent', '#2E6F9E')};"
+            f" border-color: {theme.get('accent_active', '#1F5A83')};"
+            " color: #FFFFFF;"
+            "}"
+        )
+
+    def _set_combo_text_if_present(self, combo: QComboBox, value: str) -> None:
+        text = str(value or "").strip()
+        index = combo.findText(text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif combo.isEditable():
+            combo.setCurrentText(text)
+
+    def _refresh_op_group_detail_panel(self) -> None:
+        table = getattr(self, "op_groups_table", None)
+        if table is None:
+            return
+        row = int(table.currentRow())
+        selected_rows = self._selected_op_rows() if hasattr(self, "_selected_op_rows") else []
+        if selected_rows:
+            row = selected_rows[0]
+        if row < 0 or row >= table.rowCount():
+            summary = "Select a group row to review VFO, FLDigi, auto-tune, and condition-level details."
+            values = ("--", "--", "--", "--")
+        else:
+            def _item_text(column: int, fallback: str = "") -> str:
+                item = table.item(row, column)
+                return item.text().strip() if item is not None else fallback
+
+            group = _item_text(1, "Group")
+            band = _item_text(3)
+            freq = _item_text(4)
+            vfo = _item_text(5, "A") or "A"
+            fldigi_mode = _item_text(6, "not set") or "not set"
+            fldigi_offset = _item_text(7)
+            auto_widget = table.cellWidget(row, 8)
+            auto_enabled = False
+            if isinstance(auto_widget, QCheckBox):
+                auto_enabled = auto_widget.isChecked()
+            elif isinstance(auto_widget, QWidget):
+                chk = auto_widget.findChild(QCheckBox)
+                auto_enabled = bool(chk and chk.isChecked())
+            cond_widget = table.cellWidget(row, 9)
+            cond_enabled = False
+            if isinstance(cond_widget, QCheckBox):
+                cond_enabled = cond_widget.isChecked()
+            elif isinstance(cond_widget, QWidget):
+                chk = cond_widget.findChild(QCheckBox)
+                cond_enabled = bool(chk and chk.isChecked())
+            summary = f"{group} {band} at {freq}"
+            values = (
+                vfo,
+                f"{fldigi_mode}" + (f" / offset {fldigi_offset}" if fldigi_offset else ""),
+                "Enabled" if auto_enabled else "Disabled",
+                "Enabled for group" if cond_enabled else "Disabled",
+            )
+        for label, text in zip(
+            (
+                getattr(self, "op_group_detail_vfo_label", None),
+                getattr(self, "op_group_detail_fldigi_label", None),
+                getattr(self, "op_group_detail_auto_label", None),
+                getattr(self, "op_group_detail_condition_label", None),
+            ),
+            values,
+        ):
+            if isinstance(label, QLabel):
+                label.setText(text)
+        summary_label = getattr(self, "op_group_detail_summary_label", None)
+        if isinstance(summary_label, QLabel):
+            summary_label.setText(summary)
+        self._populate_operating_group_editor(row if row >= 0 and row < table.rowCount() else None)
+
+    def _populate_operating_group_editor(self, row: int | None) -> None:
+        table = getattr(self, "op_groups_table", None)
+        if table is None:
+            return
+        selected_group = self._current_operating_group_name()
+        if row is None or row < 0 or row >= table.rowCount():
+            group = selected_group
+            mode = "Digi"
+            band = "20M"
+            freq = ""
+            vfo = "A"
+            fldigi_mode = ""
+            fldigi_offset = ""
+            auto_enabled = False
+            cond_enabled = False
+            original_key = None
+        else:
+            def _item_text(column: int, fallback: str = "") -> str:
+                item = table.item(row, column)
+                return item.text().strip() if item is not None else fallback
+
+            group = _item_text(1, selected_group)
+            mode = normalize_operating_group_mode(_item_text(2, "Digi"), _item_text(3, "20M"))
+            band = _item_text(3, "20M")
+            freq = _item_text(4)
+            vfo = _item_text(5, "A")
+            fldigi_mode = _item_text(6)
+            fldigi_offset = _item_text(7)
+            auto_widget = table.cellWidget(row, 8)
+            auto_enabled = bool(auto_widget.findChild(QCheckBox).isChecked()) if isinstance(auto_widget, QWidget) and auto_widget.findChild(QCheckBox) else False
+            cond_widget = table.cellWidget(row, 9)
+            cond_enabled = bool(cond_widget.findChild(QCheckBox).isChecked()) if isinstance(cond_widget, QWidget) and cond_widget.findChild(QCheckBox) else False
+            original_key = (group.strip().upper(), mode, band.strip().upper())
+
+        self._op_group_editor_original_key = original_key
+        self.op_group_name_edit.setText(group)
+        self._set_combo_text_if_present(self.op_group_mode_combo, mode)
+        self._set_combo_text_if_present(self.op_group_band_combo, band)
+        self.op_group_freq_edit.setText(self._format_freq(freq) if freq else "")
+        self._set_combo_text_if_present(self.op_group_vfo_combo, vfo or "A")
+        self._set_combo_text_if_present(self.op_group_fldigi_mode_combo, fldigi_mode)
+        self.op_group_fldigi_offset_edit.setText(fldigi_offset)
+        self.op_group_auto_tune_chk.setChecked(bool(auto_enabled))
+        self.op_group_condition_levels_chk.setChecked(bool(cond_enabled))
+
+    def _focus_operating_group_editor(self) -> None:
+        self._refresh_op_group_detail_panel()
+        if hasattr(self, "op_group_name_edit"):
+            self.op_group_name_edit.setFocus()
+
+    def _add_operating_group_inline(self) -> None:
+        selected_group = self._current_operating_group_name()
+        self._populate_operating_group_editor(None)
+        self._op_group_editor_original_key = None
+        self.op_group_name_edit.setText(selected_group or "")
+        self.op_group_freq_edit.clear()
+        self.op_group_name_edit.setFocus()
+
+    def _save_operating_group_editor(self) -> None:
+        old_key = getattr(self, "_op_group_editor_original_key", None)
+        new_name = self.op_group_name_edit.text().strip().upper()
+        new_band = self.op_group_band_combo.currentText().strip().upper()
+        new_mode = normalize_operating_group_mode(self.op_group_mode_combo.currentText(), new_band)
+        new_freq_txt = self.op_group_freq_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, "Validation", "Group Name is required.")
+            return
+        if not self._validate_band_frequency(new_band, new_mode, new_freq_txt):
+            QMessageBox.warning(self, "Validation", f"Frequency {new_freq_txt} invalid for {new_band} {new_mode}.")
+            return
+        offset_txt = self.op_group_fldigi_offset_edit.text().strip()
+        if offset_txt:
+            try:
+                int(offset_txt)
+            except Exception:
+                QMessageBox.warning(self, "Validation", "FLDigi Offset must be an integer.")
+                return
+        old_group = str(old_key[0]).strip().upper() if isinstance(old_key, tuple) and old_key else ""
+        if old_group and old_group != new_name:
+            for g in self.operating_groups:
+                if str(g.get("group", "")).strip().upper() == old_group:
+                    g["group"] = new_name
+        if isinstance(old_key, tuple):
+            old_group_key = new_name if old_group and old_group != new_name else str(old_key[0]).strip().upper()
+            old_mode_key = str(old_key[1] or "").strip()
+            old_band_key = str(old_key[2] or "").strip().upper()
+            self.operating_groups = [
+                g
+                for g in self.operating_groups
+                if not (
+                    str(g.get("group", "")).strip().upper() == old_group_key
+                    and normalize_operating_group_mode(g.get("mode", ""), g.get("band", "")) == old_mode_key
+                    and str(g.get("band", "")).strip().upper() == old_band_key
+                )
+            ]
+        self._upsert_operating_group(
+            new_name,
+            new_mode,
+            new_band,
+            new_freq_txt,
+            auto_tune=self.op_group_auto_tune_chk.isChecked(),
+            vfo=self.op_group_vfo_combo.currentText().strip().upper() or "A",
+            fldigi_mode=self.op_group_fldigi_mode_combo.currentText().strip(),
+            fldigi_offset=offset_txt,
+            use_condition_levels=self.op_group_condition_levels_chk.isChecked(),
         )
 
     def _update_op_group_action_buttons(self):
@@ -19887,6 +20896,8 @@ class SettingsTab(QWidget):
         self.delete_group_btn.setEnabled(True)
         self.edit_group_btn.setStyleSheet(button_style(role, theme))
         self.delete_group_btn.setStyleSheet(button_style(role, theme))
+        self._refresh_known_operating_group_preview()
+        self._refresh_op_group_selector_style()
 
     def _on_operating_group_condition_toggled(self, row: int, state: int) -> None:
         if self._loading_settings or self._op_group_condition_sync:
@@ -19939,96 +20950,38 @@ class SettingsTab(QWidget):
 
     def _table_to_operating_groups(self) -> List[Dict[str, object]]:
         result: List[Dict[str, object]] = []
-        existing_levels: Dict[Tuple[str, str, str], int] = {}
-        for g in self.operating_groups:
+        for g in list(self.operating_groups or []):
+            if not isinstance(g, dict):
+                continue
             try:
+                group = str(g.get("group", "")).strip().upper()
                 band_key = str(g.get("band", "")).strip().upper()
                 mode_key = normalize_operating_group_mode(g.get("mode", ""), band_key)
-                key = (
-                    str(g.get("group", "")).strip().upper(),
-                    mode_key,
-                    band_key,
-                )
                 level = int(g.get("condition_level", 5) or 5)
+                freq_val = self._parse_freq_mhz(g.get("frequency", ""))
             except Exception:
+                continue
+            if not group or not mode_key or not band_key or freq_val is None:
                 continue
             if level < 1 or level > 5:
                 level = 5
-            existing_levels[key] = level
-        group_condition_levels: Dict[str, bool] = {}
-        for r in range(self.op_groups_table.rowCount()):
-            group_item = self.op_groups_table.item(r, 1)
-            group = (group_item.text().strip().upper() if group_item else "")
-            if not group:
-                continue
-            cond_widget = self.op_groups_table.cellWidget(r, 9)
-            use_condition_levels = False
-            if isinstance(cond_widget, QCheckBox):
-                use_condition_levels = cond_widget.isChecked()
-            elif isinstance(cond_widget, QWidget):
-                chk = cond_widget.findChild(QCheckBox)
-                if chk is not None:
-                    use_condition_levels = chk.isChecked()
-            if group not in group_condition_levels:
-                group_condition_levels[group] = use_condition_levels
-            elif group_condition_levels[group] != use_condition_levels:
-                # Resolve inconsistencies defensively by preferring enabled if any row is enabled.
-                group_condition_levels[group] = group_condition_levels[group] or use_condition_levels
-        for r in range(self.op_groups_table.rowCount()):
-            group = (
-                self.op_groups_table.item(r, 1).text().strip().upper() if self.op_groups_table.item(r, 1) else ""
+            vfo_val = str(g.get("vfo", "A") or "A").strip().upper()
+            if vfo_val not in ("A", "B"):
+                vfo_val = "A"
+            result.append(
+                {
+                    "group": group,
+                    "mode": mode_key,
+                    "band": band_key,
+                    "frequency": self._format_freq_storage(freq_val),
+                    "vfo": vfo_val,
+                    "fldigi_mode": str(g.get("fldigi_mode", "") or "").strip(),
+                    "fldigi_offset": str(g.get("fldigi_offset", "") or "").strip(),
+                    "auto_tune": bool(g.get("auto_tune", False)),
+                    "use_condition_levels": bool(g.get("use_condition_levels", False)),
+                    "condition_level": level,
+                }
             )
-            mode = self.op_groups_table.item(r, 2).text().strip() if self.op_groups_table.item(r, 2) else ""
-            band = self.op_groups_table.item(r, 3).text().strip().upper() if self.op_groups_table.item(r, 3) else ""
-            mode = normalize_operating_group_mode(mode, band)
-            freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
-            vfo_txt = self.op_groups_table.item(r, 5).text().strip() if self.op_groups_table.item(r, 5) else "A"
-            fldigi_mode = (
-                self.op_groups_table.item(r, 6).text().strip() if self.op_groups_table.item(r, 6) else ""
-            )
-            fldigi_offset = (
-                self.op_groups_table.item(r, 7).text().strip() if self.op_groups_table.item(r, 7) else ""
-            )
-            auto_widget = self.op_groups_table.cellWidget(r, 8)
-            auto_tune = False
-            if isinstance(auto_widget, QCheckBox):
-                auto_tune = auto_widget.isChecked()
-            elif isinstance(auto_widget, QWidget):
-                chk = auto_widget.findChild(QCheckBox)
-                if chk is not None:
-                    auto_tune = chk.isChecked()
-            cond_widget = self.op_groups_table.cellWidget(r, 9)
-            use_condition_levels = False
-            if isinstance(cond_widget, QCheckBox):
-                use_condition_levels = cond_widget.isChecked()
-            elif isinstance(cond_widget, QWidget):
-                chk = cond_widget.findChild(QCheckBox)
-                if chk is not None:
-                    use_condition_levels = chk.isChecked()
-            use_condition_levels = bool(group_condition_levels.get(group, use_condition_levels))
-            try:
-                freq_val = float(freq_txt)
-            except Exception:
-                freq_val = None
-            if group and mode and band and freq_val is not None:
-                cond_level = existing_levels.get((group, mode, band), 5)
-                vfo_val = (vfo_txt or "A").strip().upper()
-                if vfo_val not in ("A", "B"):
-                    vfo_val = "A"
-                result.append(
-                    {
-                        "group": group,
-                        "mode": mode,
-                        "band": band,
-                        "frequency": self._format_freq(freq_val),
-                        "vfo": vfo_val,
-                        "fldigi_mode": fldigi_mode,
-                        "fldigi_offset": fldigi_offset,
-                        "auto_tune": auto_tune,
-                        "use_condition_levels": use_condition_levels,
-                        "condition_level": cond_level,
-                    }
-                )
         return result
 
     def _selected_op_rows(self) -> List[int]:
@@ -20115,17 +21068,30 @@ class SettingsTab(QWidget):
         band_combo = QComboBox()
         band_combo.addItems(
             [
-                "20M",
-                "40M",
+                "160M",
                 "80M",
-                "2M",
-                "6M",
-                "10M",
-                "12M",
-                "15M",
-                "17M",
-                "30M",
                 "60M",
+                "40M",
+                "30M",
+                "20M",
+                "17M",
+                "15M",
+                "12M",
+                "10M",
+                "6M",
+                "2M",
+                "2MHZ",
+                "4MHZ",
+                "6MHZ",
+                "8MHZ",
+                "9MHZ",
+                "10MHZ",
+                "11MHZ",
+                "12MHZ",
+                "13MHZ",
+                "16MHZ",
+                "17MHZ",
+                "23MHZ",
             ]
         )
         band_combo.setMinimumWidth(110)
@@ -20134,7 +21100,8 @@ class SettingsTab(QWidget):
             band_combo.setCurrentText(band)
         form.addRow("Band:", band_combo)
 
-        freq_edit = QLineEdit(freq_txt)
+        freq_edit = QLineEdit(self._format_freq(freq_txt))
+        freq_edit.setPlaceholderText("e.g., 14.115.000")
         form.addRow("Frequency (MHz):", freq_edit)
 
         vfo_combo = QComboBox()
@@ -20366,21 +21333,226 @@ class SettingsTab(QWidget):
                     rows.append(r)
         return rows
 
+    def _local_net_group_names(self) -> List[str]:
+        return sorted(
+            {
+                str(row.get("group", "") or "").strip().upper()
+                for row in list(self.local_net_profiles or [])
+                if str(row.get("group", "") or "").strip()
+            }
+        )
+
+    def _current_local_net_group_name(self) -> str:
+        group_list = getattr(self, "local_net_group_list", None)
+        if isinstance(group_list, QListWidget):
+            item = group_list.currentItem()
+            if item is not None:
+                return str(item.data(Qt.UserRole) or item.text() or "").strip().upper()
+        combo = getattr(self, "local_net_group_combo", None)
+        if isinstance(combo, QComboBox):
+            text = combo.currentText().strip().upper()
+            placeholder = combo.itemText(0).strip().upper() if combo.count() > 0 else ""
+            if combo.currentIndex() == 0 and not str(combo.currentData() or "").strip() and text == placeholder:
+                return ""
+            return text
+        return ""
+
+    def _is_local_net_group_enabled(self, group: object) -> bool:
+        group_name = str(group or "").strip().upper()
+        if not group_name:
+            return False
+        return any(
+            str(row.get("group", "") or "").strip().upper() == group_name
+            for row in list(self.local_net_profiles or [])
+        )
+
+    def _select_local_net_group(self, group: object) -> None:
+        group_name = str(group or "").strip().upper()
+        combo = getattr(self, "local_net_group_combo", None)
+        if isinstance(combo, QComboBox):
+            if group_name:
+                idx = combo.findText(group_name)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                elif combo.isEditable():
+                    combo.setCurrentIndex(-1)
+                    combo.setCurrentText(group_name)
+            elif combo.count() > 0:
+                combo.setCurrentIndex(0)
+        group_list = getattr(self, "local_net_group_list", None)
+        if group_name and isinstance(group_list, QListWidget):
+            for row in range(group_list.count()):
+                item = group_list.item(row)
+                if item and str(item.data(Qt.UserRole) or item.text() or "").strip().upper() == group_name:
+                    group_list.setCurrentRow(row)
+                    break
+        self._update_local_net_action_buttons()
+
+    def _on_local_net_group_selected(self) -> None:
+        group = self._current_local_net_group_name()
+        combo = getattr(self, "local_net_group_combo", None)
+        if isinstance(combo, QComboBox) and group:
+            idx = combo.findText(group)
+            combo.blockSignals(True)
+            try:
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                elif combo.isEditable():
+                    combo.setCurrentIndex(-1)
+                    combo.setCurrentText(group)
+            finally:
+                combo.blockSignals(False)
+        self._refresh_local_net_profiles_table()
+
+    def _on_local_net_group_combo_changed(self, _idx: int) -> None:
+        group = ""
+        combo = getattr(self, "local_net_group_combo", None)
+        if isinstance(combo, QComboBox):
+            group = combo.currentText().strip().upper()
+        group_list = getattr(self, "local_net_group_list", None)
+        if group and isinstance(group_list, QListWidget):
+            for row in range(group_list.count()):
+                item = group_list.item(row)
+                if item and str(item.data(Qt.UserRole) or item.text() or "").strip().upper() == group:
+                    if group_list.currentRow() != row:
+                        group_list.setCurrentRow(row)
+                    break
+        self._refresh_local_net_profiles_table()
+
+    def _toggle_local_net_group(self) -> None:
+        group = self._current_local_net_group_name()
+        if not group:
+            return
+        if self._is_local_net_group_enabled(group):
+            self._disable_local_net_group(group)
+        else:
+            self._upsert_local_net_profile(
+                {
+                    "group": group,
+                    "resource": LOCAL_NET_RESOURCE_OPTIONS[0],
+                    "mode": "Voice",
+                    "target": "",
+                    "notes": "",
+                }
+            )
+
+    def _disable_local_net_group(self, group: object) -> None:
+        group_name = str(group or "").strip().upper()
+        if not group_name:
+            return
+        before = len(self.local_net_profiles)
+        self.local_net_profiles = [
+            row
+            for row in list(self.local_net_profiles or [])
+            if str(row.get("group", "") or "").strip().upper() != group_name
+        ]
+        if len(self.local_net_profiles) == before:
+            return
+        self._local_net_editor_original_key = None
+        self._refresh_local_net_profiles_table()
+        self._persist_local_net_profiles_quiet()
+
     def _update_local_net_action_buttons(self) -> None:
         theme = resolve_theme(self.settings)
         has_selection = bool(self._selected_local_net_rows()) if hasattr(self, "local_net_table") else False
+        group = self._current_local_net_group_name()
+        group_enabled = self._is_local_net_group_enabled(group)
         role = "info" if has_selection else "muted"
         self.add_local_net_btn.setStyleSheet(button_style("primary", theme))
         self.edit_local_net_btn.setEnabled(True)
         self.delete_local_net_btn.setEnabled(True)
+        if hasattr(self, "local_net_group_action_btn"):
+            self.local_net_group_action_btn.setEnabled(bool(group))
+            self.local_net_group_action_btn.setText("Disable Group" if group_enabled else "Enable Group")
+            self.local_net_group_action_btn.setStyleSheet(
+                button_style("warning" if group_enabled else ("eligible_info" if group else "muted"), theme)
+            )
         self.edit_local_net_btn.setStyleSheet(button_style(role, theme))
         self.delete_local_net_btn.setStyleSheet(button_style(role, theme))
+        self._refresh_local_net_group_selector_style()
+
+    def _refresh_local_net_group_selector_style(self) -> None:
+        selector = getattr(self, "local_net_group_list", None)
+        if not isinstance(selector, QListWidget):
+            return
+        theme = resolve_theme(self.settings)
+        selector.setStyleSheet(
+            "QListWidget#localCommsGroupList {"
+            f" background-color: {theme.get('surface', '#F0F2F4')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 3px;"
+            " outline: 0;"
+            "}"
+            " QListWidget#localCommsGroupList::item {"
+            f" background-color: {theme.get('surface_alt', '#DDE1E6')};"
+            f" color: {theme.get('text', '#1C1F21')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 5px 12px;"
+            " margin: 1px 4px 1px 0;"
+            " font-weight: 600;"
+            "}"
+            " QListWidget#localCommsGroupList::item:hover {"
+            f" background-color: {theme.get('accent_hover', '#3B84B4')};"
+            " color: #FFFFFF;"
+            "}"
+            " QListWidget#localCommsGroupList::item:selected {"
+            f" background-color: {theme.get('accent', '#2E6F9E')};"
+            f" border-color: {theme.get('accent_active', '#1F5A83')};"
+            " color: #FFFFFF;"
+            "}"
+        )
 
     def _refresh_local_net_profiles_table(self) -> None:
         rows = self._table_to_local_net_profiles()
         table = self.local_net_table
+        selected_group = self._current_local_net_group_name()
+        current_key = getattr(self, "_local_net_editor_original_key", None)
+        combo = getattr(self, "local_net_group_combo", None)
+        if isinstance(combo, QComboBox):
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItem("Select or type local group", "")
+                for group_name in self._local_net_group_names():
+                    combo.addItem(group_name, group_name)
+                if selected_group:
+                    idx = combo.findText(selected_group)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                    elif combo.isEditable():
+                        combo.setCurrentIndex(-1)
+                        combo.setCurrentText(selected_group)
+            finally:
+                combo.blockSignals(False)
+        group_list = getattr(self, "local_net_group_list", None)
+        if isinstance(group_list, QListWidget):
+            was_blocked = group_list.blockSignals(True)
+            try:
+                group_list.clear()
+                groups = self._local_net_group_names()
+                for group_name in groups:
+                    item = QListWidgetItem(group_name)
+                    item.setData(Qt.UserRole, group_name)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setSizeHint(QSize(max(110, 14 * len(group_name)), 34))
+                    group_list.addItem(item)
+                target_group = selected_group if selected_group in groups else (groups[0] if groups else "")
+                if target_group:
+                    for row_idx in range(group_list.count()):
+                        item = group_list.item(row_idx)
+                        if item and str(item.data(Qt.UserRole) or "") == target_group:
+                            group_list.setCurrentRow(row_idx)
+                            selected_group = target_group
+                            break
+            finally:
+                group_list.blockSignals(was_blocked)
         table.setRowCount(0)
         for prof in rows:
+            group_key = str(prof.get("group", "") or "").strip().upper()
+            if selected_group and group_key != selected_group:
+                continue
             row = table.rowCount()
             table.insertRow(row)
             sel_chk = QCheckBox()
@@ -20397,8 +21569,20 @@ class SettingsTab(QWidget):
             table.setItem(row, 3, QTableWidgetItem(prof.get("mode", "")))
             table.setItem(row, 4, QTableWidgetItem(prof.get("target", "")))
             table.setItem(row, 5, QTableWidgetItem(prof.get("notes", "")))
+        table.setColumnHidden(5, True)
         # These group tables sit in compact Settings panels; six rows keeps the section scannable.
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=6, extra_rows=1)
+        if table.rowCount() > 0:
+            target_row = 0
+            if isinstance(current_key, tuple):
+                for row_idx in range(table.rowCount()):
+                    row_key = self._local_net_profile_row_key(self._local_profile_from_row(row_idx))
+                    if row_key == current_key:
+                        target_row = row_idx
+                        break
+            if table.currentRow() < 0 or table.currentRow() >= table.rowCount():
+                table.setCurrentCell(target_row, 1)
+        self._refresh_local_net_editor()
         self._refresh_fit_content_section_height(getattr(self, "local_net_section_group", None))
         self._update_local_net_action_buttons()
         self._refresh_section_titles()
@@ -20411,6 +21595,105 @@ class SettingsTab(QWidget):
             "target": self.local_net_table.item(row, 4).text().strip() if self.local_net_table.item(row, 4) else "",
             "notes": self.local_net_table.item(row, 5).text().strip() if self.local_net_table.item(row, 5) else "",
         }
+
+    def _set_local_combo_text_if_present(self, combo: QComboBox, value: str) -> None:
+        text = str(value or "").strip()
+        index = combo.findText(text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif combo.isEditable():
+            combo.setCurrentText(text)
+
+    def _refresh_local_net_editor(self) -> None:
+        table = getattr(self, "local_net_table", None)
+        if table is None or not hasattr(self, "local_net_group_edit"):
+            return
+        row = int(table.currentRow())
+        selected_rows = self._selected_local_net_rows() if hasattr(self, "_selected_local_net_rows") else []
+        if selected_rows:
+            row = selected_rows[0]
+        selected_group = self._current_local_net_group_name()
+        if row < 0 or row >= table.rowCount():
+            group = selected_group
+            resource = LOCAL_NET_RESOURCE_OPTIONS[0]
+            mode = "Voice"
+            target = ""
+            notes = ""
+            original_key = None
+        else:
+            profile = self._local_profile_from_row(row)
+            group = profile.get("group", selected_group)
+            resource = profile.get("resource", LOCAL_NET_RESOURCE_OPTIONS[0])
+            mode = profile.get("mode", "Voice")
+            target = profile.get("target", "")
+            notes = profile.get("notes", "")
+            original_key = self._local_net_profile_row_key(self._normalize_local_net_profile(profile))
+        self._local_net_editor_original_key = original_key
+        self.local_net_group_edit.setText(group)
+        self._set_local_combo_text_if_present(self.local_net_resource_combo, resource)
+        self._set_local_combo_text_if_present(self.local_net_mode_combo, mode)
+        self.local_net_target_edit.setText(target)
+        self.local_net_notes_edit.setPlainText(notes)
+        summary = f"{group or 'New local group'}"
+        if resource:
+            summary += f" / {resource}"
+        if target:
+            summary += f" / {target}"
+        self.local_net_summary_label.setText(summary)
+
+    def _focus_local_net_editor(self) -> None:
+        self._refresh_local_net_editor()
+        if hasattr(self, "local_net_group_edit"):
+            self.local_net_group_edit.setFocus()
+
+    def _add_local_net_profile_inline(self) -> None:
+        selected_group = self._current_local_net_group_name()
+        self._local_net_editor_original_key = None
+        self.local_net_group_edit.setText(selected_group or "")
+        self._set_local_combo_text_if_present(self.local_net_resource_combo, LOCAL_NET_RESOURCE_OPTIONS[0])
+        self._set_local_combo_text_if_present(self.local_net_mode_combo, "Voice")
+        self.local_net_target_edit.clear()
+        self.local_net_notes_edit.clear()
+        self.local_net_group_edit.setFocus()
+
+    def _save_local_net_editor(self) -> None:
+        old_key = getattr(self, "_local_net_editor_original_key", None)
+        candidate = self._normalize_local_net_profile(
+            {
+                "group": self.local_net_group_edit.text(),
+                "resource": self.local_net_resource_combo.currentText(),
+                "mode": self.local_net_mode_combo.currentText(),
+                "target": self.local_net_target_edit.text(),
+                "notes": self.local_net_notes_edit.toPlainText(),
+            }
+        )
+        if not candidate.get("group"):
+            QMessageBox.warning(self, "Validation", "Group is required.")
+            return
+        old_row = None
+        if isinstance(old_key, tuple):
+            for row in self.local_net_profiles:
+                normalized = self._normalize_local_net_profile(row)
+                if self._local_net_profile_row_key(normalized) == old_key:
+                    old_row = normalized
+                    break
+        self._upsert_local_net_profile(candidate, old_row=old_row)
+        self._select_local_net_group(candidate.get("group", ""))
+
+    def _persist_local_net_profiles_quiet(self) -> None:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("local_net_profiles", self._table_to_local_net_profiles())
+            elif hasattr(self.settings, "_data"):
+                self.settings._data["local_net_profiles"] = self._table_to_local_net_profiles()  # type: ignore[attr-defined]
+            self._settings_dirty = False
+            self._set_save_button_state("success")
+            try:
+                self.local_net_profiles_changed.emit()
+            except Exception:
+                pass
+        except Exception:
+            log.exception("Failed to persist Local Net Profiles; will remain in-memory only.")
 
     def _open_local_net_profile_dialog(self, existing: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
         dlg = QDialog(self)
@@ -20487,42 +21770,13 @@ class SettingsTab(QWidget):
         ]
         self.local_net_profiles.append(normalized)
         self._refresh_local_net_profiles_table()
-        try:
-            # Persist Local Net Profiles directly so this workflow is not blocked
-            # by unrelated full-settings validation requirements.
-            if hasattr(self.settings, "set"):
-                self.settings.set("local_net_profiles", self._table_to_local_net_profiles())
-            elif hasattr(self.settings, "_data"):
-                self.settings._data["local_net_profiles"] = self._table_to_local_net_profiles()  # type: ignore[attr-defined]
-            self._settings_dirty = False
-            self._set_save_button_state("success")
-            try:
-                self.local_net_profiles_changed.emit()
-            except Exception:
-                pass
-        except Exception:
-            log.exception("Failed to persist Local Net Profile; will remain in-memory only.")
+        self._persist_local_net_profiles_quiet()
 
     def _add_local_net_profile(self) -> None:
-        created = self._open_local_net_profile_dialog(existing=None)
-        if not created:
-            return
-        self._upsert_local_net_profile(created)
+        self._add_local_net_profile_inline()
 
     def _edit_local_net_profile(self) -> None:
-        rows = self._selected_local_net_rows()
-        if not rows:
-            QMessageBox.information(self, "Edit Entry", "Select one Local Net entry to edit.")
-            return
-        if len(rows) > 1:
-            QMessageBox.warning(self, "Edit Entry", "Please select only one Local Net entry to edit.")
-            return
-        row = rows[0]
-        existing = self._local_profile_from_row(row)
-        updated = self._open_local_net_profile_dialog(existing=existing)
-        if not updated:
-            return
-        self._upsert_local_net_profile(updated, old_row=existing)
+        self._focus_local_net_editor()
 
     def _delete_local_net_profiles(self) -> None:
         rows = self._selected_local_net_rows()
@@ -20543,22 +21797,7 @@ class SettingsTab(QWidget):
             if self._local_net_profile_row_key(self._normalize_local_net_profile(row)) not in to_remove
         ]
         self._refresh_local_net_profiles_table()
-        try:
-            # Persist Local Net Profiles directly so this workflow is not blocked
-            # by unrelated full-settings validation requirements.
-            if hasattr(self.settings, "set"):
-                self.settings.set("local_net_profiles", self._table_to_local_net_profiles())
-            elif hasattr(self.settings, "_data"):
-                self.settings._data["local_net_profiles"] = self._table_to_local_net_profiles()  # type: ignore[attr-defined]
-            self._settings_dirty = False
-            self._set_save_button_state("success")
-            try:
-                self.local_net_profiles_changed.emit()
-            except Exception:
-                pass
-        except Exception:
-            log.exception("Failed to persist Local Net Profile deletions; will remain in-memory only.")
-        QMessageBox.information(self, "Delete Entries", f"Deleted {len(to_remove)} Local Net entr{'y' if len(to_remove) == 1 else 'ies'}.")
+        self._persist_local_net_profiles_quiet()
 
     # ---------- GPG authenticity ---------- #
 

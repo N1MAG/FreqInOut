@@ -45,8 +45,20 @@ SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "schedu
 EFFECTIVE_ASSIGNMENT_STATES = frozenset({"active", "temporary_override"})
 SUPPORTED_SCHEDULER_MODES = frozenset({"full", "simple"})
 SUPPORTED_FREQUENCY_PLAN_CATEGORIES = frozenset(
-    {"normal", "event", "portable", "exercise", "emergency", "ad_hoc", "rx_watch", "sop_schedule"}
+    {
+        "normal",
+        "event",
+        "portable",
+        "exercise",
+        "emergency",
+        "ad_hoc",
+        "rx_watch",
+        "sop_schedule",
+        "hf_daily_schedule",
+        "hf_net_schedule",
+    }
 )
+SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES = frozenset({"hf_daily_schedule", "hf_net_schedule"})
 SUPPORTED_FREQUENCY_PLAN_STATUSES = frozenset({"draft", "saved", "archived"})
 DEFAULT_TIMER_ENFORCEMENT_MODE = "On Schedule Change"
 DEFAULT_TIMER_PROMPT_INTERVAL = "Hourly"
@@ -2989,6 +3001,8 @@ def _set_assigned_plan_conn(
         raise KeyError(f"Unknown Frequency Plan id: {frequency_plan_id}")
     if int(frequency_plan.get("enabled", 1) or 0) != 1:
         raise ValueError("Cannot assign a disabled Frequency Plan.")
+    if str(frequency_plan.get("category") or "").strip().lower() in SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES:
+        raise ValueError("Source schedules must be blended into a Frequency Plan before assignment to a radio.")
     _validate_schedule_assignment_compatibility(device, frequency_plan)
     validation = _schedule_assignment_validation_status_conn(conn, device, frequency_plan)
     if validation.get("state") == "blocked":
