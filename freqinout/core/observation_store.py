@@ -327,6 +327,46 @@ def get_projection_checkpoint(db_path: str | Path, source_key: str) -> dict[str,
         conn.close()
 
 
+def delete_observations_by_source_refs(
+    db_path: str | Path,
+    source_refs: Sequence[str],
+    *,
+    source_family: str = "",
+) -> int:
+    refs = sorted({str(ref or "").strip() for ref in source_refs if str(ref or "").strip()})
+    if not refs:
+        return 0
+    placeholders = ",".join("?" for _ in refs)
+    clauses = [f"source_ref IN ({placeholders})"]
+    params: list[Any] = list(refs)
+    if source_family:
+        clauses.append("source_family=?")
+        params.append(str(source_family or "").strip())
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_observation_schema(conn)
+        rows = conn.execute(
+            f"SELECT observation_id FROM observation_projection WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        ).fetchall()
+        ids = [row[0] for row in rows if row and row[0]]
+        if not ids:
+            return 0
+        id_placeholders = ",".join("?" for _ in ids)
+        with conn:
+            conn.execute(
+                f"DELETE FROM observation_projection_topics WHERE observation_id IN ({id_placeholders})",
+                tuple(ids),
+            )
+            cur = conn.execute(
+                f"DELETE FROM observation_projection WHERE observation_id IN ({id_placeholders})",
+                tuple(ids),
+            )
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
 def _observation_values(observation: Observation, projected_utc: str) -> tuple[Any, ...]:
     return (
         observation.observation_id,

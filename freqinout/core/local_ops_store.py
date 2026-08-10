@@ -893,6 +893,40 @@ def record_local_report(
                 touch_seen=True,
                 seen_utc=stamp,
             )
+        _mirror_local_report_to_observation(
+            {
+                "id": report_id,
+                "created_utc": stamp,
+                "updated_utc": stamp,
+                "source_kind": str(source_kind or "voice").strip().lower() or "voice",
+                "source_channel": str(source_channel or "").strip(),
+                "net_session_id": str(net_session_id or "").strip(),
+                "callsign": cs,
+                "operator_id": str(operator_id or "").strip(),
+                "from_name": str(from_name or "").strip(),
+                "city": str(city or "").strip(),
+                "county": str(county or "").strip(),
+                "state": str(state or "").strip().upper(),
+                "grid": str(grid or "").strip().upper(),
+                "lat": lat,
+                "lon": lon,
+                "location_source": str(location_source or "").strip(),
+                "location_confidence": str(location_confidence or "").strip(),
+                "status": _norm_report_status(status),
+                "topics": topic_values,
+                "topic_evidence": topic_evidence_json,
+                "subject": str(subject or "").strip(),
+                "body": str(body or "").strip(),
+                "confirmed_state": _norm_confirmed_state(confirmed_state),
+                "followup_state": str(followup_state or "").strip(),
+                "exercise_flag": bool(exercise_flag),
+                "source_radio_id": source_radio,
+                "source_app": str(source_app or "").strip(),
+                "raw_reference": str(raw_reference or "").strip(),
+                "created_by": str(created_by or "").strip(),
+                "updated_by": str(created_by or "").strip(),
+            }
+        )
         return report_id
     except Exception as e:
         log.error("local_ops_store.record_local_report failed for %s: %s", cs or from_name, e)
@@ -994,12 +1028,19 @@ def delete_local_reports(report_ids: List[int]) -> int:
     placeholders = ",".join("?" for _ in ids)
     conn = sqlite3.connect(_db_path())
     try:
+        ref_rows = conn.execute(
+            f"SELECT id, raw_reference FROM local_operator_reports WHERE id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
         with conn:
             cur = conn.execute(
                 f"DELETE FROM local_operator_reports WHERE id IN ({placeholders})",
                 tuple(ids),
             )
-        return int(cur.rowcount or 0)
+        deleted = int(cur.rowcount or 0)
+        refs = [row[1] or f"local_operator_reports:{int(row[0] or 0)}" for row in ref_rows]
+        _delete_local_report_observations(refs)
+        return deleted
     finally:
         conn.close()
 
@@ -1124,6 +1165,29 @@ def _format_report_summary(report: Dict[str, Any]) -> str:
     if title:
         parts.append(title)
     return " | ".join(parts)
+
+
+def _mirror_local_report_to_observation(report: Dict[str, Any]) -> None:
+    try:
+        from freqinout.core.observation_projection import observation_from_local_report
+        from freqinout.core.observation_store import upsert_observation
+
+        upsert_observation(_db_path(), observation_from_local_report(report))
+    except Exception as exc:
+        log.debug("local_ops_store: observation projection mirror failed: %s", exc)
+
+
+def _delete_local_report_observations(source_refs: List[str]) -> None:
+    try:
+        from freqinout.core.observation_store import delete_observations_by_source_refs
+
+        delete_observations_by_source_refs(
+            _db_path(),
+            source_refs,
+            source_family="local_report",
+        )
+    except Exception as exc:
+        log.debug("local_ops_store: observation projection delete mirror failed: %s", exc)
 
 
 def _report_row_to_dict(row: Any) -> Dict[str, Any]:

@@ -1,6 +1,7 @@
 import sqlite3
 
 from freqinout.core import local_ops_store
+from freqinout.core.observation_store import list_observations
 
 
 def _use_tmp_db(monkeypatch, tmp_path):
@@ -61,6 +62,15 @@ def test_record_local_report_preserves_operator_notes_and_adds_topic_evidence(mo
         indexes = {r[1] for r in conn.execute("PRAGMA index_list(local_operator_reports)").fetchall()}
     assert "idx_local_reports_callsign" in indexes
     assert "idx_local_reports_status" in indexes
+
+    observations = list_observations(db_path, source_family="local_report", topic="Fire")
+    assert len(observations) == 1
+    assert observations[0].source_ref == f"local_operator_reports:{report_id}"
+    assert observations[0].from_call == "K7ETC"
+    assert observations[0].grid == "DM38ST"
+    assert observations[0].confirmed_state == "SECOND_HAND"
+    assert observations[0].route_eligible is False
+    assert observations[0].publish_authorized is False
 
 
 def test_local_report_filters_by_topic_status_and_keyword(monkeypatch, tmp_path) -> None:
@@ -123,7 +133,7 @@ def test_latest_report_summaries_choose_higher_urgency_context(monkeypatch, tmp_
 
 
 def test_delete_local_reports_removes_only_requested_reports(monkeypatch, tmp_path) -> None:
-    _use_tmp_db(monkeypatch, tmp_path)
+    db_path = _use_tmp_db(monkeypatch, tmp_path)
     first_id = local_ops_store.record_local_report(
         callsign="K7ETC",
         status="PRIORITY",
@@ -141,6 +151,8 @@ def test_delete_local_reports_removes_only_requested_reports(monkeypatch, tmp_pa
 
     deleted = local_ops_store.delete_local_reports([int(first_id or 0), 999999])
     rows = local_ops_store.list_local_reports()
+    observations = list_observations(db_path, source_family="local_report")
 
     assert deleted == 1
     assert [row["id"] for row in rows] == [second_id]
+    assert [row.source_ref for row in observations] == [f"local_operator_reports:{second_id}"]
