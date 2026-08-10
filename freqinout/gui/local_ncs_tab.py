@@ -87,6 +87,7 @@ class LocalNCSTab(QWidget):
         self._clock_timer: Optional[QTimer] = None
         self._autosave_timer: Optional[QTimer] = None
         self._report_topics: List[str] = []
+        self._report_topic_buttons: Dict[str, QPushButton] = {}
 
         self._build_ui()
         self._restore_context()
@@ -239,20 +240,25 @@ class LocalNCSTab(QWidget):
             self.report_confirmed_combo.addItem(label, value)
         report_grid.addWidget(self.report_confirmed_combo, 0, 5)
 
-        report_grid.addWidget(QLabel("Topic:"), 1, 0)
-        self.report_topic_combo = QComboBox()
-        self.report_topic_combo.addItems(list(TOPIC_TAXONOMY))
-        report_grid.addWidget(self.report_topic_combo, 1, 1)
-        self.add_report_topic_btn = QPushButton("Add Topic")
-        report_grid.addWidget(self.add_report_topic_btn, 1, 2)
-        self.report_topics_label = QLabel("Topics: none")
+        report_grid.addWidget(QLabel("Topics:"), 1, 0)
+        self.report_topics_label = QLabel("none")
         self.report_topics_label.setWordWrap(True)
-        report_grid.addWidget(self.report_topics_label, 1, 3, 1, 3)
+        report_grid.addWidget(self.report_topics_label, 1, 1, 1, 5)
 
-        report_grid.addWidget(QLabel("Subject:"), 2, 0)
+        topic_grid = QGridLayout()
+        for idx, topic in enumerate(TOPIC_TAXONOMY):
+            btn = QPushButton(str(topic))
+            btn.setCheckable(True)
+            btn.setToolTip(f"Toggle {topic} for this local report.")
+            btn.clicked.connect(lambda checked=False, value=str(topic): self._toggle_report_topic(value, checked))
+            self._report_topic_buttons[str(topic)] = btn
+            topic_grid.addWidget(btn, idx // 4, idx % 4)
+        report_grid.addLayout(topic_grid, 2, 0, 1, 6)
+
+        report_grid.addWidget(QLabel("Subject:"), 3, 0)
         self.report_subject_edit = QLineEdit()
         self.report_subject_edit.setPlaceholderText("Short report title, e.g. Repeater outage or wildfire update")
-        report_grid.addWidget(self.report_subject_edit, 2, 1, 1, 5)
+        report_grid.addWidget(self.report_subject_edit, 3, 1, 1, 5)
         report_panel.addLayout(report_grid)
 
         self.report_body_edit = QTextEdit()
@@ -290,7 +296,6 @@ class LocalNCSTab(QWidget):
         self.status_combo.currentTextChanged.connect(self._mark_current_dirty)
         self.notes_edit.textChanged.connect(self._mark_current_dirty)
         self.save_entry_btn.clicked.connect(lambda: self._save_current_entry(show_feedback=True))
-        self.add_report_topic_btn.clicked.connect(self._add_report_topic)
         self.clear_report_btn.clicked.connect(lambda: self._clear_report_editor(clear_status=True))
         self.save_report_btn.clicked.connect(self._save_local_report)
         self.lookup_edit.installEventFilter(self)
@@ -359,9 +364,9 @@ class LocalNCSTab(QWidget):
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
         self.save_entry_btn.setStyleSheet(button_style("muted", theme))
-        self.add_report_topic_btn.setStyleSheet(button_style("muted", theme))
         self.clear_report_btn.setStyleSheet(button_style("muted", theme))
         self.save_report_btn.setStyleSheet(button_style("eligible_info" if self._editing_entry_id else "muted", theme))
+        self._refresh_report_topic_button_styles(theme)
         self._update_action_button_styles(theme)
         self._refresh_status_cell_colors()
 
@@ -892,8 +897,6 @@ class LocalNCSTab(QWidget):
             "report_source_combo",
             "report_status_combo",
             "report_confirmed_combo",
-            "report_topic_combo",
-            "add_report_topic_btn",
             "report_subject_edit",
             "report_body_edit",
             "save_report_btn",
@@ -902,6 +905,8 @@ class LocalNCSTab(QWidget):
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.setEnabled(enabled)
+        for btn in getattr(self, "_report_topic_buttons", {}).values():
+            btn.setEnabled(enabled)
 
     def _on_table_selection_changed(self) -> None:
         if self._binding_selection:
@@ -944,15 +949,40 @@ class LocalNCSTab(QWidget):
             return {}
         return self._rows_by_id.get(int(self._editing_entry_id), {}) or {}
 
-    def _add_report_topic(self, *_args) -> None:
-        topic = self.report_topic_combo.currentText().strip()
-        if topic and topic not in self._report_topics:
+    def _toggle_report_topic(self, topic: str, checked: bool) -> None:
+        topic = str(topic or "").strip()
+        if not topic:
+            return
+        if checked and topic not in self._report_topics:
             self._report_topics.append(topic)
+        elif not checked and topic in self._report_topics:
+            self._report_topics.remove(topic)
         self._refresh_report_topics_label()
+        self._refresh_report_topic_button_styles()
 
     def _refresh_report_topics_label(self) -> None:
         text = ", ".join(self._report_topics) if self._report_topics else "none"
-        self.report_topics_label.setText(f"Topics: {text}")
+        self.report_topics_label.setText(text)
+        self._sync_report_topic_button_checks()
+
+    def _sync_report_topic_button_checks(self) -> None:
+        selected = set(self._report_topics)
+        for topic, btn in getattr(self, "_report_topic_buttons", {}).items():
+            if btn.isChecked() == (topic in selected):
+                continue
+            btn.blockSignals(True)
+            try:
+                btn.setChecked(topic in selected)
+            finally:
+                btn.blockSignals(False)
+
+    def _refresh_report_topic_button_styles(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if not isinstance(theme, dict):
+            theme = resolve_theme(self.settings)
+        selected = set(self._report_topics)
+        for topic, btn in getattr(self, "_report_topic_buttons", {}).items():
+            role = "eligible_info" if topic in selected else "muted"
+            btn.setStyleSheet(button_style(role, theme))
 
     def _clear_report_editor(self, *, clear_status: bool = True) -> None:
         self._report_topics = []

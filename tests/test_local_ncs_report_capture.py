@@ -40,8 +40,7 @@ def test_local_ncs_saves_selected_checkin_report_to_message_intelligence_store(m
     tab.report_source_combo.setCurrentText("GMRS")
     tab.report_status_combo.setCurrentText("PRIORITY")
     tab.report_confirmed_combo.setCurrentText("Second Hand")
-    tab.report_topic_combo.setCurrentText("Fire")
-    tab._add_report_topic()
+    tab._toggle_report_topic("Fire", True)
     tab.report_subject_edit.setText("Wildfire update")
     tab.report_body_edit.setPlainText("Evac route closed near the bridge.")
 
@@ -56,4 +55,29 @@ def test_local_ncs_saves_selected_checkin_report_to_message_intelligence_store(m
     assert {"Fire", "Travel/Roads", "Infrastructure"}.issubset(set(reports[0]["topics"]))
     assert reports[0]["raw_reference"] == f"local_ncs_checkins:{entry_id}"
     assert tab.report_subject_edit.text() == ""
+    assert tab.report_topics_label.text() == "none"
     assert "Saved report #" in tab.report_save_label.text()
+
+
+def test_local_ncs_topic_buttons_toggle_selected_topics(monkeypatch, tmp_path) -> None:
+    _app()
+    _use_tmp_db(monkeypatch, tmp_path)
+
+    tab = LocalNCSTab()
+    tab._set_editor_enabled(True)
+    fire_btn = tab._report_topic_buttons["Fire"]
+    comms_btn = tab._report_topic_buttons["Comms"]
+
+    fire_btn.click()
+    comms_btn.click()
+
+    assert tab._report_topics == ["Fire", "Comms"]
+    assert tab.report_topics_label.text() == "Fire, Comms"
+    assert fire_btn.isChecked() is True
+    assert comms_btn.isChecked() is True
+
+    fire_btn.click()
+
+    assert tab._report_topics == ["Comms"]
+    assert tab.report_topics_label.text() == "Comms"
+    assert fire_btn.isChecked() is False

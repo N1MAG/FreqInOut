@@ -1758,7 +1758,7 @@ Phase 6: Performance and soak hardening
       `Weather`, `Fire`, `Medical`, `Power`, `Water`, `Fuel`, `Food`, `Travel/Roads`, `Comms`, `Security`, `Shelter`, `Logistics`, `Infrastructure`, `General Intel`.
     - User workflow:
       - Select or add the reporting operator.
-      - Pick one or more topic categories. Current Local NCS slice uses a compact topic picker with an `Add Topic` action; the final polish target remains chip/button-style selection.
+      - Pick one or more topic categories from compact selectable topic buttons.
       - Enter short subject and concise report text.
       - Set status/urgency: `Info`, `Watch`, `Priority`, `Emergency`.
       - Set or infer location using available granularity: `Operator location`, `City/County`, `State`, `Grid`, `Lat/Lon`, or `Unknown`.
@@ -1783,7 +1783,7 @@ Phase 6: Performance and soak hardening
       - Local report history belongs in `Local Reports`, not HF Operator History.
     - UI/UX:
       - The capture control should be reachable from the selected check-in row with one obvious action such as `Log Report`.
-      - Category selection should graduate to a compact chip/grid control for final UI polish; do not regress to a long list of form types.
+      - Category selection uses a compact chip/button grid; do not regress to a long list of form types.
       - The inline form should prioritize speed: source, topic, status, subject, body, location, follow-up.
       - The report list should default to recent/highest-urgency, with search by topic, callsign, location, and keyword.
       - Minimized-window usability is required: report capture and recent reports must scroll cleanly without compressed fields.
