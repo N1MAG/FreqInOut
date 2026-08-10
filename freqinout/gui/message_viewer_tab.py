@@ -1385,8 +1385,6 @@ class _RowsBuildWorker(QObject):
                 status = self._file_status(rec)
                 is_image = rec.path.suffix.lower() in IMAGE_EXTS
                 form_meta = {} if is_image else self._extract_form_file_metadata(rec)
-                from_call = "" if is_image else (form_meta.get("from") or self._extract_sender_from_file(rec))
-                to_call = "" if is_image else form_meta.get("to", "")
                 intelligence = None
                 if not is_image:
                     intelligence = analyze_form_text(
@@ -1396,6 +1394,12 @@ class _RowsBuildWorker(QObject):
                         path=rec.path,
                         fields=form_meta,
                     )
+                from_call = "" if is_image else (
+                    (intelligence.from_call if intelligence else "")
+                    or form_meta.get("from")
+                    or self._extract_sender_from_file(rec)
+                )
+                to_call = "" if is_image else ((intelligence.to_call if intelligence else "") or form_meta.get("to", ""))
                 title = (
                     "Image Received"
                     if is_image

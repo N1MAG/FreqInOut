@@ -4,6 +4,8 @@ from freqinout.core.message_intelligence import (
     analyze_spotter_text,
     normalize_topic_terms,
 )
+from freqinout.core.message_file_scanner import FileRecord
+from freqinout.gui.message_viewer_tab import _RowsBuildWorker
 
 
 def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summary() -> None:
@@ -218,3 +220,62 @@ def test_inbox_attention_is_separate_from_routeable_scope() -> None:
     assert info.actionable is True
     assert info.routing_candidate is False
     assert "topics:Weather" in info.routing_reasons
+
+
+def test_message_row_builder_uses_shared_intelligence_for_flmsg_scan_and_search(tmp_path) -> None:
+    path = tmp_path / "K7ETC-20260803-040212Z-57.k2s"
+    path.write_text(
+        """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID
+260803-0402z
+To
+MR08
+From
+K7ETC
+Subject
+Widemouth 2 Fire
+Message
+UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
+""",
+        encoding="utf-8",
+    )
+    stat = path.stat()
+    worker = _RowsBuildWorker(
+        js8_messages=[],
+        spotter_messages=[],
+        varac_messages=[],
+        sitrep_messages=[],
+        commstat_messages=[],
+        files={"flmsg": [FileRecord(path=path, origin="flmsg", size=stat.st_size, mtime=stat.st_mtime)]},
+        read_state_map={},
+        signature_state_map={},
+        spotter_auth_state_map={},
+        spotter_expect_state_map={},
+        sender_cache_seed={},
+        form_titles={},
+        custom_forms_path="",
+        message_form_codes=None,
+        alert_form_codes=None,
+        show_local_time=False,
+        tz_name="UTC",
+        sitrep_dedupe_enabled=False,
+        sitrep_show_raw_duplicates=False,
+        force=False,
+        generation=1,
+    )
+    emitted = []
+    worker.finished.connect(lambda payload: emitted.append(payload))
+
+    worker.run()
+
+    row = emitted[0]["rows"][0]
+    assert row.msg_type == "FLMSG"
+    assert row.from_call == "K7ETC"
+    assert row.to_call == "MR08"
+    assert row.title == "MAGNET General Use Form - v1.1.1 | K7ETC -> MR08 | Widemouth 2 Fire | 260803-0402z"
+    assert "Fire" in row.topics
+    assert row.actionable is True
+    assert "dm38st" in row.search_text
+    assert "ut" in row.search_text
+    assert "fire" in row.search_text
