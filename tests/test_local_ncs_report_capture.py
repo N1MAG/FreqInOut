@@ -1,4 +1,5 @@
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from freqinout.core import local_ops_store
 from freqinout.gui.local_ncs_tab import LocalNCSTab
@@ -81,3 +82,20 @@ def test_local_ncs_topic_buttons_toggle_selected_topics(monkeypatch, tmp_path) -
     assert tab._report_topics == ["Comms"]
     assert tab.report_topics_label.text() == "Comms"
     assert fire_btn.isChecked() is False
+
+
+def test_local_ncs_report_capture_scrolls_without_compressing_core_controls(monkeypatch, tmp_path) -> None:
+    _app()
+    _use_tmp_db(monkeypatch, tmp_path)
+
+    tab = LocalNCSTab()
+
+    assert isinstance(tab.local_ncs_scroll_area, QScrollArea)
+    assert tab.local_ncs_scroll_area.widget() is tab.local_ncs_content
+    assert tab.local_ncs_scroll_area.widgetResizable() is True
+    assert tab.local_ncs_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert tab.local_ncs_scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+    assert tab.table.minimumHeight() >= 180
+    assert tab.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+    assert tab.notes_edit.maximumHeight() <= 140
+    assert tab.report_body_edit.maximumHeight() <= 150

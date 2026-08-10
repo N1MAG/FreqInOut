@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -97,7 +99,17 @@ class LocalNCSTab(QWidget):
         self.apply_theme()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        self.local_ncs_scroll_area = QScrollArea()
+        self.local_ncs_scroll_area.setObjectName("localNcsScrollArea")
+        self.local_ncs_scroll_area.setWidgetResizable(True)
+        self.local_ncs_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.local_ncs_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.local_ncs_content = QWidget()
+        self.local_ncs_content.setObjectName("localNcsContent")
+        self.local_ncs_content.setMinimumWidth(0)
+        layout = QVBoxLayout(self.local_ncs_content)
+        outer_layout.addWidget(self.local_ncs_scroll_area)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Local NCS</h3>"))
@@ -181,6 +193,9 @@ class LocalNCSTab(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(180)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         header_view = self.table.horizontalHeader()
         header_view.setSectionResizeMode(self.COL_TIME, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
@@ -214,6 +229,7 @@ class LocalNCSTab(QWidget):
             "Persistent notes for this check-in. Update as new local information arrives."
         )
         self.notes_edit.setMinimumHeight(90)
+        self.notes_edit.setMaximumHeight(140)
         editor_row.addWidget(self.notes_edit)
         layout.addLayout(editor_row)
 
@@ -246,13 +262,15 @@ class LocalNCSTab(QWidget):
         report_grid.addWidget(self.report_topics_label, 1, 1, 1, 5)
 
         topic_grid = QGridLayout()
+        topic_columns = 3
         for idx, topic in enumerate(TOPIC_TAXONOMY):
             btn = QPushButton(str(topic))
             btn.setCheckable(True)
             btn.setToolTip(f"Toggle {topic} for this local report.")
+            btn.setMinimumWidth(0)
             btn.clicked.connect(lambda checked=False, value=str(topic): self._toggle_report_topic(value, checked))
             self._report_topic_buttons[str(topic)] = btn
-            topic_grid.addWidget(btn, idx // 4, idx % 4)
+            topic_grid.addWidget(btn, idx // topic_columns, idx % topic_columns)
         report_grid.addLayout(topic_grid, 2, 0, 1, 6)
 
         report_grid.addWidget(QLabel("Subject:"), 3, 0)
@@ -266,6 +284,7 @@ class LocalNCSTab(QWidget):
             "Capture the field report in plain language. FIO will classify useful terms for message intelligence."
         )
         self.report_body_edit.setMinimumHeight(88)
+        self.report_body_edit.setMaximumHeight(150)
         report_panel.addWidget(self.report_body_edit)
 
         report_actions = QHBoxLayout()
@@ -301,6 +320,7 @@ class LocalNCSTab(QWidget):
         self.lookup_edit.installEventFilter(self)
         self.add_checkin_btn.installEventFilter(self)
         self.setTabOrder(self.lookup_edit, self.add_checkin_btn)
+        self.local_ncs_scroll_area.setWidget(self.local_ncs_content)
         self._update_net_session_ui()
 
     def _setup_timers(self) -> None:
