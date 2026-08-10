@@ -1744,12 +1744,55 @@ Phase 6: Performance and soak hardening
     - Per-check-in notes remain editable and persistent across session/restart.
     - Autosave runs periodically and persists dirty status/notes edits.
     - Persist latest status/notes back to the matching local operator record.
+  - Local operator report intake:
+    - Add a fast report-capture surface in `Local NCS` and `Local Operators` for information received by voice or local-network channels.
+    - Intended sources include VHF/UHF voice, GMRS, MURS/FRS, local simplex/repeater traffic, in-person relay, phone/SMS relay when manually logged, and future mesh/Reticulum integrations.
+    - Capture must use the same operator-facing topic taxonomy as Messages/Message Intelligence:
+      `Weather`, `Fire`, `Medical`, `Power`, `Water`, `Fuel`, `Food`, `Travel/Roads`, `Comms`, `Security`, `Shelter`, `Logistics`, `Infrastructure`, `General Intel`.
+    - User workflow:
+      - Select or add the reporting operator.
+      - Pick one or more topic categories from compact chips/buttons.
+      - Enter short subject and concise report text.
+      - Set status/urgency: `Info`, `Watch`, `Priority`, `Emergency`.
+      - Set location using available granularity: `Operator location`, `City/County`, `State`, `Grid`, `Lat/Lon`, or `Unknown`.
+      - Mark whether the report is confirmed, second-hand, exercise/test, or needs follow-up.
+      - Save without leaving the NCS/check-in flow.
+    - Notes model:
+      - Keep simple per-operator notes for ongoing local context.
+      - Store each report as a separate timestamped observation so important information is not buried inside a long free-text notes field.
+      - Show the latest/highest-urgency report summary on the Local NCS check-in row and Local Operators row.
+      - Allow quick append from an active local net session; do not require a modal if the report can be captured inline.
+    - Data model:
+      - Add `local_operator_reports` table:
+        `id`, `created_utc`, `updated_utc`, `source_kind`, `source_channel`, `net_session_id`, `callsign`, `operator_id`, `from_name`, `city`, `county`, `state`, `grid`, `lat`, `lon`, `location_source`, `location_confidence`, `status`, `topics_json`, `topic_evidence_json`, `subject`, `body`, `confirmed_state`, `followup_state`, `exercise_flag`, `source_radio_id`, `source_app`, `raw_reference`, `created_by`, `updated_by`.
+      - Keep `topic_evidence_json` compatible with `MessageIntelligence.topic_evidence`, but mark evidence source as `manual`, `voice`, `mesh`, `reticulum`, or another explicit source label.
+      - Add indexes for `created_utc`, `callsign`, `state`, `grid`, `status`, and topic lookup support.
+    - Integration:
+      - Feed saved local reports into a core normalized observation/read-model service, not directly from GUI rows.
+      - Messages may optionally show a `Local Report` source/category in a future unified inbox view, but Local NCS should remain the primary capture surface.
+      - Map may show local report markers only when location confidence is sufficient and the user has enabled local-report layers.
+      - Managed BBS/routing must require explicit user rules and audit rows before moving or publishing any report.
+      - Operator History should show a concise local-report history timeline for each callsign.
+    - UI/UX:
+      - The capture control should be reachable from the selected check-in row with one obvious action such as `Log Report`.
+      - Category selection should use a compact chip/grid control, not a long dropdown.
+      - The inline form should prioritize speed: source, topic, status, subject, body, location, follow-up.
+      - The report list should default to recent/highest-urgency, with search by topic, callsign, location, and keyword.
+      - Minimized-window usability is required: report capture and recent reports must scroll cleanly without compressed fields.
+    - Guardrails:
+      - A manually logged report is operator-entered information, not automatically verified digital traffic.
+      - Display source/provenance clearly: e.g. `Voice report`, `GMRS`, `Local repeater`, `Mesh`, `Reticulum`, `Manual`.
+      - Do not route/map solely from category selection. Future map/BBS decisions require explicit rules, location confidence, audit logging, and operator-visible provenance.
 - Acceptance:
   - Updated labels appear consistently in sidebar and settings UI.
   - `Local Operators` CRUD/import/export works and persists after restart.
   - `Local NCS` can add check-ins from lookup/parsing without scheduler coupling.
   - SitRep status and notes edits survive restart and update local operator records.
   - UI stays responsive while editing/adding rows; no heavy blocking path on tab activation.
+  - Local NCS can log a voice/local report against a checked-in operator in one flow and preserve it as a timestamped observation.
+  - Local Operators shows the latest/highest-urgency report context without burying it in free-text notes.
+  - Topic/category search finds local reports using the same language as Messages intelligence.
+  - Manual local reports are never auto-routed to Map or BBS without explicit user rules and audit-ready provenance.
 - Rollback:
   - Revert local workflow additions in:
     - `freqinout/core/local_ops_store.py`
