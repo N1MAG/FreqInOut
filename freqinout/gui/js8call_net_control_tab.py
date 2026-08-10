@@ -42,6 +42,7 @@ from freqinout.core.js8_spotter_forms import (
     forms_enabled_for,
     legacy_default_forms_for,
 )
+from freqinout.core.message_ingest import MessageIngestor
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
@@ -2561,6 +2562,11 @@ class JS8CallNetControlTab(QWidget):
             return
         self._polling_rx = True
         try:
+            try:
+                if any("F!" in str((msg.get("params", {}) or {}).get("TEXT") or msg.get("value") or "").upper() for msg in messages if isinstance(msg, dict)):
+                    MessageIngestor(self.settings).ingest_spotter_from_js8_events(messages)
+            except Exception as exc:
+                log.debug("JS8CallNetControl: Spotter live ingest failed: %s", exc)
             for msg in messages:
                 now_ts = time.time()
                 self._last_rx_ts = now_ts

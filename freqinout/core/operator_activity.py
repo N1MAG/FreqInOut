@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import sqlite3
 from typing import Dict, Iterable, Optional, Tuple
@@ -16,18 +17,25 @@ def parse_utc_timestamp(value: object) -> Optional[float]:
     text = str(value or "").strip()
     if not text:
         return None
-    try:
-        numeric = float(text)
-        if math.isfinite(numeric) and numeric > 0:
-            return numeric
-    except Exception:
-        pass
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 14:
+        try:
+            dt = datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            pass
     if len(text) == 8 and text.isdigit():
         try:
             dt = datetime.datetime.strptime(text, "%Y%m%d").replace(tzinfo=datetime.timezone.utc)
             return dt.timestamp()
         except Exception:
             return None
+    try:
+        numeric = float(text)
+        if math.isfinite(numeric) and numeric > 0:
+            return numeric
+    except Exception:
+        pass
     if len(text) == 10 and text.count("-") == 2:
         try:
             dt = datetime.datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
@@ -46,13 +54,6 @@ def parse_utc_timestamp(value: object) -> Optional[float]:
     if len(text) >= 19 and " " in text:
         try:
             dt = datetime.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-            return dt.timestamp()
-        except Exception:
-            pass
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if len(digits) >= 14:
-        try:
-            dt = datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
             return dt.timestamp()
         except Exception:
             pass
@@ -219,6 +220,7 @@ def load_operator_activity_summary(
     summary: Dict[str, Dict[str, object]] = {}
     _load_js8_summary(conn, summary)
     _load_varac_summary(conn, summary)
+    _load_imported_spotter_summary(conn, summary)
     if include_operator_checkins_fallback:
         _load_operator_checkins_fallback(conn, summary)
     return summary
@@ -282,6 +284,9 @@ def _summary_entry(summary: Dict[str, Dict[str, object]], callsign: str) -> Dict
             "varac_last_seen_ts": 0.0,
             "varac_last_band": "",
             "varac_last_freq_hz": None,
+            "spotter_last_seen_ts": 0.0,
+            "spotter_last_band": "",
+            "spotter_last_freq_hz": None,
             "legacy_last_seen_ts": 0.0,
         }
         summary[callsign] = entry
@@ -339,6 +344,78 @@ def _load_varac_summary(conn: sqlite3.Connection, summary: Dict[str, Dict[str, o
         _apply_overall(entry, ts_val, "varac", str(last_band or "").strip().upper(), last_freq_hz)
 
 
+def _load_imported_spotter_summary(conn: sqlite3.Connection, summary: Dict[str, Dict[str, object]]) -> None:
+    query = """
+        SELECT source_table, payload_json, imported_ts
+        FROM js8spotter_import_archive
+        WHERE lower(source_table) IN ('grid', 'signal', 'activity')
+        ORDER BY
+            COALESCE(
+                json_extract(payload_json, '$.sig_timestamp'),
+                json_extract(payload_json, '$.grid_timestamp'),
+                json_extract(payload_json, '$.spotdate'),
+                json_extract(payload_json, '$.timestamp'),
+                json_extract(payload_json, '$.lm'),
+                imported_ts
+            ) DESC,
+            id DESC
+        LIMIT 5000
+    """
+    try:
+        cur = conn.execute(query)
+    except Exception:
+        try:
+            cur = conn.execute(
+                """
+                SELECT source_table, payload_json, imported_ts
+                FROM js8spotter_import_archive
+                WHERE lower(source_table) IN ('grid', 'signal', 'activity')
+                ORDER BY id DESC
+                LIMIT 5000
+                """
+            )
+        except Exception:
+            return
+    for source_table, payload_json, imported_ts in cur.fetchall():
+        table = str(source_table or "").strip().lower()
+        try:
+            payload = json.loads(str(payload_json or "{}"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        callsign = ""
+        timestamp = None
+        freq_value = None
+        if table == "grid":
+            callsign = _first_payload_text(payload, "grid_callsign", "callsign", "call")
+            timestamp = payload.get("grid_timestamp") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("grid_dial") or payload.get("dial") or payload.get("freq")
+        elif table == "signal":
+            callsign = _first_payload_text(payload, "sig_callsign", "callsign", "call")
+            timestamp = payload.get("sig_timestamp") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("sig_freq") or payload.get("sig_dial") or payload.get("freq") or payload.get("dial")
+        elif table == "activity":
+            callsign = _first_payload_text(payload, "call", "callsign", "fromcall")
+            timestamp = payload.get("spotdate") or payload.get("timestamp") or payload.get("lm")
+            freq_value = payload.get("freq") or payload.get("dial")
+        cs = _clean_callsign(callsign)
+        ts_val = parse_utc_timestamp(timestamp)
+        if ts_val is None:
+            ts_val = parse_utc_timestamp(imported_ts)
+        if not cs or ts_val is None or ts_val <= 0:
+            continue
+        freq_hz = _freq_hz_from_value(freq_value)
+        band = _band_from_freq_hz(freq_hz)
+        entry = _summary_entry(summary, cs)
+        existing = float(entry.get("spotter_last_seen_ts", 0.0) or 0.0)
+        if ts_val > existing:
+            entry["spotter_last_seen_ts"] = float(ts_val)
+            entry["spotter_last_band"] = band
+            entry["spotter_last_freq_hz"] = freq_hz
+        _apply_overall(entry, ts_val, "spotter_import", band, freq_hz)
+
+
 def _load_operator_checkins_fallback(conn: sqlite3.Connection, summary: Dict[str, Dict[str, object]]) -> None:
     try:
         cur = conn.execute("SELECT callsign, last_seen_utc FROM operator_checkins")
@@ -355,3 +432,57 @@ def _load_operator_checkins_fallback(conn: sqlite3.Connection, summary: Dict[str
         entry["legacy_last_seen_ts"] = float(ts_val)
         if float(entry.get("overall_last_seen_ts", 0.0) or 0.0) <= 0:
             _apply_overall(entry, ts_val, "operator_checkins")
+
+
+def _first_payload_text(payload: Dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _freq_hz_from_value(value: object) -> Optional[float]:
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+    except Exception:
+        return None
+    if numeric <= 0:
+        return None
+    if numeric < 1000:
+        return numeric * 1_000_000.0
+    if numeric < 100_000:
+        return numeric * 1_000.0
+    return numeric
+
+
+def _band_from_freq_hz(freq_hz: Optional[float]) -> str:
+    if not freq_hz or freq_hz <= 0:
+        return ""
+    mhz = float(freq_hz) / 1_000_000.0
+    if 1.8 <= mhz < 2.0:
+        return "160M"
+    if 3.0 <= mhz < 4.0:
+        return "80M"
+    if 5.0 <= mhz < 5.5:
+        return "60M"
+    if 7.0 <= mhz < 7.4:
+        return "40M"
+    if 10.0 <= mhz < 10.2:
+        return "30M"
+    if 14.0 <= mhz < 14.35:
+        return "20M"
+    if 18.0 <= mhz < 18.2:
+        return "17M"
+    if 21.0 <= mhz < 21.45:
+        return "15M"
+    if 24.8 <= mhz < 25.0:
+        return "12M"
+    if 28.0 <= mhz < 29.7:
+        return "10M"
+    if 50.0 <= mhz < 54.0:
+        return "6M"
+    return ""

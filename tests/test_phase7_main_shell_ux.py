@@ -46,9 +46,10 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '("Main", "Settings")' in source
     assert '("Radios", "Settings")' in source
     assert 'self._nav_group_order: list[str] = ["Station", "FreqPlanner", "Messages", "NCS", "Operators", "Settings"]' in source
-    assert '"Messages": True' in source
-    assert 'defaults["Station"] = True' in source
-    assert 'defaults["FreqPlanner"] = True' in source
+    assert '"Messages": False' in source
+    assert '"Station": False' in source
+    assert '"FreqPlanner": False' in source
+    assert "self._suppress_initial_nav_group_auto_expand = True" in source
     assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
     assert 'if screen in {"FreqPlanner", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
@@ -74,12 +75,14 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert "def _expand_nav_group_for_screen" in source
     assert "self._expand_nav_group_for_screen(label)" in source
     assert "if changed:\n            self._persist_nav_group_states()" not in source
+    assert '"Station": False' in source
+    assert "self._suppress_initial_nav_group_auto_expand = True" in source
     assert 'if key == "Station" and not expanded:' in source
     assert "self._station_health_alert_counts()" in source
     assert "Expand Station or open Health Details." in source
 
 
-def test_phase7_primary_nav_groups_recover_from_persisted_collapsed_state() -> None:
+def test_phase7_primary_nav_groups_start_collapsed() -> None:
     from freqinout.gui.main_window import MainWindow
 
     class FakeSettings:
@@ -99,10 +102,21 @@ def test_phase7_primary_nav_groups_recover_from_persisted_collapsed_state() -> N
 
     states = MainWindow._load_nav_group_states(window)
 
-    assert states["Station"] is True
-    assert states["FreqPlanner"] is True
+    assert states["Station"] is False
+    assert states["FreqPlanner"] is False
+    assert states["Messages"] is False
     assert states["NCS"] is True
     assert states["Operators"] is True
+
+
+def test_phase7_controlfreq_setup_review_sits_above_title() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    review_widget = source.index("self.readiness_review_widget = QWidget()")
+    review_add = source.index("root.addWidget(self.readiness_review_widget)")
+    root_header = source.index("root.addLayout(header)")
+    filter_add = source.index("root.addLayout(filter_row)")
+
+    assert review_widget < review_add < root_header < filter_add
 
 
 def test_phase7_station_workspace_decisions_are_specified() -> None:
@@ -439,8 +453,15 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
 
         assert tab._responsive_layout_mode == "compact"
         assert tab._daily_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
-        assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 5).widget() is tab.save_source_btn
+        assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.resources_resolve_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
+        assert tab.schedule_source_label.text() == "HF Daily Schedule:"
+        assert tab.save_source_btn.text() == "Save / Update Schedule"
+        assert tab.delete_source_btn.text() == "Delete Schedule"
+        assert tab.save_btn.text() == "Assign with RF Guard"
+        assert tab.move_to_resources_btn.isHidden() is True
+        assert tab.resources_delete_btn.isHidden() is True
         assert tab.daily_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_FREQ) == QHeaderView.ResizeToContents
@@ -451,7 +472,8 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
 
         assert tab._responsive_layout_mode == "wide"
         assert tab._daily_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
-        assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 6).widget() is tab.save_source_btn
+        assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.resources_resolve_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
     finally:
         tab.deleteLater()
@@ -677,7 +699,7 @@ def test_phase7_hf_daily_resources_use_empty_state_instead_of_blank_table(monkey
         app.processEvents()
 
         assert tab.resources_empty_label.isHidden() is False
-        assert "No HF schedule resources configured" in tab.resources_empty_label.text()
+        assert "No saved HF Daily schedules yet" in tab.resources_empty_label.text()
         assert tab.resources_table.isHidden() is True
 
         tab._schedule_resource_rows = [
@@ -704,6 +726,40 @@ def test_phase7_hf_daily_resources_use_empty_state_instead_of_blank_table(monkey
     finally:
         tab.deleteLater()
         app.processEvents()
+
+
+def test_phase7_hf_daily_hides_manual_copy_to_library_action() -> None:
+    source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.move_to_resources_btn = QPushButton("Copy Selected to Library")' in source
+    assert "self.move_to_resources_btn.setVisible(False)" in source
+    assert "(self.move_to_resources_btn," not in source[source.index("def _arrange_daily_action_rows") : source.index("def _apply_schedule_table_height_hints")]
+    assert "self.resources_delete_btn.setVisible(False)" in source
+
+
+def test_phase7_hf_daily_assignment_action_points_to_rf_guard_flow() -> None:
+    source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.header_title_label = QLabel("<h3>HF Frequency Schedule</h3>")' in source
+    assert "def _update_header_title" in source
+    assert "Radio shown for context only" in source
+    assert 'self.save_btn = QPushButton("Assign with RF Guard")' in source
+    assert "self.save_btn.clicked.connect(self._on_assign_with_rf_guard_clicked)" in source
+    assert "self.save_btn.clicked.connect(self._save_schedule)" not in source
+    assert "Save the blended Frequency Plan and assign that plan to radio(s)" in source
+
+
+def test_phase7_hf_daily_library_includes_saved_schedule_rows() -> None:
+    source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    loader = source[source.index("def _load_schedule_resource_rows") : source.index("def _load_manual_schedule_resource_rows")]
+
+    assert "def _load_saved_schedule_resource_rows" in source
+    assert "saved_schedule_rows = self._load_saved_schedule_resource_rows()" in loader
+    assert "_load_manual_schedule_resource_rows()" not in loader
+    assert "_load_sop_schedule_resource_rows(" not in loader
+    assert "_load_sop_gap_resource_rows(" not in loader
+    assert 'source_key": f"saved:{schedule_id}:{idx}"' in source
+    assert '"source": "saved_schedule"' in source
 
 
 def test_phase7_hf_peers_uses_view_edit_selected_row_wording() -> None:
@@ -1149,7 +1205,7 @@ def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() 
 
 def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
-    build_block = source[source.index("header = QHBoxLayout()") : source.index("self.readiness_review_widget = QWidget()")]
+    build_block = source[source.index("header = QHBoxLayout()") : source.index("controlfreq_context_text = (")]
     header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QHBoxLayout()")]
     filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
 
@@ -1161,7 +1217,7 @@ def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
     assert "filter_row.addWidget(self.refresh_btn)" in filter_block
     assert "filter_row.addWidget(self.clear_filters_btn)" in filter_block
     assert "filter_row.addWidget(self.time_toggle_btn)" in filter_block
-    assert "self.plan_context_label.setVisible(False)" in filter_block
+    assert "self.plan_context_label.setVisible(False)" in source
 
 
 def test_phase7_controlfreq_has_responsive_card_layout_breakpoint() -> None:
@@ -1984,7 +2040,100 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
         window.station_command_health_label,
     ):
         widget.deleteLater()
-    app.processEvents()
+        app.processEvents()
+
+
+def test_phase7_station_command_radio_selector_uses_hero_treatment() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert 'self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")' in source
+    assert "QComboBox#stationCommandRadioSelector {" in source
+    assert "font-size: 20px;" in source
+    assert "font-weight: 800;" in source
+    assert "setMaximumWidth(340)" in source
+
+
+def test_phase7_runtime_banner_suppresses_routine_launch_control_context() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    profile = {"name": "FIO-A", "control_backend": "flrig", "deployment_mode": "standard"}
+    policy = {
+        "operating_profile_name": "Default Operating Profile",
+        "assignment_state": "active",
+        "scheduler_enabled": True,
+        "use_map": True,
+        "use_messages": True,
+        "use_net_control_tabs": True,
+        "use_background_ingest": True,
+        "use_launch_control": False,
+    }
+
+    assert MainWindow._runtime_banner_text(profile, policy) == ""
+
+    policy["use_messages"] = False
+    assert "Messages hidden" in MainWindow._runtime_banner_text(profile, policy)
+
+
+def test_phase7_controlfreq_search_exposes_app_wide_quick_find() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.search_edit.setPlaceholderText("Search FIO... radios, schedules, messages, settings")' in source
+    assert "self.search_edit.returnPressed.connect(self._show_app_search_results)" in source
+    assert 'self.app_search_btn = QPushButton("Search FIO")' in source
+    assert "root.show_quick_search_results(query, self.search_edit)" in source
+
+
+def test_phase7_main_window_quick_search_indexes_core_app_objects(monkeypatch) -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_device_profiles(self):
+            return [
+                {
+                    "id": 7,
+                    "name": "FIO-A",
+                    "device_class": "tx_rx",
+                    "control_backend": "flrig",
+                    "assigned_operating_profile_name": "Default Plan",
+                }
+            ]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "name": "MAGNET Daily Blend",
+                    "category": "normal",
+                    "source_refs_json": "[]",
+                    "group_refs_json": '["MAGNET"]',
+                    "frequency_refs_json": '["40M:7.115"]',
+                }
+            ]
+
+    class FakeSettings:
+        def all(self):
+            return {"operator_callsign": "N0CALL", "operating_groups": []}
+
+        def get(self, key, default=None):
+            if key == "operating_groups":
+                return [{"group": "MAGNET", "band": "40M", "mode": "Digi", "frequency": "7.115"}]
+            return default
+
+    window = MainWindow.__new__(MainWindow)
+    window._quick_search_cache = (0.0, [])
+    window._nav_specs = [("ControlFreq", "ControlFreq"), ("Compose", "Messages"), ("Radios", "Settings")]
+    window._screen_is_runtime_suppressed = lambda _screen: False
+    window.multi_radio_store = FakeStore()
+    window.settings = FakeSettings()
+
+    radio_results = MainWindow.quick_search(window, "FIO-A")
+    schedule_results = MainWindow.quick_search(window, "MAGNET")
+    compose_results = MainWindow.quick_search(window, "compose")
+
+    assert radio_results[0]["category"] == "Radio"
+    assert radio_results[0]["radio_id"] == 7
+    assert any(row["title"] == "MAGNET Daily Blend" for row in schedule_results)
+    assert compose_results[0]["action"] == "messages"
+    assert compose_results[0]["message_mode"] == "compose"
 
 
 def test_phase7_station_command_bar_handles_no_configured_radio(monkeypatch) -> None:

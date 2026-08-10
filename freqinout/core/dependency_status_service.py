@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -143,6 +144,14 @@ def _initial_snapshot() -> DependencySnapshot:
     )
 
 
+def _logger_handlers_available() -> bool:
+    for handler in getattr(log, "handlers", []) or []:
+        stream = getattr(handler, "stream", None)
+        if stream is not None and bool(getattr(stream, "closed", False)):
+            return False
+    return True
+
+
 class DependencyStatusService(QObject):
     """
     Main-thread owner for shared dependency status snapshots.
@@ -162,6 +171,7 @@ class DependencyStatusService(QObject):
         self._latest_snapshot = _initial_snapshot()
         self._sequence = 0
         self._worker_pending = False
+        self._stopped = False
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-dependency-status")
         self._snapshot_ready.connect(self._publish_snapshot, Qt.QueuedConnection)
         self._timer = QTimer(self)
@@ -185,6 +195,8 @@ class DependencyStatusService(QObject):
 
     def refresh_now(self, *, reason: str = "manual", force: bool = False) -> DependencySnapshot:
         with self._lock:
+            if self._stopped:
+                return self._latest_snapshot
             if self._worker_pending and not force:
                 return self._latest_snapshot
             self._worker_pending = True
@@ -196,6 +208,9 @@ class DependencyStatusService(QObject):
 
     @Slot()
     def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            self._worker_pending = False
         try:
             self._timer.stop()
         except Exception:
@@ -208,6 +223,10 @@ class DependencyStatusService(QObject):
             pass
 
     def _on_worker_done(self, future: Future) -> None:
+        with self._lock:
+            stopped = self._stopped
+        if stopped:
+            return
         try:
             snapshot = future.result()
         except Exception as exc:
@@ -220,6 +239,8 @@ class DependencyStatusService(QObject):
     @Slot(object)
     def _publish_snapshot(self, snapshot: DependencySnapshot) -> None:
         with self._lock:
+            if self._stopped:
+                return
             self._latest_snapshot = snapshot
             self._worker_pending = False
         self.snapshot_changed.emit(snapshot)
@@ -277,7 +298,9 @@ class DependencyStatusService(QObject):
                     meta={"program": program_name},
                 )
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        if elapsed_ms > 250.0:
+        with self._lock:
+            stopped = self._stopped
+        if elapsed_ms > 250.0 and not stopped and _logger_handlers_available():
             log.info(
                 "DEPENDENCY_STATUS|slow_process_snapshot|scope=%s|duration_ms=%.1f|reason=%s",
                 LEGACY_PRIMARY_DEPENDENCY_SCOPE,
@@ -369,8 +392,28 @@ _SERVICE: Optional[DependencyStatusService] = None
 def get_dependency_status_service(settings: Any, parent: Optional[QObject] = None) -> DependencyStatusService:
     global _SERVICE
     with _SERVICE_LOCK:
-        if _SERVICE is None:
+        if _SERVICE is None or bool(getattr(_SERVICE, "_stopped", False)):
             _SERVICE = DependencyStatusService(settings, parent=None)
         elif settings is not None:
             _SERVICE.settings = settings
         return _SERVICE
+
+
+def shutdown_dependency_status_service() -> None:
+    global _SERVICE
+    with _SERVICE_LOCK:
+        service = _SERVICE
+        _SERVICE = None
+    if service is None:
+        return
+    try:
+        service.stop()
+    except Exception:
+        pass
+    try:
+        service.deleteLater()
+    except Exception:
+        pass
+
+
+atexit.register(shutdown_dependency_status_service)

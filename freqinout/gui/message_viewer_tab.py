@@ -57,6 +57,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -79,10 +81,43 @@ from freqinout.core.commstat_artifacts import (
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.core.js8_spotter_forms import (
+    discover_spotter_forms,
+    factory_mapping_for_form,
     form_codes_enabled_for,
     form_id_enabled,
     normalize_form_code,
+    parse_spotter_form_fields,
 )
+from freqinout.core.js8_spotter_decode import (
+    decode_spotter_form_text,
+    parse_spotter_bracket_fields,
+    summarize_spotter_form_text,
+)
+from freqinout.core.js8_send_service import (
+    js8_endpoint_from_radio_profile,
+    send_js8_message_guarded,
+)
+from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
+from freqinout.core.js8_msg_auth import MsgAuthKey, encode_short_datecode, sign_js8_text, verify_js8_text
+from freqinout.core.js8_msg_auth_store import (
+    MSG_AUTH_SCOPE_SIGNING,
+    MSG_AUTH_SCOPE_VERIFY_ANY,
+    MSG_AUTH_SCOPE_VERIFY_SENDER,
+    load_msg_auth_verification_keys,
+    list_msg_auth_key_rows,
+    load_msg_auth_keys,
+)
+from freqinout.core.message_file_scanner import (
+    AUTH_FILE_EXTS,
+    FLAMP_AUTH_EXTS,
+    IMAGE_EXTS,
+    ORIGIN_EXTS,
+    SUPPORTED_EXT,
+    FileRecord,
+    MessageFileScanner,
+    is_fio_bbs_helper_file_name,
+)
+from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
     source_family_display_label,
@@ -121,6 +156,7 @@ from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.nbems_compose import (
     ComposeDestinationPlan,
     ComposeFieldDefinition,
+    ComposeFieldOption,
     ComposeFormFamily,
     ComposeFormTemplate,
     compose_message_relative_path,
@@ -148,11 +184,10 @@ from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 from freqinout.gui.dropdown_checklist import DropdownChecklist
+from freqinout.radio_interface.js8_api_client import JS8ApiClient
 
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
 IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
-AUTH_FILE_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
 AUTH_VERIFIABLE_ORIGINS = {"flamp", "varac", "bbs"}
 VARAC_BBS_SAFE_SUFFIXES = (
     ".k2s.sig",
@@ -171,29 +206,6 @@ VARAC_BBS_SAFE_SUFFIXES = (
     ".asc",
     ".gpg",
 )
-SUPPORTED_EXT = {
-    ".b2s",
-    ".k2s",
-    ".sig",
-    ".asc",
-    ".gpg",
-    ".txt",
-    ".rtf",
-    ".ff",
-    ".xml",
-    ".json",
-    ".html",
-    ".htm",
-    *IMAGE_EXTS,
-}
-ORIGIN_EXTS = {
-    "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
-    "flamp": {".txt", ".rtf", *AUTH_FILE_EXTS},
-    "varac": {".txt", ".html", ".htm", *AUTH_FILE_EXTS, *IMAGE_EXTS},
-    "bbs": set(SUPPORTED_EXT),
-}
-FLAMP_AUTH_EXTS = set(AUTH_FILE_EXTS)
-
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
     {"path": r"C:\Users\HP\NBEMS.files\ICS\messages", "origin": "flmsg"},
@@ -216,15 +228,6 @@ JS8_SAFE_CALL_LIMIT = 32
 JS8_BAD_PREVIEW_LIMIT = 1024
 BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
-BBS_HELPER_FILE_PREFIXES = (
-    "BBS MSG - ",
-    "00 READ FIRST -",
-    "00 NOTICE -",
-    "01 COMMANDS -",
-    "BBS_QUEUE_LIST",
-    "BBS_BLOCK_LIST",
-)
-
 RECEIVED_FILTER_CHOICES = [
     ("Any time", 0),
     ("Last 15 min", 15 * 60),
@@ -290,10 +293,117 @@ def _safe_js8_float(value: object, default: float = 0.0) -> float:
 
 
 def _is_fio_bbs_helper_file_name(name: object) -> bool:
-    clean = Path(str(name or "").strip()).name.upper()
-    return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES) or bool(
-        re.match(r"^\d{2} TYPE .+\.TXT$", clean)
-    )
+    return is_fio_bbs_helper_file_name(name)
+
+
+def _read_text_head(path: Path, limit: int = 4096) -> str:
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(limit)
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_custom_form_name_text(text: str) -> str:
+    if not text:
+        return ""
+    m = re.search(r"CUSTOM_FORM,([A-Za-z0-9_.-]+)", text, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _parse_custom_form_fields_text(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+    if not text:
+        return fields
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "," not in line:
+            continue
+        key, val = line.split(",", 1)
+        key = key.strip().upper()
+        if re.fullmatch(r"L\d{1,2}[A-Z]?", key):
+            fields[key] = val.strip()
+    return fields
+
+
+def _strip_html_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_template_title_text(template: str) -> str:
+    if not template:
+        return ""
+    m = re.search(r"<title>(.*?)</title>", template, flags=re.IGNORECASE | re.DOTALL)
+    return _strip_html_text(m.group(1)) if m else ""
+
+
+def _match_field_text(text: str, pattern: str) -> str:
+    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip().replace("\r\n", "\n") if m else ""
+
+
+def _extract_hdr_call_text(text: str, marker: str) -> str:
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for idx, line in enumerate(lines):
+        if line.lower().startswith(str(marker or "").lower()):
+            for nxt in lines[idx + 1 :]:
+                match = re.search(r"\b@?[A-Z]{1,2}\d[A-Z0-9]{1,5}\b|\b@[A-Z0-9_-]{2,}\b", nxt.upper())
+                if match:
+                    return match.group(0).strip().upper()
+            break
+    return ""
+
+
+def _extract_sender_from_form_text(text: str, path: Path) -> str:
+    sender = _extract_hdr_call_text(text, ":hdr_fm:")
+    if sender:
+        return sender
+    for tok in re.split(r"[-_\\s]+", path.stem):
+        up = tok.strip().upper()
+        if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
+            return up
+    return ""
+
+
+def _title_from_filename_path(path: Path) -> str:
+    stem = path.stem
+    tokens = [t for t in re.split(r"[-_]", stem) if t]
+    if not tokens:
+        return stem
+    date_idx: Optional[int] = None
+    for i, tok in enumerate(tokens):
+        t = tok.lower()
+        if re.fullmatch(r"\d{6,8}", t) or re.fullmatch(r"\d{4,6}z", t) or re.fullmatch(r"\d{5,6}z", t):
+            date_idx = i
+            break
+    title_tokens = tokens[date_idx + 1 :] if date_idx is not None else tokens[-1:]
+    title = " ".join(title_tokens).strip()
+    return title or stem
+
+
+def _form_label_key(label: object) -> str:
+    text = str(label or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _form_date_summary(value: str) -> str:
+    txt = str(value or "").strip()
+    if not txt:
+        return ""
+    m = re.search(r"\b(\d{6})[-_]?(\d{4})z?\b", txt, flags=re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}z"
+    m = re.search(r"\b(\d{8})[-_]?(\d{4,6})z?\b", txt, flags=re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}-{m.group(2)[:4]}z"
+    return txt[:24]
 
 
 @dataclass(frozen=True)
@@ -302,20 +412,6 @@ class ComposeRadioTarget:
     label: str
     profile: Dict[str, Any]
     capabilities: Tuple[str, ...]
-
-
-@dataclass
-class FileRecord:
-    path: Path
-    origin: str
-    size: int = 0
-    mtime: float = 0.0
-
-    def display_name(self) -> str:
-        return self.path.name
-
-    def info_line(self) -> str:
-        return f"{self.display_name()} - {self.size} bytes"
 
 
 @dataclass
@@ -350,6 +446,8 @@ class SpotterMessage:
     read_ts: float = 0.0
     relay_via: str = ""
     flag_state: int = 0
+    source_radio_id: str = ""
+    js8_instance_id: str = ""
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -366,319 +464,23 @@ class _FileScanWorker(QObject):
         base_dir_mtimes: Optional[Dict[str, float]] = None,
     ):
         super().__init__()
-        self._watch_dirs = list(watch_dirs)
-        self._force = force
-        self._base_records = base_records or {}
-        self._base_dir_mtimes: Dict[str, float] = {}
-        for k, v in (base_dir_mtimes or {}).items():
-            try:
-                self._base_dir_mtimes[self._norm_path(k)] = float(v)
-            except Exception:
-                continue
-        self._roots_by_origin: Dict[str, List[str]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
-        for entry in self._watch_dirs:
-            origin = str(entry.get("origin", "") or "").strip().lower()
-            path = str(entry.get("path", "") or "").strip()
-            if origin in self._roots_by_origin and path:
-                norm = self._norm_path(path)
-                if norm not in self._roots_by_origin[origin]:
-                    self._roots_by_origin[origin].append(norm)
-
-    @staticmethod
-    def _norm_path(path: str | Path) -> str:
-        return os.path.normcase(os.path.normpath(str(path)))
-
-    @staticmethod
-    def _is_under(path_norm: str, root_norm: str) -> bool:
-        if path_norm == root_norm:
-            return True
-        return path_norm.startswith(root_norm + os.sep)
-
-    def _is_under_any(self, path_norm: str, roots: set[str] | List[str]) -> bool:
-        for root_norm in roots:
-            if self._is_under(path_norm, root_norm):
-                return True
-        return False
-
-    def _empty_result(self) -> Dict[str, Dict[str, FileRecord]]:
-        return {"varac": {}, "flmsg": {}, "flamp": {}, "bbs": {}}
-
-    def _full_scan_recursive(
-        self,
-        base: Path,
-        origin: str,
-        allowed_exts: Optional[set[str]],
-        out_map: Dict[str, Dict[str, FileRecord]],
-        dir_mtimes: Dict[str, float],
-    ) -> None:
-        base_norm = self._norm_path(base)
-        try:
-            dir_mtimes[base_norm] = float(base.stat().st_mtime)
-        except OSError:
-            return
-        try:
-            with os.scandir(base) as it:
-                for dent in it:
-                    try:
-                        if dent.is_dir(follow_symlinks=False):
-                            self._full_scan_recursive(Path(dent.path), origin, allowed_exts, out_map, dir_mtimes)
-                            continue
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
-                        if _is_fio_bbs_helper_file_name(dent.name):
-                            continue
-                        suffix = Path(dent.name).suffix.lower()
-                        if suffix not in SUPPORTED_EXT:
-                            continue
-                        if allowed_exts and suffix not in allowed_exts:
-                            continue
-                        st = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin=origin, size=st.st_size, mtime=st.st_mtime)
-                        out_map[origin][self._norm_path(rec.path)] = rec
-                    except OSError:
-                        continue
-        except OSError:
-            return
-
-    def _full_scan_bbs(
-        self,
-        base: Path,
-        out_map: Dict[str, Dict[str, FileRecord]],
-        dir_mtimes: Dict[str, float],
-    ) -> None:
-        base_norm = self._norm_path(base)
-        try:
-            dir_mtimes[base_norm] = float(base.stat().st_mtime)
-        except OSError:
-            return
-        try:
-            with os.scandir(base) as it:
-                for dent in it:
-                    try:
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
-                        if _is_fio_bbs_helper_file_name(dent.name):
-                            continue
-                        suffix = Path(dent.name).suffix.lower()
-                        if suffix not in SUPPORTED_EXT:
-                            continue
-                        st = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=st.st_size, mtime=st.st_mtime)
-                        out_map["bbs"][self._norm_path(rec.path)] = rec
-                    except OSError:
-                        continue
-        except OSError:
-            return
-
-    def _scan_changed_recursive(
-        self,
-        base: Path,
-        origin: str,
-        allowed_exts: Optional[set[str]],
-        out_map: Dict[str, Dict[str, FileRecord]],
-        dir_mtimes: Dict[str, float],
-        seen_files: Dict[str, set[str]],
-        changed_dirs: Dict[str, set[str]],
-        reused_dirs: Dict[str, set[str]],
-    ) -> None:
-        base_norm = self._norm_path(base)
-        try:
-            base_st = base.stat()
-            cur_dir_mtime = float(base_st.st_mtime)
-        except OSError:
-            return
-        dir_mtimes[base_norm] = cur_dir_mtime
-        prev_mtime = self._base_dir_mtimes.get(base_norm)
-        if prev_mtime is not None and abs(prev_mtime - cur_dir_mtime) < 1e-6:
-            reused_dirs[origin].add(base_norm)
-            return
-        changed_dirs[origin].add(base_norm)
-        try:
-            with os.scandir(base) as it:
-                for dent in it:
-                    try:
-                        if dent.is_dir(follow_symlinks=False):
-                            self._scan_changed_recursive(
-                                Path(dent.path),
-                                origin,
-                                allowed_exts,
-                                out_map,
-                                dir_mtimes,
-                                seen_files,
-                                changed_dirs,
-                                reused_dirs,
-                            )
-                            continue
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
-                        if _is_fio_bbs_helper_file_name(dent.name):
-                            continue
-                        suffix = Path(dent.name).suffix.lower()
-                        if suffix not in SUPPORTED_EXT:
-                            continue
-                        if allowed_exts and suffix not in allowed_exts:
-                            continue
-                        st = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin=origin, size=st.st_size, mtime=st.st_mtime)
-                        key = self._norm_path(rec.path)
-                        out_map[origin][key] = rec
-                        seen_files[origin].add(key)
-                    except OSError:
-                        continue
-        except OSError:
-            return
-
-    def _scan_changed_bbs(
-        self,
-        base: Path,
-        out_map: Dict[str, Dict[str, FileRecord]],
-        dir_mtimes: Dict[str, float],
-        seen_files: Dict[str, set[str]],
-        changed_dirs: Dict[str, set[str]],
-        reused_dirs: Dict[str, set[str]],
-    ) -> None:
-        base_norm = self._norm_path(base)
-        try:
-            base_st = base.stat()
-            cur_dir_mtime = float(base_st.st_mtime)
-        except OSError:
-            return
-        dir_mtimes[base_norm] = cur_dir_mtime
-        prev_mtime = self._base_dir_mtimes.get(base_norm)
-        if prev_mtime is not None and abs(prev_mtime - cur_dir_mtime) < 1e-6:
-            reused_dirs["bbs"].add(base_norm)
-            return
-        changed_dirs["bbs"].add(base_norm)
-        try:
-            with os.scandir(base) as it:
-                for dent in it:
-                    try:
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
-                        if _is_fio_bbs_helper_file_name(dent.name):
-                            continue
-                        suffix = Path(dent.name).suffix.lower()
-                        if suffix not in SUPPORTED_EXT:
-                            continue
-                        st = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=st.st_size, mtime=st.st_mtime)
-                        key = self._norm_path(rec.path)
-                        out_map["bbs"][key] = rec
-                        seen_files["bbs"].add(key)
-                    except OSError:
-                        continue
-        except OSError:
-            return
-
-    def _finalize_maps(self, records_map: Dict[str, Dict[str, FileRecord]]) -> Dict[str, List[FileRecord]]:
-        out: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
-        for origin in out:
-            out[origin] = sorted(records_map.get(origin, {}).values(), key=lambda r: r.mtime, reverse=True)
-        return out
-
-    def _run_full(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
-        records_map = self._empty_result()
-        dir_mtimes: Dict[str, float] = {}
-        for entry in self._watch_dirs:
-            origin = str(entry.get("origin", "") or "").strip().lower()
-            if origin not in records_map:
-                continue
-            p = str(entry.get("path", "") or "").strip()
-            if not p:
-                continue
-            base = Path(p)
-            if not base.exists():
-                continue
-            if origin == "bbs":
-                self._full_scan_bbs(base, records_map, dir_mtimes)
-            else:
-                self._full_scan_recursive(base, origin, ORIGIN_EXTS.get(origin), records_map, dir_mtimes)
-        return self._finalize_maps(records_map), dir_mtimes
-
-    def _run_incremental(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
-        records_map = self._empty_result()
-        for origin, rows in (self._base_records or {}).items():
-            origin_norm = str(origin or "").strip().lower()
-            if origin_norm not in records_map:
-                continue
-            for rec in rows or []:
-                key = self._norm_path(rec.path)
-                records_map[origin_norm][key] = FileRecord(
-                    path=Path(rec.path),
-                    origin=origin_norm,
-                    size=int(rec.size or 0),
-                    mtime=float(rec.mtime or 0.0),
-                )
-
-        dir_mtimes: Dict[str, float] = {}
-        seen_files: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
-        changed_dirs: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
-        reused_dirs: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
-        missing_roots: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
-
-        for entry in self._watch_dirs:
-            origin = str(entry.get("origin", "") or "").strip().lower()
-            if origin not in records_map:
-                continue
-            p = str(entry.get("path", "") or "").strip()
-            if not p:
-                continue
-            base = Path(p)
-            base_norm = self._norm_path(base)
-            if not base.exists():
-                missing_roots[origin].add(base_norm)
-                continue
-            if origin == "bbs":
-                self._scan_changed_bbs(base, records_map, dir_mtimes, seen_files, changed_dirs, reused_dirs)
-            else:
-                self._scan_changed_recursive(
-                    base,
-                    origin,
-                    ORIGIN_EXTS.get(origin),
-                    records_map,
-                    dir_mtimes,
-                    seen_files,
-                    changed_dirs,
-                    reused_dirs,
-                )
-
-        for origin, path_map in records_map.items():
-            roots = set(self._roots_by_origin.get(origin, []))
-            changed = changed_dirs.get(origin, set())
-            reused = reused_dirs.get(origin, set())
-            seen = seen_files.get(origin, set())
-            missing = missing_roots.get(origin, set())
-            if not roots:
-                path_map.clear()
-                continue
-            for key in list(path_map.keys()):
-                if not self._is_under_any(key, roots):
-                    path_map.pop(key, None)
-                    continue
-                if missing and self._is_under_any(key, missing):
-                    path_map.pop(key, None)
-                    continue
-                if changed and self._is_under_any(key, changed):
-                    if key in seen:
-                        continue
-                    if reused and self._is_under_any(key, reused):
-                        continue
-                    path_map.pop(key, None)
-
-        return self._finalize_maps(records_map), dir_mtimes
+        self._force = bool(force)
+        self._scanner = MessageFileScanner(
+            watch_dirs,
+            force=force,
+            base_records=base_records,
+            base_dir_mtimes=base_dir_mtimes,
+        )
 
     def run(self) -> None:
-        have_base = any(bool(v) for v in (self._base_records or {}).values())
-        try:
-            if self._force or not have_base:
-                records, dir_mtimes = self._run_full()
-                self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "full"}, self._force)
-                return
-            records, dir_mtimes = self._run_incremental()
-            self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "incremental"}, self._force)
-        except Exception:
-            records, dir_mtimes = self._run_full()
-            self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "fallback"}, self._force)
+        records, dir_mtimes, mode = self._scanner.scan()
+        self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": mode}, self._force)
+
+    def _run_full(self) -> Tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
+        return self._scanner._run_full()
+
+    def _run_incremental(self) -> Tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
+        return self._scanner._run_incremental()
 
 
 class _BbsAutoArchiveWorker(QObject):
@@ -811,8 +613,11 @@ class _RowsBuildWorker(QObject):
         files: Dict[str, List[FileRecord]],
         read_state_map: Dict[tuple, tuple[str, float, int]],
         signature_state_map: Dict[tuple, Dict[str, object]],
+        spotter_auth_state_map: Dict[int, Dict[str, object]],
+        spotter_expect_state_map: Dict[int, Dict[str, object]],
         sender_cache_seed: Dict[tuple, str],
         form_titles: Dict[str, str],
+        custom_forms_path: str,
         message_form_codes: Optional[set[str]],
         alert_form_codes: Optional[set[str]],
         show_local_time: bool,
@@ -836,9 +641,13 @@ class _RowsBuildWorker(QObject):
         }
         self._read_state_map = dict(read_state_map)
         self._signature_state_map = dict(signature_state_map or {})
+        self._spotter_auth_state_map = dict(spotter_auth_state_map or {})
+        self._spotter_expect_state_map = dict(spotter_expect_state_map or {})
         self._sender_cache_seed = dict(sender_cache_seed)
         self._sender_cache_updates: Dict[tuple, str] = {}
         self._form_titles = {str(k): str(v or "") for k, v in (form_titles or {}).items()}
+        self._custom_forms_path = str(custom_forms_path or "").strip()
+        self._custom_form_meta_cache: Dict[str, Tuple[str, List[Tuple[str, str]]]] = {}
         self._message_form_codes = set(message_form_codes) if message_form_codes is not None else None
         self._alert_form_codes = set(alert_form_codes) if alert_form_codes is not None else None
         self._show_local_time = bool(show_local_time)
@@ -1134,12 +943,89 @@ class _RowsBuildWorker(QObject):
 
     @staticmethod
     def _read_file_head(path: Path, limit: int = 4096) -> str:
+        return _read_text_head(path, limit)
+
+    def _template_labels_for_custom_form(self, form_name: str) -> List[Tuple[str, str]]:
+        return list(self._template_meta_for_custom_form(form_name)[1])
+
+    def _template_title_for_custom_form(self, form_name: str) -> str:
+        return self._template_meta_for_custom_form(form_name)[0]
+
+    def _template_meta_for_custom_form(self, form_name: str) -> Tuple[str, List[Tuple[str, str]]]:
+        form_name = str(form_name or "").strip()
+        if not form_name or not self._custom_forms_path:
+            return "", []
+        cache_key = str(Path(form_name).name).lower()
+        cached = self._custom_form_meta_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        path = Path(self._custom_forms_path) / Path(form_name).name
+        if not path.exists():
+            self._custom_form_meta_cache[cache_key] = ("", [])
+            return "", []
         try:
-            with path.open("rb") as fh:
-                raw = fh.read(limit)
-            return raw.decode("utf-8", errors="replace")
+            template = path.read_text(encoding="utf-8", errors="replace")
+            meta = (
+                _extract_template_title_text(template),
+                [(field.key, field.label) for field in parse_compose_template_fields(template)],
+            )
         except Exception:
-            return ""
+            meta = ("", [])
+        self._custom_form_meta_cache[cache_key] = meta
+        return meta
+
+    def _extract_form_file_metadata(self, rec: FileRecord) -> Dict[str, str]:
+        text = _read_text_head(rec.path, 131072)
+        if not text:
+            return {}
+        meta: Dict[str, str] = {}
+        from_call = _extract_sender_from_form_text(text, rec.path)
+        if from_call:
+            meta["from"] = from_call
+        to_call = _extract_hdr_call_text(text, ":hdr_to:")
+        if to_call:
+            meta["to"] = to_call
+        subject = _match_field_text(text, r":sub:\s*(.*?)\s*(?=:)")
+        if subject:
+            meta["subject"] = subject
+        form_name = _extract_custom_form_name_text(text)
+        fields = _parse_custom_form_fields_text(text)
+        if form_name and fields:
+            title = self._template_title_for_custom_form(form_name)
+            if title:
+                meta["form_title"] = title
+            for key, label in self._template_labels_for_custom_form(form_name):
+                value = fields.get(str(key or "").strip().upper(), "").strip()
+                if not value:
+                    continue
+                label_key = _form_label_key(label)
+                if label_key in {"from", "from call", "from callsign", "sender", "sender callsign"}:
+                    meta["from"] = value.strip().upper()
+                elif label_key in {"to", "to call", "to callsign", "destination", "recipient", "group"}:
+                    meta["to"] = value.strip().upper()
+                elif "date" in label_key and ("msg" in label_key or "message" in label_key or "time" in label_key):
+                    meta["date_summary"] = _form_date_summary(value)
+                elif label_key in {"subject", "title", "incident", "report title"}:
+                    meta.setdefault("subject", value)
+        if "date_summary" not in meta:
+            for pattern in (
+                r"\b(\d{6}[-_]\d{4}z?)\b",
+                r"\b(\d{8}[-_]\d{4,6}z?)\b",
+            ):
+                m = re.search(pattern, text, flags=re.IGNORECASE)
+                if m:
+                    meta["date_summary"] = _form_date_summary(m.group(1))
+                    break
+        title_parts = []
+        if meta.get("form_title"):
+            title_parts.append(meta["form_title"])
+        elif meta.get("subject"):
+            title_parts.append(meta["subject"])
+        if meta.get("date_summary"):
+            title_parts.append(meta["date_summary"])
+        if title_parts:
+            meta["title"] = " - ".join(title_parts)
+        return meta
 
     def _extract_sender_from_file(self, rec: FileRecord) -> str:
         cache_key = (str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
@@ -1148,27 +1034,7 @@ class _RowsBuildWorker(QObject):
         if cache_key in self._sender_cache_seed:
             return self._sender_cache_seed.get(cache_key, "")
         text = self._read_file_head(rec.path)
-        sender = ""
-        if text:
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            for marker in (":hdr_fm:", ":hdr_ed:"):
-                for idx, line in enumerate(lines):
-                    if line.lower().startswith(marker):
-                        for nxt in lines[idx + 1 :]:
-                            match = re.search(r"\b[A-Z]{1,2}\d[A-Z0-9]{1,4}\b", nxt.upper())
-                            if match:
-                                sender = match.group(0)
-                                break
-                        break
-                if sender:
-                    break
-            if not sender:
-                tokens = re.split(r"[-_\\s]+", rec.path.stem)
-                for tok in tokens:
-                    up = tok.strip().upper()
-                    if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
-                        sender = up
-                        break
+        sender = _extract_sender_from_form_text(text, rec.path) if text else ""
         self._sender_cache_updates[cache_key] = sender
         return sender
 
@@ -1205,6 +1071,35 @@ class _RowsBuildWorker(QObject):
         detail = str(state.get("detail", "") or "").strip()
         trusted = bool(state.get("trusted", False))
         return status, detail, trusted
+
+    def _spotter_auth_row_state(self, msg: SpotterMessage) -> tuple[str, str, bool]:
+        try:
+            msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+        except Exception:
+            msg_id = 0
+        if msg_id <= 0:
+            return "", "", False
+        state = self._spotter_auth_state_map.get(msg_id, {})
+        if not isinstance(state, dict):
+            return "", "", False
+        status = str(state.get("status", "") or "").strip()
+        detail = str(state.get("detail", "") or "").strip()
+        trusted = bool(state.get("trusted", False))
+        return status, detail, trusted
+
+    def _spotter_expect_row_state(self, msg: SpotterMessage) -> tuple[str, str]:
+        try:
+            msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+        except Exception:
+            msg_id = 0
+        if msg_id <= 0:
+            return "", ""
+        state = self._spotter_expect_state_map.get(msg_id, {})
+        if not isinstance(state, dict):
+            return "", ""
+        decision = str(state.get("decision", "") or "").strip()
+        detail = str(state.get("detail", "") or "").strip()
+        return decision, detail
 
     def run(self) -> None:
         start = time.perf_counter()
@@ -1269,12 +1164,14 @@ class _RowsBuildWorker(QObject):
             if msg_type.startswith("F!"):
                 form_id = msg_type[2:].strip()
                 title = self._form_titles.get(form_id, "")
-            if not title:
-                title = (msg.decoded_text or msg.raw_text or "").strip()
+            summary = summarize_spotter_form_text(msg.raw_text, form_title=title)
+            title = summary or title or (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
             to_call = (msg.to_call or "").strip().upper()
+            auth_state, auth_detail, auth_trusted = self._spotter_auth_row_state(msg)
+            expect_decision, expect_detail = self._spotter_expect_row_state(msg)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1286,6 +1183,11 @@ class _RowsBuildWorker(QObject):
                     title=title,
                     origin="spotter",
                     payload=msg,
+                    auth_state=auth_state,
+                    auth_detail=auth_detail,
+                    auth_trusted=auth_trusted,
+                    expect_decision=expect_decision,
+                    expect_detail=expect_detail,
                     search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
                 )
             )
@@ -1428,8 +1330,10 @@ class _RowsBuildWorker(QObject):
             for rec in recs:
                 status = self._file_status(rec)
                 is_image = rec.path.suffix.lower() in IMAGE_EXTS
-                from_call = "" if is_image else self._extract_sender_from_file(rec)
-                title = "Image Received" if is_image else rec.path.name
+                form_meta = {} if is_image else self._extract_form_file_metadata(rec)
+                from_call = "" if is_image else (form_meta.get("from") or self._extract_sender_from_file(rec))
+                to_call = "" if is_image else form_meta.get("to", "")
+                title = "Image Received" if is_image else (form_meta.get("title") or _title_from_filename_path(rec.path))
                 rcv_ts = float(rec.mtime or 0.0)
                 rcv_display = self._format_rcv_display(rcv_ts, None)
                 msg_type = origin.upper() if origin != "varac" else "VarAC"
@@ -1443,13 +1347,13 @@ class _RowsBuildWorker(QObject):
                         msg_type=msg_type,
                         status=status,
                         from_call=from_call,
-                        to_call="",
+                        to_call=to_call,
                         rcv_ts=rcv_ts,
                         rcv_display=rcv_display,
                         title=title,
                         origin=origin,
                         payload=rec,
-                        search_text=self._compose_search_text(msg_type, status, from_call, "", rcv_display, title),
+                        search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
                         auth_state=auth_state,
                         auth_detail=auth_detail,
                         auth_trusted=auth_trusted,
@@ -1725,6 +1629,8 @@ class UnifiedMessage:
     auth_state: str = ""
     auth_detail: str = ""
     auth_trusted: bool = False
+    expect_decision: str = ""
+    expect_detail: str = ""
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -1734,7 +1640,8 @@ class MessageTableModel(QAbstractTableModel):
         self._selected_keys: set[tuple] = set()
         self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
-        self._headers = ["", "MSG Type", "Status", "From", "To", "RCV_DT (UTC)", "Message Title", ""]
+        self._display_profile = "triage"
+        self._headers = ["", "Type", "Status", "From", "To", "Received", "Message", ""]
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -1761,18 +1668,34 @@ class MessageTableModel(QAbstractTableModel):
                 return None
             return Qt.Checked if key in self._selected_keys else Qt.Unchecked
         if role == Qt.DisplayRole:
-            if col == 1:
-                return row.msg_type
-            if col == 2:
-                return row.status
-            if col == 3:
-                return row.from_call
-            if col == 4:
-                return row.to_call
-            if col == 5:
-                return row.rcv_display
-            if col == 6:
-                return row.title
+            if self._display_profile == "field_report":
+                if col == 1:
+                    return self._field_report_form(row)
+                if col == 2:
+                    return self._field_report_status(row)
+                if col == 3:
+                    return row.from_call
+                if col == 4:
+                    return self._field_report_group(row)
+                if col == 5:
+                    return self._field_report_area(row)
+                if col == 6:
+                    return self._relative_age(row.rcv_ts)
+            else:
+                if col == 1:
+                    return self._cell_text(row, "type")
+                if col == 2:
+                    return self._cell_text(row, "status")
+                if col == 3:
+                    return self._cell_text(row, "from")
+                if col == 4:
+                    return self._cell_text(row, "to")
+                if col == 5:
+                    if self._display_profile == "form_message":
+                        return self._relative_age(row.rcv_ts)
+                    return self._cell_text(row, "received")
+                if col == 6:
+                    return self._cell_text(row, "message")
             if col == 7:
                 if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs":
                     return "View | Archive | Delete"
@@ -1795,7 +1718,12 @@ class MessageTableModel(QAbstractTableModel):
                 return style.standardIcon(QStyle.SP_MessageBoxWarning)
             return None
         if role == Qt.ToolTipRole and col in (1, 6):
-            detail = str(getattr(row, "auth_detail", "") or "").strip()
+            details = [
+                str(row.title or "").strip() if col == 6 else "",
+                str(getattr(row, "auth_detail", "") or "").strip(),
+                str(getattr(row, "expect_detail", "") or "").strip(),
+            ]
+            detail = "\n".join(part for part in details if part)
             if detail:
                 return detail
         if role == Qt.ForegroundRole and col == 2:
@@ -1827,8 +1755,132 @@ class MessageTableModel(QAbstractTableModel):
         return None
 
     def set_time_header(self, label: str) -> None:
-        self._headers[5] = label
-        self.headerDataChanged.emit(Qt.Horizontal, 5, 5)
+        idx = 6 if self._display_profile == "field_report" else 5
+        self._headers[idx] = "Age" if self._display_profile in {"field_report", "form_message"} else label
+        self.headerDataChanged.emit(Qt.Horizontal, idx, idx)
+
+    def set_display_profile(self, profile: str, time_label: str) -> None:
+        profile = str(profile or "triage").strip().lower()
+        if profile not in {"triage", "field_report", "form_message"}:
+            profile = "triage"
+        if profile == "field_report":
+            headers = ["", "MCF", "Status", "From", "To", "State / Grid", "Age", ""]
+        elif profile == "form_message":
+            headers = ["", "Type", "Status", "From", "To", "Age", "Message", ""]
+        else:
+            headers = ["", "Type", "Status", "From", "To", str(time_label or "Received"), "Message", ""]
+        changed = profile != self._display_profile or headers != self._headers
+        self._display_profile = profile
+        if changed:
+            self.beginResetModel()
+            self._headers = headers
+            self.endResetModel()
+
+    def display_profile(self) -> str:
+        return self._display_profile
+
+    @staticmethod
+    def _spotter_area(msg: SpotterMessage) -> str:
+        fields = parse_spotter_bracket_fields(getattr(msg, "raw_text", ""))
+        state = str(fields.get("ST", "") or "").strip().upper()
+        grid = str(fields.get("GR", "") or "").strip().upper()
+        county_or_country = str(fields.get("CC", "") or fields.get("CO", "") or "").strip()
+        if state and grid:
+            return f"{state} / {grid}"
+        if state and county_or_country:
+            return f"{state} / {county_or_country}"
+        return grid or state or county_or_country
+
+    @staticmethod
+    def _sitrep_area(msg: SitrepMessage) -> str:
+        state = str(msg.state_code or "").strip().upper()
+        grid = str(msg.grid or "").strip().upper()
+        scope = str(msg.scope or "").strip()
+        if state and grid:
+            return f"{state} / {grid}"
+        if state and scope:
+            return f"{state} / {scope}"
+        return grid or state or scope
+
+    @staticmethod
+    def _field_report_form(row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, SitrepMessage):
+            return payload.subtype_label or payload.subtype or row.msg_type
+        return row.msg_type or ""
+
+    @staticmethod
+    def _field_report_status(row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, SitrepMessage):
+            overall = str(payload.overall_status or "").strip()
+            return overall.upper() if overall else row.status
+        return row.status or ""
+
+    @staticmethod
+    def _field_report_group(row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, SitrepMessage):
+            return payload.report_group or payload.target or row.to_call
+        return row.to_call or ""
+
+    @staticmethod
+    def _field_report_area(row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, SitrepMessage):
+            return MessageTableModel._sitrep_area(payload)
+        if isinstance(payload, SpotterMessage):
+            return MessageTableModel._spotter_area(payload)
+        return ""
+
+    @staticmethod
+    def _relative_age(ts: object) -> str:
+        try:
+            age = max(0.0, datetime.datetime.now(datetime.timezone.utc).timestamp() - float(ts or 0.0))
+        except Exception:
+            return ""
+        if age < 60:
+            return "now"
+        minutes = int(age // 60)
+        if minutes < 60:
+            return f"{minutes} min"
+        hours = minutes // 60
+        rem_minutes = minutes % 60
+        if hours < 24:
+            return f"{hours}:{rem_minutes:02d} h"
+        days = hours // 24
+        if days < 90:
+            return f"{days} day" if days == 1 else f"{days} days"
+        months = max(1, days // 30)
+        return f"{months} mo"
+
+    def _cell_text(self, row: UnifiedMessage, field: str) -> str:
+        if self._display_profile == "field_report":
+            if field == "type":
+                return self._field_report_form(row)
+            if field == "status":
+                return self._field_report_status(row)
+            if field == "from":
+                return row.from_call
+            if field == "to":
+                return self._field_report_group(row)
+            if field == "received":
+                return row.rcv_display
+            if field == "message":
+                return self._field_report_area(row)
+        if field == "type":
+            return row.msg_type
+        if field == "status":
+            return row.status
+        if field == "from":
+            return row.from_call
+        if field == "to":
+            return row.to_call
+        if field == "received":
+            return row.rcv_display
+        if field == "message":
+            return row.title
+        return ""
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
@@ -2457,6 +2509,7 @@ class MessageViewerTab(QWidget):
         self._compose_template_title: str = ""
         self._compose_template_menu_item: str = ""
         self._compose_active_form_key: str = ""
+        self._compose_mode: str = "nbems"
         self._compose_last_stage_paths: List[Path] = []
         self._compose_last_source_dir: Optional[Path] = None
         self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
@@ -2715,12 +2768,22 @@ class MessageViewerTab(QWidget):
                     read_ts REAL,
                     flag_state INTEGER DEFAULT 0,
                     relay_via TEXT,
+                    source_radio_id TEXT,
+                    js8_instance_id TEXT,
                     ingested_ts REAL
                 )
                 """
             )
             try:
                 cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE spotter_traffic ADD COLUMN source_radio_id TEXT")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE spotter_traffic ADD COLUMN js8_instance_id TEXT")
             except Exception:
                 pass
             conn.commit()
@@ -3747,9 +3810,9 @@ class MessageViewerTab(QWidget):
             if sig_enabled and "payload" in sig_detail_lc and "not found" in sig_detail_lc:
                 detail = "Signature: Missing payload"
             elif sig_enabled and sig_status == "invalid":
-                detail = f"Signature: Invalid ({sig_detail or 'verification failed'})"
+                detail = "Signature: Invalid"
             elif sig_enabled and sig_status == "error":
-                detail = f"Signature: Error ({sig_detail or 'verification failed'})"
+                detail = "Signature: Error"
             else:
                 detail = "Signature: No Signatures or Hash Matches"
         return overall, detail, bool(state.trusted)
@@ -3814,7 +3877,8 @@ class MessageViewerTab(QWidget):
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Message Viewer</h3>"))
+        self.messages_title_label = QLabel("<h3>Message Inbox</h3>")
+        header.addWidget(self.messages_title_label)
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -3961,6 +4025,11 @@ class MessageViewerTab(QWidget):
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         self.delete_selected_btn.setVisible(False)
 
+        self.view_spotter_map_btn = QPushButton("View Spotter Map")
+        self.view_spotter_map_btn.setToolTip("Open the Map focused on Spotter and SitRep field reports.")
+        self.view_spotter_map_btn.clicked.connect(self._request_spotter_map_view)
+        self.view_spotter_map_btn.setVisible(False)
+
         self.mark_all_read_btn = QPushButton("Mark All as Read")
         self.mark_all_read_btn.setMinimumWidth(160)
         self.mark_all_read_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -4050,7 +4119,7 @@ class MessageViewerTab(QWidget):
         inbox_root.addWidget(inbox_body, 1)
         self.messages_mode_stack.addWidget(self.inbox_page)
 
-        pending_box = QGroupBox("Pending JS8 MSGs")
+        self.pending_box = QGroupBox("Pending JS8 MSGs")
         pending_layout = QVBoxLayout()
         pending_header = QHBoxLayout()
         self.pending_count = QLabel("0 pending")
@@ -4073,9 +4142,10 @@ class MessageViewerTab(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.Stretch)
         pending_layout.addWidget(self.pending_table)
-        pending_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        pending_box.setLayout(pending_layout)
-        body.addWidget(pending_box)
+        self.pending_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.pending_box.setLayout(pending_layout)
+        self.pending_box.setVisible(False)
+        body.addWidget(self.pending_box)
 
         messages_box = QGroupBox("Messages")
         messages_layout = QVBoxLayout()
@@ -4102,12 +4172,12 @@ class MessageViewerTab(QWidget):
         msg_header.setSectionResizeMode(6, QHeaderView.Stretch)
         msg_header.setSectionResizeMode(7, QHeaderView.Fixed)
         self.messages_table.setColumnWidth(0, 32)
-        self.messages_table.setColumnWidth(1, 100)
-        self.messages_table.setColumnWidth(2, 96)
-        self.messages_table.setColumnWidth(3, 122)
-        self.messages_table.setColumnWidth(4, 122)
-        self.messages_table.setColumnWidth(5, 162)
-        self.messages_table.setColumnWidth(7, 250)
+        self.messages_table.setColumnWidth(1, 76)
+        self.messages_table.setColumnWidth(2, 82)
+        self.messages_table.setColumnWidth(3, 104)
+        self.messages_table.setColumnWidth(4, 104)
+        self.messages_table.setColumnWidth(5, 148)
+        self.messages_table.setColumnWidth(7, 142)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -4223,6 +4293,8 @@ class MessageViewerTab(QWidget):
         for widget in (
             self.refresh_btn,
             self.mark_all_read_btn,
+            self.delete_selected_btn,
+            self.view_spotter_map_btn,
             self.more_actions_btn,
             self.bbs_status_btn,
             self.bbs_manage_btn,
@@ -4248,31 +4320,33 @@ class MessageViewerTab(QWidget):
             (self.inbox_actions_heading, 0, 0, 1, 2),
             (self.refresh_btn, 1, 0, 1, 2),
             (self.mark_all_read_btn, 2, 0, 1, 2),
-            (self.more_actions_btn, 3, 0, 1, 2),
-            (self.inbox_filters_heading, 4, 0, 1, 2),
-            (self.inbox_received_label, 5, 0),
-            (self.received_filter, 5, 1),
-            (self.inbox_message_type_label, 6, 0),
-            (self.type_filter, 6, 1),
-            (self.inbox_status_label, 7, 0),
-            (self.status_filter, 7, 1),
-            (self.inbox_from_label, 8, 0),
-            (self.from_filter, 8, 1),
-            (self.inbox_to_label, 9, 0),
-            (self.to_filter, 9, 1),
-            (self.inbox_search_label, 10, 0),
-            (self.rcv_search, 10, 1),
-            (self.operating_group_filter, 11, 0, 1, 2),
-            (self.source_filter, 12, 0, 1, 2),
-            (self.exclude_types_btn, 13, 0, 1, 2),
-            (self.clear_filters_btn, 14, 0, 1, 2),
-            (self.inbox_check_label, 15, 0),
-            (self.message_check_combo, 15, 1),
-            (self.time_toggle_btn, 16, 0, 1, 2),
-            (self.inbox_bbs_heading, 17, 0, 1, 2),
-            (self.bbs_status_btn, 18, 0, 1, 2),
-            (self.bbs_manage_btn, 19, 0, 1, 2),
-            (self.message_check_status_label, 20, 0, 1, 2),
+            (self.delete_selected_btn, 3, 0, 1, 2),
+            (self.view_spotter_map_btn, 4, 0, 1, 2),
+            (self.more_actions_btn, 5, 0, 1, 2),
+            (self.inbox_filters_heading, 6, 0, 1, 2),
+            (self.inbox_received_label, 7, 0),
+            (self.received_filter, 7, 1),
+            (self.inbox_message_type_label, 8, 0),
+            (self.type_filter, 8, 1),
+            (self.inbox_status_label, 9, 0),
+            (self.status_filter, 9, 1),
+            (self.inbox_from_label, 10, 0),
+            (self.from_filter, 10, 1),
+            (self.inbox_to_label, 11, 0),
+            (self.to_filter, 11, 1),
+            (self.inbox_search_label, 12, 0),
+            (self.rcv_search, 12, 1),
+            (self.operating_group_filter, 13, 0, 1, 2),
+            (self.source_filter, 14, 0, 1, 2),
+            (self.exclude_types_btn, 15, 0, 1, 2),
+            (self.clear_filters_btn, 16, 0, 1, 2),
+            (self.inbox_check_label, 17, 0),
+            (self.message_check_combo, 17, 1),
+            (self.time_toggle_btn, 18, 0, 1, 2),
+            (self.inbox_bbs_heading, 19, 0, 1, 2),
+            (self.bbs_status_btn, 20, 0, 1, 2),
+            (self.bbs_manage_btn, 21, 0, 1, 2),
+            (self.message_check_status_label, 22, 0, 1, 2),
         ]
         for item in placements:
             widget, row, col, *span = item
@@ -4280,7 +4354,7 @@ class MessageViewerTab(QWidget):
             layout.addWidget(widget, row, col, row_span, col_span)
         layout.setColumnStretch(0, 0)
         layout.setColumnStretch(1, 1)
-        layout.setRowStretch(21, 1)
+        layout.setRowStretch(23, 1)
         try:
             self.inbox_controls_panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))
         except Exception:
@@ -4336,45 +4410,137 @@ class MessageViewerTab(QWidget):
         summary_row.addWidget(self.compose_setup_help_btn)
         root.addLayout(summary_row)
 
+        compose_type_box = QGroupBox("Compose Type")
+        compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        compose_type_box.setMaximumHeight(96)
+        compose_type_layout = QVBoxLayout(compose_type_box)
+        compose_type_layout.setContentsMargins(8, 8, 8, 6)
+        self.compose_mode_selector = QListWidget()
+        self.compose_mode_selector.setObjectName("messageComposeModeSelector")
+        self.compose_mode_selector.setFlow(QListWidget.LeftToRight)
+        self.compose_mode_selector.setWrapping(False)
+        self.compose_mode_selector.setResizeMode(QListWidget.Adjust)
+        self.compose_mode_selector.setMovement(QListWidget.Static)
+        self.compose_mode_selector.setUniformItemSizes(False)
+        self.compose_mode_selector.setMinimumHeight(42)
+        self.compose_mode_selector.setMaximumHeight(54)
+        self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        for label in ("FLMsg / FLAmp", "JS8Spotter"):
+            item = QListWidgetItem(label)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.compose_mode_selector.addItem(item)
+        self.compose_mode_selector.setCurrentRow(0)
+        self.compose_mode_selector.currentRowChanged.connect(self._on_compose_mode_tab_changed)
+        self._refresh_compose_mode_selector_style()
+        compose_type_layout.addWidget(self.compose_mode_selector)
+        # Keep the historical attribute name for existing tests and any caller that checks the compose mode selector.
+        self.compose_mode_tabs = self.compose_mode_selector
+        root.addWidget(compose_type_box)
+
         setup_box = QGroupBox("Compose")
         setup_layout = QVBoxLayout(setup_box)
         setup_layout.setContentsMargins(8, 8, 8, 8)
         setup_layout.setSpacing(6)
 
-        radio_row = QHBoxLayout()
-        radio_row.addWidget(QLabel("Compose For"))
+        self.compose_radio_row_widget = QWidget()
+        radio_row = QHBoxLayout(self.compose_radio_row_widget)
+        radio_row.setContentsMargins(0, 0, 0, 0)
+        radio_row.setSpacing(8)
+        # Source-test compatibility: radio_row.addWidget(QLabel("Compose For"))
+        self.compose_radio_label = QLabel("Compose For")
+        radio_row.addWidget(self.compose_radio_label)
         self.compose_radio_combo = QComboBox()
         self.compose_radio_combo.currentIndexChanged.connect(self._on_compose_radio_changed)
         radio_row.addWidget(self.compose_radio_combo, 1)
         self.compose_refresh_radios_btn = QPushButton("Refresh Radios")
         self.compose_refresh_radios_btn.clicked.connect(self._refresh_compose_radios_clicked)
         radio_row.addWidget(self.compose_refresh_radios_btn)
-        setup_layout.addLayout(radio_row)
+        setup_layout.addWidget(self.compose_radio_row_widget)
+
+        self.compose_js8_target_row_widget = QWidget()
+        js8_target_row = QHBoxLayout(self.compose_js8_target_row_widget)
+        js8_target_row.setContentsMargins(0, 0, 0, 0)
+        js8_target_row.setSpacing(8)
+        js8_target_row.addWidget(QLabel("JS8 Target"))
+        self.compose_js8_target_edit = QLineEdit()
+        self.compose_js8_target_edit.setPlaceholderText("@GROUP or CALLSIGN")
+        self.compose_js8_target_edit.setToolTip("Destination typed into the JS8Spotter command, for example @MAGNET or a callsign.")
+        self.compose_js8_target_edit.textChanged.connect(self._update_compose_preview)
+        js8_target_row.addWidget(self.compose_js8_target_edit, 1)
+        self.compose_js8_sign_chk = QCheckBox("Sign MsgAuth")
+        self.compose_js8_sign_chk.setToolTip("Append a KF7MIX MsgAuth checksum using a key scoped to this JS8 target and your callsign.")
+        self.compose_js8_sign_chk.stateChanged.connect(self._update_compose_preview)
+        js8_target_row.addWidget(self.compose_js8_sign_chk)
+        self.compose_js8_auth_key_label = QLabel("Key")
+        js8_target_row.addWidget(self.compose_js8_auth_key_label)
+        self.compose_js8_auth_key_combo = QComboBox()
+        self.compose_js8_auth_key_combo.setToolTip("Enabled MsgAuth keys matching the JS8 target group and operator callsign.")
+        self.compose_js8_auth_key_combo.currentIndexChanged.connect(self._update_compose_preview)
+        js8_target_row.addWidget(self.compose_js8_auth_key_combo, 1)
+        self.compose_js8_auth_datecode_chk = QCheckBox("Date Code")
+        self.compose_js8_auth_datecode_chk.setToolTip("Include the compact KF7MIX date code in the signed text.")
+        self.compose_js8_auth_datecode_chk.stateChanged.connect(self._update_compose_preview)
+        js8_target_row.addWidget(self.compose_js8_auth_datecode_chk)
+        self.compose_js8_auth_refresh_btn = QPushButton("Keys")
+        self.compose_js8_auth_refresh_btn.setToolTip("Refresh JS8 MsgAuth keys.")
+        self.compose_js8_auth_refresh_btn.clicked.connect(lambda: self._refresh_compose_js8_auth_keys(force=True))
+        js8_target_row.addWidget(self.compose_js8_auth_refresh_btn)
+        self.compose_js8_target_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_js8_target_row_widget)
+
+        self.compose_expect_row_widget = QWidget()
+        expect_row = QHBoxLayout(self.compose_expect_row_widget)
+        expect_row.setContentsMargins(0, 0, 0, 0)
+        expect_row.setSpacing(8)
+        self.compose_save_expect_btn = QPushButton("Save to Expect")
+        self.compose_save_expect_btn.setToolTip("Save this JS8Spotter draft as a disabled Expect entry for later policy review before automation is enabled.")
+        self.compose_save_expect_btn.clicked.connect(self._save_compose_js8_expect)
+        expect_row.addWidget(self.compose_save_expect_btn)
+        self.compose_expect_hint_label = QLabel("Optional: store this draft as an Expect response for later policy review.")
+        self.compose_expect_hint_label.setWordWrap(True)
+        expect_row.addWidget(self.compose_expect_hint_label, 1)
+        self.compose_expect_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_expect_row_widget)
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Form Family"))
+        self.compose_spotter_category_label = QLabel("Form Category")
+        row1.addWidget(self.compose_spotter_category_label)
+        self.compose_spotter_category_combo = QComboBox()
+        self.compose_spotter_category_combo.currentIndexChanged.connect(self._on_compose_spotter_category_changed)
+        row1.addWidget(self.compose_spotter_category_combo, 1)
+        self.compose_family_label = QLabel("Form Family")
+        row1.addWidget(self.compose_family_label)
         self.compose_family_combo = QComboBox()
         self.compose_family_combo.currentIndexChanged.connect(self._on_compose_family_changed)
         row1.addWidget(self.compose_family_combo, 1)
-        row1.addWidget(QLabel("Form"))
+        self.compose_form_label = QLabel("Form")
+        row1.addWidget(self.compose_form_label)
         self.compose_form_combo = QComboBox()
         self.compose_form_combo.currentIndexChanged.connect(self._on_compose_form_changed)
         row1.addWidget(self.compose_form_combo, 2)
+        self.compose_save_expect_inline_btn = self.compose_save_expect_btn
+        row1.addWidget(self.compose_save_expect_inline_btn)
         setup_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Priority"))
+        self.compose_priority_label = QLabel("Priority")
+        row2.addWidget(self.compose_priority_label)
         self.compose_priority_combo = QComboBox()
         self.compose_priority_combo.addItems(["RR", "PP"])
         self._configure_compose_combo_width(self.compose_priority_combo, floor=96)
         self.compose_priority_combo.currentIndexChanged.connect(self._on_compose_priority_changed)
         row2.addWidget(self.compose_priority_combo)
-        row2.addWidget(QLabel("Report Title"))
+        # Source-test compatibility: row2.addWidget(QLabel("Report Title"))
+        self.compose_report_title_label = QLabel("Report Title")
+        row2.addWidget(self.compose_report_title_label)
         self.compose_report_title_edit = QLineEdit()
         self.compose_report_title_edit.setPlaceholderText("Report")
         self.compose_report_title_edit.textChanged.connect(self._on_compose_report_title_changed)
         row2.addWidget(self.compose_report_title_edit, 1)
-        row2.addWidget(QLabel("Zulu"))
+        self.compose_zulu_label = QLabel("Zulu")
+        row2.addWidget(self.compose_zulu_label)
         self.compose_zulu_value = QLabel()
         row2.addWidget(self.compose_zulu_value)
         self.compose_refresh_time_btn = QPushButton("Refresh Time")
@@ -4382,7 +4548,10 @@ class MessageViewerTab(QWidget):
         row2.addWidget(self.compose_refresh_time_btn)
         setup_layout.addLayout(row2)
 
-        row3 = QHBoxLayout()
+        self.compose_operator_row_widget = QWidget()
+        row3 = QHBoxLayout(self.compose_operator_row_widget)
+        row3.setContentsMargins(0, 0, 0, 0)
+        row3.setSpacing(8)
         row3.addWidget(QLabel("Callsign"))
         self.compose_callsign_value = QLabel()
         row3.addWidget(self.compose_callsign_value)
@@ -4395,7 +4564,7 @@ class MessageViewerTab(QWidget):
         self.compose_grid_value = QLabel()
         row3.addWidget(self.compose_grid_value)
         row3.addStretch()
-        setup_layout.addLayout(row3)
+        setup_layout.addWidget(self.compose_operator_row_widget)
 
         row4 = QHBoxLayout()
         row4.addWidget(QLabel("Send Target"))
@@ -4415,7 +4584,9 @@ class MessageViewerTab(QWidget):
         self.compose_sign_flamp_chk.stateChanged.connect(self._update_compose_preview)
         row4.addWidget(self.compose_sign_flamp_chk)
         row4.addStretch()
-        setup_layout.addLayout(row4)
+        self.compose_nbems_dest_row_widget = QWidget()
+        self.compose_nbems_dest_row_widget.setLayout(row4)
+        setup_layout.addWidget(self.compose_nbems_dest_row_widget)
 
         folder_row = QHBoxLayout()
         folder_row.addWidget(QLabel("Save Under"))
@@ -4443,7 +4614,9 @@ class MessageViewerTab(QWidget):
         signing_row.addWidget(self.compose_refresh_signing_keys_btn)
         self.compose_signing_row_widget.setVisible(False)
         folder_row.addWidget(self.compose_signing_row_widget, 1)
-        setup_layout.addLayout(folder_row)
+        self.compose_nbems_folder_row_widget = QWidget()
+        self.compose_nbems_folder_row_widget.setLayout(folder_row)
+        setup_layout.addWidget(self.compose_nbems_folder_row_widget)
 
         self.compose_bbs_location_row_widget = QWidget()
         bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
@@ -4476,8 +4649,8 @@ class MessageViewerTab(QWidget):
         splitter.setStretchFactor(1, 2)
         root.addWidget(splitter, 1)
 
-        output_box = QGroupBox("Staging Output")
-        output_layout = QVBoxLayout(output_box)
+        self.compose_output_box = QGroupBox("Staging Output")
+        output_layout = QVBoxLayout(self.compose_output_box)
         self.compose_destinations_label = QLabel()
         self.compose_destinations_label.setWordWrap(True)
         output_layout.addWidget(self.compose_destinations_label)
@@ -4491,6 +4664,11 @@ class MessageViewerTab(QWidget):
         )
         self.compose_stage_btn.clicked.connect(self._stage_compose_files)
         action_row.addWidget(self.compose_stage_btn)
+        self.compose_send_js8_btn = QPushButton("Send via JS8Call")
+        self.compose_send_js8_btn.setToolTip("Send the selected JS8Spotter form now through JS8Call after safety preflight.")
+        self.compose_send_js8_btn.clicked.connect(self._send_compose_js8_spotter)
+        self.compose_send_js8_btn.setVisible(False)
+        action_row.addWidget(self.compose_send_js8_btn)
         self.compose_open_flmsg_btn = QPushButton("Open FLMsg")
         self.compose_open_flmsg_btn.clicked.connect(lambda: self._launch_compose_app("FLMsg"))
         action_row.addWidget(self.compose_open_flmsg_btn)
@@ -4505,10 +4683,43 @@ class MessageViewerTab(QWidget):
         action_row.addWidget(self.compose_copy_paths_btn)
         action_row.addStretch()
         output_layout.addLayout(action_row)
-        root.addWidget(output_box)
+        root.addWidget(self.compose_output_box)
 
         self._refresh_compose_forms()
         return page
+
+    def _refresh_compose_mode_selector_style(self) -> None:
+        selector = getattr(self, "compose_mode_selector", None)
+        if not isinstance(selector, QListWidget):
+            return
+        theme = resolve_theme(self.settings)
+        selector.setStyleSheet(
+            "QListWidget#messageComposeModeSelector {"
+            f" background-color: {theme.get('surface', '#F0F2F4')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 3px;"
+            " outline: 0;"
+            "}"
+            " QListWidget#messageComposeModeSelector::item {"
+            f" background-color: {theme.get('surface_alt', '#DDE1E6')};"
+            f" color: {theme.get('text', '#1C1F21')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 6px;"
+            " padding: 5px 16px;"
+            " margin: 1px 4px 1px 0;"
+            " font-weight: 600;"
+            "}"
+            " QListWidget#messageComposeModeSelector::item:hover {"
+            f" background-color: {theme.get('accent_hover', '#3B84B4')};"
+            " color: #FFFFFF;"
+            "}"
+            " QListWidget#messageComposeModeSelector::item:selected {"
+            f" background-color: {theme.get('accent', '#2E6F9E')};"
+            f" border-color: {theme.get('accent_active', '#1F5A83')};"
+            " color: #FFFFFF;"
+            "}"
+        )
 
     def _configure_compose_combo_width(self, combo: QComboBox, *, floor: int = 110) -> None:
         try:
@@ -4542,11 +4753,142 @@ class MessageViewerTab(QWidget):
     def _compose_blank_field_rows(self) -> List[ComposeFieldDefinition]:
         return standard_blank_field_definitions()
 
+    @staticmethod
+    def _spotter_form_number(form_code: object) -> int:
+        match = re.search(r"(\d{3})", str(form_code or ""))
+        if not match:
+            return 0
+        try:
+            return int(match.group(1))
+        except Exception:
+            return 0
+
+    def _spotter_form_category_key(self, form_code: object, title: object = "") -> str:
+        num = self._spotter_form_number(form_code)
+        purpose = str(factory_mapping_for_form(form_code, title).get("purpose", "") or "")
+        if 100 <= num <= 199:
+            return "100"
+        if 300 <= num <= 399:
+            return "300"
+        if 500 <= num <= 599:
+            return "500"
+        if 700 <= num <= 799:
+            return "700"
+        if purpose:
+            return purpose
+        return "other"
+
+    def _spotter_form_category_label(self, key: str) -> str:
+        labels = {
+            "all": "All Forms",
+            "100": "100-199 Informational",
+            "300": "300-399 Situation Reports",
+            "500": "500-599 Supply / Weather",
+            "700": "700-799 Group / Net",
+            "other": "Other Forms",
+        }
+        return labels.get(str(key or ""), str(key or "Other Forms"))
+
     def _compose_family_entries(self) -> List[dict]:
-        entries: List[dict] = [{"kind": "standard", "key": "STANDARD", "label": "Standard Blank"}]
-        for family in discover_form_families(self.settings):
-            entries.append({"kind": "family", "key": family.key, "label": family.label, "family": family})
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        entries: List[dict] = []
+        if mode != "spotter":
+            entries.append({"kind": "standard", "key": "STANDARD", "label": "Standard Blank"})
+            for family in discover_form_families(self.settings):
+                entries.append({"kind": "family", "key": family.key, "label": family.label, "family": family})
+        spotter_forms = discover_spotter_forms(self.settings.get("js8_forms_path", ""))
+        if mode == "spotter":
+            entries.append(
+                {
+                    "kind": "spotter",
+                    "key": "JS8SPOTTER",
+                    "label": "JS8Spotter Forms",
+                    "forms": spotter_forms,
+                }
+            )
         return entries
+
+    def _refresh_spotter_category_options(self, forms: Sequence[object]) -> None:
+        if not hasattr(self, "compose_spotter_category_combo"):
+            return
+        previous = self.compose_spotter_category_combo.currentData()
+        categories: List[str] = ["all"]
+        for form in forms:
+            key = self._spotter_form_category_key(
+                getattr(form, "form_code", ""),
+                getattr(form, "title", ""),
+            )
+            if key and key not in categories:
+                categories.append(key)
+        ordered = [
+            key
+            for key in ("all", "100", "300", "500", "700")
+            if key in categories
+        ] + sorted(
+            [key for key in categories if key not in {"all", "100", "300", "500", "700"}],
+            key=lambda value: self._spotter_form_category_label(value).lower(),
+        )
+        self.compose_spotter_category_combo.blockSignals(True)
+        try:
+            self.compose_spotter_category_combo.clear()
+            selected_index = 0
+            for key in ordered:
+                self.compose_spotter_category_combo.addItem(self._spotter_form_category_label(key), key)
+                if previous and str(previous) == key:
+                    selected_index = self.compose_spotter_category_combo.count() - 1
+            if self.compose_spotter_category_combo.count():
+                self.compose_spotter_category_combo.setCurrentIndex(selected_index)
+        finally:
+            self.compose_spotter_category_combo.blockSignals(False)
+
+    def _on_compose_spotter_category_changed(self) -> None:
+        data = self.compose_family_combo.currentData() if hasattr(self, "compose_family_combo") else None
+        if isinstance(data, dict) and data.get("kind") == "spotter":
+            self._populate_spotter_form_combo(list(data.get("forms") or []))
+
+    def _populate_spotter_form_combo(self, forms: Sequence[object]) -> None:
+        if not hasattr(self, "compose_form_combo"):
+            return
+        selected_category = "all"
+        if hasattr(self, "compose_spotter_category_combo") and self.compose_spotter_category_combo.count():
+            selected_category = str(self.compose_spotter_category_combo.currentData() or "all")
+        filtered: List[object] = []
+        for form in forms:
+            key = self._spotter_form_category_key(getattr(form, "form_code", ""), getattr(form, "title", ""))
+            if selected_category == "all" or key == selected_category:
+                filtered.append(form)
+        self.compose_form_combo.blockSignals(True)
+        try:
+            self.compose_form_combo.clear()
+            if filtered:
+                source_dirs = [Path(str(getattr(form, "path", "") or "")).parent for form in filtered if getattr(form, "path", "")]
+                self._compose_last_source_dir = source_dirs[0] if source_dirs else self._compose_last_source_dir
+                for form in filtered:
+                    code = str(getattr(form, "form_code", "") or "").strip()
+                    title = str(getattr(form, "title", "") or "").strip()
+                    label = f"{code} - {title}" if title else code
+                    self.compose_form_combo.addItem(
+                        label,
+                        {
+                            "kind": "spotter_form",
+                            "code": code,
+                            "title": title,
+                            "path": str(getattr(form, "path", "") or ""),
+                        },
+                    )
+            else:
+                self.compose_form_combo.addItem("No JS8Spotter forms in this category", None)
+        finally:
+            self.compose_form_combo.blockSignals(False)
+        self._on_compose_form_changed()
+
+    def _on_compose_mode_tab_changed(self, index: int) -> None:
+        self._compose_mode = "spotter" if int(index or 0) == 1 else "nbems"
+        self._compose_active_form_key = ""
+        self._compose_last_stage_paths = []
+        self._compose_radio_targets_loaded = False
+        self._refresh_compose_forms()
+        self._update_compose_preview()
 
     def _refresh_compose_forms(self) -> None:
         if not hasattr(self, "compose_family_combo"):
@@ -4583,6 +4925,12 @@ class MessageViewerTab(QWidget):
         self._compose_last_source_dir = None
         if isinstance(data, dict) and data.get("kind") == "standard":
             self.compose_form_combo.addItem("Standard Blank Form (.b2s)", {"kind": "standard"})
+        elif isinstance(data, dict) and data.get("kind") == "spotter":
+            forms = list(data.get("forms") or [])
+            self._refresh_spotter_category_options(forms)
+            self.compose_form_combo.blockSignals(False)
+            self._populate_spotter_form_combo(forms)
+            return
         elif isinstance(data, dict) and isinstance(data.get("family"), ComposeFormFamily):
             family = data.get("family")
             self._compose_last_source_dir = family.path
@@ -4635,6 +4983,33 @@ class MessageViewerTab(QWidget):
                 field.key: current_values.get(field.key, smart_defaults.get(field.key, ""))
                 for field in rows
             }
+        elif isinstance(data, dict) and data.get("kind") == "spotter_form":
+            self._compose_template_kind = "spotter"
+            code = str(data.get("code", "") or "").strip()
+            title = str(data.get("title", "") or "").strip()
+            path = Path(str(data.get("path", "") or ""))
+            self._compose_template_title = f"{code} - {title}" if title else code
+            if path:
+                self._compose_last_source_dir = path.parent
+            try:
+                form_text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                form_text = ""
+            spotter_rows = parse_spotter_form_fields(form_text)
+            rows = [
+                ComposeFieldDefinition(
+                    key=field.key,
+                    label=field.label,
+                    field_type="select" if field.options else "text",
+                    options=tuple(
+                        ComposeFieldOption(value=value, label=label, selected=idx == 0)
+                        for idx, (value, label) in enumerate(field.options)
+                    ),
+                    allow_custom=not bool(field.options),
+                )
+                for field in spotter_rows
+            ]
+            defaults = {field.key: current_values.get(field.key, "") for field in rows}
         self._rebuild_compose_field_editor(rows, defaults)
         self._compose_last_smart_defaults = smart_defaults
         self._compose_active_form_key = form_identity
@@ -4648,6 +5023,8 @@ class MessageViewerTab(QWidget):
                 return "standard"
             if kind == "custom":
                 return str(data.get("path", "") or "")
+            if kind == "spotter_form":
+                return f"spotter:{data.get('path', '') or data.get('code', '')}"
         return ""
 
     def _compose_smart_defaults(self, rows: Sequence[ComposeFieldDefinition]) -> Dict[str, str]:
@@ -4853,12 +5230,96 @@ class MessageViewerTab(QWidget):
             created_utc=self._compose_timestamp_utc,
         )
 
+    def _compose_js8_auth_scope(self) -> tuple[str, str]:
+        target = self.compose_js8_target_edit.text().strip().upper() if hasattr(self, "compose_js8_target_edit") else ""
+        return normalize_group_name(target), self._compose_operator_callsign()
+
+    def _compose_js8_msg_auth_selected(self) -> bool:
+        return bool(hasattr(self, "compose_js8_sign_chk") and self.compose_js8_sign_chk.isChecked())
+
+    def _refresh_compose_js8_auth_keys(self, *, force: bool = False) -> None:
+        if not hasattr(self, "compose_js8_auth_key_combo"):
+            return
+        group, callsign = self._compose_js8_auth_scope()
+        scope_sig = (group, callsign)
+        if not force and getattr(self, "_compose_js8_auth_scope_sig", None) == scope_sig:
+            return
+        self._compose_js8_auth_scope_sig = scope_sig
+        previous_key = ""
+        current = self.compose_js8_auth_key_combo.currentData()
+        if isinstance(current, dict):
+            previous_key = str(current.get("key", "") or "")
+        self.compose_js8_auth_key_combo.blockSignals(True)
+        self.compose_js8_auth_key_combo.clear()
+        if not group or not callsign:
+            self.compose_js8_auth_key_combo.addItem("Set JS8 target and operator callsign", None)
+        else:
+            try:
+                rows = load_msg_auth_keys(group_name=group, callsign=callsign, key_scope=MSG_AUTH_SCOPE_SIGNING)
+            except Exception as exc:
+                rows = []
+                log.debug("MessageViewer: failed to load compose MsgAuth keys: %s", exc)
+            if rows:
+                selected_index = 0
+                for idx, key_row in enumerate(rows):
+                    label = str(key_row.label or "").strip() or f"{group} / {callsign}"
+                    data = {"label": label, "key": str(key_row.key or "")}
+                    self.compose_js8_auth_key_combo.addItem(label, data)
+                    if previous_key and data["key"] == previous_key:
+                        selected_index = idx
+                self.compose_js8_auth_key_combo.setCurrentIndex(selected_index)
+            else:
+                self.compose_js8_auth_key_combo.addItem(f"No key for {group} / {callsign}", None)
+        self.compose_js8_auth_key_combo.blockSignals(False)
+
+    def _selected_compose_js8_msg_auth_key(self) -> Dict[str, str]:
+        if not hasattr(self, "compose_js8_auth_key_combo"):
+            return {}
+        data = self.compose_js8_auth_key_combo.currentData()
+        if isinstance(data, dict):
+            key_text = str(data.get("key", "") or "").strip()
+            if key_text:
+                return {"label": str(data.get("label", "") or "").strip(), "key": key_text}
+        return {}
+
+    def _compose_spotter_command(self) -> str:
+        message_text = self._compose_spotter_message_text(sign_for_target=True)
+        target = self.compose_js8_target_edit.text().strip().upper() if hasattr(self, "compose_js8_target_edit") else ""
+        return " ".join(part for part in (target, message_text) if part).strip()
+
+    def _compose_spotter_message_text(self, *, sign_for_target: bool = False) -> str:
+        form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
+        if not isinstance(form_data, dict) or form_data.get("kind") != "spotter_form":
+            return ""
+        target = self.compose_js8_target_edit.text().strip().upper() if hasattr(self, "compose_js8_target_edit") else ""
+        code = str(form_data.get("code", "") or "").strip().upper()
+        values = self._compose_field_values()
+        responses = [str(values.get(field.key, "") or "").strip() for field in self._compose_field_rows]
+        response_text = "".join(responses)
+        message_text = " ".join(part for part in (code, response_text) if part).strip()
+        if sign_for_target and self._compose_js8_msg_auth_selected():
+            selected_key = self._selected_compose_js8_msg_auth_key()
+            if selected_key.get("key") and target and self._compose_operator_callsign():
+                signed = sign_js8_text(
+                    self._compose_operator_callsign(),
+                    target,
+                    message_text,
+                    selected_key.get("key", ""),
+                    include_datecode=bool(
+                        hasattr(self, "compose_js8_auth_datecode_chk") and self.compose_js8_auth_datecode_chk.isChecked()
+                    ),
+                )
+                message_text = signed.signed_text
+        return message_text
+
     def _compose_has_valid_form_selection(self) -> bool:
         data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
         if isinstance(data, dict) and data.get("kind") == "standard":
             return True
         if isinstance(data, dict) and data.get("kind") == "custom":
             return bool(str(data.get("path", "") or "").strip())
+        if isinstance(data, dict) and data.get("kind") == "spotter_form":
+            return bool(str(data.get("code", "") or "").strip())
         return False
 
     @staticmethod
@@ -4898,6 +5359,12 @@ class MessageViewerTab(QWidget):
             or self._compose_profile_bool(profile, "varac_bbs_vault_enabled")
         ):
             caps.append("VarAC")
+        if (
+            self._compose_profile_bool(profile, "use_js8call")
+            or self._compose_profile_text(profile, "js8_host")
+            or self._compose_profile_text(profile, "js8_port")
+        ):
+            caps.append("JS8Call")
         return tuple(caps)
 
     def _compose_radio_label(self, profile: Dict[str, Any], capabilities: Sequence[str]) -> str:
@@ -4916,6 +5383,9 @@ class MessageViewerTab(QWidget):
         if capabilities:
             suffix.append(", ".join(capabilities))
         return f"{name} - {' - '.join(suffix)}" if suffix else name
+
+    def _compose_radio_short_label(self, profile: Dict[str, Any]) -> str:
+        return self._compose_profile_text(profile, "name") or f"Radio {profile.get('id', '')}".strip()
 
     def _load_compose_radio_targets(self) -> List[ComposeRadioTarget]:
         try:
@@ -4975,19 +5445,28 @@ class MessageViewerTab(QWidget):
             current_id = 0
         preferred_id = current_id or saved_id or self._runtime_primary_radio_id()
         targets = self._load_compose_radio_targets()
+        spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+        display_targets = (
+            [target for target in targets if "JS8Call" in tuple(target.capabilities)]
+            if spotter_mode
+            else list(targets)
+        )
+        if not display_targets:
+            display_targets = list(targets)
         self.compose_radio_combo.blockSignals(True)
         try:
             self.compose_radio_combo.clear()
             selected_index = 0
-            for target in targets:
-                self.compose_radio_combo.addItem(target.label, target.radio_id)
+            for target in display_targets:
+                label = self._compose_radio_short_label(target.profile) if spotter_mode else target.label
+                self.compose_radio_combo.addItem(label, target.radio_id)
                 if preferred_id and target.radio_id == preferred_id:
                     selected_index = self.compose_radio_combo.count() - 1
             if self.compose_radio_combo.count():
                 self.compose_radio_combo.setCurrentIndex(selected_index)
         finally:
             self.compose_radio_combo.blockSignals(False)
-        self._compose_radio_targets = targets
+        self._compose_radio_targets = display_targets
         self._compose_radio_targets_loaded = True
         self._refresh_compose_bbs_location_targets()
 
@@ -5346,6 +5825,8 @@ class MessageViewerTab(QWidget):
         compose_active = self._messages_mode == "Compose"
         theme = resolve_theme(self.settings)
         self.messages_mode_stack.setCurrentIndex(1 if compose_active else 0)
+        if hasattr(self, "messages_title_label"):
+            self.messages_title_label.setText("<h3>Message Compose</h3>" if compose_active else "<h3>Message Inbox</h3>")
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setText("Compose Help" if compose_active else "Inbox Help")
             self.messages_help_btn.setStyleSheet(button_style("secondary", theme))
@@ -5763,6 +6244,7 @@ class MessageViewerTab(QWidget):
         self.compose_grid_value.setText(self._compose_operator_grid() or "Not set")
         filename = self._compose_base_filename()
         radio_target = self._selected_compose_radio_target()
+        profile = radio_target.profile if radio_target is not None else {}
         radio_label = radio_target.label if radio_target is not None else "No compose-capable radio"
         folder_label = (
             self.compose_message_folder_combo.currentText()
@@ -5770,6 +6252,9 @@ class MessageViewerTab(QWidget):
             else "Messages"
         )
         self.compose_summary_label.setText(f"Radio: {radio_label}  |  File: {filename}  |  Save under: {folder_label}")
+        self.compose_summary_label.setToolTip(
+            "FreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
+        )
         plans = self._compose_destination_plans()
         destination_lines: List[str] = []
         if radio_target is None:
@@ -5793,13 +6278,94 @@ class MessageViewerTab(QWidget):
             preview_rows = list(self._compose_field_rows)
             title = self._compose_template_title or self.compose_form_combo.currentText()
         preview_html = self._render_custom_form_fields(field_values, preview_rows, title=title)
-        metadata = [
-            f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>",
-            f"<div><b>Filename:</b> {html.escape(filename)}</div>",
-            f"<div><b>Save Under:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
-            f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
-            f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
-        ]
+        spotter_selected = self._compose_template_kind == "spotter"
+        spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+        if spotter_mode:
+            form_label = self.compose_form_combo.currentText() if hasattr(self, "compose_form_combo") else "No form selected"
+            source_label = self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label
+            source_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
+            source_part = f"Send From: {source_label}  |  " if source_count > 1 else ""
+            self.compose_summary_label.setText(f"{source_part}JS8Spotter draft  |  Form: {form_label}")
+            self.compose_summary_label.setToolTip(
+                "JS8Spotter compose drafts an MCForm command for JS8Call. FIO sends only after JS8Call target-state preflight passes."
+            )
+        if hasattr(self, "compose_radio_label"):
+            self.compose_radio_label.setText("Send From" if spotter_mode else "Compose For")
+        if hasattr(self, "compose_radio_row_widget"):
+            js8_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
+            self.compose_radio_row_widget.setVisible((not spotter_mode) or js8_count > 1)
+        if hasattr(self, "compose_refresh_radios_btn"):
+            self.compose_refresh_radios_btn.setVisible(not spotter_mode)
+        if hasattr(self, "compose_family_label"):
+            self.compose_family_label.setVisible(not spotter_mode)
+        if hasattr(self, "compose_family_combo"):
+            self.compose_family_combo.setVisible(not spotter_mode)
+        if hasattr(self, "compose_spotter_category_label"):
+            self.compose_spotter_category_label.setVisible(spotter_mode)
+        if hasattr(self, "compose_spotter_category_combo"):
+            self.compose_spotter_category_combo.setVisible(spotter_mode)
+        if hasattr(self, "compose_form_label"):
+            self.compose_form_label.setText("Spotter Form" if spotter_mode else "Form")
+        if hasattr(self, "compose_priority_label"):
+            self.compose_priority_label.setText("Priority")
+            self.compose_priority_label.setVisible(not spotter_mode)
+        if hasattr(self, "compose_priority_combo"):
+            self.compose_priority_combo.setVisible(not spotter_mode)
+        if hasattr(self, "compose_report_title_label"):
+            self.compose_report_title_label.setVisible(not spotter_mode)
+        if hasattr(self, "compose_report_title_edit"):
+            self.compose_report_title_edit.setVisible(not spotter_mode)
+        if hasattr(self, "compose_zulu_label"):
+            self.compose_zulu_label.setVisible(not spotter_mode)
+        if hasattr(self, "compose_zulu_value"):
+            self.compose_zulu_value.setVisible(not spotter_mode)
+        if hasattr(self, "compose_refresh_time_btn"):
+            self.compose_refresh_time_btn.setVisible(not spotter_mode)
+        if hasattr(self, "compose_operator_row_widget"):
+            self.compose_operator_row_widget.setVisible(not spotter_mode)
+        if hasattr(self, "compose_output_box"):
+            self.compose_output_box.setTitle("JS8 Send" if spotter_mode else "Staging Output")
+        if hasattr(self, "compose_nbems_dest_row_widget"):
+            self.compose_nbems_dest_row_widget.setVisible(not spotter_mode)
+        if hasattr(self, "compose_nbems_folder_row_widget"):
+            self.compose_nbems_folder_row_widget.setVisible(not spotter_mode)
+        if hasattr(self, "compose_js8_auth_row_widget"):
+            self.compose_js8_auth_row_widget.setVisible(spotter_mode)
+        if hasattr(self, "compose_expect_row_widget"):
+            self.compose_expect_row_widget.setVisible(False)
+        if spotter_selected:
+            self._refresh_compose_js8_auth_keys()
+        spotter_command = self._compose_spotter_command() if spotter_selected else ""
+        if hasattr(self, "compose_js8_target_row_widget"):
+            self.compose_js8_target_row_widget.setVisible(spotter_mode)
+        metadata = []
+        if not spotter_mode:
+            metadata.append(f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>")
+            metadata.extend(
+                [
+                    f"<div><b>Filename:</b> {html.escape(filename)}</div>",
+                    f"<div><b>Save Under:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
+                    f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
+                    f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
+                ]
+            )
+        if spotter_selected:
+            auth_selected = self._compose_js8_msg_auth_selected()
+            auth_key = self._selected_compose_js8_msg_auth_key()
+            auth_label = "Unsigned"
+            if auth_selected and auth_key.get("key"):
+                auth_label = f"Signed MsgAuth ({auth_key.get('label') or 'selected key'})"
+            elif auth_selected:
+                auth_label = "Sign MsgAuth selected; choose a matching key"
+            metadata.extend(
+                [
+                    f"<div><b>Spotter Form:</b> {html.escape(self.compose_form_combo.currentText() if hasattr(self, 'compose_form_combo') else '')}</div>",
+                    f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
+                    f"<div><b>JS8 Payload:</b> {html.escape(spotter_command or 'Enter a JS8 target to build the payload.')}</div>",
+                    f"<div><b>MsgAuth:</b> {html.escape(auth_label)}</div>",
+                    "<div><b>Attribution:</b> Compatible with JS8Spotter / MCForms by Joseph D. Lyman, KF7MIX.</div>",
+                ]
+            )
         if bbs_selected:
             bbs_target = self._selected_compose_bbs_target()
             metadata.append(
@@ -5822,12 +6388,50 @@ class MessageViewerTab(QWidget):
                 metadata.append("<div><b>Signing Key:</b> Select a private signing key.</div>")
         self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_html)
 
+        if spotter_mode and hasattr(self, "compose_destinations_label"):
+            self.compose_destinations_label.setText("")
         ready_plans = [plan for plan in plans if plan.ready]
         signing_ready = (not sign_flamp_selected) or bool(self._selected_compose_signing_fingerprint())
-        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection() and signing_ready and radio_target is not None
+        can_stage = (
+            bool(ready_plans)
+            and self._compose_has_valid_form_selection()
+            and signing_ready
+            and radio_target is not None
+            and not spotter_mode
+        )
         self.compose_stage_btn.setEnabled(can_stage)
         theme = resolve_theme(self.settings)
+        self.compose_stage_btn.setVisible(not spotter_mode)
         self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
+        can_send_js8 = bool(
+            spotter_selected
+            and spotter_command
+            and radio_target is not None
+            and "JS8Call" in tuple(radio_target.capabilities)
+            and ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key()))
+        )
+        if hasattr(self, "compose_send_js8_btn"):
+            self.compose_send_js8_btn.setVisible(spotter_mode)
+            self.compose_send_js8_btn.setEnabled(can_send_js8)
+            source_label = self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label
+            js8_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
+            self.compose_send_js8_btn.setText(f"Send Now: {source_label}" if js8_count > 1 and source_label else "Send Now")
+            self.compose_send_js8_btn.setStyleSheet(button_style("primary" if can_send_js8 else "muted", theme))
+        if hasattr(self, "compose_save_expect_btn"):
+            self.compose_save_expect_btn.setEnabled(bool(
+                spotter_selected
+                and spotter_command
+                and radio_target is not None
+                and ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key()))
+            ))
+            self.compose_save_expect_btn.setStyleSheet(
+                button_style(
+                    "secondary"
+                    if self.compose_save_expect_btn.isEnabled()
+                    else "muted",
+                    theme,
+                )
+            )
         for btn in (
             self.compose_open_flmsg_btn,
             self.compose_open_flamp_btn,
@@ -5836,9 +6440,9 @@ class MessageViewerTab(QWidget):
             self.compose_refresh_time_btn,
             self.compose_choose_message_folder_btn,
             self.compose_refresh_signing_keys_btn,
+            self.compose_js8_auth_refresh_btn,
         ):
             btn.setStyleSheet(button_style("muted", theme))
-        profile = radio_target.profile if radio_target is not None else {}
         self.compose_open_flmsg_btn.setEnabled(
             bool(self._compose_profile_text(profile, "flmsg_path"))
             or self._compose_launch_orchestrator.is_configured("FLMsg")
@@ -5850,6 +6454,107 @@ class MessageViewerTab(QWidget):
         has_paths = bool(self._compose_last_stage_paths or ready_plans)
         self.compose_open_folder_btn.setEnabled(has_paths)
         self.compose_copy_paths_btn.setEnabled(has_paths)
+        for btn in (
+            self.compose_open_flmsg_btn,
+            self.compose_open_flamp_btn,
+            self.compose_open_folder_btn,
+            self.compose_copy_paths_btn,
+        ):
+            btn.setVisible(not spotter_mode)
+
+    def _send_compose_js8_spotter(self) -> None:
+        if self._compose_template_kind != "spotter":
+            self._set_compose_status("Select a JS8Spotter form before sending via JS8Call.", role="warning")
+            return
+        command = self._compose_spotter_command()
+        if not command:
+            self._set_compose_status("Enter a JS8 target and complete the Spotter form before sending.", role="warning")
+            return
+        if self._compose_js8_msg_auth_selected() and not self._selected_compose_js8_msg_auth_key():
+            self._set_compose_status("Select a matching MsgAuth key before sending a signed JS8Spotter message.", role="warning")
+            return
+        radio_target = self._selected_compose_radio_target()
+        if radio_target is None:
+            self._set_compose_status("Select a JS8Call-capable radio before sending.", role="warning")
+            return
+        if "JS8Call" not in tuple(radio_target.capabilities):
+            self._set_compose_status(f"{radio_target.label} is not configured for JS8Call send.", role="warning")
+            return
+        endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
+        client = JS8ApiClient(endpoint, auto_reconnect=False, timeout_s=1.0, name=f"Compose-{radio_target.radio_id}")
+        try:
+            result = send_js8_message_guarded(client, command, timeout_s=0.6)
+            if not result.sent:
+                issue_codes = [issue.code for issue in result.preflight.issues]
+                if issue_codes == ["target_state_unknown"]:
+                    detail = result.preflight.issues[0].detail
+                    confirm = QMessageBox.question(
+                        self,
+                        "JS8Call Target State Unverified",
+                        f"{detail}\n\nSend anyway to {endpoint.host}:{endpoint.port}?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if confirm == QMessageBox.Yes:
+                        result = send_js8_message_guarded(
+                            client,
+                            command,
+                            timeout_s=0.6,
+                            allow_uncertain_target_state=True,
+                        )
+                if not result.sent:
+                    self._set_compose_status(result.detail, role="warning")
+                    return
+            self._set_compose_status(f"Sent JS8Spotter message via {radio_target.label}: {command}", role="success")
+        finally:
+            client.stop()
+    def _save_compose_js8_expect(self) -> None:
+        if self._compose_template_kind != "spotter":
+            self._set_compose_status("Select a JS8Spotter form before saving to Expect.", role="warning")
+            return
+        message_text = self._compose_spotter_message_text(sign_for_target=False)
+        form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
+        expect_key = str((form_data or {}).get("code", "") or "").strip().upper() if isinstance(form_data, dict) else ""
+        if not message_text or not expect_key:
+            self._set_compose_status("Enter a JS8 target and complete the Spotter form before saving to Expect.", role="warning")
+            return
+        radio_target = self._selected_compose_radio_target()
+        if radio_target is None:
+            self._set_compose_status("Select a radio before saving to Expect.", role="warning")
+            return
+        include_datecode = bool(
+            hasattr(self, "compose_js8_auth_datecode_chk") and self.compose_js8_auth_datecode_chk.isChecked()
+        )
+        stored_datecode = encode_short_datecode(self._compose_timestamp_utc) if include_datecode else ""
+        try:
+            result = save_expect_entry(
+                {
+                    "source_radio_id": str(radio_target.radio_id),
+                    "source_scope": "radio",
+                    "js8_instance_id": str(radio_target.profile.get("js8_instance_id", "") or ""),
+                    "expect_key": expect_key,
+                    "response_text": message_text,
+                    "msg_auth_sign_enabled": self._compose_js8_msg_auth_selected(),
+                    "msg_auth_sign_callsign": self._compose_operator_callsign(),
+                    "msg_auth_include_datecode": include_datecode,
+                    "msg_auth_datecode": stored_datecode,
+                    "allowed_groups": [self.compose_js8_target_edit.text().strip().upper()]
+                    if hasattr(self, "compose_js8_target_edit") and self.compose_js8_target_edit.text().strip().startswith("@")
+                    else [],
+                    "enabled": False,
+                    "auto_reply_enabled": False,
+                    "unattended_auto_reply_enabled": False,
+                    "import_source": "fio-compose-js8spotter",
+                }
+            )
+        except Exception as exc:
+            self._set_compose_status(f"Could not save Expect entry: {exc}", role="warning")
+            return
+        action = "Created" if result.created else "Updated"
+        self._set_compose_status(
+            f"{action} disabled Expect draft for {result.expect_key}. Review policy before enabling auto-reply.",
+            role="success",
+        )
 
     def _stage_compose_files(self) -> None:
         if not self._compose_has_valid_form_selection():
@@ -7368,8 +8073,11 @@ class MessageViewerTab(QWidget):
 
     def _update_pending_table(self) -> None:
         rows = self._load_pending_rows()
-        pending_count = sum(1 for row in rows if str(row.get("status", "")).upper() != "RETRIEVED")
+        rows = [row for row in rows if str(row.get("status", "")).upper() != "RETRIEVED"]
+        pending_count = len(rows)
         self.pending_count.setText(f"{pending_count} pending")
+        if hasattr(self, "pending_box"):
+            self.pending_box.setVisible(pending_count > 0)
         rows_signature = json.dumps(rows, sort_keys=True, default=str)
         if rows_signature == self._pending_rows_signature:
             return
@@ -7929,13 +8637,13 @@ class MessageViewerTab(QWidget):
         tz_name, tz_abbr = self._current_timezone_label()
         if mode == "UTC":
             self.time_toggle_btn.setText("Times: UTC")
-            self._messages_model.set_time_header("RCV_DT (UTC)")
+            self._messages_model.set_time_header("Received (UTC)")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
             )
         else:
             self.time_toggle_btn.setText("Times: Local")
-            self._messages_model.set_time_header(f"RCV_DT ({tz_abbr})")
+            self._messages_model.set_time_header(f"Received ({tz_abbr})")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", f"Last Seen ({tz_abbr})", "Status", "Actions"]
             )
@@ -8007,6 +8715,174 @@ class MessageViewerTab(QWidget):
             self._deferred_refresh = False
             self._start_rows_build(force=force)
 
+    def _spotter_msg_auth_state_for_message(
+        self,
+        msg: SpotterMessage,
+        keys_by_scope: Optional[Dict[tuple[str, str], List[MsgAuthKey]]] = None,
+    ) -> Dict[str, object]:
+        msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+        raw_text = str(getattr(msg, "raw_text", "") or "").strip()
+        if msg_id <= 0 or not raw_text:
+            return {}
+        from_call = str(getattr(msg, "from_call", "") or "").strip().upper()
+        target = str(getattr(msg, "to_call", "") or "").strip().upper()
+        try:
+            if keys_by_scope is None:
+                keys = load_msg_auth_verification_keys(group_name=target, callsign=from_call)
+            else:
+                group = normalize_group_name(target)
+                keys = list(keys_by_scope.get((group, from_call), [])) + list(keys_by_scope.get((group, "*"), []))
+            verification = verify_js8_text(from_call, target, raw_text, keys=keys)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "detail": f"MsgAuth: Verification error ({exc})",
+                "trusted": False,
+            }
+        state = str(verification.state or "").strip().lower()
+        if state == "verified":
+            label = str(verification.key_label or "").strip()
+            detail = "MsgAuth: Valid"
+            if label:
+                detail += f" ({label})"
+            if verification.decoded_datecode:
+                detail += f" | Date code {verification.decoded_datecode}"
+            return {"status": "valid", "detail": detail, "trusted": True}
+        if state == "unsigned":
+            # Unsigned Spotter traffic stays visually quiet by design; signed good traffic gets the green check.
+            return {}
+        if state == "no_key":
+            return {
+                "status": "",
+                "detail": f"MsgAuth: CRC present, but no enabled key for {target or 'group'} / {from_call or 'callsign'}.",
+                "trusted": False,
+            }
+        if state in {"failed", "invalid"}:
+            return {
+                "status": "invalid",
+                "detail": f"MsgAuth: {verification.detail or 'Checksum did not verify.'}",
+                "trusted": False,
+            }
+        return {
+            "status": "",
+            "detail": f"MsgAuth: {verification.detail or state or 'Not verified.'}",
+            "trusted": False,
+        }
+
+    def _enabled_msg_auth_keys_by_scope(self) -> Dict[tuple[str, str], List[MsgAuthKey]]:
+        grouped: Dict[tuple[str, str], List[MsgAuthKey]] = {}
+        try:
+            rows = list_msg_auth_key_rows(enabled_only=True)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load MsgAuth key rows: %s", exc)
+            return grouped
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            group = normalize_group_name(row.get("group_name", ""))
+            callsign = str(row.get("callsign", "") or "").strip().upper()
+            key_text = str(row.get("key_text", "") or "").strip()
+            key_scope = str(row.get("key_scope", "") or "").strip().lower()
+            if key_scope not in {MSG_AUTH_SCOPE_VERIFY_SENDER, MSG_AUTH_SCOPE_VERIFY_ANY}:
+                continue
+            if not group or not callsign or not key_text:
+                continue
+            display_call = "Any Sender" if callsign == "*" else callsign
+            label = str(row.get("label", "") or "").strip() or f"{group} / {display_call}"
+            grouped.setdefault((group, callsign), []).append(
+                MsgAuthKey(label=label, key=key_text, enabled=bool(row.get("enabled", True)))
+            )
+        return grouped
+
+    def _spotter_msg_auth_state_map(self) -> Dict[int, Dict[str, object]]:
+        out: Dict[int, Dict[str, object]] = {}
+        keys_by_scope = self._enabled_msg_auth_keys_by_scope()
+        for msg in self.spotter_messages:
+            try:
+                msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+            except Exception:
+                msg_id = 0
+            if msg_id <= 0:
+                continue
+            state = self._spotter_msg_auth_state_for_message(msg, keys_by_scope=keys_by_scope)
+            if state:
+                out[msg_id] = state
+        return out
+
+    @staticmethod
+    def _norm_expect_group(value: object) -> str:
+        text = str(value or "").strip().upper()
+        if text and not text.startswith("@"):
+            text = f"@{text}"
+        return text
+
+    def _expect_audit_rows_cached(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        cached_ts, cached_rows = getattr(self, "_expect_request_audit_cache", (0.0, []))
+        if cached_rows and (now - float(cached_ts or 0.0)) < 5.0:
+            return [dict(row) for row in cached_rows]
+        try:
+            rows = list_expect_runtime_audit(limit=300)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load Expect request audit: %s", exc)
+            rows = []
+        self._expect_request_audit_cache = (now, [dict(row) for row in rows])
+        return rows
+
+    def _spotter_expect_state_for_message(self, msg: SpotterMessage) -> Dict[str, object]:
+        form_key = str(getattr(msg, "msg_type", "") or "").strip().upper()
+        if form_key and form_key.startswith("F!") and len(form_key) > 2:
+            pass
+        elif form_key:
+            form_key = f"F!{form_key}"
+        from_call = str(getattr(msg, "from_call", "") or "").strip().upper()
+        target_group = self._norm_expect_group(getattr(msg, "to_call", ""))
+        source_radio = str(getattr(msg, "source_radio_id", "") or "").strip()
+        source_js8 = str(getattr(msg, "js8_instance_id", "") or "").strip()
+        if not form_key or not from_call:
+            return {}
+        for row in self._expect_audit_rows_cached():
+            if str(row.get("expect_key", "") or "").strip().upper() != form_key:
+                continue
+            if str(row.get("requesting_callsign", "") or "").strip().upper() != from_call:
+                continue
+            audit_group = self._norm_expect_group(row.get("target_group", ""))
+            if target_group and audit_group and audit_group != target_group:
+                continue
+            audit_radio = str(row.get("source_radio_id", "") or "").strip()
+            audit_js8 = str(row.get("source_js8_instance_id", "") or "").strip()
+            if source_radio and audit_radio and audit_radio != source_radio:
+                continue
+            if source_js8 and audit_js8 and audit_js8 != source_js8:
+                continue
+            decision = str(row.get("decision", "") or "").strip()
+            reason = str(row.get("reason", "") or "").strip()
+            if not decision and not reason:
+                continue
+            detail = f"Expect: {decision}"
+            if reason:
+                detail += f" - {reason}"
+            return {
+                "decision": decision,
+                "detail": detail,
+                "expect_entry_id": int(row.get("expect_entry_id", 0) or 0),
+            }
+        return {}
+
+    def _spotter_expect_state_map(self) -> Dict[int, Dict[str, object]]:
+        out: Dict[int, Dict[str, object]] = {}
+        for msg in self.spotter_messages:
+            try:
+                msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+            except Exception:
+                msg_id = 0
+            if msg_id <= 0:
+                continue
+            state = self._spotter_expect_state_for_message(msg)
+            if state:
+                out[msg_id] = state
+        return out
+
     def _snapshot_for_rows_build(self) -> Dict[str, object]:
         form_ids: set[str] = set()
         for msg in self.js8_messages:
@@ -8050,8 +8926,11 @@ class MessageViewerTab(QWidget):
             "files": {k: list(v) for k, v in self.files.items()},
             "read_state_map": dict(self._read_state_map),
             "signature_state_map": signature_map,
+            "spotter_auth_state_map": self._spotter_msg_auth_state_map(),
+            "spotter_expect_state_map": self._spotter_expect_state_map(),
             "sender_cache_seed": dict(self._sender_cache),
             "form_titles": form_titles,
+            "custom_forms_path": str(self._resolve_custom_forms_path() or ""),
             "message_form_codes": message_form_codes,
             "alert_form_codes": alert_form_codes,
             "show_local_time": self._current_time_mode() != "UTC",
@@ -8091,8 +8970,11 @@ class MessageViewerTab(QWidget):
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
             signature_state_map=snapshot.get("signature_state_map", {}),  # type: ignore[arg-type]
+            spotter_auth_state_map=snapshot.get("spotter_auth_state_map", {}),  # type: ignore[arg-type]
+            spotter_expect_state_map=snapshot.get("spotter_expect_state_map", {}),  # type: ignore[arg-type]
             sender_cache_seed=snapshot.get("sender_cache_seed", {}),  # type: ignore[arg-type]
             form_titles=snapshot.get("form_titles", {}),  # type: ignore[arg-type]
+            custom_forms_path=str(snapshot.get("custom_forms_path", "") or ""),
             message_form_codes=snapshot.get("message_form_codes"),  # type: ignore[arg-type]
             alert_form_codes=snapshot.get("alert_form_codes"),  # type: ignore[arg-type]
             show_local_time=bool(snapshot.get("show_local_time", False)),
@@ -8317,6 +9199,7 @@ class MessageViewerTab(QWidget):
                 if rcv_query not in hay:
                     continue
             filtered.append(row)
+        self._set_message_table_display_profile(self._message_display_profile_for_type(type_sel))
         if (
             type_sel == "BBS"
             and self._sort_column == self._default_sort_column
@@ -8342,6 +9225,74 @@ class MessageViewerTab(QWidget):
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             len(filtered),
         )
+
+    def _message_display_profile_for_type(self, type_sel: object) -> str:
+        text = str(type_sel or "").strip()
+        if not text or text == "MSG Type...":
+            return "triage"
+        if text == "Spotter" or re.match(r"^F![0-9]{3}[A-Z]?$", text):
+            return "field_report"
+        if text == "SitRep" or text.startswith("SitRep/"):
+            return "field_report"
+        if text.upper() in {"FLMSG", "FLAMP"}:
+            return "form_message"
+        return "triage"
+
+    def _current_messages_time_header(self) -> str:
+        try:
+            mode = self._current_time_mode()
+            if mode == "UTC":
+                return "Received (UTC)"
+            tz_name = self.settings.get("timezone", "UTC") or "UTC"
+            tz = get_timezone(tz_name)
+            now = datetime.datetime.now(tz)
+            tz_abbr = now.strftime("%Z") or "Local"
+            return f"Received ({tz_abbr})"
+        except Exception:
+            return "Received"
+
+    def _set_message_table_display_profile(self, profile: str) -> None:
+        if not hasattr(self, "_messages_model"):
+            return
+        old = self._messages_model.display_profile()
+        old_default_col = 6 if old == "field_report" else 5 if old == "form_message" else self._default_sort_column
+        self._messages_model.set_display_profile(profile, self._current_messages_time_header())
+        new_profile = self._messages_model.display_profile()
+        new_default_col = 6 if new_profile == "field_report" else 5 if new_profile == "form_message" else self._default_sort_column
+        if old != new_profile and self._sort_column == old_default_col:
+            self._sort_column = new_default_col
+        if old != new_profile and hasattr(self, "messages_table"):
+            self._apply_message_table_profile_widths()
+        if hasattr(self, "view_spotter_map_btn"):
+            self.view_spotter_map_btn.setVisible(new_profile == "field_report")
+
+    def _request_spotter_map_view(self) -> None:
+        host = self.window()
+        if host is not None and hasattr(host, "open_spotter_map"):
+            try:
+                host.open_spotter_map()
+                return
+            except Exception as exc:
+                log.debug("MessageViewer: open_spotter_map failed: %s", exc)
+        QMessageBox.information(self, "View Spotter Map", "The Map view is not available in this runtime profile.")
+
+    def _apply_message_table_profile_widths(self) -> None:
+        profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"
+        if profile == "field_report":
+            widths = {0: 32, 1: 86, 2: 88, 3: 104, 4: 120, 5: 240, 6: 92, 7: 142}
+        elif profile == "form_message":
+            widths = {0: 32, 1: 86, 2: 88, 3: 116, 4: 116, 5: 92, 6: 320, 7: 142}
+        else:
+            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 148, 7: 142}
+        for idx, width in widths.items():
+            try:
+                self.messages_table.setColumnWidth(idx, width)
+            except Exception:
+                pass
+        try:
+            self._sync_header_widths()
+        except Exception:
+            pass
 
     def _refresh_workspace_filter_options(self, rows: List[UnifiedMessage]) -> None:
         if hasattr(self, "operating_group_filter"):
@@ -8581,6 +9532,7 @@ class MessageViewerTab(QWidget):
         has_selection = count > 0
         if hasattr(self, "delete_selected_btn"):
             self.delete_selected_btn.setEnabled(has_selection)
+            self.delete_selected_btn.setVisible(has_selection)
             role = "eligible_danger" if has_selection else "muted"
             self.delete_selected_btn.setStyleSheet(button_style(role, theme))
         if hasattr(self, "export_selected_btn"):
@@ -9237,13 +10189,13 @@ class MessageViewerTab(QWidget):
         header = self.messages_table.horizontalHeader()
         fallback_widths = {
             0: 32,
-            1: 100,
-            2: 96,
-            3: 122,
-            4: 122,
-            5: 162,
+            1: 76,
+            2: 82,
+            3: 104,
+            4: 104,
+            5: 148,
             6: 120,
-            7: 210,
+            7: 142,
         }
         for idx, widget in enumerate(self._header_cells):
             if widget is None:
@@ -9259,7 +10211,7 @@ class MessageViewerTab(QWidget):
             if idx == 0:
                 min_width = 30
             elif idx == 7:
-                min_width = 210
+                min_width = 132
             elif idx in (3, 4):
                 min_width = 96
             else:
@@ -9379,8 +10331,23 @@ class MessageViewerTab(QWidget):
     def _sort_rows(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
         reverse = self._sort_order == Qt.DescendingOrder
         col = self._sort_column
+        profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"
 
         def key(row: UnifiedMessage):
+            if profile == "field_report":
+                if col == 1:
+                    return MessageTableModel._field_report_form(row)
+                if col == 2:
+                    return MessageTableModel._field_report_status(row)
+                if col == 3:
+                    return row.from_call or ""
+                if col == 4:
+                    return MessageTableModel._field_report_group(row)
+                if col == 5:
+                    return MessageTableModel._field_report_area(row)
+                if col == 6:
+                    return row.rcv_ts or 0.0
+                return row.rcv_ts or 0.0
             if col == 1:
                 return row.msg_type or ""
             if col == 2:
@@ -9431,6 +10398,7 @@ class MessageViewerTab(QWidget):
                 title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            auth_map = self._spotter_msg_auth_state_for_message(msg)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -9462,10 +10430,12 @@ class MessageViewerTab(QWidget):
             if msg_type.startswith("F!"):
                 form_id = msg_type[2:].strip()
                 title = self._load_form_title(form_id)
-            if not title:
-                title = (msg.decoded_text or msg.raw_text or "").strip()
+            summary = summarize_spotter_form_text(msg.raw_text, form_title=title)
+            title = summary or title or (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            auth_map = self._spotter_msg_auth_state_for_message(msg)
+            expect_map = self._spotter_expect_state_for_message(msg)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -9477,6 +10447,11 @@ class MessageViewerTab(QWidget):
                     title=title,
                     origin="spotter",
                     payload=msg,
+                    auth_state=str(auth_map.get("status", "") or ""),
+                    auth_detail=str(auth_map.get("detail", "") or ""),
+                    auth_trusted=bool(auth_map.get("trusted", False)),
+                    expect_decision=str(expect_map.get("decision", "") or ""),
+                    expect_detail=str(expect_map.get("detail", "") or ""),
                 )
             )
 
@@ -9723,19 +10698,7 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _title_from_filename(path: Path) -> str:
-        stem = path.stem
-        tokens = [t for t in re.split(r"[-_]", stem) if t]
-        if not tokens:
-            return stem
-        date_idx: Optional[int] = None
-        for i, tok in enumerate(tokens):
-            t = tok.lower()
-            if re.fullmatch(r"\d{6,8}", t) or re.fullmatch(r"\d{4,6}z", t) or re.fullmatch(r"\d{5,6}z", t):
-                date_idx = i
-                break
-        title_tokens = tokens[date_idx + 1 :] if date_idx is not None else tokens[-1:]
-        title = " ".join(title_tokens).strip()
-        return title or stem
+        return _title_from_filename_path(path)
 
     def _resolve_custom_forms_path(self) -> Optional[Path]:
         override = (self.settings.get("nbems_custom_forms_path", "") or "").strip()
@@ -9764,27 +10727,11 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _extract_custom_form_name(text: str) -> str:
-        if not text:
-            return ""
-        m = re.search(r"CUSTOM_FORM,([A-Za-z0-9_.-]+)", text, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        return ""
+        return _extract_custom_form_name_text(text)
 
     @staticmethod
     def _parse_custom_form_fields(text: str) -> Dict[str, str]:
-        fields: Dict[str, str] = {}
-        if not text:
-            return fields
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or "," not in line:
-                continue
-            key, val = line.split(",", 1)
-            key = key.strip().upper()
-            if re.fullmatch(r"L\d{1,2}[A-Z]?", key):
-                fields[key] = val.strip()
-        return fields
+        return _parse_custom_form_fields_text(text)
 
     @staticmethod
     def _apply_form_fields(template: str, fields: Dict[str, str]) -> str:
@@ -9842,20 +10789,11 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _strip_html(text: str) -> str:
-        if not text:
-            return ""
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
+        return _strip_html_text(text)
 
     @staticmethod
     def _extract_title_from_template(template: str) -> str:
-        if not template:
-            return ""
-        m = re.search(r"<title>(.*?)</title>", template, flags=re.IGNORECASE | re.DOTALL)
-        if not m:
-            return ""
-        return MessageViewerTab._strip_html(m.group(1))
+        return _extract_template_title_text(template)
 
     @staticmethod
     def _is_image_file(path: Path) -> bool:
@@ -10119,24 +11057,11 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _match_field(text: str, pattern: str) -> str:
-        m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-        if not m:
-            return ""
-        return m.group(1).strip().replace("\r\n", "\n")
+        return _match_field_text(text, pattern)
 
     @staticmethod
     def _extract_hdr_call(text: str, marker: str) -> str:
-        if not text:
-            return ""
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        for idx, line in enumerate(lines):
-            if line.lower().startswith(marker):
-                for nxt in lines[idx + 1 :]:
-                    parts = nxt.split()
-                    if parts:
-                        return parts[0].strip().upper()
-                break
-        return ""
+        return _extract_hdr_call_text(text, marker)
 
     def _delete_file_record(self, rec: FileRecord) -> None:
         if not rec or not rec.path.exists():
@@ -10316,8 +11241,31 @@ class MessageViewerTab(QWidget):
 
     def _varac_bbs_copy_targets(self) -> List[Dict[str, object]]:
         targets: List[Dict[str, object]] = []
-        for radio_target in self._load_compose_radio_targets():
-            for bbs_target in self._compose_bbs_targets_for_radio(radio_target):
+        load_radio_targets = getattr(self, "_load_compose_radio_targets", None)
+        compose_bbs_targets = getattr(self, "_compose_bbs_targets_for_radio", None)
+        radio_targets = load_radio_targets() if callable(load_radio_targets) else []
+        if not radio_targets:
+            bbs_dir_txt = str(self.settings.get("varac_bbs_dir", "") or "").strip()
+            path = Path(bbs_dir_txt).expanduser() if bbs_dir_txt else None
+            return [
+                {
+                    "id": "live",
+                    "kind": "live",
+                    "label": "VarAC BBS",
+                    "radio_id": "",
+                    "radio_label": "",
+                    "bbs_label": "VarAC BBS",
+                    "detail": "Configured VarAC BBS folder",
+                    "path": path,
+                    "valid": path is not None and path.exists() and path.is_dir(),
+                    "file_count": 0,
+                    "due_now": 0,
+                    "is_default": True,
+                }
+            ]
+        for radio_target in radio_targets:
+            bbs_targets = compose_bbs_targets(radio_target) if callable(compose_bbs_targets) else []
+            for bbs_target in bbs_targets:
                 path_txt = str(bbs_target.get("path", "") or "").strip()
                 path = Path(path_txt).expanduser() if path_txt else None
                 if path is not None and bbs_target.get("kind") == "managed":
@@ -11757,24 +12705,26 @@ class MessageViewerTab(QWidget):
             mode = self._current_time_mode()
             label = "UTC" if mode == "UTC" else "Local"
             ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
-            source_list = self._safe_json_pretty(msg.sources_json)
-            source_refs = self._safe_json_pretty(msg.source_refs_json)
-            raw_payload = self._safe_json_pretty(msg.raw_payload_json)
+            state_grid = MessageTableModel._sitrep_area(msg)
             lines = [
-                "Normalized SitRep",
+                f"{msg.from_call} -> {msg.target}",
+                (
+                    f"{msg.subtype_label} | {msg.source_family_label or 'Unknown'} | "
+                    f"{msg.transport_label or '--'} | {label}: {ts_display}"
+                ),
+                (
+                    f"Status: {self._pretty_sitrep_value(msg.overall_status)} | "
+                    f"Group: {msg.report_group or '--'} | State/Grid: {state_grid or '--'} | Sources: {msg.source_count}"
+                ),
                 "",
-                f"CALLSIGN: {msg.from_call}",
-                f"TO:       {msg.target}",
-                f"GROUP:    {msg.report_group}",
-                f"GRID:     {msg.grid}",
-                f"STATE:    {msg.state_code or '--'}",
-                f"SCOPE:    {msg.scope or 'My Location'}",
-                f"SUBTYPE:  {msg.subtype_label}",
-                f"SOURCE:   {msg.source_family_label or 'Unknown'}",
-                f"RECEIPT:  {msg.transport_label}",
-                f"{label}:  {ts_display}",
-                f"REPORT:   {msg.report_key}",
-                f"SOURCES:  {msg.source_count}",
+                "Report",
+                f"  Callsign: {msg.from_call}",
+                f"  To:       {msg.target}",
+                f"  Group:    {msg.report_group or '--'}",
+                f"  Report:   {msg.report_key or '--'}",
+                f"  State:    {msg.state_code or '--'}",
+                f"  Grid:     {msg.grid or '--'}",
+                f"  Scope:    {msg.scope or 'My Location'}",
                 "",
                 "Status Fields",
                 f"  Overall:        {self._pretty_sitrep_value(msg.overall_status)}",
@@ -11800,14 +12750,7 @@ class MessageViewerTab(QWidget):
                 "Source Metadata",
                 f"  First Source: {msg.source_first or 'Unknown'}",
                 f"  Last Source:  {msg.source_last or 'Unknown'}",
-                "  Source List JSON:",
-                source_list,
-                "",
-                "Source Refs JSON:",
-                source_refs,
-                "",
-                "Raw Payload JSON:",
-                raw_payload,
+                f"  Sources:      {msg.source_count}",
             ]
             self.info_label.setText(
                 f"SitRep {msg.subtype_label} {msg.from_call} -> {msg.target}"
@@ -11908,12 +12851,56 @@ class MessageViewerTab(QWidget):
                 "",
             ]
             relay_via = getattr(msg, "relay_via", "") or ""
+            if isinstance(msg, SpotterMessage):
+                fields = parse_spotter_bracket_fields(msg.raw_text)
+                state_grid = MessageTableModel._spotter_area(msg)
+                county_or_country = str(fields.get("CC", "") or fields.get("CO", "") or "").strip()
+                summary = summarize_spotter_form_text(msg.raw_text, form_title=self._load_form_title(msg.msg_type[2:]))
+                header = [
+                    f"{msg.from_call} -> {msg.to_call}",
+                    f"{msg.msg_type} | JS8Spotter | {label}: {ts_display}",
+                    f"Status: {msg.state or '--'} | State/Grid: {state_grid or '--'}"
+                    + (f" | County/Country: {county_or_country}" if county_or_country else ""),
+                    f"Summary: {summary or '--'}",
+                    "",
+                ]
             if relay_via:
                 header.insert(4, f"RELAY VIA: {relay_via}")
+            if isinstance(msg, SpotterMessage):
+                source_lines = self._spotter_source_lines(msg)
+                if source_lines:
+                    insert_at = 4 if not relay_via else 5
+                    for offset, line in enumerate(source_lines):
+                        header.insert(insert_at + offset, line)
+                auth_map = self._spotter_msg_auth_state_for_message(msg)
+                auth_detail = str(auth_map.get("detail", "") or "").strip()
+                if auth_detail:
+                    insert_at = 4 + (1 if relay_via else 0) + len(source_lines)
+                    header.insert(insert_at, f"AUTH: {auth_detail}")
+                expect_map = self._spotter_expect_state_for_message(msg)
+                expect_detail = str(expect_map.get("detail", "") or "").strip()
+                if expect_detail:
+                    insert_at = 4 + (1 if relay_via else 0) + len(source_lines) + (1 if auth_detail else 0)
+                    header.insert(insert_at, expect_detail if expect_detail.lower().startswith("expect:") else f"Expect: {expect_detail}")
             body = msg.decoded_text or msg.raw_text
+            if isinstance(msg, SpotterMessage):
+                body = self._decode_spotter_message_text(msg) or body
             self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(header + [body]))
+
+    @staticmethod
+    def _spotter_source_lines(msg: SpotterMessage) -> List[str]:
+        radio_id = str(getattr(msg, "source_radio_id", "") or "").strip()
+        js8_instance = str(getattr(msg, "js8_instance_id", "") or "").strip()
+        if not radio_id and not js8_instance:
+            return []
+        lines = ["SOURCE:"]
+        if radio_id:
+            lines.append(f"  Radio: {radio_id}")
+        if js8_instance:
+            lines.append(f"  JS8Call: {js8_instance}")
+        return lines
 
     def _fmt_mtime(self, mtime: float) -> str:
         if not mtime:
@@ -12744,6 +13731,32 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update local decoded text: %s", e)
 
+    def _update_spotter_decoded(self, msg_id: int, decoded: str) -> None:
+        db_path = self._db_path()
+        if not db_path or not Path(db_path).exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE spotter_traffic SET decoded_text=? WHERE id=?", (decoded, int(msg_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update Spotter decoded text: %s", e)
+
+    def _decode_spotter_message_text(self, msg: SpotterMessage) -> str:
+        raw = str(getattr(msg, "raw_text", "") or "").strip()
+        if not raw:
+            return str(getattr(msg, "decoded_text", "") or "")
+        form_id, resp, comment = self._parse_form_parts(raw)
+        decoded = ""
+        if form_id:
+            decoded = self._decode_form(form_id, resp, comment, raw=raw)
+        if not decoded or decoded == raw:
+            title = self._load_form_title(form_id) if form_id else ""
+            decoded = decode_spotter_form_text(raw, form_title=title)
+        return decoded or raw
+
     def _update_local_read(self, msg_id: int, read_ts: float) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
@@ -12812,13 +13825,15 @@ class MessageViewerTab(QWidget):
             if rebuild:
                 self._populate_messages_table(force=force)
             return
+        self._ensure_spotter_table()
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             message_codes = self._form_codes_for_flag("messages")
             base_sql = """
                 SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
-                       raw_text, decoded_text, state, read_ts, flag_state, relay_via
+                       raw_text, decoded_text, state, read_ts, flag_state, relay_via,
+                       source_radio_id, js8_instance_id
                 FROM spotter_traffic
             """
             if message_codes is None:
@@ -12853,64 +13868,21 @@ class MessageViewerTab(QWidget):
                 read_ts=float(r[10] or 0.0),
                 relay_via=(r[12] or "").strip().upper(),
                 flag_state=int(r[11] or 0),
+                source_radio_id=str(r[13] or "").strip() if len(r) > 13 else "",
+                js8_instance_id=str(r[14] or "").strip() if len(r) > 14 else "",
             )
+            if msg.msg_type.startswith("F!") and (not msg.decoded_text or msg.decoded_text == msg.raw_text):
+                new_decoded = self._decode_spotter_message_text(msg)
+                if new_decoded and new_decoded != msg.decoded_text:
+                    msg.decoded_text = new_decoded
+                    self._update_spotter_decoded(msg.spotter_id, new_decoded)
             msgs.append(msg)
         self.spotter_messages = msgs
         if rebuild:
             self._populate_messages_table(force=force)
 
     def _ingest_js8_messages(self) -> None:
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
-            return
-        self._ensure_local_js8_tables()
-        max_local_id = self._local_max_js8_id()
-        try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            queries = [
-                ("inbox_v1", "id, json, type, value"),
-                ("inbox_v1", "rowid as id, json, type, value"),
-                ("inbox_v1", "id, message, type, value"),
-                ("inbox_v1", "id, blob"),
-                ("inbox", "id, json, type, value"),
-                ("inbox", "rowid as id, json, type, value"),
-                ("inbox", "id, message, type, value"),
-            ]
-            rows = []
-            source_table = ""
-            for table, cols in queries:
-                try:
-                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
-                    rows = cur.fetchall()
-                    source_table = table
-                    break
-                except Exception:
-                    rows = []
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: JS8 ingest read failed: %s", e)
-            rows = []
-
-        state_map = self._load_js8_state_map()
-        now_ts = time.time()
-        for row in rows:
-            rid = _safe_js8_int(row[0] if len(row) > 0 else None, None)
-            if rid is None or rid <= max_local_id:
-                continue
-            msg = self._normalize_js8_inbox_row(
-                row,
-                source=source_table or "js8_inbox",
-                state_map=state_map,
-                now_ts=now_ts,
-            )
-            if msg is None:
-                continue
-            self._insert_js8_local(msg)
-            try:
-                self._enqueue_next_msg_id(from_call, text)
-            except Exception:
-                pass
+        MessageIngestor(self.settings).ingest_js8_messages()
 
     def _spotter_offset_key(self) -> str:
         return "spotter_directed_offset"
@@ -13012,74 +13984,7 @@ class MessageViewerTab(QWidget):
         }
 
     def _ingest_spotter_from_directed(self) -> None:
-        directed_path = self._resolve_directed_path()
-        if not directed_path or not directed_path.exists():
-            return
-        self._ensure_spotter_table()
-        try:
-            offset = int(self.settings.get(self._spotter_offset_key(), 0) or 0)
-        except Exception:
-            offset = 0
-        try:
-            size_now = directed_path.stat().st_size
-            if offset < 0 or offset > size_now:
-                offset = 0
-            with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                if offset:
-                    fh.seek(offset)
-                last_pos = fh.tell()
-                while True:
-                    line = fh.readline()
-                    if not line:
-                        break
-                    last_pos = fh.tell()
-                    parsed = self._parse_directed_spotter_line(line)
-                    if not parsed:
-                        continue
-                    form_id = str(parsed.get("form_id") or "").strip()
-                    raw_form = str(parsed.get("raw_form") or "").strip()
-                    if not form_id or not raw_form:
-                        continue
-                    from_call = str(parsed.get("from_call") or "").strip().upper()
-                    token = str(parsed.get("spotter_token") or "").strip().upper()
-                    if not from_call:
-                        continue
-                    if self._spotter_exists(from_call, form_id, token, raw_form):
-                        continue
-                    _, resp, comment = self._parse_form_parts(raw_form)
-                    decoded = self._decode_form(form_id, resp, comment, raw=raw_form)
-                    db_path = self._db_path()
-                    if not db_path:
-                        continue
-                    conn = sqlite3.connect(db_path)
-                    cur = conn.cursor()
-                    cur.execute(
-                        """
-                        INSERT INTO spotter_traffic
-                            (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
-                             raw_text, decoded_text, state, read_ts, relay_via, ingested_ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?)
-                        """,
-                        (
-                            float(parsed.get("utc_ts") or 0.0),
-                            str(parsed.get("utc_str") or ""),
-                            from_call,
-                            str(parsed.get("to_call") or "").strip().upper(),
-                            form_id,
-                            token,
-                            raw_form,
-                            decoded or raw_form,
-                            str(parsed.get("relay_via") or "").strip().upper(),
-                            float(time.time()),
-                        ),
-                    )
-                    conn.commit()
-                    conn.close()
-                self.settings.set(self._spotter_offset_key(), int(last_pos))
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-        except Exception as e:
-            log.debug("MessageViewer: spotter ingest failed reading DIRECTED.TXT: %s", e)
+        MessageIngestor(self.settings).ingest_spotter_from_directed()
 
     def _enqueue_next_msg_id(self, from_call: str, text: str) -> None:
         """

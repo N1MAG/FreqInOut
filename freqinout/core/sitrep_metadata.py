@@ -81,7 +81,7 @@ def source_family_key(source: object) -> str:
         return "UNKNOWN"
     if src in {"COMMSTAT3", "COMMSTAT23", "COMMSTAT", "COMMSTAT_12", "COMMSTAT_FWD"}:
         return "COMMSTAT"
-    if src in {"JS8SPOTTER", "SPOTTER"}:
+    if src in {"JS8SPOTTER", "JS8SPOTTER_IMPORT", "SPOTTER"}:
         return "JS8SPOTTER"
     if src == "MANUAL":
         return "MANUAL"

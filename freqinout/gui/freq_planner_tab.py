@@ -42,6 +42,7 @@ from freqinout.core.schedule_source_sets import (
     HF_NET_SOURCE_SETS_KEY,
     SELECTED_HF_DAILY_SOURCE_SET_KEY,
     SELECTED_HF_NET_SOURCE_SET_KEY,
+    selected_source_schedule_dependency_refs,
     selected_source_set_id,
     source_set_row_by_id_for_category,
     source_sets_for_category,
@@ -1194,12 +1195,13 @@ class FreqPlannerTab(QWidget):
             self.frequency_plan_action_hint_label.setText("Enter a clear Frequency Plan name before saving.")
             return
         schedule_refs = projection.schedule_refs()
+        source_refs = projection.source_refs() + selected_source_schedule_dependency_refs(self.settings)
         plan_payload: Dict[str, Any] = {
             "name": name,
             "status": "saved",
             "category": "normal",
             "description": "Saved from FreqPlanner blended HF Daily + HF Nets + SOP projection.",
-            "source_refs": projection.source_refs(),
+            "source_refs": source_refs,
             "schedule_refs": schedule_refs,
             "frequency_refs": projection.frequency_refs(),
             "group_refs": projection.group_refs(),

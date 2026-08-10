@@ -9,6 +9,7 @@ from typing import Callable, Dict, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.js8_expect_runtime import ExpectAutomationCoordinator, GuardPreflightCallback
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.multi_rig_runtime_status import (
@@ -28,7 +29,7 @@ from freqinout.core.varac_bbs_vault import (
     run_varac_bbs_vault,
 )
 from freqinout.core.varac_guard import run_varac_guard
-from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
+from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 
 
 class _DeviceProfileVaultSettings:
@@ -58,6 +59,14 @@ class _DeviceProfileVaultSettings:
         return self.fallback_settings.get(key, default)
 
     def set(self, key: str, value) -> None:
+        if str(key or "").startswith("spotter_directed_offset"):
+            try:
+                self.fallback_settings.set(key, value)
+                if hasattr(self.fallback_settings, "save"):
+                    self.fallback_settings.save()
+            except Exception:
+                pass
+            return
         self.profile[key] = value
         if key in {"varac_bbs_vault_runtime_state_v1", "varac_bbs_vault_last_summary"}:
             try:
@@ -79,9 +88,10 @@ class BackgroundIngestController(QObject):
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
     _controller_thread_call = Signal(object)
 
-    def __init__(self, settings: SettingsManager):
+    def __init__(self, settings: SettingsManager, *, expect_guard_preflight: Optional[GuardPreflightCallback] = None):
         super().__init__()
         self.settings = settings
+        self.expect_guard_preflight = expect_guard_preflight
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
@@ -526,8 +536,75 @@ class BackgroundIngestController(QObject):
             msg_ingest.ingest_spotter_from_directed()
         except Exception as e:
             log.debug("BackgroundIngest: spotter ingest failed: %s", e)
+        try:
+            self._run_multi_radio_spotter_ingest()
+        except Exception as e:
+            log.debug("BackgroundIngest: multi-radio spotter ingest failed: %s", e)
         finally:
             worker_settings.close()
+
+    def _active_js8_spotter_profiles(self) -> list[Dict[str, object]]:
+        try:
+            store = MultiRadioStore()
+            runtime_status = build_multi_rig_runtime_status(store)
+            if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
+                return []
+            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
+        except Exception:
+            return []
+        out: list[Dict[str, object]] = []
+        for profile in profiles:
+            if not self._truthy(profile.get("use_js8call", False), False) and not self._truthy(profile.get("use_js8spotter", False), False):
+                continue
+            if not str(profile.get("js8_directed_path", "") or "").strip():
+                continue
+            out.append(profile)
+        return out
+
+    def _run_multi_radio_spotter_ingest(self) -> None:
+        profiles = self._active_js8_spotter_profiles()
+        if not profiles:
+            return
+        store = MultiRadioStore()
+        worker_settings = self._new_worker_settings()
+        coordinator = ExpectAutomationCoordinator(
+            worker_settings,
+            profiles=profiles,
+            guard_preflight=self.expect_guard_preflight,
+        )
+        for profile in profiles:
+            radio_id = int(profile.get("id", 0) or 0)
+            directed = str(profile.get("js8_directed_path", "") or "").strip()
+            if radio_id <= 0 or not directed:
+                continue
+            profile_settings = _DeviceProfileVaultSettings(profile, self._new_worker_settings(), store)
+            try:
+                ingestor = MessageIngestor(
+                    profile_settings,  # type: ignore[arg-type]
+                    expect_dispatch_client_factory=coordinator.client_factory_for_ingest(),
+                    expect_auto_reply_enabled=coordinator.runtime_unattended_enabled(),
+                )
+                ingestor.ingest_spotter_from_directed(
+                    directed_path=Path(directed).expanduser(),
+                    source_radio_id=radio_id,
+                    js8_instance_id=str(profile.get("js8_instance_id", "") or profile.get("name", "") or radio_id),
+                    offset_key=f"spotter_directed_offset_radio_{radio_id}",
+                    evaluate_expect=True,
+                )
+            except Exception as exc:
+                log.debug("BackgroundIngest: spotter ingest failed for radio %s: %s", radio_id, exc)
+            finally:
+                try:
+                    profile_settings.fallback_settings.close()
+                except Exception:
+                    pass
+        try:
+            coordinator.close()
+        finally:
+            try:
+                worker_settings.close()
+            except Exception:
+                pass
 
     def _ingest_varac(self) -> None:
         self._submit_job("varac", self._run_varac_job)

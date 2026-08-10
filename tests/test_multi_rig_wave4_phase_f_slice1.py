@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QCheckBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.settings_manager import SettingsManager
@@ -29,6 +29,30 @@ def _select_device_profiles(tab, device_ids: list[int]) -> None:
         if device_id in wanted:
             found.add(device_id)
     assert found == wanted
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
+
+
+def _create_primary_device(store: MultiRadioStore, name: str = "Primary Rig") -> dict[str, object]:
+    device = store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "flrig",
+            "device_class": "tx_rx",
+            "launch_enabled": False,
+            "launch_path": "",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    store.set_device_profile_runtime_active(int(device["id"]), True)
+    store.set_runtime_primary_device_profile(int(device["id"]))
+    return store.get_runtime_primary_device_profile() or device
 
 
 def _select_assignment_devices(tab, device_ids: list[int]) -> None:
@@ -93,8 +117,7 @@ def test_store_derives_sdr_follow_policies_and_blocks_observer_primary(monkeypat
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
     observer = _observer_device(store)
 
     active_profiles = store.list_runtime_active_device_profiles()
@@ -124,8 +147,7 @@ def test_station_runtime_manager_reports_observer_follow_guidance(monkeypatch, t
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
     observer = _observer_device(store)
     watcher = store.save_operating_profile(
         {
@@ -174,14 +196,19 @@ def test_station_runtime_manager_reports_observer_follow_guidance(monkeypatch, t
 def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    _create_primary_device(store)
 
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     tab = SettingsTab()
     try:
@@ -249,10 +276,11 @@ def test_settings_tab_persists_observer_fields_and_preferred_bands(monkeypatch, 
 def test_station_overview_shows_observer_follow_guidance(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    _create_primary_device(store)
     observer = _observer_device(store)
     watcher = store.save_operating_profile(
         {

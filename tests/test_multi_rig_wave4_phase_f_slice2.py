@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtWidgets import QApplication, QCheckBox
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
@@ -26,6 +27,30 @@ def _select_varac_clusters(tab, cluster_ids: list[int]) -> None:
         if cluster_id in wanted:
             found.add(cluster_id)
     assert found == wanted
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
+
+
+def _create_primary_device(store: MultiRadioStore, name: str = "Primary Rig") -> dict[str, object]:
+    device = store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "flrig",
+            "device_class": "tx_rx",
+            "launch_enabled": False,
+            "launch_path": "",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    store.set_device_profile_runtime_active(int(device["id"]), True)
+    store.set_runtime_primary_device_profile(int(device["id"]))
+    return store.get_runtime_primary_device_profile() or device
 
 
 def _select_varac_memberships(tab, cluster_device_pairs: list[tuple[int, int]]) -> None:
@@ -62,10 +87,10 @@ def test_store_persists_varac_clusters_and_memberships(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
-    SettingsManager()
+    settings = SettingsManager()
+    settings.set("varac_cluster_mode_enabled", True)
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
 
     updated_primary = store.save_device_profile(
         {
@@ -114,8 +139,7 @@ def test_station_runtime_manager_exposes_varac_cluster_summary(monkeypatch, tmp_
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
 
     shared_db = tmp_path / "cluster" / "VarAC.db"
     shared_db.parent.mkdir(parents=True, exist_ok=True)
@@ -165,12 +189,12 @@ def test_station_runtime_manager_exposes_varac_cluster_summary(monkeypatch, tmp_
 def test_settings_tab_shows_varac_cluster_and_membership_tables(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
-    SettingsManager()
+    settings = SettingsManager()
+    settings.set("varac_cluster_mode_enabled", True)
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_device(store)
     store.save_device_profile(
         {
             "id": primary["id"],
@@ -224,7 +248,7 @@ def test_settings_tab_shows_varac_cluster_and_membership_tables(monkeypatch, tmp
 def test_settings_tab_persists_device_profile_varac_fields(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())

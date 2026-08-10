@@ -56,7 +56,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="messages.compose",
         anchor="messages-compose",
         title="Messages Compose Help",
-        summary="Compose and stage outbound traffic for FLMsg, FLAmp, and VarAC destinations.",
+        summary="Compose and stage outbound traffic for FLMsg, FLAmp, and VarAC destinations; review JS8Spotter MCForms drafts before guarded JS8Call send is enabled.",
     ),
     "messages.bbs": HelpContext(
         key="messages.bbs",
@@ -152,7 +152,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.js8call",
         anchor="settings-js8call-details",
         title="JS8Call Settings Help",
-        summary="JS8Call connection, JS8 traffic files, CommStat, JS8Spotter, and JS8Spotter form mapping.",
+        summary="JS8Call connection, JS8 traffic files, CommStat, JS8Spotter, JS8Spotter form mapping, and Expect preparation.",
     ),
     "settings.fast-light": HelpContext(
         key="settings.fast-light",
@@ -182,7 +182,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.message-auth",
         anchor="settings-message-auth",
         title="Message Auth Help",
-        summary="Plain-language signature and checksum verification, trusted hashes, GPG keys, and signing identity.",
+        summary="Plain-language signature and checksum verification, JS8 MsgAuth keys scoped by group/callsign, trusted hashes, GPG keys, and signing identity.",
     ),
     "settings.launch-control": HelpContext(
         key="settings.launch-control",

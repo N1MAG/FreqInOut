@@ -62,6 +62,18 @@ class _ClearSharedPttManager:
         )
 
 
+def _primary_radio(store: MultiRadioStore, name: str = "Primary Rig") -> dict:
+    return store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "flrig",
+            "device_class": "tx_rx",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+
+
 def _configure_scheduler_for_apply(monkeypatch, engine: SchedulerEngine, queued: list[tuple[str, int]]) -> None:
     monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
     monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
@@ -77,8 +89,7 @@ def test_scheduler_shared_ptt_block_publishes_busy_and_conflict_evidence(monkeyp
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
     owner = store.save_device_profile({"name": "Remote Rig", "control_backend": "flrig", "ptt_group": "AMP-A"})
     primary_id = radio_shared_state_id(primary["id"])
     owner_id = radio_shared_state_id(owner["id"])
@@ -110,8 +121,7 @@ def test_scheduler_local_ptt_active_publishes_busy_evidence(monkeypatch, tmp_pat
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
     primary_id = radio_shared_state_id(primary["id"])
     engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None, station_runtime_manager=_ClearSharedPttManager())
     queued: list[tuple[str, int]] = []
@@ -137,8 +147,7 @@ def test_scheduler_local_ptt_clear_removes_scheduler_owned_busy_evidence(monkeyp
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
     primary_id = radio_shared_state_id(primary["id"])
     engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None, station_runtime_manager=_ClearSharedPttManager())
     queued: list[tuple[str, int]] = []
@@ -163,8 +172,7 @@ def test_scheduler_shared_ptt_clear_removes_scheduler_owned_evidence(monkeypatch
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
     owner = store.save_device_profile({"name": "Remote Rig", "control_backend": "flrig", "ptt_group": "AMP-A"})
     primary_id = radio_shared_state_id(primary["id"])
     manager = _SharedPttManager(owner["id"])
@@ -191,8 +199,7 @@ def test_scheduler_shared_ptt_clear_keeps_conflict_where_primary_is_only_blocker
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
     other = store.save_device_profile({"name": "Other Requested Rig", "control_backend": "flrig", "ptt_group": "AMP-A"})
     primary_id = radio_shared_state_id(primary["id"])
     other_id = radio_shared_state_id(other["id"])

@@ -28,6 +28,13 @@ def _idle_status_snapshot(self, **kwargs):
     }
 
 
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
+
+
 def _create_active_device(store: MultiRadioStore, name: str) -> dict[str, object]:
     device = store.save_device_profile(
         {
@@ -40,6 +47,23 @@ def _create_active_device(store: MultiRadioStore, name: str) -> dict[str, object
     )
     store.set_device_profile_runtime_active(int(device["id"]), True)
     return device
+
+
+def _create_primary_device(store: MultiRadioStore, name: str = "Primary Rig") -> dict[str, object]:
+    device = store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "flrig",
+            "launch_enabled": False,
+            "launch_path": "",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+            "notes": f"{name} primary profile",
+        }
+    )
+    store.set_device_profile_runtime_active(int(device["id"]), True)
+    store.set_runtime_primary_device_profile(int(device["id"]))
+    return store.get_runtime_primary_device_profile() or device
 
 
 def _select_assignment_devices(tab, device_ids: list[int]) -> None:
@@ -63,8 +87,7 @@ def test_store_temporary_swap_use_target_profile_restores_primary_and_target_ass
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    source = store.get_runtime_primary_device_profile()
-    assert source is not None
+    source = store.get_runtime_primary_device_profile() or _create_primary_device(store)
 
     target_profile = store.save_operating_profile({"name": "Remote Ops"})
     target = _create_active_device(store, "Remote Rig")
@@ -110,8 +133,7 @@ def test_store_carry_swap_restores_target_assignment_and_blocks_unsafe_edits(mon
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    source = store.get_runtime_primary_device_profile()
-    assert source is not None
+    source = store.get_runtime_primary_device_profile() or _create_primary_device(store)
 
     source_profile = store.save_operating_profile({"name": "Field Carry", "allow_profile_swap": True})
     target_profile = store.save_operating_profile({"name": "Target Default"})
@@ -169,8 +191,7 @@ def test_station_runtime_manager_reports_active_profile_swap_annotations(monkeyp
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    source = store.get_runtime_primary_device_profile()
-    assert source is not None
+    source = store.get_runtime_primary_device_profile() or _create_primary_device(store)
 
     source_profile = store.save_operating_profile({"name": "Field Carry", "allow_profile_swap": True})
     target_profile = store.save_operating_profile({"name": "Remote Default"})
@@ -203,7 +224,7 @@ def test_station_runtime_manager_reports_active_profile_swap_annotations(monkeyp
 def test_settings_tab_persists_allow_profile_swap_and_handles_swap_start_restore(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
@@ -212,7 +233,12 @@ def test_settings_tab_persists_allow_profile_swap_and_handles_swap_start_restore
 
     monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
+    _create_primary_device(store, "Settings Primary")
     target = _create_active_device(store, "Settings Target")
     target_profile = store.save_operating_profile({"name": "Settings Target Profile"})
     store.set_device_operating_profile(int(target["id"]), int(target_profile["id"]), assignment_state="active")
@@ -235,9 +261,8 @@ def test_settings_tab_persists_allow_profile_swap_and_handles_swap_start_restore
         active_swap = store.get_active_profile_swap()
         assert active_swap is not None
         assert int(active_swap["target_device_id"]) == int(target["id"])
-        assert "Temporary plan swap active" in tab.device_assignments_hint_label.text()
+        assert "Temporary model swap active" in tab.device_assignments_hint_label.text()
 
-        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
         tab._restore_temporary_profile_swap()
 
         assert store.get_active_profile_swap() is None

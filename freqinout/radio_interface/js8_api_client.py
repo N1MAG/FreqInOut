@@ -295,6 +295,21 @@ class JS8ApiClient:
                 )
         return response
 
+    def send(
+        self,
+        command: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        value: object = "",
+    ) -> None:
+        """Send a JS8Call API command without waiting for a response."""
+        command_text = _safe_text(command, limit=_FIELD_LIMIT).strip().upper()
+        if not command_text:
+            raise ValueError("JS8 API command is required")
+        if not self.is_connected:
+            raise JS8ApiConnectionError(f"JS8Call API is not connected at {self.endpoint.host}:{self.endpoint.port}")
+        self._send({"type": command_text, "value": _safe_text(value), "params": dict(params or {})})
+
     def probe_capabilities(self, *, timeout_s: float = 0.4) -> JS8CapabilitySnapshot:
         """
         Probe common JS8Call TCP API commands and classify endpoint capability.

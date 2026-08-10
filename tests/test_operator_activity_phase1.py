@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from freqinout.core.operator_activity import (
+    _band_from_freq_hz,
+    _freq_hz_from_value,
     ensure_js8_callsign_stats,
     load_js8_direct_contact_summary,
     load_operator_activity_summary,
+    parse_utc_timestamp,
 )
 
 
@@ -118,3 +122,127 @@ def test_activity_summary_prefers_mode_specific_data_over_legacy_operator_checki
 
     assert summary["W1ABC"]["overall_last_seen_ts"] == 500.0
     assert summary["W1ABC"]["overall_last_band"] == "80M"
+
+
+def test_activity_summary_uses_imported_js8spotter_archive_rows() -> None:
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE js8spotter_import_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_db TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            imported_ts REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO js8spotter_import_archive
+            (source_db, source_table, source_id, source_fingerprint, payload_json, imported_ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "/legacy/js8spotter.db",
+            "signal",
+            "sig-1",
+            "fp-sig-1",
+            json.dumps(
+                {
+                    "sig_callsign": "W9BVM",
+                    "sig_timestamp": "2026-04-09 16:40:42",
+                    "sig_freq": "14.115",
+                    "sig_snr": "-8",
+                }
+            ),
+            1_710_000_000.0,
+        ),
+    )
+
+    summary = load_operator_activity_summary(conn)
+
+    assert summary["W9BVM"]["spotter_last_seen_ts"] == 1_775_752_842.0
+    assert summary["W9BVM"]["spotter_last_band"] == "20M"
+    assert summary["W9BVM"]["overall_last_seen_source"] == "spotter_import"
+    assert summary["W9BVM"]["overall_last_band"] == "20M"
+
+
+def test_imported_spotter_frequency_values_accept_mhz_khz_and_hz() -> None:
+    assert _band_from_freq_hz(_freq_hz_from_value("14.115")) == "20M"
+    assert _band_from_freq_hz(_freq_hz_from_value("7115")) == "40M"
+    assert _band_from_freq_hz(_freq_hz_from_value("14115000")) == "20M"
+
+
+def test_compact_spotter_timestamps_parse_as_dates_not_epoch_seconds() -> None:
+    assert parse_utc_timestamp("20260409164042") == 1_775_752_842.0
+
+
+def test_imported_spotter_activity_summary_prefers_event_time_before_import_time() -> None:
+    conn = _conn()
+    conn.execute(
+        """
+        CREATE TABLE js8spotter_import_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_db TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            imported_ts REAL NOT NULL
+        )
+        """
+    )
+    old_rows = [
+        (
+            "/legacy/js8spotter.db",
+            "signal",
+            f"old-{idx}",
+            f"fp-old-{idx}",
+            json.dumps(
+                {
+                    "sig_callsign": f"N{idx}OLD",
+                    "sig_timestamp": "2020-01-01 00:00:00",
+                    "sig_freq": "7.115",
+                }
+            ),
+            9_999_999_000.0 + idx,
+        )
+        for idx in range(5000)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO js8spotter_import_archive
+            (source_db, source_table, source_id, source_fingerprint, payload_json, imported_ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        old_rows,
+    )
+    conn.execute(
+        """
+        INSERT INTO js8spotter_import_archive
+            (source_db, source_table, source_id, source_fingerprint, payload_json, imported_ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "/legacy/js8spotter.db",
+            "signal",
+            "new-event-old-import",
+            "fp-new-event",
+            json.dumps(
+                {
+                    "sig_callsign": "W9NEW",
+                    "sig_timestamp": "2026-04-09 16:40:42",
+                    "sig_freq": "14.115",
+                }
+            ),
+            1.0,
+        ),
+    )
+
+    summary = load_operator_activity_summary(conn)
+
+    assert summary["W9NEW"]["spotter_last_seen_ts"] == 1_775_752_842.0
+    assert summary["W9NEW"]["overall_last_band"] == "20M"

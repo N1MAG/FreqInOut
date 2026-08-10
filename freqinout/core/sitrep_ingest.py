@@ -113,6 +113,17 @@ def ingest_sitreps(settings, *, max_rows_per_source: int = 500) -> Dict[str, int
                     )
                     stats["sources_ok"] += 1
 
+            if _is_enabled(settings, "sitrep_ingest_imported_js8spotter_archive_enabled", True):
+                stats["sources_attempted"] += 1
+                archive_stats = _ingest_imported_js8spotter_archive(
+                    conn,
+                    str(local_db),
+                    max_rows=max_rows_per_source,
+                )
+                _merge_stats(stats, archive_stats)
+                if int(archive_stats.get("errors", 0) or 0) <= 0:
+                    stats["sources_ok"] += 1
+
             if _is_enabled(settings, "sitrep_ingest_js8spotter_enabled", True):
                 stats["sources_attempted"] += 1
                 path = _resolve_js8spotter_db_path(settings)
@@ -941,6 +952,138 @@ def _ingest_local_spotter_backfill(
             settings.set(done_key, True)
         except Exception:
             pass
+    return out
+
+
+def _ingest_imported_js8spotter_archive(
+    local_conn: sqlite3.Connection,
+    source_db_path: str,
+    *,
+    max_rows: int,
+) -> Dict[str, int]:
+    out = {"rows_scanned": 0, "events_inserted": 0, "errors": 0}
+    source = "JS8SPOTTER_IMPORT"
+    table = "csstatrep"
+
+    if not _table_exists(local_conn, "js8spotter_import_archive"):
+        return out
+
+    last_id = _get_last_id(local_conn, source, table, source_db_path)
+    cur = local_conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, source_db, source_id, payload_json, imported_ts
+            FROM js8spotter_import_archive
+            WHERE id > ?
+              AND lower(source_table)=?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (last_id, table, int(max_rows)),
+        )
+        rows = cur.fetchall()
+    except Exception as e:
+        out["errors"] += 1
+        _set_last_id(local_conn, source, table, source_db_path, last_id, error_text=str(e))
+        return out
+
+    max_seen = last_id
+    for archive_id, original_db, original_id, payload_json, imported_ts in rows:
+        rid = int(archive_id or 0)
+        max_seen = max(max_seen, rid)
+        out["rows_scanned"] += 1
+        try:
+            payload = json.loads(str(payload_json or "{}"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        status_txt = str(payload.get("cssr_status", "") or "").strip()
+        subtype = "COMMSTAT_12" if len(status_txt) >= 12 else "COMMSTAT_FWD"
+        from_call = str(payload.get("cssr_from", "") or "")
+        target = str(payload.get("cssr_group", "") or "")
+        grid = str(payload.get("cssr_grid", "") or "")
+        priority = str(payload.get("cssr_prio", "") or "")
+        notes = str(payload.get("cssr_notes", "") or "")
+        event_ts, event_ts_utc = _parse_ts(payload.get("cssr_timestamp"), fallback=str(imported_ts or ""))
+        metadata = _commstat_metadata(
+            target=target,
+            grid=grid,
+            remarks_text=notes,
+            source_value=1,
+            raw_message=notes,
+        )
+        raw_payload = {
+            "source_db": str(original_db or ""),
+            "source_id": str(original_id or ""),
+            "cssr_from": from_call,
+            "cssr_group": target,
+            "cssr_grid": grid,
+            "cssr_prio": priority,
+            "cssr_msgid": str(payload.get("cssr_msgid", "") or ""),
+            "cssr_status": status_txt,
+            "cssr_notes": notes,
+            "cssr_timestamp": str(payload.get("cssr_timestamp", "") or ""),
+        }
+        inserted = _insert_source_event(
+            local_conn,
+            source=source,
+            source_table=table,
+            source_db_path=source_db_path,
+            source_id=rid,
+            subtype=subtype,
+            from_call=from_call,
+            target=target,
+            report_group=metadata["report_group"] or target,
+            grid=grid,
+            scope=priority,
+            transport_mode=metadata["transport_mode"] or "js8",
+            remarks_text=metadata["remarks_text"],
+            brevity_code=metadata["brevity_code"],
+            brevity_summary=metadata["brevity_summary"],
+            state_code=metadata["state_code"],
+            state_confidence=metadata["state_confidence"],
+            geo_confidence=metadata["geo_confidence"],
+            status_payload={
+                "status": status_txt,
+                "priority": priority,
+            },
+            raw_payload=raw_payload,
+            event_ts=event_ts,
+            event_ts_utc=event_ts_utc,
+        )
+        if inserted:
+            out["events_inserted"] += 1
+        _upsert_commstat_statrep_artifact(
+            local_conn,
+            source=source,
+            source_table=table,
+            source_id=rid,
+            event_ts=event_ts,
+            event_ts_utc=event_ts_utc,
+            from_call=from_call,
+            target=target,
+            report_group=metadata["report_group"] or target,
+            grid=grid,
+            state_code=metadata["state_code"],
+            scope=priority,
+            transport_mode=metadata["transport_mode"] or "js8",
+            status_payload={
+                "status": status_txt,
+                "priority": priority,
+            },
+            remarks_text=notes,
+            external_ids=[str(payload.get("cssr_msgid", "") or "").strip(), str(original_id or "").strip()],
+            payload={
+                "source": source,
+                "source_table": table,
+                **raw_payload,
+            },
+        )
+
+    _set_last_id(local_conn, source, table, source_db_path, max_seen)
     return out
 
 

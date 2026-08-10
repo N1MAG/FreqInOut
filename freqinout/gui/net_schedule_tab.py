@@ -54,6 +54,7 @@ from freqinout.core.schedule_source_sets import (
     HF_NET_SOURCE_CATEGORY,
     HF_NET_SOURCE_SETS_KEY,
     SELECTED_HF_NET_SOURCE_SET_KEY,
+    assigned_plan_rf_guard_impacts_for_source_update,
     delete_source_schedule,
     save_source_schedule,
     selected_source_set_id,
@@ -759,6 +760,13 @@ class NetScheduleTab(QWidget):
             if not ok:
                 return
             existing_id = 0
+        if existing_id and not self._confirm_rf_guard_source_update(
+            HF_NET_SOURCE_CATEGORY,
+            f"plan:{existing_id}",
+            rows,
+            name,
+        ):
+            return
         try:
             saved = save_source_schedule(
                 self.settings,
@@ -780,6 +788,59 @@ class NetScheduleTab(QWidget):
             f"HF Net Source {verb}",
             f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s). Select it in FreqPlanner Overview.",
         )
+
+    def _confirm_rf_guard_source_update(
+        self,
+        category: str,
+        set_id: str,
+        rows: List[Dict[str, Any]],
+        name: str,
+    ) -> bool:
+        try:
+            impacts = assigned_plan_rf_guard_impacts_for_source_update(self.settings, category, set_id, rows)
+        except Exception as exc:
+            log.exception("Net Schedule: RF Guard impact scan failed.")
+            response = QMessageBox.question(
+                self,
+                "RF Guard Check Unavailable",
+                "RF Guard could not check assigned master schedules before updating this HF Net schedule.\n\n"
+                f"{exc}\n\nSave the schedule anyway?",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            return response == QMessageBox.Save
+        if not impacts:
+            return True
+        lines: List[str] = []
+        blocked = False
+        for impact in impacts:
+            validation = impact.get("validation", {})
+            state = str(validation.get("state") or "").strip().lower()
+            blocked = blocked or state == "blocked"
+            plan = impact.get("plan", {})
+            device = impact.get("device", {})
+            plan_name = str(plan.get("name") or "assigned Frequency Plan")
+            radio_name = str(device.get("name") or f"Radio {impact.get('assignment', {}).get('device_profile_id')}")
+            messages = [str(item) for item in validation.get("messages", []) if str(item or "").strip()]
+            detail = messages[0] if messages else "RF Guard reported a schedule conflict."
+            lines.append(f"- {radio_name} / {plan_name}: {detail}")
+        body = (
+            f"Updating '{name}' affects one or more master schedules assigned to radios.\n\n"
+            + "\n".join(lines[:6])
+        )
+        if len(lines) > 6:
+            body += f"\n- +{len(lines) - 6} more"
+        if blocked:
+            QMessageBox.warning(self, "RF Guard Blocked Update", body + "\n\nFix the conflict before saving this update.")
+            return False
+        response = QMessageBox.question(
+            self,
+            "RF Guard Warning",
+            body + "\n\nSave this HF Net schedule update anyway?",
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Save
 
     def _on_delete_freqplanner_source_clicked(self) -> None:
         row = self._selected_freqplanner_source_row()

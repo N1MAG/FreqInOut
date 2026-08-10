@@ -49,6 +49,13 @@ class SpotterFormDefinition:
     path: str = ""
 
 
+@dataclass(frozen=True)
+class SpotterFormField:
+    key: str
+    label: str
+    options: tuple[tuple[str, str], ...] = ()
+
+
 def normalize_form_code(value: object) -> str:
     text = str(value or "").strip().upper()
     if not text:
@@ -98,6 +105,50 @@ def discover_spotter_forms(forms_dir: object) -> List[SpotterFormDefinition]:
         form_code = f"F!{match.group(1).upper()}"
         out.append(SpotterFormDefinition(form_code=form_code, title=_read_form_title(path), path=str(path)))
     return out
+
+
+def parse_spotter_form_fields(text: object) -> List[SpotterFormField]:
+    """Parse JS8Spotter MCForms question/option rows into editable field metadata."""
+    fields: List[SpotterFormField] = []
+    current_label = ""
+    current_options: List[tuple[str, str]] = []
+
+    def flush() -> None:
+        nonlocal current_label, current_options
+        label = current_label.strip()
+        if not label:
+            current_options = []
+            return
+        key_base = re.sub(r"[^A-Za-z0-9]+", "_", label.upper()).strip("_") or f"FIELD_{len(fields) + 1}"
+        key = key_base
+        suffix = 2
+        existing = {field.key for field in fields}
+        while key in existing:
+            key = f"{key_base}_{suffix}"
+            suffix += 1
+        fields.append(SpotterFormField(key=key, label=label, options=tuple(current_options)))
+        current_label = ""
+        current_options = []
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("?"):
+            flush()
+            current_label = line[1:].strip().strip(":")
+            continue
+        if line.startswith("@") and current_label:
+            parts = line[1:].strip().split(maxsplit=1)
+            if not parts:
+                continue
+            token = parts[0].strip()
+            label = parts[1].strip() if len(parts) > 1 else token
+            if token:
+                current_options.append((token, label))
+            continue
+    flush()
+    return fields
 
 
 def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str, object]:

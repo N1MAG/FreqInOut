@@ -4,8 +4,21 @@ import json
 import sqlite3
 from pathlib import Path
 
+from freqinout.core import sitrep_ingest
 from freqinout.core.commstat_sitrep import parse_commstat_message
-from freqinout.core.sitrep_ingest import _ensure_local_tables, _ingest_commstat3
+from freqinout.core.sitrep_metadata import source_family_label
+from freqinout.core.sitrep_ingest import _ensure_local_tables, _ingest_commstat3, _ingest_imported_js8spotter_archive
+
+
+class DummySettings:
+    def __init__(self, values: dict[str, object] | None = None):
+        self._values = dict(values or {})
+
+    def get(self, key: str, default=None):
+        return self._values.get(key, default)
+
+    def set(self, key: str, value):
+        self._values[key] = value
 
 
 def _write_brevity_assets(base: Path, list_id: str = "4") -> None:
@@ -255,3 +268,124 @@ def test_ingest_commstat3_statrep_populates_transport_and_geo(tmp_path: Path) ->
         assert row == ("AMRRON", "internet", "MI", "explicit", "grid6")
     finally:
         local_conn.close()
+
+
+def test_ingest_imported_js8spotter_csstatrep_archives_into_sitrep_events() -> None:
+    local_conn = sqlite3.connect(":memory:")
+    try:
+        _ensure_local_tables(local_conn)
+        local_conn.execute(
+            """
+            CREATE TABLE js8spotter_import_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_db TEXT NOT NULL,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                imported_ts REAL NOT NULL,
+                UNIQUE(source_db, source_table, source_id, source_fingerprint)
+            )
+            """
+        )
+        local_conn.execute(
+            """
+            INSERT INTO js8spotter_import_archive
+                (source_db, source_table, source_id, source_fingerprint, payload_json, imported_ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "/legacy/js8spotter.db",
+                "csstatrep",
+                "42",
+                "fp-42",
+                json.dumps(
+                    {
+                        "cssr_from": "N0DDK",
+                        "cssr_group": "MAGNET",
+                        "cssr_grid": "EM83",
+                        "cssr_prio": "My County",
+                        "cssr_msgid": "CSR-42",
+                        "cssr_status": "321311111331",
+                        "cssr_notes": "NTR OR 4BBGUB",
+                        "cssr_timestamp": "2026-04-09 16:40:42",
+                    }
+                ),
+                1_710_000_000.0,
+            ),
+        )
+        local_conn.commit()
+
+        stats = _ingest_imported_js8spotter_archive(local_conn, "freqinout_nets.db", max_rows=50)
+
+        assert stats["rows_scanned"] == 1
+        assert stats["events_inserted"] == 1
+        row = local_conn.execute(
+            """
+            SELECT source, source_table, from_call, target, report_group, grid, transport_mode,
+                   status_payload, raw_payload
+            FROM sitrep_source_events
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[:7] == ("JS8SPOTTER_IMPORT", "csstatrep", "N0DDK", "MAGNET", "MAGNET", "EM83", "js8")
+        assert json.loads(row[7])["status"] == "321311111331"
+        raw_payload = json.loads(row[8])
+        assert raw_payload["source_db"] == "/legacy/js8spotter.db"
+        assert raw_payload["source_id"] == "42"
+
+        artifact = local_conn.execute(
+            """
+            SELECT source_first, source_last, source_refs_json, from_call, report_group, title
+            FROM commstat_artifacts
+            """
+        ).fetchone()
+        assert artifact is not None
+        assert artifact[0] == "JS8SPOTTER_IMPORT"
+        assert artifact[1] == "JS8SPOTTER_IMPORT"
+        assert json.loads(artifact[2]) == ["csstatrep:1"]
+        assert artifact[3] == "N0DDK"
+        assert artifact[4] == "MAGNET"
+    finally:
+        local_conn.close()
+
+
+def test_imported_js8spotter_source_uses_existing_family_label() -> None:
+    assert source_family_label("JS8SPOTTER_IMPORT") == "JS8Spotter"
+
+
+def test_imported_js8spotter_archive_errors_do_not_count_source_ok(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_local_tables(conn)
+        conn.execute(
+            """
+            CREATE TABLE js8spotter_import_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(sitrep_ingest, "_local_db_path", lambda: db_path)
+    monkeypatch.setattr(sitrep_ingest, "_LAST_RUN_MONO", 0.0)
+    settings = DummySettings(
+        {
+            "sitrep_unified_ingest_enabled": True,
+            "sitrep_ingest_local_spotter_backfill_enabled": False,
+            "sitrep_ingest_imported_js8spotter_archive_enabled": True,
+            "sitrep_ingest_js8spotter_enabled": False,
+            "sitrep_ingest_commstat3_enabled": False,
+            "sitrep_ingest_commstat23_enabled": False,
+        }
+    )
+
+    stats = sitrep_ingest.ingest_sitreps(settings, max_rows_per_source=50)
+
+    assert stats["sources_attempted"] == 1
+    assert stats["errors"] == 1
+    assert stats["sources_ok"] == 0

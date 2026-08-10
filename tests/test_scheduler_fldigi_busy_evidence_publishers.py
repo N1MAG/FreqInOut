@@ -11,6 +11,14 @@ def _engine_with_store(monkeypatch, tmp_path):
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
     primary = store.get_runtime_primary_device_profile()
     assert primary is not None
     engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=object())

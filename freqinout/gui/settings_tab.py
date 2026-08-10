@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import csv
 import json
 import platform
 import subprocess
@@ -76,6 +77,17 @@ from freqinout.core.config_migration_preview import (
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
+from freqinout.core.js8_msg_auth import generate_msg_auth_secret_key
+from freqinout.core.js8_msg_auth_store import (
+    MSG_AUTH_ANY_SENDER,
+    MSG_AUTH_SCOPE_SIGNING,
+    MSG_AUTH_SCOPE_VERIFY_ANY,
+    MSG_AUTH_SCOPE_VERIFY_SENDER,
+    delete_msg_auth_key,
+    list_msg_auth_key_rows,
+    normalize_msg_auth_scope,
+    save_msg_auth_key,
+)
 from freqinout.core.known_operating_groups import WEFAX_STATIONS, load_known_operating_group_catalog
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
@@ -121,6 +133,18 @@ from freqinout.core.hash_tools import (
     normalize_hash_hex,
     normalize_trusted_hash_entries,
 )
+from freqinout.core.js8_expect_store import (
+    delete_expect_entry,
+    delete_expect_allow_policy,
+    list_expect_management_audit,
+    list_expect_runtime_audit,
+    list_expect_entries,
+    list_expect_allow_policies,
+    save_expect_allow_policy,
+    update_expect_entry_controls,
+)
+from freqinout.core.js8spotter_importer import import_js8spotter_database
+from freqinout.core.js8spotter_archive import load_js8spotter_archive_records
 from freqinout.core.js8_spotter_forms import (
     MAPPER_SETTINGS_KEY,
     PURPOSE_OPTIONS,
@@ -210,7 +234,7 @@ from freqinout.core.varac_bbs_vault import (
     vault_runtime_state_to_data,
 )
 from freqinout.utils.timezones import get_timezone
-from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
+from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import (
     resolve_theme,
@@ -652,6 +676,19 @@ class SettingsTab(QWidget):
         self._gpg_trusted_fingerprints: set[str] = set()
         self._trusted_hashes_table_loading = False
         self._trusted_hash_entries: List[Dict[str, object]] = []
+        self._js8_msg_auth_keys_table_loading = False
+        self._js8_msg_auth_key_rows: List[Dict[str, Any]] = []
+        self._js8_msg_auth_selected_id: int = 0
+        self._js8_expect_policies_table_loading = False
+        self._js8_expect_policy_rows: List[Dict[str, Any]] = []
+        self._js8_expect_policy_selected_id: int = 0
+        self._js8_expect_entries_table_loading = False
+        self._js8_expect_entry_rows: List[Dict[str, Any]] = []
+        self._js8_expect_entry_selected_id: int = 0
+        self._js8_expect_audit_rows: List[Dict[str, Any]] = []
+        self._js8_expect_request_rows: List[Dict[str, Any]] = []
+        self._js8spotter_watch_rows: List[Dict[str, Any]] = []
+        self._js8spotter_activity_rows: List[Dict[str, Any]] = []
         self._spotter_mapper_loading = False
         self._settings_radio_focus_id: Optional[int] = None
         self._settings_radio_selector_buttons: Dict[int, QPushButton] = {}
@@ -4283,6 +4320,80 @@ class SettingsTab(QWidget):
         load_links_row.addStretch()
         js8_v.addLayout(load_links_row)
 
+        import_spotter_row = QHBoxLayout()
+        import_spotter_row.setSpacing(8)
+        import_spotter_row.setContentsMargins(0, 0, 0, 0)
+        import_spotter_label = QLabel("JS8Spotter DB")
+        import_spotter_label.setFixedWidth(js8_label_width)
+        import_spotter_row.addWidget(import_spotter_label)
+        self.js8spotter_import_db_edit = QLineEdit()
+        self.js8spotter_import_db_edit.setPlaceholderText("Select existing js8spotter.db to import history and Expect rules")
+        import_spotter_row.addWidget(self.js8spotter_import_db_edit, 1)
+        self.js8spotter_import_choose_btn = QPushButton("Choose")
+        self.js8spotter_import_choose_btn.clicked.connect(self._choose_js8spotter_import_db)
+        import_spotter_row.addWidget(self.js8spotter_import_choose_btn)
+        self.js8spotter_import_btn = QPushButton("Import")
+        self.js8spotter_import_btn.clicked.connect(self._import_js8spotter_database)
+        import_spotter_row.addWidget(self.js8spotter_import_btn)
+        js8_v.addLayout(import_spotter_row)
+        self.js8spotter_import_status_label = QLabel("")
+        self.js8spotter_import_status_label.setWordWrap(True)
+        js8_v.addWidget(self.js8spotter_import_status_label)
+
+        spotter_watch_header = QHBoxLayout()
+        spotter_watch_header.setContentsMargins(0, 4, 0, 0)
+        spotter_watch_header.setSpacing(8)
+        spotter_watch_header.addWidget(QLabel("Imported Spotter Watch Review"))
+        spotter_watch_header.addStretch()
+        self.js8spotter_watch_refresh_btn = QPushButton("Refresh Watch Review")
+        spotter_watch_header.addWidget(self.js8spotter_watch_refresh_btn)
+        js8_v.addLayout(spotter_watch_header)
+
+        self.js8spotter_watch_table = QTableWidget(0, 5)
+        self.js8spotter_watch_table.setHorizontalHeaderLabels(["Type", "Name", "Summary", "Source", "Imported"])
+        self.js8spotter_watch_table.verticalHeader().setVisible(False)
+        self.js8spotter_watch_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8spotter_watch_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8spotter_watch_table.setAlternatingRowColors(True)
+        self.js8spotter_watch_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        watch_hdr = self.js8spotter_watch_table.horizontalHeader()
+        watch_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        watch_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        watch_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        watch_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        watch_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.js8spotter_watch_table.setMinimumHeight(110)
+        self.js8spotter_watch_table.setMaximumHeight(180)
+        self.js8spotter_watch_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8spotter_watch_table)
+
+        spotter_activity_header = QHBoxLayout()
+        spotter_activity_header.setContentsMargins(0, 4, 0, 0)
+        spotter_activity_header.setSpacing(8)
+        spotter_activity_header.addWidget(QLabel("Imported Spotter Activity Review"))
+        spotter_activity_header.addStretch()
+        self.js8spotter_activity_refresh_btn = QPushButton("Refresh Activity Review")
+        spotter_activity_header.addWidget(self.js8spotter_activity_refresh_btn)
+        js8_v.addLayout(spotter_activity_header)
+
+        self.js8spotter_activity_table = QTableWidget(0, 5)
+        self.js8spotter_activity_table.setHorizontalHeaderLabels(["Type", "Call/Grid", "Summary", "Source", "Imported"])
+        self.js8spotter_activity_table.verticalHeader().setVisible(False)
+        self.js8spotter_activity_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8spotter_activity_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8spotter_activity_table.setAlternatingRowColors(True)
+        self.js8spotter_activity_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        activity_hdr = self.js8spotter_activity_table.horizontalHeader()
+        activity_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        activity_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        activity_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        activity_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        activity_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.js8spotter_activity_table.setMinimumHeight(120)
+        self.js8spotter_activity_table.setMaximumHeight(190)
+        self.js8spotter_activity_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8spotter_activity_table)
+
         def build_js8_path_row(label: str, edit: QLineEdit, browse_cb, autofill_btn: QPushButton | None = None) -> QWidget:
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -4406,11 +4517,235 @@ class SettingsTab(QWidget):
         mapper_hint.setWordWrap(True)
         js8_v.addWidget(mapper_hint)
 
+        expect_header = QHBoxLayout()
+        expect_header.setContentsMargins(0, 4, 0, 0)
+        expect_header.setSpacing(8)
+        expect_header.addWidget(QLabel("Expect Allow Policies"))
+        expect_header.addStretch()
+        js8_v.addLayout(expect_header)
+
+        expect_form = QGridLayout()
+        expect_form.setContentsMargins(0, 0, 0, 0)
+        expect_form.setHorizontalSpacing(8)
+        expect_form.setVerticalSpacing(6)
+        self.js8_expect_policy_name_edit = QLineEdit()
+        self.js8_expect_policy_name_edit.setPlaceholderText("Policy name")
+        self.js8_expect_allowed_groups_edit = QLineEdit()
+        self.js8_expect_allowed_groups_edit.setPlaceholderText("@MAGNET, @GROUP")
+        self.js8_expect_allowed_callsigns_edit = QLineEdit()
+        self.js8_expect_allowed_callsigns_edit.setPlaceholderText("CALL1, CALL2")
+        self.js8_expect_blocked_callsigns_edit = QLineEdit()
+        self.js8_expect_blocked_callsigns_edit.setPlaceholderText("Blocked callsigns")
+        self.js8_expect_scope_combo = QComboBox()
+        self.js8_expect_scope_combo.addItems(["all", "radio"])
+        self.js8_expect_policy_enabled_chk = QCheckBox("Enabled")
+        self.js8_expect_policy_enabled_chk.setChecked(True)
+        expect_form.addWidget(QLabel("Name"), 0, 0)
+        expect_form.addWidget(self.js8_expect_policy_name_edit, 0, 1)
+        expect_form.addWidget(QLabel("Scope"), 0, 2)
+        expect_form.addWidget(self.js8_expect_scope_combo, 0, 3)
+        expect_form.addWidget(QLabel("Groups"), 1, 0)
+        expect_form.addWidget(self.js8_expect_allowed_groups_edit, 1, 1)
+        expect_form.addWidget(QLabel("Callsigns"), 1, 2)
+        expect_form.addWidget(self.js8_expect_allowed_callsigns_edit, 1, 3)
+        expect_form.addWidget(QLabel("Blocked"), 2, 0)
+        expect_form.addWidget(self.js8_expect_blocked_callsigns_edit, 2, 1)
+        expect_form.addWidget(self.js8_expect_policy_enabled_chk, 2, 3)
+        js8_v.addLayout(expect_form)
+
+        expect_actions = QHBoxLayout()
+        expect_actions.setContentsMargins(0, 0, 0, 0)
+        expect_actions.setSpacing(8)
+        self.js8_expect_save_policy_btn = QPushButton("Save Policy")
+        self.js8_expect_new_policy_btn = QPushButton("New Policy")
+        self.js8_expect_delete_policy_btn = QPushButton("Delete Selected")
+        self.js8_expect_delete_policy_btn.setEnabled(False)
+        expect_actions.addWidget(self.js8_expect_save_policy_btn)
+        expect_actions.addWidget(self.js8_expect_new_policy_btn)
+        expect_actions.addWidget(self.js8_expect_delete_policy_btn)
+        expect_actions.addStretch()
+        js8_v.addLayout(expect_actions)
+
+        self.js8_expect_policies_table = QTableWidget(0, 6)
+        self.js8_expect_policies_table.setHorizontalHeaderLabels(["Use", "Name", "Groups", "Callsigns", "Blocked", "Scope"])
+        self.js8_expect_policies_table.verticalHeader().setVisible(False)
+        self.js8_expect_policies_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8_expect_policies_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8_expect_policies_table.setAlternatingRowColors(True)
+        self.js8_expect_policies_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        expect_hdr = self.js8_expect_policies_table.horizontalHeader()
+        expect_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        expect_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        expect_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        expect_hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+        expect_hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        expect_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.js8_expect_policies_table.setMinimumHeight(150)
+        self.js8_expect_policies_table.setMaximumHeight(220)
+        self.js8_expect_policies_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8_expect_policies_table)
+
+        expect_entries_header = QHBoxLayout()
+        expect_entries_header.setContentsMargins(0, 8, 0, 0)
+        expect_entries_header.setSpacing(8)
+        expect_entries_header.addWidget(QLabel("Expect Entries"))
+        expect_entries_header.addStretch()
+        self.js8_expect_refresh_entries_btn = QPushButton("Refresh Entries")
+        expect_entries_header.addWidget(self.js8_expect_refresh_entries_btn)
+        js8_v.addLayout(expect_entries_header)
+
+        expect_entry_form = QGridLayout()
+        expect_entry_form.setContentsMargins(0, 0, 0, 0)
+        expect_entry_form.setHorizontalSpacing(8)
+        expect_entry_form.setVerticalSpacing(6)
+        self.js8_expect_entry_policy_combo = QComboBox()
+        self.js8_expect_entry_policy_combo.addItem("No policy", 0)
+        self.js8_expect_entry_allowed_groups_edit = QLineEdit()
+        self.js8_expect_entry_allowed_groups_edit.setPlaceholderText("@MAGNET, @GROUP")
+        self.js8_expect_entry_allowed_callsigns_edit = QLineEdit()
+        self.js8_expect_entry_allowed_callsigns_edit.setPlaceholderText("CALL1, CALL2")
+        self.js8_expect_entry_blocked_callsigns_edit = QLineEdit()
+        self.js8_expect_entry_blocked_callsigns_edit.setPlaceholderText("Blocked callsigns")
+        self.js8_expect_entry_max_replies_spin = QSpinBox()
+        self.js8_expect_entry_max_replies_spin.setRange(1, 99)
+        self.js8_expect_entry_max_replies_spin.setValue(1)
+        self.js8_expect_entry_cooldown_spin = QSpinBox()
+        self.js8_expect_entry_cooldown_spin.setRange(0, 86400)
+        self.js8_expect_entry_cooldown_spin.setSingleStep(60)
+        self.js8_expect_entry_enabled_chk = QCheckBox("Enabled")
+        self.js8_expect_entry_auto_reply_chk = QCheckBox("Auto Reply")
+        self.js8_expect_entry_auto_reply_chk.setToolTip("Stores the auto-reply intent. Runtime auto-reply remains guarded until the Expect runtime is enabled.")
+        expect_entry_form.addWidget(QLabel("Policy"), 0, 0)
+        expect_entry_form.addWidget(self.js8_expect_entry_policy_combo, 0, 1)
+        expect_entry_form.addWidget(QLabel("Groups"), 0, 2)
+        expect_entry_form.addWidget(self.js8_expect_entry_allowed_groups_edit, 0, 3)
+        expect_entry_form.addWidget(QLabel("Callsigns"), 1, 0)
+        expect_entry_form.addWidget(self.js8_expect_entry_allowed_callsigns_edit, 1, 1)
+        expect_entry_form.addWidget(QLabel("Blocked"), 1, 2)
+        expect_entry_form.addWidget(self.js8_expect_entry_blocked_callsigns_edit, 1, 3)
+        expect_entry_form.addWidget(QLabel("Replies"), 2, 0)
+        expect_entry_form.addWidget(self.js8_expect_entry_max_replies_spin, 2, 1)
+        expect_entry_form.addWidget(QLabel("Cooldown (sec)"), 2, 2)
+        expect_entry_form.addWidget(self.js8_expect_entry_cooldown_spin, 2, 3)
+        expect_entry_form.addWidget(self.js8_expect_entry_enabled_chk, 3, 1)
+        expect_entry_form.addWidget(self.js8_expect_entry_auto_reply_chk, 3, 3)
+        js8_v.addLayout(expect_entry_form)
+
+        expect_entry_actions = QHBoxLayout()
+        expect_entry_actions.setContentsMargins(0, 0, 0, 0)
+        expect_entry_actions.setSpacing(8)
+        self.js8_expect_save_entry_btn = QPushButton("Save Entry")
+        self.js8_expect_save_entry_btn.setEnabled(False)
+        self.js8_expect_clear_entry_btn = QPushButton("Clear Selection")
+        self.js8_expect_delete_entry_btn = QPushButton("Delete Entry")
+        self.js8_expect_delete_entry_btn.setEnabled(False)
+        expect_entry_actions.addWidget(self.js8_expect_save_entry_btn)
+        expect_entry_actions.addWidget(self.js8_expect_clear_entry_btn)
+        expect_entry_actions.addWidget(self.js8_expect_delete_entry_btn)
+        expect_entry_actions.addStretch()
+        js8_v.addLayout(expect_entry_actions)
+
+        self.js8_expect_entries_table = QTableWidget(0, 9)
+        self.js8_expect_entries_table.setHorizontalHeaderLabels(
+            ["Use", "Auto", "Form", "Policy", "Groups", "Callsigns", "Cooldown", "Replies", "Source"]
+        )
+        self.js8_expect_entries_table.verticalHeader().setVisible(False)
+        self.js8_expect_entries_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8_expect_entries_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8_expect_entries_table.setAlternatingRowColors(True)
+        self.js8_expect_entries_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        entry_hdr = self.js8_expect_entries_table.horizontalHeader()
+        entry_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        entry_hdr.setSectionResizeMode(5, QHeaderView.Stretch)
+        entry_hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        entry_hdr.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        self.js8_expect_entries_table.setMinimumHeight(170)
+        self.js8_expect_entries_table.setMaximumHeight(260)
+        self.js8_expect_entries_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8_expect_entries_table)
+
+        expect_audit_header = QHBoxLayout()
+        expect_audit_header.setContentsMargins(0, 6, 0, 0)
+        expect_audit_header.setSpacing(8)
+        expect_audit_header.addWidget(QLabel("Expect Change History"))
+        expect_audit_header.addStretch()
+        self.js8_expect_refresh_audit_btn = QPushButton("Refresh History")
+        expect_audit_header.addWidget(self.js8_expect_refresh_audit_btn)
+        js8_v.addLayout(expect_audit_header)
+
+        self.js8_expect_audit_table = QTableWidget(0, 6)
+        self.js8_expect_audit_table.setHorizontalHeaderLabels(["When", "Action", "Form", "Source", "State", "Import"])
+        self.js8_expect_audit_table.verticalHeader().setVisible(False)
+        self.js8_expect_audit_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8_expect_audit_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8_expect_audit_table.setAlternatingRowColors(True)
+        self.js8_expect_audit_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        audit_hdr = self.js8_expect_audit_table.horizontalHeader()
+        audit_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        audit_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        audit_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        audit_hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+        audit_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        audit_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.js8_expect_audit_table.setMinimumHeight(110)
+        self.js8_expect_audit_table.setMaximumHeight(180)
+        self.js8_expect_audit_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8_expect_audit_table)
+
+        expect_request_header = QHBoxLayout()
+        expect_request_header.setContentsMargins(0, 6, 0, 0)
+        expect_request_header.setSpacing(8)
+        expect_request_header.addWidget(QLabel("Expect Request History"))
+        expect_request_header.addStretch()
+        self.js8_expect_refresh_requests_btn = QPushButton("Refresh Requests")
+        expect_request_header.addWidget(self.js8_expect_refresh_requests_btn)
+        js8_v.addLayout(expect_request_header)
+
+        self.js8_expect_requests_table = QTableWidget(0, 7)
+        self.js8_expect_requests_table.setHorizontalHeaderLabels(["When", "Decision", "Form", "From", "Target", "Source", "Reason"])
+        self.js8_expect_requests_table.verticalHeader().setVisible(False)
+        self.js8_expect_requests_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8_expect_requests_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8_expect_requests_table.setAlternatingRowColors(True)
+        self.js8_expect_requests_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        request_hdr = self.js8_expect_requests_table.horizontalHeader()
+        request_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        request_hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.js8_expect_requests_table.setMinimumHeight(120)
+        self.js8_expect_requests_table.setMaximumHeight(190)
+        self.js8_expect_requests_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_v.addWidget(self.js8_expect_requests_table)
+
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(lambda _text: self._refresh_spotter_form_mapper())
+        self.js8spotter_watch_refresh_btn.clicked.connect(self._refresh_js8spotter_watch_review)
+        self.js8spotter_activity_refresh_btn.clicked.connect(self._refresh_js8spotter_activity_review)
         self.spotter_mapper_refresh_btn.clicked.connect(self._refresh_spotter_form_mapper)
         self.spotter_mapper_auto_btn.clicked.connect(self._auto_classify_spotter_forms)
+        self.js8_expect_save_policy_btn.clicked.connect(self._save_js8_expect_policy_from_editor)
+        self.js8_expect_new_policy_btn.clicked.connect(self._clear_js8_expect_policy_editor)
+        self.js8_expect_delete_policy_btn.clicked.connect(self._delete_selected_js8_expect_policy)
+        self.js8_expect_policies_table.itemSelectionChanged.connect(self._load_selected_js8_expect_policy)
+        self.js8_expect_policies_table.itemChanged.connect(self._on_js8_expect_policy_table_item_changed)
+        self.js8_expect_refresh_entries_btn.clicked.connect(self._refresh_js8_expect_entries_table)
+        self.js8_expect_refresh_audit_btn.clicked.connect(self._refresh_js8_expect_audit_table)
+        self.js8_expect_refresh_requests_btn.clicked.connect(self._refresh_js8_expect_requests_table)
+        self.js8_expect_save_entry_btn.clicked.connect(self._save_js8_expect_entry_from_editor)
+        self.js8_expect_clear_entry_btn.clicked.connect(self._clear_js8_expect_entry_editor)
+        self.js8_expect_delete_entry_btn.clicked.connect(self._delete_selected_js8_expect_entry)
+        self.js8_expect_entries_table.itemSelectionChanged.connect(self._load_selected_js8_expect_entry)
+        self.js8_expect_entries_table.itemChanged.connect(self._on_js8_expect_entry_table_item_changed)
         self.js8call_path_edit.textChanged.connect(self._refresh_section_titles)
         self.js8spotter_path_edit.textChanged.connect(self._refresh_section_titles)
         self.commstat_path_edit.textChanged.connect(self._refresh_section_titles)
@@ -4793,11 +5128,194 @@ class SettingsTab(QWidget):
         gpg_overview_v.addWidget(self.hash_verify_enabled_chk)
         overview_note = QLabel(
             "Use this section to verify received message files, manage trusted hashes, review trusted GPG keys, "
-            "and choose the signing identity used for FLAmp compose."
+            "choose the signing identity used for FLAmp compose, and prepare JS8 text authentication for Spotter traffic."
         )
         overview_note.setWordWrap(True)
         gpg_overview_v.addWidget(overview_note)
         gpg_v.addWidget(_make_message_auth_subsection("Overview", gpg_overview_tab, checked=True))
+
+        js8_auth_tab = QWidget()
+        js8_auth_v = QVBoxLayout(js8_auth_tab)
+        js8_auth_v.setContentsMargins(8, 8, 8, 8)
+        js8_auth_v.setSpacing(8)
+        js8_auth_v.setAlignment(Qt.AlignTop)
+        self.js8_msg_auth_enabled_chk = QCheckBox("Verify JS8 text signatures when MsgAuth keys are configured")
+        self.js8_msg_auth_enabled_chk.setToolTip(
+            "MsgAuth keys are scoped to operating group and callsign. Unsigned Spotter traffic remains visible; "
+            "verified messages can show the same green trust cue used elsewhere in FIO."
+        )
+        js8_auth_v.addWidget(self.js8_msg_auth_enabled_chk)
+        js8_auth_note = QLabel(
+            "Use MsgAuth to sign JS8 text you send and to show a verified indicator when signed traffic can be trusted."
+        )
+        js8_auth_note.setWordWrap(True)
+        js8_auth_v.addWidget(js8_auth_note)
+        js8_auth_credit = QLabel("Compatible with JS8Spotter / Message Authenticator by Joseph D. Lyman, KF7MIX.")
+        js8_auth_credit.setToolTip("https://kf7mix.com/")
+        js8_auth_credit.setWordWrap(True)
+        js8_auth_v.addWidget(js8_auth_credit)
+
+        js8_key_editor = QWidget()
+        js8_key_form = QGridLayout(js8_key_editor)
+        js8_key_form.setContentsMargins(8, 8, 8, 8)
+        js8_key_form.setHorizontalSpacing(8)
+        js8_key_form.setVerticalSpacing(6)
+        self.js8_msg_auth_scope_combo = QComboBox()
+        self.js8_msg_auth_scope_combo.addItem("My Signing Key", MSG_AUTH_SCOPE_SIGNING)
+        self.js8_msg_auth_scope_combo.addItem("Trusted Group Key (Any Sender)", MSG_AUTH_SCOPE_VERIFY_ANY)
+        self.js8_msg_auth_scope_combo.addItem("Trusted Sender Key", MSG_AUTH_SCOPE_VERIFY_SENDER)
+        self.js8_msg_auth_scope_combo.setToolTip(
+            "My Signing Key is used when you send. Trusted keys are used to verify received signed traffic."
+        )
+        self.js8_msg_auth_group_edit = QLineEdit()
+        self.js8_msg_auth_group_edit.setPlaceholderText("Operating group")
+        self.js8_msg_auth_callsign_edit = QLineEdit()
+        self.js8_msg_auth_callsign_edit.setPlaceholderText("My callsign or sender callsign")
+        self.js8_msg_auth_label_edit = QLineEdit()
+        self.js8_msg_auth_label_edit.setPlaceholderText("Label")
+        self.js8_msg_auth_key_edit = QLineEdit()
+        self.js8_msg_auth_key_edit.setPlaceholderText("Shared key exchanged off-air")
+        self.js8_msg_auth_key_edit.setEchoMode(QLineEdit.Password)
+        self.js8_msg_auth_key_enabled_chk = QCheckBox("Enabled")
+        self.js8_msg_auth_key_enabled_chk.setChecked(True)
+        js8_key_form.addWidget(QLabel("Purpose"), 0, 0)
+        js8_key_form.addWidget(self.js8_msg_auth_scope_combo, 0, 1)
+        js8_key_form.addWidget(QLabel("Group"), 0, 2)
+        js8_key_form.addWidget(self.js8_msg_auth_group_edit, 0, 3)
+        self.js8_msg_auth_callsign_label = QLabel("My Callsign")
+        js8_key_form.addWidget(self.js8_msg_auth_callsign_label, 1, 0)
+        js8_key_form.addWidget(self.js8_msg_auth_callsign_edit, 1, 1)
+        js8_key_form.addWidget(QLabel("Label"), 1, 2)
+        js8_key_form.addWidget(self.js8_msg_auth_label_edit, 1, 3)
+        js8_key_form.addWidget(QLabel("Key"), 2, 0)
+        js8_key_form.addWidget(self.js8_msg_auth_key_edit, 2, 1, 1, 2)
+        js8_key_form.addWidget(self.js8_msg_auth_key_enabled_chk, 2, 3)
+
+        js8_key_actions = QHBoxLayout()
+        js8_key_actions.setContentsMargins(0, 0, 0, 0)
+        js8_key_actions.setSpacing(8)
+        self.js8_msg_auth_save_key_btn = QPushButton("Save Key")
+        self.js8_msg_auth_new_key_btn = QPushButton("New Key")
+        self.js8_msg_auth_delete_key_btn = QPushButton("Delete Selected")
+        self.js8_msg_auth_delete_key_btn.setEnabled(False)
+        js8_key_actions.addWidget(self.js8_msg_auth_save_key_btn)
+        js8_key_actions.addWidget(self.js8_msg_auth_new_key_btn)
+        js8_key_actions.addWidget(self.js8_msg_auth_delete_key_btn)
+        js8_key_actions.addStretch()
+        js8_key_form.addLayout(js8_key_actions, 3, 0, 1, 4)
+
+        generator_box = QGroupBox("Generate My Signing Keys")
+        generator_box.setToolTip("Generate one active key plus optional rotation keys for messages you sign.")
+        generator_layout = QGridLayout(generator_box)
+        generator_layout.setContentsMargins(8, 8, 8, 8)
+        generator_layout.setHorizontalSpacing(8)
+        generator_layout.setVerticalSpacing(6)
+        self.js8_msg_auth_generate_group_edit = QLineEdit()
+        self.js8_msg_auth_generate_group_edit.setPlaceholderText("Operating group")
+        self.js8_msg_auth_generate_callsign_edit = QLineEdit()
+        self.js8_msg_auth_generate_callsign_edit.setPlaceholderText("My callsign")
+        self.js8_msg_auth_generate_count_spin = QSpinBox()
+        self.js8_msg_auth_generate_count_spin.setRange(1, 12)
+        self.js8_msg_auth_generate_count_spin.setValue(2)
+        self.js8_msg_auth_generate_count_spin.setToolTip("Suggested default is 2: one active key and one rotation/backup key.")
+        self.js8_msg_auth_generate_label_edit = QLineEdit()
+        self.js8_msg_auth_generate_label_edit.setPlaceholderText("Label prefix")
+        self.js8_msg_auth_generate_btn = QPushButton("Generate Keys")
+        self.js8_msg_auth_generate_btn.setToolTip("Generate strong MsgAuth shared keys FIO can use when you sign outgoing JS8 text.")
+        generator_layout.addWidget(QLabel("Group"), 0, 0)
+        generator_layout.addWidget(self.js8_msg_auth_generate_group_edit, 0, 1)
+        generator_layout.addWidget(QLabel("My Callsign"), 0, 2)
+        generator_layout.addWidget(self.js8_msg_auth_generate_callsign_edit, 0, 3)
+        generator_layout.addWidget(QLabel("Keys"), 1, 0)
+        generator_layout.addWidget(self.js8_msg_auth_generate_count_spin, 1, 1)
+        generator_layout.addWidget(QLabel("Label"), 1, 2)
+        generator_layout.addWidget(self.js8_msg_auth_generate_label_edit, 1, 3)
+        generator_layout.addWidget(self.js8_msg_auth_generate_btn, 2, 0, 1, 4)
+        js8_auth_v.addWidget(generator_box)
+
+        import_key_box = QGroupBox("Import Trusted Keys")
+        import_key_layout = QGridLayout(import_key_box)
+        import_key_layout.setContentsMargins(8, 8, 8, 8)
+        import_key_layout.setHorizontalSpacing(8)
+        import_key_layout.setVerticalSpacing(6)
+        self.js8_msg_auth_import_group_edit = QLineEdit()
+        self.js8_msg_auth_import_group_edit.setPlaceholderText("Operating group")
+        self.js8_msg_auth_import_scope_combo = QComboBox()
+        self.js8_msg_auth_import_scope_combo.addItem("Any Sender in Group", MSG_AUTH_SCOPE_VERIFY_ANY)
+        self.js8_msg_auth_import_scope_combo.addItem("Specific Sender Callsign", MSG_AUTH_SCOPE_VERIFY_SENDER)
+        self.js8_msg_auth_import_callsign_edit = QLineEdit()
+        self.js8_msg_auth_import_callsign_edit.setPlaceholderText("Sender callsign")
+        self.js8_msg_auth_import_label_edit = QLineEdit()
+        self.js8_msg_auth_import_label_edit.setPlaceholderText("Label")
+        self.js8_msg_auth_import_key_edit = QLineEdit()
+        self.js8_msg_auth_import_key_edit.setPlaceholderText("Paste shared key")
+        self.js8_msg_auth_import_key_edit.setEchoMode(QLineEdit.Password)
+        self.js8_msg_auth_import_btn = QPushButton("Import Key")
+        self.js8_msg_auth_import_btn.setToolTip("Save a key shared to you for verifying signed JS8/Spotter traffic.")
+        self.js8_msg_auth_bulk_import_edit = QPlainTextEdit()
+        self.js8_msg_auth_bulk_import_edit.setPlaceholderText(
+            "Paste one or many keys:\n"
+            "MAGNET, *, MAGNET Shared, ABC123KEY\n"
+            "MAGNET, K1ABC, K1ABC Active, XYZ987KEY\n"
+            "GHOSTNET K9XYZ Shared KEYVALUE"
+        )
+        self.js8_msg_auth_bulk_import_edit.setFixedHeight(92)
+        self.js8_msg_auth_bulk_import_btn = QPushButton("Import Pasted Keys")
+        self.js8_msg_auth_bulk_import_btn.setToolTip("Import multiple trusted verification keys from pasted rows.")
+        self.js8_msg_auth_bulk_import_status_label = QLabel("")
+        self.js8_msg_auth_bulk_import_status_label.setWordWrap(True)
+        import_key_layout.addWidget(QLabel("Group"), 0, 0)
+        import_key_layout.addWidget(self.js8_msg_auth_import_group_edit, 0, 1)
+        import_key_layout.addWidget(QLabel("Trust"), 0, 2)
+        import_key_layout.addWidget(self.js8_msg_auth_import_scope_combo, 0, 3)
+        self.js8_msg_auth_import_callsign_label = QLabel("Sender Callsign")
+        import_key_layout.addWidget(self.js8_msg_auth_import_callsign_label, 1, 0)
+        import_key_layout.addWidget(self.js8_msg_auth_import_callsign_edit, 1, 1)
+        import_key_layout.addWidget(QLabel("Label"), 1, 2)
+        import_key_layout.addWidget(self.js8_msg_auth_import_label_edit, 1, 3)
+        import_key_layout.addWidget(QLabel("Key"), 2, 0)
+        import_key_layout.addWidget(self.js8_msg_auth_import_key_edit, 2, 1, 1, 2)
+        import_key_layout.addWidget(self.js8_msg_auth_import_btn, 2, 3)
+        import_key_layout.addWidget(QLabel("Bulk Paste"), 3, 0)
+        import_key_layout.addWidget(self.js8_msg_auth_bulk_import_edit, 3, 1, 1, 3)
+        import_key_layout.addWidget(self.js8_msg_auth_bulk_import_btn, 4, 1)
+        import_key_layout.addWidget(self.js8_msg_auth_bulk_import_status_label, 4, 2, 1, 2)
+        js8_auth_v.addWidget(import_key_box)
+
+        key_table_header = QHBoxLayout()
+        key_table_header.setContentsMargins(0, 0, 0, 0)
+        key_table_header.setSpacing(8)
+        key_table_header.addWidget(QLabel("Saved Keys"))
+        key_table_header.addStretch()
+        self.js8_msg_auth_show_keys_chk = QCheckBox("Show Keys")
+        self.js8_msg_auth_show_keys_chk.setToolTip("Show full key values when you need to copy or review them.")
+        key_table_header.addWidget(self.js8_msg_auth_show_keys_chk)
+        js8_auth_v.addLayout(key_table_header)
+
+        self.js8_msg_auth_keys_table = QTableWidget(0, 6)
+        self.js8_msg_auth_keys_table.setHorizontalHeaderLabels(["Use", "Purpose", "Group", "Callsign", "Label", "Key"])
+        self.js8_msg_auth_keys_table.verticalHeader().setVisible(False)
+        self.js8_msg_auth_keys_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.js8_msg_auth_keys_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.js8_msg_auth_keys_table.setAlternatingRowColors(True)
+        self.js8_msg_auth_keys_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        js8_key_hdr = self.js8_msg_auth_keys_table.horizontalHeader()
+        js8_key_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        js8_key_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        js8_key_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        js8_key_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        js8_key_hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        js8_key_hdr.setSectionResizeMode(5, QHeaderView.Stretch)
+        self.js8_msg_auth_keys_table.setColumnWidth(0, 54)
+        self.js8_msg_auth_keys_table.setColumnWidth(1, 130)
+        self.js8_msg_auth_keys_table.setColumnWidth(2, 110)
+        self.js8_msg_auth_keys_table.setColumnWidth(3, 115)
+        self.js8_msg_auth_keys_table.setMinimumHeight(160)
+        self.js8_msg_auth_keys_table.setMaximumHeight(320)
+        self.js8_msg_auth_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        js8_auth_v.addWidget(self.js8_msg_auth_keys_table, 1)
+        js8_auth_v.addWidget(_make_message_auth_subsection("Selected Key Details", js8_key_editor, checked=False))
+        gpg_v.addWidget(_make_message_auth_subsection("JS8 Text Auth (MsgAuth)", js8_auth_tab, checked=True))
 
         trusted_hash_tab = QWidget()
         trusted_hash_v = QVBoxLayout(trusted_hash_tab)
@@ -5000,6 +5518,18 @@ class SettingsTab(QWidget):
 
         self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.hash_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.js8_msg_auth_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.js8_msg_auth_scope_combo.currentIndexChanged.connect(self._on_js8_msg_auth_scope_changed)
+        self.js8_msg_auth_save_key_btn.clicked.connect(self._save_js8_msg_auth_key_from_editor)
+        self.js8_msg_auth_new_key_btn.clicked.connect(self._clear_js8_msg_auth_key_editor)
+        self.js8_msg_auth_delete_key_btn.clicked.connect(self._delete_selected_js8_msg_auth_key)
+        self.js8_msg_auth_generate_btn.clicked.connect(self._generate_js8_msg_auth_keys)
+        self.js8_msg_auth_import_scope_combo.currentIndexChanged.connect(self._on_js8_msg_auth_import_scope_changed)
+        self.js8_msg_auth_import_btn.clicked.connect(self._import_js8_msg_auth_verification_key)
+        self.js8_msg_auth_bulk_import_btn.clicked.connect(self._bulk_import_js8_msg_auth_verification_keys)
+        self.js8_msg_auth_show_keys_chk.stateChanged.connect(self._refresh_js8_msg_auth_keys_table)
+        self.js8_msg_auth_keys_table.itemSelectionChanged.connect(self._load_selected_js8_msg_auth_key)
+        self.js8_msg_auth_keys_table.itemChanged.connect(self._on_js8_msg_auth_key_table_item_changed)
         self.trusted_hash_edit.returnPressed.connect(self._add_trusted_hash_entry)
         self.trusted_hash_add_btn.clicked.connect(self._add_trusted_hash_entry)
         self.trusted_hash_import_btn.clicked.connect(self._import_trusted_hash_file)
@@ -5021,6 +5551,8 @@ class SettingsTab(QWidget):
         self.gpg_signing_key_combo.currentIndexChanged.connect(self._on_gpg_signing_key_changed)
         self.gpg_check_save_passphrase_btn.clicked.connect(self._check_and_save_gpg_signing_passphrase)
         self.gpg_clear_passphrase_btn.clicked.connect(self._clear_gpg_signing_passphrase)
+        self._on_js8_msg_auth_scope_changed()
+        self._on_js8_msg_auth_import_scope_changed()
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
@@ -7489,12 +8021,16 @@ class SettingsTab(QWidget):
     def _summary_gpg_settings(self) -> str:
         enabled = bool(hasattr(self, "gpg_verify_enabled_chk") and self.gpg_verify_enabled_chk.isChecked())
         hash_enabled = bool(hasattr(self, "hash_verify_enabled_chk") and self.hash_verify_enabled_chk.isChecked())
+        js8_auth_enabled = bool(
+            hasattr(self, "js8_msg_auth_enabled_chk") and self.js8_msg_auth_enabled_chk.isChecked()
+        )
         path_set = bool(hasattr(self, "gpg_path_edit") and self.gpg_path_edit.text().strip())
         trusted = len(self._gpg_trusted_fingerprints)
         local_hashes = len([r for r in self._trusted_hash_entries if bool(r.get("enabled", True))])
         return (
             f"Sig {'on' if enabled else 'off'}, Hash {'on' if hash_enabled else 'off'}, "
-            f"GPG {'set' if path_set else 'auto'}, {trusted} keys, {local_hashes} hashes"
+            f"JS8 {'on' if js8_auth_enabled else 'off'}, GPG {'set' if path_set else 'auto'}, "
+            f"{trusted} keys, {local_hashes} hashes"
         )
 
     def _summary_varac_settings(self) -> str:
@@ -8528,12 +9064,18 @@ class SettingsTab(QWidget):
                     self.settings._data = data  # type: ignore[attr-defined]
         self.js8_offset_edit.setText(str(offset_int))
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
+        if hasattr(self, "js8spotter_import_db_edit"):
+            self.js8spotter_import_db_edit.setText(str(data.get("js8spotter_import_db_path", "") or ""))
         if MAPPER_SETTINGS_KEY not in data:
             try:
                 self.settings.set(MAPPER_SETTINGS_KEY, normalize_mapping_rows([]))
             except Exception:
                 pass
         self._refresh_spotter_form_mapper()
+        self._refresh_js8_expect_policies_table()
+        self._refresh_js8_expect_entries_table()
+        self._refresh_js8spotter_watch_review()
+        self._refresh_js8spotter_activity_review()
         self.js8call_path_edit.setText((data.get("path_js8call", "") or "").strip())
         self.js8spotter_path_edit.setText((data.get("path_js8spotter", "") or "").strip())
         self.commstat_path_edit.setText((data.get("path_commstat", "") or "").strip())
@@ -8546,6 +9088,7 @@ class SettingsTab(QWidget):
             edit.setText(msg_paths.get(origin, ""))
         gpg_enabled = bool(data.get("gpg_verify_flamp_k2s_enabled", False))
         hash_enabled = bool(data.get("hash_verify_flamp_k2s_enabled", True))
+        js8_msg_auth_enabled = bool(data.get("js8_msg_auth_enabled", True))
         gpg_path = str(data.get("gpg_executable_path", "") or "").strip()
         trusted = data.get("gpg_trusted_signers", [])
         if not isinstance(trusted, list):
@@ -8559,6 +9102,9 @@ class SettingsTab(QWidget):
             self.gpg_verify_enabled_chk.setChecked(gpg_enabled)
         if hasattr(self, "hash_verify_enabled_chk"):
             self.hash_verify_enabled_chk.setChecked(hash_enabled)
+        if hasattr(self, "js8_msg_auth_enabled_chk"):
+            self.js8_msg_auth_enabled_chk.setChecked(js8_msg_auth_enabled)
+        self._refresh_js8_msg_auth_keys_table()
         if hasattr(self, "gpg_path_edit"):
             self.gpg_path_edit.setText(gpg_path)
         self._refresh_trusted_hash_table()
@@ -8652,6 +9198,8 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_guard_status_label"):
             guard_summary = str(data.get("varac_guard_last_summary", "") or "").strip()
             self.varac_guard_status_label.setText(guard_summary or "No VGuard scan yet.")
+        if hasattr(self, "varac_cluster_mode_chk"):
+            self.varac_cluster_mode_chk.setChecked(bool(data.get("varac_cluster_mode_enabled", False)))
         try:
             if hasattr(self, "varac_ini_path_edit") and self.varac_ini_path_edit.text().strip():
                 self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(
@@ -8952,6 +9500,9 @@ class SettingsTab(QWidget):
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+        data["js8spotter_import_db_path"] = (
+            self.js8spotter_import_db_edit.text().strip() if hasattr(self, "js8spotter_import_db_edit") else ""
+        )
         data[MAPPER_SETTINGS_KEY] = self._collect_spotter_form_mappings()
         data["path_js8call"] = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
         data["path_js8spotter"] = (
@@ -8968,6 +9519,9 @@ class SettingsTab(QWidget):
         )
         data["hash_verify_flamp_k2s_enabled"] = bool(
             self.hash_verify_enabled_chk.isChecked() if hasattr(self, "hash_verify_enabled_chk") else True
+        )
+        data["js8_msg_auth_enabled"] = bool(
+            self.js8_msg_auth_enabled_chk.isChecked() if hasattr(self, "js8_msg_auth_enabled_chk") else True
         )
         data["gpg_executable_path"] = self.gpg_path_edit.text().strip() if hasattr(self, "gpg_path_edit") else ""
         data["gpg_trusted_signers"] = sorted(
@@ -9336,6 +9890,8 @@ class SettingsTab(QWidget):
             )
             self.settings.set("gpg_verify_flamp_k2s_enabled", data.get("gpg_verify_flamp_k2s_enabled", False))
             self.settings.set("hash_verify_flamp_k2s_enabled", data.get("hash_verify_flamp_k2s_enabled", True))
+            self.settings.set("js8_msg_auth_enabled", data.get("js8_msg_auth_enabled", True))
+            self.settings.set("js8spotter_import_db_path", data.get("js8spotter_import_db_path", ""))
             self.settings.set("gpg_executable_path", data.get("gpg_executable_path", ""))
             self.settings.set("gpg_trusted_signers", data.get("gpg_trusted_signers", []))
             self.settings.set(
@@ -22442,6 +22998,1054 @@ class SettingsTab(QWidget):
         self._refresh_trusted_hash_table()
         self._mark_settings_dirty()
         self._refresh_section_titles()
+
+    def _refresh_js8_msg_auth_keys_table(self) -> None:
+        if not hasattr(self, "js8_msg_auth_keys_table"):
+            return
+        try:
+            rows = list_msg_auth_key_rows()
+        except Exception as exc:
+            log.debug("Settings: failed to load JS8 MsgAuth keys: %s", exc)
+            rows = []
+        self._js8_msg_auth_key_rows = rows
+        self._js8_msg_auth_keys_table_loading = True
+        try:
+            self.js8_msg_auth_keys_table.setRowCount(0)
+            for idx, row in enumerate(rows):
+                self.js8_msg_auth_keys_table.insertRow(idx)
+                use_item = QTableWidgetItem("")
+                use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                use_item.setCheckState(Qt.Checked if bool(row.get("enabled", True)) else Qt.Unchecked)
+                self.js8_msg_auth_keys_table.setItem(idx, 0, use_item)
+
+                key_scope = normalize_msg_auth_scope(row.get("key_scope", ""))
+                purpose_item = QTableWidgetItem(self._msg_auth_scope_label(key_scope))
+                purpose_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.js8_msg_auth_keys_table.setItem(idx, 1, purpose_item)
+
+                display_callsign = str(row.get("callsign", "") or "")
+                if key_scope == MSG_AUTH_SCOPE_VERIFY_ANY or display_callsign.strip() == MSG_AUTH_ANY_SENDER:
+                    display_callsign = "Any Sender"
+                for col, value in (
+                    (2, str(row.get("group_name", "") or "")),
+                    (3, display_callsign),
+                    (4, str(row.get("label", "") or "")),
+                ):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    self.js8_msg_auth_keys_table.setItem(idx, col, item)
+
+                key_text = str(row.get("key_text", "") or "")
+                show_keys = bool(
+                    hasattr(self, "js8_msg_auth_show_keys_chk") and self.js8_msg_auth_show_keys_chk.isChecked()
+                )
+                masked = "*" * min(max(len(key_text), 6), 18) if key_text else ""
+                key_item = QTableWidgetItem(key_text if show_keys else masked)
+                key_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                key_item.setToolTip("Full key visible" if show_keys and key_text else "Enable Show Keys to reveal key values.")
+                self.js8_msg_auth_keys_table.setItem(idx, 5, key_item)
+        finally:
+            self._js8_msg_auth_keys_table_loading = False
+        self._update_js8_msg_auth_key_actions()
+
+    @staticmethod
+    def _msg_auth_scope_label(scope: object) -> str:
+        normalized = normalize_msg_auth_scope(scope)
+        if normalized == MSG_AUTH_SCOPE_VERIFY_ANY:
+            return "Trusted Group"
+        if normalized == MSG_AUTH_SCOPE_VERIFY_SENDER:
+            return "Trusted Sender"
+        return "My Signing"
+
+    def _set_msg_auth_scope_combo(self, combo: QComboBox, scope: object) -> None:
+        target = normalize_msg_auth_scope(scope)
+        for idx in range(combo.count()):
+            if normalize_msg_auth_scope(combo.itemData(idx)) == target:
+                combo.setCurrentIndex(idx)
+                return
+        combo.setCurrentIndex(0)
+
+    def _on_js8_msg_auth_scope_changed(self) -> None:
+        if not hasattr(self, "js8_msg_auth_scope_combo"):
+            return
+        scope = normalize_msg_auth_scope(self.js8_msg_auth_scope_combo.currentData())
+        any_sender = scope == MSG_AUTH_SCOPE_VERIFY_ANY
+        if hasattr(self, "js8_msg_auth_callsign_label"):
+            if scope == MSG_AUTH_SCOPE_VERIFY_SENDER:
+                self.js8_msg_auth_callsign_label.setText("Sender Callsign")
+            elif any_sender:
+                self.js8_msg_auth_callsign_label.setText("Sender")
+            else:
+                self.js8_msg_auth_callsign_label.setText("My Callsign")
+        if hasattr(self, "js8_msg_auth_callsign_edit"):
+            self.js8_msg_auth_callsign_edit.setVisible(not any_sender)
+            if any_sender:
+                self.js8_msg_auth_callsign_edit.setText(MSG_AUTH_ANY_SENDER)
+            elif self.js8_msg_auth_callsign_edit.text().strip() == MSG_AUTH_ANY_SENDER:
+                self.js8_msg_auth_callsign_edit.clear()
+
+    def _on_js8_msg_auth_import_scope_changed(self) -> None:
+        if not hasattr(self, "js8_msg_auth_import_scope_combo"):
+            return
+        scope = normalize_msg_auth_scope(self.js8_msg_auth_import_scope_combo.currentData())
+        any_sender = scope == MSG_AUTH_SCOPE_VERIFY_ANY
+        if hasattr(self, "js8_msg_auth_import_callsign_label"):
+            self.js8_msg_auth_import_callsign_label.setVisible(not any_sender)
+        if hasattr(self, "js8_msg_auth_import_callsign_edit"):
+            self.js8_msg_auth_import_callsign_edit.setVisible(not any_sender)
+
+    def _update_js8_msg_auth_key_actions(self) -> None:
+        if not hasattr(self, "js8_msg_auth_delete_key_btn") or not hasattr(self, "js8_msg_auth_keys_table"):
+            return
+        has_selection = bool(self.js8_msg_auth_keys_table.selectionModel().selectedRows())
+        self.js8_msg_auth_delete_key_btn.setEnabled(has_selection)
+
+    def _selected_js8_msg_auth_key_row(self) -> Dict[str, Any]:
+        if not hasattr(self, "js8_msg_auth_keys_table"):
+            return {}
+        row_idx = int(self.js8_msg_auth_keys_table.currentRow())
+        if row_idx < 0 or row_idx >= len(self._js8_msg_auth_key_rows):
+            return {}
+        return dict(self._js8_msg_auth_key_rows[row_idx])
+
+    def _load_selected_js8_msg_auth_key(self) -> None:
+        self._update_js8_msg_auth_key_actions()
+        row = self._selected_js8_msg_auth_key_row()
+        if not row:
+            return
+        self._js8_msg_auth_selected_id = int(row.get("id", 0) or 0)
+        scope = normalize_msg_auth_scope(row.get("key_scope", ""))
+        self._set_msg_auth_scope_combo(self.js8_msg_auth_scope_combo, scope)
+        self.js8_msg_auth_group_edit.setText(str(row.get("group_name", "") or ""))
+        callsign = str(row.get("callsign", "") or "")
+        self.js8_msg_auth_callsign_edit.setText(MSG_AUTH_ANY_SENDER if scope == MSG_AUTH_SCOPE_VERIFY_ANY else callsign)
+        self.js8_msg_auth_label_edit.setText(str(row.get("label", "") or ""))
+        self.js8_msg_auth_key_edit.setText(str(row.get("key_text", "") or ""))
+        self.js8_msg_auth_key_enabled_chk.setChecked(bool(row.get("enabled", True)))
+        if scope == MSG_AUTH_SCOPE_SIGNING:
+            self.js8_msg_auth_generate_group_edit.setText(str(row.get("group_name", "") or ""))
+            self.js8_msg_auth_generate_callsign_edit.setText(callsign)
+        self._on_js8_msg_auth_scope_changed()
+
+    def _clear_js8_msg_auth_key_editor(self) -> None:
+        self._js8_msg_auth_selected_id = 0
+        if hasattr(self, "js8_msg_auth_keys_table"):
+            self.js8_msg_auth_keys_table.clearSelection()
+        self._set_msg_auth_scope_combo(self.js8_msg_auth_scope_combo, MSG_AUTH_SCOPE_SIGNING)
+        self.js8_msg_auth_group_edit.clear()
+        self.js8_msg_auth_callsign_edit.clear()
+        self.js8_msg_auth_label_edit.clear()
+        self.js8_msg_auth_key_edit.clear()
+        self.js8_msg_auth_key_enabled_chk.setChecked(True)
+        self._on_js8_msg_auth_scope_changed()
+        self.js8_msg_auth_group_edit.setFocus()
+        self._update_js8_msg_auth_key_actions()
+
+    @staticmethod
+    def _default_msg_auth_generate_label(index: int, total: int) -> str:
+        if total <= 1:
+            return "Active"
+        if index == 0:
+            return "Active"
+        if index == 1:
+            return "Rotation"
+        return f"Rotation {index}"
+
+    def _existing_msg_auth_signing_labels(self, group_name: str, callsign: str) -> set[str]:
+        return {
+            str(row.get("label", "") or "").strip().casefold()
+            for row in getattr(self, "_js8_msg_auth_key_rows", [])
+            if normalize_msg_auth_scope(row.get("key_scope", "")) == MSG_AUTH_SCOPE_SIGNING
+            and str(row.get("group_name", "") or "").strip().upper() == str(group_name or "").strip().upper()
+            and str(row.get("callsign", "") or "").strip().upper() == str(callsign or "").strip().upper()
+        }
+
+    def _next_msg_auth_generate_label(
+        self,
+        group_name: str,
+        callsign: str,
+        index: int,
+        total: int,
+        prefix: str,
+        reserved_labels: set[str],
+    ) -> str:
+        existing = set(reserved_labels)
+        base = self._default_msg_auth_generate_label(index, total)
+        candidate = f"{prefix} {base}".strip() if prefix else base
+        if candidate.casefold() not in existing:
+            reserved_labels.add(candidate.casefold())
+            return candidate
+        rotation_base = f"{prefix} Rotation".strip() if prefix else "Rotation"
+        suffix = 2
+        while f"{rotation_base} {suffix}".casefold() in existing:
+            suffix += 1
+        label = f"{rotation_base} {suffix}"
+        reserved_labels.add(label.casefold())
+        return label
+
+    def _generate_js8_msg_auth_keys(self) -> None:
+        group_name = (
+            self.js8_msg_auth_generate_group_edit.text().strip()
+            or self.js8_msg_auth_group_edit.text().strip()
+        )
+        callsign = (
+            self.js8_msg_auth_generate_callsign_edit.text().strip()
+            or self.js8_msg_auth_callsign_edit.text().strip()
+            or str(self.settings.get("operator_callsign", "") or self.settings.get("callsign", "") or "").strip()
+        )
+        if not group_name or not callsign:
+            QMessageBox.warning(self, "JS8 Text Auth", "Group and callsign are required to generate MsgAuth keys.")
+            return
+        count = int(self.js8_msg_auth_generate_count_spin.value() if hasattr(self, "js8_msg_auth_generate_count_spin") else 2)
+        prefix = self.js8_msg_auth_generate_label_edit.text().strip() if hasattr(self, "js8_msg_auth_generate_label_edit") else ""
+        reserved_labels = self._existing_msg_auth_signing_labels(group_name, callsign)
+        saved_ids: List[int] = []
+        try:
+            for idx in range(max(1, count)):
+                label = self._next_msg_auth_generate_label(group_name, callsign, idx, count, prefix, reserved_labels)
+                saved_ids.append(
+                    save_msg_auth_key(
+                        {
+                            "group_name": group_name,
+                            "callsign": callsign,
+                            "key_scope": MSG_AUTH_SCOPE_SIGNING,
+                            "label": label,
+                            "key_text": generate_msg_auth_secret_key(),
+                            "enabled": True,
+                        }
+                    )
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "JS8 Text Auth", f"Could not generate keys:\n{exc}")
+            return
+        self.js8_msg_auth_group_edit.setText(group_name)
+        self.js8_msg_auth_callsign_edit.setText(callsign)
+        self.js8_msg_auth_generate_group_edit.setText(group_name)
+        self.js8_msg_auth_generate_callsign_edit.setText(callsign)
+        self._refresh_js8_msg_auth_keys_table()
+        target_id = int(saved_ids[0]) if saved_ids else 0
+        for row_idx, row in enumerate(self._js8_msg_auth_key_rows):
+            if int(row.get("id", 0) or 0) == target_id:
+                self.js8_msg_auth_keys_table.selectRow(row_idx)
+                break
+        self._refresh_section_titles()
+
+    def _import_js8_msg_auth_verification_key(self) -> None:
+        group_name = self.js8_msg_auth_import_group_edit.text().strip()
+        scope = normalize_msg_auth_scope(self.js8_msg_auth_import_scope_combo.currentData())
+        callsign = self.js8_msg_auth_import_callsign_edit.text().strip() if scope == MSG_AUTH_SCOPE_VERIFY_SENDER else MSG_AUTH_ANY_SENDER
+        key_text = self.js8_msg_auth_import_key_edit.text().strip()
+        if not group_name or not key_text or (scope == MSG_AUTH_SCOPE_VERIFY_SENDER and not callsign):
+            QMessageBox.warning(self, "JS8 Text Auth", "Group, key, and sender callsign when required are needed to import a verification key.")
+            return
+        label = self.js8_msg_auth_import_label_edit.text().strip()
+        if not label:
+            label = "Group Shared" if scope == MSG_AUTH_SCOPE_VERIFY_ANY else "Sender Shared"
+        try:
+            row_id = save_msg_auth_key(
+                {
+                    "group_name": group_name,
+                    "callsign": callsign,
+                    "key_scope": scope,
+                    "label": label,
+                    "key_text": key_text,
+                    "enabled": True,
+                }
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "JS8 Text Auth", f"Could not import key:\n{exc}")
+            return
+        self._js8_msg_auth_selected_id = int(row_id)
+        self.js8_msg_auth_import_key_edit.clear()
+        self.js8_msg_auth_group_edit.setText(group_name)
+        self._set_msg_auth_scope_combo(self.js8_msg_auth_scope_combo, scope)
+        self.js8_msg_auth_callsign_edit.setText(callsign)
+        self.js8_msg_auth_label_edit.setText(label)
+        self._refresh_js8_msg_auth_keys_table()
+        for row_idx, row in enumerate(self._js8_msg_auth_key_rows):
+            if int(row.get("id", 0) or 0) == int(row_id):
+                self.js8_msg_auth_keys_table.selectRow(row_idx)
+                break
+        self._refresh_section_titles()
+
+    @staticmethod
+    def _parse_js8_msg_auth_bulk_row(raw_line: str) -> Dict[str, str]:
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#"):
+            return {}
+        parts: List[str]
+        if "," in line:
+            try:
+                parts = [part.strip() for part in next(csv.reader([line]))]
+            except Exception:
+                parts = [part.strip() for part in line.split(",")]
+        else:
+            parts = line.split()
+        parts = [part for part in parts if part]
+        if len(parts) < 3:
+            raise ValueError("expected group, sender, and key")
+        group_name = parts[0]
+        sender = parts[1]
+        if len(parts) == 3:
+            label = ""
+            key_text = parts[2]
+        else:
+            label = " ".join(parts[2:-1]).strip()
+            key_text = parts[-1]
+        sender_norm = sender.strip().upper()
+        any_sender = sender_norm in {"*", "ANY", "ANY_SENDER", "ANY-SENDER", "GROUP"}
+        return {
+            "group_name": group_name,
+            "callsign": MSG_AUTH_ANY_SENDER if any_sender else sender,
+            "key_scope": MSG_AUTH_SCOPE_VERIFY_ANY if any_sender else MSG_AUTH_SCOPE_VERIFY_SENDER,
+            "label": label or ("Group Shared" if any_sender else "Sender Shared"),
+            "key_text": key_text,
+        }
+
+    def _bulk_import_js8_msg_auth_verification_keys(self) -> None:
+        text = self.js8_msg_auth_bulk_import_edit.toPlainText() if hasattr(self, "js8_msg_auth_bulk_import_edit") else ""
+        rows: List[Dict[str, str]] = []
+        errors: List[str] = []
+        for line_no, raw_line in enumerate(str(text or "").splitlines(), start=1):
+            try:
+                parsed = self._parse_js8_msg_auth_bulk_row(raw_line)
+            except Exception as exc:
+                errors.append(f"Line {line_no}: {exc}")
+                continue
+            if parsed:
+                rows.append(parsed)
+        if not rows:
+            status = "No keys found to import."
+            if errors:
+                status += " " + "; ".join(errors[:3])
+            if hasattr(self, "js8_msg_auth_bulk_import_status_label"):
+                self.js8_msg_auth_bulk_import_status_label.setText(status)
+            return
+        saved_ids: List[int] = []
+        for row in rows:
+            try:
+                saved_ids.append(save_msg_auth_key({**row, "enabled": True}))
+            except Exception as exc:
+                errors.append(f"{row.get('group_name', '')}/{row.get('callsign', '')}: {exc}")
+        self._refresh_js8_msg_auth_keys_table()
+        if saved_ids:
+            target_id = int(saved_ids[0])
+            for row_idx, row in enumerate(self._js8_msg_auth_key_rows):
+                if int(row.get("id", 0) or 0) == target_id:
+                    self.js8_msg_auth_keys_table.selectRow(row_idx)
+                    break
+            self.js8_msg_auth_bulk_import_edit.clear()
+        imported = len(saved_ids)
+        status = f"Imported {imported} trusted key{'s' if imported != 1 else ''}."
+        if errors:
+            status += f" {len(errors)} row{'s' if len(errors) != 1 else ''} need review: " + "; ".join(errors[:3])
+        if hasattr(self, "js8_msg_auth_bulk_import_status_label"):
+            self.js8_msg_auth_bulk_import_status_label.setText(status)
+        self._refresh_section_titles()
+
+    def _save_js8_msg_auth_key_from_editor(self) -> None:
+        group_name = self.js8_msg_auth_group_edit.text().strip()
+        scope = normalize_msg_auth_scope(self.js8_msg_auth_scope_combo.currentData())
+        callsign = self.js8_msg_auth_callsign_edit.text().strip() if scope != MSG_AUTH_SCOPE_VERIFY_ANY else MSG_AUTH_ANY_SENDER
+        key_text = self.js8_msg_auth_key_edit.text().strip()
+        if not group_name or not callsign or not key_text:
+            QMessageBox.warning(self, "JS8 Text Auth", "Group, callsign, and key are required.")
+            return
+        try:
+            row_id = save_msg_auth_key(
+                {
+                    "group_name": group_name,
+                    "callsign": callsign,
+                    "key_scope": scope,
+                    "label": self.js8_msg_auth_label_edit.text().strip(),
+                    "key_text": key_text,
+                    "enabled": self.js8_msg_auth_key_enabled_chk.isChecked(),
+                    "id": self._js8_msg_auth_selected_id,
+                }
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "JS8 Text Auth", f"Could not save key:\n{exc}")
+            return
+        self._js8_msg_auth_selected_id = int(row_id)
+        self._refresh_js8_msg_auth_keys_table()
+        for row_idx, row in enumerate(self._js8_msg_auth_key_rows):
+            if int(row.get("id", 0) or 0) == int(row_id):
+                self.js8_msg_auth_keys_table.selectRow(row_idx)
+                break
+        self._refresh_section_titles()
+
+    def _delete_selected_js8_msg_auth_key(self) -> None:
+        row = self._selected_js8_msg_auth_key_row()
+        row_id = int(row.get("id", 0) or 0) if row else 0
+        if row_id <= 0:
+            return
+        try:
+            delete_msg_auth_key(row_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "JS8 Text Auth", f"Could not delete key:\n{exc}")
+            return
+        self._clear_js8_msg_auth_key_editor()
+        self._refresh_js8_msg_auth_keys_table()
+        self._refresh_section_titles()
+
+    def _on_js8_msg_auth_key_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._js8_msg_auth_keys_table_loading or item is None or item.column() != 0:
+            return
+        row_idx = int(item.row())
+        if row_idx < 0 or row_idx >= len(self._js8_msg_auth_key_rows):
+            return
+        row = dict(self._js8_msg_auth_key_rows[row_idx])
+        row["enabled"] = bool(item.checkState() == Qt.Checked)
+        try:
+            save_msg_auth_key(
+                {
+                    "group_name": row.get("group_name", ""),
+                    "callsign": row.get("callsign", ""),
+                    "key_scope": row.get("key_scope", MSG_AUTH_SCOPE_SIGNING),
+                    "label": row.get("label", ""),
+                    "key_text": row.get("key_text", ""),
+                    "enabled": row.get("enabled", True),
+                }
+            )
+        except Exception as exc:
+            log.debug("Settings: failed to update JS8 MsgAuth key enabled state: %s", exc)
+            return
+        self._refresh_js8_msg_auth_keys_table()
+        self._refresh_section_titles()
+
+    @staticmethod
+    def _comma_text(values: object) -> str:
+        if isinstance(values, str):
+            return values
+        try:
+            return ", ".join(str(item or "").strip() for item in values if str(item or "").strip())
+        except Exception:
+            return ""
+
+    def _refresh_js8_expect_policies_table(self) -> None:
+        if not hasattr(self, "js8_expect_policies_table"):
+            return
+        try:
+            rows = list_expect_allow_policies()
+        except Exception as exc:
+            log.debug("Settings: failed to load JS8 Expect policies: %s", exc)
+            rows = []
+        self._js8_expect_policy_rows = rows
+        self._js8_expect_policies_table_loading = True
+        try:
+            self.js8_expect_policies_table.setRowCount(0)
+            for idx, row in enumerate(rows):
+                self.js8_expect_policies_table.insertRow(idx)
+                use_item = QTableWidgetItem("")
+                use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                use_item.setCheckState(Qt.Checked if bool(row.get("enabled", True)) else Qt.Unchecked)
+                self.js8_expect_policies_table.setItem(idx, 0, use_item)
+                values = [
+                    str(row.get("name", "") or ""),
+                    self._comma_text(row.get("allowed_groups", [])),
+                    self._comma_text(row.get("allowed_callsigns", [])),
+                    self._comma_text(row.get("blocked_callsigns", [])),
+                    str(row.get("source_scope", "") or "all"),
+                ]
+                for col, value in enumerate(values, start=1):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    self.js8_expect_policies_table.setItem(idx, col, item)
+        finally:
+            self._js8_expect_policies_table_loading = False
+        self._update_js8_expect_policy_actions()
+        self._refresh_js8_expect_policy_combo()
+
+    def _refresh_js8_expect_policy_combo(self) -> None:
+        if not hasattr(self, "js8_expect_entry_policy_combo"):
+            return
+        current = self.js8_expect_entry_policy_combo.currentData()
+        try:
+            current_id = int(current or 0)
+        except Exception:
+            current_id = 0
+        self.js8_expect_entry_policy_combo.blockSignals(True)
+        try:
+            self.js8_expect_entry_policy_combo.clear()
+            self.js8_expect_entry_policy_combo.addItem("No policy", 0)
+            selected_index = 0
+            for row in self._js8_expect_policy_rows:
+                row_id = int(row.get("id", 0) or 0)
+                name = str(row.get("name", "") or f"Policy {row_id}")
+                self.js8_expect_entry_policy_combo.addItem(name, row_id)
+                if row_id == current_id:
+                    selected_index = self.js8_expect_entry_policy_combo.count() - 1
+            self.js8_expect_entry_policy_combo.setCurrentIndex(selected_index)
+        finally:
+            self.js8_expect_entry_policy_combo.blockSignals(False)
+
+    def _selected_js8_expect_policy_row(self) -> Dict[str, Any]:
+        if not hasattr(self, "js8_expect_policies_table"):
+            return {}
+        row_idx = int(self.js8_expect_policies_table.currentRow())
+        if row_idx < 0 or row_idx >= len(self._js8_expect_policy_rows):
+            return {}
+        return dict(self._js8_expect_policy_rows[row_idx])
+
+    def _update_js8_expect_policy_actions(self) -> None:
+        if not hasattr(self, "js8_expect_delete_policy_btn") or not hasattr(self, "js8_expect_policies_table"):
+            return
+        self.js8_expect_delete_policy_btn.setEnabled(bool(self.js8_expect_policies_table.selectionModel().selectedRows()))
+
+    def _load_selected_js8_expect_policy(self) -> None:
+        self._update_js8_expect_policy_actions()
+        row = self._selected_js8_expect_policy_row()
+        if not row:
+            return
+        self._js8_expect_policy_selected_id = int(row.get("id", 0) or 0)
+        self.js8_expect_policy_name_edit.setText(str(row.get("name", "") or ""))
+        self.js8_expect_allowed_groups_edit.setText(self._comma_text(row.get("allowed_groups", [])))
+        self.js8_expect_allowed_callsigns_edit.setText(self._comma_text(row.get("allowed_callsigns", [])))
+        self.js8_expect_blocked_callsigns_edit.setText(self._comma_text(row.get("blocked_callsigns", [])))
+        self.js8_expect_scope_combo.setCurrentText(str(row.get("source_scope", "") or "all"))
+        self.js8_expect_policy_enabled_chk.setChecked(bool(row.get("enabled", True)))
+
+    def _clear_js8_expect_policy_editor(self) -> None:
+        self._js8_expect_policy_selected_id = 0
+        if hasattr(self, "js8_expect_policies_table"):
+            self.js8_expect_policies_table.clearSelection()
+        self.js8_expect_policy_name_edit.clear()
+        self.js8_expect_allowed_groups_edit.clear()
+        self.js8_expect_allowed_callsigns_edit.clear()
+        self.js8_expect_blocked_callsigns_edit.clear()
+        self.js8_expect_scope_combo.setCurrentText("all")
+        self.js8_expect_policy_enabled_chk.setChecked(True)
+        self.js8_expect_policy_name_edit.setFocus()
+        self._update_js8_expect_policy_actions()
+
+    def _save_js8_expect_policy_from_editor(self) -> None:
+        name = self.js8_expect_policy_name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Expect Allow Policy", "Policy name is required.")
+            return
+        try:
+            result = save_expect_allow_policy(
+                {
+                    "id": self._js8_expect_policy_selected_id,
+                    "name": name,
+                    "allowed_groups": self.js8_expect_allowed_groups_edit.text(),
+                    "allowed_callsigns": self.js8_expect_allowed_callsigns_edit.text(),
+                    "blocked_callsigns": self.js8_expect_blocked_callsigns_edit.text(),
+                    "source_scope": self.js8_expect_scope_combo.currentText(),
+                    "enabled": self.js8_expect_policy_enabled_chk.isChecked(),
+                    "import_source": "fio-settings",
+                }
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Expect Allow Policy", f"Could not save policy:\n{exc}")
+            return
+        self._js8_expect_policy_selected_id = int(result.id)
+        self._refresh_js8_expect_policies_table()
+        self._refresh_js8_expect_entries_table()
+        for row_idx, row in enumerate(self._js8_expect_policy_rows):
+            if int(row.get("id", 0) or 0) == int(result.id):
+                self.js8_expect_policies_table.selectRow(row_idx)
+                break
+        self._refresh_section_titles()
+
+    def _delete_selected_js8_expect_policy(self) -> None:
+        row = self._selected_js8_expect_policy_row()
+        row_id = int(row.get("id", 0) or 0) if row else 0
+        if row_id <= 0:
+            return
+        try:
+            delete_expect_allow_policy(row_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Expect Allow Policy", f"Could not delete policy:\n{exc}")
+            return
+        self._clear_js8_expect_policy_editor()
+        self._refresh_js8_expect_policies_table()
+        self._refresh_js8_expect_entries_table()
+        self._refresh_section_titles()
+
+    def _on_js8_expect_policy_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._js8_expect_policies_table_loading or item is None or item.column() != 0:
+            return
+        row_idx = int(item.row())
+        if row_idx < 0 or row_idx >= len(self._js8_expect_policy_rows):
+            return
+        row = dict(self._js8_expect_policy_rows[row_idx])
+        row["enabled"] = bool(item.checkState() == Qt.Checked)
+        try:
+            save_expect_allow_policy(
+                {
+                    "id": row.get("id", 0),
+                    "name": row.get("name", ""),
+                    "allowed_groups": row.get("allowed_groups", []),
+                    "allowed_callsigns": row.get("allowed_callsigns", []),
+                    "blocked_callsigns": row.get("blocked_callsigns", []),
+                    "source_scope": row.get("source_scope", "all"),
+                    "source_radio_ids": row.get("source_radio_ids", []),
+                    "enabled": row.get("enabled", True),
+                    "import_source": row.get("import_source", "fio-settings"),
+                    "notes": row.get("notes", ""),
+                }
+            )
+        except Exception as exc:
+            log.debug("Settings: failed to update JS8 Expect policy enabled state: %s", exc)
+            return
+        self._refresh_js8_expect_policies_table()
+        self._refresh_js8_expect_entries_table()
+        self._refresh_section_titles()
+
+    def _refresh_js8_expect_entries_table(self) -> None:
+        if not hasattr(self, "js8_expect_entries_table"):
+            return
+        try:
+            rows = list_expect_entries()
+        except Exception as exc:
+            log.debug("Settings: failed to load JS8 Expect entries: %s", exc)
+            rows = []
+        self._js8_expect_entry_rows = rows
+        self._js8_expect_entries_table_loading = True
+        try:
+            self.js8_expect_entries_table.setRowCount(0)
+            for idx, row in enumerate(rows):
+                self.js8_expect_entries_table.insertRow(idx)
+                use_item = QTableWidgetItem("")
+                use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                use_item.setCheckState(Qt.Checked if bool(row.get("enabled", False)) else Qt.Unchecked)
+                self.js8_expect_entries_table.setItem(idx, 0, use_item)
+                auto_item = QTableWidgetItem("")
+                auto_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                auto_item.setCheckState(Qt.Checked if bool(row.get("auto_reply_enabled", False)) else Qt.Unchecked)
+                self.js8_expect_entries_table.setItem(idx, 1, auto_item)
+                values = [
+                    str(row.get("expect_key", "") or ""),
+                    str(row.get("allow_policy_name", "") or ""),
+                    self._comma_text(row.get("allowed_groups", [])),
+                    self._comma_text(row.get("allowed_callsigns", [])),
+                    str(int(row.get("cooldown_seconds", 0) or 0)),
+                    str(int(row.get("max_replies", 1) or 1)),
+                    self._expect_source_display(row),
+                ]
+                for col, value in enumerate(values, start=2):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    if col == 2:
+                        response = str(row.get("response_text", "") or "")
+                        item.setToolTip(response)
+                    elif col == 8:
+                        item.setToolTip(self._expect_source_detail(row))
+                    self.js8_expect_entries_table.setItem(idx, col, item)
+        finally:
+            self._js8_expect_entries_table_loading = False
+        self._update_js8_expect_entry_actions()
+        self._refresh_js8_expect_audit_table()
+        self._refresh_js8_expect_requests_table()
+
+    @staticmethod
+    def _expect_source_display(row: Mapping[str, Any]) -> str:
+        radio_id = str(row.get("source_radio_id", "") or "").strip()
+        js8_id = str(row.get("js8_instance_id", "") or "").strip()
+        scope = str(row.get("source_scope", "") or "").strip()
+        parts = []
+        if radio_id:
+            parts.append(f"Radio {radio_id}")
+        if js8_id:
+            parts.append(js8_id)
+        if not parts and scope:
+            parts.append(scope)
+        return " / ".join(parts)
+
+    def _expect_source_detail(self, row: Mapping[str, Any]) -> str:
+        js8_id = str(row.get("js8_instance_id", "") or row.get("source_js8_instance_id", "") or "").strip()
+        return "\n".join(
+            line
+            for line in (
+                f"Radio: {str(row.get('source_radio_id', '') or '').strip() or 'Any'}",
+                f"Scope: {str(row.get('source_scope', '') or '').strip() or 'all'}",
+                f"JS8Call: {js8_id or 'Any'}",
+                f"Import: {str(row.get('import_source', '') or '').strip() or 'FIO'}",
+                f"Form: {str(row.get('expect_key', '') or '').strip() or '--'}",
+            )
+            if line
+        )
+
+    @staticmethod
+    def _format_expect_audit_ts(value: object) -> str:
+        try:
+            ts = float(value or 0.0)
+        except Exception:
+            ts = 0.0
+        if ts <= 0:
+            return ""
+        try:
+            return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    def _refresh_js8_expect_audit_table(self) -> None:
+        if not hasattr(self, "js8_expect_audit_table"):
+            return
+        try:
+            rows = list_expect_management_audit(limit=40)
+        except Exception as exc:
+            log.debug("Settings: failed to load JS8 Expect change history: %s", exc)
+            rows = []
+        self._js8_expect_audit_rows = rows
+        self.js8_expect_audit_table.setRowCount(0)
+        for idx, row in enumerate(rows):
+            self.js8_expect_audit_table.insertRow(idx)
+            source = " ".join(
+                part for part in (self._expect_source_display(row),) if part
+            )
+            state_bits = []
+            state_bits.append("Enabled" if bool(row.get("enabled", False)) else "Disabled")
+            if bool(row.get("auto_reply_enabled", False)):
+                state_bits.append("Auto-reply intent")
+            values = [
+                self._format_expect_audit_ts(row.get("created_ts")),
+                str(row.get("action", "") or ""),
+                str(row.get("expect_key", "") or ""),
+                source,
+                ", ".join(state_bits),
+                str(row.get("import_source", "") or ""),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if col in (1, 5):
+                    item.setToolTip(self._expect_source_detail(row) + "\n\n" + str(row.get("detail_json", "") or ""))
+                self.js8_expect_audit_table.setItem(idx, col, item)
+
+    def _refresh_js8_expect_requests_table(self) -> None:
+        if not hasattr(self, "js8_expect_requests_table"):
+            return
+        try:
+            rows = list_expect_runtime_audit(limit=60)
+        except Exception as exc:
+            log.debug("Settings: failed to load JS8 Expect request history: %s", exc)
+            rows = []
+        self._js8_expect_request_rows = rows
+        self.js8_expect_requests_table.setRowCount(0)
+        for idx, row in enumerate(rows):
+            self.js8_expect_requests_table.insertRow(idx)
+            source = self._expect_source_display(
+                {
+                    "source_radio_id": row.get("source_radio_id", ""),
+                    "js8_instance_id": row.get("source_js8_instance_id", ""),
+                    "source_scope": "",
+                }
+            )
+            values = [
+                self._format_expect_audit_ts(row.get("created_ts")),
+                str(row.get("decision", "") or ""),
+                str(row.get("expect_key", "") or f"Entry {row.get('expect_entry_id', '')}").strip(),
+                str(row.get("requesting_callsign", "") or ""),
+                str(row.get("target_group", "") or ""),
+                source,
+                str(row.get("reason", "") or ""),
+            ]
+            tooltip = "\n".join(
+                line
+                for line in (
+                    f"Event: {str(row.get('event_id', '') or '').strip() or '--'}",
+                    f"Entry: {str(row.get('expect_entry_id', '') or '').strip() or '--'}",
+                    f"Reply Radio: {str(row.get('reply_radio_id', '') or '').strip() or '--'}",
+                    f"Reply JS8Call: {str(row.get('reply_js8_instance_id', '') or '').strip() or '--'}",
+                    f"Reason: {str(row.get('reason', '') or '').strip() or '--'}",
+                )
+                if line
+            )
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setToolTip(tooltip)
+                self.js8_expect_requests_table.setItem(idx, col, item)
+
+    def _selected_js8_expect_entry_row(self) -> Dict[str, Any]:
+        if not hasattr(self, "js8_expect_entries_table"):
+            return {}
+        row_idx = int(self.js8_expect_entries_table.currentRow())
+        if row_idx < 0 or row_idx >= len(self._js8_expect_entry_rows):
+            return {}
+        return dict(self._js8_expect_entry_rows[row_idx])
+
+    def _set_expect_entry_policy_combo_id(self, policy_id: int) -> None:
+        if not hasattr(self, "js8_expect_entry_policy_combo"):
+            return
+        for idx in range(self.js8_expect_entry_policy_combo.count()):
+            try:
+                item_id = int(self.js8_expect_entry_policy_combo.itemData(idx) or 0)
+            except Exception:
+                item_id = 0
+            if item_id == int(policy_id or 0):
+                self.js8_expect_entry_policy_combo.setCurrentIndex(idx)
+                return
+        self.js8_expect_entry_policy_combo.setCurrentIndex(0)
+
+    def _update_js8_expect_entry_actions(self) -> None:
+        if not hasattr(self, "js8_expect_save_entry_btn") or not hasattr(self, "js8_expect_entries_table"):
+            return
+        selected = bool(self.js8_expect_entries_table.selectionModel().selectedRows())
+        self.js8_expect_save_entry_btn.setEnabled(selected)
+        self.js8_expect_delete_entry_btn.setEnabled(selected)
+
+    def _load_selected_js8_expect_entry(self) -> None:
+        self._update_js8_expect_entry_actions()
+        row = self._selected_js8_expect_entry_row()
+        if not row:
+            return
+        self._js8_expect_entry_selected_id = int(row.get("id", 0) or 0)
+        self._set_expect_entry_policy_combo_id(int(row.get("allow_policy_id", 0) or 0))
+        self.js8_expect_entry_allowed_groups_edit.setText(self._comma_text(row.get("allowed_groups", [])))
+        self.js8_expect_entry_allowed_callsigns_edit.setText(self._comma_text(row.get("allowed_callsigns", [])))
+        self.js8_expect_entry_blocked_callsigns_edit.setText(self._comma_text(row.get("blocked_callsigns", [])))
+        self.js8_expect_entry_max_replies_spin.setValue(max(1, int(row.get("max_replies", 1) or 1)))
+        self.js8_expect_entry_cooldown_spin.setValue(max(0, int(row.get("cooldown_seconds", 0) or 0)))
+        self.js8_expect_entry_enabled_chk.setChecked(bool(row.get("enabled", False)))
+        self.js8_expect_entry_auto_reply_chk.setChecked(bool(row.get("auto_reply_enabled", False)))
+
+    def _clear_js8_expect_entry_editor(self) -> None:
+        self._js8_expect_entry_selected_id = 0
+        if hasattr(self, "js8_expect_entries_table"):
+            self.js8_expect_entries_table.clearSelection()
+        self._set_expect_entry_policy_combo_id(0)
+        self.js8_expect_entry_allowed_groups_edit.clear()
+        self.js8_expect_entry_allowed_callsigns_edit.clear()
+        self.js8_expect_entry_blocked_callsigns_edit.clear()
+        self.js8_expect_entry_max_replies_spin.setValue(1)
+        self.js8_expect_entry_cooldown_spin.setValue(0)
+        self.js8_expect_entry_enabled_chk.setChecked(False)
+        self.js8_expect_entry_auto_reply_chk.setChecked(False)
+        self._update_js8_expect_entry_actions()
+
+    def _save_js8_expect_entry_from_editor(self) -> None:
+        if int(self._js8_expect_entry_selected_id or 0) <= 0:
+            QMessageBox.warning(self, "Expect Entry", "Select an Expect entry before saving.")
+            return
+        try:
+            policy_id = int(self.js8_expect_entry_policy_combo.currentData() or 0)
+        except Exception:
+            policy_id = 0
+        try:
+            update_expect_entry_controls(
+                self._js8_expect_entry_selected_id,
+                {
+                    "allow_policy_id": policy_id or None,
+                    "allowed_groups": self.js8_expect_entry_allowed_groups_edit.text(),
+                    "allowed_callsigns": self.js8_expect_entry_allowed_callsigns_edit.text(),
+                    "blocked_callsigns": self.js8_expect_entry_blocked_callsigns_edit.text(),
+                    "max_replies": self.js8_expect_entry_max_replies_spin.value(),
+                    "cooldown_seconds": self.js8_expect_entry_cooldown_spin.value(),
+                    "enabled": self.js8_expect_entry_enabled_chk.isChecked(),
+                    "auto_reply_enabled": self.js8_expect_entry_auto_reply_chk.isChecked(),
+                    "unattended_auto_reply_enabled": False,
+                },
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Expect Entry", f"Could not save entry:\n{exc}")
+            return
+        selected_id = int(self._js8_expect_entry_selected_id)
+        self._refresh_js8_expect_entries_table()
+        for row_idx, row in enumerate(self._js8_expect_entry_rows):
+            if int(row.get("id", 0) or 0) == selected_id:
+                self.js8_expect_entries_table.selectRow(row_idx)
+                break
+        self._refresh_section_titles()
+
+    def _delete_selected_js8_expect_entry(self) -> None:
+        row = self._selected_js8_expect_entry_row()
+        row_id = int(row.get("id", 0) or 0) if row else 0
+        if row_id <= 0:
+            return
+        try:
+            delete_expect_entry(row_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Expect Entry", f"Could not delete entry:\n{exc}")
+            return
+        self._clear_js8_expect_entry_editor()
+        self._refresh_js8_expect_entries_table()
+        self._refresh_section_titles()
+
+    def _on_js8_expect_entry_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._js8_expect_entries_table_loading or item is None or item.column() not in (0, 1):
+            return
+        row_idx = int(item.row())
+        if row_idx < 0 or row_idx >= len(self._js8_expect_entry_rows):
+            return
+        row = dict(self._js8_expect_entry_rows[row_idx])
+        row["enabled"] = bool(self.js8_expect_entries_table.item(row_idx, 0).checkState() == Qt.Checked)
+        row["auto_reply_enabled"] = bool(self.js8_expect_entries_table.item(row_idx, 1).checkState() == Qt.Checked)
+        try:
+            update_expect_entry_controls(
+                int(row.get("id", 0) or 0),
+                {
+                    "allow_policy_id": row.get("allow_policy_id"),
+                    "allowed_groups": row.get("allowed_groups", []),
+                    "allowed_callsigns": row.get("allowed_callsigns", []),
+                    "blocked_callsigns": row.get("blocked_callsigns", []),
+                    "max_replies": row.get("max_replies", 1),
+                    "cooldown_seconds": row.get("cooldown_seconds", 0),
+                    "enabled": row.get("enabled", False),
+                    "auto_reply_enabled": row.get("auto_reply_enabled", False),
+                    "unattended_auto_reply_enabled": row.get("unattended_auto_reply_enabled", False),
+                },
+            )
+        except Exception as exc:
+            log.debug("Settings: failed to update JS8 Expect entry enabled state: %s", exc)
+            return
+        self._refresh_js8_expect_entries_table()
+        self._refresh_section_titles()
+
+    def _choose_js8spotter_import_db(self) -> None:
+        start_dir = ""
+        current = self.js8spotter_import_db_edit.text().strip() if hasattr(self, "js8spotter_import_db_edit") else ""
+        if current:
+            try:
+                start_dir = str(Path(current).expanduser().parent)
+            except Exception:
+                start_dir = ""
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select JS8Spotter database",
+            start_dir,
+            "SQLite Databases (*.db *.sqlite *.sqlite3);;All Files (*)",
+        )
+        if not fn:
+            return
+        path = Path(fn).expanduser()
+        if not path.exists():
+            QMessageBox.warning(self, "JS8Spotter Import", "Selected database does not exist.")
+            return
+        self.js8spotter_import_db_edit.setText(str(path))
+        try:
+            self.settings.set("js8spotter_import_db_path", str(path))
+        except Exception:
+            pass
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
+
+    def _import_js8spotter_database(self) -> None:
+        source = self.js8spotter_import_db_edit.text().strip() if hasattr(self, "js8spotter_import_db_edit") else ""
+        if not source:
+            QMessageBox.warning(self, "JS8Spotter Import", "Select a JS8Spotter database first.")
+            return
+        path = Path(source).expanduser()
+        if not path.exists():
+            QMessageBox.warning(self, "JS8Spotter Import", "Selected JS8Spotter database does not exist.")
+            return
+        radio_id, radio_label = self._selected_settings_feedback_target()
+        try:
+            stats = import_js8spotter_database(path, source_radio_id=radio_id or "", js8_instance_id=radio_label or "")
+        except Exception as exc:
+            QMessageBox.warning(self, "JS8Spotter Import", f"Import failed:\n{exc}")
+            return
+        if hasattr(self, "js8spotter_import_status_label"):
+            status = (
+                f"Imported JS8Spotter DB: forms {stats.forms_imported}/{stats.forms_scanned}, "
+                f"Expect {stats.expect_imported}/{stats.expect_scanned}, "
+                f"archive {stats.archive_imported}/{stats.archive_scanned}, "
+                f"operator grids {stats.grid_operators_updated}."
+            )
+            if stats.errors:
+                status += f" Errors: {'; '.join(stats.errors[:3])}"
+            if stats.warnings:
+                status += f" Note: {'; '.join(stats.warnings[:3])}"
+            self.js8spotter_import_status_label.setText(status)
+        if stats.warnings and stats.forms_scanned == 0 and stats.expect_scanned == 0:
+            QMessageBox.information(
+                self,
+                "JS8Spotter Import",
+                "The selected JS8Spotter database did not contain Spotter form history or Expect rules.\n\n"
+                "Choose the active JS8Spotter database that contains your traffic history.",
+            )
+        try:
+            self.settings.set("js8spotter_import_db_path", str(path))
+        except Exception:
+            pass
+        self._refresh_js8_expect_entries_table()
+        self._refresh_js8spotter_watch_review()
+        self._refresh_js8spotter_activity_review()
+        self._refresh_section_titles()
+
+    def _refresh_js8spotter_watch_review(self) -> None:
+        if not hasattr(self, "js8spotter_watch_table"):
+            return
+        try:
+            records = load_js8spotter_archive_records(table_names=("search", "notify", "profile"), limit_per_table=50)
+        except Exception as exc:
+            log.debug("Settings: failed to load imported JS8Spotter watch rows: %s", exc)
+            records = []
+        self._js8spotter_watch_rows = [
+            {
+                "type": str(record.source_table or ""),
+                "name": str(record.title or ""),
+                "summary": str(record.subtitle or ""),
+                "source": str(record.source_db or ""),
+                "imported_ts": float(record.imported_ts or 0.0),
+                "payload": dict(record.payload or {}),
+            }
+            for record in records
+        ]
+        self.js8spotter_watch_table.setRowCount(0)
+        for idx, row in enumerate(self._js8spotter_watch_rows):
+            self.js8spotter_watch_table.insertRow(idx)
+            source = str(row.get("source", "") or "")
+            try:
+                source_display = Path(source).name if source else ""
+            except Exception:
+                source_display = source
+            values = [
+                str(row.get("type", "") or ""),
+                str(row.get("name", "") or ""),
+                str(row.get("summary", "") or ""),
+                source_display,
+                self._format_expect_audit_ts(row.get("imported_ts")),
+            ]
+            tooltip = json.dumps(row.get("payload", {}) or {}, indent=2, sort_keys=True, default=str)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setToolTip(tooltip)
+                self.js8spotter_watch_table.setItem(idx, col, item)
+
+    def _refresh_js8spotter_activity_review(self) -> None:
+        if not hasattr(self, "js8spotter_activity_table"):
+            return
+        try:
+            records = load_js8spotter_archive_records(table_names=("activity", "grid", "signal", "csstatrep"), limit_per_table=50)
+        except Exception as exc:
+            log.debug("Settings: failed to load imported JS8Spotter activity rows: %s", exc)
+            records = []
+        self._js8spotter_activity_rows = [
+            {
+                "type": str(record.source_table or ""),
+                "name": str(record.title or ""),
+                "summary": str(record.subtitle or ""),
+                "source": str(record.source_db or ""),
+                "imported_ts": float(record.imported_ts or 0.0),
+                "payload": dict(record.payload or {}),
+            }
+            for record in records
+        ]
+        self.js8spotter_activity_table.setRowCount(0)
+        for idx, row in enumerate(self._js8spotter_activity_rows):
+            self.js8spotter_activity_table.insertRow(idx)
+            source = str(row.get("source", "") or "")
+            try:
+                source_display = Path(source).name if source else ""
+            except Exception:
+                source_display = source
+            values = [
+                str(row.get("type", "") or ""),
+                str(row.get("name", "") or ""),
+                str(row.get("summary", "") or ""),
+                source_display,
+                self._format_expect_audit_ts(row.get("imported_ts")),
+            ]
+            tooltip = json.dumps(row.get("payload", {}) or {}, indent=2, sort_keys=True, default=str)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setToolTip(tooltip)
+                self.js8spotter_activity_table.setItem(idx, col, item)
 
     # ---------- JS8 DIRECTED PATH ---------- #
 

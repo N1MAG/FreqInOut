@@ -10,7 +10,7 @@ import pytest
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
-from freqinout.core.station_runtime_manager import StationRuntimeManager
+from freqinout.core.station_runtime_manager import DeviceRuntime, StationRuntimeManager
 from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
@@ -43,6 +43,13 @@ def _stub_status_snapshot(self, **kwargs):
         "JS8Spotter": {"state": "idle", "tooltip": "JS8Spotter idle"},
         "CommStat": {"state": "idle", "tooltip": "CommStat idle"},
     }
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
 
 
 def test_store_supports_multiple_active_devices_with_one_primary(monkeypatch, tmp_path):
@@ -122,7 +129,8 @@ def test_restart_preserves_non_default_runtime_primary(monkeypatch, tmp_path):
 
     assert primary is not None
     assert int(primary["id"]) == int(remote["id"])
-    assert int(default_device.get("runtime_primary", 0) or 0) == 0
+    if int(default_device.get("id", 0) or 0) != int(remote["id"]):
+        assert int(default_device.get("runtime_primary", 0) or 0) == 0
     assert int(default_device.get("runtime_active", 0) or 0) == 1
     assert restarted_settings.get("control_via") == "JS8Call"
     assert restarted_settings.get("js8_host") == "10.0.0.10"
@@ -135,8 +143,16 @@ def test_store_blocks_primary_deactivation_until_another_primary_exists(monkeypa
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    default_primary = store.get_runtime_primary_device_profile()
-    assert default_primary is not None
+    default_primary = store.save_device_profile(
+        {
+            "name": "Primary FLRig",
+            "control_backend": "flrig",
+            "flrig_host": "10.0.0.7",
+            "flrig_port": 12345,
+        }
+    )
+    store.set_device_profile_runtime_active(int(default_primary["id"]), True)
+    store.set_runtime_primary_device_profile(int(default_primary["id"]))
 
     remote = store.save_device_profile(
         {
@@ -168,6 +184,15 @@ def test_station_runtime_manager_snapshots_multiple_active_devices(monkeypatch, 
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    local = store.save_device_profile(
+        {
+            "name": "Local FLRig",
+            "control_backend": "flrig",
+            "flrig_host": "10.0.0.8",
+            "flrig_port": 12345,
+            "deployment_mode": "full",
+        }
+    )
     remote = store.save_device_profile(
         {
             "name": "Remote Rigctld",
@@ -177,10 +202,17 @@ def test_station_runtime_manager_snapshots_multiple_active_devices(monkeypatch, 
             "deployment_mode": "minimal",
         }
     )
+    store.set_device_profile_runtime_active(int(local["id"]), True)
     store.set_device_profile_runtime_active(int(remote["id"]), True)
     store.set_runtime_primary_device_profile(int(remote["id"]))
 
     monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _stub_status_snapshot)
+    monkeypatch.setattr(DeviceRuntime, "ptt_active", lambda self, force=False: False)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: 7_115_000 if str(self.profile.get("control_backend", "")).lower() == "flrig" else 14_115_000,
+    )
 
     manager = StationRuntimeManager(store=store, settings=settings)
     manager.sync_with_store()
@@ -198,7 +230,7 @@ def test_station_runtime_manager_snapshots_multiple_active_devices(monkeypatch, 
 def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
@@ -213,6 +245,8 @@ def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path
     store.set_device_profile_runtime_active(int(remote["id"]), True)
 
     monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _stub_status_snapshot)
+    monkeypatch.setattr(DeviceRuntime, "ptt_active", lambda self, force=False: False)
+    monkeypatch.setattr(DeviceRuntime, "current_frequency_hz", lambda self, force=False: 7_115_000)
 
     manager = StationRuntimeManager(store=store, settings=settings)
     manager.sync_with_store()
@@ -237,7 +271,7 @@ def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path
             for row in range(tab.control_center_table.rowCount())
             if tab.control_center_table.item(row, 5) is not None
         } == {"Read-only"}
-        assert tab.cards_layout.count() >= 3
+        assert tab.cards_layout.count() >= 2
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -246,7 +280,7 @@ def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path
 def test_settings_tab_supports_multi_active_profiles_and_primary_selection(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
@@ -293,7 +327,7 @@ def test_settings_tab_supports_multi_active_profiles_and_primary_selection(monke
 
 
 def test_js8_rx_hub_instances_are_keyed_by_endpoint():
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
     hub_a = JS8RxHub.instance("127.0.0.1", 2442)
     hub_b = JS8RxHub.instance("127.0.0.1", 2542)
     try:

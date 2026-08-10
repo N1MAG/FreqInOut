@@ -6,6 +6,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+import pytest
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.scheduler_engine import SchedulerEngine
@@ -28,6 +29,13 @@ def _idle_status_snapshot(self, **kwargs):
         "JS8Spotter": {"state": "idle", "tooltip": "JS8Spotter idle"},
         "CommStat": {"state": "idle", "tooltip": "CommStat idle"},
     }
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
 
 
 def test_store_derives_rf_conflict_policies_from_shared_resources(monkeypatch, tmp_path):
@@ -434,7 +442,7 @@ def test_station_runtime_manager_blocks_advanced_close_frequency_guard(monkeypat
 def test_settings_tab_persists_rf_resource_groups(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())

@@ -20,6 +20,7 @@ from freqinout.core.multi_rig_runtime_status import (
     MultiRigRuntimeStatus,
     build_multi_rig_runtime_status,
 )
+from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_ingest import load_latest_varac_sync_status
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -359,6 +360,7 @@ class DeviceRuntime:
         fallback_settings: Optional[object] = None,
         assignment: Optional[Mapping[str, Any]] = None,
         operating_profile: Optional[Mapping[str, Any]] = None,
+        status_poll_coordinator: Optional[RadioStatusPollCoordinator] = None,
     ) -> None:
         self.fallback_settings = fallback_settings
         self.profile: Dict[str, Any] = {}
@@ -370,6 +372,11 @@ class DeviceRuntime:
         self.rig_client: Optional[RigControlClient] = None
         self.js8_control_client: Optional[JS8ControlClient] = None
         self.varac_status_client: Optional[VarACStatusClient] = None
+        self.status_poll_coordinator = status_poll_coordinator or RadioStatusPollCoordinator(
+            ttl_seconds=0.8,
+            retry_seconds=4.0,
+            time_fn=time.monotonic,
+        )
         self._config_signature: tuple[object, ...] = tuple()
         self._ptt_state_cache: bool = False
         self._ptt_state_ts: float = 0.0
@@ -452,6 +459,17 @@ class DeviceRuntime:
         self._freq_state_cache = None
         self._freq_state_ts = 0.0
         self._freq_retry_ts = 0.0
+        try:
+            self.status_poll_coordinator.invalidate(self._status_poll_key("ptt"))
+            self.status_poll_coordinator.invalidate(self._status_poll_key("frequency"))
+        except Exception:
+            pass
+
+    def _status_poll_key(self, kind: str) -> str:
+        device_id = int(self.profile.get("id", 0) or 0)
+        if device_id > 0:
+            return f"device:{device_id}:{kind}"
+        return f"device:{id(self)}:{kind}"
 
     def ptt_active(self, *, force: bool = False) -> bool:
         if _normalize_device_class(self.profile.get("device_class", "tx_rx")) == "observer":
@@ -461,19 +479,21 @@ class DeviceRuntime:
             return False
         if self.rig_client is None or not hasattr(self.rig_client, "get_ptt"):
             return False
-        now = time.monotonic()
-        if not force and (now - float(self._ptt_state_ts or 0.0)) < float(self._ptt_state_ttl_sec):
-            return bool(self._ptt_state_cache)
-        if not force and now < float(self._ptt_retry_ts or 0.0):
-            return bool(self._ptt_state_cache)
-        try:
-            self._ptt_state_cache = bool(self.rig_client.get_ptt())
-            self._ptt_retry_ts = 0.0
-        except Exception as exc:
-            log.debug("DeviceRuntime: get_ptt failed for %s: %s", self.profile.get("name", ""), exc)
-            self._ptt_state_cache = False
-            self._ptt_retry_ts = now + float(self._ptt_retry_sec)
-        self._ptt_state_ts = now
+        snapshot = self.status_poll_coordinator.get_snapshot(
+            self._status_poll_key("ptt"),
+            lambda: {
+                "ptt_active": bool(self.rig_client.get_ptt()),
+                "ptt_known": True,
+                "source": "runtime_ptt",
+            },
+            force=force,
+        )
+        self._ptt_state_cache = bool(snapshot.ptt_active) if snapshot.ptt_known else False
+        self._ptt_state_ts = float(snapshot.generated_at or 0.0)
+        self._ptt_retry_ts = float(snapshot.backoff_until or 0.0)
+        self._ptt_retry_sec = float(self.status_poll_coordinator.retry_seconds)
+        if snapshot.errors:
+            log.debug("DeviceRuntime: get_ptt failed for %s: %s", self.profile.get("name", ""), snapshot.errors)
         return bool(self._ptt_state_cache)
 
     def current_frequency_hz(self, *, force: bool = False) -> Optional[int]:
@@ -484,20 +504,20 @@ class DeviceRuntime:
             return None
         if self.rig_client is None or not hasattr(self.rig_client, "get_vfo_frequency"):
             return None
-        now = time.monotonic()
-        if not force and (now - float(self._freq_state_ts or 0.0)) < float(self._freq_state_ttl_sec):
-            return self._freq_state_cache
-        if not force and now < float(self._freq_retry_ts or 0.0):
-            return self._freq_state_cache
-        try:
-            value = self.rig_client.get_vfo_frequency()
-            self._freq_state_cache = int(value) if isinstance(value, (int, float)) and int(value) > 0 else None
-            self._freq_retry_ts = 0.0
-        except Exception as exc:
-            log.debug("DeviceRuntime: get_vfo_frequency failed for %s: %s", self.profile.get("name", ""), exc)
-            self._freq_state_cache = None
-            self._freq_retry_ts = now + float(self._freq_retry_sec)
-        self._freq_state_ts = now
+        snapshot = self.status_poll_coordinator.get_snapshot(
+            self._status_poll_key("frequency"),
+            lambda: {
+                "frequency_hz": self.rig_client.get_vfo_frequency(),
+                "source": "runtime_frequency",
+            },
+            force=force,
+        )
+        self._freq_state_cache = snapshot.frequency_hz
+        self._freq_state_ts = float(snapshot.generated_at or 0.0)
+        self._freq_retry_ts = float(snapshot.backoff_until or 0.0)
+        self._freq_retry_sec = float(self.status_poll_coordinator.retry_seconds)
+        if snapshot.errors:
+            log.debug("DeviceRuntime: get_vfo_frequency failed for %s: %s", self.profile.get("name", ""), snapshot.errors)
         return self._freq_state_cache
 
     def operating_policy(self) -> Dict[str, object]:
@@ -840,6 +860,11 @@ class StationRuntimeManager:
         self._varac_sync_by_source: Dict[str, Dict[str, Any]] = {}
         self._active_profile_swap: Optional[Dict[str, Any]] = None
         self._runtime_status: Optional[MultiRigRuntimeStatus] = None
+        self._status_poll_coordinator = RadioStatusPollCoordinator(
+            ttl_seconds=0.8,
+            retry_seconds=4.0,
+            time_fn=time.monotonic,
+        )
 
     def invalidate_runtime_status(self) -> None:
         self._runtime_status = None
@@ -990,6 +1015,7 @@ class StationRuntimeManager:
                     fallback_settings=self.settings,
                     assignment=assignment,
                     operating_profile=operating,
+                    status_poll_coordinator=self._status_poll_coordinator,
                 )
                 self._runtimes[device_id] = runtime
             else:

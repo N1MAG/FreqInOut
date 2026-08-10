@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from PySide6.QtCore import QCoreApplication, QEvent
+
 
 class _BlockedFuture:
     def done(self) -> bool:
@@ -7,6 +9,13 @@ class _BlockedFuture:
 
     def cancel(self) -> bool:
         return False
+
+
+def _shutdown_engine(engine) -> None:
+    engine.stop()
+    if QCoreApplication.instance() is not None:
+        engine.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def test_status_timeout_does_not_replace_executor(monkeypatch):
@@ -27,7 +36,7 @@ def test_status_timeout_does_not_replace_executor(monkeypatch):
         assert engine._status_snapshot_future is not None
         assert engine._status_snapshot_timeout_reported is True
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(monkeypatch):
@@ -105,7 +114,7 @@ def test_status_refresh_invokes_js8_shadow_comparison_for_offset_only_branch(mon
         assert shadow_calls == [{"offset_hz": 1950}]
         assert engine._last_js8_shadow_comparison == {"connected": True, "mode": "api_basic", "version": "3.0.2"}
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_control_timeout_does_not_replace_executor(monkeypatch):
@@ -138,7 +147,7 @@ def test_control_timeout_does_not_replace_executor(monkeypatch):
         assert engine._control_future is not None
         assert engine._control_timeout_reported is True
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_status_refresh_invokes_js8_shadow_comparison(monkeypatch):
@@ -223,4 +232,90 @@ def test_status_refresh_invokes_js8_shadow_comparison(monkeypatch):
         ]
         assert engine._last_js8_shadow_comparison == {"connected": True, "mode": "api_basic", "version": "3.0.2"}
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
+
+
+def test_status_refresh_reuses_coordinated_js8_and_varac_snapshots(monkeypatch):
+    import freqinout.core.scheduler_engine as scheduler_module
+
+    calls = {"js8": 0, "varac": 0}
+
+    class _ImmediateFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def done(self) -> bool:
+            return True
+
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def result(self):
+            return self._value
+
+    class _ImmediateExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def submit(self, fn, *args, **kwargs):
+            return _ImmediateFuture(fn(*args, **kwargs))
+
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+            pass
+
+    class DummySettings:
+        def get(self, key, default=None):
+            return "JS8Call" if key == "control_via" else default
+
+        def close(self):
+            pass
+
+    class _FakeVarACStatusClient:
+        def get_status(self, include_db_transfer: bool = True):
+            calls["varac"] += 1
+            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+
+    class _FakeShadowService:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def js8_shadow_comparison_status(self, *, legacy_readings, **_kwargs):
+            return {"connected": True, "mode": "api_basic", "version": "3.0.2"}
+
+    class _FakeJS8Client:
+        def __init__(self, *args, **kwargs):
+            calls["js8"] += 1
+
+        def is_busy(self) -> bool:
+            return False
+
+        def get_frequency(self):
+            return 7078000
+
+        def get_offset(self):
+            return 1950
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "SettingsManager", DummySettings)
+    monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
+    monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)
+    monkeypatch.setattr(scheduler_module, "JS8ControlClient", _FakeJS8Client)
+
+    engine = scheduler_module.SchedulerEngine(js8=_FakeJS8Client())
+    try:
+        engine._status_snapshot_refresh_interval_s = 0.0
+        engine._status_poll_coordinator.ttl_seconds = 30.0
+        monkeypatch.setattr(engine, "_queue_scheduler_thread_call", lambda callback: callback(), raising=False)
+
+        engine._maybe_refresh_external_status_snapshot(force=False)
+        engine._maybe_refresh_external_status_snapshot(force=False)
+
+        assert calls == {"js8": 2, "varac": 1}
+        assert engine._status_js8_freq_hz == 7078000
+        assert engine._status_js8_offset_hz == 1950
+        assert engine._last_varac_status == {"busy": False, "waiting_for_frequency": False, "reason": None}
+    finally:
+        _shutdown_engine(engine)

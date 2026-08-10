@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 import sys
 import time
@@ -30,8 +31,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QStyle,
     QToolButton,
+    QMenu,
 )
-from PySide6.QtGui import QPixmap, QIcon, QFontMetrics
+from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QTimer, QUrl
 from pathlib import Path
@@ -47,8 +49,14 @@ from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackServi
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
-from freqinout.core.dependency_status_service import get_dependency_status_service
-from freqinout.core.station_readiness import visible_status_programs
+from freqinout.core.dependency_status_service import get_dependency_status_service, shutdown_dependency_status_service
+from freqinout.core.station_readiness import (
+    build_station_readiness_report,
+    format_readiness_issue,
+    visible_status_programs,
+)
+from freqinout.core.js8spotter_archive import load_js8spotter_archive_records
+from freqinout.core.js8_expect_runtime import build_expect_rf_guard_preflight
 from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.utils.timezones import get_timezone
@@ -173,6 +181,7 @@ class MainWindow(QMainWindow):
         self._suppressed_screen_labels: set[str] = set()
         self._launch_startup_suppressed = False
         self._station_health_scope_map: dict[str, str] = {}
+        self._quick_search_cache: tuple[float, list[dict[str, object]]] = (0.0, [])
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
@@ -351,6 +360,7 @@ class MainWindow(QMainWindow):
         self._nav_group_sections: dict[str, QWidget] = {}
         self._nav_group_order: list[str] = ["Station", "FreqPlanner", "Messages", "NCS", "Operators", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
+        self._suppress_initial_nav_group_auto_expand = True
 
         for nav_idx, (button_label, screen_label) in enumerate(self._nav_specs):
             screen_idx = self._screen_index_by_label.get(screen_label)
@@ -571,10 +581,10 @@ class MainWindow(QMainWindow):
         self.station_command_radio_label.setObjectName("stationCommandRadioLabel")
         self.station_command_radio_combo = QComboBox(self.station_command_bar)
         self.station_command_radio_combo.setObjectName("stationCommandRadioSelector")
-        self.station_command_radio_combo.setMinimumWidth(120)
-        self.station_command_radio_combo.setMaximumWidth(260)
+        self.station_command_radio_combo.setMinimumWidth(160)
+        self.station_command_radio_combo.setMaximumWidth(340)
         self.station_command_radio_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.station_command_radio_combo.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.station_command_radio_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.station_command_radio_combo.currentIndexChanged.connect(self._on_station_command_radio_changed)
         self.station_command_radio_separator = QFrame(self.station_command_bar)
         self.station_command_radio_separator.setObjectName("stationCommandRadioSeparator")
@@ -698,6 +708,7 @@ class MainWindow(QMainWindow):
             self.nav_buttons[0].setChecked(True)
             first_screen_index = self.button_group.id(self.nav_buttons[0])
             self._set_screen(first_screen_index if first_screen_index >= 0 else 0)
+        self._suppress_initial_nav_group_auto_expand = False
         QTimer.singleShot(600, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
@@ -746,7 +757,10 @@ class MainWindow(QMainWindow):
             pass
         self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
-        self.background_ingest = BackgroundIngestController(self.settings)
+        self.background_ingest = BackgroundIngestController(
+            self.settings,
+            expect_guard_preflight=build_expect_rf_guard_preflight(self.station_runtime_manager),
+        )
         if self._runtime_background_ingest_enabled(self._active_runtime_profile, startup_policy):
             self.background_ingest.start()
         else:
@@ -2423,6 +2437,10 @@ class MainWindow(QMainWindow):
         self._shutting_down = True
         self._close_transient_shutdown_ui()
         try:
+            shutdown_dependency_status_service()
+        except Exception as e:
+            log.debug("MainWindow shutdown: dependency status service stop failed: %s", e)
+        try:
             if hasattr(self, "_ui_watchdog"):
                 self._ui_watchdog.stop()
         except Exception:
@@ -3046,6 +3064,20 @@ class MainWindow(QMainWindow):
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
+    def open_spotter_map(self) -> None:
+        idx = self._screen_index_by_label.get("Map", -1)
+        if idx < 0 or self._screen_is_runtime_suppressed("Map"):
+            return
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is not None and hasattr(tab, "focus_spotter_reports"):
+            QTimer.singleShot(0, tab.focus_spotter_reports)
+            QTimer.singleShot(0, self._sync_map_filters_from_tab)
+        self._set_screen(idx)
+        try:
+            self._sync_map_filters_from_tab()
+        except Exception:
+            pass
+
     def _apply_messages_nav_context(self) -> None:
         tab = getattr(self, "message_viewer_tab", None)
         if tab is None:
@@ -3090,6 +3122,299 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def _quick_search_blob(record: Mapping[str, object]) -> str:
+        return " ".join(
+            str(record.get(key, "") or "")
+            for key in ("title", "subtitle", "category", "keywords")
+        ).upper()
+
+    def _quick_search_add_record(
+        self,
+        records: list[dict[str, object]],
+        *,
+        category: str,
+        title: str,
+        subtitle: str = "",
+        screen: str = "",
+        action: str = "screen",
+        keywords: str = "",
+        section_key: str = "",
+        message_mode: str = "",
+        radio_id: int = 0,
+        detail_text: str = "",
+    ) -> None:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return
+        records.append(
+            {
+                "category": str(category or "Result"),
+                "title": clean_title,
+                "subtitle": str(subtitle or "").strip(),
+                "screen": str(screen or "").strip(),
+                "action": str(action or "screen").strip(),
+                "keywords": str(keywords or "").strip(),
+                "section_key": str(section_key or "").strip(),
+                "message_mode": str(message_mode or "").strip(),
+                "radio_id": int(radio_id or 0),
+                "detail_text": str(detail_text or "").strip(),
+            }
+        )
+
+    def _build_quick_search_records(self) -> list[dict[str, object]]:
+        now = time.time()
+        cached_ts, cached_records = getattr(self, "_quick_search_cache", (0.0, []))
+        if cached_records and (now - float(cached_ts or 0.0)) < 5.0:
+            return [dict(row) for row in cached_records]
+        records: list[dict[str, object]] = []
+        for button_label, screen_label in getattr(self, "_nav_specs", []) or []:
+            label = str(button_label or screen_label or "").strip()
+            screen = str(screen_label or label).strip()
+            if not label or self._screen_is_runtime_suppressed(screen):
+                continue
+            action = "screen"
+            message_mode = ""
+            section_key = ""
+            if screen == "Settings":
+                action = "settings"
+                section_key = "radio_profiles" if label == "Radios" else "operator_info"
+            elif screen == "Messages":
+                action = "messages"
+                message_mode = "compose" if label == "Compose" else "inbox"
+            self._quick_search_add_record(
+                records,
+                category="Go To",
+                title=label,
+                subtitle=screen,
+                screen=screen,
+                action=action,
+                section_key=section_key,
+                message_mode=message_mode,
+                keywords=f"{label} {screen} tab view navigation",
+            )
+        for title, section, keywords in (
+            ("RF Guard", "radio_profiles", "safety antenna band overlap advanced frequency guard radio settings"),
+            ("Operating Groups", "hf_operating_groups", "hf magnet ghostnet js8call wefax groups frequencies"),
+            ("Local Groups", "local_comms_groups", "repeaters local comms groups"),
+            ("Schedule Assignment", "radio_profiles", "assign frequency plan schedule radio rf guard"),
+            ("Message Compose", "", "compose message outbound inbox js8 flmsg varac"),
+        ):
+            self._quick_search_add_record(
+                records,
+                category="Action" if title == "Message Compose" else "Settings",
+                title=title,
+                subtitle="Messages" if title == "Message Compose" else "Open related settings",
+                screen="Messages" if title == "Message Compose" else "Settings",
+                action="messages" if title == "Message Compose" else "settings",
+                section_key=section,
+                message_mode="compose" if title == "Message Compose" else "",
+                keywords=keywords,
+            )
+        try:
+            for profile in self.multi_radio_store.list_device_profiles():
+                ident = int(profile.get("id", 0) or 0)
+                backend = str(profile.get("control_backend", "") or "").strip()
+                device_class = str(profile.get("device_class", "") or "").strip()
+                assignment = str(profile.get("assigned_operating_profile_name", "") or "").strip()
+                subtitle = " ".join(part for part in (device_class, backend, assignment) if part)
+                self._quick_search_add_record(
+                    records,
+                    category="Radio",
+                    title=str(profile.get("name") or f"Radio {ident}"),
+                    subtitle=subtitle or "Radio profile",
+                    screen="Settings",
+                    action="settings",
+                    section_key="radio_profiles",
+                    radio_id=ident,
+                    keywords=f"{backend} {device_class} {assignment} flrig rigctld js8call sdr",
+                )
+        except Exception:
+            pass
+        try:
+            for plan in self.multi_radio_store.list_frequency_plans():
+                category = str(plan.get("category", "") or "normal").strip()
+                target_screen = "FreqPlanner"
+                if category == "hf_daily_schedule":
+                    target_screen = "HF Schedule"
+                elif category == "hf_net_schedule":
+                    target_screen = "Net Schedule"
+                self._quick_search_add_record(
+                    records,
+                    category="Schedule",
+                    title=str(plan.get("name") or "Frequency Plan"),
+                    subtitle=category.replace("_", " "),
+                    screen=target_screen,
+                    action="screen",
+                    keywords=f"{plan.get('source_refs_json', '')} {plan.get('group_refs_json', '')} {plan.get('frequency_refs_json', '')}",
+                )
+        except Exception:
+            pass
+        try:
+            for row in load_operating_groups(self.settings):
+                group = str(row.get("group") or row.get("group_name") or "").strip()
+                band = str(row.get("band") or "").strip()
+                freq = str(row.get("frequency") or row.get("freq") or "").strip()
+                mode = str(row.get("mode") or "").strip()
+                self._quick_search_add_record(
+                    records,
+                    category="Frequency",
+                    title=" ".join(part for part in (group, band) if part),
+                    subtitle=" ".join(part for part in (freq, mode) if part),
+                    screen="ControlFreq",
+                    action="screen",
+                    keywords=f"{group} {band} {freq} {mode} operating group qsy schedule",
+                )
+        except Exception:
+            pass
+        try:
+            for archive in load_js8spotter_archive_records(limit_per_table=12)[:72]:
+                table = str(archive.source_table or "").strip().lower()
+                if table in {"grid", "signal", "activity", "csstatrep"}:
+                    screen = "HF Operators"
+                    keywords = f"{archive.keywords} js8spotter spotter history traffic map operator callsign grid"
+                else:
+                    screen = "Messages"
+                    keywords = f"{archive.keywords} js8spotter spotter history messages expect alert profile search"
+                source_label = archive.source_db
+                try:
+                    if source_label:
+                        source_label = Path(source_label).name
+                except Exception:
+                    pass
+                detail_lines = [
+                    "JS8Spotter History",
+                    "",
+                    f"Type: {archive.source_table}",
+                    f"Source ID: {archive.source_id}",
+                    f"Source DB: {archive.source_db or 'Unknown'}",
+                    f"Imported: {datetime.datetime.fromtimestamp(archive.imported_ts).strftime('%Y-%m-%d %H:%M') if archive.imported_ts else 'Unknown'}",
+                    "",
+                    "Summary:",
+                    archive.subtitle or archive.title,
+                    "",
+                    "Archived Payload:",
+                    json.dumps(archive.payload, indent=2, sort_keys=True, default=str),
+                ]
+                self._quick_search_add_record(
+                    records,
+                    category="Spotter History",
+                    title=archive.title,
+                    subtitle=" | ".join(part for part in (f"{table}: {archive.subtitle}" if archive.subtitle else table, source_label) if part),
+                    screen=screen,
+                    action="spotter_archive_detail",
+                    keywords=keywords,
+                    detail_text="\n".join(detail_lines),
+                )
+        except Exception:
+            pass
+        try:
+            report = build_station_readiness_report(
+                self.settings.all(),
+                device_profiles=self.multi_radio_store.list_device_profiles(),
+                operating_groups=load_operating_groups(self.settings),
+            )
+            for issue in list(getattr(report, "issues", ()) or ())[:20]:
+                self._quick_search_add_record(
+                    records,
+                    category="Issue",
+                    title=format_readiness_issue(issue),
+                    subtitle="Station Health / Settings",
+                    screen="Station Health",
+                    action="health",
+                    section_key=str(getattr(issue, "section_key", "") or ""),
+                    radio_id=int(getattr(issue, "radio_id", 0) or 0),
+                    keywords=f"{getattr(issue, 'severity', '')} {getattr(issue, 'scope', '')}",
+                )
+        except Exception:
+            pass
+        self._quick_search_cache = (now, [dict(row) for row in records])
+        return records
+
+    def quick_search(self, query: str, *, limit: int = 16) -> list[dict[str, object]]:
+        terms = [part.strip().upper() for part in str(query or "").split() if part.strip()]
+        if not terms:
+            return []
+        matches: list[tuple[int, int, dict[str, object]]] = []
+        for idx, record in enumerate(self._build_quick_search_records()):
+            blob = self._quick_search_blob(record)
+            if not all(term in blob for term in terms):
+                continue
+            title = str(record.get("title", "") or "").upper()
+            category = str(record.get("category", "") or "")
+            score = 100 if title == " ".join(terms) else 80 if title.startswith(terms[0]) else 50
+            if category in {"Issue", "Action", "Radio"}:
+                score += 10
+            matches.append((score, idx, record))
+        matches.sort(key=lambda item: (-item[0], item[1]))
+        return [dict(record) for _score, _idx, record in matches[: max(1, int(limit or 16))]]
+
+    def _activate_quick_search_result(self, record: Mapping[str, object]) -> None:
+        action = str(record.get("action", "screen") or "screen").strip()
+        screen = str(record.get("screen", "") or "").strip()
+        if action == "settings":
+            self.open_settings_section(
+                str(record.get("section_key", "") or "operator_info"),
+                radio_id=int(record.get("radio_id", 0) or 0),
+            )
+            return
+        if action == "messages":
+            self.open_messages_mode(str(record.get("message_mode", "") or "inbox"))
+            return
+        if action == "health":
+            self._open_station_health_detail(
+                device_profile_id=int(record.get("radio_id", 0) or 0),
+                scope_name=str(record.get("section_key", "") or ""),
+            )
+            return
+        if action == "spotter_archive_detail":
+            detail = str(record.get("detail_text", "") or "").strip()
+            if detail:
+                QMessageBox.information(self, str(record.get("title", "") or "Spotter History"), detail)
+                return
+        idx = self._screen_index_by_label.get(screen, -1)
+        if idx >= 0:
+            self._set_screen(idx)
+
+    def show_quick_search_results(self, query: str, anchor: QWidget | None = None) -> bool:
+        results = self.quick_search(query)
+        if not results:
+            try:
+                service = getattr(self, "action_feedback_service", None)
+                if service is not None:
+                    service.publish(
+                        scope="global",
+                        status="info",
+                        summary=f"No FIO results for '{str(query or '').strip()}'.",
+                        detail="Try a radio name, schedule, group, frequency, setting, message action, or setup issue.",
+                        source_surface="quick_search",
+                    )
+            except Exception:
+                pass
+            return False
+        anchor_widget = anchor or self
+        menu = QMenu(anchor_widget)
+        last_category = ""
+        for record in results:
+            category = str(record.get("category", "Result") or "Result")
+            if category != last_category:
+                header = QAction(category, menu)
+                header.setEnabled(False)
+                menu.addAction(header)
+                last_category = category
+            title = str(record.get("title", "") or "")
+            subtitle = str(record.get("subtitle", "") or "")
+            action = QAction(f"{title}  -  {subtitle}" if subtitle else title, menu)
+            action.setData(dict(record))
+            menu.addAction(action)
+        selected = menu.exec(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+        if selected is None or not selected.isEnabled():
+            return True
+        data = selected.data()
+        if isinstance(data, Mapping):
+            self._activate_quick_search_result(data)
+        return True
+
     def _style_station_command_bar(self, theme: dict) -> None:
         if not hasattr(self, "station_command_bar"):
             return
@@ -3126,6 +3451,20 @@ class MainWindow(QMainWindow):
                 f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
                 f"border: 1px solid {border}; border-radius: 5px; padding: 4px 10px; font-weight: 800;"
                 "font-size: 20px;"
+                "}"
+            )
+        if getattr(self, "station_command_radio_combo", None) is not None:
+            self.station_command_radio_combo.setStyleSheet(
+                "QComboBox#stationCommandRadioSelector {"
+                f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
+                f"border: 1px solid {border}; border-radius: 5px; padding: 4px 28px 4px 10px; font-weight: 800;"
+                "font-size: 20px;"
+                "}"
+                "QComboBox#stationCommandRadioSelector::drop-down {"
+                "border: none; width: 24px;"
+                "}"
+                "QComboBox#stationCommandRadioSelector QAbstractItemView {"
+                f"background: {theme.get('surface', '#FFFFFF')}; color: {text}; selection-background-color: {border};"
                 "}"
             )
         if getattr(self, "station_command_duration_combo", None) is not None:
@@ -3838,6 +4177,8 @@ class MainWindow(QMainWindow):
             restrictions.append("background ingest off")
         if not MainWindow._runtime_policy_enabled(policy, "use_launch_control", True):
             restrictions.append("launch control off")
+        if not swap_summary and restrictions == ["launch control off"]:
+            return ""
         if not restrictions:
             return swap_summary
         operating_txt = operating_name or "assigned operating model"
@@ -3862,7 +4203,22 @@ class MainWindow(QMainWindow):
             pass
 
     def _set_nav_visibility_for_screen(self, screen_label: str, visible: bool) -> None:
-        screen_idx = self._screen_index_by_label.get(str(screen_label or "").strip())
+        label = str(screen_label or "").strip()
+        if label == "Settings":
+            indices = list(getattr(self, "_settings_nav_button_indices", {}).values())
+        elif label == "Messages":
+            indices = list(getattr(self, "_messages_nav_button_indices", {}).values())
+        else:
+            indices = []
+        if indices:
+            for nav_idx in indices:
+                if 0 <= nav_idx < len(self.nav_buttons):
+                    try:
+                        self.nav_buttons[nav_idx].setVisible(bool(visible))
+                    except Exception:
+                        pass
+            return
+        screen_idx = self._screen_index_by_label.get(label)
         if screen_idx is None:
             return
         nav_idx = self._nav_screen_index_map.get(screen_idx)
@@ -5270,15 +5626,15 @@ class MainWindow(QMainWindow):
         self.logo_label.setPixmap(pix)
 
     def _load_nav_group_states(self) -> dict[str, bool]:
-        # Station and FreqPlanner are primary workspaces; keep their children
-        # discoverable on startup. NCS/Operators remain compact by default.
+        # Keep main navigation compact on startup. Screen changes and Quick
+        # Search expand the relevant group when navigation intent is explicit.
         defaults = {
-            "Station": True,
-            "FreqPlanner": True,
-            "Messages": True,
+            "Station": False,
+            "FreqPlanner": False,
+            "Messages": False,
             "NCS": False,
             "Operators": False,
-            "Settings": True,
+            "Settings": False,
         }
         try:
             raw = self.settings.get("main_nav_group_states", {}) or {}
@@ -5293,10 +5649,6 @@ class MainWindow(QMainWindow):
             for key in defaults:
                 if key in raw:
                     defaults[key] = bool(raw.get(key))
-            # Older 7A builds could persist auto-collapsed primary workspaces.
-            # Reset those so schedules and Station details do not vanish after restart.
-            defaults["Station"] = True
-            defaults["FreqPlanner"] = True
         return defaults
 
     def _persist_nav_group_states(self) -> None:
@@ -5823,7 +6175,10 @@ class MainWindow(QMainWindow):
                         )
                     else:
                         nav_idx = self._nav_screen_index_map.get(index)
-                    self._expand_nav_group_for_screen(label)
+                    if bool(getattr(self, "_suppress_initial_nav_group_auto_expand", False)):
+                        self._suppress_initial_nav_group_auto_expand = False
+                    else:
+                        self._expand_nav_group_for_screen(label)
                     if nav_idx is not None and 0 <= nav_idx < len(self.nav_buttons):
                         btn = self.nav_buttons[nav_idx]
                         if not btn.isChecked():

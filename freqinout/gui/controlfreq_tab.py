@@ -254,6 +254,34 @@ class ControlFreqTab(QWidget):
         root.setSpacing(8)
         self.controlfreq_scroll.setWidget(self.controlfreq_content)
 
+        self.readiness_review_widget = QWidget()
+        readiness_layout = QVBoxLayout(self.readiness_review_widget)
+        readiness_layout.setContentsMargins(10, 8, 10, 8)
+        readiness_layout.setSpacing(8)
+        self.readiness_review_label = QLabel()
+        self.readiness_review_label.setWordWrap(True)
+        readiness_layout.addWidget(self.readiness_review_label)
+        readiness_actions = QGridLayout()
+        readiness_actions.setContentsMargins(0, 0, 0, 0)
+        readiness_actions.setHorizontalSpacing(8)
+        readiness_actions.setVerticalSpacing(8)
+        self.readiness_review_now_btn = QPushButton("Review Now")
+        self.readiness_review_now_btn.clicked.connect(self._review_readiness_now)
+        readiness_actions.addWidget(self.readiness_review_now_btn, 0, 0)
+        self.readiness_review_copy_btn = QPushButton("Copy Summary")
+        self.readiness_review_copy_btn.clicked.connect(self._copy_readiness_review_summary)
+        readiness_actions.addWidget(self.readiness_review_copy_btn, 0, 1)
+        self.readiness_review_dismiss_btn = QPushButton("Dismiss")
+        self.readiness_review_dismiss_btn.clicked.connect(self._dismiss_readiness_review)
+        readiness_actions.addWidget(self.readiness_review_dismiss_btn, 0, 2)
+        self.readiness_review_suppress_btn = QPushButton("Do Not Remind Again For This Version")
+        self.readiness_review_suppress_btn.clicked.connect(self._suppress_readiness_review_for_version)
+        readiness_actions.addWidget(self.readiness_review_suppress_btn, 1, 0, 1, 3)
+        readiness_actions.setColumnStretch(3, 1)
+        readiness_layout.addLayout(readiness_actions)
+        self.readiness_review_widget.setVisible(False)
+        root.addWidget(self.readiness_review_widget)
+
         header = QHBoxLayout()
         title = QLabel("<h3>ControlFreq</h3>")
         header.addWidget(title)
@@ -269,11 +297,17 @@ class ControlFreqTab(QWidget):
         filter_row.setSpacing(8)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Filter by keyword...")
+        self.search_edit.setPlaceholderText("Search FIO... radios, schedules, messages, settings")
         self.search_edit.textChanged.connect(self._on_filters_changed)
-        self.search_edit.setMinimumWidth(340)
-        self.search_edit.setMaximumWidth(420)
+        self.search_edit.returnPressed.connect(self._show_app_search_results)
+        self.search_edit.setMinimumWidth(360)
+        self.search_edit.setMaximumWidth(520)
         filter_row.addWidget(self.search_edit, 1)
+
+        self.app_search_btn = QPushButton("Search FIO")
+        self.app_search_btn.setToolTip("Search across radios, schedules, settings, actions, and current setup issues.")
+        self.app_search_btn.clicked.connect(self._show_app_search_results)
+        filter_row.addWidget(self.app_search_btn)
 
         self.group_combo = QComboBox()
         self.group_combo.setMinimumWidth(180)
@@ -314,34 +348,6 @@ class ControlFreqTab(QWidget):
         root.addWidget(self.plan_context_label)
         if self.plan_context_service is not None:
             self.plan_context_label.refresh_context(refresh=True)
-
-        self.readiness_review_widget = QWidget()
-        readiness_layout = QVBoxLayout(self.readiness_review_widget)
-        readiness_layout.setContentsMargins(10, 8, 10, 8)
-        readiness_layout.setSpacing(8)
-        self.readiness_review_label = QLabel()
-        self.readiness_review_label.setWordWrap(True)
-        readiness_layout.addWidget(self.readiness_review_label)
-        readiness_actions = QGridLayout()
-        readiness_actions.setContentsMargins(0, 0, 0, 0)
-        readiness_actions.setHorizontalSpacing(8)
-        readiness_actions.setVerticalSpacing(8)
-        self.readiness_review_now_btn = QPushButton("Review Now")
-        self.readiness_review_now_btn.clicked.connect(self._review_readiness_now)
-        readiness_actions.addWidget(self.readiness_review_now_btn, 0, 0)
-        self.readiness_review_copy_btn = QPushButton("Copy Summary")
-        self.readiness_review_copy_btn.clicked.connect(self._copy_readiness_review_summary)
-        readiness_actions.addWidget(self.readiness_review_copy_btn, 0, 1)
-        self.readiness_review_dismiss_btn = QPushButton("Dismiss")
-        self.readiness_review_dismiss_btn.clicked.connect(self._dismiss_readiness_review)
-        readiness_actions.addWidget(self.readiness_review_dismiss_btn, 0, 2)
-        self.readiness_review_suppress_btn = QPushButton("Do Not Remind Again For This Version")
-        self.readiness_review_suppress_btn.clicked.connect(self._suppress_readiness_review_for_version)
-        readiness_actions.addWidget(self.readiness_review_suppress_btn, 1, 0, 1, 3)
-        readiness_actions.setColumnStretch(3, 1)
-        readiness_layout.addLayout(readiness_actions)
-        self.readiness_review_widget.setVisible(False)
-        root.addWidget(self.readiness_review_widget)
 
         updated_row = QHBoxLayout()
 
@@ -1220,6 +1226,7 @@ class ControlFreqTab(QWidget):
         try:
             theme = self._theme()
             self.help_btn.setStyleSheet(button_style("secondary", theme))
+            self.app_search_btn.setStyleSheet(button_style("secondary", theme))
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
             self.freq_action_btn.setStyleSheet(button_style("muted", theme))
@@ -1797,6 +1804,18 @@ class ControlFreqTab(QWidget):
         group_active = bool((self.group_combo.currentData() or "").strip())
         window_active = int(self.activity_window_combo.currentData() or 120) != 120
         return search_active or group_active or window_active
+
+    def _show_app_search_results(self) -> None:
+        query = (self.search_edit.text() or "").strip()
+        if not query:
+            return
+        root = self.window()
+        if hasattr(root, "show_quick_search_results"):
+            try:
+                root.show_quick_search_results(query, self.search_edit)
+                return
+            except Exception as e:
+                log.debug("ControlFreq: app search failed: %s", e)
 
     def _update_clear_filters_style(self) -> None:
         try:

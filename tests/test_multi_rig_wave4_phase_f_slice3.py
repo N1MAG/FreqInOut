@@ -28,6 +28,23 @@ def _status_snapshot(*_args, **_kwargs):
     }
 
 
+def _create_primary_device(store: MultiRadioStore, name: str = "Primary Rig") -> dict[str, object]:
+    device = store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "flrig",
+            "device_class": "tx_rx",
+            "launch_enabled": False,
+            "launch_path": "",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    store.set_device_profile_runtime_active(int(device["id"]), True)
+    store.set_runtime_primary_device_profile(int(device["id"]))
+    return store.get_runtime_primary_device_profile() or device
+
+
 def _configure_varac_device(store: MultiRadioStore, device: dict[str, object], root: str) -> dict[str, object]:
     return store.save_device_profile(
         {
@@ -47,7 +64,11 @@ def test_varac_membership_enforces_unique_instance_and_one_enabled_membership_pe
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = _configure_varac_device(store, store.get_runtime_primary_device_profile() or {}, "C:/VarAC/Main")
+    primary = _configure_varac_device(
+        store,
+        store.get_runtime_primary_device_profile() or _create_primary_device(store),
+        "C:/VarAC/Main",
+    )
     second = _configure_varac_device(
         store,
         store.save_device_profile({"name": "Cluster Node B", "control_backend": "flrig"}),
@@ -74,7 +95,11 @@ def test_gateway_handler_must_be_enabled_member_and_member_cannot_be_removed_or_
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = _configure_varac_device(store, store.get_runtime_primary_device_profile() or {}, "C:/VarAC/Main")
+    primary = _configure_varac_device(
+        store,
+        store.get_runtime_primary_device_profile() or _create_primary_device(store),
+        "C:/VarAC/Main",
+    )
     second = _configure_varac_device(
         store,
         store.save_device_profile({"name": "Cluster Node B", "control_backend": "flrig"}),
@@ -121,7 +146,11 @@ def test_station_runtime_manager_warns_for_missing_shared_db_and_missing_gateway
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = _configure_varac_device(store, store.get_runtime_primary_device_profile() or {}, "C:/VarAC/Main")
+    primary = _configure_varac_device(
+        store,
+        store.get_runtime_primary_device_profile() or _create_primary_device(store),
+        "C:/VarAC/Main",
+    )
     second = _configure_varac_device(
         store,
         store.save_device_profile({"name": "Cluster Node B", "control_backend": "flrig"}),

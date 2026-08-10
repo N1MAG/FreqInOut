@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.js8_expect_dispatcher import dispatch_expect_auto_reply, record_expect_dispatch_hold
 from freqinout.core.js8_spotter_forms import (
     MAPPER_SETTINGS_KEY,
     form_id_enabled,
@@ -16,6 +18,8 @@ from freqinout.core.js8_spotter_forms import (
     forms_enabled_for,
     normalize_form_code,
 )
+from freqinout.core.js8_spotter_decode import decode_spotter_form_text
+from freqinout.core.js8_expect_store import ExpectEvaluationResult, evaluate_expect_request
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 
@@ -129,10 +133,21 @@ class JS8FormDecoder:
         return questions
 
 
+ExpectDispatchClientFactory = Callable[[str, str], Any]
+
+
 class MessageIngestor:
-    def __init__(self, settings: SettingsManager):
+    def __init__(
+        self,
+        settings: SettingsManager,
+        *,
+        expect_dispatch_client_factory: Optional[ExpectDispatchClientFactory] = None,
+        expect_auto_reply_enabled: Optional[bool] = None,
+    ):
         self.settings = settings
         self._decoder = JS8FormDecoder(settings)
+        self._expect_dispatch_client_factory = expect_dispatch_client_factory
+        self._expect_auto_reply_enabled_override = expect_auto_reply_enabled
 
     def ingest_js8_messages(self) -> None:
         inbox_path = self._inbox_path()
@@ -230,13 +245,21 @@ class MessageIngestor:
             except Exception:
                 pass
 
-    def ingest_spotter_from_directed(self) -> None:
-        directed_path = self._resolve_directed_path()
+    def ingest_spotter_from_directed(
+        self,
+        *,
+        directed_path: Optional[Path] = None,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        offset_key: str = "",
+        evaluate_expect: bool = True,
+    ) -> None:
+        directed_path = directed_path or self._resolve_directed_path()
         if not directed_path or not directed_path.exists():
             return
         self._ensure_spotter_table()
         try:
-            offset = int(self.settings.get(self._spotter_offset_key(), 0) or 0)
+            offset = int(self.settings.get(offset_key or self._spotter_offset_key(directed_path, source_radio_id), 0) or 0)
         except Exception:
             offset = 0
         try:
@@ -263,10 +286,19 @@ class MessageIngestor:
                     token = str(parsed.get("spotter_token") or "").strip().upper()
                     if not from_call:
                         continue
-                    if self._spotter_exists(from_call, form_id, token, raw_form):
+                    if self._spotter_exists(
+                        from_call,
+                        form_id,
+                        token,
+                        raw_form,
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                    ):
                         continue
                     form_part, resp, comment = self._parse_form_parts(raw_form)
                     decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+                    if not decoded or decoded == raw_form:
+                        decoded = decode_spotter_form_text(raw_form)
                     db_path = self._db_path()
                     if not db_path:
                         continue
@@ -277,8 +309,9 @@ class MessageIngestor:
                         """
                         INSERT INTO spotter_traffic
                             (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
-                             raw_text, decoded_text, state, read_ts, relay_via, ingested_ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?)
+                             raw_text, decoded_text, state, read_ts, relay_via,
+                             source_radio_id, js8_instance_id, ingested_ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?)
                         """,
                         (
                             float(parsed.get("utc_ts") or 0.0),
@@ -290,6 +323,8 @@ class MessageIngestor:
                             raw_form,
                             decoded or raw_form,
                             str(parsed.get("relay_via") or "").strip().upper(),
+                            str(source_radio_id or ""),
+                            str(js8_instance_id or ""),
                             ingested_ts,
                         ),
                     )
@@ -305,11 +340,204 @@ class MessageIngestor:
                     )
                     conn.commit()
                     conn.close()
-                self.settings.set(self._spotter_offset_key(), int(last_pos))
+                    if evaluate_expect:
+                        try:
+                            event_id = f"directed:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
+                            evaluation = evaluate_expect_request(
+                                expect_key=f"F!{form_id}",
+                                requesting_callsign=from_call,
+                                target_group=str(parsed.get("to_call") or ""),
+                                source_radio_id=source_radio_id,
+                                js8_instance_id=js8_instance_id,
+                                event_id=event_id,
+                            )
+                            self._maybe_dispatch_expect_auto_reply(
+                                evaluation,
+                                event_id=event_id,
+                                source_radio_id=source_radio_id,
+                                source_js8_instance_id=js8_instance_id,
+                                requesting_callsign=from_call,
+                                target_group=str(parsed.get("to_call") or ""),
+                            )
+                        except Exception as exc:
+                            log.debug("MessageIngest: Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
+                self.settings.set(offset_key or self._spotter_offset_key(directed_path, source_radio_id), int(last_pos))
                 if hasattr(self.settings, "save"):
                     self.settings.save()
         except Exception as e:
             log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
+
+    def ingest_spotter_from_js8_events(
+        self,
+        messages: Iterable[Dict[str, Any]],
+        *,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        evaluate_expect: bool = True,
+    ) -> int:
+        self._ensure_spotter_table()
+        imported = 0
+        for event in list(messages or []):
+            parsed = self._parse_js8_spotter_event(event)
+            if not parsed:
+                continue
+            form_id = str(parsed.get("form_id") or "").strip()
+            raw_form = str(parsed.get("raw_form") or "").strip()
+            from_call = str(parsed.get("from_call") or "").strip().upper()
+            token = str(parsed.get("spotter_token") or "").strip().upper()
+            if not form_id or not raw_form or not from_call:
+                continue
+            if self._spotter_exists(
+                from_call,
+                form_id,
+                token,
+                raw_form,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+            ):
+                continue
+            form_part, resp, comment = self._parse_form_parts(raw_form)
+            decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+            if not decoded or decoded == raw_form:
+                decoded = decode_spotter_form_text(raw_form)
+            db_path = self._db_path()
+            if not db_path:
+                continue
+            ingested_ts = float(time.time())
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO spotter_traffic
+                        (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
+                         raw_text, decoded_text, state, read_ts, relay_via,
+                         source_radio_id, js8_instance_id, ingested_ts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(parsed.get("utc_ts") or 0.0),
+                        str(parsed.get("utc_str") or ""),
+                        from_call,
+                        str(parsed.get("to_call") or "").strip().upper(),
+                        form_id,
+                        token,
+                        raw_form,
+                        decoded or raw_form,
+                        str(parsed.get("relay_via") or "").strip().upper(),
+                        str(source_radio_id or ""),
+                        str(js8_instance_id or ""),
+                        ingested_ts,
+                    ),
+                )
+                self._upsert_spotter_station_status(
+                    cur,
+                    from_call=from_call,
+                    form_id=form_id,
+                    response_code=resp,
+                    raw_form=raw_form,
+                    utc_ts=float(parsed.get("utc_ts") or 0.0),
+                    utc_str=str(parsed.get("utc_str") or ""),
+                    ingested_ts=ingested_ts,
+                )
+                conn.commit()
+                conn.close()
+                imported += 1
+            except Exception as exc:
+                log.debug("MessageIngest: JS8 event Spotter insert failed: %s", exc)
+                continue
+            if evaluate_expect:
+                try:
+                    event_id = f"js8-api:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
+                    evaluation = evaluate_expect_request(
+                        expect_key=f"F!{form_id}",
+                        requesting_callsign=from_call,
+                        target_group=str(parsed.get("to_call") or ""),
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        event_id=event_id,
+                    )
+                    self._maybe_dispatch_expect_auto_reply(
+                        evaluation,
+                        event_id=event_id,
+                        source_radio_id=source_radio_id,
+                        source_js8_instance_id=js8_instance_id,
+                        requesting_callsign=from_call,
+                        target_group=str(parsed.get("to_call") or ""),
+                    )
+                except Exception as exc:
+                    log.debug("MessageIngest: JS8 event Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
+        return imported
+
+    def _expect_auto_reply_runtime_enabled(self) -> bool:
+        if self._expect_auto_reply_enabled_override is not None:
+            return bool(self._expect_auto_reply_enabled_override)
+        try:
+            return bool(self.settings.get("js8_expect_unattended_auto_reply_enabled", False))
+        except Exception:
+            return False
+
+    def _maybe_dispatch_expect_auto_reply(
+        self,
+        evaluation: ExpectEvaluationResult,
+        *,
+        event_id: str,
+        source_radio_id: object = "",
+        source_js8_instance_id: object = "",
+        requesting_callsign: object = "",
+        target_group: object = "",
+    ) -> None:
+        if evaluation.decision != "reply-ready":
+            return
+        if not self._expect_auto_reply_runtime_enabled():
+            return
+        client_factory = self._expect_dispatch_client_factory
+        if client_factory is None:
+            record_expect_dispatch_hold(
+                evaluation=evaluation,
+                reason="No JS8 client factory is configured for Expect auto-reply.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                source_js8_instance_id=source_js8_instance_id,
+                requesting_callsign=requesting_callsign,
+                target_group=target_group,
+            )
+            log.debug("MessageIngest: Expect auto-reply runtime enabled, but no JS8 client factory is configured.")
+            return
+        reply_radio_id = str(evaluation.reply_radio_id or source_radio_id or "")
+        reply_js8_instance_id = str(evaluation.reply_js8_instance_id or source_js8_instance_id or "")
+        try:
+            client = client_factory(reply_radio_id, reply_js8_instance_id)
+            if client is None:
+                reason = "No JS8 client is available for this Expect auto-reply source."
+                source_owner = getattr(client_factory, "__self__", None)
+                status = getattr(source_owner, "last_status", None)
+                status_reason = str(getattr(status, "reason", "") or "").strip()
+                if status_reason:
+                    reason = status_reason
+                record_expect_dispatch_hold(
+                    evaluation=evaluation,
+                    reason=reason,
+                    event_id=event_id,
+                    source_radio_id=source_radio_id,
+                    source_js8_instance_id=source_js8_instance_id,
+                    requesting_callsign=requesting_callsign,
+                    target_group=target_group,
+                )
+                log.debug("MessageIngest: Expect auto-reply client factory returned no client for radio=%s js8=%s.", reply_radio_id, reply_js8_instance_id)
+                return
+            dispatch_expect_auto_reply(
+                evaluation=evaluation,
+                client=client,
+                runtime_unattended_enabled=True,
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                source_js8_instance_id=source_js8_instance_id,
+                requesting_callsign=requesting_callsign,
+                target_group=target_group,
+            )
+        except Exception as exc:
+            log.debug("MessageIngest: Expect auto-reply dispatch failed for %s: %s", event_id, exc)
 
     def _db_path(self) -> Path | None:
         try:
@@ -388,7 +616,17 @@ class MessageIngestor:
         except Exception as e:
             log.debug("MessageIngest: failed to enqueue NEXT MSG ID: %s", e)
 
-    def _spotter_offset_key(self) -> str:
+    def _spotter_offset_key(self, directed_path: Optional[Path] = None, source_radio_id: object = "") -> str:
+        source = str(source_radio_id or "").strip()
+        if source:
+            return f"spotter_directed_offset_radio_{source}"
+        if directed_path is not None:
+            try:
+                key_src = str(directed_path.expanduser().resolve())
+            except Exception:
+                key_src = str(directed_path)
+            digest = hashlib.sha1(key_src.encode("utf-8", errors="replace")).hexdigest()[:16]
+            return f"spotter_directed_offset_path_{digest}"
         return "spotter_directed_offset"
 
     def _resolve_directed_path(self) -> Optional[Path]:
@@ -397,30 +635,48 @@ class MessageIngestor:
             return None
         return Path(directed)
 
-    def _spotter_exists(self, from_call: str, form_id: str, token: str, raw_text: str) -> bool:
+    def _spotter_exists(
+        self,
+        from_call: str,
+        form_id: str,
+        token: str,
+        raw_text: str,
+        *,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+    ) -> bool:
         db_path = self._db_path()
         if not db_path:
             return False
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
+            source_radio = str(source_radio_id or "").strip()
+            source_js8 = str(js8_instance_id or "").strip()
+            source_clause = ""
+            source_params: tuple[object, ...] = ()
+            if source_radio or source_js8:
+                source_clause = " AND COALESCE(source_radio_id, '')=? AND COALESCE(js8_instance_id, '')=?"
+                source_params = (source_radio, source_js8)
             if token:
                 cur.execute(
-                    """
+                    f"""
                     SELECT 1 FROM spotter_traffic
                     WHERE from_call=? AND form_id=? AND spotter_token=?
+                    {source_clause}
                     LIMIT 1
                     """,
-                    (from_call, form_id, token),
+                    (from_call, form_id, token) + source_params,
                 )
             else:
                 cur.execute(
-                    """
+                    f"""
                     SELECT 1 FROM spotter_traffic
                     WHERE from_call=? AND form_id=? AND raw_text=?
+                    {source_clause}
                     LIMIT 1
                     """,
-                    (from_call, form_id, raw_text),
+                    (from_call, form_id, raw_text) + source_params,
                 )
             exists = cur.fetchone() is not None
             conn.close()
@@ -485,6 +741,60 @@ class MessageIngestor:
             "spotter_token": token,
             "raw_form": raw_form,
             "relay_via": relay_via,
+        }
+
+    def _parse_js8_spotter_event(self, event: Dict[str, Any]) -> Optional[Dict[str, str | float]]:
+        if not isinstance(event, dict):
+            return None
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        text = str(params.get("TEXT") or event.get("value") or "").strip()
+        if not text:
+            return None
+        text_upper = text.upper()
+        if "?" in text_upper or "E?" in text_upper or "..." in text:
+            return None
+        if re.search(r"\bMSG\b", text_upper):
+            return None
+        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", text_upper)
+        if not form_match:
+            return None
+        form_start = text_upper.find("F!")
+        raw_form = text[form_start:].strip()
+        raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
+        if raw_form.endswith("\u2662"):
+            raw_form = raw_form[:-1].rstrip()
+        token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
+        utc_str = str(params.get("UTC") or event.get("time") or "").strip()
+        utc_ts = 0.0
+        if utc_str:
+            try:
+                utc_ts = datetime.datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except Exception:
+                utc_ts = 0.0
+        if utc_ts <= 0:
+            utc_ts = time.time()
+            utc_str = datetime.datetime.fromtimestamp(utc_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        from_call = str(params.get("FROM") or "").strip().upper()
+        to_call = str(params.get("TO") or "").strip().upper()
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", text_upper)
+        if de_match:
+            from_call = de_match.group(1).strip().upper()
+        if not from_call:
+            return None
+        if not to_call:
+            leading = text[:form_start].strip()
+            to_call = (leading.split()[-1] if leading.split() else "").strip().strip(",").upper()
+        if not to_call:
+            to_call = str(params.get("CMD") or "").strip().upper()
+        return {
+            "utc_ts": float(utc_ts),
+            "utc_str": utc_str,
+            "from_call": from_call,
+            "to_call": to_call,
+            "form_id": form_match.group(1),
+            "spotter_token": token_match.group(1) if token_match else "",
+            "raw_form": raw_form,
+            "relay_via": str(params.get("FROM") or "").strip().upper(),
         }
 
     @staticmethod
@@ -714,6 +1024,8 @@ class MessageIngestor:
                     read_ts REAL,
                     flag_state INTEGER DEFAULT 0,
                     relay_via TEXT,
+                    source_radio_id TEXT,
+                    js8_instance_id TEXT,
                     ingested_ts REAL
                 )
                 """
@@ -739,6 +1051,16 @@ class MessageIngestor:
                 cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
             except Exception:
                 pass
+            for col_name, col_ddl in (
+                ("relay_via", "TEXT"),
+                ("source_radio_id", "TEXT"),
+                ("js8_instance_id", "TEXT"),
+                ("ingested_ts", "REAL"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE spotter_traffic ADD COLUMN {col_name} {col_ddl}")
+                except Exception:
+                    pass
             for col_name, col_ddl in (
                 ("status_source", "TEXT"),
                 ("status_source_detail", "TEXT"),

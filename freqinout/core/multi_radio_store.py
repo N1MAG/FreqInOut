@@ -3639,6 +3639,10 @@ def _normalize_runtime_primary_device(
     chosen = next((row for row in active_candidates if int(row[3] or 0) == 1), None)
     if chosen is None and active_candidates:
         chosen = active_candidates[0]
+    if chosen is None and not allow_pre_migration:
+        conn.execute("UPDATE device_profiles SET runtime_primary=0 WHERE runtime_primary<>0")
+        conn.commit()
+        return None
     if chosen is None:
         chosen = candidates[0]
     chosen_id = int(chosen[0])

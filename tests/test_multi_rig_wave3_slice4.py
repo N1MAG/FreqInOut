@@ -56,6 +56,14 @@ def test_scheduler_filters_schedule_rows_by_primary_target_scope(monkeypatch, tm
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
     primary = store.get_runtime_primary_device_profile()
     assert primary is not None
     primary_id = int(primary["id"])

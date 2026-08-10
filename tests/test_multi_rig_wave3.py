@@ -5,7 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QWidget
 import pytest
 
@@ -20,6 +20,25 @@ from freqinout.gui import controlfreq_tab as controlfreq_mod
 from freqinout.gui import qsy_helper
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.qsy_helper import scheduler_enabled, set_scheduler_enabled_override
+
+
+def _create_primary_radio(store: MultiRadioStore, name: str = "Primary Radio") -> dict:
+    return store.save_device_profile(
+        {
+            "name": name,
+            "control_backend": "manual",
+            "device_class": "tx_rx",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
 
 
 def _select_assignment_devices(tab, device_ids: list[int]) -> None:
@@ -43,8 +62,7 @@ def test_store_supports_operating_profile_crud_and_effective_assignment_override
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_radio(store)
 
     field_ops = store.save_operating_profile(
         {
@@ -96,8 +114,7 @@ def test_settings_manager_reinit_preserves_effective_operating_assignment(monkey
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_radio(store)
 
     field_ops = store.save_operating_profile(
         {
@@ -135,8 +152,7 @@ def test_station_runtime_manager_primary_snapshot_includes_operating_policy(monk
 
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
-    primary = store.get_runtime_primary_device_profile()
-    assert primary is not None
+    primary = store.get_runtime_primary_device_profile() or _create_primary_radio(store)
 
     field_ops = store.save_operating_profile(
         {
@@ -216,10 +232,11 @@ def test_device_runtime_snapshot_defaults_launch_policy_off_when_missing() -> No
 def test_settings_tab_supports_operating_profiles_and_assignments(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _create_primary_radio(store)
 
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -245,21 +262,17 @@ def test_settings_tab_supports_operating_profiles_and_assignments(monkeypatch, t
         assert any(row["name"] == "Field Ops" for row in tab.operating_profiles)
         assert tab.device_assignments_table.rowCount() >= 1
 
-        primary = store.get_runtime_primary_device_profile()
-        assert primary is not None
         _select_assignment_devices(tab, [int(primary["id"])])
 
-        monkeypatch.setattr(
-            tab,
-            "_open_assignment_dialog",
-            lambda selected: {
-                "operating_profile_id": int(field_ops["id"]),
-                "assignment_state": "temporary_override",
-                "reason": "Field assignment",
-                "ends_utc": "",
-            },
-        )
         tab._assign_operating_profile_to_selected_devices()
+        profile_idx = tab.assignment_editor_plan_combo.findData(int(field_ops["id"]))
+        assert profile_idx >= 0
+        tab.assignment_editor_plan_combo.setCurrentIndex(profile_idx)
+        state_idx = tab.assignment_editor_state_combo.findData("temporary_override")
+        assert state_idx >= 0
+        tab.assignment_editor_state_combo.setCurrentIndex(state_idx)
+        tab.assignment_editor_reason_edit.setText("Field assignment")
+        tab._save_assignment_editor()
 
         effective = store.get_effective_assignment_for_device(int(primary["id"]))
         assert effective is not None
@@ -338,7 +351,7 @@ def test_scheduler_engine_runtime_timer_policy_override(monkeypatch, tmp_path):
 
 
 def test_hold_duration_helpers_prefer_runtime_profile_default() -> None:
-    QApplication.instance() or QApplication([])
+    _qapplication_or_skip()
 
     class _Settings:
         def get(self, key, default=None):
@@ -361,7 +374,9 @@ def test_runtime_hold_duration_uses_active_radio_profile() -> None:
     control_source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
     helper_source = Path("freqinout/gui/qsy_helper.py").read_text(encoding="utf-8")
 
-    assert "from freqinout.core.multi_radio_store import DEFAULT_HOLD_DURATION_MINUTES, SUPPORTED_HOLD_DURATION_MINUTES" in helper_source
+    assert "from freqinout.core.multi_radio_store import (" in helper_source
+    assert "DEFAULT_HOLD_DURATION_MINUTES" in helper_source
+    assert "SUPPORTED_HOLD_DURATION_MINUTES" in helper_source
     assert "HOLD_DURATION_PRESETS: tuple[int, ...] = tuple(sorted(SUPPORTED_HOLD_DURATION_MINUTES))" in helper_source
     assert "def get_hold_duration_default(settings, profile" in helper_source
     assert 'profile.get("schedule_hold_minutes_default")' in helper_source
@@ -442,9 +457,11 @@ class StubTab(QWidget):
     local_operator_updated = Signal()
     local_data_updated = Signal()
     sop_data_changed = Signal()
+    health_details_requested = Signal(str)
 
     def __init__(self, parent=None, **_kwargs) -> None:
         super().__init__(parent)
+        self._running = False
 
     def on_settings_saved(self) -> None:
         return
@@ -608,8 +625,9 @@ class StubScheduler(QObject):
 
 
 class StubBackgroundIngest(QObject):
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, **_kwargs) -> None:
         super().__init__()
+        self.settings = settings
         self._running = False
 
     def start(self, *, initial_stagger: bool = True) -> None:
@@ -681,7 +699,7 @@ def _nav_button(window, text: str):
 def _make_window(monkeypatch, tmp_path, active_profile, active_policy):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     def _stub_module(name: str, **attrs):
         module = types.ModuleType(name)
@@ -775,7 +793,8 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
         map_idx = window._screen_index_by_label["Map"]
         assert window._suppressed_screen_labels == {"Map", "Messages", "NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}
         assert _nav_button(window, "Map").isHidden() is True
-        assert _nav_button(window, "Messages").isHidden() is True
+        assert _nav_button(window, "Inbox").isHidden() is True
+        assert _nav_button(window, "Compose").isHidden() is True
         assert _nav_button(window, "FLDigi / SSB").isHidden() is True
         assert _nav_button(window, "JS8Call").isHidden() is True
         assert _nav_button(window, "VHF/UHF").isHidden() is True
@@ -799,8 +818,9 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
         assert window.launch_orchestrator.start_calls == 0
     finally:
         window._on_app_about_to_quit()
-        window.deleteLater()
         app.processEvents()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def test_controlfreq_active_hold_allows_new_qsy_without_resume(monkeypatch):

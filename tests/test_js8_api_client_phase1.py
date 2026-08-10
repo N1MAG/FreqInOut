@@ -285,6 +285,25 @@ def test_native_client_request_fails_fast_when_not_connected() -> None:
         client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ",))
 
 
+def test_native_client_send_one_way_command() -> None:
+    server = _FakeJs8Server({})
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        client.send("TX.SET_TEXT", value="")
+
+        deadline = time.time() + 1.0
+        while not server.received and time.time() < deadline:
+            time.sleep(0.02)
+
+        assert server.received
+        assert server.received[0]["type"] == "TX.SET_TEXT"
+        assert "_ID" not in server.received[0].get("params", {})
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_probe_capabilities_classifies_full_api() -> None:
     def version_response(request: Mapping[str, Any]) -> Dict[str, Any]:
         return _response("STATION.VERSION", request, {"VERSION": "3.0.2"})

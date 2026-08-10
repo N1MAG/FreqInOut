@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.schedule_projection import build_blended_schedule_projection
 
 
 LIVE_SOURCE_SET_ID = "__live__"
@@ -15,6 +16,7 @@ SELECTED_HF_DAILY_SOURCE_SET_KEY = "freqplanner_selected_hf_daily_schedule_set_i
 SELECTED_HF_NET_SOURCE_SET_KEY = "freqplanner_selected_hf_net_schedule_set_id"
 HF_DAILY_SOURCE_CATEGORY = "hf_daily_schedule"
 HF_NET_SOURCE_CATEGORY = "hf_net_schedule"
+_SOURCE_DEPENDENCY_PREFIXES = (HF_DAILY_SOURCE_CATEGORY, HF_NET_SOURCE_CATEGORY)
 
 
 def slug_source_set_id(value: str) -> str:
@@ -37,6 +39,134 @@ def _parse_refs(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [dict(row) for row in raw if isinstance(row, dict)]
+
+
+def _parse_ref_values(value: Any) -> List[str]:
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    refs: List[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            refs.append(text)
+    return refs
+
+
+def source_schedule_dependency_ref(category: str, set_id: str) -> str:
+    clean_category = str(category or "").strip().lower()
+    clean_set_id = str(set_id or "").strip()
+    if clean_category not in _SOURCE_DEPENDENCY_PREFIXES:
+        return ""
+    if not clean_set_id or clean_set_id == LIVE_SOURCE_SET_ID:
+        return ""
+    return f"{clean_category}:{clean_set_id}"
+
+
+def selected_source_schedule_dependency_refs(settings: Any) -> List[str]:
+    refs = [
+        source_schedule_dependency_ref(
+            HF_DAILY_SOURCE_CATEGORY,
+            selected_source_set_id(settings, SELECTED_HF_DAILY_SOURCE_SET_KEY),
+        ),
+        source_schedule_dependency_ref(
+            HF_NET_SOURCE_CATEGORY,
+            selected_source_set_id(settings, SELECTED_HF_NET_SOURCE_SET_KEY),
+        ),
+    ]
+    return [ref for ref in refs if ref]
+
+
+def _dependency_set_id(source_refs: List[str], category: str) -> str:
+    prefix = f"{category}:"
+    for ref in source_refs:
+        if ref.startswith(prefix):
+            return ref[len(prefix) :]
+    return ""
+
+
+def _rows_for_dependency(settings: Any, category: str, set_id: str) -> List[Dict[str, Any]]:
+    sets_key = HF_DAILY_SOURCE_SETS_KEY if category == HF_DAILY_SOURCE_CATEGORY else HF_NET_SOURCE_SETS_KEY
+    row = source_set_row_by_id_for_category(settings, sets_key, category, set_id)
+    if not row:
+        return []
+    return [dict(item) for item in row.get("rows", []) if isinstance(item, dict)]
+
+
+def _week_start_sunday_utc(now_utc: datetime.datetime) -> datetime.date:
+    return (now_utc.date() - datetime.timedelta(days=(now_utc.weekday() + 1) % 7))
+
+
+def assigned_plan_rf_guard_impacts_for_source_update(
+    settings: Any,
+    category: str,
+    set_id: str,
+    updated_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    dependency_ref = source_schedule_dependency_ref(category, set_id)
+    if not dependency_ref:
+        return []
+    store = MultiRadioStore()
+    plans_by_id = {int(row.get("id", 0) or 0): dict(row) for row in store.list_frequency_plans()}
+    devices_by_id = {int(row.get("id", 0) or 0): dict(row) for row in store.list_device_profiles()}
+    impacts: List[Dict[str, Any]] = []
+    for assignment in store.list_effective_assigned_plans():
+        plan_id = int(assignment.get("frequency_plan_id", 0) or 0)
+        device_id = int(assignment.get("device_profile_id", 0) or 0)
+        plan = plans_by_id.get(plan_id)
+        if not plan:
+            continue
+        source_refs = _parse_ref_values(plan.get("source_refs_json", plan.get("source_refs", "[]")))
+        if dependency_ref not in source_refs:
+            continue
+        daily_set_id = _dependency_set_id(source_refs, HF_DAILY_SOURCE_CATEGORY)
+        net_set_id = _dependency_set_id(source_refs, HF_NET_SOURCE_CATEGORY)
+        daily_rows = _rows_for_dependency(settings, HF_DAILY_SOURCE_CATEGORY, daily_set_id) if daily_set_id else []
+        net_rows = _rows_for_dependency(settings, HF_NET_SOURCE_CATEGORY, net_set_id) if net_set_id else []
+        if category == HF_DAILY_SOURCE_CATEGORY:
+            daily_rows = [dict(row) for row in updated_rows]
+        elif category == HF_NET_SOURCE_CATEGORY:
+            net_rows = [dict(row) for row in updated_rows]
+        projection = build_blended_schedule_projection(
+            daily_rows,
+            net_rows,
+            [],
+            [],
+            week_start_utc=_week_start_sunday_utc(datetime.datetime.now(datetime.timezone.utc)),
+        )
+        payload = dict(plan)
+        refs = projection.schedule_refs()
+        payload["schedule_refs"] = refs
+        payload["schedule_refs_json"] = json.dumps(refs)
+        payload["frequency_refs"] = projection.frequency_refs()
+        payload["group_refs"] = projection.group_refs()
+        try:
+            validation = store.validate_frequency_plan_for_device(device_id, payload)
+        except ValueError as exc:
+            validation = {
+                "state": "blocked",
+                "rf_guard_validation": "enforced",
+                "messages": [str(exc)],
+                "blocked": [str(exc)],
+            }
+        state = str(validation.get("state") or "").strip().lower()
+        if state not in {"blocked", "warning"}:
+            continue
+        device = devices_by_id.get(device_id, {})
+        impacts.append(
+            {
+                "assignment": dict(assignment),
+                "plan": dict(plan),
+                "device": dict(device),
+                "validation": dict(validation),
+            }
+        )
+    return impacts
 
 
 def source_sets_for_category(settings: Any, legacy_key: str, category: str) -> List[Dict[str, Any]]:

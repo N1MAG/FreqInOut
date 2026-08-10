@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
+import pytest
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.settings_manager import SettingsManager
@@ -27,6 +28,13 @@ def _idle_status_snapshot(self, **kwargs):
         "JS8Spotter": {"state": "idle", "tooltip": "JS8Spotter idle"},
         "CommStat": {"state": "idle", "tooltip": "CommStat idle"},
     }
+
+
+def _qapplication_or_skip():
+    app = QApplication.instance()
+    if app is not None and not isinstance(app, QApplication):
+        pytest.skip("A non-GUI QCoreApplication already exists in this test process.")
+    return app or QApplication([])
 
 
 def test_store_derives_shared_ptt_policies_from_device_groups(monkeypatch, tmp_path):
@@ -106,7 +114,7 @@ def test_station_runtime_manager_reports_shared_ptt_lock(monkeypatch, tmp_path):
     default_primary = next(
         row for row in store.list_device_profiles() if str(row.get("system_key", "") or "") == "default_device"
     )
-    if int(default_primary.get("runtime_active", 0) or 0) == 1:
+    if int(default_primary.get("id", 0) or 0) != int(primary["id"]) and int(default_primary.get("runtime_active", 0) or 0) == 1:
         store.set_device_profile_runtime_active(int(default_primary["id"]), False)
 
     monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
@@ -139,7 +147,7 @@ def test_station_runtime_manager_reports_shared_ptt_lock(monkeypatch, tmp_path):
 def test_settings_tab_persists_and_shows_ptt_group(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
-    app = QApplication.instance() or QApplication([])
+    app = _qapplication_or_skip()
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
@@ -175,7 +183,12 @@ def test_settings_tab_persists_and_shows_ptt_group(monkeypatch, tmp_path):
             for row in range(tab.device_profiles_table.rowCount())
             if int(tab.device_profiles_table.item(row, 3).data(Qt.UserRole) or 0) == int(saved["id"])
         )
-        assert tab.device_profiles_table.item(row_index, 8).text() == "AMP-A"
+        ptt_col = next(
+            col
+            for col in range(tab.device_profiles_table.columnCount())
+            if tab.device_profiles_table.horizontalHeaderItem(col).text() == "PTT Group"
+        )
+        assert tab.device_profiles_table.item(row_index, ptt_col).text() == "AMP-A"
     finally:
         tab.deleteLater()
         app.processEvents()

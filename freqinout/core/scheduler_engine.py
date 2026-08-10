@@ -18,6 +18,7 @@ from freqinout.core.js8_defaults import random_default_js8_offset_hz
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, normalize_rf_guard_mode, settings_db_path
 from freqinout.core.ptt_conflict_service import PttConflictService
+from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.scheduler_events import record_scheduler_event
 from freqinout.core.schedule_targeting import (
@@ -307,7 +308,13 @@ class SchedulerEngine(QObject):
         self._manual_control_service = SchedulerManualControlService(MultiRadioStore(settings_db_path()))
         self._busy_evidence_service = BusyEvidenceService(MultiRadioStore(settings_db_path()))
         self._ptt_conflict_service = PttConflictService(MultiRadioStore(settings_db_path()))
-        self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
+        self._status_poll_coordinator = RadioStatusPollCoordinator(
+            ttl_seconds=0.8,
+            retry_seconds=4.0,
+            time_fn=time.time,
+        )
+        self._scheduler_thread_call_connected = False
+        self._connect_scheduler_thread_call()
         self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
         self.varac: Optional[object] = varac
@@ -461,7 +468,8 @@ class SchedulerEngine(QObject):
 
         self.timer = QTimer(self)
         self.timer.setInterval(poll_interval_ms)
-        self.timer.timeout.connect(self._on_timer)
+        self._timer_connected = False
+        self._connect_timer()
 
         # If a rig was provided, we can optionally sanity-check it
         # (non-fatal if unavailable).
@@ -480,6 +488,42 @@ class SchedulerEngine(QObject):
             callback()
         except Exception as e:
             log.debug("SchedulerEngine: queued scheduler-thread callback failed: %s", e)
+
+    def _connect_scheduler_thread_call(self) -> None:
+        if self._scheduler_thread_call_connected:
+            return
+        try:
+            self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
+            self._scheduler_thread_call_connected = True
+        except Exception:
+            self._scheduler_thread_call_connected = False
+
+    def _disconnect_scheduler_thread_call(self) -> None:
+        if not self._scheduler_thread_call_connected:
+            return
+        try:
+            self._scheduler_thread_call.disconnect(self._run_scheduler_thread_call)
+        except Exception:
+            pass
+        self._scheduler_thread_call_connected = False
+
+    def _connect_timer(self) -> None:
+        if self._timer_connected:
+            return
+        try:
+            self.timer.timeout.connect(self._on_timer)
+            self._timer_connected = True
+        except Exception:
+            self._timer_connected = False
+
+    def _disconnect_timer(self) -> None:
+        if not self._timer_connected:
+            return
+        try:
+            self.timer.timeout.disconnect(self._on_timer)
+        except Exception:
+            pass
+        self._timer_connected = False
 
     def _queue_scheduler_thread_call(self, callback: Callable[[], None]) -> None:
         self._scheduler_thread_call.emit(callback)
@@ -753,6 +797,8 @@ class SchedulerEngine(QObject):
                 thread_name_prefix="freqinout-status",
             )
         self._shutdown_requested = False
+        self._connect_scheduler_thread_call()
+        self._connect_timer()
         if not self.timer.isActive():
             self.timer.start()
         self._maybe_refresh_external_status_snapshot(force=True)
@@ -768,6 +814,8 @@ class SchedulerEngine(QObject):
         self._shutdown_requested = True
         if self.timer.isActive():
             self.timer.stop()
+        self._disconnect_timer()
+        self._disconnect_scheduler_thread_call()
         self._latest_intent = None
         self._latest_intent_ts = 0.0
         self._retry_scheduled = False
@@ -1176,6 +1224,7 @@ class SchedulerEngine(QObject):
         except Exception:
             pass
         rig = self.rig
+        status_poll_coordinator = self._status_poll_coordinator
         current_entry = dict(self.current_schedule_entry or {})
         js8_offset_check_active = self._js8_offset_authority_active(current_entry, self._cached_control_mode())
 
@@ -1195,38 +1244,79 @@ class SchedulerEngine(QObject):
                     "checked_ts": time.time(),
                 }
                 try:
-                    varac = VarACStatusClient()
-                    out["varac_status"] = varac.get_status(include_db_transfer=True)
+                    def _poll_varac_status() -> Dict[str, object]:
+                        varac = VarACStatusClient()
+                        return {
+                            "varac_status": varac.get_status(include_db_transfer=True),
+                            "source": "scheduler_background_varac",
+                        }
+
+                    varac_snapshot = status_poll_coordinator.get_snapshot(
+                        "scheduler:primary:background_varac",
+                        _poll_varac_status,
+                        force=force,
+                    )
+                    if not varac_snapshot.errors:
+                        out["varac_status"] = dict(varac_snapshot.varac_status or {})
                 except Exception as e:
                     log.debug("SchedulerEngine: background VarAC status failed: %s", e)
                 if rig is not None:
                     try:
-                        if hasattr(rig, "get_ptt"):
-                            out["rig_ptt"] = bool(rig.get_ptt())
-                            out["rig_ptt_known"] = True
-                        out["rig_freq_hz"] = rig.get_vfo_frequency() if hasattr(rig, "get_vfo_frequency") else None
-                        if hasattr(rig, "get_active_vfo"):
-                            out["rig_vfo"] = rig.get_active_vfo()
+                        def _poll_rig_status() -> Dict[str, object]:
+                            reading: Dict[str, object] = {}
+                            if hasattr(rig, "get_ptt"):
+                                reading["ptt_active"] = bool(rig.get_ptt())
+                                reading["ptt_known"] = True
+                            if hasattr(rig, "get_vfo_frequency"):
+                                reading["frequency_hz"] = rig.get_vfo_frequency()
+                            if hasattr(rig, "get_active_vfo"):
+                                reading["vfo"] = rig.get_active_vfo()
+                            reading["source"] = "scheduler_background_rig"
+                            return reading
+
+                        rig_snapshot = status_poll_coordinator.get_snapshot(
+                            "scheduler:primary:background_rig",
+                            _poll_rig_status,
+                            force=force,
+                        )
+                        out["rig_ptt"] = bool(rig_snapshot.ptt_active)
+                        out["rig_ptt_known"] = bool(rig_snapshot.ptt_known and not rig_snapshot.errors)
+                        out["rig_freq_hz"] = rig_snapshot.frequency_hz
+                        out["rig_vfo"] = rig_snapshot.vfo
                     except Exception as e:
                         log.debug("SchedulerEngine: background rig status failed: %s", e)
                 if control_mode == "JS8CALL" or js8_offset_check_active:
                     try:
-                        js8 = JS8ControlClient()
+                        def _poll_js8_status() -> Dict[str, object]:
+                            js8 = JS8ControlClient()
+                            reading: Dict[str, object] = {"source": "scheduler_background_js8"}
+                            if control_mode == "JS8CALL":
+                                reading["js8_busy"] = bool(js8.is_busy())
+                                reading["js8_frequency_hz"] = js8.get_frequency()
+                                reading["js8_offset_hz"] = js8.get_offset()
+                            elif js8_offset_check_active:
+                                reading["js8_offset_hz"] = js8.get_offset()
+                            return reading
+
+                        js8_snapshot = status_poll_coordinator.get_snapshot(
+                            "scheduler:primary:background_js8",
+                            _poll_js8_status,
+                            force=force,
+                        )
                         legacy_readings: Dict[str, object] = {}
-                        if control_mode == "JS8CALL":
-                            out["js8_busy"] = bool(js8.is_busy())
-                            out["js8_freq_hz"] = js8.get_frequency()
-                            out["js8_offset_hz"] = js8.get_offset()
-                        elif js8_offset_check_active:
-                            out["js8_offset_hz"] = js8.get_offset()
-                        if control_mode == "JS8CALL":
-                            legacy_readings = {
-                                "busy": out.get("js8_busy"),
-                                "frequency_hz": out.get("js8_freq_hz"),
-                                "offset_hz": out.get("js8_offset_hz"),
-                            }
-                        elif js8_offset_check_active:
-                            legacy_readings = {"offset_hz": out.get("js8_offset_hz")}
+                        if not js8_snapshot.errors:
+                            if control_mode == "JS8CALL":
+                                out["js8_busy"] = bool(js8_snapshot.js8_busy)
+                                out["js8_freq_hz"] = js8_snapshot.js8_frequency_hz
+                                out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
+                                legacy_readings = {
+                                    "busy": out.get("js8_busy"),
+                                    "frequency_hz": out.get("js8_freq_hz"),
+                                    "offset_hz": out.get("js8_offset_hz"),
+                                }
+                            elif js8_offset_check_active:
+                                out["js8_offset_hz"] = js8_snapshot.js8_offset_hz
+                                legacy_readings = {"offset_hz": out.get("js8_offset_hz")}
                         if legacy_readings:
                             shadow = self._software_status.js8_shadow_comparison_status(legacy_readings=legacy_readings)
                             out["js8_shadow_comparison"] = dict(shadow)
@@ -1340,6 +1430,7 @@ class SchedulerEngine(QObject):
         rig = self.rig
         js8 = self.js8
         mode_key = (control_mode or "").strip().upper()
+        status_poll_coordinator = self._status_poll_coordinator
 
         def _task() -> Dict[str, object]:
             out: Dict[str, object] = {
@@ -1353,16 +1444,33 @@ class SchedulerEngine(QObject):
                 "errors": {},
             }
             errors: Dict[str, str] = {}
-            try:
-                if rig is not None and hasattr(rig, "get_vfo_frequency"):
-                    out["flrig_freq_hz"] = rig.get_vfo_frequency()
-                if rig is not None and hasattr(rig, "get_ptt"):
-                    out["flrig_ptt_active"] = bool(rig.get_ptt())
-                    out["flrig_ptt_known"] = True
-                if rig is not None and hasattr(rig, "get_active_vfo"):
-                    out["flrig_vfo"] = rig.get_active_vfo()
-            except Exception as e:
-                errors["rig"] = str(e)
+            if rig is not None:
+                try:
+                    def _poll_rig_status() -> Dict[str, object]:
+                        reading: Dict[str, object] = {}
+                        if hasattr(rig, "get_vfo_frequency"):
+                            reading["frequency_hz"] = rig.get_vfo_frequency()
+                        if hasattr(rig, "get_ptt"):
+                            reading["ptt_active"] = bool(rig.get_ptt())
+                            reading["ptt_known"] = True
+                        if hasattr(rig, "get_active_vfo"):
+                            reading["vfo"] = rig.get_active_vfo()
+                        reading["source"] = "scheduler_post_apply_rig"
+                        return reading
+
+                    rig_snapshot = status_poll_coordinator.get_snapshot(
+                        "scheduler:primary:post_apply_rig",
+                        _poll_rig_status,
+                        force=True,
+                    )
+                    out["flrig_freq_hz"] = rig_snapshot.frequency_hz
+                    out["flrig_ptt_active"] = bool(rig_snapshot.ptt_active)
+                    out["flrig_ptt_known"] = bool(rig_snapshot.ptt_known and not rig_snapshot.errors)
+                    out["flrig_vfo"] = rig_snapshot.vfo
+                    if rig_snapshot.errors:
+                        errors["rig"] = "; ".join(str(value) for value in rig_snapshot.errors.values())
+                except Exception as e:
+                    errors["rig"] = str(e)
             if mode_key == "JS8CALL" or verify_js8_offset or not out.get("flrig_freq_hz"):
                 try:
                     if js8 is not None:
@@ -3086,32 +3194,22 @@ class SchedulerEngine(QObject):
             state.flrig_ptt_active = False
 
         if force:
-            freq = self._current_rig_frequency(
+            freq = self._status_poll_rig_frequency(
                 control_mode=mode if mode in {"FLRIG", "RIGCTLD"} else "FLRIG",
-                status_cached=False,
+                force=True,
             )
             if isinstance(freq, (int, float)) and freq > 0:
                 state.flrig_freq_hz = int(freq)
-                self._status_flrig_freq_hz = int(freq)
-                self._status_flrig_freq_ts = now_ts
             elif state.flrig_freq_hz is None:
                 state.errors["rig_frequency"] = "unavailable"
-            try:
-                if self.rig and hasattr(self.rig, "get_ptt"):
-                    state.flrig_ptt_active = bool(self.rig.get_ptt())
-                    state.flrig_ptt_known = True
-                    state.flrig_ptt_age_s = 0.0
-                    state.flrig_ptt_stale = False
-                    self._last_ptt_active = state.flrig_ptt_active
-                    self._status_flrig_ptt = state.flrig_ptt_active
-                    self._status_flrig_ptt_known = True
-                    self._status_flrig_ptt_ts = now_ts
-            except Exception as e:
-                state.flrig_ptt_active = False
-                state.flrig_ptt_known = False
-                state.flrig_ptt_stale = True
-                self._status_flrig_ptt_known = False
-                state.errors["rig_ptt"] = str(e)
+            if self.rig and hasattr(self.rig, "get_ptt"):
+                ptt_active = self._status_poll_rig_ptt(force=True)
+                state.flrig_ptt_active = bool(ptt_active and self._status_flrig_ptt_known)
+                state.flrig_ptt_known = bool(self._status_flrig_ptt_known)
+                state.flrig_ptt_age_s = 0.0 if state.flrig_ptt_known else None
+                state.flrig_ptt_stale = not state.flrig_ptt_known
+                if not state.flrig_ptt_known:
+                    state.errors["rig_ptt"] = "unavailable"
             try:
                 if self.rig and hasattr(self.rig, "get_active_vfo"):
                     vfo_txt = str(self.rig.get_active_vfo() or "").strip().upper()[:1]
@@ -5183,29 +5281,36 @@ class SchedulerEngine(QObject):
         voice_hint = (entry.get("fldigi_mode") or "").strip()
         return resolve_rig_mode(mode_txt, band_txt, voice_hint=voice_hint)
 
-    def _status_poll_rig_frequency(self, *, control_mode: Optional[str] = None) -> Optional[int]:
+    def _status_poll_rig_frequency(self, *, control_mode: Optional[str] = None, force: bool = False) -> Optional[int]:
         """
         Lightweight rig-backend status poll with short-lived caching/backoff.
         """
         if not self.rig or not hasattr(self.rig, "get_vfo_frequency"):
             self._status_flrig_freq_hz = None
             return None
-        now_ts = time.time()
-        if now_ts - self._status_flrig_freq_ts < self._status_poll_ttl_s:
-            return self._status_flrig_freq_hz
-        if now_ts < self._status_flrig_retry_ts:
-            return self._status_flrig_freq_hz
-        self._status_flrig_freq_ts = now_ts
-        freq = self._current_rig_frequency(control_mode=control_mode or "FLRIG", status_cached=False)
-        if isinstance(freq, (int, float)) and freq > 0:
-            self._status_flrig_freq_hz = int(freq)
-            self._status_flrig_retry_ts = 0.0
-            return self._status_flrig_freq_hz
-        self._status_flrig_freq_hz = None
-        self._status_flrig_retry_ts = now_ts + self._status_poll_retry_s
-        return None
+        self._status_poll_coordinator.ttl_seconds = float(self._status_poll_ttl_s)
+        self._status_poll_coordinator.retry_seconds = float(self._status_poll_retry_s)
 
-    def _status_poll_rig_ptt(self) -> bool:
+        def _poll() -> Dict[str, object]:
+            freq = self._current_rig_frequency(control_mode=control_mode or "FLRIG", status_cached=False)
+            if not isinstance(freq, (int, float)) or int(freq) <= 0:
+                raise RuntimeError("rig frequency unavailable")
+            return {
+                "frequency_hz": int(freq),
+                "source": "scheduler_rig_frequency",
+            }
+
+        snapshot = self._status_poll_coordinator.get_snapshot(
+            "scheduler:primary:rig_frequency",
+            _poll,
+            force=force,
+        )
+        self._status_flrig_freq_hz = snapshot.frequency_hz
+        self._status_flrig_freq_ts = float(snapshot.generated_at or 0.0)
+        self._status_flrig_retry_ts = float(snapshot.backoff_until or 0.0)
+        return self._status_flrig_freq_hz
+
+    def _status_poll_rig_ptt(self, *, force: bool = False) -> bool:
         """
         Lightweight rig-backend PTT status poll with shared retry backoff.
         """
@@ -5213,18 +5318,30 @@ class SchedulerEngine(QObject):
             self._status_flrig_ptt = False
             self._status_flrig_ptt_known = False
             return False
-        now_ts = time.time()
-        if now_ts - self._status_flrig_ptt_ts < self._status_poll_ttl_s:
-            return self._status_flrig_ptt
-        if now_ts < self._status_flrig_retry_ts:
-            return self._status_flrig_ptt
-        self._status_flrig_ptt_ts = now_ts
-        try:
-            self._status_flrig_ptt = bool(self.rig.get_ptt())
-            self._status_flrig_ptt_known = True
-        except Exception:
+        self._status_poll_coordinator.ttl_seconds = float(self._status_poll_ttl_s)
+        self._status_poll_coordinator.retry_seconds = float(self._status_poll_retry_s)
+
+        def _poll() -> Dict[str, object]:
+            return {
+                "ptt_active": bool(self.rig.get_ptt()),
+                "ptt_known": True,
+                "source": "scheduler_rig_ptt",
+            }
+
+        snapshot = self._status_poll_coordinator.get_snapshot(
+            "scheduler:primary:rig_ptt",
+            _poll,
+            force=force,
+        )
+        if snapshot.errors or snapshot.source in {"error", "backoff"}:
             self._status_flrig_ptt = False
             self._status_flrig_ptt_known = False
+        else:
+            self._status_flrig_ptt = bool(snapshot.ptt_active)
+            self._status_flrig_ptt_known = bool(snapshot.ptt_known)
+            self._last_ptt_active = bool(snapshot.ptt_active)
+        self._status_flrig_ptt_ts = float(snapshot.generated_at or 0.0)
+        self._status_flrig_retry_ts = float(snapshot.backoff_until or 0.0)
         return self._status_flrig_ptt
 
     def _shared_ptt_lock_status(self, *, force: bool = False) -> Dict[str, object]:

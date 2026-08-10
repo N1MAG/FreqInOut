@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core import scheduler_engine as scheduler_engine_module
@@ -36,6 +37,13 @@ def _primary_radio(store: MultiRadioStore, name: str = "DX10") -> dict:
     return radio
 
 
+def _shutdown_engine(engine: SchedulerEngine) -> None:
+    engine.stop()
+    if QCoreApplication.instance() is not None:
+        engine.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
 def test_scheduler_manual_control_defaults_to_on_schedule_and_creates_schema(tmp_path) -> None:
     store = MultiRadioStore(tmp_path / "freqinout.db")
     radio = _radio(store, "DX10")
@@ -52,6 +60,195 @@ def test_scheduler_manual_control_defaults_to_on_schedule_and_creates_schema(tmp
             "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduler_manual_control_states'"
         ).fetchone()
     assert table is not None
+
+
+def test_scheduler_stop_disconnects_qt_callbacks_and_start_reconnects(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=60_000)
+    try:
+        assert engine._timer_connected is True
+        assert engine._scheduler_thread_call_connected is True
+
+        engine.stop()
+
+        assert engine.timer.isActive() is False
+        assert engine._timer_connected is False
+        assert engine._scheduler_thread_call_connected is False
+
+        monkeypatch.setattr(engine, "_maybe_refresh_external_status_snapshot", lambda *, force=False: None)
+        monkeypatch.setattr(engine, "_apply_js8_offset_startup", lambda: None)
+        monkeypatch.setattr(engine, "_evaluate", lambda **_kwargs: None)
+
+        engine.start()
+
+        assert engine._timer_connected is True
+        assert engine._scheduler_thread_call_connected is True
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_rig_frequency_poll_uses_coordinator_cache(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+
+    class _Rig:
+        def __init__(self) -> None:
+            self.values = [7_115_000, 14_115_000]
+            self.calls = 0
+
+        def get_vfo_frequency(self):
+            self.calls += 1
+            return self.values[min(self.calls - 1, len(self.values) - 1)]
+
+    rig = _Rig()
+    engine = SchedulerEngine(rig=rig, js8=None, varac=None, fldigi_log=None)
+    try:
+        engine._status_poll_ttl_s = 30.0
+
+        assert engine._status_poll_rig_frequency() == 7_115_000
+        assert engine._status_poll_rig_frequency() == 7_115_000
+        engine._status_poll_coordinator.invalidate("scheduler:primary:rig_frequency")
+        assert engine._status_poll_rig_frequency() == 14_115_000
+        assert rig.calls == 2
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_rig_frequency_poll_preserves_cached_value_during_backoff(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+
+    class _Rig:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fail = False
+
+        def get_vfo_frequency(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("rig read timeout")
+            return 7_115_000
+
+    rig = _Rig()
+    engine = SchedulerEngine(rig=rig, js8=None, varac=None, fldigi_log=None)
+    try:
+        now = [100.0]
+        engine._status_poll_coordinator._time_fn = lambda: now[0]
+        engine._status_poll_ttl_s = 0.0
+        engine._status_poll_retry_s = 5.0
+
+        assert engine._status_poll_rig_frequency() == 7_115_000
+        now[0] = 101.0
+        rig.fail = True
+        assert engine._status_poll_rig_frequency() == 7_115_000
+        assert engine._status_flrig_retry_ts == 106.0
+        now[0] = 102.0
+        assert engine._status_poll_rig_frequency() == 7_115_000
+        assert rig.calls == 2
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_rig_ptt_poll_uses_coordinator_cache(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+
+    class _Rig:
+        def __init__(self) -> None:
+            self.values = [True, False]
+            self.calls = 0
+
+        def get_ptt(self):
+            self.calls += 1
+            return self.values[min(self.calls - 1, len(self.values) - 1)]
+
+    rig = _Rig()
+    engine = SchedulerEngine(rig=rig, js8=None, varac=None, fldigi_log=None)
+    try:
+        engine._status_poll_ttl_s = 30.0
+
+        assert engine._status_poll_rig_ptt() is True
+        assert engine._status_poll_rig_ptt() is True
+        engine._status_poll_coordinator.invalidate("scheduler:primary:rig_ptt")
+        assert engine._status_poll_rig_ptt() is False
+        assert rig.calls == 2
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_rig_ptt_poll_marks_unknown_during_backoff(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+
+    class _Rig:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fail = False
+
+        def get_ptt(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("ptt timeout")
+            return True
+
+    rig = _Rig()
+    engine = SchedulerEngine(rig=rig, js8=None, varac=None, fldigi_log=None)
+    try:
+        now = [100.0]
+        engine._status_poll_coordinator._time_fn = lambda: now[0]
+        engine._status_poll_ttl_s = 0.0
+        engine._status_poll_retry_s = 5.0
+
+        assert engine._status_poll_rig_ptt() is True
+        assert engine._status_flrig_ptt_known is True
+        now[0] = 101.0
+        rig.fail = True
+
+        assert engine._status_poll_rig_ptt() is False
+        assert engine._status_flrig_ptt_known is False
+        assert engine._status_flrig_retry_ts == 106.0
+
+        now[0] = 102.0
+        assert engine._status_poll_rig_ptt() is False
+        assert engine._status_flrig_ptt_known is False
+        assert rig.calls == 2
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_forced_actual_state_uses_coordinator_status_helpers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+
+    class _Rig:
+        def __init__(self) -> None:
+            self.freq_calls = 0
+            self.ptt_calls = 0
+
+        def get_vfo_frequency(self):
+            self.freq_calls += 1
+            return 7_115_000
+
+        def get_ptt(self):
+            self.ptt_calls += 1
+            return True
+
+    rig = _Rig()
+    engine = SchedulerEngine(rig=rig, js8=None, varac=None, fldigi_log=None)
+    try:
+        state = engine._read_station_actual_state(force=True, control_mode="FLRIG")
+
+        assert state.flrig_freq_hz == 7_115_000
+        assert state.flrig_ptt_active is True
+        assert state.flrig_ptt_known is True
+        assert state.flrig_ptt_stale is False
+        assert rig.freq_calls == 1
+        assert rig.ptt_calls == 1
+        assert engine._status_poll_coordinator.latest_snapshot("scheduler:primary:rig_frequency") is not None
+        assert engine._status_poll_coordinator.latest_snapshot("scheduler:primary:rig_ptt") is not None
+    finally:
+        _shutdown_engine(engine)
 
 
 def test_repeated_qsy_updates_manual_target_and_preserves_hold_for_one_radio(tmp_path) -> None:
@@ -167,7 +364,7 @@ def test_scheduler_manual_qsy_persists_primary_radio_manual_state(monkeypatch, t
         assert state.manual_target.vfo == "B"
         assert state.reason_code == "operator_qsy"
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_state(monkeypatch, tmp_path) -> None:
@@ -227,7 +424,7 @@ def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_sta
         assert state.state == "on_schedule"
         assert state.manual_target is None
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_blocks_schedule_transition_for_unsupported_antenna_band(monkeypatch, tmp_path) -> None:
@@ -270,7 +467,7 @@ def test_scheduler_blocks_schedule_transition_for_unsupported_antenna_band(monke
         assert status["rf_conflict_warning"] is True
         assert "antenna is not configured for 40M" in status["rf_conflict_summary"]
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_infers_band_for_unsupported_antenna_guard_when_band_missing(monkeypatch, tmp_path) -> None:
@@ -313,7 +510,7 @@ def test_scheduler_infers_band_for_unsupported_antenna_guard_when_band_missing(m
         assert status["rf_conflict_warning"] is True
         assert "antenna is not configured for 40M" in status["rf_conflict_summary"]
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_warn_only_rf_guard_continues_schedule_transition(monkeypatch, tmp_path) -> None:
@@ -377,7 +574,7 @@ def test_scheduler_warn_only_rf_guard_continues_schedule_transition(monkeypatch,
         assert warning_events[0]["action"] == "Continuing schedule change after RF Safety Guard warn-only notice"
         assert warning_events[0]["detail"] == "Warn only should not hold schedule automation."
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_rf_safety_block_does_not_require_provider_signature(monkeypatch, tmp_path) -> None:
@@ -439,7 +636,7 @@ def test_scheduler_rf_safety_block_does_not_require_provider_signature(monkeypat
         assert block_events[0]["detail"] == "Prevent Band Overlap group NORTH MAST is blocking this change."
         assert block_events[0]["metadata"]["signature"]
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_peer_block_wins_over_local_antenna_warning(monkeypatch, tmp_path) -> None:
@@ -505,7 +702,7 @@ def test_scheduler_peer_block_wins_over_local_antenna_warning(monkeypatch, tmp_p
         assert status["rf_conflict_summary"] == "RF Safety Guard: Protected Receiver blocks same-band overlap."
         assert "Prevent Band Overlap group NORTH MAST" in status["rf_conflict_detail"]
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_hold_and_resume_update_primary_radio_manual_state(monkeypatch, tmp_path) -> None:
@@ -532,7 +729,7 @@ def test_scheduler_hold_and_resume_update_primary_radio_manual_state(monkeypatch
         assert resumed.manual_target is None
         assert resumed.hold_until_utc is None
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_resume_rf_safety_block_does_not_clear_hold(monkeypatch, tmp_path) -> None:
@@ -572,7 +769,7 @@ def test_scheduler_resume_rf_safety_block_does_not_clear_hold(monkeypatch, tmp_p
         assert result is False
         assert not any(key == "schedule_suspend_until" and value == 0 for key, value in set_calls)
     finally:
-        engine.stop()
+        _shutdown_engine(engine)
 
 
 def test_scheduler_resume_rf_safety_block_does_not_require_provider_signature(monkeypatch, tmp_path) -> None:
@@ -619,4 +816,4 @@ def test_scheduler_resume_rf_safety_block_does_not_require_provider_signature(mo
         assert block_events[0]["detail"] == "Prevent Band Overlap group NORTH MAST is blocking this resume."
         assert block_events[0]["metadata"]["signature"]
     finally:
-        engine.stop()
+        _shutdown_engine(engine)

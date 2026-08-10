@@ -22,7 +22,7 @@ def _select_device_profile(tab, profile_id: int) -> None:
     raise AssertionError(f"Device profile row not found: {profile_id}")
 
 
-def test_settings_tab_loads_default_device_profile(monkeypatch, tmp_path):
+def test_settings_tab_loads_blank_device_profile_slate(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
     app = QApplication.instance() or QApplication([])
@@ -30,12 +30,16 @@ def test_settings_tab_loads_default_device_profile(monkeypatch, tmp_path):
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     tab = SettingsTab()
     try:
-        assert tab.device_profiles_table.rowCount() == 1
-        assert len(tab.device_profiles) == 1
-        assert "Station default:" in tab.device_profiles_hint_label.text()
+        assert tab.device_profiles_table.rowCount() == 0
+        assert len(tab.device_profiles) == 0
+        assert "Additional radios can be added" in tab.device_profiles_hint_label.text()
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -49,6 +53,10 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     tab = SettingsTab()
     try:
@@ -70,9 +78,9 @@ def test_settings_tab_add_device_profile_persists(monkeypatch, tmp_path):
 
         store = MultiRadioStore(settings_db_path())
         devices = store.list_device_profiles()
-        assert len(devices) == 2
+        assert len(devices) == 1
         assert any(str(row.get("name", "")) == "Remote JS8" for row in devices)
-        assert tab.device_profiles_table.rowCount() == 2
+        assert tab.device_profiles_table.rowCount() == 1
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -100,6 +108,10 @@ def test_settings_tab_set_active_device_profile_refreshes_projection_without_ful
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     tab = SettingsTab()
     try:
@@ -142,16 +154,19 @@ def test_settings_tab_set_active_device_profile_allows_rigctld(monkeypatch, tmp_
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
     tab = SettingsTab()
     try:
         before = store.get_runtime_active_device_profile()
-        assert before is not None
+        assert before is None
         _select_device_profile(tab, int(rigctld["id"]))
         tab._set_active_selected_device_profile()
 
         after = store.get_runtime_active_device_profile()
         assert after is not None
-        assert int(after["id"]) != int(before["id"])
         assert int(after["id"]) == int(rigctld["id"])
         assert tab.control_combo.currentText() == "RIGCTLD"
     finally:
@@ -177,6 +192,7 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
     from freqinout.gui.settings_tab import SettingsTab
 
     monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status_compat", lambda self, force=False: None)
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
 
@@ -186,9 +202,9 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
         tab._delete_device_profiles()
 
         devices = store.list_device_profiles()
-        assert len(devices) == 1
+        assert len(devices) == 0
         assert all(int(row.get("id", 0) or 0) != int(remote["id"]) for row in devices)
-        assert tab.device_profiles_table.rowCount() == 1
+        assert tab.device_profiles_table.rowCount() == 0
     finally:
         tab.deleteLater()
         app.processEvents()

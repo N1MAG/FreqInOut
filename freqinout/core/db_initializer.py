@@ -187,6 +187,273 @@ def _ensure_controlfreq_support_indexes(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_js8_expect_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_msg_auth_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT,
+            callsign TEXT,
+            label TEXT,
+            key_text TEXT,
+            key_scope TEXT DEFAULT 'signing',
+            enabled INTEGER DEFAULT 1,
+            notes TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_msg_auth_keys",
+        {
+            "group_name": "TEXT",
+            "callsign": "TEXT",
+            "label": "TEXT",
+            "key_text": "TEXT",
+            "key_scope": "TEXT DEFAULT 'signing'",
+            "enabled": "INTEGER DEFAULT 1",
+            "notes": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_msg_auth_keys_scope ON js8_msg_auth_keys(group_name, callsign)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_msg_auth_keys_purpose ON js8_msg_auth_keys(key_scope, group_name, callsign)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_allow_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            allowed_callsigns_json TEXT DEFAULT '[]',
+            allowed_groups_json TEXT DEFAULT '[]',
+            blocked_callsigns_json TEXT DEFAULT '[]',
+            source_scope TEXT DEFAULT 'all',
+            source_radio_ids_json TEXT DEFAULT '[]',
+            enabled INTEGER DEFAULT 1,
+            import_source TEXT,
+            notes TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_allow_policies",
+        {
+            "name": "TEXT",
+            "allowed_callsigns_json": "TEXT DEFAULT '[]'",
+            "allowed_groups_json": "TEXT DEFAULT '[]'",
+            "blocked_callsigns_json": "TEXT DEFAULT '[]'",
+            "source_scope": "TEXT DEFAULT 'all'",
+            "source_radio_ids_json": "TEXT DEFAULT '[]'",
+            "enabled": "INTEGER DEFAULT 1",
+            "import_source": "TEXT",
+            "notes": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_allow_policies_name ON js8_expect_allow_policies(name)")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_radio_id TEXT,
+            source_scope TEXT DEFAULT 'all',
+            js8_instance_id TEXT,
+            allow_policy_id INTEGER,
+            expect_key TEXT,
+            response_text TEXT,
+            msg_auth_sign_enabled INTEGER DEFAULT 0,
+            msg_auth_sign_callsign TEXT,
+            msg_auth_include_datecode INTEGER DEFAULT 0,
+            msg_auth_datecode TEXT,
+            allowed_callsigns_json TEXT DEFAULT '[]',
+            allowed_groups_json TEXT DEFAULT '[]',
+            allow_any INTEGER DEFAULT 0,
+            blocked_callsigns_json TEXT DEFAULT '[]',
+            max_replies INTEGER DEFAULT 1,
+            cooldown_seconds INTEGER DEFAULT 0,
+            tx_speed TEXT,
+            auto_tx_schedule TEXT,
+            auto_reply_enabled INTEGER DEFAULT 0,
+            unattended_auto_reply_enabled INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            import_source TEXT,
+            created_ts REAL,
+            updated_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_entries",
+        {
+            "source_radio_id": "TEXT",
+            "source_scope": "TEXT DEFAULT 'all'",
+            "js8_instance_id": "TEXT",
+            "allow_policy_id": "INTEGER",
+            "expect_key": "TEXT",
+            "response_text": "TEXT",
+            "msg_auth_sign_enabled": "INTEGER DEFAULT 0",
+            "msg_auth_sign_callsign": "TEXT",
+            "msg_auth_include_datecode": "INTEGER DEFAULT 0",
+            "msg_auth_datecode": "TEXT",
+            "allowed_callsigns_json": "TEXT DEFAULT '[]'",
+            "allowed_groups_json": "TEXT DEFAULT '[]'",
+            "allow_any": "INTEGER DEFAULT 0",
+            "blocked_callsigns_json": "TEXT DEFAULT '[]'",
+            "max_replies": "INTEGER DEFAULT 1",
+            "cooldown_seconds": "INTEGER DEFAULT 0",
+            "tx_speed": "TEXT",
+            "auto_tx_schedule": "TEXT",
+            "auto_reply_enabled": "INTEGER DEFAULT 0",
+            "unattended_auto_reply_enabled": "INTEGER DEFAULT 0",
+            "enabled": "INTEGER DEFAULT 1",
+            "import_source": "TEXT",
+            "created_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_key ON js8_expect_entries(expect_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_policy ON js8_expect_entries(allow_policy_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_entries_source ON js8_expect_entries(source_scope, source_radio_id, js8_instance_id)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            expect_entry_id INTEGER,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_js8_instance_id TEXT,
+            requesting_callsign TEXT,
+            target_group TEXT,
+            decision TEXT,
+            reason TEXT,
+            reply_radio_id TEXT,
+            reply_js8_instance_id TEXT,
+            created_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_audit",
+        {
+            "event_id": "TEXT",
+            "expect_entry_id": "INTEGER",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_js8_instance_id": "TEXT",
+            "requesting_callsign": "TEXT",
+            "target_group": "TEXT",
+            "decision": "TEXT",
+            "reason": "TEXT",
+            "reply_radio_id": "TEXT",
+            "reply_js8_instance_id": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_audit_created_call ON js8_expect_audit(created_ts DESC, requesting_callsign)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_dispatch_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            expect_entry_id INTEGER,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_js8_instance_id TEXT,
+            requesting_callsign TEXT,
+            target_group TEXT,
+            decision TEXT,
+            reason TEXT,
+            reply_radio_id TEXT,
+            reply_js8_instance_id TEXT,
+            transmitted_text TEXT,
+            created_ts REAL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_dispatch_audit",
+        {
+            "event_id": "TEXT",
+            "expect_entry_id": "INTEGER",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_js8_instance_id": "TEXT",
+            "requesting_callsign": "TEXT",
+            "target_group": "TEXT",
+            "decision": "TEXT",
+            "reason": "TEXT",
+            "reply_radio_id": "TEXT",
+            "reply_js8_instance_id": "TEXT",
+            "transmitted_text": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_dispatch_audit_created ON js8_expect_dispatch_audit(created_ts DESC, expect_key)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_management_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expect_entry_id INTEGER,
+            action TEXT NOT NULL,
+            expect_key TEXT,
+            source_radio_id TEXT,
+            source_scope TEXT,
+            js8_instance_id TEXT,
+            enabled INTEGER,
+            auto_reply_enabled INTEGER,
+            import_source TEXT,
+            detail_json TEXT,
+            created_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_management_audit",
+        {
+            "expect_entry_id": "INTEGER",
+            "action": "TEXT",
+            "expect_key": "TEXT",
+            "source_radio_id": "TEXT",
+            "source_scope": "TEXT",
+            "js8_instance_id": "TEXT",
+            "enabled": "INTEGER",
+            "auto_reply_enabled": "INTEGER",
+            "import_source": "TEXT",
+            "detail_json": "TEXT",
+            "created_ts": "REAL",
+        },
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_js8_expect_management_audit_recent
+        ON js8_expect_management_audit(created_ts DESC, expect_entry_id)
+        """
+    )
+
+
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table})")
@@ -1393,6 +1660,7 @@ def _ensure_nets_db() -> None:
         _ensure_local_operator_tables(conn)
         _ensure_js8_links(conn)
         ensure_varac_local_tables(conn)
+        _ensure_js8_expect_tables(conn)
         _ensure_controlfreq_support_indexes(conn)
         _repair_sitrep_commstat_groups(conn)
 

@@ -24,9 +24,11 @@ from freqinout.core.schedule_source_sets import (
     LIVE_SOURCE_SET_ID,
     SELECTED_HF_DAILY_SOURCE_SET_KEY,
     SELECTED_HF_NET_SOURCE_SET_KEY,
+    assigned_plan_rf_guard_impacts_for_source_update,
     delete_source_schedule,
     save_source_schedule,
     save_source_set,
+    source_schedule_dependency_ref,
 )
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
@@ -1028,6 +1030,180 @@ def test_freqplanner_db_named_source_schedules_drive_projection(monkeypatch, tmp
         ("HF", "40M", ""),
         ("NET", "80M", "Ops Net"),
     ]
+
+    monkeypatch.setattr(tab, "_rf_guard_preflight_for_plan", lambda _payload: {"state": "ok", "messages": []})
+    monkeypatch.setattr(tab, "_prompt_for_name", lambda *args, **kwargs: ("Assigned Blend", True))
+    monkeypatch.setattr(planner_mod.QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Save)
+
+    tab._on_save_plan_clicked()
+    app.processEvents()
+
+    saved = next(row for row in tab.plan_context_service.store.list_frequency_plans() if row["name"] == "Assigned Blend")
+    source_refs = json.loads(str(saved["source_refs_json"]))
+    assert "hf_daily" in source_refs
+    assert "hf_nets" in source_refs
+    assert source_schedule_dependency_ref(HF_DAILY_SOURCE_CATEGORY, daily["id"]) in source_refs
+    assert source_schedule_dependency_ref(HF_NET_SOURCE_CATEGORY, net["id"]) in source_refs
+
+
+def test_saved_source_update_reports_rf_guard_impacts_for_assigned_master_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "Twenty Meter Only",
+            "enabled": 1,
+            "runtime_active": 1,
+            "runtime_primary": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["20M"],
+            "antenna_band_guard_mode": "block",
+        }
+    )
+    daily = save_source_schedule(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Safe Daily",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "20M",
+                "frequency": "14.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+    source_refs = ["hf_daily", source_schedule_dependency_ref(HF_DAILY_SOURCE_CATEGORY, daily["id"])]
+    plan = store.save_frequency_plan(
+        {
+            "name": "Assigned Master",
+            "source_refs": source_refs,
+            "schedule_refs": [
+                {
+                    "source": "HF",
+                    "day_utc": "Monday",
+                    "start_utc": "01:00",
+                    "end_utc": "02:00",
+                    "band": "20M",
+                    "frequency": "14.078",
+                    "group_name": "OPS",
+                }
+            ],
+            "frequency_refs": ["20M:14.078"],
+            "group_refs": ["OPS"],
+        }
+    )
+    store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+
+    impacts = assigned_plan_rf_guard_impacts_for_source_update(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        daily["id"],
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+
+    assert len(impacts) == 1
+    assert impacts[0]["plan"]["name"] == "Assigned Master"
+    assert impacts[0]["device"]["name"] == "Twenty Meter Only"
+    assert impacts[0]["validation"]["state"] == "blocked"
+    assert "antenna support does not include 40M" in " ".join(impacts[0]["validation"]["messages"])
+
+
+def test_saved_net_update_reports_rf_guard_impacts_for_assigned_master_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "Net Guard Radio",
+            "enabled": 1,
+            "runtime_active": 1,
+            "runtime_primary": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["20M"],
+            "antenna_band_guard_mode": "block",
+        }
+    )
+    net = save_source_schedule(
+        settings,
+        HF_NET_SOURCE_CATEGORY,
+        SELECTED_HF_NET_SOURCE_SET_KEY,
+        "Safe Nets",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "20M",
+                "frequency": "14.078",
+                "group_name": "OPS",
+                "net_name": "Safe Net",
+            }
+        ],
+    )
+    plan = store.save_frequency_plan(
+        {
+            "name": "Assigned Net Master",
+            "source_refs": ["hf_nets", source_schedule_dependency_ref(HF_NET_SOURCE_CATEGORY, net["id"])],
+            "schedule_refs": [
+                {
+                    "source": "NET",
+                    "day_utc": "Monday",
+                    "start_utc": "01:00",
+                    "end_utc": "02:00",
+                    "band": "20M",
+                    "frequency": "14.078",
+                    "group_name": "OPS",
+                    "net_name": "Safe Net",
+                }
+            ],
+            "frequency_refs": ["20M:14.078"],
+            "group_refs": ["OPS"],
+        }
+    )
+    store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+
+    impacts = assigned_plan_rf_guard_impacts_for_source_update(
+        settings,
+        HF_NET_SOURCE_CATEGORY,
+        net["id"],
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+                "net_name": "Unsafe Net",
+            }
+        ],
+    )
+
+    assert len(impacts) == 1
+    assert impacts[0]["plan"]["name"] == "Assigned Net Master"
+    assert impacts[0]["device"]["name"] == "Net Guard Radio"
+    assert impacts[0]["validation"]["state"] == "blocked"
+    assert "antenna support does not include 40M" in " ".join(impacts[0]["validation"]["messages"])
 
 
 def test_freqplanner_edit_bridge_loads_selected_daily_source_schedule(monkeypatch, tmp_path) -> None:
