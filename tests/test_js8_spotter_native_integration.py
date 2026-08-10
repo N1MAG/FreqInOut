@@ -157,6 +157,18 @@ def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries
     assert '"Infrastructure"' in intel_source
 
 
+def test_message_inbox_search_sits_above_messages_table_with_useful_hints() -> None:
+    source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+    search_idx = source.index('self.rcv_search.setPlaceholderText("Search messages:')
+    table_idx = source.index("messages_layout.addWidget(self.messages_table)")
+    left_grid = source.split("placements = [", 1)[1].split("]", 1)[0]
+
+    assert search_idx > table_idx
+    assert "messages_layout.insertLayout(1, search_row)" in source
+    assert "callsign, group, MCF/F! code, topic, state/grid, keyword" in source
+    assert "self.rcv_search" not in left_grid
+
+
 def test_message_inbox_delegates_visible_ingest_to_shared_ingestor() -> None:
     source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     js8_body = source.split("def _ingest_js8_messages", 1)[1].split("def _spotter_offset_key", 1)[0]

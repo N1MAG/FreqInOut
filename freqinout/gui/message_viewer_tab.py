@@ -4331,6 +4331,21 @@ class MessageViewerTab(QWidget):
         self._make_combo_searchable(self.from_filter, "From")
         self._make_combo_searchable(self.to_filter, "To")
         self.rcv_search = QLineEdit()
+        self.rcv_search.setClearButtonEnabled(True)
+        self.rcv_search.setPlaceholderText("Search messages: callsign, group, MCF/F! code, topic, state/grid, keyword...")
+        self.rcv_search.setToolTip(
+            "Search visible message text and decoded metadata. Try a callsign, @group, MCF/F! form code, "
+            "topic such as wildfire or power, state, grid, or any keyword."
+        )
+        self.rcv_search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 4)
+        search_row.setSpacing(8)
+        self.message_search_label = QLabel("Search")
+        self.message_search_label.setStyleSheet("font-weight: bold;")
+        search_row.addWidget(self.message_search_label)
+        search_row.addWidget(self.rcv_search, 1)
+        messages_layout.insertLayout(1, search_row)
         self.clear_filters_btn = QPushButton("Clear Filters")
         self.clear_filters_btn.setMinimumWidth(130)
         self.clear_filters_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -4354,7 +4369,6 @@ class MessageViewerTab(QWidget):
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self._on_filter_changed)
-        self.rcv_search.setPlaceholderText("Search...")
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
         self._arrange_inbox_action_controls(compact=False)
         self._build_messages_header()
@@ -4417,7 +4431,6 @@ class MessageViewerTab(QWidget):
             self.status_filter,
             self.from_filter,
             self.to_filter,
-            self.rcv_search,
             self.exclude_types_btn,
             self.clear_filters_btn,
         ):
@@ -4444,19 +4457,17 @@ class MessageViewerTab(QWidget):
             (self.from_filter, 10, 1),
             (self.inbox_to_label, 11, 0),
             (self.to_filter, 11, 1),
-            (self.inbox_search_label, 12, 0),
-            (self.rcv_search, 12, 1),
-            (self.operating_group_filter, 13, 0, 1, 2),
-            (self.source_filter, 14, 0, 1, 2),
-            (self.exclude_types_btn, 15, 0, 1, 2),
-            (self.clear_filters_btn, 16, 0, 1, 2),
-            (self.inbox_check_label, 17, 0),
-            (self.message_check_combo, 17, 1),
-            (self.time_toggle_btn, 18, 0, 1, 2),
-            (self.inbox_bbs_heading, 19, 0, 1, 2),
-            (self.bbs_status_btn, 20, 0, 1, 2),
-            (self.bbs_manage_btn, 21, 0, 1, 2),
-            (self.message_check_status_label, 22, 0, 1, 2),
+            (self.operating_group_filter, 12, 0, 1, 2),
+            (self.source_filter, 13, 0, 1, 2),
+            (self.exclude_types_btn, 14, 0, 1, 2),
+            (self.clear_filters_btn, 15, 0, 1, 2),
+            (self.inbox_check_label, 16, 0),
+            (self.message_check_combo, 16, 1),
+            (self.time_toggle_btn, 17, 0, 1, 2),
+            (self.inbox_bbs_heading, 18, 0, 1, 2),
+            (self.bbs_status_btn, 19, 0, 1, 2),
+            (self.bbs_manage_btn, 20, 0, 1, 2),
+            (self.message_check_status_label, 21, 0, 1, 2),
         ]
         for item in placements:
             widget, row, col, *span = item
@@ -10272,7 +10283,12 @@ class MessageViewerTab(QWidget):
                 pass
             self._fit_filter_combo_popup(combo)
         try:
-            search_needed = int(self.rcv_search.fontMetrics().horizontalAdvance("Search...") + 136)
+            search_needed = int(
+                self.rcv_search.fontMetrics().horizontalAdvance(
+                    "Search callsign, group, MCF/F! code, topic, state/grid, keyword..."
+                )
+                + 72
+            )
             current_min = int(self.rcv_search.minimumWidth() or 0)
             base = self.rcv_search.property("_fio_base_min_width")
             try:
@@ -10280,7 +10296,7 @@ class MessageViewerTab(QWidget):
             except Exception:
                 base_w = current_min
                 self.rcv_search.setProperty("_fio_base_min_width", base_w)
-            self.rcv_search.setMinimumWidth(max(base_w, min(320, search_needed)))
+            self.rcv_search.setMinimumWidth(max(base_w, min(640, search_needed)))
         except Exception:
             pass
         try:

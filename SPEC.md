@@ -7540,6 +7540,24 @@ Acceptance criteria:
 Rollback:
 - Remove the persistent hidden-type control and revert Messages filtering to the prior inclusive-only behavior.
 
+### 1.137b Addendum (2026-03-04): Messages Search Placement And Hints
+
+Problem:
+- The Messages search field in the left filter ledge is easy to miss and competes with filters/actions.
+- Operators need a fast way to search by callsign, group, form code, topic, state/grid, or keyword while reading the message table.
+
+Scope:
+- Move the Messages search field out of the left ledge and place it directly above the Messages table.
+- Preserve the existing in-memory search/filter behavior and debounce.
+- Add clear placeholder and tooltip hints with examples such as callsign, `@group`, `MCF`/`F!` code, topic, state/grid, and keyword.
+- Keep the left ledge focused on actions, type/status/from/to filters, group/source filters, refresh timing, and BBS controls.
+
+Acceptance criteria:
+- Search is visible immediately above the Messages table.
+- The left menu no longer contains a separate `Search` row.
+- Typing in the table search still filters rows by existing decoded/search metadata.
+- Minimized-window layout remains usable; the search field expands with the table area rather than compressing the left ledge.
+
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy
 
 Problem:
