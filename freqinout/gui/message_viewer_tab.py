@@ -117,7 +117,7 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
-from freqinout.core.message_intelligence import analyze_form_text, analyze_spotter_text
+from freqinout.core.message_intelligence import MessageIntelligence, analyze_form_text, analyze_spotter_text
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
@@ -12391,6 +12391,7 @@ class MessageViewerTab(QWidget):
             content = data
             is_html = False
             ext = rec.path.suffix.lower()
+            rendered_form_title = ""
             if ext in {".html", ".htm"}:
                 is_html = True
             elif self._is_transport_form_ext(ext):
@@ -12414,6 +12415,7 @@ class MessageViewerTab(QWidget):
                                 rec.path.name,
                             )
                             title = self._extract_title_from_template(template)
+                            rendered_form_title = title
                             labels = self._extract_template_labels(template)
                             content = self._render_custom_form_fields(fields, labels, title)
                             is_html = True
@@ -12459,6 +12461,29 @@ class MessageViewerTab(QWidget):
                     content = data  # fallback to raw
 
             info = f"{rec.path.name} - {self._file_origin_label(rec)} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+            sig_detail = self._signature_detail_for_record(rec)
+            if self._is_transport_form_ext(ext):
+                intelligence = self._file_record_intelligence(rec, data, form_title=rendered_form_title)
+                detail_lines = self._message_intelligence_header(
+                    intelligence,
+                    timestamp=self._fmt_mtime(rec.mtime),
+                    status=self._file_status(rec),
+                    source=self._file_origin_label(rec),
+                )
+                self._append_detail_section(
+                    detail_lines,
+                    "Verification",
+                    (("Signature / Hash", sig_detail),),
+                )
+                if is_html:
+                    detail_html = "<pre style='font-family: sans-serif; white-space: pre-wrap;'>" + html.escape(
+                        "\n".join(detail_lines)
+                    ) + "</pre>"
+                    content = detail_html + "<hr>" + str(content)
+                else:
+                    self._append_text_body(detail_lines, "Decoded Message", content)
+                    content = "\n".join(detail_lines)
+                info = intelligence.summary or info
             self.info_label.setText(self._compose_info_with_signature(rec, info))
             if is_html:
                 self.viewer.setAcceptRichText(True)
@@ -12752,6 +12777,72 @@ class MessageViewerTab(QWidget):
             return self._file_origin_label(payload)
         return ""
 
+    @staticmethod
+    def _append_detail_section(lines: List[str], title: str, entries: Sequence[tuple[str, object]]) -> None:
+        clean_entries = [(label, str(value or "").strip()) for label, value in entries if str(value or "").strip()]
+        if not clean_entries:
+            return
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append(title)
+        for label, value in clean_entries:
+            lines.append(f"  {label}: {value}")
+
+    def _message_intelligence_header(
+        self,
+        info: MessageIntelligence,
+        *,
+        timestamp: str = "",
+        status: str = "",
+        source: str = "",
+    ) -> List[str]:
+        lines = [
+            info.summary or info.subject or info.form_name or "Message",
+            "",
+        ]
+        self._append_detail_section(
+            lines,
+            "Key Fields",
+            (
+                ("From", info.from_call),
+                ("To", info.to_call),
+                ("Subject", info.subject),
+                ("Form", info.form_name),
+                ("Date/Msg ID", info.date_summary),
+                ("Received", timestamp),
+                ("Status", status),
+                ("State", info.state),
+                ("Grid", info.grid),
+                ("Groups", ", ".join(info.groups)),
+                ("Topics", ", ".join(info.topics)),
+                ("Source", source or info.source_type),
+            ),
+        )
+        return lines
+
+    @staticmethod
+    def _append_text_body(lines: List[str], title: str, body: object) -> None:
+        text = str(body or "").strip()
+        if not text:
+            return
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend([title, text])
+
+    def _file_record_intelligence(self, rec: FileRecord, data: str, form_title: str = "") -> MessageIntelligence:
+        meta = self._extract_form_file_metadata(rec)
+        if form_title and "form_title" not in meta:
+            meta["form_title"] = form_title
+        if "_raw_head" not in meta:
+            meta["_raw_head"] = data[:131072]
+        return analyze_form_text(
+            meta.get("_raw_head", "") or data[:131072],
+            form_name=meta.get("form_title", ""),
+            source_type=rec.origin,
+            path=rec.path,
+            fields=meta,
+        )
+
     def _load_sitrep_content(self, msg: SitrepMessage) -> None:
         with perf_span(
             "messages.load_sitrep_content",
@@ -12764,51 +12855,61 @@ class MessageViewerTab(QWidget):
             ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
             state_grid = MessageTableModel._sitrep_area(msg)
             lines = [
-                f"{msg.from_call} -> {msg.target}",
-                (
-                    f"{msg.subtype_label} | {msg.source_family_label or 'Unknown'} | "
-                    f"{msg.transport_label or '--'} | {label}: {ts_display}"
-                ),
-                (
-                    f"Status: {self._pretty_sitrep_value(msg.overall_status)} | "
-                    f"Group: {msg.report_group or '--'} | State/Grid: {state_grid or '--'} | Sources: {msg.source_count}"
-                ),
-                "",
-                "Report",
-                f"  Callsign: {msg.from_call}",
-                f"  To:       {msg.target}",
-                f"  Group:    {msg.report_group or '--'}",
-                f"  Report:   {msg.report_key or '--'}",
-                f"  State:    {msg.state_code or '--'}",
-                f"  Grid:     {msg.grid or '--'}",
-                f"  Scope:    {msg.scope or 'My Location'}",
-                "",
-                "Status Fields",
-                f"  Overall:        {self._pretty_sitrep_value(msg.overall_status)}",
-                f"  Power:          {self._pretty_sitrep_value(msg.power)}",
-                f"  Water:          {self._pretty_sitrep_value(msg.water)}",
-                f"  Medical:        {self._pretty_sitrep_value(msg.medical)}",
-                f"  Communications: {self._pretty_sitrep_value(msg.communications)}",
-                f"  Internet:       {self._pretty_sitrep_value(msg.internet)}",
-                f"  Travel:         {self._pretty_sitrep_value(msg.travel)}",
-                f"  Food:           {self._pretty_sitrep_value(msg.food)}",
-                f"  Fuel:           {self._pretty_sitrep_value(msg.fuel)}",
-                f"  Crime:          {self._pretty_sitrep_value(msg.crime)}",
-                f"  Civil Unrest:   {self._pretty_sitrep_value(msg.civil_unrest)}",
-                f"  Political:      {self._pretty_sitrep_value(msg.political)}",
-                "",
-                "CommStat / Location Metadata",
-                f"  Remarks:        {msg.remarks_text or '--'}",
-                f"  Brevity Code:   {msg.brevity_code or '--'}",
-                f"  Brevity Decode: {msg.brevity_summary or '--'}",
-                f"  State Confidence: {msg.state_confidence or '--'}",
-                f"  Geo Confidence:   {msg.geo_confidence or '--'}",
-                "",
-                "Source Metadata",
-                f"  First Source: {msg.source_first or 'Unknown'}",
-                f"  Last Source:  {msg.source_last or 'Unknown'}",
-                f"  Sources:      {msg.source_count}",
+                f"{msg.subtype_label or 'SitRep'} | {msg.from_call} -> {msg.target}",
             ]
+            self._append_detail_section(
+                lines,
+                "Key Fields",
+                (
+                    ("From", msg.from_call),
+                    ("To", msg.target),
+                    ("Group", msg.report_group),
+                    ("Report", msg.report_key),
+                    ("Received", f"{label}: {ts_display}"),
+                    ("Status", self._pretty_sitrep_value(msg.overall_status)),
+                    ("State/Grid", state_grid),
+                    ("Scope", msg.scope or "My Location"),
+                    ("Source", msg.source_family_label or "Unknown"),
+                    ("Receipt", msg.transport_label),
+                ),
+            )
+            self._append_detail_section(
+                lines,
+                "Status Fields",
+                (
+                    ("Overall", self._pretty_sitrep_value(msg.overall_status)),
+                    ("Power", self._pretty_sitrep_value(msg.power)),
+                    ("Water", self._pretty_sitrep_value(msg.water)),
+                    ("Medical", self._pretty_sitrep_value(msg.medical)),
+                    ("Communications", self._pretty_sitrep_value(msg.communications)),
+                    ("Internet", self._pretty_sitrep_value(msg.internet)),
+                    ("Travel", self._pretty_sitrep_value(msg.travel)),
+                    ("Food", self._pretty_sitrep_value(msg.food)),
+                    ("Fuel", self._pretty_sitrep_value(msg.fuel)),
+                    ("Crime", self._pretty_sitrep_value(msg.crime)),
+                    ("Civil Unrest", self._pretty_sitrep_value(msg.civil_unrest)),
+                    ("Political", self._pretty_sitrep_value(msg.political)),
+                ),
+            )
+            self._append_detail_section(
+                lines,
+                "Notes",
+                (
+                    ("Remarks", msg.remarks_text),
+                    ("Brevity", " - ".join(part for part in (msg.brevity_code, msg.brevity_summary) if part)),
+                ),
+            )
+            self._append_detail_section(
+                lines,
+                "Source / Confidence",
+                (
+                    ("First Source", msg.source_first or "Unknown"),
+                    ("Last Source", msg.source_last or "Unknown"),
+                    ("Sources", msg.source_count),
+                    ("State Confidence", msg.state_confidence),
+                    ("Geo Confidence", msg.geo_confidence),
+                ),
+            )
             self.info_label.setText(
                 f"SitRep {msg.subtype_label} {msg.from_call} -> {msg.target}"
                 + (f" | {msg.source_family_label}" if msg.source_family_label else "")
@@ -12827,49 +12928,38 @@ class MessageViewerTab(QWidget):
             mode = self._current_time_mode()
             label = "UTC" if mode == "UTC" else "Local"
             ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
-            source_list = self._safe_json_pretty(msg.sources_json)
-            source_refs = self._safe_json_pretty(msg.source_refs_json)
-            external_ids = self._safe_json_pretty(msg.external_ids_json)
-            payload = self._safe_json_pretty(msg.payload_json)
             lines = [
-                artifact_kind_label(msg.artifact_kind),
-                "",
-                f"CALLSIGN: {msg.from_call}",
-                f"TO:       {msg.target}",
-                f"GROUP:    {msg.report_group or '--'}",
-                f"GRID:     {msg.grid or '--'}",
-                f"STATE:    {msg.state_code or '--'}",
-                f"SCOPE:    {msg.scope or '--'}",
-                f"SOURCE:   {msg.source_family_label or 'CommStat'}",
-                f"RECEIPT:  {msg.transport_label or '--'}",
-                f"{label}:  {ts_display}",
-                f"STATUS:   {msg.status_label or '--'}",
-                f"ALERT:    {msg.alert_color or '--'}",
-                f"SUBTYPE:  {msg.subtype or '--'}",
-                "",
-                f"TITLE: {msg.title or '--'}",
-                "",
-                "BODY",
-                msg.body_text or "--",
-                "",
-                "DETAILS",
-                f"  Remarks:      {msg.remarks_text or '--'}",
-                f"  First Source: {msg.source_first or 'Unknown'}",
-                f"  Last Source:  {msg.source_last or 'Unknown'}",
-                f"  Sources:      {msg.source_count}",
-                "",
-                "Source List JSON:",
-                source_list,
-                "",
-                "Source Refs JSON:",
-                source_refs,
-                "",
-                "External IDs JSON:",
-                external_ids,
-                "",
-                "Payload JSON:",
-                payload,
+                msg.title or artifact_kind_label(msg.artifact_kind),
             ]
+            self._append_detail_section(
+                lines,
+                "Key Fields",
+                (
+                    ("From", msg.from_call),
+                    ("To", msg.target),
+                    ("Group", msg.report_group),
+                    ("Received", f"{label}: {ts_display}"),
+                    ("Status", msg.status_label),
+                    ("Alert", msg.alert_color),
+                    ("State", msg.state_code),
+                    ("Grid", msg.grid),
+                    ("Scope", msg.scope),
+                    ("Subtype", msg.subtype),
+                    ("Source", msg.source_family_label or "CommStat"),
+                    ("Receipt", msg.transport_label),
+                ),
+            )
+            self._append_text_body(lines, "Message", msg.body_text or "--")
+            self._append_detail_section(
+                lines,
+                "Source / Notes",
+                (
+                    ("Remarks", msg.remarks_text),
+                    ("First Source", msg.source_first or "Unknown"),
+                    ("Last Source", msg.source_last or "Unknown"),
+                    ("Sources", msg.source_count),
+                ),
+            )
             self.info_label.setText(
                 f"{artifact_kind_label(msg.artifact_kind)} {msg.from_call} -> {msg.target}"
                 + (f" | {msg.source_family_label}" if msg.source_family_label else "")
@@ -12900,51 +12990,61 @@ class MessageViewerTab(QWidget):
             mode = self._current_time_mode()
             label = "UTC" if mode == "UTC" else "Local"
             ts_display = self._format_rcv_display(msg.utc_ts or 0.0, msg.utc_str)
-            header = [
-                f"FROM: {msg.from_call}",
-                f"TO:   {msg.to_call}",
-                f"TYPE: {msg.msg_type}",
-                f"{label}:  {ts_display}",
-                "",
-            ]
+            header: List[str]
             relay_via = getattr(msg, "relay_via", "") or ""
             if isinstance(msg, SpotterMessage):
-                fields = parse_spotter_bracket_fields(msg.raw_text)
-                state_grid = MessageTableModel._spotter_area(msg)
-                county_or_country = str(fields.get("CC", "") or fields.get("CO", "") or "").strip()
-                summary = summarize_spotter_form_text(msg.raw_text, form_title=self._load_form_title(msg.msg_type[2:]))
+                intelligence = analyze_spotter_text(
+                    msg.raw_text,
+                    form_name=self._load_form_title(msg.msg_type[2:]) or msg.msg_type,
+                    from_call=msg.from_call,
+                    to_call=msg.to_call,
+                )
+                header = self._message_intelligence_header(
+                    intelligence,
+                    timestamp=f"{label}: {ts_display}",
+                    status=msg.state,
+                    source="JS8Spotter",
+                )
+            else:
                 header = [
-                    f"{msg.from_call} -> {msg.to_call}",
-                    f"{msg.msg_type} | JS8Spotter | {label}: {ts_display}",
-                    f"Status: {msg.state or '--'} | State/Grid: {state_grid or '--'}"
-                    + (f" | County/Country: {county_or_country}" if county_or_country else ""),
-                    f"Summary: {summary or '--'}",
-                    "",
+                    f"{msg.msg_type or 'JS8 Message'} | {msg.from_call} -> {msg.to_call}",
                 ]
+                self._append_detail_section(
+                    header,
+                    "Key Fields",
+                    (
+                        ("From", msg.from_call),
+                        ("To", msg.to_call),
+                        ("Type", msg.msg_type),
+                        ("Received", f"{label}: {ts_display}"),
+                        ("Status", msg.state),
+                    ),
+                )
             if relay_via:
-                header.insert(4, f"RELAY VIA: {relay_via}")
+                self._append_detail_section(header, "Relay", (("Via", relay_via),))
             if isinstance(msg, SpotterMessage):
                 source_lines = self._spotter_source_lines(msg)
                 if source_lines:
-                    insert_at = 4 if not relay_via else 5
-                    for offset, line in enumerate(source_lines):
-                        header.insert(insert_at + offset, line)
+                    self._append_text_body(header, "Source", "\n".join(source_lines[1:]) if source_lines[0] == "SOURCE:" else "\n".join(source_lines))
                 auth_map = self._spotter_msg_auth_state_for_message(msg)
                 auth_detail = str(auth_map.get("detail", "") or "").strip()
-                if auth_detail:
-                    insert_at = 4 + (1 if relay_via else 0) + len(source_lines)
-                    header.insert(insert_at, f"AUTH: {auth_detail}")
                 expect_map = self._spotter_expect_state_for_message(msg)
                 expect_detail = str(expect_map.get("detail", "") or "").strip()
-                if expect_detail:
-                    insert_at = 4 + (1 if relay_via else 0) + len(source_lines) + (1 if auth_detail else 0)
-                    header.insert(insert_at, expect_detail if expect_detail.lower().startswith("expect:") else f"Expect: {expect_detail}")
+                self._append_detail_section(
+                    header,
+                    "Verification / Automation",
+                    (
+                        ("MsgAuth", auth_detail),
+                        ("Expect", expect_detail),
+                    ),
+                )
             body = msg.decoded_text or msg.raw_text
             if isinstance(msg, SpotterMessage):
                 body = self._decode_spotter_message_text(msg) or body
+            self._append_text_body(header, "Decoded Message", body)
             self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
             self.viewer.setAcceptRichText(False)
-            self.viewer.setPlainText("\n".join(header + [body]))
+            self.viewer.setPlainText("\n".join(header))
 
     @staticmethod
     def _spotter_source_lines(msg: SpotterMessage) -> List[str]:
