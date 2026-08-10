@@ -36,11 +36,10 @@ class LocalReportHistoryTab(QWidget):
     COL_STATUS = 0
     COL_AGE = 1
     COL_FROM = 2
-    COL_TO = 3
-    COL_SOURCE = 4
-    COL_TOPICS = 5
-    COL_SUBJECT = 6
-    COL_LOCATION = 7
+    COL_SOURCE = 3
+    COL_TOPICS = 4
+    COL_SUBJECT = 5
+    COL_LOCATION = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,9 +82,21 @@ class LocalReportHistoryTab(QWidget):
         filter_row.addWidget(self.clear_filters_btn)
         layout.addLayout(filter_row)
 
-        self.table = QTableWidget(0, 8)
+        summary_row = QHBoxLayout()
+        self.summary_total_label = QLabel("Reports: 0")
+        self.summary_priority_label = QLabel("Priority/Emergency: 0")
+        self.summary_newest_label = QLabel("Newest: --")
+        self.summary_filters_label = QLabel("Filters: none")
+        self.summary_filters_label.setWordWrap(True)
+        summary_row.addWidget(self.summary_total_label)
+        summary_row.addWidget(self.summary_priority_label)
+        summary_row.addWidget(self.summary_newest_label)
+        summary_row.addWidget(self.summary_filters_label, stretch=1)
+        layout.addLayout(summary_row)
+
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Status", "Age", "From", "To", "Source", "Topics", "Subject", "Location"]
+            ["Status", "Age", "From", "Source", "Topics", "Subject", "Location"]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -96,7 +107,6 @@ class LocalReportHistoryTab(QWidget):
         hv.setSectionResizeMode(self.COL_STATUS, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_AGE, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_FROM, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_TO, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_SOURCE, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_TOPICS, QHeaderView.Stretch)
         hv.setSectionResizeMode(self.COL_SUBJECT, QHeaderView.Stretch)
@@ -148,6 +158,7 @@ class LocalReportHistoryTab(QWidget):
             rows = []
         self._rows = rows
         self._row_by_id = {int(row.get("id", 0) or 0): row for row in rows if int(row.get("id", 0) or 0) > 0}
+        self._update_summary(rows)
         self._populate_table(rows)
 
     def _clear_filters(self) -> None:
@@ -170,7 +181,6 @@ class LocalReportHistoryTab(QWidget):
                     str(row.get("status", "")),
                     self._age_text(str(row.get("created_utc", ""))),
                     str(row.get("callsign", "")),
-                    self._target_text(row),
                     self._source_text(row),
                     self._topics_text(row),
                     str(row.get("subject", "")) or self._body_preview(row),
@@ -197,6 +207,36 @@ class LocalReportHistoryTab(QWidget):
         item = self.table.item(rows[0].row(), self.COL_STATUS)
         report_id = int(item.data(Qt.UserRole) or 0) if item is not None else 0
         return self._row_by_id.get(report_id)
+
+    def _update_summary(self, rows: List[Dict[str, Any]]) -> None:
+        total = len(rows)
+        priority_count = sum(
+            1
+            for row in rows
+            if str(row.get("status", "")).strip().upper() in {"PRIORITY", "EMERGENCY"}
+        )
+        newest = self._age_text(str(rows[0].get("created_utc", ""))) if rows else "--"
+        filters = self._active_filter_text()
+        self.summary_total_label.setText(f"Reports: {total}")
+        self.summary_priority_label.setText(f"Priority/Emergency: {priority_count}")
+        self.summary_newest_label.setText(f"Newest: {newest}")
+        self.summary_filters_label.setText(f"Filters: {filters}")
+
+    def _active_filter_text(self) -> str:
+        filters: List[str] = []
+        query = self.search_edit.text().strip()
+        callsign = self.callsign_edit.text().strip().upper()
+        topic = str(self.topic_combo.currentData() or "").strip()
+        status = str(self.status_combo.currentData() or "").strip()
+        if query:
+            filters.append(f"search {query}")
+        if callsign:
+            filters.append(f"from {callsign}")
+        if topic:
+            filters.append(f"topic {topic}")
+        if status:
+            filters.append(f"status {status}")
+        return ", ".join(filters) if filters else "none"
 
     def _on_selection_changed(self) -> None:
         row = self._selected_report()

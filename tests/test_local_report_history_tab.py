@@ -40,9 +40,12 @@ def test_local_report_history_renders_report_table_and_readable_detail(monkeypat
     tab = LocalReportHistoryTab()
 
     assert tab.table.rowCount() == 1
+    assert tab.table.columnCount() == 7
+    assert tab.summary_total_label.text() == "Reports: 1"
+    assert tab.summary_priority_label.text() == "Priority/Emergency: 1"
+    assert tab.summary_filters_label.text() == "Filters: none"
     assert tab.table.item(0, tab.COL_STATUS).text() == "PRIORITY"
     assert tab.table.item(0, tab.COL_FROM).text() == "K7ETC"
-    assert tab.table.item(0, tab.COL_TO).text() == "County GMRS Net"
     assert tab.table.item(0, tab.COL_SOURCE).text() == "GMRS 462.675"
     assert "Fire" in tab.table.item(0, tab.COL_TOPICS).text()
     assert "Wildfire update" in tab.detail_text.toPlainText()
@@ -76,12 +79,15 @@ def test_local_report_history_filters_by_free_text_topic_and_status(monkeypatch,
 
     assert tab.table.rowCount() == 1
     assert tab.table.item(0, tab.COL_FROM).text() == "K7ETC"
+    assert "search fire" in tab.summary_filters_label.text()
 
     tab.search_edit.clear()
     tab.status_combo.setCurrentText("INFO")
 
     assert tab.table.rowCount() == 1
     assert tab.table.item(0, tab.COL_FROM).text() == "N0PWR"
+    assert tab.summary_priority_label.text() == "Priority/Emergency: 0"
+    assert "status INFO" in tab.summary_filters_label.text()
 
 
 def test_local_report_history_show_callsign_prefilters_reports(monkeypatch, tmp_path) -> None:
