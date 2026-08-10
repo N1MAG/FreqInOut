@@ -927,10 +927,11 @@ def list_local_reports(
     if q:
         clauses.append(
             "(LOWER(callsign) LIKE ? OR LOWER(from_name) LIKE ? OR LOWER(subject) LIKE ? OR LOWER(body) LIKE ? "
-            "OR LOWER(city) LIKE ? OR LOWER(county) LIKE ? OR LOWER(state) LIKE ? OR LOWER(grid) LIKE ?)"
+            "OR LOWER(city) LIKE ? OR LOWER(county) LIKE ? OR LOWER(state) LIKE ? OR LOWER(grid) LIKE ? "
+            "OR LOWER(status) LIKE ? OR LOWER(source_kind) LIKE ? OR LOWER(source_channel) LIKE ? OR LOWER(topics_json) LIKE ?)"
         )
         like = f"%{q}%"
-        params.extend([like] * 8)
+        params.extend([like] * 12)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     lim = max(1, int(limit or 200))
     params.append(lim)

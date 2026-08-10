@@ -1748,7 +1748,8 @@ Phase 6: Performance and soak hardening
     - Add a fast report-capture surface for information received by voice or local-network channels.
     - Landed first slice: `Local NCS` can save a selected check-in report into `local_operator_reports`.
     - Landed follow-up slice: `Local Operators` shows latest/highest-urgency local-report context and search can match report topics/keywords.
-    - Remaining follow-up: expose fuller local-report history/details from Local Operators without cluttering the roster.
+    - Landed follow-up slice: a dedicated `Local Reports` screen shows local-report history and readable selected-report detail while keeping HF Operator History separate.
+    - Remaining follow-up: refine local-report history actions only if operator review shows a need; do not clutter the Local Operators roster.
     - Intended sources include VHF/UHF voice, GMRS, MURS/FRS, local simplex/repeater traffic, in-person relay, phone/SMS relay when manually logged, and future mesh/Reticulum integrations.
     - Capture must use the same operator-facing topic taxonomy as Messages/Message Intelligence:
       `Weather`, `Fire`, `Medical`, `Power`, `Water`, `Fuel`, `Food`, `Travel/Roads`, `Comms`, `Security`, `Shelter`, `Logistics`, `Infrastructure`, `General Intel`.
@@ -1773,9 +1774,10 @@ Phase 6: Performance and soak hardening
     - Integration:
       - Feed saved local reports into a core normalized observation/read-model service, not directly from GUI rows.
       - Messages may optionally show a `Local Report` source/category in a future unified inbox view, but Local NCS should remain the primary capture surface.
+      - `Local Reports` is the dedicated local report review surface. Do not merge local voice/manual report history into HF Operator History.
       - Map may show local report markers only when location confidence is sufficient and the user has enabled local-report layers.
       - Managed BBS/routing must require explicit user rules and audit rows before moving or publishing any report.
-      - Operator History should show a concise local-report history timeline for each callsign.
+      - Local report history belongs in `Local Reports`, not HF Operator History.
     - UI/UX:
       - The capture control should be reachable from the selected check-in row with one obvious action such as `Log Report`.
       - Category selection should graduate to a compact chip/grid control for final UI polish; do not regress to a long list of form types.

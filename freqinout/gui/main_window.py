@@ -76,6 +76,7 @@ from freqinout.gui.sop_tab import SOPTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.local_operator_tab import LocalOperatorTab
 from freqinout.gui.local_ncs_tab import LocalNCSTab
+from freqinout.gui.local_report_history_tab import LocalReportHistoryTab
 from freqinout.gui.log_viewer import LogViewerTab
 from freqinout.gui.stations_map_tab import (
     StationsMapTab,
@@ -204,6 +205,7 @@ class MainWindow(QMainWindow):
         self.sop_tab = SOPTab(self, plan_context_service=self.plan_context_service)
         self.operator_history_tab = OperatorHistoryTab(self)
         self.local_operator_tab = LocalOperatorTab(self)
+        self.local_report_history_tab = LocalReportHistoryTab(self)
         self.local_ncs_tab = LocalNCSTab(self)
         self.log_tab: LogViewerTab | None = None
         self._log_dialog: QDialog | None = None
@@ -247,6 +249,7 @@ class MainWindow(QMainWindow):
             ("NCS-Local", self.local_ncs_tab),
             ("HF Operators", self.operator_history_tab),
             ("Local Operators", self.local_operator_tab),
+            ("Local Reports", self.local_report_history_tab),
             ("Map", self.stations_map_tab),
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
@@ -289,6 +292,7 @@ class MainWindow(QMainWindow):
             ("HF Peers", "Peer Schedules"),
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
+            ("Local Reports", "Local Reports"),
             ("SOP Builder", "SOP"),
             ("Main", "Settings"),
             ("Radios", "Settings"),
@@ -869,6 +873,7 @@ class MainWindow(QMainWindow):
             log.debug("MainWindow signal wiring failed: sop_data_changed -> main_window: %s", e)
         _connect_or_log("settings_saved -> local_operator_tab", self.settings_tab.settings_saved, self.local_operator_tab.on_settings_saved)
         _connect_or_log("settings_saved -> local_ncs_tab", self.settings_tab.settings_saved, self.local_ncs_tab.on_settings_saved)
+        _connect_or_log("settings_saved -> local_report_history_tab", self.settings_tab.settings_saved, self.local_report_history_tab.on_settings_saved)
         # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
         try:
             if hasattr(self.operator_history_tab, "operator_history_updated"):
@@ -885,6 +890,7 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self.local_ncs_tab, "local_data_updated"):
                 self.local_ncs_tab.local_data_updated.connect(self.local_operator_tab._load_data)
+                self.local_ncs_tab.local_data_updated.connect(self.local_report_history_tab.refresh_reports)
                 self.local_ncs_tab.local_data_updated.connect(self.local_ncs_tab.reload_operator_lookup)
         except Exception as e:
             log.debug("MainWindow signal wiring failed: local_data_updated fanout: %s", e)
@@ -3625,6 +3631,7 @@ class MainWindow(QMainWindow):
             self.stations_map_tab,
             self.operator_history_tab,
             self.local_operator_tab,
+            self.local_report_history_tab,
             self.local_ncs_tab,
             self.peer_sched_tab,
             self.settings_tab,
@@ -5668,7 +5675,7 @@ class MainWindow(QMainWindow):
             return "FreqPlanner"
         if screen == "Messages":
             return "Messages"
-        if screen in {"HF Operators", "Local Operators"}:
+        if screen in {"HF Operators", "Local Operators", "Local Reports"}:
             return "Operators"
         if screen == "Settings":
             return "Settings"
