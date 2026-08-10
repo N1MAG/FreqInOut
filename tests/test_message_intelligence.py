@@ -20,8 +20,12 @@ def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summar
     assert info.grid == "EM48EQ"
     assert info.groups == ("@MAGNET",)
     assert "Fire" in info.topics
+    assert any(item.startswith("body:wildfire") for item in info.topic_evidence["Fire"])
     assert "General Intel" not in info.topics
     assert info.actionable is True
+    assert info.operator_attention is True
+    assert info.routing_candidate is True
+    assert "location:grid" in info.routing_reasons
     assert info.summary == "MCF701 Field Report | W0IFM -> @MAGNET | FORM POSTED FOR WILDFIRE EVACUATION UPDATE | 260429-1839z"
 
 
@@ -59,7 +63,10 @@ UT - Widemouth 2 Fire - DM38ST - evacuation posture updated due to wildfire.
     assert info.date_summary == "260729-0354z"
     assert info.grid == "DM38ST"
     assert "Fire" in info.topics
+    assert any(item.startswith("subject:fire") for item in info.topic_evidence["Fire"])
     assert info.actionable is True
+    assert info.operator_attention is True
+    assert info.routing_candidate is True
     assert info.summary == "MAGNET General Use Form | K7ETC -> MR08 | Widemouth 2 Fire | 260729-0354z"
 
 
@@ -150,7 +157,10 @@ def test_commstat_statrep_terms_enrich_future_routing_topics() -> None:
     assert info.to_call == "MR08"
     assert "@MR08" in info.groups
     assert {"Power", "Water", "Comms", "Infrastructure", "General Intel"}.issubset(set(info.topics))
+    assert "body:power" in info.topic_evidence["Power"]
     assert info.actionable is True
+    assert info.operator_attention is True
+    assert info.routing_candidate is True
 
 
 def test_commstat_general_message_is_flat_not_nested() -> None:
@@ -165,4 +175,16 @@ def test_commstat_general_message_is_flat_not_nested() -> None:
     assert info.form_name == "CommStat Message"
     assert info.summary.startswith("CommStat Message | N1MAG -> @MAGNET | Regional advisory")
     assert "Comms" in info.topics
+    assert info.operator_attention is True
+    assert info.routing_candidate is True
     assert info.metadata["kind"] == "CommStat Message"
+
+
+def test_inbox_attention_is_separate_from_routeable_scope() -> None:
+    info = analyze_form_text("Weather briefing only. No location or group included.", source_type="flmsg")
+
+    assert "Weather" in info.topics
+    assert info.operator_attention is True
+    assert info.actionable is True
+    assert info.routing_candidate is False
+    assert "topics:Weather" in info.routing_reasons

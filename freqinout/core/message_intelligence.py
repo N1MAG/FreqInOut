@@ -72,20 +72,43 @@ class MessageIntelligence:
     groups: tuple[str, ...] = ()
     body: str = ""
     topics: tuple[str, ...] = ()
+    topic_evidence: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     actionable: bool = False
+    operator_attention: bool = False
+    routing_candidate: bool = False
+    routing_reasons: tuple[str, ...] = ()
     summary: str = ""
     confidence: float = 0.0
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 def normalize_topic_terms(text: object) -> tuple[str, ...]:
+    return tuple(_topic_evidence_for_text(text).keys())
+
+
+def collect_topic_evidence(parts: Mapping[str, object] | Sequence[tuple[str, object]]) -> Mapping[str, tuple[str, ...]]:
+    items = parts.items() if isinstance(parts, Mapping) else parts
+    found: dict[str, list[str]] = {}
+    for label, value in items:
+        label_text = str(label or "text").strip() or "text"
+        for topic, terms in _topic_evidence_for_text(value).items():
+            bucket = found.setdefault(topic, [])
+            for term in terms:
+                evidence = f"{label_text}:{term}"
+                if evidence not in bucket:
+                    bucket.append(evidence)
+    return {topic: tuple(values) for topic, values in found.items()}
+
+
+def _topic_evidence_for_text(text: object) -> Mapping[str, tuple[str, ...]]:
     haystack = f" {str(text or '').lower()} "
-    found: list[str] = []
+    found: dict[str, tuple[str, ...]] = {}
     for topic in TOPIC_TAXONOMY:
         patterns = _TOPIC_PATTERNS.get(topic, ())
-        if any(_term_matches(haystack, term) for term in patterns):
-            found.append(topic)
-    return tuple(found)
+        matched = tuple(term for term in patterns if _term_matches(haystack, term))
+        if matched:
+            found[topic] = matched
+    return found
 
 
 def summarize_intelligence(info: MessageIntelligence) -> str:
@@ -121,8 +144,19 @@ def analyze_spotter_text(
     from_value = _clean_call(_first_nonempty(from_call, fields.get("FR")))
     date_summary = _form_date_summary(fields.get("DA", ""))
     form_title = str(form_name or "").strip()
-    topics = normalize_topic_terms(" ".join([raw, form_title, subject]))
+    topic_evidence = collect_topic_evidence((("body", raw), ("form", form_title), ("subject", subject)))
+    topics = tuple(topic_evidence.keys())
     metadata = {str(k): str(v) for k, v in fields.items()}
+    routing_candidate, routing_reasons = _routing_candidate(
+        source_type=source_type,
+        topics=topics,
+        state=state,
+        grid=grid,
+        groups=_groups_from_values(to_value, raw),
+        subject=subject,
+        body=raw,
+    )
+    operator_attention = bool(topics or state or grid or subject)
     info = MessageIntelligence(
         source_type=source_type,
         form_name=form_title or _spotter_form_code(raw),
@@ -135,7 +169,11 @@ def analyze_spotter_text(
         groups=_groups_from_values(to_value, raw),
         body=raw,
         topics=topics,
-        actionable=bool(topics or state or grid or subject),
+        topic_evidence=topic_evidence,
+        actionable=operator_attention,
+        operator_attention=operator_attention,
+        routing_candidate=routing_candidate,
+        routing_reasons=routing_reasons,
         confidence=0.82 if fields else 0.45,
         metadata=metadata,
     )
@@ -190,7 +228,21 @@ def analyze_form_text(
     state = _clean_state(_first_nonempty(parsed_fields.get("state"), _field_after_label(raw, "State")))
     grid = _clean_grid(_first_nonempty(parsed_fields.get("grid"), _field_after_label(raw, "Grid")))
     body = _first_nonempty(parsed_fields.get("body"), _message_body(raw), raw)
-    topics = normalize_topic_terms(" ".join([str(path or ""), form_title, subject, body]))
+    topic_evidence = collect_topic_evidence(
+        (("path", str(path or "")), ("form", form_title), ("subject", subject), ("body", body))
+    )
+    topics = tuple(topic_evidence.keys())
+    groups = _groups_from_values(to_call, raw, str(path or ""))
+    routing_candidate, routing_reasons = _routing_candidate(
+        source_type=source_type,
+        topics=topics,
+        state=state,
+        grid=grid,
+        groups=groups,
+        subject=subject,
+        body=body,
+    )
+    operator_attention = bool(topics or state or grid or subject)
     info = MessageIntelligence(
         source_type=source_type,
         form_name=form_title,
@@ -200,10 +252,14 @@ def analyze_form_text(
         date_summary=date_summary,
         state=state,
         grid=grid,
-        groups=_groups_from_values(to_call, raw, str(path or "")),
+        groups=groups,
         body=body,
         topics=topics,
-        actionable=bool(topics or state or grid or subject),
+        topic_evidence=topic_evidence,
+        actionable=operator_attention,
+        operator_attention=operator_attention,
+        routing_candidate=routing_candidate,
+        routing_reasons=routing_reasons,
         confidence=0.72 if (from_call or to_call or subject or form_title) else 0.35,
         metadata=dict(parsed_fields),
     )
@@ -259,14 +315,40 @@ def analyze_commstat_fields(
         )
         if str(part or "").strip()
     )
-    topics = normalize_topic_terms(combined)
+    topic_evidence = collect_topic_evidence(
+        (
+            ("kind", kind),
+            ("title", title_text),
+            ("body", body_text),
+            ("remarks", remarks),
+            ("status", status_text),
+            ("alert", alert_text),
+            ("subtype", subtype),
+            ("scope", scope),
+            ("transport", transport),
+            ("source", source_family),
+        )
+    )
+    topics = tuple(topic_evidence.keys())
     if kind in {"CommStat Alert", "CommStat StatRep", "CommStat SitRep"} and "General Intel" not in topics:
         topics = tuple([*topics, "General Intel"])
+        topic_evidence = {**topic_evidence, "General Intel": (f"kind:{kind}",)}
     elevated = status_text not in {"", "INFO", "READ", "NEW", "GREEN", "OK", "NORMAL"} or alert_text in {
         "RED",
         "YELLOW",
         "ORANGE",
     }
+    groups = _groups_from_values(to_value, group_value, title_text, body_text)
+    routing_candidate, routing_reasons = _routing_candidate(
+        source_type="commstat",
+        topics=topics,
+        state=state_value,
+        grid=grid_value,
+        groups=groups,
+        subject=title_text,
+        body=body_text,
+    )
+    operator_attention = bool(elevated or topics or state_value or grid_value or title_text or body_text)
     metadata = {
         "kind": kind,
         "status": status_text,
@@ -285,10 +367,14 @@ def analyze_commstat_fields(
         date_summary=_form_date_summary(event_utc),
         state=state_value,
         grid=grid_value,
-        groups=_groups_from_values(to_value, group_value, title_text, body_text),
+        groups=groups,
         body=body_text,
         topics=topics,
-        actionable=bool(elevated or topics or state_value or grid_value or title_text or body_text),
+        topic_evidence=topic_evidence,
+        actionable=operator_attention,
+        operator_attention=operator_attention,
+        routing_candidate=routing_candidate,
+        routing_reasons=routing_reasons,
         confidence=0.78 if (from_value or to_value or title_text or body_text) else 0.5,
         metadata={k: v for k, v in metadata.items() if v},
     )
@@ -308,11 +394,47 @@ def _with_summary(info: MessageIntelligence) -> MessageIntelligence:
         groups=info.groups,
         body=info.body,
         topics=info.topics,
+        topic_evidence=info.topic_evidence,
         actionable=info.actionable,
+        operator_attention=info.operator_attention,
+        routing_candidate=info.routing_candidate,
+        routing_reasons=info.routing_reasons,
         summary=summarize_intelligence(info),
         confidence=info.confidence,
         metadata=info.metadata,
     )
+
+
+def _routing_candidate(
+    *,
+    source_type: object,
+    topics: Sequence[str],
+    state: object = "",
+    grid: object = "",
+    groups: Sequence[str] = (),
+    subject: object = "",
+    body: object = "",
+) -> tuple[bool, tuple[str, ...]]:
+    reasons: list[str] = []
+    source = str(source_type or "").strip().lower()
+    if source in {"spotter", "commstat", "flmsg", "flamp", "bbs", "form"}:
+        reasons.append(f"source:{source}")
+    if topics:
+        reasons.append("topics:" + ",".join(topics))
+    if str(grid or "").strip():
+        reasons.append("location:grid")
+    elif str(state or "").strip():
+        reasons.append("location:state")
+    if groups:
+        reasons.append("groups:" + ",".join(groups))
+    if str(subject or "").strip():
+        reasons.append("subject")
+    if str(body or "").strip():
+        reasons.append("body")
+    has_source = any(reason.startswith("source:") for reason in reasons)
+    has_content = bool(topics or str(subject or "").strip() or str(body or "").strip())
+    has_scope = bool(str(grid or "").strip() or str(state or "").strip() or groups)
+    return bool(has_source and has_content and has_scope), tuple(reasons)
 
 
 def _commstat_kind_label(value: object) -> str:
