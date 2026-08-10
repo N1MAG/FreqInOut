@@ -7569,6 +7569,27 @@ Acceptance criteria:
 - Typing in the table search still filters rows by existing decoded/search metadata.
 - Minimized-window layout remains usable; the search field expands with the table area rather than compressing the left ledge.
 
+### 1.137c Addendum (2026-08-10): Shared Message Intelligence Read Model
+
+Problem:
+- Messages receives actionable traffic from Spotter, CommStat, FLMsg, FLAmp, local NCS reports, and future transports.
+- Operators need one human-first summary model for scanning, search, map candidates, and future Managed BBS rules.
+- FLMsg/FLAmp detail panes must not show raw GPG diagnostic clutter when a concise signature state is enough.
+
+Scope:
+- Keep parsing in `freqinout/core/message_intelligence.py`; avoid source-specific UI parsing unless it is only rendering.
+- Normalize common FLMsg/FLAmp fields into `MessageIntelligence`: form name, from, to, subject, date/message id, state, grid, precedence, region, topics, and routing-candidate reasons.
+- Support both stacked labels and inline `Label: value` form text.
+- Extract state/grid from narrative/body text when common MAGNET-style rendered forms carry location there.
+- Preserve raw provenance internally, but keep table/detail surfaces operator-readable.
+- Signature/hash detail shown in Messages must be concise (`Signature: Invalid`, `Checksum: Valid`, etc.) and must not dump raw GPG diagnostics into the read pane.
+
+Acceptance:
+- FLMsg/FLAmp, Spotter, and CommStat rows use shared intelligence for summaries, topic search, and action-needed logic.
+- Common rendered MAGNET forms produce From/To/Subject/Date/State/Grid/Topic fields without requiring UI-specific parsing.
+- Future map/BBS logic consumes only the shared read model plus explicit user-enabled rules and audit-ready provenance.
+- No new UI-thread full-directory rescans or DB full-table scans are introduced for this refinement.
+
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy
 
 Problem:

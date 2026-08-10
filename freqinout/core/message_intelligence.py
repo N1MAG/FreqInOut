@@ -225,11 +225,39 @@ def analyze_form_text(
     form_title = str(form_name or parsed_fields.get("form_title", "") or "").strip()
     if not form_title:
         form_title = _infer_form_title(raw, path)
-    state = _clean_state(_first_nonempty(parsed_fields.get("state"), _field_after_label(raw, "State")))
-    grid = _clean_grid(_first_nonempty(parsed_fields.get("grid"), _field_after_label(raw, "Grid")))
     body = _first_nonempty(parsed_fields.get("body"), _message_body(raw), raw)
+    state = _clean_state(
+        _first_nonempty(
+            parsed_fields.get("state"),
+            _field_after_label(raw, "State"),
+            _leading_state_from_body(body),
+        )
+    )
+    grid = _clean_grid(_first_nonempty(parsed_fields.get("grid"), _field_after_label(raw, "Grid"), body))
+    precedence = _first_nonempty(
+        parsed_fields.get("precedence"),
+        parsed_fields.get("prec"),
+        _field_after_label(raw, "Msg Precedence"),
+        _field_after_label(raw, "Precedence"),
+        _field_after_label(raw, "Prec"),
+    )
+    region = _first_nonempty(
+        parsed_fields.get("region"),
+        parsed_fields.get("scope"),
+        _field_after_label(raw, "Region"),
+        _field_after_label(raw, "Scope"),
+    )
     topic_evidence = collect_topic_evidence(
-        (("path", str(path or "")), ("form", form_title), ("subject", subject), ("body", body))
+        (
+            ("path", str(path or "")),
+            ("form", form_title),
+            ("subject", subject),
+            ("body", body),
+            ("state", state),
+            ("grid", grid),
+            ("precedence", precedence),
+            ("region", region),
+        )
     )
     topics = tuple(topic_evidence.keys())
     groups = _groups_from_values(to_call, raw, str(path or ""))
@@ -261,7 +289,7 @@ def analyze_form_text(
         routing_candidate=routing_candidate,
         routing_reasons=routing_reasons,
         confidence=0.72 if (from_call or to_call or subject or form_title) else 0.35,
-        metadata=dict(parsed_fields),
+        metadata={k: v for k, v in {**parsed_fields, "precedence": precedence, "region": region}.items() if v},
     )
     return _with_summary(info)
 
@@ -548,6 +576,9 @@ def _field_after_label(text: str, label: str) -> str:
     lines = [line.strip() for line in str(text or "").splitlines()]
     label_key = str(label or "").strip().lower()
     for idx, line in enumerate(lines):
+        inline = re.match(rf"^{re.escape(label_key)}\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        if inline:
+            return inline.group(1).strip()
         if line.lower().rstrip(":") == label_key:
             for next_line in lines[idx + 1 :]:
                 if next_line:
@@ -560,6 +591,9 @@ def _block_after_label(text: str, label: str) -> str:
     label_key = str(label or "").strip().lower()
     start = -1
     for idx, line in enumerate(lines):
+        inline = re.match(rf"^{re.escape(label_key)}\s*:\s*(.+)$", line.strip(), flags=re.IGNORECASE)
+        if inline:
+            return re.sub(r"\s+", " ", inline.group(1).strip())
         if line.strip().lower().rstrip(":") == label_key:
             start = idx + 1
             break
@@ -607,6 +641,12 @@ def _message_body(text: str) -> str:
         if value:
             return value
     return ""
+
+
+def _leading_state_from_body(text: object) -> str:
+    value = str(text or "").strip()
+    match = re.match(r"^([A-Z]{2})\s*(?:[-:|/]\s*)", value, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else ""
 
 
 def _infer_form_title(text: str, path: object = None) -> str:

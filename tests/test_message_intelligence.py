@@ -97,9 +97,39 @@ Residents south of 300 South should monitor alerts and prepare to leave.
     assert info.to_call == "MR08"
     assert info.subject == "Widemouth 2 Fire"
     assert info.date_summary == "260803-0402z"
+    assert info.state == "UT"
+    assert info.grid == "DM38ST"
+    assert info.metadata["precedence"] == "Routine"
+    assert info.metadata["region"] == "MR08"
     assert "Residents south of 300 South" in info.body
     assert "Fire" in info.topics
     assert info.summary.startswith("MAGNET General Use Form - v1.1.1 | K7ETC -> MR08 | Widemouth 2 Fire")
+
+
+def test_rendered_form_inline_labels_and_body_location_feed_intelligence() -> None:
+    text = """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID: 260810-1405z
+To: MAGNET
+From: K7ETC
+Msg Precedence: Priority
+Region: MR08
+Subject: Infrastructure update
+Message: UT - DM38ST - water plant generator is offline and fuel delivery is delayed.
+"""
+
+    info = analyze_form_text(text, source_type="flamp", path="K7ETC-20260810-140500Z-57.k2s")
+
+    assert info.from_call == "K7ETC"
+    assert info.to_call == "MAGNET"
+    assert info.date_summary == "260810-1405z"
+    assert info.state == "UT"
+    assert info.grid == "DM38ST"
+    assert info.metadata["precedence"] == "Priority"
+    assert info.metadata["region"] == "MR08"
+    assert {"Infrastructure", "Water", "Power", "Fuel"}.issubset(set(info.topics))
+    assert info.routing_candidate is True
+    assert info.summary == "MAGNET General Use Form - v1.1.1 | K7ETC -> MAGNET | Infrastructure update | 260810-1405z"
 
 
 def test_filename_and_body_terms_support_bbs_rule_routing_concepts() -> None:

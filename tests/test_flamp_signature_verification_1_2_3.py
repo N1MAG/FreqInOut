@@ -17,7 +17,13 @@ from freqinout.core.gpg_tools import (
     signature_payload_candidates,
     verify_file_with_discovery,
 )
-from freqinout.gui.message_viewer_tab import ORIGIN_EXTS, SUPPORTED_EXT, FileRecord, MessageViewerTab
+from freqinout.gui.message_viewer_tab import (
+    ORIGIN_EXTS,
+    SUPPORTED_EXT,
+    FileRecord,
+    FileSignatureState,
+    MessageViewerTab,
+)
 
 
 def _valid_gpg_result() -> subprocess.CompletedProcess[str]:
@@ -39,6 +45,27 @@ def test_default_inline_suffixes_include_canonical_and_dot_style_names() -> None
     assert "-sig.b2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
     assert ".sig.k2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
     assert ".sig.b2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
+
+
+def test_message_viewer_signature_detail_suppresses_raw_gpg_diagnostics() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._is_signature_verification_enabled = lambda: True
+    tab._is_hash_verification_enabled = lambda: False
+    state = FileSignatureState(
+        status="invalid",
+        detail=(
+            "Signature verification failed (NODATA). gpg: no valid OpenPGP data found.\n"
+            "gpg: block_filter: 1st length byte missing\n"
+            "gpg: the signature could not be verified."
+        ),
+    )
+
+    overall, detail, trusted = tab._derive_auth_ui(state)
+
+    assert overall == "invalid"
+    assert detail == "Signature: Invalid"
+    assert trusted is False
+    assert "gpg:" not in detail.lower()
 
 
 def test_gpg_available_resolves_kleopatra_sibling_gpg(monkeypatch, tmp_path: Path) -> None:
