@@ -82,86 +82,98 @@ def upsert_observation(db_path: str | Path, observation: Observation, *, project
     try:
         ensure_observation_schema(conn)
         with conn:
-            conn.execute(
-                """
-                INSERT INTO observation_projection (
-                    observation_id,
-                    source_family,
-                    source_ref,
-                    source_radio_id,
-                    source_app,
-                    received_utc,
-                    event_utc,
-                    from_call,
-                    to_target,
-                    groups_json,
-                    observed_topics_json,
-                    operator_attention,
-                    status,
-                    urgency,
-                    subject,
-                    summary,
-                    state,
-                    grid,
-                    lat,
-                    lon,
-                    location_confidence,
-                    auth_state,
-                    trusted_state,
-                    confirmed_state,
-                    exercise_flag,
-                    route_eligible,
-                    publish_authorized,
-                    provenance_json,
-                    projected_utc
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(observation_id) DO UPDATE SET
-                    source_family=excluded.source_family,
-                    source_ref=excluded.source_ref,
-                    source_radio_id=excluded.source_radio_id,
-                    source_app=excluded.source_app,
-                    received_utc=excluded.received_utc,
-                    event_utc=excluded.event_utc,
-                    from_call=excluded.from_call,
-                    to_target=excluded.to_target,
-                    groups_json=excluded.groups_json,
-                    observed_topics_json=excluded.observed_topics_json,
-                    operator_attention=excluded.operator_attention,
-                    status=excluded.status,
-                    urgency=excluded.urgency,
-                    subject=excluded.subject,
-                    summary=excluded.summary,
-                    state=excluded.state,
-                    grid=excluded.grid,
-                    lat=excluded.lat,
-                    lon=excluded.lon,
-                    location_confidence=excluded.location_confidence,
-                    auth_state=excluded.auth_state,
-                    trusted_state=excluded.trusted_state,
-                    confirmed_state=excluded.confirmed_state,
-                    exercise_flag=excluded.exercise_flag,
-                    route_eligible=excluded.route_eligible,
-                    publish_authorized=excluded.publish_authorized,
-                    provenance_json=excluded.provenance_json,
-                    projected_utc=excluded.projected_utc
-                """,
-                _observation_values(observation, stamp),
-            )
-            conn.execute(
-                "DELETE FROM observation_projection_topics WHERE observation_id=?",
-                (observation.observation_id,),
-            )
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO observation_projection_topics (observation_id, topic)
-                VALUES (?, ?)
-                """,
-                [(observation.observation_id, topic) for topic in observation.observed_topics],
-            )
+            upsert_observation_conn(conn, observation, projected_utc=stamp)
         return observation.observation_id
     finally:
         conn.close()
+
+
+def upsert_observation_conn(
+    conn: sqlite3.Connection,
+    observation: Observation,
+    *,
+    projected_utc: str | None = None,
+) -> str:
+    ensure_observation_schema(conn)
+    stamp = str(projected_utc or utc_now_iso()).strip()
+    conn.execute(
+        """
+        INSERT INTO observation_projection (
+            observation_id,
+            source_family,
+            source_ref,
+            source_radio_id,
+            source_app,
+            received_utc,
+            event_utc,
+            from_call,
+            to_target,
+            groups_json,
+            observed_topics_json,
+            operator_attention,
+            status,
+            urgency,
+            subject,
+            summary,
+            state,
+            grid,
+            lat,
+            lon,
+            location_confidence,
+            auth_state,
+            trusted_state,
+            confirmed_state,
+            exercise_flag,
+            route_eligible,
+            publish_authorized,
+            provenance_json,
+            projected_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(observation_id) DO UPDATE SET
+            source_family=excluded.source_family,
+            source_ref=excluded.source_ref,
+            source_radio_id=excluded.source_radio_id,
+            source_app=excluded.source_app,
+            received_utc=excluded.received_utc,
+            event_utc=excluded.event_utc,
+            from_call=excluded.from_call,
+            to_target=excluded.to_target,
+            groups_json=excluded.groups_json,
+            observed_topics_json=excluded.observed_topics_json,
+            operator_attention=excluded.operator_attention,
+            status=excluded.status,
+            urgency=excluded.urgency,
+            subject=excluded.subject,
+            summary=excluded.summary,
+            state=excluded.state,
+            grid=excluded.grid,
+            lat=excluded.lat,
+            lon=excluded.lon,
+            location_confidence=excluded.location_confidence,
+            auth_state=excluded.auth_state,
+            trusted_state=excluded.trusted_state,
+            confirmed_state=excluded.confirmed_state,
+            exercise_flag=excluded.exercise_flag,
+            route_eligible=excluded.route_eligible,
+            publish_authorized=excluded.publish_authorized,
+            provenance_json=excluded.provenance_json,
+            projected_utc=excluded.projected_utc
+        """,
+        _observation_values(observation, stamp),
+    )
+    conn.execute(
+        "DELETE FROM observation_projection_topics WHERE observation_id=?",
+        (observation.observation_id,),
+    )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO observation_projection_topics (observation_id, topic)
+        VALUES (?, ?)
+        """,
+        [(observation.observation_id, topic) for topic in observation.observed_topics],
+    )
+    return observation.observation_id
 
 
 def upsert_observations(

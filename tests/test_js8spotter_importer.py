@@ -4,6 +4,7 @@ import sqlite3
 from freqinout.core.js8_expect_store import list_expect_entries
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text, summarize_spotter_form_text
 from freqinout.core.js8spotter_importer import import_js8spotter_database
+from freqinout.core.observation_store import list_observations
 
 
 def _make_spotter_db(path: Path) -> None:
@@ -134,6 +135,17 @@ def test_js8spotter_importer_imports_forms_and_expect_idempotently(tmp_path: Pat
     assert entries[0]["allowed_groups"] == ["@MAGNET"]
     assert entries[0]["allowed_callsigns"] == ["N0CALL"]
     assert entries[0]["max_replies"] == 3
+
+    observations = list_observations(target_db, source_family="spotter")
+    assert len(observations) == 1
+    assert observations[0].source_ref == "spotter_traffic:1"
+    assert observations[0].from_call == "N0CALL"
+    assert observations[0].to_target == "@MAGNET"
+    assert observations[0].source_radio_id == 7
+    assert observations[0].source_app == "fio-a"
+    assert observations[0].route_eligible is False
+    assert observations[0].publish_authorized is False
+    assert observations[0].provenance["import_source"] == "js8spotter-db-import"
 
 
 def test_spotter_bracket_decoder_makes_imported_mcforms_readable() -> None:

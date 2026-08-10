@@ -12,6 +12,9 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.js8_expect_store import default_expect_db_path, save_expect_entry
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text
+from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.observation_projection import observation_from_message_intelligence
+from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 
@@ -317,6 +320,56 @@ def _upsert_operator_grid_from_spotter(conn, row: Mapping[str, Any]) -> bool:
     return True
 
 
+def _mirror_spotter_import_to_observation(
+    conn,
+    *,
+    imported_id: object,
+    source_db: str,
+    source_table: str,
+    source_id: object,
+    raw_text: str,
+    form_id: str,
+    from_call: str,
+    to_call: str,
+    utc_str: str,
+    source_radio_id: object,
+    js8_instance_id: object,
+) -> None:
+    try:
+        info = analyze_spotter_text(
+            raw_text,
+            form_name=f"MCF{str(form_id or '').strip()}",
+            from_call=from_call,
+            to_call=to_call,
+        )
+        observation = observation_from_message_intelligence(
+            info,
+            source_ref=f"spotter_traffic:{int(imported_id or 0)}",
+            source_family="spotter",
+            source_radio_id=_int_or_none(source_radio_id),
+            source_app=str(js8_instance_id or "").strip(),
+            received_utc=utc_str,
+            event_utc=utc_str,
+            status="UNREAD",
+            extra_provenance={
+                "import_source": "js8spotter-db-import",
+                "source_db": source_db,
+                "source_table": source_table,
+                "source_id": str(source_id or ""),
+            },
+        )
+        upsert_observation_conn(conn, observation)
+    except Exception:
+        pass
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if str(value or "").strip() else None
+    except Exception:
+        return None
+
+
 def import_js8spotter_database(
     source_db: str | Path,
     *,
@@ -373,6 +426,7 @@ def import_js8spotter_database(
                     imported_id = int(existing[0])
                     stats.forms_skipped += 1
                 else:
+                    decoded_text = decode_spotter_form_text(raw_text)
                     dst.execute(
                         """
                         INSERT INTO spotter_traffic
@@ -389,7 +443,7 @@ def import_js8spotter_database(
                             form_id,
                             token,
                             raw_text,
-                            decode_spotter_form_text(raw_text),
+                            decoded_text,
                             str(source_radio_id or ""),
                             str(js8_instance_id or ""),
                             time.time(),
@@ -397,6 +451,20 @@ def import_js8spotter_database(
                     )
                     imported_id = int(dst.execute("SELECT last_insert_rowid()").fetchone()[0])
                     stats.forms_imported += 1
+                _mirror_spotter_import_to_observation(
+                    dst,
+                    imported_id=imported_id,
+                    source_db=source_identity,
+                    source_table="forms",
+                    source_id=source_id,
+                    raw_text=raw_text,
+                    form_id=form_id,
+                    from_call=from_call,
+                    to_call=to_call,
+                    utc_str=utc_str,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                )
                 _record_import(
                     dst,
                     source_db=source_identity,
