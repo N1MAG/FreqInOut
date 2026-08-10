@@ -138,6 +138,20 @@ def test_message_inbox_uses_adaptive_spotter_sitrep_views() -> None:
     assert "_relative_age" in source
 
 
+def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries() -> None:
+    source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+    intel_source = (ROOT / "freqinout/core/message_intelligence.py").read_text(encoding="utf-8")
+
+    assert "from freqinout.core.message_intelligence import analyze_form_text, analyze_spotter_text" in source
+    assert "analyze_spotter_text(" in source
+    assert "analyze_form_text(" in source
+    assert "topics=tuple(intelligence.topics)" in source
+    assert "actionable=bool(intelligence.actionable)" in source
+    assert "TOPIC_TAXONOMY" in intel_source
+    assert '"General Intel"' in intel_source
+    assert '"Infrastructure"' in intel_source
+
+
 def test_message_inbox_delegates_visible_ingest_to_shared_ingestor() -> None:
     source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     js8_body = source.split("def _ingest_js8_messages", 1)[1].split("def _spotter_offset_key", 1)[0]

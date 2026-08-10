@@ -117,6 +117,7 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
+from freqinout.core.message_intelligence import analyze_form_text, analyze_spotter_text
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
@@ -978,7 +979,7 @@ class _RowsBuildWorker(QObject):
         text = _read_text_head(rec.path, 131072)
         if not text:
             return {}
-        meta: Dict[str, str] = {}
+        meta: Dict[str, str] = {"_raw_head": text}
         from_call = _extract_sender_from_form_text(text, rec.path)
         if from_call:
             meta["from"] = from_call
@@ -1164,8 +1165,18 @@ class _RowsBuildWorker(QObject):
             if msg_type.startswith("F!"):
                 form_id = msg_type[2:].strip()
                 title = self._form_titles.get(form_id, "")
-            summary = summarize_spotter_form_text(msg.raw_text, form_title=title)
-            title = summary or title or (msg.decoded_text or msg.raw_text or "").strip()
+            intelligence = analyze_spotter_text(
+                msg.raw_text,
+                form_name=title or msg_type,
+                from_call=msg.from_call,
+                to_call=msg.to_call,
+            )
+            title = (
+                intelligence.summary
+                or summarize_spotter_form_text(msg.raw_text, form_title=title)
+                or title
+                or (msg.decoded_text or msg.raw_text or "").strip()
+            )
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
@@ -1188,7 +1199,16 @@ class _RowsBuildWorker(QObject):
                     auth_trusted=auth_trusted,
                     expect_decision=expect_decision,
                     expect_detail=expect_detail,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    topics=tuple(intelligence.topics),
+                    actionable=bool(intelligence.actionable),
+                    search_text=self._compose_search_text(
+                        msg_type,
+                        status,
+                        from_call,
+                        to_call,
+                        rcv_display,
+                        " ".join([title, " ".join(intelligence.topics), intelligence.state, intelligence.grid]),
+                    ),
                 )
             )
 
@@ -1333,7 +1353,24 @@ class _RowsBuildWorker(QObject):
                 form_meta = {} if is_image else self._extract_form_file_metadata(rec)
                 from_call = "" if is_image else (form_meta.get("from") or self._extract_sender_from_file(rec))
                 to_call = "" if is_image else form_meta.get("to", "")
-                title = "Image Received" if is_image else (form_meta.get("title") or _title_from_filename_path(rec.path))
+                intelligence = None
+                if not is_image:
+                    intelligence = analyze_form_text(
+                        form_meta.get("_raw_head", ""),
+                        form_name=form_meta.get("form_title", ""),
+                        source_type=origin,
+                        path=rec.path,
+                        fields=form_meta,
+                    )
+                title = (
+                    "Image Received"
+                    if is_image
+                    else (
+                        (intelligence.summary if intelligence else "")
+                        or form_meta.get("title")
+                        or _title_from_filename_path(rec.path)
+                    )
+                )
                 rcv_ts = float(rec.mtime or 0.0)
                 rcv_display = self._format_rcv_display(rcv_ts, None)
                 msg_type = origin.upper() if origin != "varac" else "VarAC"
@@ -1353,10 +1390,28 @@ class _RowsBuildWorker(QObject):
                         title=title,
                         origin=origin,
                         payload=rec,
-                        search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                        search_text=self._compose_search_text(
+                            msg_type,
+                            status,
+                            from_call,
+                            to_call,
+                            rcv_display,
+                            " ".join(
+                                part
+                                for part in (
+                                    title,
+                                    " ".join(intelligence.topics) if intelligence else "",
+                                    intelligence.state if intelligence else "",
+                                    intelligence.grid if intelligence else "",
+                                )
+                                if part
+                            ),
+                        ),
                         auth_state=auth_state,
                         auth_detail=auth_detail,
                         auth_trusted=auth_trusted,
+                        topics=tuple(intelligence.topics) if intelligence else (),
+                        actionable=bool(intelligence.actionable) if intelligence else False,
                     )
                 )
 
@@ -1631,6 +1686,8 @@ class UnifiedMessage:
     auth_trusted: bool = False
     expect_decision: str = ""
     expect_detail: str = ""
+    topics: Tuple[str, ...] = ()
+    actionable: bool = False
 
 
 class MessageTableModel(QAbstractTableModel):
