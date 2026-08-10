@@ -21,6 +21,9 @@ from freqinout.core.js8_spotter_forms import (
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text
 from freqinout.core.js8_expect_store import ExpectEvaluationResult, evaluate_expect_request
 from freqinout.core.logger import log
+from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.observation_projection import observation_from_message_intelligence
+from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.settings_manager import SettingsManager
 
 
@@ -328,6 +331,7 @@ class MessageIngestor:
                             ingested_ts,
                         ),
                     )
+                    imported_id = int(cur.lastrowid or 0)
                     self._upsert_spotter_station_status(
                         cur,
                         from_call=from_call,
@@ -337,6 +341,18 @@ class MessageIngestor:
                         utc_ts=float(parsed.get("utc_ts") or 0.0),
                         utc_str=str(parsed.get("utc_str") or ""),
                         ingested_ts=ingested_ts,
+                    )
+                    self._mirror_spotter_observation(
+                        conn,
+                        imported_id=imported_id,
+                        raw_form=raw_form,
+                        form_id=form_id,
+                        from_call=from_call,
+                        to_call=str(parsed.get("to_call") or "").strip().upper(),
+                        utc_str=str(parsed.get("utc_str") or ""),
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        source_kind="directed",
                     )
                     conn.commit()
                     conn.close()
@@ -430,6 +446,7 @@ class MessageIngestor:
                         ingested_ts,
                     ),
                 )
+                imported_id = int(cur.lastrowid or 0)
                 self._upsert_spotter_station_status(
                     cur,
                     from_call=from_call,
@@ -439,6 +456,18 @@ class MessageIngestor:
                     utc_ts=float(parsed.get("utc_ts") or 0.0),
                     utc_str=str(parsed.get("utc_str") or ""),
                     ingested_ts=ingested_ts,
+                )
+                self._mirror_spotter_observation(
+                    conn,
+                    imported_id=imported_id,
+                    raw_form=raw_form,
+                    form_id=form_id,
+                    from_call=from_call,
+                    to_call=str(parsed.get("to_call") or "").strip().upper(),
+                    utc_str=str(parsed.get("utc_str") or ""),
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    source_kind="js8-api",
                 )
                 conn.commit()
                 conn.close()
@@ -476,6 +505,52 @@ class MessageIngestor:
             return bool(self.settings.get("js8_expect_unattended_auto_reply_enabled", False))
         except Exception:
             return False
+
+    def _mirror_spotter_observation(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        imported_id: int,
+        raw_form: str,
+        form_id: str,
+        from_call: str,
+        to_call: str,
+        utc_str: str,
+        source_radio_id: object,
+        js8_instance_id: object,
+        source_kind: str,
+    ) -> None:
+        try:
+            info = analyze_spotter_text(
+                raw_form,
+                form_name=f"MCF{str(form_id or '').strip()}",
+                from_call=from_call,
+                to_call=to_call,
+            )
+            observation = observation_from_message_intelligence(
+                info,
+                source_ref=f"spotter_traffic:{int(imported_id or 0)}",
+                source_family="spotter",
+                source_radio_id=self._int_or_none(source_radio_id),
+                source_app=str(js8_instance_id or "").strip(),
+                received_utc=utc_str,
+                event_utc=utc_str,
+                status="UNREAD",
+                extra_provenance={
+                    "ingest_source": source_kind,
+                    "js8_instance_id": str(js8_instance_id or "").strip(),
+                },
+            )
+            upsert_observation_conn(conn, observation)
+        except Exception as exc:
+            log.debug("MessageIngest: observation projection mirror failed: %s", exc)
+
+    @staticmethod
+    def _int_or_none(value: object) -> int | None:
+        try:
+            return int(value) if str(value or "").strip() else None
+        except Exception:
+            return None
 
     def _maybe_dispatch_expect_auto_reply(
         self,

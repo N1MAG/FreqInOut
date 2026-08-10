@@ -4,6 +4,7 @@ import sqlite3
 from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
 from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.observation_store import list_observations
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 from tests.test_js8_send_service import _safe_server
@@ -62,6 +63,14 @@ def test_spotter_directed_ingest_adds_source_and_expect_audit(monkeypatch, tmp_p
     assert audit[0]["source_radio_id"] == "7"
     assert audit[0]["source_js8_instance_id"] == "fio-a"
     assert settings.get("spotter_directed_offset_radio_7", 0) > 0
+    observations = list_observations(db_path, source_family="spotter")
+    assert len(observations) == 1
+    assert observations[0].source_ref == "spotter_traffic:1"
+    assert observations[0].from_call == "N0CALL"
+    assert observations[0].to_target == "@MAGNET"
+    assert observations[0].source_radio_id == 7
+    assert observations[0].source_app == "fio-a"
+    assert observations[0].provenance["ingest_source"] == "directed"
 
 
 def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_path: Path) -> None:
@@ -114,6 +123,12 @@ def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_
     assert audit[0]["decision"] == "reply-ready"
     assert audit[0]["event_id"].startswith("js8-api:8:fio-b")
     assert list_expect_dispatch_audit(db_path=db_path) == []
+    observations = list_observations(db_path, source_family="spotter")
+    assert len(observations) == 1
+    assert observations[0].source_ref == "spotter_traffic:1"
+    assert observations[0].source_radio_id == 8
+    assert observations[0].source_app == "fio-b"
+    assert observations[0].provenance["ingest_source"] == "js8-api"
 
 
 def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monkeypatch, tmp_path: Path) -> None:
