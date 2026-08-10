@@ -986,6 +986,24 @@ def list_reports_for_operator(callsign: str, *, limit: int = 50) -> List[Dict[st
     return list_local_reports(callsign=callsign, limit=limit)
 
 
+def delete_local_reports(report_ids: List[int]) -> int:
+    ensure_tables()
+    ids = sorted({int(report_id) for report_id in report_ids if int(report_id or 0) > 0})
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    conn = sqlite3.connect(_db_path())
+    try:
+        with conn:
+            cur = conn.execute(
+                f"DELETE FROM local_operator_reports WHERE id IN ({placeholders})",
+                tuple(ids),
+            )
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
 def latest_report_summaries_for_callsigns(
     callsigns: List[str],
     *,

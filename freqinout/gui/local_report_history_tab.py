@@ -5,11 +5,13 @@ from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from freqinout.core.local_ops_store import list_local_reports
+from freqinout.core.local_ops_store import delete_local_reports, list_local_reports
 from freqinout.core.logger import log
 from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.settings_manager import SettingsManager
@@ -94,13 +96,25 @@ class LocalReportHistoryTab(QWidget):
         summary_row.addWidget(self.summary_filters_label, stretch=1)
         layout.addLayout(summary_row)
 
+        actions_row = QHBoxLayout()
+        self.copy_selected_btn = QPushButton("Copy Selected")
+        self.copy_filtered_btn = QPushButton("Copy Filtered Summary")
+        self.delete_selected_btn = QPushButton("Delete Selected")
+        self.copy_status_label = QLabel("")
+        self.copy_status_label.setWordWrap(True)
+        actions_row.addWidget(self.copy_selected_btn)
+        actions_row.addWidget(self.copy_filtered_btn)
+        actions_row.addWidget(self.delete_selected_btn)
+        actions_row.addWidget(self.copy_status_label, stretch=1)
+        layout.addLayout(actions_row)
+
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             ["Status", "Age", "From", "Source", "Topics", "Subject", "Location"]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(True)
         hv = self.table.horizontalHeader()
@@ -122,6 +136,9 @@ class LocalReportHistoryTab(QWidget):
 
         self.refresh_btn.clicked.connect(self.refresh_reports)
         self.clear_filters_btn.clicked.connect(self._clear_filters)
+        self.copy_selected_btn.clicked.connect(self._copy_selected_report)
+        self.copy_filtered_btn.clicked.connect(self._copy_filtered_summary)
+        self.delete_selected_btn.clicked.connect(self._delete_selected_reports)
         self.search_edit.textChanged.connect(self.refresh_reports)
         self.callsign_edit.textChanged.connect(self.refresh_reports)
         self.topic_combo.currentIndexChanged.connect(self.refresh_reports)
@@ -132,6 +149,7 @@ class LocalReportHistoryTab(QWidget):
         theme = resolve_theme(self.settings)
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
+        self._update_copy_actions()
 
     def on_settings_saved(self) -> None:
         try:
@@ -197,6 +215,7 @@ class LocalReportHistoryTab(QWidget):
             else:
                 self.detail_title.setText("No local reports")
                 self.detail_text.clear()
+            self._update_copy_actions()
         finally:
             self.table.setSortingEnabled(sorting_enabled)
 
@@ -243,15 +262,108 @@ class LocalReportHistoryTab(QWidget):
         if not row:
             self.detail_title.setText("Select a report")
             self.detail_text.clear()
+            self._update_copy_actions()
             return
         title = str(row.get("subject", "")).strip() or self._body_preview(row)
         self.detail_title.setText(
             f"{row.get('status', 'INFO')} | {row.get('callsign', '')} | {title or 'Local report'}"
         )
+        self.detail_text.setPlainText(self._format_report_detail(row))
+        self._update_copy_actions()
+
+    def _update_copy_actions(self) -> None:
+        theme = resolve_theme(self.settings)
+        has_selected = self._selected_report() is not None
+        has_rows = bool(self._rows)
+        self.copy_selected_btn.setEnabled(has_selected)
+        self.copy_filtered_btn.setEnabled(has_rows)
+        self.delete_selected_btn.setEnabled(has_selected)
+        self.copy_selected_btn.setStyleSheet(button_style("primary" if has_selected else "muted", theme))
+        self.copy_filtered_btn.setStyleSheet(button_style("primary" if has_rows else "muted", theme))
+        self.delete_selected_btn.setStyleSheet(button_style("eligible_danger" if has_selected else "muted", theme))
+
+    def _selected_report_ids(self) -> List[int]:
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        ids: List[int] = []
+        for model_index in rows:
+            item = self.table.item(model_index.row(), self.COL_STATUS)
+            report_id = int(item.data(Qt.UserRole) or 0) if item is not None else 0
+            if report_id > 0:
+                ids.append(report_id)
+        return ids
+
+    def _copy_to_clipboard(self, text: str, status: str) -> None:
+        QApplication.clipboard().setText(text)
+        self.copy_status_label.setText(status)
+
+    def _copy_selected_report(self) -> None:
+        row = self._selected_report()
+        if not row:
+            self.copy_status_label.setText("Select a report to copy.")
+            return
+        self._copy_to_clipboard(
+            f"Local Report\n{self._format_report_detail(row)}",
+            "Copied selected report.",
+        )
+
+    def _copy_filtered_summary(self) -> None:
+        if not self._rows:
+            self.copy_status_label.setText("No reports to copy.")
+            return
+        priority_count = sum(
+            1
+            for row in self._rows
+            if str(row.get("status", "")).strip().upper() in {"PRIORITY", "EMERGENCY"}
+        )
+        lines = [
+            "Local Reports Summary",
+            f"Reports: {len(self._rows)}",
+            f"Priority/Emergency: {priority_count}",
+            f"Filters: {self._active_filter_text()}",
+            "",
+        ]
+        lines.extend(self._format_report_summary_line(row) for row in self._rows)
+        self._copy_to_clipboard(
+            "\n".join(lines),
+            f"Copied {len(self._rows)} report summary line(s).",
+        )
+
+    def _delete_selected_reports(self) -> None:
+        ids = self._selected_report_ids()
+        if not ids:
+            self.copy_status_label.setText("Select one or more reports to delete.")
+            return
+        count = len(ids)
+        answer = QMessageBox.question(
+            self,
+            "Delete Local Reports",
+            f"Delete {count} selected local report{'s' if count != 1 else ''}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self.copy_status_label.setText("Delete canceled.")
+            return
+        deleted = delete_local_reports(ids)
+        self.copy_status_label.setText(f"Deleted {deleted} local report{'s' if deleted != 1 else ''}.")
+        self.refresh_reports()
+
+    def _format_report_summary_line(self, row: Dict[str, Any]) -> str:
+        status = str(row.get("status", "")).strip().upper() or "INFO"
+        age = self._age_text(str(row.get("created_utc", ""))) or "--"
+        callsign = str(row.get("callsign", "") or row.get("from_name", "")).strip() or "Unknown"
+        source = self._source_text(row) or "Local"
+        topics = self._topics_text(row) or "Uncategorized"
+        title = str(row.get("subject", "")).strip() or self._body_preview(row) or "No subject"
+        location = self._location_text(row)
+        place = f" | {location}" if location else ""
+        return f"{status} | {age} | {callsign} | {source} | {topics} | {title}{place}"
+
+    def _format_report_detail(self, row: Dict[str, Any]) -> str:
         lines = [
             f"From: {row.get('callsign', '') or row.get('from_name', '')}",
             f"To: {self._target_text(row) or 'Local'}",
-            f"Source: {self._source_text(row)}",
+            f"Source: {self._source_text(row) or 'Local'}",
             f"When: {self._age_text(str(row.get('created_utc', '')))} ({row.get('created_utc', '')})",
             f"Status: {row.get('status', '')}",
             f"Confidence: {self._confirmation_text(row)}",
@@ -266,7 +378,7 @@ class LocalReportHistoryTab(QWidget):
         body = str(row.get("body", "")).strip()
         if body:
             lines.extend(["", body])
-        self.detail_text.setPlainText("\n".join(lines))
+        return "\n".join(lines)
 
     @staticmethod
     def _parse_utc(value: str) -> Optional[dt.datetime]:

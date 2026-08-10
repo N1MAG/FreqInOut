@@ -120,3 +120,27 @@ def test_latest_report_summaries_choose_higher_urgency_context(monkeypatch, tmp_
     assert summary["latest_display"].startswith("INFO | Comms")
     assert summary["highest_display"].startswith("PRIORITY | Fire")
     assert summary["topics"] == ["Comms", "Fire", "Travel/Roads"]
+
+
+def test_delete_local_reports_removes_only_requested_reports(monkeypatch, tmp_path) -> None:
+    _use_tmp_db(monkeypatch, tmp_path)
+    first_id = local_ops_store.record_local_report(
+        callsign="K7ETC",
+        status="PRIORITY",
+        topics=["Fire"],
+        subject="Wildfire update",
+        created_utc="2026-08-10T12:00:00+00:00",
+    )
+    second_id = local_ops_store.record_local_report(
+        callsign="N0PWR",
+        status="INFO",
+        topics=["Comms"],
+        subject="Repeater normal",
+        created_utc="2026-08-10T13:00:00+00:00",
+    )
+
+    deleted = local_ops_store.delete_local_reports([int(first_id or 0), 999999])
+    rows = local_ops_store.list_local_reports()
+
+    assert deleted == 1
+    assert [row["id"] for row in rows] == [second_id]
