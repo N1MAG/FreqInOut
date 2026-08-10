@@ -40,14 +40,15 @@ def test_local_report_history_renders_report_table_and_readable_detail(monkeypat
     tab = LocalReportHistoryTab()
 
     assert tab.table.rowCount() == 1
-    assert tab.table.columnCount() == 7
+    assert tab.table.columnCount() == 6
     assert tab.summary_total_label.text() == "Reports: 1"
     assert tab.summary_priority_label.text() == "Priority/Emergency: 1"
     assert tab.summary_filters_label.text() == "Filters: none"
     assert tab.table.item(0, tab.COL_STATUS).text() == "PRIORITY"
     assert tab.table.item(0, tab.COL_FROM).text() == "K7ETC"
     assert tab.table.item(0, tab.COL_SOURCE).text() == "GMRS 462.675"
-    assert "Fire" in tab.table.item(0, tab.COL_TOPICS).text()
+    assert "Fire" in tab.table.item(0, tab.COL_REPORT).text()
+    assert "Wildfire update" in tab.table.item(0, tab.COL_REPORT).text()
     assert "Wildfire update" in tab.detail_text.toPlainText()
     assert "Evac route closed" in tab.detail_text.toPlainText()
     assert "Source:" in tab.detail_text.toPlainText()

@@ -38,6 +38,9 @@ def test_local_ncs_saves_selected_checkin_report_to_message_intelligence_store(m
     tab.channels_edit.setText("GMRS RPT 462.650")
     tab._load_checkins(select_id=int(entry_id or 0))
 
+    assert tab.table.columnCount() == 7
+    assert tab.table.item(0, tab.COL_LOCATION).text() == "Delta, UT"
+
     tab.report_source_combo.setCurrentText("GMRS")
     tab.report_status_combo.setCurrentText("PRIORITY")
     tab.report_confirmed_combo.setCurrentText("Second Hand")

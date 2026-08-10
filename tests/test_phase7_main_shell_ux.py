@@ -1681,9 +1681,9 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
     assert "self._inbox_actions_layout = QGridLayout()" in source
     assert "(self.inbox_actions_heading, 0, 0, 1, 2)" in source
-    assert "(self.type_filter, 6, 1)" in source
-    assert "(self.operating_group_filter, 11, 0, 1, 2)" in source
-    assert "(self.source_filter, 12, 0, 1, 2)" in source
+    assert "(self.type_filter, 8, 1)" in source
+    assert "(self.operating_group_filter, 12, 0, 1, 2)" in source
+    assert "(self.source_filter, 13, 0, 1, 2)" in source
     assert "self.messages_header.setVisible(False)" in source
     assert 'fallback_text="Messages uses the current radio and Frequency Plan context' not in source
     assert "self.plan_context_label.setVisible(False)" in source
@@ -1825,17 +1825,18 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         compact_layout = tab._inbox_actions_layout
         assert tab._responsive_layout_mode == "compact"
         assert compact_layout.itemAtPosition(0, 0).widget() is tab.inbox_actions_heading
-        assert compact_layout.itemAtPosition(6, 1).widget() is tab.type_filter
-        assert compact_layout.itemAtPosition(11, 0).widget() is tab.operating_group_filter
-        assert compact_layout.itemAtPosition(15, 0).widget() is tab.inbox_check_label
-        assert compact_layout.itemAtPosition(17, 0).widget() is tab.inbox_bbs_heading
+        assert compact_layout.itemAtPosition(8, 1).widget() is tab.type_filter
+        assert compact_layout.itemAtPosition(12, 0).widget() is tab.operating_group_filter
+        assert compact_layout.itemAtPosition(16, 0).widget() is tab.inbox_check_label
+        assert compact_layout.itemAtPosition(18, 0).widget() is tab.inbox_bbs_heading
         assert tab.compose_splitter.orientation() == Qt.Vertical
 
         tab.resize(900, 560)
         tab.show()
         tab._update_messages_responsive_layout()
         app.processEvents()
-        assert tab.inbox_controls_panel.minimumHeight() > tab.inbox_controls_scroll.viewport().height()
+        assert tab.inbox_controls_panel.minimumHeight() >= 420
+        assert tab.inbox_controls_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.refresh_btn.minimumHeight() >= 24
         assert tab.type_filter.minimumHeight() >= 24
 
@@ -1846,10 +1847,10 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         wide_layout = tab._inbox_actions_layout
         assert tab._responsive_layout_mode == "wide"
         assert wide_layout.itemAtPosition(0, 0).widget() is tab.inbox_actions_heading
-        assert wide_layout.itemAtPosition(6, 1).widget() is tab.type_filter
-        assert wide_layout.itemAtPosition(11, 0).widget() is tab.operating_group_filter
-        assert wide_layout.itemAtPosition(15, 0).widget() is tab.inbox_check_label
-        assert wide_layout.itemAtPosition(17, 0).widget() is tab.inbox_bbs_heading
+        assert wide_layout.itemAtPosition(8, 1).widget() is tab.type_filter
+        assert wide_layout.itemAtPosition(12, 0).widget() is tab.operating_group_filter
+        assert wide_layout.itemAtPosition(16, 0).widget() is tab.inbox_check_label
+        assert wide_layout.itemAtPosition(18, 0).widget() is tab.inbox_bbs_heading
         assert tab.compose_splitter.orientation() == Qt.Horizontal
     finally:
         tab.deleteLater()

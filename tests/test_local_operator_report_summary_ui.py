@@ -39,9 +39,10 @@ def test_local_operator_table_shows_and_searches_latest_report_summary(monkeypat
 
     tab = LocalOperatorTab()
 
-    assert tab.table.columnCount() == 8
+    assert tab.table.columnCount() == 7
     assert tab.table.item(0, tab.COL_NAME).text() == "Test Operator"
     assert tab.table.item(0, tab.COL_LOCATION).text() == "Delta, UT"
+    assert tab.table.item(0, tab.COL_ACTIVITY).text() == "GMRS | 0 check-ins"
     report_item = tab.table.item(0, tab.COL_REPORT)
     assert report_item is not None
     assert "PRIORITY" in report_item.text()

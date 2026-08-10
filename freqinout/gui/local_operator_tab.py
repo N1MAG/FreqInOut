@@ -50,10 +50,9 @@ class LocalOperatorTab(QWidget):
     COL_CALLSIGN = 1
     COL_NAME = 2
     COL_LOCATION = 3
-    COL_CATEGORY = 4
-    COL_COUNT = 5
-    COL_SITREP = 6
-    COL_REPORT = 7
+    COL_ACTIVITY = 4
+    COL_SITREP = 5
+    COL_REPORT = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,15 +100,14 @@ class LocalOperatorTab(QWidget):
         actions.addStretch()
         layout.addLayout(actions)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             [
                 "Selected",
                 "Callsign",
                 "Name",
                 "Location",
-                "Category",
-                "Check-ins",
+                "Activity",
                 "SitRep",
                 "Latest Report",
             ]
@@ -122,10 +120,10 @@ class LocalOperatorTab(QWidget):
         header.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_COUNT, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_ACTIVITY, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_REPORT, QHeaderView.Stretch)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         layout.addWidget(self.table)
 
         self.refresh_btn.clicked.connect(self._load_data)
@@ -238,8 +236,7 @@ class LocalOperatorTab(QWidget):
                     str(row.get("callsign", "")).upper(),
                     self._operator_display_name(row),
                     self._operator_location(row),
-                    str(row.get("category", "")),
-                    str(int(row.get("checkin_count", 0) or 0)),
+                    self._operator_activity(row),
                     str(row.get("sitrep_status", "GREEN")).upper(),
                     self._report_display_text(str(row.get("callsign", ""))),
                 ]
@@ -274,6 +271,19 @@ class LocalOperatorTab(QWidget):
         if city and state:
             return f"{city}, {state}"
         return city or state
+
+    @staticmethod
+    def _operator_activity(row: Dict[str, Any]) -> str:
+        category = str(row.get("category", "")).strip().upper()
+        try:
+            checkins = int(row.get("checkin_count", 0) or 0)
+        except Exception:
+            checkins = 0
+        parts = []
+        if category:
+            parts.append(category)
+        parts.append(f"{checkins} check-in{'s' if checkins != 1 else ''}")
+        return " | ".join(parts)
 
     def _report_summary(self, callsign: str) -> Dict[str, Any]:
         return self._report_summaries.get(str(callsign or "").strip().upper(), {})

@@ -1144,7 +1144,7 @@ class _RowsBuildWorker(QObject):
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
-            to_call = (msg.to_call or "").strip().upper()
+            to_call = MessageTableModel._strip_group_marker(msg.to_call)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1189,10 +1189,11 @@ class _RowsBuildWorker(QObject):
                 or title
                 or (msg.decoded_text or msg.raw_text or "").strip()
             )
+            title = MessageTableModel._strip_group_markers_in_display_text(title)
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
-            to_call = (msg.to_call or "").strip().upper()
+            to_call = MessageTableModel._strip_group_marker(msg.to_call)
             auth_state, auth_detail, auth_trusted = self._spotter_auth_row_state(msg)
             expect_decision, expect_detail = self._spotter_expect_row_state(msg)
             rows.append(
@@ -1237,7 +1238,7 @@ class _RowsBuildWorker(QObject):
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
-            to_call = (msg.to_call or "").strip().upper()
+            to_call = MessageTableModel._strip_group_marker(msg.to_call)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1263,7 +1264,7 @@ class _RowsBuildWorker(QObject):
             rcv_ts = float(msg.event_ts or 0.0)
             rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
             from_call = (msg.from_call or "").strip().upper()
-            to_call = (msg.target or "").strip().upper()
+            to_call = MessageTableModel._strip_group_marker(msg.target)
             overall = (msg.overall_status or "").strip().lower()
             scope = (msg.scope or "").strip()
             title_parts = [msg.subtype_label]
@@ -1315,7 +1316,6 @@ class _RowsBuildWorker(QObject):
             rcv_ts = float(msg.event_ts or 0.0)
             rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
             from_call = (msg.from_call or "").strip().upper()
-            to_call = (msg.target or "").strip().upper()
             status = str(msg.status_label or "INFO").strip().upper() or "INFO"
             intelligence = analyze_commstat_fields(
                 artifact_kind=msg.artifact_kind,
@@ -1336,9 +1336,12 @@ class _RowsBuildWorker(QObject):
                 event_utc=msg.event_ts_utc,
             )
             msg_type = intelligence.form_name or artifact_kind_label(msg.artifact_kind)
-            title = intelligence.summary or str(msg.title or "").strip() or msg_type
+            title = MessageTableModel._strip_group_markers_in_display_text(
+                intelligence.summary or str(msg.title or "").strip() or msg_type
+            )
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            to_call = intelligence.to_call or MessageTableModel._strip_group_marker(msg.target)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1925,10 +1928,19 @@ class MessageTableModel(QAbstractTableModel):
     def _field_report_group(row: UnifiedMessage) -> str:
         payload = row.payload
         if isinstance(payload, SitrepMessage):
-            return payload.report_group or payload.target or row.to_call
+            return MessageTableModel._strip_group_marker(payload.report_group or payload.target or row.to_call)
         if isinstance(payload, CommStatArtifact):
-            return payload.report_group or payload.target or row.to_call
+            return MessageTableModel._strip_group_marker(payload.report_group or payload.target or row.to_call)
         return row.to_call or ""
+
+    @staticmethod
+    def _strip_group_marker(value: object) -> str:
+        text = str(value or "").strip().upper()
+        return text[1:] if text.startswith("@") else text
+
+    @staticmethod
+    def _strip_group_markers_in_display_text(value: object) -> str:
+        return re.sub(r"@([A-Z0-9_-]{2,})", r"\1", str(value or ""))
 
     @staticmethod
     def _field_report_area(row: UnifiedMessage) -> str:
@@ -10595,7 +10607,7 @@ class MessageViewerTab(QWidget):
                     msg_type=msg_type,
                     status=status,
                     from_call=(msg.from_call or "").strip().upper(),
-                    to_call=(msg.to_call or "").strip().upper(),
+                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
                     rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
                     title=title,
@@ -10622,7 +10634,9 @@ class MessageViewerTab(QWidget):
                 form_id = msg_type[2:].strip()
                 title = self._load_form_title(form_id)
             summary = summarize_spotter_form_text(msg.raw_text, form_title=title)
-            title = summary or title or (msg.decoded_text or msg.raw_text or "").strip()
+            title = MessageTableModel._strip_group_markers_in_display_text(
+                summary or title or (msg.decoded_text or msg.raw_text or "").strip()
+            )
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             auth_map = self._spotter_msg_auth_state_for_message(msg)
@@ -10632,7 +10646,7 @@ class MessageViewerTab(QWidget):
                     msg_type=msg_type,
                     status=status,
                     from_call=(msg.from_call or "").strip().upper(),
-                    to_call=(msg.to_call or "").strip().upper(),
+                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
                     rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
                     title=title,
@@ -10663,7 +10677,7 @@ class MessageViewerTab(QWidget):
                     msg_type=msg_type,
                     status=status,
                     from_call=(msg.from_call or "").strip().upper(),
-                    to_call=(msg.to_call or "").strip().upper(),
+                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
                     rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
                     title=title,
@@ -10696,7 +10710,7 @@ class MessageViewerTab(QWidget):
                     msg_type="SitRep",
                     status="INFO",
                     from_call=(msg.from_call or "").strip().upper(),
-                    to_call=(msg.target or "").strip().upper(),
+                    to_call=MessageTableModel._strip_group_marker(msg.target),
                     rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
                     title=title,
@@ -10726,7 +10740,9 @@ class MessageViewerTab(QWidget):
                 source_family=msg.source_family_label,
                 event_utc=msg.event_ts_utc,
             )
-            title = intelligence.summary or str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
+            title = MessageTableModel._strip_group_markers_in_display_text(
+                intelligence.summary or str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
+            )
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
@@ -10734,7 +10750,7 @@ class MessageViewerTab(QWidget):
                     msg_type=intelligence.form_name or artifact_kind_label(msg.artifact_kind),
                     status=str(msg.status_label or "INFO").strip().upper() or "INFO",
                     from_call=(msg.from_call or "").strip().upper(),
-                    to_call=(msg.target or "").strip().upper(),
+                    to_call=intelligence.to_call or MessageTableModel._strip_group_marker(msg.target),
                     rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
                     title=title,

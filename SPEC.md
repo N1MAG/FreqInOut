@@ -1750,9 +1750,9 @@ Phase 6: Performance and soak hardening
     - Landed follow-up slice: `Local Operators` shows latest/highest-urgency local-report context and search can match report topics/keywords.
     - Landed follow-up slice: a dedicated `Local Reports` screen shows local-report history and readable selected-report detail while keeping HF Operator History separate.
     - Landed follow-up slice: `Local Operators` includes `View Reports` for a selected callsign, opening `Local Reports` pre-filtered to that operator.
-    - Landed UI refinement: `Local Operators` table is an operator scan view, not a database grid. Visible columns are limited to selection, callsign, name, location, category, check-ins, SitRep, and latest report; dates/notes remain available through edit/search/import/export.
-    - Landed UI refinement: `Local Reports` table is a report scan view with a summary strip and limited columns: status, age, from, source, topics, subject, location. Net/session target stays in selected-report detail.
-    - Landed UI refinement: `Local NCS` content is scroll-safe for minimized windows; check-in table retains internal scrolling, and notes/report text areas are height-capped so report capture remains reachable.
+    - Landed UI refinement: `Local Operators` table is an operator scan view, not a database grid. Visible columns are limited to selection, callsign, name, location, activity (category/check-ins), SitRep, and latest report; dates/notes remain available through edit/search/import/export.
+    - Landed UI refinement: `Local Reports` table is a report scan view with a summary strip and limited columns: status, age, from, source, report (topics/subject), and location. Net/session target stays in selected-report detail.
+    - Landed UI refinement: `Local NCS` content is scroll-safe for minimized windows; check-in table retains internal scrolling, merges city/state into location, and keeps notes/report text areas height-capped so report capture remains reachable.
     - Landed UI refinement: `Local Reports` includes operator-readable copy actions for the selected report and the current filtered summary. These actions copy concise text for handoff/logging and intentionally avoid raw JSON or internal provenance dumps.
     - Landed UI refinement: local-report cleanup is handled from the dedicated `Local Reports` surface with selected-report deletion, keeping destructive history management out of the Local Operators roster.
     - Remaining follow-up: map markers, BBS routing, and cross-source intelligence use local reports only through explicit user-enabled rules with audit-ready provenance.
@@ -7646,6 +7646,15 @@ Acceptance:
 - Map/BBS consumers can explain why an observation is or is not eligible.
 - Audit-ready provenance exists before any publish/copy automation is enabled.
 - Peer/code review must confirm no accidental routing side effects before enabling any action mode.
+
+Implementation notes:
+- `freqinout.core.observation_projection` provides the read-only `Observation` model and map/BBS eligibility explainers.
+- `freqinout.core.observation_store` owns the indexed observation projection tables, topic side table, and source checkpoints.
+- Local Reports mirror into observations on save/delete and remain inert unless a future explicit layer/rule enables use.
+- JS8Spotter DB import, live JS8 directed/API Spotter ingest, and FLMsg/FLAmp message file scans project observations with source references back to the source row/file.
+- `freqinout.core.observation_backfill` provides bounded checkpointed backfill for existing Local Reports and Spotter traffic; background ingest runs this from the Messages job with a configurable batch cap.
+- `freqinout.core.observation_queries` is the intended read-only facade for future map/search/BBS consumers. Consumers must use eligibility explanations and must not read projection tables directly for routing decisions.
+- JS8 group markers (`@MAGNET`, `@MR08`) are preserved for compose/transmit targets and compatible Spotter payload parsing, but report, message, observation, search, and summary views display the operating group without `@` to avoid noisy duplicate group names.
 
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy
 

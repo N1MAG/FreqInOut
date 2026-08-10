@@ -39,9 +39,8 @@ class LocalReportHistoryTab(QWidget):
     COL_AGE = 1
     COL_FROM = 2
     COL_SOURCE = 3
-    COL_TOPICS = 4
-    COL_SUBJECT = 5
-    COL_LOCATION = 6
+    COL_REPORT = 4
+    COL_LOCATION = 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,9 +107,9 @@ class LocalReportHistoryTab(QWidget):
         actions_row.addWidget(self.copy_status_label, stretch=1)
         layout.addLayout(actions_row)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Status", "Age", "From", "Source", "Topics", "Subject", "Location"]
+            ["Status", "Age", "From", "Source", "Report", "Location"]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -122,9 +121,9 @@ class LocalReportHistoryTab(QWidget):
         hv.setSectionResizeMode(self.COL_AGE, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_FROM, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_SOURCE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_TOPICS, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_SUBJECT, QHeaderView.Stretch)
+        hv.setSectionResizeMode(self.COL_REPORT, QHeaderView.Stretch)
         hv.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         layout.addWidget(self.table, stretch=2)
 
         self.detail_title = QLabel("Select a report")
@@ -200,8 +199,7 @@ class LocalReportHistoryTab(QWidget):
                     self._age_text(str(row.get("created_utc", ""))),
                     str(row.get("callsign", "")),
                     self._source_text(row),
-                    self._topics_text(row),
-                    str(row.get("subject", "")) or self._body_preview(row),
+                    self._report_table_text(row),
                     self._location_text(row),
                 ]
                 for c, value in enumerate(values):
@@ -415,6 +413,14 @@ class LocalReportHistoryTab(QWidget):
     def _body_preview(row: Dict[str, Any]) -> str:
         body = str(row.get("body", "")).strip().replace("\n", " ")
         return body if len(body) <= 80 else body[:77] + "..."
+
+    @classmethod
+    def _report_table_text(cls, row: Dict[str, Any]) -> str:
+        topics = cls._topics_text(row)
+        title = str(row.get("subject", "")).strip() or cls._body_preview(row)
+        if topics and title:
+            return f"{topics} | {title}"
+        return title or topics
 
     @staticmethod
     def _topics_text(row: Dict[str, Any]) -> str:

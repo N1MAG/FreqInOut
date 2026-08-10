@@ -320,8 +320,8 @@ def analyze_commstat_fields(
     body_text = _first_nonempty(body, remarks, brevity_summary, title)
     status_text = str(status or "").strip().upper()
     alert_text = str(alert_color or "").strip().upper()
-    to_value = _clean_group_or_call(_first_nonempty(target, report_group))
-    group_value = _clean_group_or_call(report_group)
+    to_value = _clean_commstat_group_or_call(_first_nonempty(target, report_group))
+    group_value = _clean_commstat_group_or_call(report_group)
     from_value = _clean_call(from_call)
     state_value = _clean_state(state)
     grid_value = _clean_grid(grid)
@@ -366,7 +366,7 @@ def analyze_commstat_fields(
         "YELLOW",
         "ORANGE",
     }
-    groups = _groups_from_values(to_value, group_value, title_text, body_text)
+    groups = _commstat_groups_from_values(to_value, group_value, title_text, body_text)
     routing_candidate, routing_reasons = _routing_candidate(
         source_type="commstat",
         topics=topics,
@@ -510,6 +510,11 @@ def _clean_group_or_call(value: object) -> str:
     return _clean_call(text)
 
 
+def _clean_commstat_group_or_call(value: object) -> str:
+    text = _clean_group_or_call(value)
+    return text[1:] if text.startswith("@") else text
+
+
 def _clean_state(value: object) -> str:
     text = str(value or "").strip().upper()
     match = re.search(r"\b[A-Z]{2}\b", text)
@@ -533,6 +538,10 @@ def _groups_from_values(*values: object) -> tuple[str, ...]:
             if clean not in groups:
                 groups.append(clean)
     return tuple(groups)
+
+
+def _commstat_groups_from_values(*values: object) -> tuple[str, ...]:
+    return tuple(group[1:] if group.startswith("@") else group for group in _groups_from_values(*values))
 
 
 def _spotter_form_code(text: str) -> str:

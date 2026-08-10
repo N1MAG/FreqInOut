@@ -19,8 +19,9 @@ from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
-# Base config directory (user-writable)
-CONFIG_DIR = get_config_dir() / "config"
+def _config_dir() -> Path:
+    """Resolve the active profile config directory at call time."""
+    return get_config_dir() / "config"
 
 
 def _ensure_settings_db() -> None:
@@ -28,8 +29,9 @@ def _ensure_settings_db() -> None:
     Ensure settings DB (freqinout.db) has the compatibility kv table and
     Wave 1 multi-rig settings schema.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = CONFIG_DIR / "freqinout.db"
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout.db"
     conn = connect_sqlite(db_path)
     try:
         ensure_multi_radio_settings_schema(conn)
@@ -1191,8 +1193,9 @@ def _ensure_nets_db() -> None:
     """
     Ensure nets DB (freqinout_nets.db) has required tables.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = CONFIG_DIR / "freqinout_nets.db"
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
     conn = connect_sqlite(db_path)
     try:
         cur = conn.cursor()

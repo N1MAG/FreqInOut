@@ -99,8 +99,11 @@ def observation_from_message_intelligence(
         received_utc=_clean(received_utc),
         event_utc=_clean(event_utc or info.date_summary),
         from_call=_clean_call(info.from_call),
-        to_target=_clean_target(info.to_call),
-        groups=_dedupe(_clean_target(value) for value in info.groups),
+        to_target=_clean_commstat_target(info.to_call) if source.lower() == "commstat" else _clean_target(info.to_call),
+        groups=_dedupe(
+            _clean_commstat_target(value) if source.lower() == "commstat" else _clean_target(value)
+            for value in info.groups
+        ),
         observed_topics=_dedupe(info.topics),
         operator_attention=bool(info.operator_attention),
         status=_clean(status),
@@ -287,6 +290,11 @@ def _clean_target(value: object) -> str:
     if text and not text.startswith("@") and len(text) <= 6 and not any(ch.isdigit() for ch in text):
         return f"@{text}"
     return text
+
+
+def _clean_commstat_target(value: object) -> str:
+    text = _clean(value).upper()
+    return text[1:] if text.startswith("@") else text
 
 
 def _clean_state(value: object) -> str:

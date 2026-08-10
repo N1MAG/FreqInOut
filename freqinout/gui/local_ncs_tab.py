@@ -64,11 +64,10 @@ class LocalNCSTab(QWidget):
     COL_TIME = 0
     COL_CALLSIGN = 1
     COL_NAME = 2
-    COL_CITY = 3
-    COL_STATE = 4
-    COL_CATEGORY = 5
-    COL_STATUS = 6
-    COL_NOTES = 7
+    COL_LOCATION = 3
+    COL_CATEGORY = 4
+    COL_STATUS = 5
+    COL_NOTES = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -185,9 +184,9 @@ class LocalNCSTab(QWidget):
         self.empty_table_label.setVisible(False)
         layout.addWidget(self.empty_table_label)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Check-in UTC", "Callsign", "Name", "City", "State", "Category", "SitRep", "Notes"]
+            ["Check-in UTC", "Callsign", "Name", "Location", "Category", "SitRep", "Notes"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -200,8 +199,7 @@ class LocalNCSTab(QWidget):
         header_view.setSectionResizeMode(self.COL_TIME, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(self.COL_CITY, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_STATUS, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
@@ -513,6 +511,14 @@ class LocalNCSTab(QWidget):
         first_name = str(row.get("first_name", "")).strip()
         last_name = str(row.get("last_name", "")).strip()
         return str(row.get("name", "")).strip() or " ".join([p for p in (first_name, last_name) if p]).strip()
+
+    @staticmethod
+    def _location_text(row: Dict[str, Any]) -> str:
+        city = str(row.get("city", "")).strip()
+        state = str(row.get("state", "")).strip().upper()
+        if city and state:
+            return f"{city}, {state}"
+        return city or state
 
     def _formatted_lookup_entry(self, row: Dict[str, Any]) -> str:
         return self._format_entry(
@@ -845,8 +851,7 @@ class LocalNCSTab(QWidget):
                             ]
                         ).strip()
                     ),
-                    str(row.get("city", "")),
-                    str(row.get("state", "")).upper(),
+                    self._location_text(row),
                     str(row.get("category", "")),
                     str(row.get("sitrep_status", "GREEN")).upper(),
                     notes_preview,

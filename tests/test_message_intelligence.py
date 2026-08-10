@@ -5,7 +5,7 @@ from freqinout.core.message_intelligence import (
     normalize_topic_terms,
 )
 from freqinout.core.message_file_scanner import FileRecord
-from freqinout.gui.message_viewer_tab import MessageViewerTab, UnifiedMessage, _RowsBuildWorker
+from freqinout.gui.message_viewer_tab import MessageViewerTab, SpotterMessage, UnifiedMessage, _RowsBuildWorker
 
 
 def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summary() -> None:
@@ -168,12 +168,12 @@ def test_commstat_alert_flattens_to_actionable_operator_summary() -> None:
 
     assert info.form_name == "CommStat Alert"
     assert info.from_call == "W8UFO"
-    assert info.to_call == "@MAGNET"
+    assert info.to_call == "MAGNET"
     assert info.state == "FL"
     assert info.grid == "EL98"
     assert {"Weather", "Shelter", "General Intel"}.issubset(set(info.topics))
     assert info.actionable is True
-    assert info.summary == "CommStat Alert | W8UFO -> @MAGNET | Storm Surge Warning | 2026-08-10 12:34:56"
+    assert info.summary == "CommStat Alert | W8UFO -> MAGNET | Storm Surge Warning | 2026-08-10 12:34:56"
 
 
 def test_commstat_statrep_terms_enrich_future_routing_topics() -> None:
@@ -187,7 +187,7 @@ def test_commstat_statrep_terms_enrich_future_routing_topics() -> None:
 
     assert info.form_name == "CommStat StatRep"
     assert info.to_call == "MR08"
-    assert "@MR08" in info.groups
+    assert "MR08" in info.groups
     assert {"Power", "Water", "Comms", "Infrastructure", "General Intel"}.issubset(set(info.topics))
     assert "body:power" in info.topic_evidence["Power"]
     assert info.actionable is True
@@ -205,7 +205,8 @@ def test_commstat_general_message_is_flat_not_nested() -> None:
     )
 
     assert info.form_name == "CommStat Message"
-    assert info.summary.startswith("CommStat Message | N1MAG -> @MAGNET | Regional advisory")
+    assert info.to_call == "MAGNET"
+    assert info.summary.startswith("CommStat Message | N1MAG -> MAGNET | Regional advisory")
     assert "Comms" in info.topics
     assert info.operator_attention is True
     assert info.routing_candidate is True
@@ -279,6 +280,53 @@ UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
     assert "dm38st" in row.search_text
     assert "ut" in row.search_text
     assert "fire" in row.search_text
+
+
+def test_message_row_builder_strips_js8_group_marker_for_spotter_display() -> None:
+    worker = _RowsBuildWorker(
+        js8_messages=[],
+        spotter_messages=[
+            SpotterMessage(
+                spotter_id=1,
+                from_call="K7ETC",
+                to_call="@MR08",
+                msg_type="F!307",
+                utc_str="2026-08-10 12:00:00",
+                utc_ts=1786363200.0,
+                raw_text="F!307 TO[@MR08] FR[K7ETC] GR[DM38ST] NA[Fire status] #D2NT",
+                decoded_text="",
+                state="UNREAD",
+            )
+        ],
+        varac_messages=[],
+        sitrep_messages=[],
+        commstat_messages=[],
+        files={},
+        read_state_map={},
+        signature_state_map={},
+        spotter_auth_state_map={},
+        spotter_expect_state_map={},
+        sender_cache_seed={},
+        form_titles={"307": "MCF307 Wildfire Status Report"},
+        custom_forms_path="",
+        message_form_codes=None,
+        alert_form_codes=None,
+        show_local_time=False,
+        tz_name="UTC",
+        sitrep_dedupe_enabled=False,
+        sitrep_show_raw_duplicates=False,
+        force=False,
+        generation=1,
+    )
+    emitted = []
+    worker.finished.connect(lambda payload: emitted.append(payload))
+
+    worker.run()
+
+    row = emitted[0]["rows"][0]
+    assert row.to_call == "MR08"
+    assert "K7ETC -> MR08" in row.title
+    assert "@MR08" not in row.title
 
 
 def test_selected_messages_summary_is_operator_readable_without_raw_payload() -> None:

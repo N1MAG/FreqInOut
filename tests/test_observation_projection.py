@@ -1,6 +1,6 @@
 import json
 
-from freqinout.core.message_intelligence import analyze_form_text, analyze_spotter_text
+from freqinout.core.message_intelligence import analyze_commstat_fields, analyze_form_text, analyze_spotter_text
 from freqinout.core.observation_projection import (
     explain_bbs_eligibility,
     explain_map_eligibility,
@@ -133,3 +133,22 @@ def test_bbs_eligibility_requires_explicit_rule_preview_and_destination() -> Non
     )
     assert allowed.allowed is True
     assert "explicit rule authorized" in allowed.reasons
+
+
+def test_commstat_observation_keeps_group_targets_without_js8_marker() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="MESSAGE",
+        title="Regional advisory",
+        from_call="N1MAG",
+        target="@MAGNET",
+    )
+
+    obs = observation_from_message_intelligence(
+        info,
+        source_ref="commstat:1",
+        source_family="commstat",
+    )
+
+    assert info.to_call == "MAGNET"
+    assert obs.to_target == "MAGNET"
+    assert obs.groups == ("MAGNET",)
