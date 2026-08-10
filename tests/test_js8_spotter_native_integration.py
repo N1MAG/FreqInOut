@@ -250,3 +250,12 @@ def test_message_file_scan_logic_lives_in_core_not_message_tab() -> None:
     assert "class MessageFileScanner" in scanner_source
     assert "def _full_scan_recursive" in scanner_source
     assert "os.scandir(" in scanner_source
+
+
+def test_message_file_scan_projects_flmsg_flamp_observations_with_bounded_helper() -> None:
+    message_source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+
+    assert "from freqinout.core.observation_backfill import project_message_file_observations" in message_source
+    assert "self._project_message_files_to_observations(records)" in message_source
+    assert "observation_file_projection_batch_limit" in message_source
+    assert "min(250, limit)" in message_source

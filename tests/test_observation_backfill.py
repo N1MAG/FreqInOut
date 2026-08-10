@@ -1,6 +1,8 @@
 import sqlite3
 
 from freqinout.core.observation_backfill import backfill_observations
+from freqinout.core.message_file_scanner import FileRecord
+from freqinout.core.observation_backfill import project_message_file_observations
 from freqinout.core.observation_store import get_projection_checkpoint, list_observations
 
 
@@ -124,5 +126,44 @@ def test_observation_backfill_projects_existing_local_reports_without_routing(tm
     assert len(rows) == 1
     assert rows[0].from_call == "K0PRA"
     assert rows[0].confirmed_state == "CONFIRMED"
+    assert rows[0].route_eligible is False
+    assert rows[0].publish_authorized is False
+
+
+def test_message_file_projection_uses_existing_form_intelligence_without_authorizing(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    msg_path = tmp_path / "K7ETC-20260803-040212Z-57.k2s"
+    msg_path.write_text(
+        """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID
+260803-0402z
+To
+MR08
+From
+K7ETC
+Subject
+Widemouth 2 Fire
+Message
+UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
+""",
+        encoding="utf-8",
+    )
+    stat = msg_path.stat()
+    records = {
+        "flmsg": [FileRecord(path=msg_path, origin="flmsg", size=stat.st_size, mtime=stat.st_mtime)],
+        "flamp": [],
+    }
+
+    projected = project_message_file_observations(db_path, records, batch_limit=10)
+
+    assert projected == 1
+    rows = list_observations(db_path, source_family="flmsg", topic="Fire")
+    assert len(rows) == 1
+    assert rows[0].source_ref == f"file:{msg_path}"
+    assert rows[0].from_call == "K7ETC"
+    assert rows[0].to_target == "MR08"
+    assert rows[0].state == "UT"
+    assert rows[0].grid == "DM38ST"
     assert rows[0].route_eligible is False
     assert rows[0].publish_authorized is False

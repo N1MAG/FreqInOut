@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import datetime as dt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from freqinout.core.message_file_scanner import FileRecord, IMAGE_EXTS
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.observation_projection import (
     observation_from_local_report,
@@ -17,6 +19,7 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 LOCAL_REPORT_SOURCE_KEY = "local_operator_reports"
 SPOTTER_TRAFFIC_SOURCE_KEY = "spotter_traffic"
+FORM_FILE_ORIGINS = {"flmsg", "flamp"}
 
 
 def backfill_observations(
@@ -36,6 +39,46 @@ def backfill_observations(
             if include_spotter_traffic:
                 counts["spotter_traffic"] = _backfill_spotter_traffic(conn, batch_limit=batch_limit)
         return counts
+    finally:
+        conn.close()
+
+
+def project_message_file_observations(
+    db_path: str | Path,
+    records: Mapping[str, Sequence[FileRecord]],
+    *,
+    origins: Sequence[str] = ("flmsg", "flamp"),
+    batch_limit: int = 100,
+) -> int:
+    allowed = {str(origin or "").strip().lower() for origin in origins if str(origin or "").strip()}
+    allowed &= FORM_FILE_ORIGINS
+    if not allowed:
+        return 0
+    candidates: list[FileRecord] = []
+    for origin in sorted(allowed):
+        candidates.extend(record for record in records.get(origin, ()) if isinstance(record, FileRecord))
+    candidates = [
+        record
+        for record in candidates
+        if str(record.path.suffix or "").strip().lower() not in IMAGE_EXTS
+        and str(record.path or "").strip()
+    ]
+    candidates.sort(key=lambda record: float(record.mtime or 0.0), reverse=True)
+    candidates = candidates[: max(1, int(batch_limit or 100))]
+    if not candidates:
+        return 0
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_observation_schema(conn)
+        count = 0
+        with conn:
+            for record in candidates:
+                observation = _observation_from_file_record(record)
+                if observation is None:
+                    continue
+                upsert_observation_conn(conn, observation)
+                count += 1
+        return count
     finally:
         conn.close()
 
@@ -96,6 +139,40 @@ def _backfill_local_reports(conn: sqlite3.Connection, *, batch_limit: int) -> in
     return count
 
 
+def _observation_from_file_record(record: FileRecord):
+    origin = str(record.origin or "").strip().lower()
+    if origin not in FORM_FILE_ORIGINS:
+        return None
+    text = _read_text_head(record.path, limit=131072)
+    if not text:
+        return None
+    info = analyze_spotter_text(text) if text.strip().upper().startswith("F!") else None
+    if info is None:
+        from freqinout.core.message_intelligence import analyze_form_text
+
+        info = analyze_form_text(
+            text,
+            source_type=origin,
+            path=record.path,
+        )
+    mtime_utc = _mtime_utc(record.mtime)
+    return observation_from_message_intelligence(
+        info,
+        source_ref=f"file:{record.path}",
+        source_family=origin,
+        received_utc=mtime_utc,
+        event_utc=mtime_utc,
+        status="NEW",
+        extra_provenance={
+            "file_path": str(record.path),
+            "file_name": record.path.name,
+            "file_mtime": float(record.mtime or 0.0),
+            "file_size": int(record.size or 0),
+            "projection_source": "message_file_scan",
+        },
+    )
+
+
 def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> int:
     if not table_exists(conn, "spotter_traffic"):
         return 0
@@ -153,6 +230,24 @@ def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> 
     if count:
         _set_checkpoint(conn, SPOTTER_TRAFFIC_SOURCE_KEY, last_id=last_seen)
     return count
+
+
+def _read_text_head(path: Path, *, limit: int) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(max(1, int(limit or 131072)))
+    except Exception:
+        return ""
+
+
+def _mtime_utc(value: object) -> str:
+    try:
+        ts = float(value or 0.0)
+    except Exception:
+        ts = 0.0
+    if ts <= 0:
+        return ""
+    return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _checkpoint_id(conn: sqlite3.Connection, source_key: str) -> int:

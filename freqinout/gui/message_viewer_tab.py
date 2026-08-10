@@ -117,6 +117,7 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
+from freqinout.core.observation_backfill import project_message_file_observations
 from freqinout.core.message_intelligence import (
     MessageIntelligence,
     analyze_commstat_fields,
@@ -7710,6 +7711,7 @@ class MessageViewerTab(QWidget):
                     self._read_state_map = self._load_read_state_map()
                     self._save_file_scan_cache(records, dir_mtimes=dir_mtimes)
                     self._scan_cache_loaded = True
+                    self._project_message_files_to_observations(records)
                     self._refresh_varac_messages(force=force, rebuild=False)
                     self._populate_messages_table(force=force)
                 self._start_signature_verification(force=force)
@@ -7732,6 +7734,26 @@ class MessageViewerTab(QWidget):
             )
             if elapsed > 0.5:
                 log.debug("MessageViewer: refresh_files took %.2fs", elapsed)
+
+    def _project_message_files_to_observations(self, records: Dict[str, List[FileRecord]]) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            limit = int(self.settings.get("observation_file_projection_batch_limit", 100) or 100)
+        except Exception:
+            limit = 100
+        try:
+            projected = project_message_file_observations(
+                db_path,
+                records,
+                origins=("flmsg", "flamp"),
+                batch_limit=max(1, min(250, limit)),
+            )
+            if projected:
+                log.debug("MessageViewer: projected %s message file observations", projected)
+        except Exception as exc:
+            log.debug("MessageViewer: message file observation projection failed: %s", exc)
 
     def _refresh_js8_messages(self, force: bool = False, rebuild: bool = True):
         if self._is_shutting_down:
