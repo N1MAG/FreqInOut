@@ -17,6 +17,7 @@ from freqinout.core.multi_rig_runtime_status import (
     build_multi_rig_runtime_status,
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.observation_backfill import backfill_observations
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
 from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
 from freqinout.core.settings_manager import SettingsManager
@@ -540,8 +541,24 @@ class BackgroundIngestController(QObject):
             self._run_multi_radio_spotter_ingest()
         except Exception as e:
             log.debug("BackgroundIngest: multi-radio spotter ingest failed: %s", e)
+        try:
+            self._run_observation_backfill(worker_settings)
+        except Exception as e:
+            log.debug("BackgroundIngest: observation backfill failed: %s", e)
         finally:
             worker_settings.close()
+
+    def _run_observation_backfill(self, worker_settings: SettingsManager) -> None:
+        try:
+            limit = int(worker_settings.get("observation_backfill_batch_limit", 100) or 100)
+        except Exception:
+            limit = 100
+        limit = max(1, min(500, limit))
+        db_path = worker_settings.config_dir / "freqinout_nets.db"
+        result = backfill_observations(db_path, batch_limit=limit)
+        total = sum(int(value or 0) for value in result.values())
+        if total:
+            log.debug("BackgroundIngest: observation backfill projected=%s detail=%s", total, result)
 
     def _active_js8_spotter_profiles(self) -> list[Dict[str, object]]:
         try:

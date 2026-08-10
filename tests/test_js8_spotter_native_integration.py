@@ -228,6 +228,15 @@ def test_background_js8_link_ingest_uses_core_indexer_not_map_tab() -> None:
     assert "from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer" in map_source
 
 
+def test_background_messages_job_runs_bounded_observation_backfill() -> None:
+    background_source = (ROOT / "freqinout/core/background_ingest.py").read_text(encoding="utf-8")
+
+    assert "from freqinout.core.observation_backfill import backfill_observations" in background_source
+    assert "self._run_observation_backfill(worker_settings)" in background_source
+    assert "observation_backfill_batch_limit" in background_source
+    assert "min(500, limit)" in background_source
+
+
 def test_message_file_scan_logic_lives_in_core_not_message_tab() -> None:
     message_source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     scanner_source = (ROOT / "freqinout/core/message_file_scanner.py").read_text(encoding="utf-8")
