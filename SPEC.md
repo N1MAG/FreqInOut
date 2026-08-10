@@ -1749,6 +1749,7 @@ Phase 6: Performance and soak hardening
     - Landed first slice: `Local NCS` can save a selected check-in report into `local_operator_reports`.
     - Landed follow-up slice: `Local Operators` shows latest/highest-urgency local-report context and search can match report topics/keywords.
     - Landed follow-up slice: a dedicated `Local Reports` screen shows local-report history and readable selected-report detail while keeping HF Operator History separate.
+    - Landed follow-up slice: `Local Operators` includes `View Reports` for a selected callsign, opening `Local Reports` pre-filtered to that operator.
     - Remaining follow-up: refine local-report history actions only if operator review shows a need; do not clutter the Local Operators roster.
     - Intended sources include VHF/UHF voice, GMRS, MURS/FRS, local simplex/repeater traffic, in-person relay, phone/SMS relay when manually logged, and future mesh/Reticulum integrations.
     - Capture must use the same operator-facing topic taxonomy as Messages/Message Intelligence:

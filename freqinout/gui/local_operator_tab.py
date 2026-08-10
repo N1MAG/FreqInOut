@@ -44,6 +44,7 @@ class LocalOperatorTab(QWidget):
     """
 
     local_operator_updated = Signal()
+    local_reports_requested = Signal(str)
 
     COL_SELECT = 0
     COL_CALLSIGN = 1
@@ -91,12 +92,14 @@ class LocalOperatorTab(QWidget):
         self.refresh_btn = QPushButton("Refresh")
         self.add_btn = QPushButton("Add")
         self.edit_btn = QPushButton("Edit Selected")
+        self.view_reports_btn = QPushButton("View Reports")
         self.delete_btn = QPushButton("Delete Selected")
         self.import_btn = QPushButton("Import CSV")
         self.export_btn = QPushButton("Export CSV")
         actions.addWidget(self.refresh_btn)
         actions.addWidget(self.add_btn)
         actions.addWidget(self.edit_btn)
+        actions.addWidget(self.view_reports_btn)
         actions.addWidget(self.delete_btn)
         actions.addWidget(self.import_btn)
         actions.addWidget(self.export_btn)
@@ -143,6 +146,7 @@ class LocalOperatorTab(QWidget):
         self.refresh_btn.clicked.connect(self._load_data)
         self.add_btn.clicked.connect(self._add_operator)
         self.edit_btn.clicked.connect(self._edit_selected)
+        self.view_reports_btn.clicked.connect(self._view_selected_reports)
         self.delete_btn.clicked.connect(self._delete_selected)
         self.import_btn.clicked.connect(self._import_csv)
         self.export_btn.clicked.connect(self._export_csv)
@@ -155,6 +159,7 @@ class LocalOperatorTab(QWidget):
         self.add_btn.setStyleSheet(button_style("eligible_success", theme))
         role = "eligible_info" if self._selected_callsigns() else "muted"
         self.edit_btn.setStyleSheet(button_style(role, theme))
+        self.view_reports_btn.setStyleSheet(button_style("eligible_info" if len(self._selected_callsigns()) == 1 else "muted", theme))
         self.delete_btn.setStyleSheet(button_style("eligible_danger" if self._selected_callsigns() else "muted", theme))
         self.import_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
@@ -466,6 +471,16 @@ class LocalOperatorTab(QWidget):
             return
         delete_operators(selected)
         self._load_data()
+
+    def _view_selected_reports(self) -> None:
+        selected = self._selected_callsigns()
+        if not selected:
+            QMessageBox.information(self, "View Local Reports", "Select one local operator to view reports.")
+            return
+        if len(selected) > 1:
+            QMessageBox.information(self, "View Local Reports", "Select only one local operator to view reports.")
+            return
+        self.local_reports_requested.emit(selected[0])
 
     @staticmethod
     def _csv_pick(row: Dict[str, Any], keys: List[str]) -> str:

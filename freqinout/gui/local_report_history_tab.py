@@ -130,6 +130,10 @@ class LocalReportHistoryTab(QWidget):
             pass
         self.apply_theme()
 
+    def show_callsign(self, callsign: str) -> None:
+        self.callsign_edit.setText(str(callsign or "").strip().upper())
+        self.refresh_reports()
+
     def refresh_reports(self, *_args) -> None:
         try:
             rows = list_local_reports(

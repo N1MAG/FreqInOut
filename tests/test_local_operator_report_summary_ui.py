@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QCheckBox, QWidget
 
 from freqinout.core import local_ops_store
 from freqinout.gui.local_operator_tab import LocalOperatorTab
@@ -50,3 +50,22 @@ def test_local_operator_table_shows_and_searches_latest_report_summary(monkeypat
 
     assert tab.table.rowCount() == 1
     assert tab.table.item(0, tab.COL_CALLSIGN).text() == "K7ETC"
+
+
+def test_local_operator_view_reports_action_emits_selected_callsign(monkeypatch, tmp_path) -> None:
+    _app()
+    _use_tmp_db(monkeypatch, tmp_path)
+    local_ops_store.upsert_operator("K7ETC", first_name="Test", state="UT", touch_seen=False)
+
+    tab = LocalOperatorTab()
+    seen: list[str] = []
+    tab.local_reports_requested.connect(lambda callsign: seen.append(callsign))
+    wrapper = tab.table.cellWidget(0, tab.COL_SELECT)
+    assert isinstance(wrapper, QWidget)
+    checkbox = wrapper.findChild(QCheckBox)
+    assert checkbox is not None
+    checkbox.setChecked(True)
+
+    tab._view_selected_reports()
+
+    assert seen == ["K7ETC"]

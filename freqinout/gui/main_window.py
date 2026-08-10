@@ -888,6 +888,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.debug("MainWindow signal wiring failed: local_operator_updated -> local_ncs_tab: %s", e)
         try:
+            if hasattr(self.local_operator_tab, "local_reports_requested"):
+                self.local_operator_tab.local_reports_requested.connect(self.open_local_reports)
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: local_reports_requested -> local reports: %s", e)
+        try:
             if hasattr(self.local_ncs_tab, "local_data_updated"):
                 self.local_ncs_tab.local_data_updated.connect(self.local_operator_tab._load_data)
                 self.local_ncs_tab.local_data_updated.connect(self.local_report_history_tab.refresh_reports)
@@ -3083,6 +3088,15 @@ class MainWindow(QMainWindow):
             self._sync_map_filters_from_tab()
         except Exception:
             pass
+
+    def open_local_reports(self, callsign: str = "") -> None:
+        idx = self._screen_index_by_label.get("Local Reports", -1)
+        if idx < 0:
+            return
+        self._set_screen(idx)
+        tab = getattr(self, "local_report_history_tab", None)
+        if tab is not None and hasattr(tab, "show_callsign"):
+            QTimer.singleShot(0, lambda cs=str(callsign or "").strip().upper(): tab.show_callsign(cs))
 
     def _apply_messages_nav_context(self) -> None:
         tab = getattr(self, "message_viewer_tab", None)

@@ -84,6 +84,34 @@ def test_local_report_history_filters_by_free_text_topic_and_status(monkeypatch,
     assert tab.table.item(0, tab.COL_FROM).text() == "N0PWR"
 
 
+def test_local_report_history_show_callsign_prefilters_reports(monkeypatch, tmp_path) -> None:
+    _app()
+    _use_tmp_db(monkeypatch, tmp_path)
+    local_ops_store.record_local_report(
+        callsign="K7ETC",
+        status="PRIORITY",
+        topics=["Fire"],
+        subject="Wildfire update",
+        body="Evac route closed.",
+        created_utc="2026-08-10T12:00:00+00:00",
+    )
+    local_ops_store.record_local_report(
+        callsign="N0PWR",
+        status="INFO",
+        topics=["Comms"],
+        subject="Repeater normal",
+        body="Local repeater normal.",
+        created_utc="2026-08-10T13:00:00+00:00",
+    )
+
+    tab = LocalReportHistoryTab()
+    tab.show_callsign("k7etc")
+
+    assert tab.callsign_edit.text() == "K7ETC"
+    assert tab.table.rowCount() == 1
+    assert tab.table.item(0, tab.COL_FROM).text() == "K7ETC"
+
+
 def test_main_window_registers_local_reports_separate_from_hf_operator_history() -> None:
     text = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
@@ -91,3 +119,4 @@ def test_main_window_registers_local_reports_separate_from_hf_operator_history()
     assert '("HF Operators", self.operator_history_tab)' in text
     assert '("Local Reports", self.local_report_history_tab)' in text
     assert '("Local Reports", "Local Reports")' in text
+    assert "self.local_operator_tab.local_reports_requested.connect(self.open_local_reports)" in text
