@@ -156,8 +156,21 @@ def analyze_form_text(
         for k, v in (fields or {}).items()
         if str(v or "").strip() and not str(k or "").strip().startswith("_")
     }
-    from_call = _clean_call(_first_nonempty(parsed_fields.get("from"), _extract_hdr_call(raw, ":hdr_fm:"), _call_from_filename(path)))
-    to_call = _clean_group_or_call(_first_nonempty(parsed_fields.get("to"), _extract_hdr_call(raw, ":hdr_to:")))
+    from_call = _clean_call(
+        _first_nonempty(
+            parsed_fields.get("from"),
+            _extract_hdr_call(raw, ":hdr_fm:"),
+            _field_after_label(raw, "From"),
+            _call_from_filename(path),
+        )
+    )
+    to_call = _clean_group_or_call(
+        _first_nonempty(
+            parsed_fields.get("to"),
+            _extract_hdr_call(raw, ":hdr_to:"),
+            _field_after_label(raw, "To"),
+        )
+    )
     subject = _first_nonempty(
         parsed_fields.get("subject"),
         _match_field(raw, r":sub:\s*(.*?)\s*(?=:)"),
@@ -420,13 +433,55 @@ def _field_after_label(text: str, label: str) -> str:
     return ""
 
 
+def _block_after_label(text: str, label: str) -> str:
+    lines = [line.rstrip() for line in str(text or "").splitlines()]
+    label_key = str(label or "").strip().lower()
+    start = -1
+    for idx, line in enumerate(lines):
+        if line.strip().lower().rstrip(":") == label_key:
+            start = idx + 1
+            break
+    if start < 0:
+        return ""
+    collected: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if collected and _looks_like_form_label(stripped):
+            break
+        if stripped or collected:
+            collected.append(stripped)
+    return re.sub(r"\s+", " ", "\n".join(collected).strip())
+
+
+def _looks_like_form_label(value: str) -> bool:
+    text = str(value or "").strip().lower().rstrip(":")
+    if not text or len(text) > 48:
+        return False
+    return text in {
+        "date/time/msg id",
+        "date time msg id",
+        "to",
+        "from",
+        "msg precedence",
+        "precedence",
+        "region",
+        "subject",
+        "message",
+        "remarks",
+        "comments",
+        "incident",
+        "state",
+        "grid",
+    }
+
+
 def _message_subject_from_body(text: str) -> str:
     return _first_nonempty(_field_after_label(text, "Subject"), _field_after_label(text, "Incident"))
 
 
 def _message_body(text: str) -> str:
     for label in ("Message", "Comments", "Remarks", "Body"):
-        value = _field_after_label(text, label)
+        value = _block_after_label(text, label)
         if value:
             return value
     return ""

@@ -63,6 +63,38 @@ UT - Widemouth 2 Fire - DM38ST - evacuation posture updated due to wildfire.
     assert info.summary == "MAGNET General Use Form | K7ETC -> MR08 | Widemouth 2 Fire | 260729-0354z"
 
 
+def test_rendered_form_labels_extract_route_subject_and_multiline_body() -> None:
+    text = """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID
+260803-0402z
+To
+MR08
+From
+K7ETC
+Msg Precedence
+Routine
+Region
+MR08
+Subject
+Widemouth 2 Fire
+Message
+UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
+
+Residents south of 300 South should monitor alerts and prepare to leave.
+"""
+
+    info = analyze_form_text(text, source_type="flmsg", path="K7ETC-20260803-040212Z-57.k2s")
+
+    assert info.from_call == "K7ETC"
+    assert info.to_call == "MR08"
+    assert info.subject == "Widemouth 2 Fire"
+    assert info.date_summary == "260803-0402z"
+    assert "Residents south of 300 South" in info.body
+    assert "Fire" in info.topics
+    assert info.summary.startswith("MAGNET General Use Form - v1.1.1 | K7ETC -> MR08 | Widemouth 2 Fire")
+
+
 def test_filename_and_body_terms_support_bbs_rule_routing_concepts() -> None:
     info = analyze_form_text(
         "Infrastructure report: water plant generator power outage.",

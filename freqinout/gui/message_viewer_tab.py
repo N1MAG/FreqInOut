@@ -1013,6 +1013,12 @@ class _RowsBuildWorker(QObject):
                     meta["date_summary"] = _form_date_summary(value)
                 elif label_key in {"subject", "title", "incident", "report title"}:
                     meta.setdefault("subject", value)
+                elif label_key in {"state", "st"}:
+                    meta.setdefault("state", value)
+                elif label_key in {"grid", "gr", "maidenhead", "grid square"}:
+                    meta.setdefault("grid", value)
+                elif label_key in {"message", "body", "comments", "remarks", "narrative"}:
+                    meta.setdefault("body", value)
         if "date_summary" not in meta:
             for pattern in (
                 r"\b(\d{6}[-_]\d{4}z?)\b",
@@ -3918,7 +3924,7 @@ class MessageViewerTab(QWidget):
             elif sig_enabled and sig_status == "error":
                 detail = "Signature: Error"
             else:
-                detail = "Signature: No Signatures or Hash Matches"
+                detail = ""
         return overall, detail, bool(state.trusted)
 
     def _format_signature_detail(self, state: FileSignatureState) -> str:
@@ -10664,8 +10670,21 @@ class MessageViewerTab(QWidget):
             for rec in recs:
                 status = self._get_read_state(rec)
                 is_image = self._is_image_file(rec.path)
-                from_call = "" if is_image else self._extract_sender_from_file(rec)
-                title = "Image Received" if is_image else rec.path.name
+                intelligence: MessageIntelligence | None = None
+                if not is_image and self._is_transport_form_ext(rec.path.suffix.lower()):
+                    head = _read_text_head(rec.path, 131072)
+                    intelligence = analyze_form_text(
+                        head,
+                        form_name="",
+                        source_type=rec.origin,
+                        path=rec.path,
+                        fields=self._extract_form_file_metadata(rec),
+                    )
+                from_call = "" if is_image else (intelligence.from_call if intelligence else self._extract_sender_from_file(rec))
+                to_call = "" if is_image else (intelligence.to_call if intelligence else "")
+                title = "Image Received" if is_image else (intelligence.summary if intelligence else rec.path.name)
+                if len(title) > 60:
+                    title = title[:57].rstrip() + "..."
                 rcv_ts = rec.mtime or 0.0
                 rcv_display = self._format_rcv_display(rcv_ts, None)
                 msg_type = origin.upper() if origin != "varac" else "VarAC"
@@ -10684,7 +10703,7 @@ class MessageViewerTab(QWidget):
                         msg_type=msg_type,
                         status=status,
                         from_call=from_call,
-                        to_call="",
+                        to_call=to_call,
                         rcv_ts=rcv_ts,
                         rcv_display=rcv_display,
                         title=title,
@@ -10693,6 +10712,8 @@ class MessageViewerTab(QWidget):
                         auth_state=auth_state,
                         auth_detail=auth_detail,
                         auth_trusted=auth_trusted,
+                        topics=tuple(intelligence.topics) if intelligence else (),
+                        actionable=bool(intelligence.actionable) if intelligence else False,
                     )
                 )
 
