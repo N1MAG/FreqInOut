@@ -48,17 +48,12 @@ class LocalOperatorTab(QWidget):
 
     COL_SELECT = 0
     COL_CALLSIGN = 1
-    COL_FIRST_NAME = 2
-    COL_LAST_NAME = 3
-    COL_CITY = 4
-    COL_STATE = 5
-    COL_CATEGORY = 6
-    COL_FIRST_SEEN = 7
-    COL_LAST_SEEN = 8
-    COL_COUNT = 9
-    COL_SITREP = 10
-    COL_REPORT = 11
-    COL_NOTES = 12
+    COL_NAME = 2
+    COL_LOCATION = 3
+    COL_CATEGORY = 4
+    COL_COUNT = 5
+    COL_SITREP = 6
+    COL_REPORT = 7
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -106,22 +101,17 @@ class LocalOperatorTab(QWidget):
         actions.addStretch()
         layout.addLayout(actions)
 
-        self.table = QTableWidget(0, 13)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             [
                 "Selected",
                 "Callsign",
-                "First Name",
-                "Last Name",
-                "City",
-                "State",
+                "Name",
+                "Location",
                 "Category",
-                "First Seen",
-                "Last Seen",
                 "Check-ins",
                 "SitRep",
                 "Latest Report",
-                "Notes",
             ]
         )
         self.table.verticalHeader().setVisible(False)
@@ -130,17 +120,12 @@ class LocalOperatorTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_FIRST_NAME, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_LAST_NAME, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_CITY, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_LOCATION, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_FIRST_SEEN, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_LAST_SEEN, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_COUNT, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_REPORT, QHeaderView.Stretch)
-        header.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         self.refresh_btn.clicked.connect(self._load_data)
@@ -251,17 +236,12 @@ class LocalOperatorTab(QWidget):
 
                 vals = [
                     str(row.get("callsign", "")).upper(),
-                    str(row.get("first_name", "")),
-                    str(row.get("last_name", "")),
-                    str(row.get("city", "")),
-                    str(row.get("state", "")).upper(),
+                    self._operator_display_name(row),
+                    self._operator_location(row),
                     str(row.get("category", "")),
-                    str(row.get("first_seen_utc", "")),
-                    str(row.get("last_seen_utc", "")),
                     str(int(row.get("checkin_count", 0) or 0)),
                     str(row.get("sitrep_status", "GREEN")).upper(),
                     self._report_display_text(str(row.get("callsign", ""))),
-                    str(row.get("notes", "")),
                 ]
                 for idx, value in enumerate(vals, start=1):
                     item = QTableWidgetItem(value)
@@ -270,10 +250,30 @@ class LocalOperatorTab(QWidget):
                         self._apply_sitrep_item_style(item, value)
                     if idx == self.COL_REPORT:
                         item.setToolTip(self._report_tooltip(str(row.get("callsign", ""))))
-                    if idx == self.COL_NOTES:
-                        item.setToolTip(value)
         finally:
             self.table.setSortingEnabled(sorting_enabled)
+
+    @staticmethod
+    def _operator_display_name(row: Dict[str, Any]) -> str:
+        name = str(row.get("name", "")).strip()
+        if name:
+            return name
+        return " ".join(
+            part
+            for part in (
+                str(row.get("first_name", "")).strip(),
+                str(row.get("last_name", "")).strip(),
+            )
+            if part
+        )
+
+    @staticmethod
+    def _operator_location(row: Dict[str, Any]) -> str:
+        city = str(row.get("city", "")).strip()
+        state = str(row.get("state", "")).strip().upper()
+        if city and state:
+            return f"{city}, {state}"
+        return city or state
 
     def _report_summary(self, callsign: str) -> Dict[str, Any]:
         return self._report_summaries.get(str(callsign or "").strip().upper(), {})

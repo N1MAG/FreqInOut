@@ -39,14 +39,20 @@ def test_local_operator_table_shows_and_searches_latest_report_summary(monkeypat
 
     tab = LocalOperatorTab()
 
-    assert tab.table.columnCount() == 13
+    assert tab.table.columnCount() == 8
+    assert tab.table.item(0, tab.COL_NAME).text() == "Test Operator"
+    assert tab.table.item(0, tab.COL_LOCATION).text() == "Delta, UT"
     report_item = tab.table.item(0, tab.COL_REPORT)
     assert report_item is not None
     assert "PRIORITY" in report_item.text()
     assert "Wildfire update" in report_item.text()
-    assert "General roster note" in tab.table.item(0, tab.COL_NOTES).text()
 
     tab.search_edit.setText("wildfire")
+
+    assert tab.table.rowCount() == 1
+    assert tab.table.item(0, tab.COL_CALLSIGN).text() == "K7ETC"
+
+    tab.search_edit.setText("General roster note")
 
     assert tab.table.rowCount() == 1
     assert tab.table.item(0, tab.COL_CALLSIGN).text() == "K7ETC"
