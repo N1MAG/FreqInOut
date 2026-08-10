@@ -92,3 +92,31 @@ def test_local_report_filters_by_topic_status_and_keyword(monkeypatch, tmp_path)
 
     water = local_ops_store.list_local_reports(query="water plant")
     assert [row["callsign"] for row in water] == ["W1ABC"]
+
+
+def test_latest_report_summaries_choose_higher_urgency_context(monkeypatch, tmp_path) -> None:
+    _use_tmp_db(monkeypatch, tmp_path)
+    local_ops_store.record_local_report(
+        callsign="K7ETC",
+        status="INFO",
+        topics=["Comms"],
+        subject="Repeater normal",
+        body="Local repeater is normal.",
+        created_utc="2026-08-10T12:00:00+00:00",
+    )
+    local_ops_store.record_local_report(
+        callsign="K7ETC",
+        status="PRIORITY",
+        topics=["Fire"],
+        subject="Wildfire update",
+        body="Evacuation route is closed.",
+        created_utc="2026-08-10T11:00:00+00:00",
+    )
+
+    summaries = local_ops_store.latest_report_summaries_for_callsigns(["k7etc", "N0NONE"])
+
+    summary = summaries["K7ETC"]
+    assert summary["display"].startswith("PRIORITY | Fire")
+    assert summary["latest_display"].startswith("INFO | Comms")
+    assert summary["highest_display"].startswith("PRIORITY | Fire")
+    assert summary["topics"] == ["Comms", "Fire", "Travel/Roads"]

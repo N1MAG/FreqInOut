@@ -985,6 +985,98 @@ def list_reports_for_operator(callsign: str, *, limit: int = 50) -> List[Dict[st
     return list_local_reports(callsign=callsign, limit=limit)
 
 
+def latest_report_summaries_for_callsigns(
+    callsigns: List[str],
+    *,
+    per_call_limit: int = 20,
+) -> Dict[str, Dict[str, Any]]:
+    ensure_tables()
+    normalized = sorted({_norm_callsign(cs) for cs in callsigns if _norm_callsign(cs)})
+    if not normalized:
+        return {}
+    placeholders = ",".join("?" for _ in normalized)
+    conn = sqlite3.connect(_db_path())
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                id,
+                created_utc,
+                updated_utc,
+                source_kind,
+                source_channel,
+                net_session_id,
+                callsign,
+                operator_id,
+                from_name,
+                city,
+                county,
+                state,
+                grid,
+                lat,
+                lon,
+                location_source,
+                location_confidence,
+                status,
+                topics_json,
+                topic_evidence_json,
+                subject,
+                body,
+                confirmed_state,
+                followup_state,
+                exercise_flag,
+                source_radio_id,
+                source_app,
+                raw_reference,
+                created_by,
+                updated_by
+            FROM local_operator_reports
+            WHERE callsign IN ({placeholders})
+            ORDER BY callsign ASC, created_utc DESC, id DESC
+            """,
+            tuple(normalized),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for raw in rows:
+        report = _report_row_to_dict(raw)
+        cs = _norm_callsign(report.get("callsign", ""))
+        if not cs:
+            continue
+        bucket = grouped.setdefault(cs, [])
+        if len(bucket) < max(1, int(per_call_limit or 20)):
+            bucket.append(report)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for cs, reports in grouped.items():
+        if not reports:
+            continue
+        latest = reports[0]
+        highest = max(
+            reports,
+            key=lambda item: (
+                _report_status_rank(str(item.get("status", ""))),
+                str(item.get("created_utc", "")),
+            ),
+        )
+        highest_rank = _report_status_rank(str(highest.get("status", "")))
+        latest_rank = _report_status_rank(str(latest.get("status", "")))
+        chosen = highest if highest_rank > latest_rank else latest
+        out[cs] = {
+            "callsign": cs,
+            "latest": latest,
+            "highest": highest,
+            "display": _format_report_summary(chosen),
+            "latest_display": _format_report_summary(latest),
+            "highest_display": _format_report_summary(highest),
+            "count": len(reports),
+            "topics": sorted({topic for report in reports for topic in report.get("topics", [])}),
+        }
+    return out
+
+
 def _report_status_to_sitrep(status: str) -> str:
     normalized = _norm_report_status(status)
     if normalized == "EMERGENCY":
@@ -992,6 +1084,27 @@ def _report_status_to_sitrep(status: str) -> str:
     if normalized in {"WATCH", "PRIORITY"}:
         return "YELLOW"
     return "GREEN"
+
+
+def _report_status_rank(status: str) -> int:
+    return {"INFO": 0, "WATCH": 1, "PRIORITY": 2, "EMERGENCY": 3}.get(_norm_report_status(status), 0)
+
+
+def _format_report_summary(report: Dict[str, Any]) -> str:
+    status = _norm_report_status(str(report.get("status", "")))
+    subject = str(report.get("subject", "")).strip()
+    body = str(report.get("body", "")).strip()
+    topics = [str(topic).strip() for topic in report.get("topics", []) if str(topic).strip()]
+    topic_text = ", ".join(topics[:2])
+    if len(topics) > 2:
+        topic_text += f" +{len(topics) - 2}"
+    title = subject or body[:60].strip()
+    parts = [status]
+    if topic_text:
+        parts.append(topic_text)
+    if title:
+        parts.append(title)
+    return " | ".join(parts)
 
 
 def _report_row_to_dict(row: Any) -> Dict[str, Any]:

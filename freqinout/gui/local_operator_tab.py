@@ -26,7 +26,12 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.local_ops_store import get_all_operators, upsert_operator, delete_operators
+from freqinout.core.local_ops_store import (
+    delete_operators,
+    get_all_operators,
+    latest_report_summaries_for_callsigns,
+    upsert_operator,
+)
 from freqinout.gui.theme import resolve_theme, button_style
 
 
@@ -51,12 +56,14 @@ class LocalOperatorTab(QWidget):
     COL_LAST_SEEN = 8
     COL_COUNT = 9
     COL_SITREP = 10
-    COL_NOTES = 11
+    COL_REPORT = 11
+    COL_NOTES = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict[str, Any]] = []
+        self._report_summaries: Dict[str, Dict[str, Any]] = {}
         self._build_ui()
         self._load_data()
         self.apply_theme()
@@ -72,7 +79,7 @@ class LocalOperatorTab(QWidget):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Callsign, first/last name, city, state, category, sitrep, notes")
+        self.search_edit.setPlaceholderText("Callsign, name, city/state, category, sitrep, report topic, keyword, notes")
         filter_row.addWidget(self.search_edit, stretch=1)
         filter_row.addWidget(QLabel("Category:"))
         self.category_filter = QComboBox()
@@ -96,7 +103,7 @@ class LocalOperatorTab(QWidget):
         actions.addStretch()
         layout.addLayout(actions)
 
-        self.table = QTableWidget(0, 12)
+        self.table = QTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels(
             [
                 "Selected",
@@ -110,6 +117,7 @@ class LocalOperatorTab(QWidget):
                 "Last Seen",
                 "Check-ins",
                 "SitRep",
+                "Latest Report",
                 "Notes",
             ]
         )
@@ -128,6 +136,7 @@ class LocalOperatorTab(QWidget):
         header.setSectionResizeMode(self.COL_LAST_SEEN, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_COUNT, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_REPORT, QHeaderView.Stretch)
         header.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
@@ -160,9 +169,13 @@ class LocalOperatorTab(QWidget):
     def _load_data(self) -> None:
         try:
             self._rows = get_all_operators()
+            self._report_summaries = latest_report_summaries_for_callsigns(
+                [str(row.get("callsign", "")) for row in self._rows]
+            )
         except Exception as e:
             log.error("LocalOperatorTab: load failed: %s", e)
             self._rows = []
+            self._report_summaries = {}
         self._refresh_category_filter()
         self._apply_filters()
         self.local_operator_updated.emit()
@@ -202,6 +215,7 @@ class LocalOperatorTab(QWidget):
                 str(row.get("checkin_count", "")),
                 str(row.get("sitrep_status", "")),
                 str(row.get("notes", "")),
+                self._report_search_text(str(row.get("callsign", ""))),
             ]
         ).upper()
         return query.upper() in hay
@@ -241,6 +255,7 @@ class LocalOperatorTab(QWidget):
                     str(row.get("last_seen_utc", "")),
                     str(int(row.get("checkin_count", 0) or 0)),
                     str(row.get("sitrep_status", "GREEN")).upper(),
+                    self._report_display_text(str(row.get("callsign", ""))),
                     str(row.get("notes", "")),
                 ]
                 for idx, value in enumerate(vals, start=1):
@@ -248,10 +263,44 @@ class LocalOperatorTab(QWidget):
                     self.table.setItem(r, idx, item)
                     if idx == self.COL_SITREP:
                         self._apply_sitrep_item_style(item, value)
+                    if idx == self.COL_REPORT:
+                        item.setToolTip(self._report_tooltip(str(row.get("callsign", ""))))
                     if idx == self.COL_NOTES:
                         item.setToolTip(value)
         finally:
             self.table.setSortingEnabled(sorting_enabled)
+
+    def _report_summary(self, callsign: str) -> Dict[str, Any]:
+        return self._report_summaries.get(str(callsign or "").strip().upper(), {})
+
+    def _report_display_text(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        return str(summary.get("display", "") or "")
+
+    def _report_search_text(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        topics = " ".join(str(topic) for topic in summary.get("topics", []) if str(topic).strip())
+        return " ".join(
+            [
+                str(summary.get("display", "")),
+                str(summary.get("latest_display", "")),
+                str(summary.get("highest_display", "")),
+                topics,
+            ]
+        )
+
+    def _report_tooltip(self, callsign: str) -> str:
+        summary = self._report_summary(callsign)
+        if not summary:
+            return ""
+        parts = [str(summary.get("display", ""))]
+        count = int(summary.get("count", 0) or 0)
+        if count > 1:
+            parts.append(f"{count} recent report(s) loaded for this operator")
+        topics = ", ".join(str(topic) for topic in summary.get("topics", []) if str(topic).strip())
+        if topics:
+            parts.append(f"Topics: {topics}")
+        return "\n".join(part for part in parts if part)
 
     def _apply_sitrep_item_style(self, item: QTableWidgetItem, status: str) -> None:
         key = (status or "").strip().upper()

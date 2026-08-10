@@ -1747,7 +1747,8 @@ Phase 6: Performance and soak hardening
   - Local operator report intake:
     - Add a fast report-capture surface for information received by voice or local-network channels.
     - Landed first slice: `Local NCS` can save a selected check-in report into `local_operator_reports`.
-    - Follow-up slice: expose local-report history and latest/highest-urgency summaries in `Local Operators`.
+    - Landed follow-up slice: `Local Operators` shows latest/highest-urgency local-report context and search can match report topics/keywords.
+    - Remaining follow-up: expose fuller local-report history/details from Local Operators without cluttering the roster.
     - Intended sources include VHF/UHF voice, GMRS, MURS/FRS, local simplex/repeater traffic, in-person relay, phone/SMS relay when manually logged, and future mesh/Reticulum integrations.
     - Capture must use the same operator-facing topic taxonomy as Messages/Message Intelligence:
       `Weather`, `Fire`, `Medical`, `Power`, `Water`, `Fuel`, `Food`, `Travel/Roads`, `Comms`, `Security`, `Shelter`, `Logistics`, `Infrastructure`, `General Intel`.
@@ -1762,7 +1763,7 @@ Phase 6: Performance and soak hardening
     - Notes model:
       - Keep simple per-operator notes for ongoing local context.
       - Store each report as a separate timestamped observation so important information is not buried inside a long free-text notes field.
-      - Show the latest/highest-urgency report summary on the Local NCS check-in row and Local Operators row.
+      - Show the latest/highest-urgency report summary on the Local Operators row; Local NCS can continue to prioritize live check-in handling and report capture.
       - Allow quick append from an active local net session; do not require a modal if the report can be captured inline.
     - Data model:
       - Add `local_operator_reports` table:
