@@ -7583,10 +7583,12 @@ Scope:
 - Extract state/grid from narrative/body text when common MAGNET-style rendered forms carry location there.
 - Preserve raw provenance internally, but keep table/detail surfaces operator-readable.
 - Signature/hash detail shown in Messages must be concise (`Signature: Invalid`, `Checksum: Valid`, etc.) and must not dump raw GPG diagnostics into the read pane.
+- Add an operator-facing selected-message copy summary in the existing Messages `More...` menu; this is distinct from support diagnostics and must summarize selected rows without raw payload dumps.
 
 Acceptance:
 - FLMsg/FLAmp, Spotter, and CommStat rows use shared intelligence for summaries, topic search, and action-needed logic.
 - Common rendered MAGNET forms produce From/To/Subject/Date/State/Grid/Topic fields without requiring UI-specific parsing.
+- Selected message summaries include type/status, route, age, title, and topics in concise text suitable for operator handoff.
 - Future map/BBS logic consumes only the shared read model plus explicit user-enabled rules and audit-ready provenance.
 - No new UI-thread full-directory rescans or DB full-table scans are introduced for this refinement.
 

@@ -4112,6 +4112,8 @@ class MessageViewerTab(QWidget):
         self.more_delete_selected_action = self.more_actions_menu.addAction("Delete Selected")
         self.more_delete_selected_action.triggered.connect(self._delete_selected_messages)
         self.more_actions_menu.addSeparator()
+        self.more_copy_selected_summary_action = self.more_actions_menu.addAction("Copy Selected Summary")
+        self.more_copy_selected_summary_action.triggered.connect(self._copy_selected_messages_summary)
         self.more_copy_summary_action = self.more_actions_menu.addAction("Copy Summary")
         self.more_copy_summary_action.triggered.connect(self._copy_messages_support_summary)
         self.more_inbox_help_action = self.more_actions_menu.addAction("Inbox Help")
@@ -6045,6 +6047,41 @@ class MessageViewerTab(QWidget):
             self.more_export_selected_action.setEnabled(bool(self._export_selected_available) and selected > 0)
         if hasattr(self, "more_delete_selected_action"):
             self.more_delete_selected_action.setEnabled(selected > 0)
+        if hasattr(self, "more_copy_selected_summary_action"):
+            self.more_copy_selected_summary_action.setEnabled(selected > 0)
+
+    def _copy_selected_messages_summary(self) -> None:
+        rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
+        if not rows:
+            QMessageBox.information(self, "Copy Selected Summary", "Select one or more messages to copy.")
+            return
+        QApplication.clipboard().setText(self._selected_messages_summary_text(rows))
+
+    @staticmethod
+    def _selected_messages_summary_text(rows: Sequence[UnifiedMessage]) -> str:
+        clean_rows = [row for row in rows if isinstance(row, UnifiedMessage)]
+        lines = [
+            "Selected Messages Summary",
+            f"Messages: {len(clean_rows)}",
+            "",
+        ]
+        lines.extend(MessageViewerTab._message_row_summary_line(row) for row in clean_rows)
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _message_row_summary_line(row: UnifiedMessage) -> str:
+        route = " -> ".join(part for part in (row.from_call, row.to_call) if str(part or "").strip())
+        age = MessageTableModel._relative_age(row.rcv_ts)
+        topics = ", ".join(row.topics or ())
+        parts = [
+            str(row.msg_type or row.origin or "Message").strip(),
+            str(row.status or "").strip(),
+            age,
+            route,
+            str(row.title or "").strip(),
+            f"Topics: {topics}" if topics else "",
+        ]
+        return " | ".join(part for part in parts if part)
 
     def _status_chip_html(self, text: str, role: str = "neutral") -> str:
         palette = {

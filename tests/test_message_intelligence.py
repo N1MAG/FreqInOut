@@ -5,7 +5,7 @@ from freqinout.core.message_intelligence import (
     normalize_topic_terms,
 )
 from freqinout.core.message_file_scanner import FileRecord
-from freqinout.gui.message_viewer_tab import _RowsBuildWorker
+from freqinout.gui.message_viewer_tab import MessageViewerTab, UnifiedMessage, _RowsBuildWorker
 
 
 def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summary() -> None:
@@ -279,3 +279,31 @@ UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
     assert "dm38st" in row.search_text
     assert "ut" in row.search_text
     assert "fire" in row.search_text
+
+
+def test_selected_messages_summary_is_operator_readable_without_raw_payload() -> None:
+    text = MessageViewerTab._selected_messages_summary_text(
+        [
+            UnifiedMessage(
+                msg_type="FLMSG",
+                status="NEW",
+                from_call="K7ETC",
+                to_call="MR08",
+                rcv_ts=0.0,
+                rcv_display="",
+                title="MAGNET General Use Form | K7ETC -> MR08 | Widemouth 2 Fire | 260803-0402z",
+                origin="flmsg",
+                payload=object(),
+                topics=("Fire", "Travel/Roads"),
+                actionable=True,
+            )
+        ]
+    )
+
+    assert text.startswith("Selected Messages Summary")
+    assert "Messages: 1" in text
+    assert "FLMSG | NEW" in text
+    assert "K7ETC -> MR08" in text
+    assert "Widemouth 2 Fire" in text
+    assert "Topics: Fire, Travel/Roads" in text
+    assert "raw" not in text.lower()
