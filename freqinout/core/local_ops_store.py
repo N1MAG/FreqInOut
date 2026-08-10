@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.message_intelligence import TOPIC_TAXONOMY, collect_topic_evidence
 
 
 SITREP_ALLOWED = {"GREEN", "YELLOW", "RED"}
+REPORT_STATUS_ALLOWED = {"INFO", "WATCH", "PRIORITY", "EMERGENCY"}
+CONFIRMED_ALLOWED = {"UNCONFIRMED", "CONFIRMED", "SECOND_HAND", "NEEDS_FOLLOWUP"}
 _SCHEMA_READY = False
 _SCHEMA_READY_DB = ""
 
@@ -28,6 +32,45 @@ def _norm_callsign(value: str) -> str:
 def _norm_status(value: str) -> str:
     txt = (value or "").strip().upper()
     return txt if txt in SITREP_ALLOWED else "GREEN"
+
+
+def _norm_report_status(value: str) -> str:
+    txt = (value or "").strip().upper()
+    return txt if txt in REPORT_STATUS_ALLOWED else "INFO"
+
+
+def _norm_confirmed_state(value: str) -> str:
+    txt = (value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return txt if txt in CONFIRMED_ALLOWED else "UNCONFIRMED"
+
+
+def _norm_topics(values: Any) -> List[str]:
+    if isinstance(values, str):
+        raw_values = [part.strip() for part in values.split(",")]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = [str(part or "").strip() for part in values]
+    else:
+        raw_values = []
+    by_lower = {topic.lower(): topic for topic in TOPIC_TAXONOMY}
+    out: List[str] = []
+    for value in raw_values:
+        topic = by_lower.get(value.lower())
+        if topic and topic not in out:
+            out.append(topic)
+    return out
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True)
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    try:
+        if value is None or value == "":
+            return default
+        return json.loads(str(value))
+    except Exception:
+        return default
 
 
 def _split_name_parts(value: str) -> tuple[str, str]:
@@ -148,6 +191,83 @@ def ensure_tables() -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_ts ON local_ncs_checkins(checkin_utc)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_callsign ON local_ncs_checkins(callsign)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_operator_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT,
+                source_kind TEXT,
+                source_channel TEXT,
+                net_session_id TEXT,
+                callsign TEXT,
+                operator_id TEXT,
+                from_name TEXT,
+                city TEXT,
+                county TEXT,
+                state TEXT,
+                grid TEXT,
+                lat REAL,
+                lon REAL,
+                location_source TEXT,
+                location_confidence TEXT,
+                status TEXT,
+                topics_json TEXT,
+                topic_evidence_json TEXT,
+                subject TEXT,
+                body TEXT,
+                confirmed_state TEXT,
+                followup_state TEXT,
+                exercise_flag INTEGER DEFAULT 0,
+                source_radio_id INTEGER,
+                source_app TEXT,
+                raw_reference TEXT,
+                created_by TEXT,
+                updated_by TEXT
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "local_operator_reports",
+            {
+                "created_utc": "TEXT",
+                "updated_utc": "TEXT",
+                "source_kind": "TEXT",
+                "source_channel": "TEXT",
+                "net_session_id": "TEXT",
+                "callsign": "TEXT",
+                "operator_id": "TEXT",
+                "from_name": "TEXT",
+                "city": "TEXT",
+                "county": "TEXT",
+                "state": "TEXT",
+                "grid": "TEXT",
+                "lat": "REAL",
+                "lon": "REAL",
+                "location_source": "TEXT",
+                "location_confidence": "TEXT",
+                "status": "TEXT",
+                "topics_json": "TEXT",
+                "topic_evidence_json": "TEXT",
+                "subject": "TEXT",
+                "body": "TEXT",
+                "confirmed_state": "TEXT",
+                "followup_state": "TEXT",
+                "exercise_flag": "INTEGER DEFAULT 0",
+                "source_radio_id": "INTEGER",
+                "source_app": "TEXT",
+                "raw_reference": "TEXT",
+                "created_by": "TEXT",
+                "updated_by": "TEXT",
+            },
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_created ON local_operator_reports(created_utc)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_callsign ON local_operator_reports(callsign)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_state ON local_operator_reports(state)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_grid ON local_operator_reports(grid)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_status ON local_operator_reports(status)")
         conn.commit()
         _SCHEMA_READY = True
         _SCHEMA_READY_DB = db_key
@@ -625,3 +745,283 @@ def list_checkins(limit: int = 500) -> List[Dict[str, Any]]:
         return out
     finally:
         conn.close()
+
+
+def record_local_report(
+    *,
+    callsign: str = "",
+    source_kind: str = "voice",
+    source_channel: str = "",
+    net_session_id: str = "",
+    operator_id: str = "",
+    from_name: str = "",
+    city: str = "",
+    county: str = "",
+    state: str = "",
+    grid: str = "",
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    location_source: str = "",
+    location_confidence: str = "",
+    status: str = "INFO",
+    topics: Any = None,
+    subject: str = "",
+    body: str = "",
+    confirmed_state: str = "UNCONFIRMED",
+    followup_state: str = "",
+    exercise_flag: bool = False,
+    source_radio_id: Optional[int] = None,
+    source_app: str = "",
+    raw_reference: str = "",
+    created_by: str = "",
+    created_utc: Optional[str] = None,
+) -> Optional[int]:
+    ensure_tables()
+    stamp = (created_utc or _utc_now_iso()).strip()
+    cs = _norm_callsign(callsign)
+    topic_values = _norm_topics(topics)
+    topic_evidence = collect_topic_evidence(
+        (
+            ("manual_topics", " ".join(topic_values)),
+            ("subject", subject),
+            ("body", body),
+            ("source", source_kind),
+            ("channel", source_channel),
+            ("state", state),
+            ("grid", grid),
+        )
+    )
+    if topic_values:
+        merged = {topic: list(topic_evidence.get(topic, ())) for topic in topic_values}
+        for topic in topic_values:
+            evidence = f"manual:{topic}"
+            if evidence not in merged[topic]:
+                merged[topic].insert(0, evidence)
+        for topic, values in topic_evidence.items():
+            merged.setdefault(topic, [])
+            for value in values:
+                if value not in merged[topic]:
+                    merged[topic].append(value)
+        topic_evidence_json = {topic: tuple(values) for topic, values in merged.items()}
+    else:
+        topic_values = list(topic_evidence.keys())
+        topic_evidence_json = topic_evidence
+    try:
+        source_radio = int(source_radio_id) if source_radio_id is not None else None
+    except Exception:
+        source_radio = None
+    conn = sqlite3.connect(_db_path())
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO local_operator_reports (
+                    created_utc,
+                    updated_utc,
+                    source_kind,
+                    source_channel,
+                    net_session_id,
+                    callsign,
+                    operator_id,
+                    from_name,
+                    city,
+                    county,
+                    state,
+                    grid,
+                    lat,
+                    lon,
+                    location_source,
+                    location_confidence,
+                    status,
+                    topics_json,
+                    topic_evidence_json,
+                    subject,
+                    body,
+                    confirmed_state,
+                    followup_state,
+                    exercise_flag,
+                    source_radio_id,
+                    source_app,
+                    raw_reference,
+                    created_by,
+                    updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stamp,
+                    stamp,
+                    str(source_kind or "voice").strip().lower() or "voice",
+                    str(source_channel or "").strip(),
+                    str(net_session_id or "").strip(),
+                    cs,
+                    str(operator_id or "").strip(),
+                    str(from_name or "").strip(),
+                    str(city or "").strip(),
+                    str(county or "").strip(),
+                    str(state or "").strip().upper(),
+                    str(grid or "").strip().upper(),
+                    lat,
+                    lon,
+                    str(location_source or "").strip(),
+                    str(location_confidence or "").strip(),
+                    _norm_report_status(status),
+                    _json_dumps(topic_values),
+                    _json_dumps(topic_evidence_json),
+                    str(subject or "").strip(),
+                    str(body or "").strip(),
+                    _norm_confirmed_state(confirmed_state),
+                    str(followup_state or "").strip(),
+                    1 if bool(exercise_flag) else 0,
+                    source_radio,
+                    str(source_app or "").strip(),
+                    str(raw_reference or "").strip(),
+                    str(created_by or "").strip(),
+                    str(created_by or "").strip(),
+                ),
+            )
+            report_id = int(cur.lastrowid or 0)
+        if cs:
+            upsert_operator(
+                cs,
+                name=from_name,
+                city=city,
+                state=state,
+                sitrep_status=_report_status_to_sitrep(status),
+                touch_seen=True,
+                seen_utc=stamp,
+            )
+        return report_id
+    except Exception as e:
+        log.error("local_ops_store.record_local_report failed for %s: %s", cs or from_name, e)
+        return None
+    finally:
+        conn.close()
+
+
+def list_local_reports(
+    *,
+    limit: int = 200,
+    callsign: str = "",
+    topic: str = "",
+    status: str = "",
+    query: str = "",
+) -> List[Dict[str, Any]]:
+    ensure_tables()
+    clauses: List[str] = []
+    params: List[Any] = []
+    cs = _norm_callsign(callsign)
+    if cs:
+        clauses.append("callsign=?")
+        params.append(cs)
+    if status:
+        clauses.append("status=?")
+        params.append(_norm_report_status(status))
+    topic_value = _norm_topics([topic])
+    if topic_value:
+        clauses.append("topics_json LIKE ?")
+        params.append(f"%{topic_value[0]}%")
+    q = str(query or "").strip().lower()
+    if q:
+        clauses.append(
+            "(LOWER(callsign) LIKE ? OR LOWER(from_name) LIKE ? OR LOWER(subject) LIKE ? OR LOWER(body) LIKE ? "
+            "OR LOWER(city) LIKE ? OR LOWER(county) LIKE ? OR LOWER(state) LIKE ? OR LOWER(grid) LIKE ?)"
+        )
+        like = f"%{q}%"
+        params.extend([like] * 8)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    lim = max(1, int(limit or 200))
+    params.append(lim)
+    conn = sqlite3.connect(_db_path())
+    try:
+        cur = conn.execute(
+            f"""
+            SELECT
+                id,
+                created_utc,
+                updated_utc,
+                source_kind,
+                source_channel,
+                net_session_id,
+                callsign,
+                operator_id,
+                from_name,
+                city,
+                county,
+                state,
+                grid,
+                lat,
+                lon,
+                location_source,
+                location_confidence,
+                status,
+                topics_json,
+                topic_evidence_json,
+                subject,
+                body,
+                confirmed_state,
+                followup_state,
+                exercise_flag,
+                source_radio_id,
+                source_app,
+                raw_reference,
+                created_by,
+                updated_by
+            FROM local_operator_reports
+            {where}
+            ORDER BY created_utc DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        return [_report_row_to_dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_reports_for_operator(callsign: str, *, limit: int = 50) -> List[Dict[str, Any]]:
+    return list_local_reports(callsign=callsign, limit=limit)
+
+
+def _report_status_to_sitrep(status: str) -> str:
+    normalized = _norm_report_status(status)
+    if normalized == "EMERGENCY":
+        return "RED"
+    if normalized in {"WATCH", "PRIORITY"}:
+        return "YELLOW"
+    return "GREEN"
+
+
+def _report_row_to_dict(row: Any) -> Dict[str, Any]:
+    return {
+        "id": int(row[0] or 0),
+        "created_utc": row[1] or "",
+        "updated_utc": row[2] or "",
+        "source_kind": row[3] or "",
+        "source_channel": row[4] or "",
+        "net_session_id": row[5] or "",
+        "callsign": row[6] or "",
+        "operator_id": row[7] or "",
+        "from_name": row[8] or "",
+        "city": row[9] or "",
+        "county": row[10] or "",
+        "state": row[11] or "",
+        "grid": row[12] or "",
+        "lat": row[13],
+        "lon": row[14],
+        "location_source": row[15] or "",
+        "location_confidence": row[16] or "",
+        "status": _norm_report_status(row[17] or "INFO"),
+        "topics": _json_loads(row[18], []),
+        "topic_evidence": _json_loads(row[19], {}),
+        "subject": row[20] or "",
+        "body": row[21] or "",
+        "confirmed_state": _norm_confirmed_state(row[22] or "UNCONFIRMED"),
+        "followup_state": row[23] or "",
+        "exercise_flag": bool(row[24]),
+        "source_radio_id": row[25],
+        "source_app": row[26] or "",
+        "raw_reference": row[27] or "",
+        "created_by": row[28] or "",
+        "updated_by": row[29] or "",
+    }

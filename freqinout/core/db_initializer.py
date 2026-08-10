@@ -134,6 +134,83 @@ def _ensure_local_operator_tables(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_ts ON local_ncs_checkins(checkin_utc)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_callsign ON local_ncs_checkins(callsign)")
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_operator_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT,
+            source_kind TEXT,
+            source_channel TEXT,
+            net_session_id TEXT,
+            callsign TEXT,
+            operator_id TEXT,
+            from_name TEXT,
+            city TEXT,
+            county TEXT,
+            state TEXT,
+            grid TEXT,
+            lat REAL,
+            lon REAL,
+            location_source TEXT,
+            location_confidence TEXT,
+            status TEXT,
+            topics_json TEXT,
+            topic_evidence_json TEXT,
+            subject TEXT,
+            body TEXT,
+            confirmed_state TEXT,
+            followup_state TEXT,
+            exercise_flag INTEGER DEFAULT 0,
+            source_radio_id INTEGER,
+            source_app TEXT,
+            raw_reference TEXT,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "local_operator_reports",
+        {
+            "created_utc": "TEXT",
+            "updated_utc": "TEXT",
+            "source_kind": "TEXT",
+            "source_channel": "TEXT",
+            "net_session_id": "TEXT",
+            "callsign": "TEXT",
+            "operator_id": "TEXT",
+            "from_name": "TEXT",
+            "city": "TEXT",
+            "county": "TEXT",
+            "state": "TEXT",
+            "grid": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "location_source": "TEXT",
+            "location_confidence": "TEXT",
+            "status": "TEXT",
+            "topics_json": "TEXT",
+            "topic_evidence_json": "TEXT",
+            "subject": "TEXT",
+            "body": "TEXT",
+            "confirmed_state": "TEXT",
+            "followup_state": "TEXT",
+            "exercise_flag": "INTEGER DEFAULT 0",
+            "source_radio_id": "INTEGER",
+            "source_app": "TEXT",
+            "raw_reference": "TEXT",
+            "created_by": "TEXT",
+            "updated_by": "TEXT",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_created ON local_operator_reports(created_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_callsign ON local_operator_reports(callsign)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_state ON local_operator_reports(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_grid ON local_operator_reports(grid)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_reports_status ON local_operator_reports(status)")
+
 
 def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     """
