@@ -7592,6 +7592,61 @@ Acceptance:
 - Future map/BBS logic consumes only the shared read model plus explicit user-enabled rules and audit-ready provenance.
 - No new UI-thread full-directory rescans or DB full-table scans are introduced for this refinement.
 
+### 1.137d Addendum (2026-08-10): Observation Projection Guardrails for Map and Managed BBS
+
+Status: Design guardrails before implementation
+
+Problem:
+- FIO will ingest many simultaneous observations from radios, JS8Call/Spotter, CommStat, FLMsg/FLAmp, local NCS reports, VarAC, mesh, Reticulum, and future tools.
+- Message intelligence can identify candidate topics, locations, groups, and urgency, but automatically mapping or routing those candidates could mislead an operator or publish sensitive/incorrect information.
+- Map and Managed BBS behavior must stay fast, explicit, explainable, and auditable.
+
+Definitions:
+- `Observation`: a normalized, read-only projection of one source item. It may come from `MessageIntelligence`, unified SitRep projection, Local Reports, or future transport adapters.
+- `Candidate`: an observation that has enough content to be considered for a map layer or Managed BBS rule.
+- `Action`: an explicit user-approved result such as showing a marker layer, copying a file to a BBS location, moving a file to a managed vault location, or publishing a summary.
+- `observed_topics`, `operator_attention`, and display summaries are advisory intelligence only. They must not imply verification, operator intent, delivery consent, route eligibility, or publish authorization.
+- `route_eligible` and `publish_authorized` are separate rule-evaluation outputs. They may become true only through explicit enabled rules, source allowlists, confidence gates, and audit-ready provenance.
+
+Required observation fields:
+- `observation_id`, `source_family`, `source_ref`, `source_radio_id`, `source_app`, `received_utc`, `event_utc`, `from_call`, `to_target`, `groups`, `observed_topics`, `operator_attention`, `status/urgency`, `subject`, `summary`, `state`, `grid`, `lat`, `lon`, `location_confidence`, `auth_state`, `trusted_state`, `confirmed_state`, `exercise_flag`, `route_eligible`, `publish_authorized`, `provenance_json`.
+- `source_ref` must point back to the original row/file/message; projections must not become the only source of truth.
+- Projection tables must be indexed for bounded reads by callsign, source family, topic, status/urgency, state/grid, event/received time, and rule id when rule evaluation is added.
+
+Map guardrails:
+- Map markers from observations are disabled by default until a user enables the relevant layer.
+- A marker requires location confidence high enough for the chosen layer:
+  - lat/lon explicit or verified grid can map as a point/area.
+  - state-only observations may contribute only to rollups, not point markers.
+  - unknown/ambiguous locations never create markers.
+- Marker popups must show source family, age, confidence, and whether the information is verified, trusted, unsigned, manually entered, or exercise/test.
+- Local voice/manual reports must be visually distinct from digitally received traffic.
+- Local Reports are inert by default. They may not map unless `confirmed_state` is confirmed or a rule/layer explicitly allows unconfirmed local reports.
+- Exercise/test reports are excluded from operational map layers unless the selected layer is also marked exercise/test.
+- Normalized observations must flow through one read model with layer flags, confidence gates, recency windows, and provenance chips; map code must not inject markers directly from Local Reports or message rows.
+- No map refresh path may parse source files or scan whole external directories; the map consumes cached/projection rows only.
+
+Managed BBS guardrails:
+- No observation is copied, moved, published, or assigned to a BBS location without a user-created enabled rule.
+- Rules match against normalized fields only: source family, group/to target, sender/callsign, topic, status/urgency, state/grid/location confidence, auth/trust state, age window, and exercise flag.
+- Rules must never route solely from topics/category.
+- Rules start in review-only mode. Live BBS copy/publish requires per-rule enablement, destination scope, dry-run preview, durable audit event, idempotency key, and an operator-visible staged/live state.
+- Each action writes an audit row containing rule id/name, observation id, original source ref, destination, timestamp, operator/app actor, and reason summary.
+- Duplicate suppression must compare source refs and semantic content so repeated retrievals of the same Expect/Spotter/FLMsg content do not repeatedly publish.
+- BBS routing must never mutate or delete the source message/file.
+
+Performance requirements:
+- Use incremental projection/checkpointing; no steady-state full-table rescans for external app DBs or message folders.
+- UI tables and map layers read bounded, indexed projections with recency limits.
+- Heavy parsing, import, or rule evaluation must run off the UI thread and publish compact results.
+- Projection updates must tolerate missing, locked, or partially written source DB/files without blocking the operator.
+
+Acceptance:
+- The first implementation slice creates only the observation projection/read API and tests; no automatic map/BBS actions.
+- Map/BBS consumers can explain why an observation is or is not eligible.
+- Audit-ready provenance exists before any publish/copy automation is enabled.
+- Peer/code review must confirm no accidental routing side effects before enabling any action mode.
+
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy
 
 Problem:
