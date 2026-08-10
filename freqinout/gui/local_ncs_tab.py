@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,9 +30,11 @@ from freqinout.core.local_ops_store import (
     get_all_operators,
     get_operator,
     list_checkins,
+    record_local_report,
     record_checkin,
     update_checkin_entry,
 )
+from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.gui.theme import resolve_theme, button_style
@@ -39,6 +42,13 @@ from freqinout.utils.timezones import get_timezone
 
 
 STATUS_OPTIONS = ["GREEN", "YELLOW", "RED"]
+REPORT_STATUS_OPTIONS = ["INFO", "WATCH", "PRIORITY", "EMERGENCY"]
+REPORT_CONFIRMATION_OPTIONS = [
+    ("Unconfirmed", "UNCONFIRMED"),
+    ("Confirmed", "CONFIRMED"),
+    ("Second Hand", "SECOND_HAND"),
+    ("Needs Follow-up", "NEEDS_FOLLOWUP"),
+]
 
 
 class LocalNCSTab(QWidget):
@@ -76,6 +86,7 @@ class LocalNCSTab(QWidget):
         self._ignore_next_lookup_return = False
         self._clock_timer: Optional[QTimer] = None
         self._autosave_timer: Optional[QTimer] = None
+        self._report_topics: List[str] = []
 
         self._build_ui()
         self._restore_context()
@@ -205,6 +216,62 @@ class LocalNCSTab(QWidget):
         editor_row.addWidget(self.notes_edit)
         layout.addLayout(editor_row)
 
+        report_panel = QVBoxLayout()
+        self.report_target_label = QLabel("Log Report: select a check-in")
+        report_panel.addWidget(self.report_target_label)
+
+        report_grid = QGridLayout()
+        report_grid.addWidget(QLabel("Source:"), 0, 0)
+        self.report_source_combo = QComboBox()
+        self.report_source_combo.setEditable(True)
+        self.report_source_combo.addItems(
+            ["Voice", "VHF", "UHF", "GMRS", "Simplex", "Repeater", "Mesh", "Reticulum", "Other"]
+        )
+        report_grid.addWidget(self.report_source_combo, 0, 1)
+        report_grid.addWidget(QLabel("Status:"), 0, 2)
+        self.report_status_combo = QComboBox()
+        self.report_status_combo.addItems(REPORT_STATUS_OPTIONS)
+        self.report_status_combo.setToolTip("Use WATCH/PRIORITY/EMERGENCY when the report needs operator attention.")
+        report_grid.addWidget(self.report_status_combo, 0, 3)
+        report_grid.addWidget(QLabel("Confidence:"), 0, 4)
+        self.report_confirmed_combo = QComboBox()
+        for label, value in REPORT_CONFIRMATION_OPTIONS:
+            self.report_confirmed_combo.addItem(label, value)
+        report_grid.addWidget(self.report_confirmed_combo, 0, 5)
+
+        report_grid.addWidget(QLabel("Topic:"), 1, 0)
+        self.report_topic_combo = QComboBox()
+        self.report_topic_combo.addItems(list(TOPIC_TAXONOMY))
+        report_grid.addWidget(self.report_topic_combo, 1, 1)
+        self.add_report_topic_btn = QPushButton("Add Topic")
+        report_grid.addWidget(self.add_report_topic_btn, 1, 2)
+        self.report_topics_label = QLabel("Topics: none")
+        self.report_topics_label.setWordWrap(True)
+        report_grid.addWidget(self.report_topics_label, 1, 3, 1, 3)
+
+        report_grid.addWidget(QLabel("Subject:"), 2, 0)
+        self.report_subject_edit = QLineEdit()
+        self.report_subject_edit.setPlaceholderText("Short report title, e.g. Repeater outage or wildfire update")
+        report_grid.addWidget(self.report_subject_edit, 2, 1, 1, 5)
+        report_panel.addLayout(report_grid)
+
+        self.report_body_edit = QTextEdit()
+        self.report_body_edit.setPlaceholderText(
+            "Capture the field report in plain language. FIO will classify useful terms for message intelligence."
+        )
+        self.report_body_edit.setMinimumHeight(88)
+        report_panel.addWidget(self.report_body_edit)
+
+        report_actions = QHBoxLayout()
+        self.save_report_btn = QPushButton("Save Report")
+        self.clear_report_btn = QPushButton("Clear Report")
+        self.report_save_label = QLabel("")
+        report_actions.addWidget(self.save_report_btn)
+        report_actions.addWidget(self.clear_report_btn)
+        report_actions.addWidget(self.report_save_label, stretch=1)
+        report_panel.addLayout(report_actions)
+        layout.addLayout(report_panel)
+
         self.net_name_edit.textChanged.connect(self._persist_context)
         self.channels_edit.textChanged.connect(self._persist_context)
         self.net_name_edit.textChanged.connect(self._update_net_session_ui)
@@ -223,6 +290,9 @@ class LocalNCSTab(QWidget):
         self.status_combo.currentTextChanged.connect(self._mark_current_dirty)
         self.notes_edit.textChanged.connect(self._mark_current_dirty)
         self.save_entry_btn.clicked.connect(lambda: self._save_current_entry(show_feedback=True))
+        self.add_report_topic_btn.clicked.connect(self._add_report_topic)
+        self.clear_report_btn.clicked.connect(lambda: self._clear_report_editor(clear_status=True))
+        self.save_report_btn.clicked.connect(self._save_local_report)
         self.lookup_edit.installEventFilter(self)
         self.add_checkin_btn.installEventFilter(self)
         self.setTabOrder(self.lookup_edit, self.add_checkin_btn)
@@ -289,6 +359,9 @@ class LocalNCSTab(QWidget):
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
         self.export_btn.setStyleSheet(button_style("muted", theme))
         self.save_entry_btn.setStyleSheet(button_style("muted", theme))
+        self.add_report_topic_btn.setStyleSheet(button_style("muted", theme))
+        self.clear_report_btn.setStyleSheet(button_style("muted", theme))
+        self.save_report_btn.setStyleSheet(button_style("eligible_info" if self._editing_entry_id else "muted", theme))
         self._update_action_button_styles(theme)
         self._refresh_status_cell_colors()
 
@@ -310,6 +383,8 @@ class LocalNCSTab(QWidget):
             self.end_net_btn.setStyleSheet(button_style("muted", theme))
             self.add_checkin_btn.setStyleSheet(button_style("muted", theme))
         self.save_entry_btn.setStyleSheet(button_style("eligible_info" if dirty_entry else "muted", theme))
+        if hasattr(self, "save_report_btn"):
+            self.save_report_btn.setStyleSheet(button_style("eligible_info" if self._editing_entry_id else "muted", theme))
 
     def on_settings_saved(self) -> None:
         try:
@@ -813,6 +888,20 @@ class LocalNCSTab(QWidget):
         self.status_combo.setEnabled(enabled)
         self.notes_edit.setEnabled(enabled)
         self.save_entry_btn.setEnabled(enabled)
+        for widget_name in (
+            "report_source_combo",
+            "report_status_combo",
+            "report_confirmed_combo",
+            "report_topic_combo",
+            "add_report_topic_btn",
+            "report_subject_edit",
+            "report_body_edit",
+            "save_report_btn",
+            "clear_report_btn",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     def _on_table_selection_changed(self) -> None:
         if self._binding_selection:
@@ -824,12 +913,15 @@ class LocalNCSTab(QWidget):
             self._editing_entry_id = None
             self._set_editor_enabled(False)
             self.editor_target_label.setText("Selected Check-in: none")
+            self.report_target_label.setText("Log Report: select a check-in")
             self._set_autosave_label()
+            self._update_action_button_styles()
             return
 
         row = self._rows_by_id.get(entry_id)
         if not row:
             return
+        previous_id = self._editing_entry_id
         self._editing_entry_id = entry_id
         self._binding_editor = True
         try:
@@ -841,7 +933,83 @@ class LocalNCSTab(QWidget):
         self.editor_target_label.setText(
             f"Selected Check-in: {row.get('callsign', '').upper()} @ {row.get('checkin_utc', '')}"
         )
+        self.report_target_label.setText(f"Log Report From: {row.get('callsign', '').upper()}")
+        if previous_id != entry_id:
+            self._clear_report_editor(clear_status=False)
         self._set_autosave_label()
+        self._update_action_button_styles()
+
+    def _selected_checkin_row(self) -> Dict[str, Any]:
+        if not self._editing_entry_id:
+            return {}
+        return self._rows_by_id.get(int(self._editing_entry_id), {}) or {}
+
+    def _add_report_topic(self, *_args) -> None:
+        topic = self.report_topic_combo.currentText().strip()
+        if topic and topic not in self._report_topics:
+            self._report_topics.append(topic)
+        self._refresh_report_topics_label()
+
+    def _refresh_report_topics_label(self) -> None:
+        text = ", ".join(self._report_topics) if self._report_topics else "none"
+        self.report_topics_label.setText(f"Topics: {text}")
+
+    def _clear_report_editor(self, *, clear_status: bool = True) -> None:
+        self._report_topics = []
+        self._refresh_report_topics_label()
+        self.report_subject_edit.clear()
+        self.report_body_edit.clear()
+        self.report_save_label.clear()
+        if clear_status:
+            self.report_source_combo.setCurrentText("Voice")
+            self.report_status_combo.setCurrentText("INFO")
+            self.report_confirmed_combo.setCurrentIndex(0)
+
+    def _save_local_report(self) -> None:
+        row = self._selected_checkin_row()
+        if not row:
+            QMessageBox.information(self, "Save Report", "Select a check-in before saving a report.")
+            return
+        subject = self.report_subject_edit.text().strip()
+        body = self.report_body_edit.toPlainText().strip()
+        if not subject and not body:
+            QMessageBox.information(self, "Save Report", "Enter a subject or report details before saving.")
+            return
+        source_kind = self.report_source_combo.currentText().strip() or "Voice"
+        report_id = record_local_report(
+            callsign=str(row.get("callsign", "")).strip().upper(),
+            source_kind=source_kind,
+            source_channel=self.channels_edit.text().strip(),
+            net_session_id=self._net_start_utc or self.net_name_edit.text().strip(),
+            from_name=(
+                str(row.get("name", "")).strip()
+                or " ".join(
+                    [
+                        p
+                        for p in (
+                            str(row.get("first_name", "")).strip(),
+                            str(row.get("last_name", "")).strip(),
+                        )
+                        if p
+                    ]
+                ).strip()
+            ),
+            city=str(row.get("city", "")).strip(),
+            state=str(row.get("state", "")).strip().upper(),
+            status=self.report_status_combo.currentText().strip().upper(),
+            topics=list(self._report_topics),
+            subject=subject,
+            body=body,
+            confirmed_state=str(self.report_confirmed_combo.currentData() or "UNCONFIRMED"),
+            source_app="Local NCS",
+            raw_reference=f"local_ncs_checkins:{self._editing_entry_id}",
+        )
+        if not report_id:
+            QMessageBox.warning(self, "Save Report", "Unable to save the local report.")
+            return
+        self._clear_report_editor(clear_status=True)
+        self.report_save_label.setText(f"Saved report #{report_id}")
+        self.local_data_updated.emit()
 
     def _mark_current_dirty(self) -> None:
         if self._binding_editor:

@@ -46,7 +46,7 @@ def test_record_local_report_preserves_operator_notes_and_adds_topic_evidence(mo
     assert row["source_kind"] == "gmrs"
     assert row["source_channel"] == "462.675"
     assert row["status"] == "PRIORITY"
-    assert row["topics"] == ["Fire", "Travel/Roads"]
+    assert row["topics"] == ["Fire", "Travel/Roads", "Infrastructure"]
     assert "manual:Fire" in row["topic_evidence"]["Fire"]
     assert any(item.startswith("body:wildfire") for item in row["topic_evidence"]["Fire"])
     assert row["confirmed_state"] == "SECOND_HAND"

@@ -798,6 +798,8 @@ def record_local_report(
             if evidence not in merged[topic]:
                 merged[topic].insert(0, evidence)
         for topic, values in topic_evidence.items():
+            if topic not in topic_values:
+                topic_values.append(topic)
             merged.setdefault(topic, [])
             for value in values:
                 if value not in merged[topic]:
