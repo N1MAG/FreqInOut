@@ -1745,16 +1745,18 @@ Phase 6: Performance and soak hardening
     - Autosave runs periodically and persists dirty status/notes edits.
     - Persist latest status/notes back to the matching local operator record.
   - Local operator report intake:
-    - Add a fast report-capture surface in `Local NCS` and `Local Operators` for information received by voice or local-network channels.
+    - Add a fast report-capture surface for information received by voice or local-network channels.
+    - Landed first slice: `Local NCS` can save a selected check-in report into `local_operator_reports`.
+    - Follow-up slice: expose local-report history and latest/highest-urgency summaries in `Local Operators`.
     - Intended sources include VHF/UHF voice, GMRS, MURS/FRS, local simplex/repeater traffic, in-person relay, phone/SMS relay when manually logged, and future mesh/Reticulum integrations.
     - Capture must use the same operator-facing topic taxonomy as Messages/Message Intelligence:
       `Weather`, `Fire`, `Medical`, `Power`, `Water`, `Fuel`, `Food`, `Travel/Roads`, `Comms`, `Security`, `Shelter`, `Logistics`, `Infrastructure`, `General Intel`.
     - User workflow:
       - Select or add the reporting operator.
-      - Pick one or more topic categories from compact chips/buttons.
+      - Pick one or more topic categories. Current Local NCS slice uses a compact topic picker with an `Add Topic` action; the final polish target remains chip/button-style selection.
       - Enter short subject and concise report text.
       - Set status/urgency: `Info`, `Watch`, `Priority`, `Emergency`.
-      - Set location using available granularity: `Operator location`, `City/County`, `State`, `Grid`, `Lat/Lon`, or `Unknown`.
+      - Set or infer location using available granularity: `Operator location`, `City/County`, `State`, `Grid`, `Lat/Lon`, or `Unknown`.
       - Mark whether the report is confirmed, second-hand, exercise/test, or needs follow-up.
       - Save without leaving the NCS/check-in flow.
     - Notes model:
@@ -1765,7 +1767,7 @@ Phase 6: Performance and soak hardening
     - Data model:
       - Add `local_operator_reports` table:
         `id`, `created_utc`, `updated_utc`, `source_kind`, `source_channel`, `net_session_id`, `callsign`, `operator_id`, `from_name`, `city`, `county`, `state`, `grid`, `lat`, `lon`, `location_source`, `location_confidence`, `status`, `topics_json`, `topic_evidence_json`, `subject`, `body`, `confirmed_state`, `followup_state`, `exercise_flag`, `source_radio_id`, `source_app`, `raw_reference`, `created_by`, `updated_by`.
-      - Keep `topic_evidence_json` compatible with `MessageIntelligence.topic_evidence`, but mark evidence source as `manual`, `voice`, `mesh`, `reticulum`, or another explicit source label.
+      - Keep `topic_evidence_json` compatible with `MessageIntelligence.topic_evidence`; manual topic selections are stored as `manual:<topic>` evidence and body/subject text can enrich the same report with additional detected topics.
       - Add indexes for `created_utc`, `callsign`, `state`, `grid`, `status`, and topic lookup support.
     - Integration:
       - Feed saved local reports into a core normalized observation/read-model service, not directly from GUI rows.
@@ -1775,7 +1777,7 @@ Phase 6: Performance and soak hardening
       - Operator History should show a concise local-report history timeline for each callsign.
     - UI/UX:
       - The capture control should be reachable from the selected check-in row with one obvious action such as `Log Report`.
-      - Category selection should use a compact chip/grid control, not a long dropdown.
+      - Category selection should graduate to a compact chip/grid control for final UI polish; do not regress to a long list of form types.
       - The inline form should prioritize speed: source, topic, status, subject, body, location, follow-up.
       - The report list should default to recent/highest-urgency, with search by topic, callsign, location, and keyword.
       - Minimized-window usability is required: report capture and recent reports must scroll cleanly without compressed fields.
