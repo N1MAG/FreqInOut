@@ -150,6 +150,8 @@ def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries
     assert "analyze_commstat_fields(" in source
     assert "topics=tuple(intelligence.topics)" in source
     assert "actionable=bool(intelligence.actionable)" in source
+    assert 'type_vals = base_types + ["Spotter"]' in source
+    assert 'not bool(getattr(row, "actionable", False))' in source
     assert "TOPIC_TAXONOMY" in intel_source
     assert '"General Intel"' in intel_source
     assert '"Infrastructure"' in intel_source

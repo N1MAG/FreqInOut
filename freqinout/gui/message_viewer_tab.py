@@ -9198,7 +9198,7 @@ class MessageViewerTab(QWidget):
             else:
                 insert_at = len(type_vals)
             type_vals[insert_at:insert_at] = commstat_filters
-        if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
+        if any(getattr(r.payload, "flag_state", 0) == 1 or bool(getattr(r, "actionable", False)) for r in rows):
             if "Action Needed" not in status_vals:
                 status_vals.append("Action Needed")
         self._rebuild_excluded_types_menu(type_vals)
@@ -9284,7 +9284,7 @@ class MessageViewerTab(QWidget):
                 continue
             if status_sel != "Status...":
                 if status_sel == "Action Needed":
-                    if getattr(row.payload, "flag_state", 0) != 1:
+                    if getattr(row.payload, "flag_state", 0) != 1 and not bool(getattr(row, "actionable", False)):
                         continue
                 elif row.status != status_sel:
                     continue
