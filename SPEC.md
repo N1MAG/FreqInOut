@@ -7654,6 +7654,7 @@ Implementation notes:
 - JS8Spotter DB import, live JS8 directed/API Spotter ingest, and FLMsg/FLAmp message file scans project observations with source references back to the source row/file.
 - `freqinout.core.observation_backfill` provides bounded checkpointed backfill for existing Local Reports and Spotter traffic; background ingest runs this from the Messages job with a configurable batch cap.
 - `freqinout.core.observation_queries` is the intended read-only facade for future map/search/BBS consumers. Consumers must use eligibility explanations and must not read projection tables directly for routing decisions.
+- Map `View Spotter Map` focus consumes the observation query facade as a read-only visualization layer for Spotter and confirmed Local Reports. It may cluster/place markers from station lookup, explicit lat/lon, or Maidenhead grid, but it must not set route/publish authorization or bypass map eligibility explanations.
 - JS8 group markers (`@MAGNET`, `@MR08`) are preserved for compose/transmit targets and compatible Spotter payload parsing, but report, message, observation, search, and summary views display the operating group without `@` to avoid noisy duplicate group names.
 
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy

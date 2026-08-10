@@ -65,6 +65,7 @@ from freqinout.core.operator_activity import (
     load_js8_direct_contact_summary,
     load_operator_activity_summary,
 )
+from freqinout.core.observation_queries import ObservationQuery, map_observation_rows
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.plan_context_service import PlanContextService
@@ -478,6 +479,7 @@ class StationsMapTab(QWidget):
         self._now_reachable_button: Optional[QPushButton] = None
         self._now_reachable_label: Optional[QLabel] = None
         self._sitrep_status_only_enabled: bool = False
+        self._observation_focus_enabled: bool = False
         self._sitrep_status_button: Optional[QPushButton] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
@@ -2714,6 +2716,7 @@ class StationsMapTab(QWidget):
             self._sitrep_status_button.setChecked(False)
             self._sitrep_status_button.blockSignals(False)
             self._sitrep_status_only_enabled = False
+            self._observation_focus_enabled = False
             self._update_sitrep_status_button_visual(False)
         if self._now_reachable_enabled:
             snapshot = self._compute_now_reachable_snapshot()
@@ -2736,6 +2739,8 @@ class StationsMapTab(QWidget):
 
     def _on_sitrep_status_toggled(self, checked: bool) -> None:
         self._sitrep_status_only_enabled = bool(checked)
+        if not self._sitrep_status_only_enabled:
+            self._observation_focus_enabled = False
         if self._sitrep_status_only_enabled and self._now_reachable_enabled and self._now_reachable_button is not None:
             # Pin modes are mutually exclusive; SitRep takes precedence when enabled.
             self._now_reachable_button.blockSignals(True)
@@ -2761,6 +2766,7 @@ class StationsMapTab(QWidget):
     def focus_spotter_reports(self) -> None:
         """Open a temporary map focus for Spotter/SitRep report review."""
         self._sitrep_status_only_enabled = True
+        self._observation_focus_enabled = True
         self.show_station_markers = True
         self.show_weather_reports = True
         self.show_alert_reports = True
@@ -4215,6 +4221,126 @@ class StationsMapTab(QWidget):
             summarizer=self._summarize_operational_text,
         )
 
+    def _load_observation_operational_reports(
+        self,
+        *,
+        layer_name: str,
+        max_age_sec: int,
+    ) -> List[Dict[str, object]]:
+        """Load read-only observation projection rows for map review layers."""
+        if not bool(getattr(self, "_observation_focus_enabled", False)):
+            return []
+        cache_key = (f"observation_{layer_name}_reports", int(max_age_sec or 0))
+        cached = self._query_cache_get(cache_key, ttl_sec=6.0)
+        if isinstance(cached, list):
+            return [dict(row) for row in cached if isinstance(row, dict)]
+        out: List[Dict[str, object]] = []
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        since_utc = ""
+        if max_age_sec and max_age_sec > 0:
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=max_age_sec)
+            since_utc = cutoff.replace(microsecond=0).isoformat()
+        try:
+            view_rows = map_observation_rows(
+                db_path,
+                ObservationQuery(since_utc=since_utc, limit=1500),
+                layer_enabled=True,
+                allow_unconfirmed_local=False,
+                exercise_layer=False,
+            )
+        except Exception as e:
+            log.debug("StationsMap: failed to load observation %s reports: %s", layer_name, e)
+            return out
+
+        wanted_sources = {"spotter", "local_report"}
+        for view_row in view_rows:
+            obs = view_row.observation
+            if obs.source_family not in wanted_sources:
+                continue
+            eligibility = view_row.map_eligibility
+            if eligibility is None or not eligibility.allowed:
+                continue
+            topics = {str(topic).strip() for topic in obs.observed_topics if str(topic).strip()}
+            if layer_name == "alert":
+                include = bool(
+                    topics.intersection({"Fire", "Weather", "Shelter", "Medical", "General Intel"})
+                    or str(obs.status or "").strip().upper() in {"WATCH", "PRIORITY", "EMERGENCY", "RED", "YELLOW"}
+                )
+                classifier = self._classify_alert_text
+            else:
+                include = bool(
+                    topics.intersection({"Infrastructure", "Power", "Water", "Comms", "Fuel", "Travel/Roads"})
+                )
+                classifier = self._classify_infrastructure_text
+            if not include:
+                continue
+            text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
+            icon, severity = classifier(text)
+            form = str((obs.provenance or {}).get("form_name", "") or "").strip()
+            out.append(
+                {
+                    "callsign": str(obs.from_call or "").strip().upper(),
+                    "form_id": form,
+                    "utc_ts": self._observation_ts(obs.event_utc or obs.received_utc),
+                    "utc_str": str(obs.event_utc or obs.received_utc or "").strip(),
+                    "summary": str(obs.subject or obs.summary or "Observation received").strip(),
+                    "icon": icon,
+                    "severity": severity,
+                    "lat": obs.lat,
+                    "lon": obs.lon,
+                    "grid": obs.grid,
+                    "source_family": obs.source_family,
+                    "to_target": obs.to_target,
+                    "topics": sorted(topics),
+                }
+            )
+        self._query_cache_set(cache_key, list(out))
+        return out
+
+    @staticmethod
+    def _observation_ts(value: object) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            return float(parsed.timestamp())
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _report_position(
+        report: Dict[str, object],
+        station_lookup: Dict[str, StationPoint],
+    ) -> tuple[Optional[float], Optional[float]]:
+        call = str(report.get("callsign") or "").strip().upper()
+        pt = station_lookup.get(call)
+        if pt is None:
+            base = JS8LogLinkIndexer._base_callsign(call)
+            pt = station_lookup.get(base) if base else None
+        if pt is not None:
+            return float(pt.lat or 0.0), float(pt.lon or 0.0)
+        lat = report.get("lat")
+        lon = report.get("lon")
+        try:
+            if lat is not None and lon is not None:
+                return float(lat), float(lon)
+        except Exception:
+            pass
+        grid = str(report.get("grid") or "").strip().upper()
+        if grid:
+            ll = maidenhead_to_latlon(grid)
+            if ll:
+                return float(ll[0]), float(ll[1])
+        return None, None
+
     def _build_weather_map_events(self, station_lookup: Dict[str, StationPoint]) -> List[Dict[str, object]]:
         reports = self._cached_map_value(
             "spotter_weather_reports",
@@ -4230,14 +4356,9 @@ class StationsMapTab(QWidget):
             if not isinstance(report, dict):
                 continue
             call = str(report.get("callsign") or "").strip().upper()
-            pt = station_lookup.get(call)
-            if pt is None:
-                base = JS8LogLinkIndexer._base_callsign(call)
-                pt = station_lookup.get(base) if base else None
-            if pt is None:
+            lat, lon = self._report_position(report, station_lookup)
+            if lat is None or lon is None:
                 continue
-            lat = float(pt.lat or 0.0)
-            lon = float(pt.lon or 0.0)
             key = (
                 int(round(lat / WEATHER_CLUSTER_DEGREES)),
                 int(round(lon / WEATHER_CLUSTER_DEGREES)),
@@ -4339,14 +4460,9 @@ class StationsMapTab(QWidget):
             if not isinstance(report, dict):
                 continue
             call = str(report.get("callsign") or "").strip().upper()
-            pt = station_lookup.get(call)
-            if pt is None:
-                base = JS8LogLinkIndexer._base_callsign(call)
-                pt = station_lookup.get(base) if base else None
-            if pt is None:
+            lat, lon = self._report_position(report, station_lookup)
+            if lat is None or lon is None:
                 continue
-            lat = float(pt.lat or 0.0)
-            lon = float(pt.lon or 0.0)
             key = (
                 int(round(lat / WEATHER_CLUSTER_DEGREES)),
                 int(round(lon / WEATHER_CLUSTER_DEGREES)),
@@ -6015,6 +6131,18 @@ class StationsMapTab(QWidget):
             if self.show_alert_reports
             else []
         )
+        if self.show_alert_reports and bool(getattr(self, "_observation_focus_enabled", False)):
+            alert_events.extend(
+                self._build_spotter_operational_events(
+                    weather_station_lookup,
+                    layer_name="alert",
+                    display_label="Observation Alerts",
+                    reports_loader=lambda: self._load_observation_operational_reports(
+                        layer_name="alert",
+                        max_age_sec=ALERT_REPORT_MAX_AGE_SEC,
+                    ),
+                )
+            )
         infrastructure_events = (
             self._build_spotter_operational_events(
                 weather_station_lookup,
@@ -6025,6 +6153,18 @@ class StationsMapTab(QWidget):
             if self.show_infrastructure_reports
             else []
         )
+        if self.show_infrastructure_reports and bool(getattr(self, "_observation_focus_enabled", False)):
+            infrastructure_events.extend(
+                self._build_spotter_operational_events(
+                    weather_station_lookup,
+                    layer_name="infrastructure",
+                    display_label="Observation Infrastructure",
+                    reports_loader=lambda: self._load_observation_operational_reports(
+                        layer_name="infrastructure",
+                        max_age_sec=INFRASTRUCTURE_REPORT_MAX_AGE_SEC,
+                    ),
+                )
+            )
 
         def offset_positions(base_lat: float, base_lon: float, items: List[StationPoint]):
             if len(items) == 1:
