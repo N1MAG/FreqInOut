@@ -27,7 +27,22 @@ TOPIC_TAXONOMY: tuple[str, ...] = (
 
 
 _TOPIC_PATTERNS: Mapping[str, tuple[str, ...]] = {
-    "Weather": ("weather", "wx", "wefax", "wind", "rain", "snow", "storm", "temperature", "temp"),
+    "Weather": (
+        "weather",
+        "wx",
+        "wefax",
+        "wind",
+        "rain",
+        "snow",
+        "storm",
+        "temperature",
+        "temp",
+        "warning",
+        "flood",
+        "surge",
+        "hurricane",
+        "tornado",
+    ),
     "Fire": ("fire", "wildfire", "evac", "smoke", "burn", "red flag"),
     "Medical": ("medical", "med", "injur", "hospital", "triage", "ems", "patient", "health"),
     "Power": ("power", "grid down", "outage", "generator", "battery", "electric"),
@@ -182,6 +197,91 @@ def analyze_form_text(
     return _with_summary(info)
 
 
+def analyze_commstat_fields(
+    *,
+    artifact_kind: object = "",
+    title: object = "",
+    body: object = "",
+    from_call: object = "",
+    target: object = "",
+    report_group: object = "",
+    state: object = "",
+    grid: object = "",
+    scope: object = "",
+    status: object = "",
+    alert_color: object = "",
+    subtype: object = "",
+    remarks: object = "",
+    brevity_code: object = "",
+    brevity_summary: object = "",
+    transport: object = "",
+    source_family: object = "CommStat",
+    event_utc: object = "",
+) -> MessageIntelligence:
+    kind = _commstat_kind_label(artifact_kind)
+    title_text = _first_nonempty(title, brevity_summary, remarks, body)
+    body_text = _first_nonempty(body, remarks, brevity_summary, title)
+    status_text = str(status or "").strip().upper()
+    alert_text = str(alert_color or "").strip().upper()
+    to_value = _clean_group_or_call(_first_nonempty(target, report_group))
+    group_value = _clean_group_or_call(report_group)
+    from_value = _clean_call(from_call)
+    state_value = _clean_state(state)
+    grid_value = _clean_grid(grid)
+    combined = " ".join(
+        part
+        for part in (
+            kind,
+            title_text,
+            body_text,
+            remarks,
+            brevity_code,
+            brevity_summary,
+            status_text,
+            alert_text,
+            subtype,
+            scope,
+            transport,
+            source_family,
+        )
+        if str(part or "").strip()
+    )
+    topics = normalize_topic_terms(combined)
+    if kind in {"CommStat Alert", "CommStat StatRep", "CommStat SitRep"} and "General Intel" not in topics:
+        topics = tuple([*topics, "General Intel"])
+    elevated = status_text not in {"", "INFO", "READ", "NEW", "GREEN", "OK", "NORMAL"} or alert_text in {
+        "RED",
+        "YELLOW",
+        "ORANGE",
+    }
+    metadata = {
+        "kind": kind,
+        "status": status_text,
+        "alert": alert_text,
+        "scope": str(scope or "").strip(),
+        "subtype": str(subtype or "").strip(),
+        "transport": str(transport or "").strip(),
+        "source": str(source_family or "").strip(),
+    }
+    info = MessageIntelligence(
+        source_type="commstat",
+        form_name=kind,
+        from_call=from_value,
+        to_call=to_value,
+        subject=title_text[:120],
+        date_summary=_form_date_summary(event_utc),
+        state=state_value,
+        grid=grid_value,
+        groups=_groups_from_values(to_value, group_value, title_text, body_text),
+        body=body_text,
+        topics=topics,
+        actionable=bool(elevated or topics or state_value or grid_value or title_text or body_text),
+        confidence=0.78 if (from_value or to_value or title_text or body_text) else 0.5,
+        metadata={k: v for k, v in metadata.items() if v},
+    )
+    return _with_summary(info)
+
+
 def _with_summary(info: MessageIntelligence) -> MessageIntelligence:
     return MessageIntelligence(
         source_type=info.source_type,
@@ -200,6 +300,21 @@ def _with_summary(info: MessageIntelligence) -> MessageIntelligence:
         confidence=info.confidence,
         metadata=info.metadata,
     )
+
+
+def _commstat_kind_label(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"ALERT", "ALERTS"}:
+        return "CommStat Alert"
+    if text in {"STATREP", "STAT", "STATUS"}:
+        return "CommStat StatRep"
+    if text in {"SITREP", "SIT"}:
+        return "CommStat SitRep"
+    if text in {"CHECKIN", "CHECK-IN", "CHECK_IN"}:
+        return "CommStat Check-In"
+    if text in {"MESSAGE", "MSG", ""}:
+        return "CommStat Message"
+    return f"CommStat {text.title()}"
 
 
 def _term_matches(haystack: str, term: str) -> bool:

@@ -142,9 +142,12 @@ def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries
     source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     intel_source = (ROOT / "freqinout/core/message_intelligence.py").read_text(encoding="utf-8")
 
-    assert "from freqinout.core.message_intelligence import MessageIntelligence, analyze_form_text, analyze_spotter_text" in source
+    assert "from freqinout.core.message_intelligence import (" in source
+    assert "MessageIntelligence" in source
+    assert "analyze_commstat_fields" in source
     assert "analyze_spotter_text(" in source
     assert "analyze_form_text(" in source
+    assert "analyze_commstat_fields(" in source
     assert "topics=tuple(intelligence.topics)" in source
     assert "actionable=bool(intelligence.actionable)" in source
     assert "TOPIC_TAXONOMY" in intel_source

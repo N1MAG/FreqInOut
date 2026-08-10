@@ -1,4 +1,9 @@
-from freqinout.core.message_intelligence import analyze_form_text, analyze_spotter_text, normalize_topic_terms
+from freqinout.core.message_intelligence import (
+    analyze_commstat_fields,
+    analyze_form_text,
+    analyze_spotter_text,
+    normalize_topic_terms,
+)
 
 
 def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summary() -> None:
@@ -73,3 +78,59 @@ def test_filename_and_body_terms_support_bbs_rule_routing_concepts() -> None:
 def test_topic_terms_are_canonical_and_do_not_overmatch_short_codes() -> None:
     assert "General Intel" in normalize_topic_terms("S2 regional intelligence snapshot")
     assert "General Intel" not in normalize_topic_terms("pass2 checksum only")
+
+
+def test_commstat_alert_flattens_to_actionable_operator_summary() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="ALERT",
+        title="Storm Surge Warning",
+        body="Move to elevated shelter locations immediately.",
+        from_call="W8UFO",
+        target="@MAGNET",
+        state="FL",
+        grid="EL98",
+        status="RED",
+        alert_color="RED",
+        source_family="CommStat",
+        event_utc="2026-08-10 12:34:56",
+    )
+
+    assert info.form_name == "CommStat Alert"
+    assert info.from_call == "W8UFO"
+    assert info.to_call == "@MAGNET"
+    assert info.state == "FL"
+    assert info.grid == "EL98"
+    assert {"Weather", "Shelter", "General Intel"}.issubset(set(info.topics))
+    assert info.actionable is True
+    assert info.summary == "CommStat Alert | W8UFO -> @MAGNET | Storm Surge Warning | 2026-08-10 12:34:56"
+
+
+def test_commstat_statrep_terms_enrich_future_routing_topics() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="STATREP",
+        body="County power outage, water plant generator offline, radio repeater degraded.",
+        from_call="K7ETC",
+        report_group="MR08",
+        status="YELLOW",
+    )
+
+    assert info.form_name == "CommStat StatRep"
+    assert info.to_call == "MR08"
+    assert "@MR08" in info.groups
+    assert {"Power", "Water", "Comms", "Infrastructure", "General Intel"}.issubset(set(info.topics))
+    assert info.actionable is True
+
+
+def test_commstat_general_message_is_flat_not_nested() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="MESSAGE",
+        title="Regional advisory",
+        body="Station staffing update for internet relay coverage.",
+        from_call="N1MAG",
+        target="@MAGNET",
+    )
+
+    assert info.form_name == "CommStat Message"
+    assert info.summary.startswith("CommStat Message | N1MAG -> @MAGNET | Regional advisory")
+    assert "Comms" in info.topics
+    assert info.metadata["kind"] == "CommStat Message"

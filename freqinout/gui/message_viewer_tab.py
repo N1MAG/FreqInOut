@@ -117,7 +117,12 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
-from freqinout.core.message_intelligence import MessageIntelligence, analyze_form_text, analyze_spotter_text
+from freqinout.core.message_intelligence import (
+    MessageIntelligence,
+    analyze_commstat_fields,
+    analyze_form_text,
+    analyze_spotter_text,
+)
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
@@ -1304,9 +1309,27 @@ class _RowsBuildWorker(QObject):
             rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
             from_call = (msg.from_call or "").strip().upper()
             to_call = (msg.target or "").strip().upper()
-            msg_type = artifact_kind_label(msg.artifact_kind)
             status = str(msg.status_label or "INFO").strip().upper() or "INFO"
-            title = str(msg.title or "").strip() or msg_type
+            intelligence = analyze_commstat_fields(
+                artifact_kind=msg.artifact_kind,
+                title=msg.title,
+                body=msg.body_text,
+                from_call=msg.from_call,
+                target=msg.target,
+                report_group=msg.report_group,
+                state=msg.state_code,
+                grid=msg.grid,
+                scope=msg.scope,
+                status=msg.status_label,
+                alert_color=msg.alert_color,
+                subtype=msg.subtype,
+                remarks=msg.remarks_text,
+                transport=msg.transport_label,
+                source_family=msg.source_family_label,
+                event_utc=msg.event_ts_utc,
+            )
+            msg_type = intelligence.form_name or artifact_kind_label(msg.artifact_kind)
+            title = intelligence.summary or str(msg.title or "").strip() or msg_type
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
@@ -1320,6 +1343,8 @@ class _RowsBuildWorker(QObject):
                     title=title,
                     origin="commstat",
                     payload=msg,
+                    topics=tuple(intelligence.topics),
+                    actionable=bool(intelligence.actionable),
                     search_text=self._compose_search_text(
                         msg_type,
                         status,
@@ -1330,6 +1355,9 @@ class _RowsBuildWorker(QObject):
                             part
                             for part in (
                                 title,
+                                " ".join(intelligence.topics),
+                                intelligence.state,
+                                intelligence.grid,
                                 msg.report_group,
                                 msg.transport_label,
                                 msg.source_family_label,
@@ -1725,7 +1753,7 @@ class MessageTableModel(QAbstractTableModel):
                 return None
             return Qt.Checked if key in self._selected_keys else Qt.Unchecked
         if role == Qt.DisplayRole:
-            if self._display_profile == "field_report":
+            if self._display_profile in {"field_report", "intel_report"}:
                 if col == 1:
                     return self._field_report_form(row)
                 if col == 2:
@@ -1812,16 +1840,18 @@ class MessageTableModel(QAbstractTableModel):
         return None
 
     def set_time_header(self, label: str) -> None:
-        idx = 6 if self._display_profile == "field_report" else 5
-        self._headers[idx] = "Age" if self._display_profile in {"field_report", "form_message"} else label
+        idx = 6 if self._display_profile in {"field_report", "intel_report"} else 5
+        self._headers[idx] = "Age" if self._display_profile in {"field_report", "intel_report", "form_message"} else label
         self.headerDataChanged.emit(Qt.Horizontal, idx, idx)
 
     def set_display_profile(self, profile: str, time_label: str) -> None:
         profile = str(profile or "triage").strip().lower()
-        if profile not in {"triage", "field_report", "form_message"}:
+        if profile not in {"triage", "field_report", "intel_report", "form_message"}:
             profile = "triage"
         if profile == "field_report":
             headers = ["", "MCF", "Status", "From", "To", "State / Grid", "Age", ""]
+        elif profile == "intel_report":
+            headers = ["", "Kind", "Status", "From", "To", "State / Grid", "Age", ""]
         elif profile == "form_message":
             headers = ["", "Type", "Status", "From", "To", "Age", "Message", ""]
         else:
@@ -1864,6 +1894,8 @@ class MessageTableModel(QAbstractTableModel):
         payload = row.payload
         if isinstance(payload, SitrepMessage):
             return payload.subtype_label or payload.subtype or row.msg_type
+        if isinstance(payload, CommStatArtifact):
+            return row.msg_type or artifact_kind_label(payload.artifact_kind)
         return row.msg_type or ""
 
     @staticmethod
@@ -1872,12 +1904,18 @@ class MessageTableModel(QAbstractTableModel):
         if isinstance(payload, SitrepMessage):
             overall = str(payload.overall_status or "").strip()
             return overall.upper() if overall else row.status
+        if isinstance(payload, CommStatArtifact):
+            alert = str(payload.alert_color or "").strip().upper()
+            if alert:
+                return alert
         return row.status or ""
 
     @staticmethod
     def _field_report_group(row: UnifiedMessage) -> str:
         payload = row.payload
         if isinstance(payload, SitrepMessage):
+            return payload.report_group or payload.target or row.to_call
+        if isinstance(payload, CommStatArtifact):
             return payload.report_group or payload.target or row.to_call
         return row.to_call or ""
 
@@ -1888,6 +1926,15 @@ class MessageTableModel(QAbstractTableModel):
             return MessageTableModel._sitrep_area(payload)
         if isinstance(payload, SpotterMessage):
             return MessageTableModel._spotter_area(payload)
+        if isinstance(payload, CommStatArtifact):
+            state = str(payload.state_code or "").strip().upper()
+            grid = str(payload.grid or "").strip().upper()
+            scope = str(payload.scope or "").strip()
+            if state and grid:
+                return f"{state} / {grid}"
+            if state and scope:
+                return f"{state} / {scope}"
+            return grid or state or scope
         return ""
 
     @staticmethod
@@ -1912,7 +1959,7 @@ class MessageTableModel(QAbstractTableModel):
         return f"{months} mo"
 
     def _cell_text(self, row: UnifiedMessage, field: str) -> str:
-        if self._display_profile == "field_report":
+        if self._display_profile in {"field_report", "intel_report"}:
             if field == "type":
                 return self._field_report_form(row)
             if field == "status":
@@ -9125,7 +9172,7 @@ class MessageViewerTab(QWidget):
         )
         sitrep_subtypes = [s for s in sitrep_subtypes if s]
         if spotter_forms:
-            type_vals = base_types + ["Spotter"] + spotter_forms
+            type_vals = base_types + ["Spotter"]
         else:
             type_vals = base_types
         if sitrep_subtypes:
@@ -9290,7 +9337,9 @@ class MessageViewerTab(QWidget):
         if text == "Spotter" or re.match(r"^F![0-9]{3}[A-Z]?$", text):
             return "field_report"
         if text == "SitRep" or text.startswith("SitRep/"):
-            return "field_report"
+            return "intel_report"
+        if text == "CommStat" or text.startswith("CommStat/"):
+            return "intel_report"
         if text.upper() in {"FLMSG", "FLAMP"}:
             return "form_message"
         return "triage"
@@ -9312,10 +9361,10 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "_messages_model"):
             return
         old = self._messages_model.display_profile()
-        old_default_col = 6 if old == "field_report" else 5 if old == "form_message" else self._default_sort_column
+        old_default_col = 6 if old in {"field_report", "intel_report"} else 5 if old == "form_message" else self._default_sort_column
         self._messages_model.set_display_profile(profile, self._current_messages_time_header())
         new_profile = self._messages_model.display_profile()
-        new_default_col = 6 if new_profile == "field_report" else 5 if new_profile == "form_message" else self._default_sort_column
+        new_default_col = 6 if new_profile in {"field_report", "intel_report"} else 5 if new_profile == "form_message" else self._default_sort_column
         if old != new_profile and self._sort_column == old_default_col:
             self._sort_column = new_default_col
         if old != new_profile and hasattr(self, "messages_table"):
@@ -10574,12 +10623,30 @@ class MessageViewerTab(QWidget):
         for msg in self.commstat_messages:
             rcv_ts = msg.event_ts or 0.0
             rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
-            title = str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
+            intelligence = analyze_commstat_fields(
+                artifact_kind=msg.artifact_kind,
+                title=msg.title,
+                body=msg.body_text,
+                from_call=msg.from_call,
+                target=msg.target,
+                report_group=msg.report_group,
+                state=msg.state_code,
+                grid=msg.grid,
+                scope=msg.scope,
+                status=msg.status_label,
+                alert_color=msg.alert_color,
+                subtype=msg.subtype,
+                remarks=msg.remarks_text,
+                transport=msg.transport_label,
+                source_family=msg.source_family_label,
+                event_utc=msg.event_ts_utc,
+            )
+            title = intelligence.summary or str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
                 UnifiedMessage(
-                    msg_type=artifact_kind_label(msg.artifact_kind),
+                    msg_type=intelligence.form_name or artifact_kind_label(msg.artifact_kind),
                     status=str(msg.status_label or "INFO").strip().upper() or "INFO",
                     from_call=(msg.from_call or "").strip().upper(),
                     to_call=(msg.target or "").strip().upper(),
@@ -10588,6 +10655,8 @@ class MessageViewerTab(QWidget):
                     title=title,
                     origin="commstat",
                     payload=msg,
+                    topics=tuple(intelligence.topics),
+                    actionable=bool(intelligence.actionable),
                 )
             )
 
@@ -10637,6 +10706,8 @@ class MessageViewerTab(QWidget):
                         row.to_call or "",
                         row.rcv_display or "",
                         row.title or "",
+                        " ".join(row.topics or ()),
+                        "actionable" if row.actionable else "",
                     ]
                 ).lower()
         rows.sort(key=lambda r: r.rcv_ts, reverse=True)
@@ -12843,6 +12914,27 @@ class MessageViewerTab(QWidget):
             fields=meta,
         )
 
+    @staticmethod
+    def _commstat_intelligence(msg: CommStatArtifact) -> MessageIntelligence:
+        return analyze_commstat_fields(
+            artifact_kind=msg.artifact_kind,
+            title=msg.title,
+            body=msg.body_text,
+            from_call=msg.from_call,
+            target=msg.target,
+            report_group=msg.report_group,
+            state=msg.state_code,
+            grid=msg.grid,
+            scope=msg.scope,
+            status=msg.status_label,
+            alert_color=msg.alert_color,
+            subtype=msg.subtype,
+            remarks=msg.remarks_text,
+            transport=msg.transport_label,
+            source_family=msg.source_family_label,
+            event_utc=msg.event_ts_utc,
+        )
+
     def _load_sitrep_content(self, msg: SitrepMessage) -> None:
         with perf_span(
             "messages.load_sitrep_content",
@@ -12928,9 +13020,13 @@ class MessageViewerTab(QWidget):
             mode = self._current_time_mode()
             label = "UTC" if mode == "UTC" else "Local"
             ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
-            lines = [
-                msg.title or artifact_kind_label(msg.artifact_kind),
-            ]
+            intelligence = self._commstat_intelligence(msg)
+            lines = self._message_intelligence_header(
+                intelligence,
+                timestamp=f"{label}: {ts_display}",
+                status=msg.status_label or msg.alert_color or "INFO",
+                source=msg.source_family_label or "CommStat",
+            )
             self._append_detail_section(
                 lines,
                 "Key Fields",
@@ -12938,14 +13034,12 @@ class MessageViewerTab(QWidget):
                     ("From", msg.from_call),
                     ("To", msg.target),
                     ("Group", msg.report_group),
-                    ("Received", f"{label}: {ts_display}"),
                     ("Status", msg.status_label),
                     ("Alert", msg.alert_color),
                     ("State", msg.state_code),
                     ("Grid", msg.grid),
                     ("Scope", msg.scope),
                     ("Subtype", msg.subtype),
-                    ("Source", msg.source_family_label or "CommStat"),
                     ("Receipt", msg.transport_label),
                 ),
             )
