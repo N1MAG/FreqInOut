@@ -252,3 +252,111 @@ def test_spotter_js8_event_duplicates_are_scoped_to_source(monkeypatch, tmp_path
         conn.close()
 
     assert rows == [("8", "fio-b"), ("9", "fio-c")]
+
+
+def test_spotter_live_then_directed_same_source_does_not_duplicate_or_reevaluate_expect(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-08 12:34:56\t7078000\t0\t-10\tN0CALL: @MAGNET F!304 11111111 #HHJL *DE* N0CALL \u2662\n",
+        encoding="utf-8",
+    )
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    save_expect_entry(
+        {
+            "source_radio_id": "8",
+            "source_scope": "radio",
+            "js8_instance_id": "fio-b",
+            "expect_key": "F!304",
+            "response_text": "@MAGNET F!304 OK",
+            "allowed_groups": ["@MAGNET"],
+            "enabled": True,
+            "auto_reply_enabled": True,
+        },
+        db_path=db_path,
+    )
+    ingestor = MessageIngestor(settings)
+
+    imported = ingestor.ingest_spotter_from_js8_events(
+        [
+            {
+                "type": "RX.DIRECTED",
+                "value": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
+                "params": {
+                    "FROM": "N0CALL",
+                    "TO": "@MAGNET",
+                    "TEXT": "@MAGNET F!304 11111111 #HHJL *DE* N0CALL",
+                    "UTC": "2026-08-08 12:34:56",
+                },
+            }
+        ],
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+    )
+    assert imported == 1
+
+    ingestor.ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+        offset_key="spotter_directed_offset_visible_radio_8",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT from_call, to_call, form_id, spotter_token, source_radio_id, js8_instance_id FROM spotter_traffic"
+        ).fetchall()
+    finally:
+        conn.close()
+    audit = list_expect_runtime_audit(db_path=db_path)
+
+    assert rows == [("N0CALL", "@MAGNET", "304", "#HHJL", "8", "fio-b")]
+    assert len(audit) == 1
+
+
+def test_spotter_directed_visible_and_background_offsets_share_idempotence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-08 12:34:56\t7078000\t0\t-10\tN0CALL: @MAGNET F!304 11111111 #HHJL *DE* N0CALL \u2662\n",
+        encoding="utf-8",
+    )
+    settings = SettingsManager()
+    ingestor = MessageIngestor(settings)
+
+    ingestor.ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+        offset_key="spotter_directed_offset_background_radio_8",
+    )
+    ingestor.ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+        offset_key="spotter_directed_offset_visible_radio_8",
+    )
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM spotter_traffic").fetchone()[0]
+        rows = conn.execute(
+            "SELECT from_call, to_call, form_id, spotter_token, source_radio_id, js8_instance_id FROM spotter_traffic"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert count == 1
+    assert rows == [("N0CALL", "@MAGNET", "304", "#HHJL", "8", "fio-b")]
+    assert settings.get("spotter_directed_offset_background_radio_8", 0) > 0
+    assert settings.get("spotter_directed_offset_visible_radio_8", 0) > 0
