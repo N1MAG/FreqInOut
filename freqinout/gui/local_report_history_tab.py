@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -34,6 +34,8 @@ class LocalReportHistoryTab(QWidget):
     This intentionally stays separate from HF Operator History. HF history is a
     callsign/activity model; this view is a local field-report review surface.
     """
+
+    local_reports_map_requested = Signal()
 
     COL_STATUS = 0
     COL_AGE = 1
@@ -96,11 +98,13 @@ class LocalReportHistoryTab(QWidget):
         layout.addLayout(summary_row)
 
         actions_row = QHBoxLayout()
+        self.view_local_map_btn = QPushButton("View Local Reports Map")
         self.copy_selected_btn = QPushButton("Copy Selected")
         self.copy_filtered_btn = QPushButton("Copy Filtered Summary")
         self.delete_selected_btn = QPushButton("Delete Selected")
         self.copy_status_label = QLabel("")
         self.copy_status_label.setWordWrap(True)
+        actions_row.addWidget(self.view_local_map_btn)
         actions_row.addWidget(self.copy_selected_btn)
         actions_row.addWidget(self.copy_filtered_btn)
         actions_row.addWidget(self.delete_selected_btn)
@@ -134,6 +138,7 @@ class LocalReportHistoryTab(QWidget):
         layout.addWidget(self.detail_text, stretch=1)
 
         self.refresh_btn.clicked.connect(self.refresh_reports)
+        self.view_local_map_btn.clicked.connect(self.local_reports_map_requested)
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.copy_selected_btn.clicked.connect(self._copy_selected_report)
         self.copy_filtered_btn.clicked.connect(self._copy_filtered_summary)
@@ -147,6 +152,7 @@ class LocalReportHistoryTab(QWidget):
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self.refresh_btn.setStyleSheet(button_style("primary", theme))
+        self.view_local_map_btn.setStyleSheet(button_style("secondary", theme))
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
         self._update_copy_actions()
 

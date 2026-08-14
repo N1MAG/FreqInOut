@@ -349,6 +349,9 @@ class RfConflictSnapshot:
     summary: str
     detail: str
     signature: str
+    peer_status_unknown: bool = False
+    peer_status_stale: bool = False
+    peer_status_detail: str = ""
 
 
 class DeviceRuntime:
@@ -1255,6 +1258,9 @@ class StationRuntimeManager:
         self._apply_profile_swap_annotations(snapshots)
         return snapshots
 
+    def get_status_poll_metrics(self) -> Dict[str, int]:
+        return self._status_poll_coordinator.metrics_snapshot().as_dict()
+
     def get_primary_runtime(self) -> Optional[DeviceRuntime]:
         if self._primary_device_id is None:
             return None
@@ -1293,22 +1299,52 @@ class StationRuntimeManager:
             peer_runtime = self._runtimes.get(peer_id)
             if peer_runtime is None:
                 continue
-            peer_frequency_hz = peer_runtime.current_frequency_hz(force=force)
-            if not isinstance(peer_frequency_hz, (int, float)) or int(peer_frequency_hz) <= 0:
-                continue
-            peer_frequency_hz = int(peer_frequency_hz)
-            peer_band = _hz_to_band(peer_frequency_hz)
-            same_frequency = (
-                isinstance(target_frequency_hz, (int, float))
-                and abs(int(target_frequency_hz) - peer_frequency_hz) <= 5
-            )
-            same_band = bool(normalized_band and peer_band and normalized_band == peer_band)
             trigger = dict(policy.get("trigger") or {})
             antenna_groups = _normalize_group_list(trigger.get("antenna_groups"))
             amplifier_groups = _normalize_group_list(trigger.get("amplifier_groups"))
             frontend_groups = _normalize_group_list(trigger.get("frontend_groups"))
             band_overlap_groups = _normalize_group_list(trigger.get("band_overlap_groups"))
             advanced_frequency_groups = _normalize_group_list(trigger.get("advanced_frequency_groups"))
+            if not (
+                antenna_groups
+                or amplifier_groups
+                or frontend_groups
+                or band_overlap_groups
+                or advanced_frequency_groups
+            ):
+                continue
+            peer_frequency_hz = peer_runtime.current_frequency_hz(force=force)
+            peer_status_unknown = not isinstance(peer_frequency_hz, (int, float)) or int(peer_frequency_hz) <= 0
+            peer_status_stale = False
+            peer_status_detail = ""
+            try:
+                peer_frequency_snapshot = peer_runtime.status_poll_coordinator.latest_snapshot(
+                    peer_runtime._status_poll_key("frequency")
+                )
+            except Exception:
+                peer_frequency_snapshot = None
+            if peer_frequency_snapshot is not None:
+                peer_status_stale = bool(getattr(peer_frequency_snapshot, "stale", False))
+                errors = getattr(peer_frequency_snapshot, "errors", {}) or {}
+                if errors:
+                    peer_status_unknown = True
+                    peer_status_detail = "; ".join(str(v) for v in errors.values() if str(v or "").strip())
+                elif peer_status_stale:
+                    peer_status_unknown = True
+                    peer_status_detail = "last peer frequency check is stale"
+            if peer_status_unknown:
+                peer_frequency_hz = None
+                peer_band = ""
+                same_frequency = False
+                same_band = False
+            else:
+                peer_frequency_hz = int(peer_frequency_hz)
+                peer_band = _hz_to_band(peer_frequency_hz)
+                same_frequency = (
+                    isinstance(target_frequency_hz, (int, float))
+                    and abs(int(target_frequency_hz) - peer_frequency_hz) <= 5
+                )
+                same_band = bool(normalized_band and peer_band and normalized_band == peer_band)
             advanced_windows = dict(trigger.get("advanced_frequency_windows_hz") or {})
             advanced_window_hz = 0
             if advanced_frequency_groups:
@@ -1323,7 +1359,7 @@ class StationRuntimeManager:
                 advanced_window_hz = max(0, target_window, peer_window)
             frequency_delta_hz = (
                 abs(int(target_frequency_hz) - int(peer_frequency_hz))
-                if isinstance(target_frequency_hz, (int, float))
+                if isinstance(target_frequency_hz, (int, float)) and isinstance(peer_frequency_hz, (int, float))
                 else None
             )
             advanced_frequency_close = (
@@ -1332,22 +1368,25 @@ class StationRuntimeManager:
                 and isinstance(frequency_delta_hz, int)
                 and frequency_delta_hz <= advanced_window_hz
             )
-            if not (
-                antenna_groups
-                or amplifier_groups
-                or frontend_groups
-                or band_overlap_groups
-                or advanced_frequency_groups
-            ):
-                continue
+            shared_resource_count = (
+                len(antenna_groups)
+                + len(amplifier_groups)
+                + len(frontend_groups)
+                + len(band_overlap_groups)
+                + len(advanced_frequency_groups)
+            )
+            unknown_shared_resource_risk = bool(peer_status_unknown and shared_resource_count > 0)
             if band_overlap_groups and not (same_frequency or same_band):
-                continue
+                if not unknown_shared_resource_risk:
+                    continue
             if advanced_frequency_groups and not advanced_frequency_close and not (
                 antenna_groups or amplifier_groups or frontend_groups or band_overlap_groups
             ):
-                continue
+                if not unknown_shared_resource_risk:
+                    continue
             if not advanced_frequency_close and not same_frequency and not same_band:
-                continue
+                if not unknown_shared_resource_risk:
+                    continue
             guard_mode = str(policy.get("safety_mode") or "").strip().lower()
             if guard_mode not in {"block", "prompt", "warn"}:
                 action = dict(policy.get("action") or {})
@@ -1361,14 +1400,21 @@ class StationRuntimeManager:
                     "peer_name": peer_name,
                     "peer_band": peer_band,
                     "peer_frequency_hz": peer_frequency_hz,
+                    "peer_status_unknown": bool(peer_status_unknown),
+                    "peer_status_stale": bool(peer_status_stale),
+                    "peer_status_detail": peer_status_detail,
                     "same_frequency": bool(same_frequency),
                     "same_band": bool(same_band),
                     "shared_antenna_groups": antenna_groups,
                     "shared_amplifier_groups": amplifier_groups,
                     "shared_frontend_groups": frontend_groups,
                     "shared_band_overlap_groups": band_overlap_groups,
-                    "shared_advanced_frequency_groups": advanced_frequency_groups if advanced_frequency_close else [],
-                    "advanced_frequency_window_hz": int(advanced_window_hz) if advanced_frequency_close else 0,
+                    "shared_advanced_frequency_groups": advanced_frequency_groups
+                    if (advanced_frequency_close or peer_status_unknown)
+                    else [],
+                    "advanced_frequency_window_hz": int(advanced_window_hz)
+                    if (advanced_frequency_close or peer_status_unknown)
+                    else 0,
                     "frequency_delta_hz": frequency_delta_hz if advanced_frequency_close else None,
                     "guard_mode": guard_mode,
                     "blocked": guard_mode == "block",
@@ -1387,6 +1433,7 @@ class StationRuntimeManager:
         candidates.sort(
             key=lambda item: (
                 0 if bool(item.get("same_frequency")) else 1,
+                1 if bool(item.get("peer_status_unknown")) else 0,
                 -int(item.get("shared_count", 0) or 0),
                 str(item.get("peer_name", "")).lower(),
                 int(item.get("peer_id", 0) or 0),
@@ -1409,6 +1456,13 @@ class StationRuntimeManager:
             if isinstance(item.get("frequency_delta_hz"), int)
         ]
         frequency_delta_hz = min(frequency_deltas) if frequency_deltas else None
+        peer_status_unknown = any(bool(item.get("peer_status_unknown")) for item in candidates)
+        peer_status_stale = any(bool(item.get("peer_status_stale")) for item in candidates)
+        peer_status_details = [
+            str(item.get("peer_status_detail", "") or "").strip()
+            for item in candidates
+            if str(item.get("peer_status_detail", "") or "").strip()
+        ]
         guard_mode = "warn"
         for item in candidates:
             guard_mode = stricter_rf_guard_mode(guard_mode, normalize_rf_guard_mode(item.get("guard_mode"), "confirm"))
@@ -1431,8 +1485,19 @@ class StationRuntimeManager:
 
         normalized_target_hz = int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else None
         target_frequency_label = _format_frequency_label(normalized_target_hz)
-        peer_frequency_label = _format_frequency_label(int(primary_candidate["peer_frequency_hz"]))
-        if advanced_frequency_groups and isinstance(frequency_delta_hz, int):
+        peer_frequency_label = (
+            _format_frequency_label(int(primary_candidate["peer_frequency_hz"]))
+            if isinstance(primary_candidate.get("peer_frequency_hz"), int)
+            else ""
+        )
+        peer_frequency_hz = (
+            int(primary_candidate["peer_frequency_hz"])
+            if isinstance(primary_candidate.get("peer_frequency_hz"), int)
+            else None
+        )
+        if peer_status_unknown:
+            overlap_text = f"unverified peer tuning for target {normalized_band or target_frequency_label or 'frequency change'}"
+        elif advanced_frequency_groups and isinstance(frequency_delta_hz, int):
             overlap_text = f"within {frequency_delta_hz} Hz of {peer_frequency_label or 'the peer frequency'}"
         else:
             overlap_text = (
@@ -1444,17 +1509,29 @@ class StationRuntimeManager:
         extra_text = f" (+{extra_count} more)" if extra_count else ""
         summary = f"RF conflict: {primary_candidate['peer_name']}{extra_text} on {overlap_text} via {resource_text}."
         target_tuning = " ".join(part for part in (target_frequency_label, normalized_band) if part).strip()
-        peer_tuning = " ".join(
-            part
-            for part in (peer_frequency_label, str(primary_candidate.get("peer_band", "") or "").strip())
-            if part
-        ).strip()
-        detail = (
-            f"Target {target_tuning or normalized_band or 'frequency change'} overlaps "
-            f"{primary_candidate['peer_name']} at {peer_tuning or 'active tuning'}."
-        )
+        if peer_status_unknown:
+            detail = (
+                f"Target {target_tuning or normalized_band or 'frequency change'} cannot be compared with "
+                f"{primary_candidate['peer_name']} because FIO cannot verify that radio's current frequency."
+            )
+        else:
+            peer_tuning = " ".join(
+                part
+                for part in (peer_frequency_label, str(primary_candidate.get("peer_band", "") or "").strip())
+                if part
+            ).strip()
+            detail = (
+                f"Target {target_tuning or normalized_band or 'frequency change'} overlaps "
+                f"{primary_candidate['peer_name']} at {peer_tuning or 'active tuning'}."
+            )
         if extra_count:
             detail += f" Other active peers: {', '.join(peer_names[1:])}."
+        if peer_status_unknown:
+            status_detail = "; ".join(dict.fromkeys(peer_status_details)) or "peer status is unknown"
+            detail += f" Peer status: {status_detail}."
+        elif peer_status_stale:
+            status_detail = "; ".join(dict.fromkeys(peer_status_details)) or "peer status is stale"
+            detail += f" Peer status: {status_detail}."
         detail += f" Shared resources: {resource_text}."
         signature = "|".join(
             [
@@ -1470,6 +1547,7 @@ class StationRuntimeManager:
                 ",".join(advanced_frequency_groups),
                 str(advanced_window_hz),
                 str(frequency_delta_hz if isinstance(frequency_delta_hz, int) else ""),
+                "peer_unknown" if peer_status_unknown else ("peer_stale" if peer_status_stale else ""),
                 guard_mode,
             ]
         )
@@ -1481,7 +1559,7 @@ class StationRuntimeManager:
             peer_device_profile_id=int(primary_candidate["peer_id"]),
             peer_name=str(primary_candidate["peer_name"]),
             peer_band=str(primary_candidate.get("peer_band", "") or "").strip(),
-            peer_frequency_hz=int(primary_candidate["peer_frequency_hz"]),
+            peer_frequency_hz=peer_frequency_hz,
             peer_device_ids=peer_ids,
             peer_names=peer_names,
             shared_antenna_groups=antenna_groups,
@@ -1498,6 +1576,9 @@ class StationRuntimeManager:
             summary=summary,
             detail=detail,
             signature=signature,
+            peer_status_unknown=bool(peer_status_unknown),
+            peer_status_stale=bool(peer_status_stale),
+            peer_status_detail="; ".join(dict.fromkeys(peer_status_details)),
         )
 
     def get_runtime_primary_device_profile(self) -> Optional[Dict[str, Any]]:

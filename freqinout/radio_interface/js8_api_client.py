@@ -144,6 +144,44 @@ class JS8CapabilitySnapshot:
         return bool(self.supported.get(str(command or "").strip().upper(), False))
 
 
+@dataclass(frozen=True)
+class JS8ApiClientStatus:
+    endpoint: JS8ApiEndpoint
+    name: str
+    running: bool
+    connected: bool
+    listener_count: int = 0
+    pending_request_count: int = 0
+    queued_event_count: int = 0
+    last_connected_ts: float = 0.0
+    last_message_ts: float = 0.0
+    last_error: str = ""
+    last_error_ts: float = 0.0
+    last_closing_reason: str = ""
+
+    @property
+    def key(self) -> Tuple[str, int]:
+        return self.endpoint.key
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "host": self.endpoint.host,
+            "port": self.endpoint.port,
+            "key": f"{self.endpoint.host}:{self.endpoint.port}",
+            "name": self.name,
+            "running": self.running,
+            "connected": self.connected,
+            "listener_count": self.listener_count,
+            "pending_request_count": self.pending_request_count,
+            "queued_event_count": self.queued_event_count,
+            "last_connected_ts": self.last_connected_ts,
+            "last_message_ts": self.last_message_ts,
+            "last_error": self.last_error,
+            "last_error_ts": self.last_error_ts,
+            "last_closing_reason": self.last_closing_reason,
+        }
+
+
 class JS8ApiError(RuntimeError):
     pass
 
@@ -252,6 +290,29 @@ class JS8ApiClient:
                 break
             out.append(msg)
         return out
+
+    def status_snapshot(self) -> JS8ApiClientStatus:
+        with self._state_lock:
+            listener_count = len(self._listeners)
+            pending_request_count = len(self._pending)
+        try:
+            queued_event_count = int(self._events.qsize())
+        except Exception:
+            queued_event_count = 0
+        return JS8ApiClientStatus(
+            endpoint=self.endpoint,
+            name=self.name,
+            running=self.is_running,
+            connected=self.is_connected,
+            listener_count=listener_count,
+            pending_request_count=pending_request_count,
+            queued_event_count=queued_event_count,
+            last_connected_ts=float(self.last_connected_ts or 0.0),
+            last_message_ts=float(self.last_message_ts or 0.0),
+            last_error=str(self.last_error or ""),
+            last_error_ts=float(self.last_error_ts or 0.0),
+            last_closing_reason=str(self.last_closing_reason or ""),
+        )
 
     def request(
         self,
@@ -542,6 +603,16 @@ class JS8ApiClientRegistry:
             client = cls._clients.pop(normalized.key, None)
         if client is not None:
             client.stop()
+
+    @classmethod
+    def status_snapshot(cls) -> List[JS8ApiClientStatus]:
+        with cls._lock:
+            clients = list(cls._clients.values())
+        return [client.status_snapshot() for client in clients]
+
+    @classmethod
+    def status_dicts(cls) -> List[Dict[str, Any]]:
+        return [snapshot.as_dict() for snapshot in cls.status_snapshot()]
 
     @classmethod
     def shutdown_all(cls) -> None:

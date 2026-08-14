@@ -600,6 +600,7 @@ Rollback:
 Scope:
 - Introduce pre-parsed message store in `freqinout_nets.db` for file-backed messages (FLMSG/FLAMP/Spotter/BBS metadata).
 - Store normalized preview payload at ingest time to avoid parse-on-click where possible.
+- Keep cached file-backed row semantics in core helpers: cached metadata normalization, report-vs-received age selection, topic/actionable coercion, title fallback/truncation, and effective display summary must not live only in the Messages UI.
 - Implement content cache for rendered previews (`msg_render_cache`) with invalidation on file mtime/size or source row update.
 - Move expensive parsing and format transformation off UI thread.
 - Keep `View` action non-blocking with immediate skeleton and async fill.
@@ -845,6 +846,57 @@ Acceptance criteria:
 - Operators `Clear Filters` is visually highlighted whenever search text is non-empty or group filter is not `All`; returns to normal style after clearing filters.
 - For unchanged file scans, Messages skips redundant rebuild work and emits scan metrics with `unchanged=true`.
 - For unchanged directory trees, Messages can skip the scan worker entirely (`mode=quick_skip`) without data regressions.
+- When an incremental file scan returns the same origin/path/mtime/size fingerprint as the current in-memory file set, FIO updates scan metadata and signature checks only; it must not rebuild message rows, resave the full scan cache, project observations, refresh VarAC file attachments, or reparse file-backed messages.
+- When an incremental file scan changes that fingerprint, FIO must refresh sender/read-state data, save the full scan cache, project observations, refresh VarAC file attachments, rebuild message rows, and update the in-memory fingerprint.
+- Visible Messages auto-check should compare a lightweight station-wide source fingerprint before and after JS8Call/Spotter/SitRep/CommStat/VarAC/local-cache polling. If no source identity/status/content fingerprint changed, the check updates status text and pending backlog only; it must not rebuild the message table.
+- The station-wide Messages source fingerprint must include JS8Call/JS8Spotter source identity (`source_key`, native source id, radio id, JS8 instance id, and source path when available), not just message content and timestamps. Multi-radio source ownership changes must trigger a table rebuild even when message text is otherwise identical.
+- If that source fingerprint changes, visible auto-check rebuilds the message table once after source refreshes complete.
+- Messages activation refresh and manual `Refresh Now` use the same source-fingerprint boundary. If the table already has rows and all source identities/status/content are unchanged after source polling, FIO skips the table rebuild. If the table is empty or source fingerprint changes, FIO rebuilds once.
+- JS8Call send/query actions launched from pending inbox rows resolve their TCP endpoint from source-scoped context before falling back to legacy profile/global settings. A pending row may carry either the JS8Call app-instance source key or a file/API ingest source key; both must resolve to the owning JS8Call instance so actions against one radio never send through the currently selected or default radio by accident.
+- Runtime JS8Call inventory includes configured `js8_inbox_path`/`inbox_path`/`js8call_inbox_path` entries as source-scoped SQLite inbox sources when present. Health/status should use that inbox source identity for configured inbox problems, falling back to the owning `DIRECTED.TXT` source only for legacy/discovered inbox lookup.
+- Enabled JS8Call profiles always produce an API ingest source using the configured endpoint or the default `127.0.0.1:2442`; runtime status must not hide the intended JS8Call API connection merely because the user has not customized host/port.
+- Runtime ingest status marks JS8Call API rows degraded when multiple enabled JS8Call app instances resolve to the same TCP endpoint. This is a configuration safety signal: multiple radios should not silently share one JS8Call socket unless the user intentionally configures a shared source model later.
+- Background JS8Call inbox ingest records a source-level `missing` skip reason when a runtime JS8Call source has no source-specific inbox DB/path. This is surfaced through ingest observability/station health as a configuration/data-source issue instead of being hidden as a debug-only log line.
+- Runtime ingest source presentation has a small operator-facing view model above raw source rows. UI/Station Health consumers should use states such as `Ready`, `Quiet`, `Stale`, `Unknown`, `Missing`, `Shared Endpoint`, `Backoff`, `Idle`, and `Needs Attention`, with source-kind labels like `JS8Call API`, `JS8Call Inbox`, `JS8Call DIRECTED.TXT`, `JS8Spotter DIRECTED.TXT`, `CommStat`, `VarAC`, `FLMSG`, and `FLAMP`. `Quiet`, `Stale`, `Unknown`, and `Backoff` are informational unless the source is otherwise degraded; missing/unreadable/shared endpoint states remain warning-level.
+- Runtime source details should translate cached projection summaries into operator language without additional source reads: JS8 link sources summarize heard paths and station pairs, while CommStat sources summarize artifact count plus transport/reach mix (`JS8/RF`, `Internet`, `JS8/RF + Internet`, `Limited Reach`, `Maximum Reach`).
+- Runtime source presentation exposes a pure summary helper for dashboard/header badges. It counts total, ready, quiet, stale, unknown, missing, shared endpoint, backoff, idle, needs-attention, and severity buckets, and returns a concise headline such as `1 source needs attention`, `2 sources waiting to retry`, `1 source stale`, or `4 sources ready, 1 quiet`.
+- Station Health may display a compact `Runtime ingest sources` observability row built from the shared runtime source view model. This row summarizes source states without triggering probes, file scans, app socket opens, or table rebuilds; it is a presentation of already-modeled source health/status.
+- Station Health owns the detailed `Runtime Sources` drill-down. It is a read-only table above the dependency table with `Source`, `State`, `Kind`, `Radio/App`, `Path or Endpoint`, `Cached Traffic`, and `Suggested Fix`. It must consume the same runtime source view rows as the compact summary and must not probe apps, scan files, or open sockets while rendering.
+- The detailed `Runtime Sources` table may merge inventory-derived runtime rows with background ingest source-skip rows when a skipped source is not already represented. This keeps missing/unreadable/backoff source decisions visible in one place without duplicating rows for the same `source_id`.
+- Background ingest source-skip snapshots include source id, app instance id, radio id, source type, path/endpoint, reason, cooldown seconds when known, and skip timestamp. The runtime source view translates these into operator labels such as `Retry in 12s` and `Last Source Decision: 1 min ago`.
+- Selecting the compact `Runtime ingest sources` row in the Station Health dependency table focuses the detailed `Runtime Sources` table and selects the first actionable source (`Missing`, `Shared Endpoint`, or `Needs Attention`), falling back to the first source when all sources are informational/ready.
+- Selecting a `Runtime Sources` row updates a read-only detail readout below the table with the full state, kind, radio/app, path/endpoint, cached traffic, last source decision, freshness timing, detail text, and suggested fix. The table uses stable readable column widths with horizontal scrolling on minimized screens; it must not compress diagnostic fields into unreadable slivers.
+- Selecting a `Runtime Sources` row enables `Open Related View` when FIO can infer a related settings area. JS8Call, JS8Spotter, and CommStat sources open the radio-scoped JS8Call settings; FLMsg/FLAmp/FLDigi sources open Fast Light settings; VarAC sources open VarAC settings; auth/key sources open global Message Auth. When a source row carries a radio profile id or configured radio name, Settings should focus that radio. The action must use existing runtime source metadata only and must not probe integrations during navigation.
+- When the compact `Runtime ingest sources` row covers a JS8Call API endpoint, Station Health should not also show the older per-endpoint shared-client row for the same endpoint. The shared-client row remains a fallback when runtime source rows are unavailable, but duplicate endpoint warnings should not clutter the operator-facing health panel.
+- The file-backed message metadata cache (`message_file_metadata`) must self-migrate all display/search/source/report-age columns on upgraded installs. Missing cache columns must not cause silent cache misses, repeated file parsing, or lost source projection counts after an upgrade.
+- The file-scan cache (`message_scan_cache`) persists source identity (`source_id`, `source_label`) with each file record. Its watch-directory signature includes source identity so a restart or radio/source reassignment does not lose or stale-label the source context used by Inbox filtering, source projection counts, BBS routing previews, and message intelligence.
+- Message local projection loaders for JS8Call cache, VarAC, JS8Spotter, SitRep, and CommStat use cheap table fingerprints after the first successful load. If the relevant projection table set is unchanged, FIO keeps the in-memory rows and skips the full local DB read/redecode/rebuild path.
+- SQLite table fingerprinting lives in a focused core helper so future Map/BBS/Scheduler refresh boundaries can reuse the same conservative high-water logic without duplicating SQL inside UI tabs.
+- SQLite table fingerprints include common source identity columns (`source`, `source_key`, `ingest_source_key`, `source_radio_id`, `js8_instance_id`, `source_path`, `source_db_path`, `source_table`, and numeric `source_id`) when present. Source reassignment must invalidate local projection caches even when counts, timestamps, read state, and message text remain unchanged.
+- CommStat projection fingerprints include both `commstat_artifacts` and `commstat_artifact_deletions`, so source-backed deletes change the projection boundary even when the artifact row table is otherwise unchanged.
+- Lower-level VarAC/SitRep refresh wrappers also compare station-wide source fingerprints before rebuilding the message table; direct refresh calls should not repaint the inbox when the local projected messages are unchanged.
+- Cached file-backed row display fields are adapted by core metadata helpers before the GUI constructs `UnifiedMessage` rows; tests must cover fallback type, title compaction, report-age timestamp selection, topics, and actionable flags without forcing FLMSG/FLAMP source-file parsing.
+- Parsed file-backed rows use the `freqinout.core.message_file_presentation` adapter for the background worker and synchronous fallback builder so FLMSG/FLAMP/BBS title selection, message type labels, report-date age, topics, actionable flags, and search text inputs remain identical across refresh paths. The Messages GUI may keep compatibility wrappers, but core owns the operator-facing file-row semantics.
+- Cached and parsed file-backed row candidates are built by `message_file_presentation`; the Messages GUI supplies read/auth state and wraps candidates into table rows. Both background worker and synchronous fallback paths must use the same candidate helper so cache hits, report-age selection, titles, form-family labels, topics, actionable flags, and search text do not drift.
+- The shared file-row candidate helper owns the lazy cache-hit boundary: when valid cached metadata can build an operator-facing row, the GUI must not load, parse, or inspect the source FLMSG/FLAmp/BBS file for form metadata or fallback sender extraction.
+- A cache hit is valid only when cached or explicit fallback metadata contains operator-facing content such as message type, display type, from/to, report title, report timestamp, topics, actionable flag, or search text. Bare/incomplete cache rows must fall through to parsing rather than replacing useful report fields with filenames.
+- The Messages GUI has a single file-candidate-to-`UnifiedMessage` wrapping point. Background and synchronous row builders may differ in where they obtain auth/read state, but must not duplicate candidate field/search-text mapping.
+- Non-file message table presentation for JS8Call, JS8Spotter, VarAC, SitRep, and CommStat lives in `freqinout.core.message_row_presentation`. GUI code supplies payloads, auth/expect state, timestamps formatted for the current time display, and table models; core owns operator-facing type/status/from/to/title/topics/actionable/search-detail semantics.
+- Background row builds and synchronous fallback row builds must both use the same non-file presentation helpers. Drift between those paths is a regression because it can make auto-refresh, activation refresh, and fallback refresh show different inbox labels for the same traffic.
+- Delete/audit fallback rows for JS8Call, JS8Spotter, VarAC, SitRep, and CommStat also use the same presentation helpers so cleanup summaries and audit entries do not regress to raw transport labels or noisy group markers.
+- Message table display-profile decisions, profile headers, relative age labels, MCF short labels, and field-report status/group/area labels live in `message_row_presentation`. `MessageTableModel` remains the Qt adapter for selection, icons, colors, and delegates, but it must not be the only owner of operator-facing profile semantics.
+- FLMSG/FLAmp file metadata extraction lives in `freqinout.core.message_form_metadata`. GUI code may keep thin compatibility wrappers for render-specific paths, but parsing `CUSTOM_FORM`, `L##` fields, missing-template fallbacks, sender/target/date/subject/grid/body extraction, and raw-head preservation must be testable without constructing the Messages tab.
+- Missing-template FLMSG/FLAmp fallback must avoid treating Date/Msg ID values as callsigns/groups. For MAGNET General style forms where `L01` is Date/Msg ID, fallback extraction maps `L02` to To, `L03` to From, `L06` to Subject, and `L07` to Body so inbox rows remain operator-readable even when the custom form template cannot be resolved.
+- FLMSG/FLAmp/BBS file-backed message age uses the decoded report date when present, falling back to filesystem received time only when no form date can be parsed. Supported report-date variants include `YYMMDD-HHMMz`, compact `YYMMDDHHMM`, `YYYYMMDD-HHMMSSZ`, compact `YYYYMMDDHHMMSSZ`, and common labels such as `Date/Msg ID`, `Date/Time/Msg ID`, and `DTG`. Metadata parser-version changes must invalidate stale cached file rows when these semantics change.
+- Inbox focus/type, age, status/action-needed, and search-text filter semantics live in `freqinout.core.message_inbox_filters` so table UI, future map/BBS routing, and tests share the same broad operator categories (`All`, `New`, `FLMSG/FLAMP`, `Spotter`, `CommStat`, `JS8Call`, `VarAC`) without duplicating row-matching rules in the GUI.
+- Operator-readable active-scope summaries such as `Focus Spotter; Groups MR08; Older than 2 weeks; Search "wildfire"` live in the same inbox filter core layer. The GUI supplies widget state; core owns ordering, truncation, and source labels so bulk selection, Clear Filters tooltips, future BBS routing previews, and map/report views do not drift.
+- The Messages GUI builds an `InboxFilterCriteria` from widget state, then uses shared core criteria matching for both visible table rows and group-filter option scoping. Source/group expansion remains tab-owned until roster/group-family state is moved behind a reusable service.
+- Message group/source projection for filter options lives in `message_inbox_filters`: row-derived `(group, source)` pairs plus roster-family membership produce the canonical group source map, and the same layer calculates primary/default group selections when `All Groups` is off. The GUI may still extract group/source values from concrete payloads, but it must not own roster-parent promotion or default-selection semantics.
+- Message row operating-group extraction also lives in `message_inbox_filters`: payload `report_group`/`group`/`operating_group`, payload `to_call`, and row `to_call` are normalized with the same direct-callsign and JS8 relay guards. GUI code may delegate to this helper with the configured group set; direct callsigns and relay markers must not become group-filter entries.
+- Message row workspace-scope matching for selected sources and expanded selected groups lives in `message_inbox_filters`. The Messages tab supplies the selected source set, selected group set, and configured group names; core owns the source/group row acceptance decision so table filtering, bulk actions, BBS routing previews, and map/report views cannot drift.
+- Message source normalization, labels, and default source-option construction live with `message_inbox_filters` so connected app sources such as JS8Call and VarAC remain available consistently even when the current row set has no messages from those apps.
+- Message group-name cleanup, candidate detection, and option-section ordering live with `message_inbox_filters` so starred CommStat variants collapse (`MAGNET *` -> `MAGNET`), direct callsigns do not appear as operating groups unless explicitly configured, configured groups stay first, CommStat active groups stay visible before expanded discovery, and MR child groups remain selectable. The Messages tab still owns row discovery and roster-family expansion until those are promoted to a reusable group service.
+- The Messages inbox body, focus strip, and funnel strip are fixed-width scroll content at minimized window sizes. The control/sidebar area may scroll vertically, while the message workspace scrolls horizontally instead of compressing focus buttons, group/source filters, age controls, or clear/advanced filter actions into unreadable clipped widgets.
 - Map first render does not perform synchronous Python-side network downloads for Leaflet/GeoJSON assets.
 - ControlFreq emits `controlfreq.on_tab_activated` and `controlfreq.refresh_all` spans during benchmark workflows.
 - ControlFreq activation no longer blocks on full refresh when recent data exists; heavy refresh runs deferred and rate-limited.
@@ -1407,9 +1459,9 @@ Phase 6: Performance and soak hardening
     - `Source` (`Built-in`, `Imported`, `Manual`, `Migrated`)
     - `Set` (`Winter`, `Summer`, `Custom`, etc.)
   - Add actions:
-    - `Add Selected to Net Schedule`
-    - `Add Filtered to Net Schedule`
-    - `Move Selected to Resources`
+    - `Add Selected Rows`
+    - `Add Filtered Rows`
+    - `Save Selected to Library`
   - Make resources sortable by header and filterable via global search.
   - Remember the last selected resource set between sessions.
   - Change JSON import behavior to import into `Net Resources` by default.
@@ -1419,7 +1471,7 @@ Phase 6: Performance and soak hardening
     - show detailed collision report for resolution.
   - Support round-trip edit flow:
     - rows promoted from resources to active schedule can be edited,
-    - moving edited rows back to resources updates the corresponding resource entry.
+    - saving edited rows to the library updates the corresponding resource entry without removing rows from the schedule.
   - Add citation text in Net Resources section:
     - `Visit SitRepNet.com for more information.`
 - Acceptance:
@@ -1439,8 +1491,8 @@ Phase 6: Performance and soak hardening
     - `fldigi_mode`
     - `fldigi_offset`
   - Add Net Resources UI actions:
-    - `Edit Selected Resource`
-    - `Delete Selected Resources`
+    - `Edit Library Row`
+    - `Delete Library Rows`
     - `Export Resource Set`
     - `Publish Set to Delivery File` (writes to `config/net_resources` with set-based filenames)
   - Expand Net Resources grid columns to display FLDigi mode/offset.
@@ -2622,9 +2674,9 @@ Problem:
 Scope:
 - HF Schedule tab:
   - Remove `NET` source from Schedule Resources.
-  - Add move/add workflow parity with Net Schedule:
-    - `Move Selected to Resources` from Active Schedule.
-    - `Add to Active Schedule` from Schedule Resources (selected/filtered actions).
+  - Add copy/add workflow parity with Net Schedule:
+    - `Save Selected to Library` from Active Schedule.
+    - `Add Selected Rows` / `Add Filtered Rows` from Daily Row Library.
   - Persist HF resource entries in a dedicated local table (`hf_schedule_resources`) so resources survive restart.
   - Add explicit section labels styled like Net Schedule (`<h3>` headers) for Active Schedule and Schedule Resources.
 - Settings tab:
@@ -3104,17 +3156,17 @@ Rollback:
 - Revert changes in:
   - `freqinout/core/logger.py`
 
-### 1.40 Addendum (2026-02-19): HF Active Schedule SOP Row Select/Move/Delete UX
+### 1.40 Addendum (2026-02-19): HF Active Schedule SOP Row Select/Copy/Delete UX
 
 Problem:
 - SOP overlay rows in HF `Active Schedule` are visible but not selectable for bulk workflows.
-- Operators need to move SOP rows into `Schedule Resources`.
+- Operators need to copy SOP rows into the `Daily Row Library`.
 - Deleting SOP rows from `Active Schedule` should remove them from that table view only, without mutating underlying SOP profile entries.
 
 Scope:
 - In HF `Active Schedule`:
   - enable checkbox selection for SOP overlay rows.
-  - allow SOP overlay rows to be included in `Move Selected to Resources`.
+  - allow SOP overlay rows to be included in `Save Selected to Library`.
   - allow SOP overlay rows to be removed via `Delete Selected` as a table-view action only.
 - Keep SOP overlay rows read-only for direct cell edits.
 - Keep persistence behavior unchanged:
@@ -3520,7 +3572,7 @@ Acceptance criteria:
 - `docs/guide.html` reflects current nav labels:
   - `ControlFreq`, `FreqPlanner`, `Messages`, `Map`
   - `FLDigi / SSB`, `JS8Call`, `VHF/UHF`
-  - `HF Daily`, `HF Nets`, `HF Peers`
+  - `HF Daily`, `HF Nets`, `HF Peer Scheds`
   - `HF Callsigns`, `Local Callsigns`
   - `SOP Builder`, `Settings`, `Help`
 - Guide includes explicit action references for nested menu actions (toolbutton dropdowns/context actions) where present.
@@ -3784,7 +3836,7 @@ Scope:
   - block SOP-derived (`sop_layer`, `sop_gap`) rows with clear user feedback.
 - Move `Resolve Conflicts` control into Active Schedule action row.
 - Replace SOP status table with compact SOP indicator/toggle buttons (max two visible rows + overflow hint).
-- Ensure Active Schedule `Delete` / `Move Selected to Resources` remain muted when no explicit selection.
+- Ensure Active Schedule `Delete` / `Save Selected to Library` remain muted when no explicit selection.
 
 Acceptance criteria:
 - HF Schedule has an `Import/Export` control next to `Save HF Schedule`.
@@ -4130,13 +4182,13 @@ Scope:
   - consolidate conflict summaries/prompts by Net/SOP row pair and show `(+N more)` occurrences.
 - Net/SOP review flow:
   - prompt once per consolidated conflict pair; apply decision to all matching overlap occurrences.
-- Move Selected to Resources:
-  - if selected schedule row originated from a built-in resource and matches the built-in record (unchanged), skip manual upsert and only remove it from active schedule.
+- Save Selected to Library:
+  - if selected schedule row originated from a built-in resource and matches the built-in record (unchanged), skip manual upsert and leave the active schedule row in place.
 
 Acceptance criteria:
 - Closing/canceling conflict resolution while adding conflicting rows leaves Net Schedule unchanged.
 - Conflict summaries for recurring rows are consolidated, not repeated per weekly occurrence line.
-- Moving unchanged built-in row(s) back to resources does not create manual duplicates or convert built-in source type.
+- Saving unchanged built-in row(s) to the library does not create manual duplicates or convert built-in source type.
 
 Verification:
 - `python -m compileall freqinout/gui/net_schedule_tab.py`
@@ -4515,6 +4567,34 @@ Verification:
 Rollback:
 - Revert changes in:
   - `freqinout/core/scheduler_engine.py`
+  - `SPEC.md`
+
+### 1.82b Addendum (2026-08-12): Radio Status Poll Observability
+
+Problem:
+- Multi-rig status refresh depends on shared polling, TTL reuse, backoff, and single-flight behavior.
+- Without lightweight coordinator metrics, redundant radio/app polling can hide behind normal UI refresh paths and become difficult to diagnose.
+
+Scope:
+- `freqinout/core/radio_status_poll_coordinator.py`
+  - expose a behavior-neutral metrics snapshot for cache hits, backoff hits, single-flight reuse, poll starts, successes, failures, snapshot count, and in-flight count.
+  - keep metrics in-memory only; do not add database writes, logs, or UI work in the hot path.
+  - preserve existing snapshot, TTL, stale, and backoff semantics.
+- `freqinout/core/station_runtime_manager.py` and `freqinout/core/scheduler_engine.py`
+  - expose read-only status poll metrics as plain dictionaries for future diagnostics and UI health summaries.
+
+Acceptance criteria:
+- Tests can assert poll reuse and failure/backoff behavior through coordinator metrics without triggering extra radio/app IO.
+- Future status dashboards can read metrics snapshots without acquiring device connections or rebuilding UI tables.
+
+Verification:
+- `.venv/bin/pytest tests/test_radio_status_poll_coordinator.py tests/test_station_runtime_status_coordinator.py tests/test_scheduler_manual_control_service.py -q`
+- `python -m py_compile freqinout/core/radio_status_poll_coordinator.py`
+
+Rollback:
+- Revert changes in:
+  - `freqinout/core/radio_status_poll_coordinator.py`
+  - `tests/test_radio_status_poll_coordinator.py`
   - `SPEC.md`
 
 ### 1.83 Addendum (2026-02-22): SOP Layer Per-Row Group Label Fidelity (FreqPlanner/Scheduler)
@@ -7592,6 +7672,99 @@ Acceptance:
 - Future map/BBS logic consumes only the shared read model plus explicit user-enabled rules and audit-ready provenance.
 - No new UI-thread full-directory rescans or DB full-table scans are introduced for this refinement.
 
+### 1.137c.1 Addendum (2026-08-11): Messages Human-First Type Taxonomy
+
+Problem:
+- The Messages type filter and type column can expose raw transport/form labels such as `F!307`, `CommStat/...`, `FLMSG`, and `FLAMP` in ways that make the inbox feel technical instead of operational.
+- Spotter MCF reports are easier to scan when the operator sees the report purpose plus the code, for example `Wildfire | F!307`.
+- CommStat has many internal message/form shapes, but users benefit from one clear `CommStat` category unless they search or open the detail.
+
+Scope:
+- Keep the Messages focus/filter taxonomy broad and operator-oriented:
+  - `All`
+  - `New`
+  - `FLMSG/FLAMP`
+  - `Spotter`
+  - `CommStat`
+  - `JS8Call`
+  - `VarAC`
+- Do not list every Spotter MCF or ICS/FLMSG form as a primary filter; keep codes and form names searchable.
+- In Spotter-specific table views, render MCF labels as `Short Name | F!xxx` when a known MCForms title is available, while preserving the raw `F!xxx` code for search/provenance.
+- Collapse CommStat subtype/filter labels to the user-facing `CommStat` family while keeping source refs and decoded metadata internally.
+- Treat raw JS8Call messages as a separate `JS8Call` category from JS8Spotter MCF traffic.
+- Keep FLMSG and FLAmp rows grouped as `FLMSG/FLAMP` for filtering while using extracted form/report names in the Message column and detail header.
+- Treat Messages as a station-wide traffic funnel across all connected radios and applications, not as a subview of the currently selected radio.
+- Keep operating group, source, age, and search controls visible with the message table as the primary funnel controls; detailed Type/Status/From/To filters may live behind advanced filters.
+- Source filters must include known connected-app families such as `JS8Call` and `VarAC` even when no current rows exist for those sources.
+- Operating group filters must be derived from messages matching the current focus/source/type/search context, and should derive group identity from routed message targets such as `MAGNET` and `MR08` without treating direct callsigns as operating groups.
+- Callsigns are never operating groups. They remain searchable and visible as From/To values.
+- JS8 relay notation (`RELAY>DEST`, or rows whose routed target ends with `>`) must be displayed as relay context (`DEST via RELAY` when inferable, otherwise `via RELAY`) and must not create an Operating Group filter entry.
+- Messages Operating Group filter options are prioritized for operator intent:
+  - locally configured HF and local groups appear first and are labeled as configured.
+  - CommStat configured/active groups appear with the configured set and are labeled as CommStat-derived.
+  - configured groups are priority labels, not automatic choices; a configured group appears only when the current message focus has matching traffic for that group.
+  - changing Focus (`FLMSG/FLAMP`, `Spotter`, `CommStat`, `JS8Call`, `VarAC`) dynamically rebuilds the group choices from rows in that focus, so groups that only have JS8Call traffic are not offered while reviewing FLMSG/FLAMP.
+  - the default group selector mirrors CommStat's focused model: show configured/active groups first, not the full traffic-derived universe.
+  - the default `Configured` group scope is treated as the normal inbox universe, not as an active user-applied filter. `Clear Filters` and `Select Matching Rows` become active only after the operator narrows group choices, enables `All Groups`, changes focus/source/age/search/type/status/from/to, or hides message types.
+  - an explicit chip-style `Configured` / `All Groups` control beside the Operating Group selector expands the selector to include other discovered CommStat/traffic groups.
+  - the expanded selector groups entries under clear section headers such as `Configured Groups`, `CommStat Active Groups`, `Other CommStat Groups`, and `Other Discovered Groups`.
+  - discovered/other grouped sections offer compact section-scoped `All` / `None` actions in the section header so operators can include or exclude long discovered lists without clicking every row.
+  - section names carry configured/active/discovered meaning; individual group rows should use clean group names without noisy suffixes when the section context already explains the source.
+  - when `Show all groups` is off, the inbox is scoped to the configured/active group set; when enabled and all options are selected, all discovered groups are visible.
+  - when `All Groups` is enabled, newly visible discovered groups are not selected by default; FIO keeps configured and active groups selected until the operator explicitly selects other groups.
+  - remaining discovered groups appear only in the expanded view after configured and CommStat-active groups.
+- Display-only group variants such as a trailing `*` are folded into the canonical operating group for the Messages filter, so `MAGNET` and `MAGNET *` do not appear as separate choices.
+- Group families should be derived from HF Operator roster data where available rather than maintained as a separate manual family table.
+  - The HF Operator roster import lets the user map the roster to a parent operating group, for example `MAGNET`.
+  - Child membership is derived from roster region/area fields such as `MR01`, `MR08`, and `MRHUB`; imported operators become members of both the parent and child group.
+  - Roster-derived parent/child membership is stored in `operator_checkins.groups_json` so map filters, message filters, MsgAuth scoping, scheduler views, and future BBS routing rules can use the same authority.
+  - `Role` and `Tier` are SOP-significant fields and must remain visible near `Callsign` in HF Operator views. Role identifies operational function; Tier identifies capability/assignment level.
+  - HF Operator tables should show `Last Seen` as compact age text for scanning, with exact stored date/timestamp available as hover detail. `First Seen` is provenance data and should not consume primary table width.
+  - Age summaries should be day-only once they are at least one day old (`2d`, `16d`). Hours/minutes are useful only for less-than-one-day recency.
+  - HF Operator tables should prefer horizontal scrolling over compressed unreadable columns when the window is minimized.
+  - Roster import group mapping should be an editable lookup populated from configured HF operating groups, with typed text allowed for rosters from groups that have not yet been configured.
+  - Roster import must show a pre-commit review before writing to the database. The review summarizes the selected parent group, imported/skipped row counts, detected child regions, detected CSV field mappings, unmapped columns that will not be imported, and sample operators with callsign/role/tier/groups so the operator can catch a bad mapping before FIO trusts the roster.
+  - Canceling the roster import review must leave the HF Operator database unchanged.
+  - Direct callsigns and JS8 relay tokens remain From/To routing values only and must not become group-family members.
+  - When message filters need a MAGNET-family view, FIO can use HF Operators membership to correlate operators heard on child groups without requiring the user to select every child group manually.
+  - Group-family expansion must live in a shared core helper, not only in the Messages tab, so Map, MsgAuth, SOP, and Managed BBS routing use the same parent/child membership model.
+  - BBS allowlist UX should prefer group-family selectors and summaries over long raw callsign checklists. For example, selecting `MAGNET family` should clearly summarize included subgroups and trusted operator count, with subgroup selection available because most operators will grant access to one or two child groups rather than an entire parent family.
+  - BBS subgroup previews should summarize trusted operator roles and tiers when known, for example `MR08 - 14 trusted - Roles: NCS 2, HUB 1; Tiers: 3 8, 4 2`, so access decisions can align with SOP expectations without opening the full roster.
+  - BBS subgroup preview should include an optional `Review Callsigns` drill-down. The main flow stays summary-first; exact callsign/role/tier/state rows appear only when requested.
+  - BBS authorization must still resolve to explicit trusted callsigns/rules at execution time; group-family selectors are a usability layer, not a hidden broad allow.
+  - When a BBS allowlist is populated from a group family/subgroup selection, FIO stores both the explicit VarAC-compatible callsign list and a compact source-intent record such as `MAGNET -> MR08`. The callsign list remains the operational output written to VarAC; the source-intent record lets FIO later refresh access after roster changes without losing why those callsigns were added.
+  - `Refresh From Roster` must rebuild the proposed BBS allowlist from saved group/subgroup source intent and current trusted roster data, then show a review of callsigns to add, remove, and keep before updating FIO's allowlist. It must not write VarAC.ini directly; the existing explicit VarAC sync/write action remains the boundary for external app changes.
+  - The BBS Allowed Callsigns area should show a compact read-only source summary such as `Roster source: MAGNET / MR08`, or a manual/synced-from-VarAC empty-state message when no roster source is saved. This keeps `Refresh From Roster` understandable without opening another management dialog.
+  - `Refresh From Roster` should be disabled/de-emphasized until a roster source is saved, with tooltip guidance to use `Add Group Family` after roster import. This avoids presenting a no-op action as primary work.
+  - `Manage Source` should allow removing saved roster source intent without removing current allowed callsigns. This action changes future roster refresh behavior only; actual BBS allowlist changes remain explicit through source refresh, manual callsign edits, or VarAC sync/write actions.
+  - BBS Allowed Callsigns controls should use two rows on narrow-friendly layouts: manual callsign lookup/add/remove first, then roster-source actions (`Add Group Family`, `Refresh From Roster`, `Manage Source`). This keeps routine manual edits and roster maintenance visually distinct.
+  - BBS roster-source intent normalization, summary text, source removal, and refresh planning should live in a core helper/service, not inside Settings UI code. Settings owns the dialog and button state; core owns reusable behavior.
+- In Spotter/MCF views, make the MCF label column wide enough for human labels such as `Wildfire | F!307`; State/Grid should remain concise.
+- In FLMSG/FLAMP views, make `Message` the first scannable column and use the type column for the form family/type (`General`, `Blank`, `SitRep`, `StatRep`, `ICS 213`, etc.) rather than only the transport (`FLMSG`/`FLAMP`).
+- Table column stretch must be profile-aware: `All`/triage views stretch `Message`, Spotter/field-report views stretch `MCF` and keep `State / Grid` concise, CommStat focus uses an intelligence-report profile rather than generic triage, and `FLMSG/FLAMP` views stretch the leading `Message` column.
+- Message table profiles must keep their primary scan column wide enough at minimized widths by using horizontal scroll and stable per-profile minimum widths instead of letting status, age, or actions consume the readable area.
+
+Acceptance:
+- A Spotter wildfire form can display as `Wildfire | F!307` in the MCF column.
+- `CommStat` appears as one primary filter/category and does not expand into many subtype entries by default.
+- `JS8Call` is available as its own focus/filter category.
+- Searching still finds raw codes (`F!307`), form titles, callsigns, groups, topics, state/grid, and decoded body keywords.
+- The table-level funnel row makes operating group, source, age, search, and clear-filter controls visible without opening advanced filters.
+- Bulk actions scoped to grouped categories (`Spotter`, `CommStat`, `JS8Call`, `FLMSG/FLAMP`) apply only to rows matching that visible category.
+- Relay targets such as `K7RIE>` do not appear in the Operating Group filter list.
+- Importing the MagNet roster format (`TimeZone, Region, Callsign, Name, Role, Tier, State/Province, GRID6`) stores parent group, child region, timezone, tier, state, grid, role, trust, and canonical group memberships while ignoring TG handle/alternate-contact columns.
+- Importing any roster requires a review step before database write; accepting writes the parsed rows, canceling writes nothing. The review names unmapped source columns such as `TG Handle` and `Alt Contact` so ignored data is explicit rather than silent.
+- Shared group-family helpers expand a parent such as `MAGNET` into roster-derived child groups and can derive trusted callsigns, operator detail rows, plus role/tier summaries for either the full parent family or selected child groups for BBS/MsgAuth/SOP use without requiring huge manual lists.
+- BBS `Refresh From Roster` computes add/remove/keep changes from stored group source intent and applies only after user review; VarAC.ini is unchanged until the user explicitly writes/syncs the `[BBS]` section.
+- BBS Allowed Callsigns shows a compact roster-source summary near the callsign list, so users can see whether the allowlist is manual/synced or refreshable from roster intent.
+- BBS `Refresh From Roster` is disabled when there is no saved roster source and becomes enabled when a group family/subgroup source is saved.
+- BBS `Manage Source` can remove saved roster source intent and leaves the current allowed callsign list unchanged.
+- BBS Allowed Callsigns presents manual callsign actions separately from roster-source actions so minimized views remain readable.
+- BBS roster-source intent behavior is covered by a core helper and direct core tests, with Settings using thin wrappers for UI refresh/dirty state only.
+- HF Operators shows `Callsign`, `Role`, and `Tier` together, renders `Last Seen` as concise age text, omits `First Seen` from the main table, and keeps columns readable through horizontal scroll at narrow widths.
+- FLMSG/FLAMP rows prioritize report names such as `Widemouth 2 Fire` or `OpNet2 81` for scanning, with form family/type immediately adjacent.
+- Profile-specific column widths keep the primary scan column readable without letting age, actions, or state/grid consume the table.
+
 ### 1.137d Addendum (2026-08-10): Observation Projection Guardrails for Map and Managed BBS
 
 Status: Design guardrails before implementation
@@ -7613,6 +7786,21 @@ Required observation fields:
 - `source_ref` must point back to the original row/file/message; projections must not become the only source of truth.
 - Projection tables must be indexed for bounded reads by callsign, source family, topic, status/urgency, state/grid, event/received time, and rule id when rule evaluation is added.
 
+CommStat reach/provenance semantics:
+- CommStat `Limited Reach` means RF only. CommStat `Maximum Reach` means RF transmission plus commsrvr/web propagation when internet is available.
+- FIO must separate message type from provenance. CommStat can deliver StatRep, Alert, general JS8 text, or future message types; only StatRep-like payloads should enter SitRep projections.
+- CommStat projections carry:
+  - `transport_mode`: path represented to the operator (`js8`, `internet`, `js8+internet`, `unknown`).
+  - `origin_path`: where FIO can prove the row came from (`rf`, `commstat_server`, `internet_only`, `unknown`).
+  - `reach_mode`: evidence-based CommStat reach (`rf_observed`, `maximum_reach`, `maximum_reach_relay`, `internet_only`, `unknown`).
+- CommStat source code behavior from the local CommStat code:
+  - `source=1`: RF/TCP JS8 path observed locally. With no server id this is `rf_observed`, not proof that the sender selected Limited Reach.
+  - `source=1` with positive StatRep `global_id`: local RF row also received a commsrvr id, so it is `maximum_reach`.
+  - `source=2`: commsrvr/server-relayed traffic, so it is `maximum_reach_relay`.
+  - `source=3`: internet-only send path.
+- Map trust, message display, dedupe, and future BBS routing must preserve these fields and must not collapse RF-observed rows and server-relayed rows into equivalent direct RF evidence.
+- Ingest runtime status may expose CommStat projection summaries by artifact kind, transport mode, reach mode, and origin path so health/status UI can remain fast and explain source mix without rescanning message rows.
+
 Map guardrails:
 - Map markers from observations are disabled by default until a user enables the relevant layer.
 - A marker requires location confidence high enough for the chosen layer:
@@ -7620,7 +7808,8 @@ Map guardrails:
   - state-only observations may contribute only to rollups, not point markers.
   - unknown/ambiguous locations never create markers.
 - Marker popups must show source family, age, confidence, and whether the information is verified, trusted, unsigned, manually entered, or exercise/test.
-- Local voice/manual reports must be visually distinct from digitally received traffic.
+- Report marker popups must be operator-readable rather than source/debug oriented. HF-derived reports should identify `HF JS8Spotter` or the relevant HF source; local/manual reports should identify `Local Report` and confirmation state. Popups should show newest age in relative form, from/to, MCF/form when available, topics aligned to message intelligence taxonomy, State/Grid location confidence, and auth/trust only when present.
+- Local voice/manual reports must be visually distinct from digitally received traffic. Operational report markers use source shape/class cues for `HF`, `Local`, and `Mixed` report clusters, and the legend must explain those cues.
 - Local Reports are inert by default. They may not map unless `confirmed_state` is confirmed or a rule/layer explicitly allows unconfirmed local reports.
 - Exercise/test reports are excluded from operational map layers unless the selected layer is also marked exercise/test.
 - Normalized observations must flow through one read model with layer flags, confidence gates, recency windows, and provenance chips; map code must not inject markers directly from Local Reports or message rows.
@@ -7652,10 +7841,28 @@ Implementation notes:
 - `freqinout.core.observation_store` owns the indexed observation projection tables, topic side table, and source checkpoints.
 - Local Reports mirror into observations on save/delete and remain inert unless a future explicit layer/rule enables use.
 - JS8Spotter DB import, live JS8 directed/API Spotter ingest, and FLMsg/FLAmp message file scans project observations with source references back to the source row/file.
+- CommStat artifact backfill mirrors StatRep/Alert artifacts and report-like Message artifacts into observations with `transport_mode`, `reach_mode`, and `origin_path` preserved in provenance. Plain CommStat JS8 text is retained in message artifacts but is not promoted to an observation unless its content contains report signal such as content-derived topics, location, scope/group report context, or elevated status.
 - `freqinout.core.observation_backfill` provides bounded checkpointed backfill for existing Local Reports and Spotter traffic; background ingest runs this from the Messages job with a configurable batch cap.
 - `freqinout.core.observation_queries` is the intended read-only facade for future map/search/BBS consumers. Consumers must use eligibility explanations and must not read projection tables directly for routing decisions.
-- Map `View Spotter Map` focus consumes the observation query facade as a read-only visualization layer for Spotter and confirmed Local Reports. It may cluster/place markers from station lookup, explicit lat/lon, or Maidenhead grid, but it must not set route/publish authorization or bypass map eligibility explanations.
+- Map report focus views consume the observation query facade as read-only visualization layers. `View HF Reports Map` shows HF-derived reports such as JS8Spotter/MCF, SitRep, StatRep, and HF field-report observations. `View Local Reports Map` shows confirmed Local/NCS reports from VHF/UHF/GMRS/Mesh/Reticulum-oriented workflows. A combined `Reports` mode may show both only when the user intentionally selects a combined context. These views may cluster/place markers from station lookup, explicit lat/lon, or Maidenhead grid, but they must not set route/publish authorization or bypass map eligibility explanations.
+- The Map control strip must be operator-first: view mode selection first (`All Stations`, `HF Reports`, `Local Reports`, `Reports`, `SitRep`, `Peer Sched Now`), then map filters (`Group`, `Region`, `Band`, `Since`), then path controls, then intelligence layers aligned to the message-intelligence taxonomy (`Weather`, `Alerts/Intel`, `Infrastructure/Utilities`). The collapsible side drawer is for secondary detail controls such as labels, regions, cities, grids, and propagation forecast settings; on narrow screens the drawer action is labeled `Show Filters & Layers`.
 - JS8 group markers (`@MAGNET`, `@MR08`) are preserved for compose/transmit targets and compatible Spotter payload parsing, but report, message, observation, search, and summary views display the operating group without `@` to avoid noisy duplicate group names.
+- JS8 NCS is an intentional realtime exception to the projection-first rule. It may tail the active JS8Call `DIRECTED.TXT` and `ALL.TXT` for net-control-critical behavior such as check-ins, announcement completion, `YES MSG` triggers, grid reports, recent traffic, and outbound `QUERY MSG` detection. Those live tails must use JS8 source-scoped offset keys in an NCS-specific namespace and must not share checkpoint keys with background message/map ingestion. This prevents multiple JS8Call instances from clobbering each other's read position while preserving immediate NCS responsiveness.
+- JS8 NCS-generated transmissions, including auto-query and net-control messages, use the shared endpoint-scoped JS8 send service and target/queue/text preflight. NCS code must not open one-off raw TCP sockets for `TX.SEND_MESSAGE`.
+- Pending `NEXT MSG ID` backlog rows preserve the JS8 source identity (`source_key`, radio id, JS8 instance id, and source path). `QUERY MSG` sends, pending status changes, pending deletes, and optional native JS8Call inbox read-sync must apply to the source row that produced the pending message; legacy blank-source rows fall back to the configured default JS8Call endpoint.
+- Expect auto-reply dispatch must resolve JS8 clients through the shared endpoint-scoped registry by default. Injected test/custom client factories may own their temporary clients, but production Expect runtime must not create duplicate JS8 API sockets per radio/app endpoint or stop a shared client when the Expect coordinator closes.
+- JS8 source matching by radio/profile id and JS8 instance id must be case-tolerant for operator-entered labels while preserving exact source identity in stored provenance.
+- JS8Spotter duplicate detection uses `source_key` when available and falls back to radio/JS8 source identity only for legacy rows. This keeps live API and file-tail ingestion idempotent for the same source without collapsing traffic from distinct JS8Call sources.
+- Background multi-radio Spotter ingestion must pass the runtime directed source id as `source_key` and use a source-id offset checkpoint when one exists. Radio-only offset keys are fallback compatibility only.
+- JS8 operational send/receive paths use shared endpoint-scoped clients. JS8 diagnostic status probes may use short-lived isolated clients so health checks do not consume runtime event streams, but a single diagnostic refresh must not open duplicate immediate TCP clients for capability plus native state reads when one client can safely serve both.
+- The shared JS8 API client registry exposes read-only endpoint status snapshots for diagnostics and UI health summaries. Reading registry status must not start, stop, or reconnect JS8Call sockets.
+- Runtime ingest status rows may enrich JS8 API sources from the shared registry snapshot. Connected clients should show as ready; idle managed clients should remain non-alarming; running disconnected clients should surface the last connection error as a degraded source.
+- Background ingest exposes a read-only controller job snapshot (`running`, queued worker jobs, realtime jobs, skip counts/reasons, per-source skip reasons, refresh skip reasons/decisions, timeout warnings, worker-active flags). This status is for diagnostics/UI health only and must not trigger source scans or device/app IO. Source-level skips must distinguish neutral no-op conditions such as cooldown/backoff, already-running gates, and missing source paths from actual ingest failures so operators and diagnostics can see why a specific JS8Call/JS8Spotter/CommStat/VarAC source did not poll.
+- Background message and source-backed app ingest must use a shared refresh planner before submitting worker jobs. Timer checks compare runtime source fingerprints and skip no-op worker submissions when source files/databases are unchanged; manual refreshes carry a force hint, realtime/API sources continue on cadence so live traffic is not starved, and SQLite-backed integrations such as VarAC keep a periodic quiet-pass fallback.
+- SitRep/CommStat background ingest separates source pulls from fusion. JS8Spotter/CommStat source reads may be fingerprint-gated and skipped when unchanged, but SitRep fusion still runs on its job cadence so already-staged source events, rollups, and operator presence projections are not starved. Manual SitRep refresh carries the same force hint through source gating.
+- Background ingest may cache the active runtime ingest inventory briefly across nearby job triggers so staggered JS8/VarAC/SitRep jobs do not repeatedly rebuild radio/app source descriptors. Settings/runtime changes must clear that cache, and the job snapshot should expose whether an inventory snapshot is cached for diagnostics.
+- Station Health may display runtime observability rows from existing snapshots: station-runtime poll metrics, scheduler poll metrics, background ingest job status, and shared JS8 API registry status. The Station Health tab must obtain these through an injected provider and must not start probes, poll radios, scan source files, or open app sockets while rendering diagnostics.
+- Scheduler status summaries may contribute compact Station Health observability rows for RF Guard warnings/blocks and stale or unavailable companion status such as JS8Call or VarAC. These rows are read-only interpretations of scheduler-owned snapshots, and Station Health must request scheduler status in cache-only mode so opening diagnostics does not enqueue companion app status reads. The main control bar should use concise operator language (`RF Guard: verify <radio>`, `Verify JS8Call`, `Verify VarAC`) while Station Health retains the longer stale/unknown peer or companion-app detail.
 
 ### 1.138 Addendum (2026-03-05): ControlFreq Hero/Next-Change Accuracy
 
@@ -8246,6 +8453,8 @@ Expected responsibilities:
 Important design note:
 - `JS8RxHub` cannot remain a singleton tied to one host/port in a multi-radio design.
   The implementation must move to host/port-keyed hubs or per-device receive hubs.
+  - Implemented receive-hub direction: `JS8RxHub` instances are keyed by host/port and prefer endpoint-scoped native `JS8ApiClientRegistry` clients for receive/event fan-out. The old process-global `js8net` queue remains fallback-only because it cannot own more than one endpoint in one process.
+  - Implemented JS8Call control direction: `JS8ControlClient` uses the endpoint-scoped native API for frequency get/set before attempting legacy `js8net` fallback, so scheduler/QSY actions target the configured JS8Call instance instead of whichever process-global js8net endpoint started first.
 - `VarAC` must be modeled as both:
   - a per-device node/runtime
   - an optional shared cluster data source
@@ -10704,3 +10913,333 @@ Acceptance:
 
 Rollback:
 - Revert this addendum and the corresponding `docs/guide.html` update together.
+
+### 1.203 Addendum (2026-08-11): Messages Inbox Bulk Management and Trusted Delete Workflow
+
+Problem:
+- The Messages Inbox is becoming the station-wide funnel for FLMSG, FLAmp, JS8Spotter, CommStat, JS8Call, VarAC, and future transports.
+- Operators need fast cleanup tools, but whole-inbox bulk deletion is risky when messages may originate from external apps, file systems, or FIO-owned stores.
+- Delete confirmation text must be operator-readable and must not expose raw payloads or programmer-oriented implementation details.
+
+Goal:
+- Make message selection and deletion fast after the operator has intentionally scoped the inbox, while preserving a strong trust boundary around source stores.
+
+Scope:
+- Do not put `Select Matching Rows`, `Select Older Than`, `Clear Selection`, or `Delete Selected` in the Inbox `More Actions` menu once the inline selection bar is available.
+- The left Inbox rail should not include `Mark All as Read`; selected rows reveal the inline `Mark Read` action instead.
+- Group `Refresh Now` and the message-check interval control together so auto-check cadence reads as part of refresh behavior.
+- Label the time toggle `Time Display: Local` or `Time Display: UTC`.
+- Any message-table time column should be labeled `Age` and render relative age. Exact receive timestamps remain available in the message detail and underlying metadata.
+- Keep the legacy left-rail `Delete Selected` action hidden/disabled during normal Inbox use; selected-row cleanup belongs in the inline bulk action bar and `More Actions` menu.
+- The message-table header checkbox is enabled only after the Inbox is scoped by a filter and only when visible rows include deletable messages.
+- Checking the table header checkbox selects deletable visible rows only; unchecking it clears visible selection. It must not select unsupported rows or imply whole-inbox deletion.
+- Show a contextual bulk action bar above the message table only when rows are selected.
+- The contextual bar must show selected count, source-family summary, `Mark Read`, `Delete`, and `Clear Selection`.
+- The contextual bar and delete action must expose the source-specific delete effect as hover guidance so an operator can quickly confirm whether the action moves files, deletes FIO rows, marks external rows deleted, or performs a safe fallback.
+- Keep selected-row actions near the table instead of permanently occupying the left control rail.
+- Name the left rail `Inbox Tools` and reserve it for refresh, mark-read, map/BBS, and maintenance utilities.
+- Keep filter controls in the table funnel: `Focus`, `Groups`, `Sources`, `Age`, `Search`, `Clear Filters`, and `Advanced Filters`.
+- Minimized Messages windows must preserve readable focus chips and funnel controls by horizontally scrolling the message workspace instead of compressing labels or overlapping `Age`/`Clear Filters`.
+- Label the secondary action menu `More Actions` and reserve it for export, summaries, maintenance, and help.
+- `Clear Filters` and `More Actions` should provide concise hover guidance that names the active scope when one exists.
+- Confirm bulk deletion with:
+  - selected message count
+  - source-family counts such as FLMSG, FLAmp, JS8Spotter, CommStat, JS8Call, VarAC
+  - source-specific delete effect summary
+  - a small human-readable sample of selected messages
+- Preserve source-specific delete behavior:
+  - FLMSG/FLAmp/BBS file records move source files through the Recycle Bin path when possible
+  - JS8Call, JS8Spotter, and SitRep rows delete from the FIO message store
+  - VarAC rows are marked deleted in VarAC/FIO integration storage
+  - CommStat artifacts delete the native source row only when FIO can prove stable provenance through `sitrep_source_events` and the source row is still present; if the source row is already absent, FIO removes the stale local projection; when source provenance is not safe, FIO hides the artifact from FIO Messages through a local tombstone.
+- Suppress locally deleted rows immediately from the current view so the inbox reflects the operator action without waiting on the next poll.
+- Record every attempted message delete/hide in a local FIO audit table with:
+  - timestamp
+  - batch id (`single` or generated bulk id)
+  - source family
+  - action/effect
+  - result (`deleted`, `failed`, `skipped`)
+  - row identity
+  - from/to/title summary
+  - short operator-readable detail
+- Delete audit entries must not store raw message payloads, decoded bodies, source JSON, or file contents.
+- Audit writes are best-effort and must not block the delete workflow if the audit table is unavailable.
+- Add a quiet `Message Maintenance...` surface under the Inbox `More...` menu for troubleshooting and cleanup review.
+- Message Maintenance shows bounded recent delete audit rows and hidden CommStat/tombstone rows without adding controls to the primary Inbox.
+- Maintenance queries must be bounded and must not perform unbounded full-history scans on open.
+
+Out of scope:
+- Broad CommStat history pruning or deleting CommStat rows without exact source-row provenance.
+- New archive/retention policy UI.
+- Per-column header text filtering.
+- Undo workflow beyond platform Recycle Bin behavior for file-backed records.
+
+Acceptance:
+- Selecting visible rows requires an active scope/filter.
+- `Advanced Filters` appears with the primary filter funnel, not in the left utility rail.
+- The left rail uses `Inbox Tools` and `More Actions` labels.
+- The left rail groups `Refresh Now` with the auto-check interval and does not show `Mark All as Read`.
+- The time toggle is labeled `Time Display: Local/UTC`.
+- Message tables use `Age` rather than `Received (...)` as the column label.
+- Selecting rows reveals the contextual bulk action bar and updates its count/source summary.
+- The contextual bulk action bar provides source/effect guidance without requiring the full confirmation dialog.
+- `More Actions` does not contain `Select Matching Rows`, `Select Older Than`, `Clear Selection`, or `Delete Selected`.
+- `Clear Filters` and `More Actions` expose concise scope/help guidance without adding another always-visible status panel.
+- At a minimized/narrow width, the left Inbox tool rail may scroll vertically, but the right Messages workspace keeps a stable content minimum and scrolls horizontally so `FLMSG/FLAMP`, `Spotter`, `CommStat`, groups, sources, age, search, and table columns remain legible.
+- `Mark Read` in the contextual bar marks only selected unread rows and clears the selection after update.
+- Bulk delete confirmation is human-readable and free of raw payload/source JSON.
+- Source-specific delete effects are displayed before confirmation.
+- Single-message and bulk delete paths record source-specific audit rows for success, failure, and skipped outcomes.
+- CommStat delete tests cover native source-row deletion, stale projection cleanup, mixed-reference safety, and local tombstone fallback.
+- `More... -> Message Maintenance...` opens a review dialog with recent delete audit history and hidden CommStat items.
+- Deleted rows are removed from the active view after successful deletion.
+- Verification passes:
+  - `.venv/bin/pytest tests/test_message_intelligence.py tests/test_js8_spotter_native_integration.py -q`
+  - `python -m compileall freqinout/gui/message_viewer_tab.py`
+
+Rollback:
+- Revert the Inbox bulk-selection actions, delete confirmation helpers, tests, and this addendum together.
+
+### 1.203a Addendum (2026-08-11): CommStat Source-Backed Delete and File Metadata Index Direction
+
+Problem:
+- CommStat now supports native row deletion in its own SQLite tables, so a permanent FIO hide/tombstone is no longer the best available behavior when FIO has trustworthy source provenance.
+- File-backed FLMSG/FLAMP/BBS message presentation can become expensive when the UI repeatedly scans full filesystem trees and reparses files for table summaries.
+
+Goal:
+- Make CommStat deletion a trusted source-backed action when FIO can prove the source table/path/id, while retaining safe hide-only fallback for incomplete provenance.
+- Establish the next performance direction for file-backed message metadata without changing file ownership rules.
+
+Scope:
+- For CommStat artifacts, parse `source_refs_json` only for allowlisted native CommStat source tables:
+  - `alerts`
+  - `messages`
+  - `statrep`
+  - `videos`
+- Resolve each source ref through `sitrep_source_events.source_db_path`.
+- If every source ref resolves to an existing SQLite DB and allowlisted table, delete the native source rows by `id`, then remove the FIO projection and source-event rows.
+- Before native deletion, preflight every resolved source row. FIO may only report `source row deleted` if every referenced native row was present and every delete affected a row.
+- If every resolved source row is already absent, remove the stale FIO projection and source-event rows without a tombstone and report that the source row was already absent.
+- If resolved provenance is mixed, where at least one referenced native source row is present and at least one is missing, fail the delete rather than partially deleting source data.
+- If provenance is missing, incomplete, or unsafe, do not attempt physical source delete; tombstone/hide the FIO projection as before.
+- Record delete audit details that distinguish:
+  - source row deleted and FIO projection removed
+  - source row already absent and stale FIO projection removed
+  - FIO-only hidden fallback
+- Bulk delete completion feedback must summarize those same outcomes in operator language:
+  - `Deleted from source`
+  - `Cleaned stale FIO rows`
+  - `Hidden in FIO`
+  - `Skipped`
+  - `Failed`
+- Keep CommStat delete UI copy operator-readable and avoid raw source JSON.
+
+File metadata index direction:
+- Add `message_file_metadata` as a display-ready cache for FLMSG/FLAMP/BBS and other file-backed rows.
+- Store bounded, display-ready metadata keyed by origin/path/mtime/size:
+  - source family
+  - status
+  - from/to
+  - form/report title
+  - date/message id
+  - decoded report timestamp when the form Date/Msg ID contains a parseable UTC value
+  - topic/search text
+  - parser version
+  - source file path and timestamps
+- Treat the metadata index as a read model/cache only; source files remain authoritative and deletes continue to use the platform recycle-bin path when possible.
+- For FLMSG/FLAMP/BBS rows, table `Age` and default sort should prefer the form's Date/Msg ID timestamp when parseable. Filesystem mtime remains the received/provenance timestamp shown in detail views and file metadata; it is not the operator-facing report age when the report itself carries a valid date.
+- File metadata must keep timestamp semantics explicit: `report_ts` stores only a parsed form Date/Msg ID timestamp, while `age_ts_source` records whether Inbox `Age` came from `report` or `received`/filesystem provenance. FIO must not store filesystem mtime as a fake report timestamp.
+- Build the index from the existing background row parse, prune stale metadata against the file scan cache, and use exact origin/path/mtime/size matches as a read fast path for unchanged file rows.
+- Messages row-build telemetry should include file metadata hit count and file parse count so performance work can distinguish cache effectiveness from parser cost.
+- Keep CommStat source-backed delete and file metadata cache behavior in focused core modules so future message sources can reuse the same contracts without growing the Messages tab.
+- Core metadata helpers own cached file-row normalization, including timestamp-source semantics, topics parsing, actionable coercion, and age timestamp fallback. `MessageViewerTab` may compose UI rows, but it must not reimplement cache interpretation rules.
+- Keep delete audit table creation, bounded reads, and audit writes in a focused core module. Message UI code may compose an operator-readable row summary, but it must not own the SQLite audit contract.
+- Bulk delete source/effect summaries, tooltips, sample rows, confirmation text, completion text, single-delete confirmation text, and single-delete success text live in `freqinout.core.message_delete_policy`. The Messages GUI owns dialogs and execution dispatch only.
+- When a file-backed row is deleted, immediately evict matching file scan, metadata, signature, and read-state cache entries so stale rows cannot linger or reappear from cache.
+- File-backed row keys, metadata cache keys, read-state keys, scan-cache keys, and local deleted-row suppression must all use the same normalized file identity: origin, path, mtime, and size. Origin casing must not create a distinct message identity.
+- File read-state loads and writes normalize origin through the same file identity helper used by metadata/delete caches so legacy mixed-case rows such as `FLMSG` still match current `flmsg` records.
+- File-backed in-memory removal should also use the shared file identity helper; GUI code must not hand-roll path-only or origin-case-sensitive removal.
+- Message row identity for JS8Call, JS8Spotter, VarAC, file-backed records, SitRep, and CommStat lives in a focused core helper. `MessageTableModel` may expose a compatibility wrapper for Qt selection, but selection, suppression, delete audit keys, and future BBS/map routing must not depend on table-only identity logic.
+- Row identity set construction and row-list filtering by identity also live in the same core helper. The Messages GUI may choose when to render filtered rows, but it must not duplicate identity filtering for locally deleted/suppressed rows.
+- Add a reusable delete capability/effect contract that determines:
+  - source label
+  - user-facing delete effect
+  - audit action text
+  - whether the row is deletable
+- Use this contract plus core row identity for bulk confirmation text, audit action labels, source summaries, delete eligibility, and the shared source-specific `MessageDeleteExecutionResult` used by both bulk delete and row-level delete actions.
+- Delete eligibility collection lives in the delete policy layer. GUI code can ask for deletable rows, but must not decide eligibility by combining table-model keys with local source checks.
+- Centralize delete result details in the same policy layer so bulk delete, single-message delete, and audit rows use identical wording for deleted, hidden, skipped, and failed outcomes.
+- Delete execution result construction for success, missing identity, source failure, and CommStat source/hide outcomes lives in the delete policy layer. The Messages GUI may still call source-specific delete functions and clear current selections/details until a fuller execution service is introduced, but it must not duplicate operator-facing result/warning semantics.
+- Single-delete failure warning fallback also lives in the delete policy layer, and GUI success finalization should use one helper for audit, local suppression, refresh, and success text wherever the source workflow already presents a success dialog.
+- Source delete SQL for JS8 local cache rows, JS8Call inbox rows, JS8Spotter store rows, SitRep store rows, VarAC local projection rows, and VarAC source soft-delete rows lives in a focused core adapter. The Messages GUI supplies database paths and still manages current-row memory/detail state, while core owns the bounded SQL delete behavior. CommStat provenance deletes and file recycle-bin deletes remain separate specialized paths.
+- Message operating-group menu rebuild selection lives in the inbox filter core layer. Rebuilds must preserve explicit user selections, must preserve an explicit `None` selection, must default expanded `All Groups` views to FIO/CommStat primary groups only, and must not silently select `Other Discovered Groups`.
+- File-backed FLMSG/FLAmp metadata parser versions must be bumped when age/source semantics change. Report Date/Msg ID timestamps (`YYMMDD-HHMMz`, `YYYYMMDD-HHMMSSZ`, and compact variants) take precedence over filesystem modified time for inbox age/sort when present, so stale metadata generated before that rule must be rebuilt on refresh.
+
+Out of scope:
+- Remote CommStat server delete directives.
+- Unbounded filesystem scans during UI refresh.
+- Storing raw message bodies or source JSON in the delete audit.
+- Replacing source files with DB-only message storage.
+
+Acceptance:
+- CommStat rows with valid source provenance are deleted from their native CommStat source table and removed from FIO projections.
+- CommStat rows whose resolved source rows are already absent are removed from FIO projections without creating a hide tombstone.
+- CommStat rows with mixed present/missing source refs are not partially deleted.
+- CommStat rows without safe provenance are hidden through the existing tombstone path.
+- Delete audit rows remain operator-readable and do not store raw payloads.
+- Delete audit rows can be created, written, and loaded through a core helper without constructing the Messages tab.
+- Bulk delete completion does not use ambiguous wording such as `Hidden/deleted`; it distinguishes source deletes, stale projection cleanup, FIO-hidden rows, skipped rows, and failed rows.
+- File-backed message rows persist display-ready metadata into `message_file_metadata` keyed by origin/path/mtime/size.
+- File-backed FLMSG/FLAMP rows with Date/Msg ID values such as `260729-0354z`, `260729035455`, `20260729-0354`, or `20260729-035455Z` use that UTC report timestamp for Inbox `Age`; rows without a parseable form date fall back to filesystem mtime.
+- Rows without a parseable form date persist `report_ts=0` and `age_ts_source=received`; cached fast-path rows still use filesystem mtime for Inbox `Age`.
+- Changing the file metadata parser contract for FLMSG/FLAMP report age requires a parser-version bump so existing cached rows with no `report_ts` are ignored, reparsed on refresh, and resaved with the form report timestamp.
+- Manual `Refresh Now` must rebuild message rows when current file identities have stale metadata parser versions, even if the underlying file path/mtime/size fingerprint is unchanged.
+- Stale metadata checks must be bounded to current file identities and chunked by path so a manual refresh does not perform one SQLite lookup per message file or scan stale rows unrelated to the current folder view.
+- Stale file metadata is pruned when the current file scan cache no longer contains that file identity.
+- Unchanged file rows can render from the metadata fast path without reparsing the source file during row-build.
+- Metadata fast-path rows must still be searchable. If an older metadata row has no stored search text, row-build composes a fallback search string from message type, status, from/to, relative receive display, title, display type, topics, and filename.
+- Metadata fast-path tests must prove unchanged rows do not call the source file metadata parser and that row-build reports metadata hits/parses.
+- Core metadata helper tests must prove cached rows normalize report-derived and received-derived ages without constructing the Messages tab.
+- File-backed delete removes the active row and clears associated caches in the same UI action.
+- File-backed in-memory removal keeps same-path/different-size or different-origin rows intact while removing the exact deleted identity.
+- Delete confirmation/effect text is derived from the shared delete capability contract.
+- Bulk and single-message delete confirmation/completion text is directly testable through core helpers without constructing `MessageViewerTab`.
+- Single-message and bulk-message delete audit details are derived from shared source/result policy rather than separate hard-coded UI strings.
+- Bulk delete and single-message delete use the same source-specific `MessageDeleteExecutionResult` path before refreshing the Messages table, and tests can construct that result without importing the Messages GUI module.
+- Unsupported payloads are not treated as deletable merely because a table row has a key.
+- Focused verification passes:
+  - `.venv/bin/pytest tests/test_message_intelligence.py tests/test_js8_spotter_native_integration.py -q`
+  - `.venv/bin/python -m compileall freqinout/gui/message_viewer_tab.py`
+
+Rollback:
+- Revert the CommStat source-delete helpers/tests and this addendum together; existing tombstone behavior remains the fallback model.
+
+## 1.2.5 Addendum: Multi-Rig Ingestion And Control Service Contract
+
+Purpose:
+- FIO must ingest traffic and control radio/application state across multiple radios, SDRs, and app instances without pushing file scans, API polling, source checkpointing, or parse/projection work into UI tabs.
+- The center-of-gravity workflow, "where to be, when to be there, and what to do when there," depends on stable source identity, bounded background work, and clear operator-facing status.
+
+Core model:
+- `Radio`: the logical station lane that may be controlled by FLRig, rigctld, JS8Call, manual control, or a future SDR/application adapter.
+- `AppInstance`: one configured integration instance, such as JS8Call, FLDigi/FLMsg/FLAmp, VarAC, CommStat, OpenWebRX, SDRangel, or another future tool. It has a stable source id, optional radio id, label, endpoints, paths, and health.
+- `IngestSource`: one file, directory, API, or SQLite source owned by an app instance. It has a stable source id, source family, source type, source path/endpoint, checkpoint key, radio id, and health.
+- `Projection`: a normalized read model for Messages, Map, Operator History, propagation, scheduler previews, RF Guard evidence, BBS routing, and future reporting. Projections point back to source refs; they do not become the only source of truth.
+
+Service boundaries:
+- UI tabs must not directly own app socket lifetimes, long-running file tails, whole-folder scans, VarAC/CommStat SQLite sync loops, radio status polling, or source checkpoint mutation.
+- UI tabs may request refresh, render read models, present actions, and dispatch operator commands through focused services.
+- Background ingest owns source enumeration, checkpointing, dedupe, parse/projection, retry/backoff, and bounded batch size.
+- Operator-facing tabs may request a background refresh through the shared ingest controller, but normal refresh/render paths should continue from the latest local projections instead of synchronously opening app files or databases when the controller is running.
+- Background refresh requests are asynchronous. Tabs that request ingest must reload/render projections on background job completion, or otherwise clearly accept eventual consistency; they must not treat "request queued" as "new source data is already projected."
+- `RadioStatusPollCoordinator` is the shared radio status polling boundary for Scheduler, RF Guard, Control Bar, and UI status. Competing direct polling loops are not allowed.
+- Radio command paths (`QSY Now`, `QSY Timer`, `Suspend Scheduler`, `Resume Schedule`, SOP/scheduler changes) must flow through a command/preflight layer that can consult RF Guard before changing a radio or assigning a schedule.
+- The station control bar is radio-scoped. When the operator toggles radios, `Now`, manual QSY metadata, scheduler state, and action tooltips must be derived from the selected radio snapshot or that radio's assignment context; labels from another radio's scheduler lane must never bleed into the selected radio. Frequency-only fallback labels may be used only when no source-specific group is available.
+- The station control bar should have a compact all-radio summary mode showing each radio's current plan/frequency, guard state, and health at a glance. Summary chips must reuse the existing runtime snapshot refresh, must not start another polling loop, and should be clickable to make a radio the active command target. Expanding it converts the same space into a compact all-radio admin panel with per-radio Select, Assign Plan, and Health actions so operators can correct state without toggling each radio one at a time.
+- Radio schedule assignment UI should make the safety gate visible in the action labels, such as `Assign with RF Guard` and `Save with RF Guard`; compact navigation labels may remain shorter.
+- If RF Guard blocks a radio schedule assignment, the user-facing guidance should name the block as an RF Guard assignment block, not as a generic save or settings failure.
+- Plan Manager may guide users toward assignment, but if the actual radio assignment remains in Settings then its action must say or explain that Settings is the final handoff. A selected unassigned plan should make the safety gate visible with stateful wording such as `Assign with RF Guard`; an assigned plan should settle to a review/change state such as `Assigned in Settings`.
+- Plan Manager `Assign with RF Guard` must open Settings directly to the editable Schedule Assignment card, preselect the requested Frequency Plan and target radio when known, and must not land on the general Radio Profile card. The post-save state remains in the editable assignment workflow; a separate read-only Schedule Assignment status card is redundant except for warnings or blocks that need operator attention.
+- Plan Manager RF Guard review must validate a saved plan against the radio(s) it is actually assigned to before falling back to the currently selected command radio. Assigned-plan warnings and blocks, including Advanced RF Guard spacing conflicts between peer radios, must be visible in Plan Manager without requiring the operator to discover them in Settings.
+- Plan Manager RF Guard issues are displayed in a structured `RF Guard Review` card with severity, issue, impact, and next-action columns. The card appears automatically when an assigned selected plan has warning/block issues, appears after manual `Review RF Guard`, and stays hidden when there are no actionable issues or no radio context. The primary resolution action opens the editable Schedule Assignment workflow preloaded to the selected plan.
+- Selecting a Plan Manager RF Guard issue row should update the plan action guidance with a concise issue/impact/next-step summary. Double-clicking an issue row should invoke the same `Resolve RF Guard` path as the button and open editable Schedule Assignment for the selected plan/radio context.
+- Plan Manager should include a radio-centric assignment view that mirrors the configured-group selector pattern: selecting a radio shows the plan assigned to that radio, its effective windows, and current RF Guard status; selecting a plan shows the assigned radio lanes that will be affected.
+- Plan Manager is the operator-facing planner surface for the center-of-gravity workflow. It should default to `Effective Windows` for clean "where/when" review, expose `Pattern Summary` for grouped rhythms such as "MAGNET 20M Daily 10:00-15:00" or "MR08 Net Thu 02:00-03:00", and keep the week grid available as a secondary diagnostic view.
+- Plan Manager name edits are explicit. `Rename Plan` changes only the selected plan name and must not regenerate schedule refs or mirror rows. Changing selected Daily/Net/SOP layers makes the visible plan modified until the user chooses `Update Plan` or `New Plan`; this modified state must keep the user's selected layers through table refresh/rebuild, show a `Modified` plan-state cue, and visibly emphasize the save/update action.
+- Plan Manager source layers are explicit: `HF Daily`, `HF Nets`, and `SOP`. Loading a saved Frequency Plan must restore the component Daily and Net schedules used by that plan, plus any saved SOP Schedule Plan dependency (`sop_schedule_plan:<id>`), so the operator can see what comprises the plan before editing or assigning it. If no saved SOP Schedule Plan is selected, the SOP selector defaults to active SOP Builder layers.
+- Plan Manager controls should read in operator workflow order: plan identity/lifecycle first, component layers second, then review/display/RF Guard/assignment controls. Time and band/frequency display toggles belong with the review table controls, not beside the plan name.
+- HF Daily and HF Nets use the same named-object lifecycle as Plan Manager: `New Schedule` detaches from the selected saved object while keeping visible rows available as a starting point, `Rename Schedule` changes only the schedule name, `Save / Update Schedule` persists row changes, and `Delete Schedule` removes the selected named schedule. Selecting a saved schedule in the schedule dropdown loads it for review/editing; a separate Load action is not required.
+- HF Daily and HF Nets lower library sections are reusable row catalogs, not second active schedule editors. User-facing labels must use copy/add language such as `Daily Row Library`, `Net Row Library`, `Add Selected Rows`, `Add Filtered Rows`, and `Save Selected to Library`; they must not imply rows are moved out of the active schedule unless the user explicitly chooses a delete action.
+- Selecting an Effective Window or Pattern Summary row opens a compact inline editor for the representative window. The editor must visibly explain the impact of each save path before the operator commits a change: `Update Plan Only` changes the saved Frequency Plan without changing source schedules; `Update HF Daily Source` or `Update HF Net Source` changes the named schedule used by this and any assigned plans. Source update buttons are available only when the selected window maps to exactly one saved source row of that type and must run assigned-plan RF Guard impact review before persistence.
+- Effective Window and Pattern Summary tables select full rows. Clicking any visible cell in a row must open the same selected-window editor, including after table sorting, so the operator never has to click a hidden metadata column or infer which row is active.
+- `Save SOP Plan` / `Update SOP Plan` is a separate SOP Schedule Plan workflow and should appear only when a saved SOP Schedule Plan layer is selected or the selected plan itself is an SOP Schedule Plan. It may update the selected plan only when that plan is already an SOP Schedule Plan; if a normal Frequency Plan is selected, saving an SOP plan creates a distinct SOP Schedule Plan instead of overwriting the normal plan.
+- `Create Plan` / `Save Plan` / `Update Plan` is the normal Frequency Plan workflow. It may update the selected plan only when that plan is not an SOP Schedule Plan; if an SOP Schedule Plan is selected, saving a normal plan creates a distinct normal Frequency Plan instead of overwriting the SOP plan.
+- Updating an existing named HF Daily or HF Net schedule that is referenced by an assigned master Frequency Plan must run an RF Guard impact scan before persistence. Blocked impacts stop the component save and leave the previously saved component rows intact; warning impacts require explicit operator confirmation.
+- SOP Schedule Plan edits made inside FreqPlanner save through the normal RF Guard plan preflight. SOP Builder HF action edits derive durable schedule-layer dependency refs (`sop_schedule_layer:<profile_id>`) in assigned master Frequency Plans; updating an existing referenced HF SOP must run an RF Guard impact scan before persistence. Blocked impacts stop the SOP save and leave the previous SOP action/layer rows intact; warning impacts require explicit operator confirmation.
+- Existing master Frequency Plans saved before SOP layer dependency refs were added may need to be rebuilt/resaved before SOP Builder update preflight can identify the dependency.
+- Station Health runtime observability should surface already-saved assigned schedule RF Guard validation warnings/blocks from assignment metadata. Rendering this status must use existing assigned-plan rows and must not probe radios, apps, or schedule sources.
+- Selecting an assigned schedule RF Guard row in Station Health should offer `Open Related View` and navigate to Settings > Radios > Schedule Assignment so the operator can review or repair the guarded assignment in the owning workflow.
+
+JS8Call:
+- A multi-rig station may run one JS8Call instance per radio.
+- Each JS8Call instance may have its own TCP/API endpoint and its own `DIRECTED.TXT`/`ALL.TXT` files.
+- JS8Call inbox cache paths may be explicit per runtime profile. If no explicit inbox is configured, FIO may discover an inbox next to that profile's `DIRECTED.TXT`; it must not fall back to another profile's/global inbox for a runtime source.
+- JS8 file checkpoints must be scoped by source id/path/role; no global offset key may be used for more than one JS8Call source.
+- JS8 API clients must be keyed by instance and shared by services that need send/read/preflight behavior. UI code must not open ad hoc duplicate TCP connections.
+- JS8 ingested rows must preserve radio/app source provenance so Messages, Map, Operator History, Expect, and BBS logic can filter by operating group without assuming a fixed radio.
+- Live JS8 API observations must resolve endpoint-to-source context through shared core logic, then carry API source id, app instance id, and radio id into map links, operator activity, Spotter traffic, and Expect audit paths.
+
+CommStat:
+- A single CommStat instance may aggregate traffic from multiple JS8Call instances.
+- FIO must preserve CommStat provenance and dedupe against native JS8 sources where a stable identity is available.
+- CommStat delete behavior must use the focused source-delete policy/adapter and must not be duplicated in the Messages UI.
+- CommStat configured/selected groups should be treated as primary group filters; discovered callsigns or relay tokens are not operating groups.
+
+VarAC:
+- Current ingest may operate against one local VarAC DB, but the contract must support multiple VarAC nodes or cluster members by source-scoped SQLite path and checkpoints.
+- VarAC ingest must remain read-only except for explicit supported actions such as safe source delete/soft-delete or managed BBS writes.
+- VarAC cluster status, BBS vault, guard, and message projections must expose source/radio provenance without forcing operators to understand database paths.
+- Local VarAC message projections must key rows by `ingest_source_key + native source + native id`. The native `source` field (`vmail`, `qso`, `broadcast`) is not a multi-rig source identifier and must not be used alone for dedupe or delete.
+- VarAC read/flag/delete UI paths must carry the projected `ingest_source_key`. When a source-backed delete is requested, FIO resolves the VarAC DB path from source-scoped sync status before falling back to the current legacy VarAC path.
+- Operator-facing VarAC cache refresh paths, including Messages, Map, and Operator History, must use the shared runtime-source VarAC ingest helper when active runtime VarAC sources are configured. The legacy single-DB path remains a fallback for compatibility.
+- VarAC link projections carry `ingest_source_key` as well as VarAC message projections so propagation outcomes, map links, and operator-history diagnostics can attribute QSO/link evidence to the correct VarAC source.
+
+FLDigi, FLMsg, FLAmp, BBS files:
+- File-backed message roots may be profile/radio-specific.
+- File scanner state and metadata cache keys must include source family/path identity so multiple roots cannot clobber one another.
+- Full and incremental file scans must preserve source id/label for nested FLMsg/FLAmp/BBS files as well as files directly under the configured root.
+- Folder scans use directory fingerprints and cached file metadata; unchanged source fingerprints must not rebuild message rows or reparse files.
+- Inbox `Age` for FLMsg/FLAmp prefers the report Date/Msg ID when parseable; filesystem timestamps remain received/provenance metadata.
+
+Performance and stability:
+- Background ingest uses bounded workers: realtime paths for operator-visible active sessions, bulk paths for normal polling/backfill, and per-job single-flight dedupe.
+- No source may run unbounded parallel jobs. Source failures enter health/backoff without freezing other integrations.
+- SQLite writes are idempotent, indexed, batched, and source-scoped. Long-running reads must use projection tables or cached metadata rather than full source rescans on every UI refresh.
+- Visible UI refresh compares cheap source/projection fingerprints first. If no source identity/status/content fingerprint changed, the UI updates status text only and skips table/map rebuild.
+- Message, map, and operator-history panes read bounded projections and should stay responsive while integrations poll in the background.
+- Source-specific ingest throttles must be keyed by source id/path/family rather than one process-global timestamp. A legacy or manually triggered ingest pass must not starve a configured multi-rig app instance that is due to poll in the same time window.
+- Projection-to-projection ingestion, such as propagation outcome learning from cached message/link tables, must checkpoint by local projection row identity rather than event timestamp alone. Imported historical traffic can be older than already-seen live traffic and still must be projected.
+- Propagation outcome events preserve source provenance when available (`source_key`, `app_instance_id`, `source_radio_id`) so later reporting and SOP/RF-Guard evidence can explain which radio/application instance observed a contact.
+- JS8Call `DIRECTED.TXT`/`ALL.TXT` link indexing consumes source inventory descriptors and stores independent offsets per JS8Call app instance/log file. Background ingest may keep per-radio health records, but path pairing and offset semantics are owned by the core JS8 log indexer.
+- JS8 link projections preserve nullable `source_id`, `app_instance_id`, and `source_radio_id` provenance. Legacy single-rig rows may remain source-blank, but inventory-driven multi-rig rows must be source-scoped so map/operator history/status diagnostics can explain which radio/application instance heard or transmitted the link.
+- JS8 callsign activity summaries preserve the source id, app instance id, and radio id that produced the latest activity for each callsign. Legacy summaries may remain source-blank, but rebuilds from source-scoped `js8_links` and new inventory-driven ingest must carry this provenance forward for operator history and future SOP decisions.
+- Live JS8 link ingestion accepts either legacy six-field observations or extended source-aware observations. When source-aware data is present, duplicate replacement is scoped to that source so the same station pair heard by two radios remains visible as two source-backed observations.
+- JS8 message projections and local read-state sidecars must key multi-rig rows by source identity plus the native JS8Call inbox row id. Bare JS8Call row ids are only safe for legacy single-source rows; two JS8Call instances can both have native row `1`, and FIO must keep their read/delete/sync state independent.
+- Operator-facing JS8 log refresh paths, including the Map tab, must use the shared runtime-source link ingest helper when active runtime JS8Call sources are configured. The legacy global JS8 settings path is a fallback for single-source installs and manual compatibility, not the normal multi-rig operating path.
+- Operator-facing JS8 inbox/Spotter cache refresh paths, including the Messages tab, must use the shared runtime-source message ingest helper when active runtime JS8Call sources are configured. This helper warms local projections source-by-source and does not dispatch Expect auto-replies unless an explicit runtime coordinator opts in.
+- Operator-facing JS8 and VarAC refresh paths in Messages, Map, and Operator History request background refresh when background ingest is running; direct source helper calls are compatibility fallbacks for startup/manual contexts where the background controller is unavailable.
+- JS8Spotter `DIRECTED.TXT` ingest uses a Spotter-specific component health key under the same JS8 source descriptor. A degraded Spotter parser/Expect path must not be confused with generic JS8 inbox ingest or JS8 link indexing for that source.
+- JS8Spotter rows carry source key, JS8 instance id, and radio id when known. Propagation outcome ingestion uses those columns so Spotter-derived contact evidence can be attributed without treating all Spotter traffic as one global source.
+- Runtime status rows are produced by core services from source descriptors, source health, component health, and recent sync status. UI surfaces consume these rows; they do not probe files, sockets, source DBs, or app endpoints to assemble operating status.
+- Source health may contain component health entries for child work such as `inbox`, `all-log`, `api`, `forms`, `bbs`, or `sync`. A degraded component rolls up to the parent source so the operator sees one understandable status while setup/drill-down views can explain which component needs attention.
+- Background ingest status must expose source-level skip reasons for cooldown/backoff and missing/unreadable paths without marking neutral throttles as failures. Station Health may show one source-skip observability row when source-specific throttles or missing paths are present.
+- Runtime status rows may include projection evidence such as cached message counts. These counts come from local indexed projection/cache tables (`js8_messages`, `message_file_metadata`, and future source-scoped tables), never from rescanning source folders or opening external app DBs during UI refresh.
+- File-backed message metadata is indexed by source and report timestamp so source status, inbox focus filters, report-age sorting, BBS routing previews, and future map/report projections can query cached metadata without rescanning source folders.
+- CommStat status rows include configured/active group context and cheap projection summaries when available so the operator sees whether the CommStat bridge is aligned with their operating groups without scanning the full discovered group list. Projection summaries include artifact, transport, reach, source, origin, and report-group counts from local `commstat_artifacts`.
+- CommStat ingest preserves the canonical reach mode (`rf_observed`, `maximum_reach`, `maximum_reach_relay`, `internet_only`) while presentation labels use operator language such as `Limited Reach (RF only)` and `Maximum Reach (RF + Internet)`.
+- CommStat plain JS8 traffic remains a `MESSAGE` artifact unless it matches a known structured SitRep/Spotter form. JS8 relay routes such as `N1MAG: K7RIE>KC7WOK ...` must preserve relay origin/via/destination metadata but must not promote the relay station or destination callsign into operating-group filters.
+- VarAC status rows may be enriched from the latest VarAC sync history. The primary operating view should show last scan/write/error state, not raw DB path details.
+
+Operator UX:
+- FIO should show simple source health by radio/app in operator language: connected, last heard/checked, degraded, needs setup, or disabled.
+- Technical details such as paths, ports, offsets, and DB names belong in setup/drill-down views, not primary operating views.
+- Message, map, and operator filters are derived from configured operating groups first, then relevant discovered groups for the selected focus/source. Callsigns and JS8 relay tokens are From/To values, not operating groups.
+
+Implementation slices:
+- Slice A: add a focused ingest source model that builds stable app/source descriptors for JS8Call, VarAC, and file-backed message roots.
+- Slice B: make JS8 link/map ingestion source-scoped, with separate checkpoints for each active JS8Call instance's `DIRECTED.TXT` and `ALL.TXT`.
+- Slice C: extend background ingest to enumerate descriptors from active runtime profiles and submit per-source work through job keys/backoff rather than per-tab refresh work.
+- Slice D: make VarAC ingest checkpoints and health source-scoped so future cluster/member support does not require a rewrite.
+- Slice E: expose a read-only connection/ingestion health projection for UI summary and diagnostics.
+- Slice F: audit Messages, Map, Operator History, Scheduler, RF Guard, and BBS views for direct source IO and move remaining heavy work into core services.
+
+Acceptance:
+- Two JS8Call instances with different `DIRECTED.TXT` paths maintain separate offsets and both contribute map/operator link observations.
+- Disabling one app instance stops its background source jobs without removing already-ingested historical projections.
+- A stalled or missing source records degraded health/backoff and does not block other radios, the scheduler, the control bar, or the Messages tab.
+- Messages, Map, and Operator History can refresh without opening JS8 TCP connections, tailing source logs, scanning full FLMsg/FLAmp folders, or syncing VarAC directly from UI code.
+- Source/projection fingerprints prevent unchanged auto-refresh cycles from rebuilding large tables.
+- Tests cover source descriptor construction, checkpoint key uniqueness, JS8 source-scoped log ingestion, and shared radio status polling behavior.
+
+Rollback:
+- Revert `ingest_source_model`, JS8 source-scoped indexer/background-ingest wiring, and this addendum together. Legacy single-source JS8 offset behavior remains available through `JS8LogLinkIndexer.update()`.

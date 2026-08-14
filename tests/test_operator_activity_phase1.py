@@ -10,6 +10,8 @@ from freqinout.core.operator_activity import (
     load_js8_direct_contact_summary,
     load_operator_activity_summary,
     parse_utc_timestamp,
+    rebuild_js8_callsign_stats,
+    record_js8_activity_batch,
 )
 
 
@@ -69,6 +71,63 @@ def test_activity_summary_uses_destination_only_rows_for_overall_last_seen() -> 
 
     assert summary["W9BVM"]["overall_last_seen_ts"] == 200.0
     assert summary["W9BVM"]["overall_last_band"] == "20M"
+
+
+def test_js8_activity_stats_preserve_latest_source_provenance() -> None:
+    conn = _conn()
+    ensure_js8_callsign_stats(conn, rebuild_if_empty=False)
+
+    record_js8_activity_batch(
+        conn,
+        [
+            ("K7AAA", 100.0, "40M", 7_115_000.0, "directed-a", "app-a", "1"),
+            ("K7AAA", 200.0, "20M", 14_115_000.0, "directed-b", "app-b", "2"),
+            ("N1MAG", 150.0, "40M", 7_115_000.0, "directed-a", "app-a", "1"),
+        ],
+    )
+
+    rows = conn.execute(
+        """
+        SELECT callsign, last_band, last_freq_hz, last_source_id, last_app_instance_id, last_source_radio_id
+          FROM js8_callsign_stats
+      ORDER BY callsign
+        """
+    ).fetchall()
+    assert rows == [
+        ("K7AAA", "20M", 14_115_000.0, "directed-b", "app-b", "2"),
+        ("N1MAG", "40M", 7_115_000.0, "directed-a", "app-a", "1"),
+    ]
+
+
+def test_js8_activity_rebuild_preserves_source_provenance_from_links() -> None:
+    conn = _conn()
+    conn.execute("ALTER TABLE js8_links ADD COLUMN source_id TEXT")
+    conn.execute("ALTER TABLE js8_links ADD COLUMN app_instance_id TEXT")
+    conn.execute("ALTER TABLE js8_links ADD COLUMN source_radio_id TEXT")
+    conn.executemany(
+        """
+        INSERT INTO js8_links (ts, origin, destination, band, freq_hz, source_id, app_instance_id, source_radio_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (100.0, "K7AAA", "N1MAG", "40M", 7_115_000.0, "directed-a", "app-a", "1"),
+            (200.0, "K7AAA", "N1MAG", "20M", 14_115_000.0, "directed-b", "app-b", "2"),
+        ],
+    )
+
+    assert rebuild_js8_callsign_stats(conn) == 2
+
+    rows = conn.execute(
+        """
+        SELECT callsign, last_band, last_source_id, last_app_instance_id, last_source_radio_id
+          FROM js8_callsign_stats
+      ORDER BY callsign
+        """
+    ).fetchall()
+    assert rows == [
+        ("K7AAA", "20M", "directed-b", "app-b", "2"),
+        ("N1MAG", "20M", "directed-b", "app-b", "2"),
+    ]
 
 
 def test_direct_contact_summary_ignores_outbound_only_attempts() -> None:

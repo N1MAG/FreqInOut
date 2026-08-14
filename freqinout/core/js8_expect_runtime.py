@@ -6,7 +6,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from freqinout.core.js8_send_service import js8_endpoint_from_radio_profile
 from freqinout.core.multi_radio_store import normalize_rf_guard_mode, stricter_rf_guard_mode
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiEndpoint
+from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiClientRegistry, JS8ApiEndpoint
 
 
 GuardPreflightCallback = Callable[[str, str, Mapping[str, Any]], Any]
@@ -239,7 +239,10 @@ class ExpectAutomationCoordinator:
         self._profiles = [dict(profile or {}) for profile in list(profiles or [])]
         self._guard_preflight = guard_preflight
         self._require_guard_preflight = bool(require_guard_preflight)
-        self._client_factory = client_factory or (lambda endpoint: JS8ApiClient(endpoint, auto_reconnect=False, timeout_s=1.0))
+        self._owns_clients = client_factory is not None
+        self._client_factory = client_factory or (
+            lambda endpoint: JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+        )
         self._clients: dict[tuple[str, int], JS8ApiClient] = {}
         self._last_status: Optional[ExpectAutomationSourceStatus] = None
 
@@ -307,6 +310,9 @@ class ExpectAutomationCoordinator:
         )
 
     def close(self) -> None:
+        if not self._owns_clients:
+            self._clients.clear()
+            return
         for client in list(self._clients.values()):
             try:
                 client.stop()
@@ -317,14 +323,16 @@ class ExpectAutomationCoordinator:
     def _profile_for_source(self, radio_id: str, js8_instance_id: str) -> Optional[Mapping[str, Any]]:
         if not self._profiles:
             return {}
+        radio_id_lc = str(radio_id or "").strip().lower()
+        js8_instance_id_lc = str(js8_instance_id or "").strip().lower()
         radio_matches: list[Mapping[str, Any]] = []
         for profile in self._profiles:
             profile_radio = str(profile.get("id", "") or profile.get("radio_profile_id", "") or "").strip()
             profile_js8 = str(profile.get("js8_instance_id", "") or profile.get("name", "") or profile_radio).strip()
-            if radio_id and profile_radio != radio_id:
+            if radio_id and profile_radio.lower() != radio_id_lc:
                 continue
             radio_matches.append(profile)
-            if js8_instance_id and profile_js8 != js8_instance_id:
+            if js8_instance_id and profile_js8.lower() != js8_instance_id_lc:
                 continue
             return profile
         if radio_id and not js8_instance_id and radio_matches:

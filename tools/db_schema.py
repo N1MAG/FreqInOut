@@ -110,7 +110,11 @@ NETS_TABLES: Dict[str, TableDef] = {
             last_role TEXT,
             checkin_count INTEGER DEFAULT 0,
             groups_json TEXT,
-            trusted INTEGER DEFAULT 0
+            trusted INTEGER DEFAULT 0,
+            timezone TEXT,
+            tier TEXT,
+            roster_parent_group TEXT,
+            roster_region TEXT
         )
         """,
     ),
@@ -315,6 +319,9 @@ NETS_TABLES: Dict[str, TableDef] = {
             snr REAL,
             band TEXT,
             freq_hz REAL,
+            source_id TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             is_relay INTEGER DEFAULT 0,
             relay_via TEXT,
             is_spotter INTEGER DEFAULT 0,
@@ -328,6 +335,12 @@ NETS_TABLES: Dict[str, TableDef] = {
             ON js8_links(destination, ts);
         CREATE INDEX IF NOT EXISTS idx_js8_links_band
             ON js8_links(band);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_source
+            ON js8_links(source_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_app_instance
+            ON js8_links(app_instance_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_radio
+            ON js8_links(source_radio_id, ts);
         """,
     ),
     "js8_callsign_stats": TableDef(
@@ -339,16 +352,23 @@ NETS_TABLES: Dict[str, TableDef] = {
             callsign TEXT PRIMARY KEY,
             last_seen_ts REAL,
             last_band TEXT,
-            last_freq_hz REAL
+            last_freq_hz REAL,
+            last_source_id TEXT,
+            last_app_instance_id TEXT,
+            last_source_radio_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_last_seen
             ON js8_callsign_stats(last_seen_ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_source
+            ON js8_callsign_stats(last_source_id, last_seen_ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_radio
+            ON js8_callsign_stats(last_source_radio_id, last_seen_ts);
         """,
     ),
     "varac_ingest_state": TableDef(
         name="varac_ingest_state",
         db=NETS_DB,
-        description="VarAC incremental ingest checkpoints by source table.",
+        description="VarAC incremental ingest checkpoints by source/table key.",
         ddl="""
         CREATE TABLE IF NOT EXISTS varac_ingest_state (
             table_name TEXT PRIMARY KEY,
@@ -368,7 +388,12 @@ NETS_TABLES: Dict[str, TableDef] = {
             success INTEGER DEFAULT 0,
             rows_scanned INTEGER DEFAULT 0,
             rows_written INTEGER DEFAULT 0,
-            error_text TEXT
+            error_text TEXT,
+            ingest_source_key TEXT,
+            ingest_scope TEXT,
+            ingest_source_label TEXT,
+            cluster_name TEXT,
+            cluster_public_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_varac_sync_status_finished
             ON varac_sync_status(run_finished_ts);
@@ -397,6 +422,7 @@ NETS_TABLES: Dict[str, TableDef] = {
         description="Unified VarAC message mirror (qso/vmail/broadcast) for UI read paths.",
         ddl="""
         CREATE TABLE IF NOT EXISTS varac_messages (
+            ingest_source_key TEXT NOT NULL DEFAULT 'legacy',
             id INTEGER,
             guid TEXT,
             source TEXT,
@@ -419,7 +445,7 @@ NETS_TABLES: Dict[str, TableDef] = {
             urgent INTEGER DEFAULT 0,
             has_attachment INTEGER DEFAULT 0,
             via_callsign TEXT,
-            PRIMARY KEY (source, id)
+            PRIMARY KEY (ingest_source_key, source, id)
         );
         CREATE INDEX IF NOT EXISTS idx_varac_messages_ts
             ON varac_messages(ts);
@@ -427,6 +453,8 @@ NETS_TABLES: Dict[str, TableDef] = {
             ON varac_messages(source, ts);
         CREATE INDEX IF NOT EXISTS idx_varac_messages_folder_label
             ON varac_messages(folder_label);
+        CREATE INDEX IF NOT EXISTS idx_varac_messages_ingest_source_ts
+            ON varac_messages(ingest_source_key, ts);
         """,
     ),
     "varac_callsign_stats": TableDef(
@@ -475,10 +503,13 @@ NETS_TABLES: Dict[str, TableDef] = {
             snr REAL,
             band TEXT,
             freq_hz REAL,
-            source TEXT
+            source TEXT,
+            ingest_source_key TEXT DEFAULT 'legacy'
         );
         CREATE INDEX IF NOT EXISTS idx_varac_links_ts
             ON varac_links(ts);
+        CREATE INDEX IF NOT EXISTS idx_varac_links_source_ts
+            ON varac_links(ingest_source_key, ts);
         """,
     ),
     "varac_vmail_folders": TableDef(
@@ -660,6 +691,9 @@ NETS_TABLES: Dict[str, TableDef] = {
             outcome TEXT NOT NULL,
             source TEXT NOT NULL,
             source_ref TEXT,
+            source_key TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             inserted_utc TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_prop_contact_events_event_key
@@ -751,6 +785,8 @@ NETS_TABLES: Dict[str, TableDef] = {
             grid TEXT,
             scope TEXT,
             transport_mode TEXT,
+            reach_mode TEXT,
+            origin_path TEXT,
             remarks_text TEXT,
             brevity_code TEXT,
             brevity_summary TEXT,
@@ -924,6 +960,8 @@ NETS_TABLES: Dict[str, TableDef] = {
             state_code TEXT,
             scope TEXT,
             transport_mode TEXT,
+            reach_mode TEXT,
+            origin_path TEXT,
             status_label TEXT,
             alert_color TEXT,
             title TEXT,

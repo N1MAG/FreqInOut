@@ -9,6 +9,7 @@ from freqinout.core.schedule_projection import ScheduleSegment, build_blended_sc
 
 
 OPERATIONAL_PLAN_CATEGORY = "sop_schedule"
+SOP_SCHEDULE_LAYER_DEPENDENCY_PREFIX = "sop_schedule_layer"
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,16 @@ class OperationalDayProjection:
             "SOP": "sop",
         }
         refs = [mapping[src] for src in ("HF", "NET", "NET_RESOURCE", "SOP") if self.source_counts.get(src, 0)]
+        if self.source_counts.get("SOP", 0):
+            for ref in self.schedule_refs():
+                if str(ref.get("source") or "").strip().upper() != "SOP":
+                    continue
+                try:
+                    profile_id = int(ref.get("sop_profile_id") or ref.get("profile_id") or 0)
+                except Exception:
+                    profile_id = 0
+                if profile_id > 0:
+                    refs.append(f"{SOP_SCHEDULE_LAYER_DEPENDENCY_PREFIX}:{profile_id}")
         return list(dict.fromkeys(refs))
 
     def frequency_refs(self) -> List[str]:

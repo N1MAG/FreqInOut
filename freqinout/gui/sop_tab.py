@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.schedule_source_sets import assigned_plan_rf_guard_impacts_for_sop_update
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
@@ -7908,6 +7909,150 @@ class SOPTab(_LegacySOPTab):
                 continue
             return True
 
+    def _pending_sop_schedule_layer_rows(
+        self,
+        profile_id: int,
+        payload: Dict[str, Any],
+        actions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        try:
+            category = self.manager._normalize_category(payload.get("category"))
+        except Exception:
+            category = str(payload.get("category") or "").strip().upper()
+        if category == self.CAT_LOCAL:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if not bool(action.get("enabled", True)):
+                continue
+            if self.manager._is_local_action(action):
+                continue
+            if not bool(action.get("schedule_applied", True)):
+                continue
+            band = str(action.get("band") or "").strip().upper()
+            freq = self.manager._normalize_frequency(action.get("frequency"))
+            if not band or not freq:
+                continue
+            group_name = str(action.get("group_name") or payload.get("operating_group") or "").strip().upper()
+            rows.append(
+                {
+                    "source": "SOP",
+                    "sop_profile_id": int(profile_id or 0),
+                    "profile_id": int(profile_id or 0),
+                    "day_utc": "ALL",
+                    "recurrence": "Daily",
+                    "biweekly_offset_weeks": 0,
+                    "month_weeks": "",
+                    "condition_levels": self.manager._normalize_condition_levels(action.get("condition_levels")),
+                    "group_name": group_name,
+                    "band": band,
+                    "mode": str(action.get("mode") or "").strip().upper() or "DIGI",
+                    "vfo": "A",
+                    "frequency": freq,
+                    "start_utc": self.manager._normalize_hhmm(action.get("daily_start_utc") or "00:00"),
+                    "end_utc": self.manager._normalize_hhmm(action.get("daily_end_utc") or "23:59"),
+                    "enabled": True,
+                }
+            )
+
+        dedup: Dict[Tuple[str, str, str, str, str, str, str, str], Dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                str(row.get("day_utc") or "").upper(),
+                str(row.get("band") or "").upper(),
+                str(row.get("mode") or "").upper(),
+                str(row.get("frequency") or ""),
+                str(row.get("start_utc") or ""),
+                str(row.get("end_utc") or ""),
+                str(row.get("group_name") or "").upper(),
+                self.manager._normalize_condition_levels(row.get("condition_levels")),
+            )
+            dedup[key] = row
+        final_rows = list(dedup.values())
+        final_rows.sort(
+            key=lambda row: (
+                str(row.get("day_utc") or ""),
+                str(row.get("start_utc") or ""),
+                str(row.get("band") or ""),
+                str(row.get("frequency") or ""),
+            )
+        )
+        for idx, row in enumerate(final_rows):
+            row["sort_order"] = idx
+        return final_rows
+
+    def _format_rf_guard_sop_impacts(self, impacts: List[Dict[str, Any]]) -> List[str]:
+        lines: List[str] = []
+        for impact in impacts[:8]:
+            device = impact.get("device") if isinstance(impact.get("device"), dict) else {}
+            plan = impact.get("plan") if isinstance(impact.get("plan"), dict) else {}
+            validation = impact.get("validation") if isinstance(impact.get("validation"), dict) else {}
+            radio_name = str(device.get("name") or f"Radio {device.get('id') or ''}").strip() or "Radio"
+            plan_name = str(plan.get("name") or f"Plan {plan.get('id') or ''}").strip() or "Frequency Plan"
+            messages = [str(m).strip() for m in validation.get("messages", []) if str(m).strip()]
+            detail = messages[0] if messages else "RF Guard reported an assignment issue."
+            lines.append(f"- {radio_name} / {plan_name}: {detail}")
+        if len(impacts) > len(lines):
+            lines.append(f"- +{len(impacts) - len(lines)} more")
+        return lines
+
+    def _confirm_rf_guard_sop_update(
+        self,
+        profile_id: int,
+        profile_name: str,
+        pending_layer_rows: List[Dict[str, Any]],
+    ) -> bool:
+        try:
+            impacts = assigned_plan_rf_guard_impacts_for_sop_update(profile_id, pending_layer_rows)
+        except Exception as exc:
+            log.debug("SOP Builder: RF Guard impact scan failed before save: %s", exc)
+            response = QMessageBox.question(
+                self,
+                "RF Guard Check Unavailable",
+                "RF Guard could not check assigned master schedules before updating this SOP.\n\n"
+                f"{exc}\n\nSave this SOP anyway?",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            return response == QMessageBox.Save
+        if not impacts:
+            return True
+
+        blocked = [
+            impact
+            for impact in impacts
+            if str((impact.get("validation") or {}).get("state") or "").strip().lower() == "blocked"
+        ]
+        warning = [
+            impact
+            for impact in impacts
+            if str((impact.get("validation") or {}).get("state") or "").strip().lower() == "warning"
+        ]
+        lines = self._format_rf_guard_sop_impacts(blocked or warning)
+        name = str(profile_name or "this SOP").strip() or "this SOP"
+        if blocked:
+            QMessageBox.warning(
+                self,
+                "RF Guard Blocked Update",
+                f"Updating '{name}' would create an RF Guard conflict in an assigned master schedule.\n\n"
+                + "\n".join(lines)
+                + "\n\nThe SOP was not saved.",
+            )
+            return False
+        response = QMessageBox.question(
+            self,
+            "RF Guard Warning",
+            f"Updating '{name}' affects an assigned master schedule and RF Guard found warning(s).\n\n"
+            + "\n".join(lines)
+            + "\n\nSave this SOP anyway?",
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return response == QMessageBox.Save
+
     def _save_profile(self) -> None:
         timer = getattr(self, "_realtime_conflict_timer", None)
         if timer is not None:
@@ -7919,6 +8064,18 @@ class SOPTab(_LegacySOPTab):
             payload, actions, _schedule_layer = self._collect_profile_payload()
             if payload.get("category") == self.CAT_HF and bool(payload.get("active")):
                 if not self._resolve_hf_activation_conflicts(actions):
+                    return
+            if payload.get("category") == self.CAT_HF and int(payload.get("id") or 0) > 0:
+                pending_layer_rows = self._pending_sop_schedule_layer_rows(
+                    int(payload.get("id") or 0),
+                    payload,
+                    actions,
+                )
+                if not self._confirm_rf_guard_sop_update(
+                    int(payload.get("id") or 0),
+                    str(payload.get("name") or ""),
+                    pending_layer_rows,
+                ):
                     return
             profile_id = self.manager.save_profile(payload, actions, schedule_layer=None)
             self._reload_profiles(select_id=profile_id)
@@ -7984,6 +8141,13 @@ class SOPTab(_LegacySOPTab):
         payload["active"] = False
         payload["id"] = int(profile.get("id") or 0)
         actions: List[Dict[str, Any]] = []
+        if self.manager._normalize_category(profile.get("category")) == self.CAT_HF:
+            if not self._confirm_rf_guard_sop_update(
+                int(profile.get("id") or 0),
+                str(profile.get("name") or ""),
+                [],
+            ):
+                return
         self.manager.save_profile(payload, actions, schedule_layer=None)
         self._reload_profiles(select_id=int(profile.get("id") or 0))
         self._set_save_dirty(False)

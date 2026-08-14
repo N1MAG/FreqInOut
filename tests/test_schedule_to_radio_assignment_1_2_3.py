@@ -31,9 +31,18 @@ def test_settings_source_exposes_radio_first_operating_model_assignment_controls
     assert "Operating Model Assignment" in source
     assert 'QPushButton("Assign Model")' in source
     assert 'QPushButton("Restore Model")' in source
-    assert 'QPushButton("Assign Schedule")' in source
+    assert 'QPushButton("Assign with RF Guard")' in source
+    assert 'QPushButton("Save with RF Guard")' in source
+    assert "RF Guard Blocked Assignment" in source
+    assert "Schedule Assignment Saved" in source
+    assert "Choose a radio and Frequency Plan, then save with RF Guard before the schedule changes." in source
+    assert "self.schedule_assignment_radio_combo = QComboBox()" in source
+    assert "def open_schedule_assignment_editor(self, *, plan_id: int = 0, device_profile_id: int = 0) -> bool:" in source
+    assert "self._select_settings_section_group(group)" in source
     assert 'self.schedule_assignments_table = QTableWidget(0, 8)' in source
     assert "def _save_schedule_assignment_editor(self) -> None:" in source
+    assert "selection_model.selectedRows()" in source
+    assert "append_assignment_for_device(device_profile_id)" in source
     assert 'self.schedule_assignment_state_combo.addItem("Inactive", "inactive")' not in source
     assert "No schedule assignments were changed." in source
     assert "self.multi_radio_store.set_assigned_plan(" in source
@@ -136,21 +145,33 @@ def test_phase5_frequency_plan_source_provenance_source_wiring() -> None:
 def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     planner_source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
 
+    assert 'QLabel("<h3>Plan Manager</h3>")' in planner_source
+    assert "plan_workspace = QVBoxLayout()" in planner_source
+    assert "plan_select_row = QHBoxLayout()" in planner_source
+    assert "plan_select_row.addWidget(self.save_plan_btn)" in planner_source
+    assert "source_workspace.addWidget(self.save_sop_plan_btn)" in planner_source
+    assert "source_workspace.addWidget(self.build_sop_layer_btn)" in planner_source
+    assert "view_workspace.addWidget(self.review_rf_guard_btn)" in planner_source
+    assert "view_workspace.addWidget(self.assign_plan_btn)" in planner_source
     assert "self.frequency_plan_combo = QComboBox()" in planner_source
     assert 'self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")' in planner_source
+    assert "self.frequency_plan_combo.setEditable(True)" in planner_source
     assert 'self.save_plan_btn = QPushButton("Save Plan")' in planner_source
     assert 'self.save_sop_plan_btn = QPushButton("Save SOP Plan")' in planner_source
-    assert 'self.assign_plan_btn = QPushButton("Assign Plan")' in planner_source
-    assert 'self.make_active_plan_btn = QPushButton("Make Active")' in planner_source
-    assert 'self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")' in planner_source
+    assert 'self.delete_plan_btn = QPushButton("Delete Plan")' in planner_source
+    assert 'self.assign_plan_btn = QPushButton("Assign in Settings")' in planner_source
+    assert 'self.make_active_plan_btn = QPushButton("Make Active")' not in planner_source
+    assert 'self.use_ad_hoc_plan_btn = QPushButton("Use Ad Hoc")' not in planner_source
     assert "self.save_plan_btn.clicked.connect(self._on_save_plan_clicked)" in planner_source
     assert "self.save_sop_plan_btn.clicked.connect(self._on_save_sop_plan_clicked)" in planner_source
+    assert "self.delete_plan_btn.clicked.connect(self._on_delete_plan_clicked)" in planner_source
     assert "self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)" in planner_source
-    assert "Review the blended HF Daily + HF Nets + SOP projection" in planner_source
-    assert "Settings > Radio Profiles > Schedule Assignment" in planner_source
+    assert "Save or update the visible HF Daily + HF Nets + SOP projection" in planner_source
+    assert "Settings > Assign Schedule" in planner_source
+    assert "Choose the radio and save with RF Guard." in planner_source
     assert 'self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")' in planner_source
     assert 'self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")' in planner_source
-    assert "Save Plan captures the reviewed HF Daily + HF Nets + SOP projection as a named Frequency Plan." in planner_source
+    assert "Build a named plan by selecting HF Daily, HF Nets, and optional SOP layers" in planner_source
     assert "def _refresh_plan_workspace_header(self) -> None:" in planner_source
     assert "self._refresh_plan_workspace_header()" in planner_source
 
@@ -185,10 +206,12 @@ def test_phase5_schedule_tabs_use_frequency_plan_target_language() -> None:
     assert "self.plan_context_label = PlanContextLabel(" in planner_source
     assert '"freqplanner",' in planner_source
     assert "self.plan_context_label.refresh_context(refresh=True)" in planner_source
-    assert "Use FreqPlanner to verify where and when the saved plan expects activity." in planner_source
+    assert "Build where-to-be, when-to-be-there, and what-to-do plans from HF Daily, HF Nets, and SOP layers." in planner_source
     assert "Frequency Plans" in guide_source
     assert "Assigned Plans" in guide_source
-    assert "week-at-a-glance Frequency Plan coverage check" in guide_source
+    assert "build, review, edit, and assign named Frequency Plans" in guide_source
+    assert "where to be, when to be there, and what to do when you get there" in guide_source
+    assert "Update Plan Only" in guide_source
     assert "ControlFreq reflects results from Settings, assigned Frequency Plans" in guide_source
     assert "Map consumes operator data, Frequency Plan and schedule-source data" in guide_source
     assert "selected radio profile and its assigned current plan" in guide_source

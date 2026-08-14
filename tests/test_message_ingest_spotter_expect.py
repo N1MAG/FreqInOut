@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sqlite3
 
 from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
@@ -8,6 +9,208 @@ from freqinout.core.observation_store import list_observations
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 from tests.test_js8_send_service import _safe_server
+
+
+def _write_js8_inbox(path: Path, *, row_id: int, from_call: str, text: str, utc: str = "2026-08-08 12:34:56") -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE inbox_v1 (id INTEGER PRIMARY KEY, json TEXT, type TEXT, value TEXT)")
+        conn.execute(
+            "INSERT INTO inbox_v1 (id, json, type, value) VALUES (?, ?, 'RX.DIRECTED', '')",
+            (
+                int(row_id),
+                json.dumps(
+                    {
+                        "type": "RX.DIRECTED",
+                        "params": {
+                            "FROM": from_call,
+                            "TO": "@MAGNET",
+                            "TEXT": text,
+                            "UTC": utc,
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_js8_inbox_read_state_is_scoped_by_source_key(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    inbox_a = tmp_path / "fio-a-inbox.sqlite"
+    inbox_b = tmp_path / "fio-b-inbox.sqlite"
+    _write_js8_inbox(inbox_a, row_id=1, from_call="K1AAA", text="MSG A")
+    _write_js8_inbox(inbox_b, row_id=1, from_call="K1BBB", text="MSG B")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER, source_key TEXT, source_id INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO js8_inbox_state (id, state, read_ts, source_key, source_id) VALUES (?, 'READ', 99.0, 'js8:fio-a', 1)",
+            (MessageIngestor._js8_local_row_id(1, "js8:fio-a"),),
+        )
+        conn.execute(
+            "INSERT INTO js8_inbox_state (id, state, read_ts, source_key, source_id) VALUES (?, 'UNREAD', 0.0, 'js8:fio-b', 1)",
+            (MessageIngestor._js8_local_row_id(1, "js8:fio-b"),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ingestor = MessageIngestor(settings)
+    ingestor.ingest_js8_messages(
+        inbox_path=inbox_a,
+        source_radio_id="7",
+        js8_instance_id="fio-a",
+        source_key="js8:fio-a",
+    )
+    ingestor.ingest_js8_messages(
+        inbox_path=inbox_b,
+        source_radio_id="8",
+        js8_instance_id="fio-b",
+        source_key="js8:fio-b",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT source_key, source_id, from_call, state, read_ts FROM js8_messages ORDER BY from_call"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [
+        ("js8:fio-a", 1, "K1AAA", "READ", 99.0),
+        ("js8:fio-b", 1, "K1BBB", "UNREAD", 0.0),
+    ]
+
+
+def test_js8_inbox_visible_and_background_same_source_do_not_duplicate(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    inbox = tmp_path / "fio-a-inbox.sqlite"
+    _write_js8_inbox(inbox, row_id=1, from_call="K1AAA", text="MSG A")
+
+    background = MessageIngestor(settings)
+    visible = MessageIngestor(settings)
+    background.ingest_js8_messages(
+        inbox_path=inbox,
+        source_radio_id="7",
+        js8_instance_id="fio-a",
+        source_key="js8:fio-a",
+    )
+    visible.ingest_js8_messages(
+        inbox_path=inbox,
+        source_radio_id="7",
+        js8_instance_id="fio-a",
+        source_key="js8:fio-a",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT source_key, source_id, from_call, raw_text FROM js8_messages"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("js8:fio-a", 1, "K1AAA", "MSG A")]
+
+
+def test_js8_local_insert_conflict_is_source_scoped_for_parallel_refresh(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    ingestor = MessageIngestor(settings)
+    ingestor._ensure_local_js8_tables()
+
+    for _ in range(2):
+        ingestor._insert_js8_local(
+            1,
+            "K1AAA",
+            "@MAGNET",
+            "MSG",
+            "2026-08-08 12:34:56",
+            111.0,
+            "MSG A",
+            "MSG A",
+            "UNREAD",
+            0.0,
+            source_key="js8:fio-a",
+            source_id=1,
+            source_radio_id="7",
+            js8_instance_id="fio-a",
+            source_path=str(tmp_path / "fio-a-inbox.sqlite"),
+        )
+    ingestor._insert_js8_local(
+        1,
+        "K1BBB",
+        "@MAGNET",
+        "MSG",
+        "2026-08-08 12:34:56",
+        111.0,
+        "MSG B",
+        "MSG B",
+        "UNREAD",
+        0.0,
+        source_key="js8:fio-b",
+        source_id=1,
+        source_radio_id="8",
+        js8_instance_id="fio-b",
+        source_path=str(tmp_path / "fio-b-inbox.sqlite"),
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT source_key, source_id, from_call, raw_text FROM js8_messages ORDER BY source_key"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [
+        ("js8:fio-a", 1, "K1AAA", "MSG A"),
+        ("js8:fio-b", 1, "K1BBB", "MSG B"),
+    ]
+
+
+def test_js8_next_msg_backlog_preserves_source_context(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    inbox = tmp_path / "fio-b-inbox.sqlite"
+    _write_js8_inbox(inbox, row_id=1, from_call="K1BBB", text="NEXT MSG ID 42")
+
+    MessageIngestor(settings).ingest_js8_messages(
+        inbox_path=inbox,
+        source_radio_id="8",
+        js8_instance_id="fio-b",
+        source_key="js8:fio-b",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT callsign, msg_id, source_key, source_radio_id, js8_instance_id, source_path
+            FROM autoquery_backlog
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("K1BBB", "42", "js8:fio-b", "8", "fio-b", str(inbox))
 
 
 def test_spotter_directed_ingest_adds_source_and_expect_audit(monkeypatch, tmp_path: Path) -> None:
@@ -254,19 +457,24 @@ def test_spotter_js8_event_duplicates_are_scoped_to_source(monkeypatch, tmp_path
     }
     ingestor = MessageIngestor(settings)
 
-    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=8, js8_instance_id="fio-b") == 1
-    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=8, js8_instance_id="fio-b") == 0
-    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=9, js8_instance_id="fio-c") == 1
+    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=8, js8_instance_id="fio-b", source_key="js8-api-b") == 1
+    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=8, js8_instance_id="FIO-B", source_key="js8-api-b") == 0
+    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=8, js8_instance_id="fio-b", source_key="js8-api-b-alt") == 1
+    assert ingestor.ingest_spotter_from_js8_events([event], source_radio_id=9, js8_instance_id="fio-c", source_key="js8-api-c") == 1
 
     conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
     try:
         rows = conn.execute(
-            "SELECT source_radio_id, js8_instance_id FROM spotter_traffic ORDER BY source_radio_id"
+            "SELECT source_radio_id, js8_instance_id, source_key FROM spotter_traffic ORDER BY source_key"
         ).fetchall()
     finally:
         conn.close()
 
-    assert rows == [("8", "fio-b"), ("9", "fio-c")]
+    assert rows == [
+        ("8", "fio-b", "js8-api-b"),
+        ("8", "fio-b", "js8-api-b-alt"),
+        ("9", "fio-c", "js8-api-c"),
+    ]
 
 
 def test_spotter_live_then_directed_same_source_does_not_duplicate_or_reevaluate_expect(
@@ -375,3 +583,59 @@ def test_spotter_directed_visible_and_background_offsets_share_idempotence(
     assert rows == [("N0CALL", "@MAGNET", "304", "#HHJL", "8", "fio-b")]
     assert settings.get("spotter_directed_offset_background_radio_8", 0) > 0
     assert settings.get("spotter_directed_offset_visible_radio_8", 0) > 0
+
+
+def test_spotter_directed_same_content_from_different_sources_keeps_provenance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    directed_a = tmp_path / "fio-a" / "DIRECTED.TXT"
+    directed_b = tmp_path / "fio-b" / "DIRECTED.TXT"
+    for directed in (directed_a, directed_b):
+        directed.parent.mkdir(parents=True, exist_ok=True)
+        directed.write_text(
+            "2026-08-08 12:34:56\t7078000\t0\t-10\tN0CALL: @MAGNET F!304 11111111 #HHJL *DE* N0CALL \u2662\n",
+            encoding="utf-8",
+        )
+    settings = SettingsManager()
+    ingestor = MessageIngestor(settings)
+
+    assert (
+        ingestor.ingest_spotter_from_directed(
+            directed_path=directed_a,
+            source_radio_id=8,
+            js8_instance_id="fio-a",
+            source_key="spotter:fio-a",
+            offset_key="spotter_directed_offset_background_radio_8",
+        )
+        == 1
+    )
+    assert (
+        ingestor.ingest_spotter_from_directed(
+            directed_path=directed_b,
+            source_radio_id=9,
+            js8_instance_id="fio-b",
+            source_key="spotter:fio-b",
+            offset_key="spotter_directed_offset_background_radio_9",
+        )
+        == 1
+    )
+
+    conn = sqlite3.connect(cfg_root / "config" / "freqinout_nets.db")
+    try:
+        rows = conn.execute(
+            """
+            SELECT from_call, to_call, form_id, spotter_token, source_radio_id, js8_instance_id, source_key
+            FROM spotter_traffic
+            ORDER BY source_key
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [
+        ("N0CALL", "@MAGNET", "304", "#HHJL", "8", "fio-a", "spotter:fio-a"),
+        ("N0CALL", "@MAGNET", "304", "#HHJL", "9", "fio-b", "spotter:fio-b"),
+    ]

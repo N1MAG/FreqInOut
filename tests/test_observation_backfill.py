@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 from freqinout.core.observation_backfill import backfill_observations
@@ -48,8 +49,8 @@ def test_observation_backfill_projects_existing_spotter_traffic_in_batches(tmp_p
     first = backfill_observations(db_path, include_local_reports=False, batch_limit=1)
     second = backfill_observations(db_path, include_local_reports=False, batch_limit=1)
 
-    assert first == {"local_reports": 0, "spotter_traffic": 1}
-    assert second == {"local_reports": 0, "spotter_traffic": 1}
+    assert first == {"local_reports": 0, "spotter_traffic": 1, "commstat_artifacts": 0}
+    assert second == {"local_reports": 0, "spotter_traffic": 1, "commstat_artifacts": 0}
     rows = list_observations(db_path, source_family="spotter")
     assert [row.source_ref for row in rows] == ["spotter_traffic:2", "spotter_traffic:1"]
     assert rows[0].from_call == "W0IFM"
@@ -121,13 +122,129 @@ def test_observation_backfill_projects_existing_local_reports_without_routing(tm
 
     result = backfill_observations(db_path, include_spotter_traffic=False)
 
-    assert result == {"local_reports": 1, "spotter_traffic": 0}
+    assert result == {"local_reports": 1, "spotter_traffic": 0, "commstat_artifacts": 0}
     rows = list_observations(db_path, source_family="local_report", topic="Comms")
     assert len(rows) == 1
     assert rows[0].from_call == "K0PRA"
     assert rows[0].confirmed_state == "CONFIRMED"
     assert rows[0].route_eligible is False
     assert rows[0].publish_authorized is False
+
+
+def test_observation_backfill_projects_commstat_artifacts_with_reach_provenance(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE commstat_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_key TEXT,
+                artifact_kind TEXT,
+                subtype TEXT,
+                event_ts_utc TEXT,
+                from_call TEXT,
+                target TEXT,
+                report_group TEXT,
+                grid TEXT,
+                state_code TEXT,
+                scope TEXT,
+                transport_mode TEXT,
+                reach_mode TEXT,
+                origin_path TEXT,
+                status_label TEXT,
+                alert_color TEXT,
+                title TEXT,
+                body_text TEXT,
+                remarks_text TEXT,
+                source_first TEXT,
+                source_last TEXT,
+                sources_json TEXT,
+                source_refs_json TEXT,
+                external_ids_json,
+                payload_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO commstat_artifacts(
+                artifact_key, artifact_kind, subtype, event_ts_utc, from_call, target,
+                report_group, grid, state_code, scope, transport_mode, reach_mode, origin_path,
+                status_label, alert_color, title, body_text, remarks_text, source_first,
+                source_last, sources_json, source_refs_json, external_ids_json, payload_json
+            )
+            VALUES (
+                'commstat-1', 'MESSAGE', 'JS8', '2026-08-10T15:05:00+00:00',
+                'K7ETC', 'MR08', 'MR08', 'DM38ST', 'UT', 'My Location',
+                'js8+internet', 'maximum_reach', 'rf', 'INFO', '',
+                'Widemouth 2 Fire', 'Wildfire update, water and comms impacts reported.',
+                '', 'COMMSTAT', 'COMMSTAT',
+                '["COMMSTAT"]', '["commstat3.messages:99"]', '["global:42"]', '{}'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = backfill_observations(db_path, include_local_reports=False, include_spotter_traffic=False)
+
+    assert result == {"local_reports": 0, "spotter_traffic": 0, "commstat_artifacts": 1}
+    rows = list_observations(db_path, source_family="commstat", topic="Fire")
+    assert len(rows) == 1
+    assert rows[0].source_ref == "commstat_artifacts:1"
+    assert rows[0].source_app == "CommStat"
+    assert rows[0].from_call == "K7ETC"
+    assert rows[0].to_target == "MR08"
+    assert rows[0].groups == ("MR08",)
+    assert rows[0].state == "UT"
+    assert rows[0].grid == "DM38ST"
+    assert rows[0].route_eligible is False
+    assert rows[0].publish_authorized is False
+    provenance = json.loads(rows[0].provenance_json)
+    assert provenance["reach_mode"] == "maximum_reach"
+    assert provenance["origin_path"] == "rf"
+    assert provenance["transport_mode"] == "js8+internet"
+    assert provenance["source_refs"] == ["commstat3.messages:99"]
+    assert get_projection_checkpoint(db_path, "commstat_artifacts")["last_source_ref"] == "commstat_artifacts:1"
+
+
+def test_observation_backfill_skips_plain_commstat_messages_without_report_signal(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE commstat_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_key TEXT,
+                artifact_kind TEXT,
+                event_ts_utc TEXT,
+                from_call TEXT,
+                target TEXT,
+                body_text TEXT,
+                status_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO commstat_artifacts(
+                artifact_key, artifact_kind, event_ts_utc, from_call, target, body_text, status_label
+            )
+            VALUES ('commstat-chat', 'MESSAGE', '2026-08-10T15:05:00+00:00', 'K7ETC', 'N1MAG', 'roger', 'INFO')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = backfill_observations(db_path, include_local_reports=False, include_spotter_traffic=False)
+
+    assert result == {"local_reports": 0, "spotter_traffic": 0, "commstat_artifacts": 0}
+    assert list_observations(db_path, source_family="commstat") == []
+    assert get_projection_checkpoint(db_path, "commstat_artifacts")["last_source_ref"] == "commstat_artifacts:1"
 
 
 def test_message_file_projection_uses_existing_form_intelligence_without_authorizing(tmp_path) -> None:

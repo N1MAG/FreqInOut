@@ -152,12 +152,20 @@ class MessageIngestor:
         self._expect_dispatch_client_factory = expect_dispatch_client_factory
         self._expect_auto_reply_enabled_override = expect_auto_reply_enabled
 
-    def ingest_js8_messages(self) -> None:
-        inbox_path = self._inbox_path()
+    def ingest_js8_messages(
+        self,
+        *,
+        inbox_path: Optional[Path] = None,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        source_key: str = "",
+    ) -> None:
+        inbox_path = inbox_path or self._inbox_path()
         if not inbox_path or not inbox_path.exists():
             return
         self._ensure_local_js8_tables()
-        max_local_id = self._local_max_js8_id()
+        effective_source_key = self._js8_source_key(source_key=source_key, source_radio_id=source_radio_id, js8_instance_id=js8_instance_id)
+        max_local_id = self._local_max_js8_id(source_key=effective_source_key)
         try:
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
@@ -183,7 +191,7 @@ class MessageIngestor:
             log.debug("MessageIngest: JS8 ingest read failed: %s", e)
             rows = []
 
-        state_map = self._load_js8_state_map()
+        state_map = self._load_js8_state_map(source_key=effective_source_key)
         message_form_codes = self._form_codes_for_flag("messages")
         now_ts = time.time()
         for row in rows:
@@ -242,9 +250,21 @@ class MessageIngestor:
                 decoded,
                 eff_state,
                 read_ts,
+                source_key=effective_source_key,
+                source_id=rid,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                source_path=str(inbox_path),
             )
             try:
-                self._enqueue_next_msg_id(from_call, text)
+                self._enqueue_next_msg_id(
+                    from_call,
+                    text,
+                    source_key=effective_source_key,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    source_path=str(inbox_path),
+                )
             except Exception:
                 pass
 
@@ -254,13 +274,15 @@ class MessageIngestor:
         directed_path: Optional[Path] = None,
         source_radio_id: object = "",
         js8_instance_id: object = "",
+        source_key: object = "",
         offset_key: str = "",
         evaluate_expect: bool = True,
-    ) -> None:
+    ) -> int:
         directed_path = directed_path or self._resolve_directed_path()
         if not directed_path or not directed_path.exists():
-            return
+            return 0
         self._ensure_spotter_table()
+        imported = 0
         try:
             offset = int(self.settings.get(offset_key or self._spotter_offset_key(directed_path, source_radio_id), 0) or 0)
         except Exception:
@@ -296,6 +318,7 @@ class MessageIngestor:
                         raw_form,
                         source_radio_id=source_radio_id,
                         js8_instance_id=js8_instance_id,
+                        source_key=source_key,
                     ):
                         continue
                     form_part, resp, comment = self._parse_form_parts(raw_form)
@@ -313,8 +336,8 @@ class MessageIngestor:
                         INSERT INTO spotter_traffic
                             (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
                              raw_text, decoded_text, state, read_ts, relay_via,
-                             source_radio_id, js8_instance_id, ingested_ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?)
+                             source_radio_id, js8_instance_id, source_key, ingested_ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?, ?)
                         """,
                         (
                             float(parsed.get("utc_ts") or 0.0),
@@ -328,6 +351,7 @@ class MessageIngestor:
                             str(parsed.get("relay_via") or "").strip().upper(),
                             str(source_radio_id or ""),
                             str(js8_instance_id or ""),
+                            str(source_key or ""),
                             ingested_ts,
                         ),
                     )
@@ -356,6 +380,7 @@ class MessageIngestor:
                     )
                     conn.commit()
                     conn.close()
+                    imported += 1
                     if evaluate_expect:
                         try:
                             event_id = f"directed:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
@@ -382,6 +407,7 @@ class MessageIngestor:
                     self.settings.save()
         except Exception as e:
             log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
+        return imported
 
     def ingest_spotter_from_js8_events(
         self,
@@ -389,6 +415,7 @@ class MessageIngestor:
         *,
         source_radio_id: object = "",
         js8_instance_id: object = "",
+        source_key: object = "",
         evaluate_expect: bool = True,
     ) -> int:
         self._ensure_spotter_table()
@@ -410,6 +437,7 @@ class MessageIngestor:
                 raw_form,
                 source_radio_id=source_radio_id,
                 js8_instance_id=js8_instance_id,
+                source_key=source_key,
             ):
                 continue
             form_part, resp, comment = self._parse_form_parts(raw_form)
@@ -428,8 +456,8 @@ class MessageIngestor:
                     INSERT INTO spotter_traffic
                         (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
                          raw_text, decoded_text, state, read_ts, relay_via,
-                         source_radio_id, js8_instance_id, ingested_ts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?)
+                         source_radio_id, js8_instance_id, source_key, ingested_ts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?, ?)
                     """,
                     (
                         float(parsed.get("utc_ts") or 0.0),
@@ -443,6 +471,7 @@ class MessageIngestor:
                         str(parsed.get("relay_via") or "").strip().upper(),
                         str(source_radio_id or ""),
                         str(js8_instance_id or ""),
+                        str(source_key or ""),
                         ingested_ts,
                     ),
                 )
@@ -645,12 +674,31 @@ class MessageIngestor:
                 )
                 """
             )
+            for column, col_type in (
+                ("source_key", "TEXT"),
+                ("source_radio_id", "TEXT"),
+                ("js8_instance_id", "TEXT"),
+                ("source_path", "TEXT"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE autoquery_backlog ADD COLUMN {column} {col_type}")
+                except Exception:
+                    pass
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageIngest: failed to ensure backlog table: %s", e)
 
-    def _enqueue_next_msg_id(self, from_call: str, text: str) -> None:
+    def _enqueue_next_msg_id(
+        self,
+        from_call: str,
+        text: str,
+        *,
+        source_key: object = "",
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        source_path: object = "",
+    ) -> None:
         call = (from_call or "").strip().upper()
         if not call or not text:
             return
@@ -671,9 +719,10 @@ class MessageIngestor:
                 """
                 SELECT 1 FROM autoquery_backlog
                 WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                  AND COALESCE(source_key, '')=COALESCE(?, '')
                 LIMIT 1
                 """,
-                (call, next_id),
+                (call, next_id, str(source_key or "").strip()),
             )
             if cur.fetchone():
                 conn.close()
@@ -681,10 +730,21 @@ class MessageIngestor:
             now_ts = time.time()
             cur.execute(
                 """
-                INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
-                VALUES (?, ?, 'MSG', 'PENDING', 0, ?, ?)
+                INSERT INTO autoquery_backlog
+                    (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts,
+                     source_key, source_radio_id, js8_instance_id, source_path)
+                VALUES (?, ?, 'MSG', 'PENDING', 0, ?, ?, ?, ?, ?, ?)
                 """,
-                (call, next_id, now_ts, now_ts),
+                (
+                    call,
+                    next_id,
+                    now_ts,
+                    now_ts,
+                    str(source_key or "").strip(),
+                    str(source_radio_id or "").strip(),
+                    str(js8_instance_id or "").strip(),
+                    str(source_path or "").strip(),
+                ),
             )
             conn.commit()
             conn.close()
@@ -719,6 +779,7 @@ class MessageIngestor:
         *,
         source_radio_id: object = "",
         js8_instance_id: object = "",
+        source_key: object = "",
     ) -> bool:
         db_path = self._db_path()
         if not db_path:
@@ -728,10 +789,14 @@ class MessageIngestor:
             cur = conn.cursor()
             source_radio = str(source_radio_id or "").strip()
             source_js8 = str(js8_instance_id or "").strip()
+            source_identity = str(source_key or "").strip()
             source_clause = ""
             source_params: tuple[object, ...] = ()
-            if source_radio or source_js8:
-                source_clause = " AND COALESCE(source_radio_id, '')=? AND COALESCE(js8_instance_id, '')=?"
+            if source_identity:
+                source_clause = " AND COALESCE(source_key, '')=?"
+                source_params = (source_identity,)
+            elif source_radio or source_js8:
+                source_clause = " AND COALESCE(source_radio_id, '')=? AND LOWER(COALESCE(js8_instance_id, ''))=LOWER(?)"
                 source_params = (source_radio, source_js8)
             if token:
                 cur.execute(
@@ -1101,6 +1166,7 @@ class MessageIngestor:
                     relay_via TEXT,
                     source_radio_id TEXT,
                     js8_instance_id TEXT,
+                    source_key TEXT,
                     ingested_ts REAL
                 )
                 """
@@ -1130,6 +1196,7 @@ class MessageIngestor:
                 ("relay_via", "TEXT"),
                 ("source_radio_id", "TEXT"),
                 ("js8_instance_id", "TEXT"),
+                ("source_key", "TEXT"),
                 ("ingested_ts", "REAL"),
             ):
                 try:
@@ -1188,7 +1255,7 @@ class MessageIngestor:
             log.debug("MessageIngest: failed to resolve local JS8 DB path: %s", e)
             return None
 
-    def _load_js8_state_map(self) -> Dict[int, Tuple[str, float]]:
+    def _load_js8_state_map(self, *, source_key: str = "") -> Dict[int, Tuple[str, float]]:
         db_path = self._local_js8_db()
         if not db_path or not db_path.exists():
             return {}
@@ -1198,7 +1265,22 @@ class MessageIngestor:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
             )
-            cur.execute("SELECT id, state, read_ts FROM js8_inbox_state")
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+            except Exception:
+                pass
+            try:
+                cur.execute("UPDATE js8_inbox_state SET source_key='' WHERE source_key IS NULL")
+            except Exception:
+                pass
+            if source_key:
+                cur.execute("SELECT COALESCE(source_id, id), state, read_ts FROM js8_inbox_state WHERE COALESCE(source_key, '')=?", (source_key,))
+            else:
+                cur.execute("SELECT id, state, read_ts FROM js8_inbox_state WHERE COALESCE(source_key, '')=''")
             rows = cur.fetchall()
             conn.close()
             return {int(r[0]): ((r[1] or "").upper(), float(r[2] or 0.0)) for r in rows if r and r[0] is not None}
@@ -1210,6 +1292,10 @@ class MessageIngestor:
         db_path = self._local_js8_db()
         if not db_path:
             return
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute(
@@ -1240,6 +1326,22 @@ class MessageIngestor:
             cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
         except Exception:
             pass
+        for column, col_type in (
+            ("source_key", "TEXT"),
+            ("source_id", "INTEGER"),
+            ("source_radio_id", "TEXT"),
+            ("js8_instance_id", "TEXT"),
+            ("source_path", "TEXT"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE js8_messages ADD COLUMN {column} {col_type}")
+            except Exception:
+                pass
+        try:
+            cur.execute("UPDATE js8_messages SET source_key='' WHERE source_key IS NULL")
+            cur.execute("UPDATE js8_messages SET source_id=id WHERE source_id IS NULL")
+        except Exception:
+            pass
         try:
             cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
         except Exception:
@@ -1248,25 +1350,62 @@ class MessageIngestor:
             cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
         except Exception:
             pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+        except Exception:
+            pass
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_js8_messages_source_native ON js8_messages(source_key, source_id)"
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_js8_messages_utc_ts ON js8_messages(utc_ts DESC, from_call)"
         )
         conn.commit()
         conn.close()
 
-    def _local_max_js8_id(self) -> int:
+    def _local_max_js8_id(self, *, source_key: str = "") -> int:
         db_path = self._local_js8_db()
         if not db_path or not db_path.exists():
             return 0
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("SELECT MAX(id) FROM js8_messages")
+            if source_key:
+                cur.execute("SELECT MAX(source_id) FROM js8_messages WHERE COALESCE(source_key, '')=?", (source_key,))
+            else:
+                cur.execute("SELECT MAX(id) FROM js8_messages WHERE COALESCE(source_key, '')=''")
             row = cur.fetchone()
             conn.close()
             return int(row[0]) if row and row[0] is not None else 0
         except Exception:
             return 0
+
+    @staticmethod
+    def _js8_source_key(*, source_key: str = "", source_radio_id: object = "", js8_instance_id: object = "") -> str:
+        explicit = str(source_key or "").strip()
+        if explicit:
+            return explicit
+        radio = str(source_radio_id or "").strip()
+        js8 = str(js8_instance_id or "").strip()
+        if radio or js8:
+            digest_src = f"{radio}|{js8}"
+            return f"js8:{hashlib.sha1(digest_src.encode('utf-8', errors='ignore')).hexdigest()[:16]}"
+        return ""
+
+    @staticmethod
+    def _js8_local_row_id(native_id: object, source_key: str = "") -> int:
+        try:
+            native_int = int(native_id or 0)
+        except Exception:
+            native_int = 0
+        if not source_key:
+            return native_int
+        digest_src = f"{source_key}|{native_int}"
+        return int(hashlib.sha1(digest_src.encode("utf-8", errors="ignore")).hexdigest()[:15], 16)
 
     def _insert_js8_local(
         self,
@@ -1280,6 +1419,12 @@ class MessageIngestor:
         decoded_text: str,
         state: str,
         read_ts: float,
+        *,
+        source_key: str = "",
+        source_id: object = 0,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        source_path: object = "",
     ) -> None:
         db_path = self._local_js8_db()
         if not db_path:
@@ -1287,14 +1432,18 @@ class MessageIngestor:
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
+            native_id = int(source_id or msg_id or 0)
+            local_id = self._js8_local_row_id(native_id, source_key)
             cur.execute(
                 """
-                INSERT INTO js8_messages (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO NOTHING
+                INSERT INTO js8_messages
+                    (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts,
+                     source_key, source_id, source_radio_id, js8_instance_id, source_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key, source_id) DO NOTHING
                 """,
                 (
-                    int(msg_id),
+                    int(local_id),
                     from_call,
                     to_call,
                     msg_type,
@@ -1304,6 +1453,11 @@ class MessageIngestor:
                     decoded_text,
                     state,
                     float(read_ts or 0.0),
+                    source_key,
+                    native_id,
+                    str(source_radio_id or ""),
+                    str(js8_instance_id or ""),
+                    str(source_path or ""),
                 ),
             )
             conn.commit()

@@ -6,7 +6,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
@@ -533,6 +533,9 @@ class JS8LogLinkIndexer:
                 snr REAL,
                 band TEXT,
                 freq_hz REAL,
+                source_id TEXT,
+                app_instance_id TEXT,
+                source_radio_id TEXT,
                 is_relay INTEGER DEFAULT 0,
                 relay_via TEXT,
                 is_spotter INTEGER DEFAULT 0,
@@ -546,6 +549,12 @@ class JS8LogLinkIndexer:
             cols = {row[1] for row in cur.fetchall()}
             if "last_seen_utc" not in cols:
                 conn.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
+            if "source_id" not in cols:
+                conn.execute("ALTER TABLE js8_links ADD COLUMN source_id TEXT")
+            if "app_instance_id" not in cols:
+                conn.execute("ALTER TABLE js8_links ADD COLUMN app_instance_id TEXT")
+            if "source_radio_id" not in cols:
+                conn.execute("ALTER TABLE js8_links ADD COLUMN source_radio_id TEXT")
         except Exception:
             pass
         try:
@@ -554,6 +563,9 @@ class JS8LogLinkIndexer:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts ON js8_links(destination, ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_dest ON js8_links(origin, destination)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_source ON js8_links(source_id, ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_app_instance ON js8_links(app_instance_id, ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_radio ON js8_links(source_radio_id, ts)")
         except Exception:
             pass
         ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
@@ -586,20 +598,56 @@ class JS8LogLinkIndexer:
         Returns number of rows inserted.
         """
         directed_path = self._resolve_directed_path()
+        return self.update_from_directed_path(
+            directed_path,
+            since_ts=since_ts,
+            directed_offset_key="js8_links_directed_offset",
+            all_offset_key="js8_links_all_offset",
+        )
+
+    def update_from_directed_path(
+        self,
+        directed_path: Optional[Path],
+        *,
+        since_ts: Optional[float] = None,
+        directed_offset_key: str = "",
+        all_offset_key: str = "",
+        source_id: str = "",
+        app_instance_id: str = "",
+        source_radio_id: str = "",
+    ) -> int:
+        """
+        Incrementally index one JS8Call log source.
+
+        Multi-rig setups can run one JS8Call instance per radio. Offsets are
+        scoped to a source path/instance so one log tail cannot advance another
+        instance's checkpoint.
+        """
         all_path = directed_path.parent / "ALL.TXT" if directed_path else None
         directed_offset = 0
         all_offset = 0
         effective_since = since_ts
         if effective_since is None:
             effective_since = self._ensure_latest_ts(last_default=0.0)
+        directed_offset_key = directed_offset_key or self._offset_key_for_path("js8_links_directed_offset", directed_path)
+        all_offset_key = all_offset_key or self._offset_key_for_path("js8_links_all_offset", all_path)
+        source_id_txt = str(source_id or "").strip()
+        app_instance_id_txt = str(app_instance_id or "").strip()
+        source_radio_id_txt = str(source_radio_id or "").strip()
+        using_legacy_offsets = (
+            directed_offset_key == "js8_links_directed_offset"
+            and all_offset_key == "js8_links_all_offset"
+        )
         try:
-            directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
+            directed_offset = int(self.settings.get(directed_offset_key, 0) or 0)
         except Exception:
             directed_offset = 0
         try:
-            all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
+            all_offset = int(self.settings.get(all_offset_key, 0) or 0)
         except Exception:
             all_offset = 0
+        if not using_legacy_offsets and directed_offset <= 0 and all_offset <= 0:
+            effective_since = None
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
@@ -666,7 +714,7 @@ class JS8LogLinkIndexer:
                         self._maybe_capture_group_grid(line)
                         handle_parsed(self._parse_directed_line(line))
                     try:
-                        self.settings.set("js8_links_directed_offset", int(last_pos))
+                        self.settings.set(directed_offset_key, int(last_pos))
                     except Exception:
                         pass
             except Exception as e:
@@ -706,7 +754,7 @@ class JS8LogLinkIndexer:
                                 self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
                         handle_parsed(self._parse_all_line(line))
                     try:
-                        self.settings.set("js8_links_all_offset", int(last_pos))
+                        self.settings.set(all_offset_key, int(last_pos))
                     except Exception:
                         pass
             except Exception as e:
@@ -725,8 +773,12 @@ class JS8LogLinkIndexer:
                 pair, band = key
                 origin, dest = pair
                 avg_snr = entry["snr_sum"] / entry["snr_count"] if entry["snr_count"] else None
-                activity_rows.append((origin, entry["last_ts"], band, entry.get("freq_hz")))
-                activity_rows.append((dest, entry["last_ts"], band, entry.get("freq_hz")))
+                activity_rows.append(
+                    (origin, entry["last_ts"], band, entry.get("freq_hz"), source_id_txt, app_instance_id_txt, source_radio_id_txt)
+                )
+                activity_rows.append(
+                    (dest, entry["last_ts"], band, entry.get("freq_hz"), source_id_txt, app_instance_id_txt, source_radio_id_txt)
+                )
                 payload.append(
                     (
                         entry["last_ts"],
@@ -735,6 +787,9 @@ class JS8LogLinkIndexer:
                         avg_snr,
                         band,
                         entry.get("freq_hz"),
+                        source_id_txt,
+                        app_instance_id_txt,
+                        source_radio_id_txt,
                         0,
                         None,
                         0,
@@ -744,15 +799,21 @@ class JS8LogLinkIndexer:
             for key, _ in agg.items():
                 pair, band = key
                 origin, dest = pair
-                conn.execute(
-                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
-                    (origin, dest, dest, origin, band),
-                )
+                if source_id_txt:
+                    conn.execute(
+                        "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,'')) AND IFNULL(source_id,'')=?",
+                        (origin, dest, dest, origin, band, source_id_txt),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,'')) AND IFNULL(source_id,'')=''",
+                        (origin, dest, dest, origin, band),
+                    )
             conn.executemany(
                 """
                 INSERT INTO js8_links
-                    (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (ts, origin, destination, snr, band, freq_hz, source_id, app_instance_id, source_radio_id, is_relay, relay_via, is_spotter)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -774,6 +835,63 @@ class JS8LogLinkIndexer:
         finally:
             conn.close()
 
+    def update_from_ingest_sources(
+        self,
+        sources: Iterable[object],
+        *,
+        since_ts: Optional[float] = None,
+    ) -> Dict[str, int]:
+        """
+        Incrementally index JS8Call log sources described by the ingest inventory.
+
+        The inventory exposes DIRECTED.TXT and ALL.TXT as separate file sources so
+        health/status UI can reason about each path. The link indexer consumes
+        them as one JS8Call log pair per app instance to keep offsets independent
+        per radio while avoiding duplicate scans.
+        """
+        grouped: Dict[str, Dict[str, object]] = {}
+        for source in sources or ():
+            family = str(getattr(source, "family", "") or "").strip().lower()
+            source_type = str(getattr(source, "source_type", "") or "").strip().lower()
+            if family != "js8call" or source_type != "file":
+                continue
+            role = str((getattr(source, "metadata", {}) or {}).get("role", "") or "").strip().lower()
+            if role not in {"directed", "all"}:
+                continue
+            app_key = str(getattr(source, "app_instance_id", "") or getattr(source, "radio_id", "") or "").strip()
+            if not app_key:
+                app_key = str(Path(str(getattr(source, "path", "") or "")).expanduser().parent)
+            bucket = grouped.setdefault(app_key, {})
+            bucket[role] = source
+
+        counts: Dict[str, int] = {}
+        for app_key, bucket in grouped.items():
+            directed_source = bucket.get("directed")
+            all_source = bucket.get("all")
+            if directed_source is not None:
+                directed_path = Path(str(getattr(directed_source, "path", "") or "")).expanduser()
+                directed_key = str(getattr(directed_source, "checkpoint_key", "") or "")
+                all_key = str(getattr(all_source, "checkpoint_key", "") or "") if all_source is not None else ""
+                source_id = str(getattr(directed_source, "source_id", "") or app_key)
+            elif all_source is not None:
+                all_path = Path(str(getattr(all_source, "path", "") or "")).expanduser()
+                directed_path = all_path.with_name("DIRECTED.TXT")
+                directed_key = self._offset_key_for_path("js8_links_directed_offset", directed_path)
+                all_key = str(getattr(all_source, "checkpoint_key", "") or "")
+                source_id = str(getattr(all_source, "source_id", "") or app_key)
+            else:
+                continue
+            counts[source_id] = self.update_from_directed_path(
+                directed_path,
+                since_ts=since_ts,
+                directed_offset_key=directed_key,
+                all_offset_key=all_key,
+                source_id=source_id,
+                app_instance_id=str(getattr(directed_source or all_source, "app_instance_id", "") or ""),
+                source_radio_id=str(getattr(directed_source or all_source, "radio_id", "") or ""),
+            )
+        return counts
+
     def query_links(self, *args, **kwargs):
         return []
 
@@ -785,6 +903,9 @@ class JS8LogLinkIndexer:
         snr: Optional[float] = None,
         freq_hz: Optional[float] = None,
         is_spotter: int = 0,
+        source_id: str = "",
+        app_instance_id: str = "",
+        source_radio_id: str = "",
     ) -> None:
         """
         Incrementally upsert a single observation from js8net without rebuilding entire table.
@@ -796,26 +917,60 @@ class JS8LogLinkIndexer:
         band = self._freq_to_band(freq_hz)
         ts_val = float(ts or time.time())
         iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+        source_id_txt = str(source_id or "").strip()
+        app_instance_id_txt = str(app_instance_id or "").strip()
+        source_radio_id_txt = str(source_radio_id or "").strip()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
-            conn.execute(
-                "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
-                (origin, destination, destination, origin, band),
-            )
+            if source_id_txt:
+                conn.execute(
+                    """
+                    DELETE FROM js8_links
+                     WHERE (origin=? AND destination=? OR origin=? AND destination=?)
+                       AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))
+                       AND COALESCE(source_id, '')=?
+                    """,
+                    (origin, destination, destination, origin, band, source_id_txt),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM js8_links
+                     WHERE (origin=? AND destination=? OR origin=? AND destination=?)
+                       AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))
+                       AND COALESCE(source_id, '')=''
+                    """,
+                    (origin, destination, destination, origin, band),
+                )
             conn.execute(
                 """
-                INSERT INTO js8_links (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter, last_seen_utc)
-                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                INSERT INTO js8_links (
+                    ts, origin, destination, snr, band, freq_hz, is_relay, relay_via,
+                    is_spotter, last_seen_utc, source_id, app_instance_id, source_radio_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)
                 """,
-                (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+                (
+                    ts_val,
+                    origin,
+                    destination,
+                    snr,
+                    band,
+                    freq_hz,
+                    int(bool(is_spotter)),
+                    iso,
+                    source_id_txt,
+                    app_instance_id_txt,
+                    source_radio_id_txt,
+                ),
             )
             record_js8_activity_batch(
                 conn,
                 (
-                    (origin, ts_val, band, freq_hz),
-                    (destination, ts_val, band, freq_hz),
+                    (origin, ts_val, band, freq_hz, source_id_txt, app_instance_id_txt, source_radio_id_txt),
+                    (destination, ts_val, band, freq_hz, source_id_txt, app_instance_id_txt, source_radio_id_txt),
                 ),
             )
             try:
@@ -885,13 +1040,23 @@ class JS8LogLinkIndexer:
         """
         Upsert multiple live observations in a single transaction.
         Each observation: (ts, origin, destination, snr, freq_hz, is_spotter)
+        or (ts, origin, destination, snr, freq_hz, is_spotter, source_id, app_instance_id, source_radio_id).
         """
         if not observations:
             return
         rows = []
         activity_rows = []
         last_seen: Dict[str, float] = {}
-        for ts, origin, destination, snr, freq_hz, is_spotter in observations:
+        for observation in observations:
+            try:
+                ts, origin, destination, snr, freq_hz, is_spotter = observation[:6]
+                source_id, app_instance_id, source_radio_id = (
+                    observation[6],
+                    observation[7],
+                    observation[8],
+                ) if len(observation) >= 9 else ("", "", "")
+            except Exception:
+                continue
             origin = (origin or "").strip().upper()
             destination = (destination or "").strip().upper()
             if not origin or not destination:
@@ -899,9 +1064,26 @@ class JS8LogLinkIndexer:
             band = self._freq_to_band(freq_hz)
             ts_val = float(ts or time.time())
             iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
-            rows.append((ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso))
-            activity_rows.append((origin, ts_val, band, freq_hz))
-            activity_rows.append((destination, ts_val, band, freq_hz))
+            source_id_txt = str(source_id or "").strip()
+            app_instance_id_txt = str(app_instance_id or "").strip()
+            source_radio_id_txt = str(source_radio_id or "").strip()
+            rows.append(
+                (
+                    ts_val,
+                    origin,
+                    destination,
+                    snr,
+                    band,
+                    freq_hz,
+                    int(bool(is_spotter)),
+                    iso,
+                    source_id_txt,
+                    app_instance_id_txt,
+                    source_radio_id_txt,
+                )
+            )
+            activity_rows.append((origin, ts_val, band, freq_hz, source_id_txt, app_instance_id_txt, source_radio_id_txt))
+            activity_rows.append((destination, ts_val, band, freq_hz, source_id_txt, app_instance_id_txt, source_radio_id_txt))
             if ts_val:
                 last_seen[origin] = max(last_seen.get(origin, 0), ts_val)
                 last_seen[destination] = max(last_seen.get(destination, 0), ts_val)
@@ -911,17 +1093,60 @@ class JS8LogLinkIndexer:
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
-            for ts_val, origin, destination, snr, band, freq_hz, is_spotter, iso in rows:
-                conn.execute(
-                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
-                    (origin, destination, destination, origin, band),
-                )
+            for (
+                ts_val,
+                origin,
+                destination,
+                snr,
+                band,
+                freq_hz,
+                is_spotter,
+                iso,
+                source_id_txt,
+                app_instance_id_txt,
+                source_radio_id_txt,
+            ) in rows:
+                if source_id_txt:
+                    conn.execute(
+                        """
+                        DELETE FROM js8_links
+                         WHERE (origin=? AND destination=? OR origin=? AND destination=?)
+                           AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))
+                           AND COALESCE(source_id, '')=?
+                        """,
+                        (origin, destination, destination, origin, band, source_id_txt),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        DELETE FROM js8_links
+                         WHERE (origin=? AND destination=? OR origin=? AND destination=?)
+                           AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))
+                           AND COALESCE(source_id, '')=''
+                        """,
+                        (origin, destination, destination, origin, band),
+                    )
                 conn.execute(
                     """
-                    INSERT INTO js8_links (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter, last_seen_utc)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    INSERT INTO js8_links (
+                        ts, origin, destination, snr, band, freq_hz, is_relay, relay_via,
+                        is_spotter, last_seen_utc, source_id, app_instance_id, source_radio_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)
                     """,
-                    (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+                    (
+                        ts_val,
+                        origin,
+                        destination,
+                        snr,
+                        band,
+                        freq_hz,
+                        int(bool(is_spotter)),
+                        iso,
+                        source_id_txt,
+                        app_instance_id_txt,
+                        source_radio_id_txt,
+                    ),
                 )
             record_js8_activity_batch(conn, activity_rows)
             try:
@@ -940,3 +1165,16 @@ class JS8LogLinkIndexer:
             return None
         p = Path(path_txt)
         return p if p.exists() else None
+
+    @staticmethod
+    def _offset_key_for_path(prefix: str, path: Optional[Path]) -> str:
+        if path is None:
+            return prefix
+        try:
+            import hashlib
+
+            resolved = str(path.expanduser().resolve())
+            digest = hashlib.sha1(resolved.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            return f"{prefix}_{digest}"
+        except Exception:
+            return prefix

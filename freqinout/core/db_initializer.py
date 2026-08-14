@@ -228,20 +228,28 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
             snr REAL,
             band TEXT,
             freq_hz REAL,
+            source_id TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             is_relay INTEGER DEFAULT 0,
             relay_via TEXT,
-            is_spotter INTEGER DEFAULT 0
+            is_spotter INTEGER DEFAULT 0,
+            last_seen_utc TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(js8_links)")
     cols = {row[1] for row in cur.fetchall()}
-    if "last_seen_utc" not in cols:
-        cur.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
+    for name in ("source_id", "app_instance_id", "source_radio_id", "last_seen_utc"):
+        if name not in cols:
+            cur.execute(f"ALTER TABLE js8_links ADD COLUMN {name} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_ts ON js8_links(origin, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts ON js8_links(destination, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_source ON js8_links(source_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_app_instance ON js8_links(app_instance_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_radio ON js8_links(source_radio_id, ts)")
     ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
 
 
@@ -621,6 +629,9 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             outcome TEXT NOT NULL,
             source TEXT NOT NULL,
             source_ref TEXT,
+            source_key TEXT,
+            app_instance_id TEXT,
+            source_radio_id TEXT,
             inserted_utc TEXT NOT NULL
         )
         """
@@ -644,6 +655,9 @@ def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
             "outcome": "TEXT",
             "source": "TEXT",
             "source_ref": "TEXT",
+            "source_key": "TEXT",
+            "app_instance_id": "TEXT",
+            "source_radio_id": "TEXT",
             "inserted_utc": "TEXT",
         },
     )
@@ -832,6 +846,8 @@ def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
             grid TEXT,
             scope TEXT,
             transport_mode TEXT,
+            reach_mode TEXT,
+            origin_path TEXT,
             remarks_text TEXT,
             brevity_code TEXT,
             brevity_summary TEXT,
@@ -861,6 +877,8 @@ def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
             "grid": "TEXT",
             "scope": "TEXT",
             "transport_mode": "TEXT",
+            "reach_mode": "TEXT",
+            "origin_path": "TEXT",
             "remarks_text": "TEXT",
             "brevity_code": "TEXT",
             "brevity_summary": "TEXT",

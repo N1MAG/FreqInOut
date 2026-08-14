@@ -14,7 +14,10 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTableWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -37,10 +40,13 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
 
     assert '("Control Center", "Station Overview")' in source
     assert '("Health Details", "Station Health")' in source
-    assert '("Overview", "FreqPlanner")' in source
+    assert '("Plan Manager", "FreqPlanner")' in source
+    assert '("SOP Builder", "SOP")' in source
+    assert source.index('("Plan Manager", "FreqPlanner")') < source.index('("SOP Builder", "SOP")')
+    assert source.index('("SOP Builder", "SOP")') < source.index('("Inbox", "Messages")')
     assert '("HF Daily", "HF Schedule")' in source
     assert '("HF Nets", "Net Schedule")' in source
-    assert '("HF Peers", "Peer Schedules")' in source
+    assert '("HF Peer Scheds", "Peer Schedules")' in source
     assert '("Inbox", "Messages")' in source
     assert '("Compose", "Messages")' in source
     assert '("Main", "Settings")' in source
@@ -52,7 +58,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert "self._suppress_initial_nav_group_auto_expand = True" in source
     assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
-    assert 'if screen in {"FreqPlanner", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
+    assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
     assert 'return "FreqPlanner"' in source
     assert 'if screen == "Messages":' in source
     assert 'return "Messages"' in source
@@ -128,6 +134,12 @@ def test_phase7_station_workspace_decisions_are_specified() -> None:
     assert "Station Control And Station Health Consolidate Into One Station Workspace" in spec
     assert "Start With A Read-Only Station Control Center" in spec
     assert "FreqPlanner Owns Schedule Planning" in spec
+    assert "Slice 7J - Plan Manager And SOP Planning Navigation" in spec
+    assert "Move `SOP Builder` into the FreqPlanner navigation group." in spec
+    assert "`What to Do When There`: selected SOP layer(s), condition levels, roles, tiers, and action guidance." in spec
+    assert "Default presentation is `Effective Windows`" in spec
+    assert "The week/grid view remains available as `Week Grid`" in spec
+    assert "`SOP Lanes` remains available" in spec
     assert "Global Local/UTC Clock Lives In The Main Ledge" in spec
     assert "Settings Layout Cleanup Is Part Of Phase 7" in spec
     assert "Tables Need Stable Headers" in spec
@@ -177,6 +189,25 @@ def test_phase7_hf_nets_uses_compact_default_with_view_edit_details() -> None:
 
     assert "COMPACT_VISIBLE_COLUMNS = frozenset(" in source
     assert 'self.view_edit_btn = QPushButton("View/Edit")' in source
+
+
+def test_phase7_schedule_tabs_use_operator_schedule_language() -> None:
+    freqplanner = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
+    daily = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    nets = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert "Active Daily Schedule" in freqplanner
+    assert "Active Net Schedule" in freqplanner
+    assert "Select Live Current" not in freqplanner
+    assert "Review blended schedule before saving" not in freqplanner
+
+    assert "Active Daily Schedule" in daily
+    assert "Active Net Schedule" in nets
+    assert 'QPushButton("Save / Update Schedule")' in daily
+    assert 'QPushButton("Save Schedule")' in nets
+    assert 'QPushButton("Delete Schedule")' in daily
+    assert 'QPushButton("Delete Schedule")' in nets
+    source = nets
     assert "self.view_edit_btn.setCheckable(True)" in source
     assert "self.view_edit_btn.toggled.connect(self._apply_compact_schedule_view)" in source
     assert "def _apply_compact_schedule_view" in source
@@ -190,6 +221,44 @@ def test_phase7_hf_nets_uses_compact_default_with_view_edit_details() -> None:
     assert 'self.net_schedule_scroll_area.setObjectName("netScheduleScrollArea")' in source
     assert "self.net_schedule_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
     assert "def _apply_net_compact_table_sizing(self, *, compact: bool) -> None:" in source
+
+
+def test_phase7_hf_nets_schedule_name_is_inline_editable() -> None:
+    source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index('self.schedule_source_label = QLabel("Net Schedule:")') : source.index("# Net resources section")]
+    action_block = source[source.index('self.move_to_resources_btn = QPushButton(') : source.index("# Net resources section")]
+    save_block = source[source.index("def _on_save_freqplanner_source_clicked") : source.index("def _confirm_rf_guard_source_update")]
+
+    assert "self.schedule_source_combo.setEditable(True)" in build_block
+    assert "Name or select a net schedule" in build_block
+    assert 'self.save_btn = QPushButton("Save Schedule")' in build_block
+    assert 'self.delete_source_btn = QPushButton("Delete Schedule")' in build_block
+    assert 'self.move_to_resources_btn = QPushButton("Save Selected to Library")' in action_block
+    assert "self.move_to_resources_btn.clicked.connect(self._save_selected_schedule_rows_as_resources)" in source
+    assert "self._current_freqplanner_source_name()" in save_block
+    assert "_prompt_for_freqplanner_source_name" not in save_block
+    assert 'return "HF Net Schedule"' in source
+    assert "source schedule" not in save_block
+    assert "source_ref=\"saved_from_schedule\"" in source
+    assert "The HF Net schedule was not changed." in source
+    assert "self.table.removeRow(r)" not in source[source.index("def _save_selected_schedule_rows_as_resources") : source.index("def _resource_import_key")]
+    assert "Net Row Library</h3>" in source
+    assert "Save Schedule when ready." in source
+    assert 'QAction("Add Selected Rows", self)' in source
+    assert 'QAction("Add Filtered Rows", self)' in source
+    assert 'self.edit_resource_btn = QPushButton("Edit Library Row")' in source
+    assert 'self.delete_resource_btn = QPushButton("Delete Library Rows")' in source
+
+
+def test_phase7_hf_nets_resources_use_age_not_raw_updated_timestamp() -> None:
+    source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+    table_block = source[source.index("self.resources_table.setHorizontalHeaderLabels") : source.index("self.resources_table.setEditTriggers")]
+    populate_block = source[source.index("def _refresh_resources_table") : source.index("def _update_resource_action_state")]
+
+    assert '"Age"' in table_block
+    assert '"Updated (UTC)"' not in table_block
+    assert "self._format_age_label(row.get(\"updated_utc\"))" in populate_block
+    assert "item.setToolTip(raw_updated if raw_updated else" in populate_block
 
 
 def test_phase7_hf_nets_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
@@ -262,12 +331,28 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
 
         assert tab._responsive_layout_mode == "compact"
         assert tab._net_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
+        assert tab._net_action_layout.itemAtPosition(0, 4).widget() is tab.new_source_btn
+        assert tab._net_action_layout.itemAtPosition(0, 5).widget() is tab.save_btn
+        assert tab._net_action_layout.itemAtPosition(0, 6).widget() is tab.rename_source_btn
+        assert tab._net_action_layout.itemAtPosition(0, 7).widget() is tab.delete_source_btn
         assert tab._net_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
         assert tab._net_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
         assert tab.net_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_NETNAME) == QHeaderView.Stretch
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_FREQ) == QHeaderView.ResizeToContents
+        assert tab.new_source_btn.text() == "New Schedule"
+        assert tab.rename_source_btn.text() == "Rename Schedule"
+        assert tab.move_to_resources_btn.text() == "Save Selected to Library"
+        assert tab.add_to_schedule_default_action.text() in {"Add Selected Rows", "Add Filtered Rows"}
+        assert tab.add_selected_resource_action.text() == "Add Selected Rows"
+        assert tab.add_filtered_resource_action.text() == "Add Filtered Rows"
+        assert tab.manage_resources_default_action.text() == "Import/Export"
+        assert tab.edit_resource_btn.text() == "Edit Library Row"
+        assert tab.delete_resource_btn.text() == "Delete Library Rows"
+        assert not tab.save_source_btn.isVisible()
+        assert tab.delete_source_btn.text() == "Delete Schedule"
+        assert tab.save_btn.text() == "Save Schedule"
 
         tab.resize(1400, 900)
         tab._update_net_responsive_layout()
@@ -275,6 +360,10 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
 
         assert tab._responsive_layout_mode == "wide"
         assert tab._net_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
+        assert tab._net_action_layout.itemAtPosition(0, 5).widget() is tab.new_source_btn
+        assert tab._net_action_layout.itemAtPosition(0, 6).widget() is tab.save_btn
+        assert tab._net_action_layout.itemAtPosition(0, 7).widget() is tab.rename_source_btn
+        assert tab._net_action_layout.itemAtPosition(0, 8).widget() is tab.delete_source_btn
         assert tab._net_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
         assert tab._net_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
     finally:
@@ -384,6 +473,30 @@ def test_phase7_hf_daily_uses_compact_default_with_view_edit_details() -> None:
     assert "def _apply_daily_compact_table_sizing(self, *, compact: bool) -> None:" in source
 
 
+def test_phase7_hf_daily_schedule_name_is_inline_editable() -> None:
+    source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index('self.schedule_source_label = QLabel("HF Daily Schedule:")') : source.index("resources_header = QHBoxLayout()")]
+    save_block = source[source.index("def _on_save_freqplanner_source_clicked") : source.index("def _confirm_rf_guard_source_update")]
+
+    assert "self.schedule_source_combo.setEditable(True)" in build_block
+    assert "Name or select a daily schedule" in build_block
+    assert "self._current_freqplanner_source_name()" in save_block
+    assert "_prompt_for_freqplanner_source_name" not in save_block
+    assert 'return "HF Daily Schedule"' in source
+
+
+def test_phase7_hf_daily_library_uses_age_not_raw_updated_timestamp() -> None:
+    source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    table_block = source[source.index("self.resources_table.setHorizontalHeaderLabels") : source.index("self.resources_table.setEditTriggers")]
+    populate_block = source[source.index("def _populate_schedule_resources_table") : source.index("def _update_schedule_resources_empty_state")]
+
+    assert '"Schedule"' in table_block
+    assert '"Age"' in table_block
+    assert '"Updated (UTC)"' not in table_block
+    assert "self._format_age_label(row.get(\"updated_utc\"))" in populate_block
+    assert "item.setToolTip(raw_updated if raw_updated else" in populate_block
+
+
 def test_phase7_hf_daily_view_edit_toggles_advanced_columns(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
@@ -453,13 +566,23 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
 
         assert tab._responsive_layout_mode == "compact"
         assert tab._daily_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
-        assert tab._daily_action_layout.itemAtPosition(0, 5).widget() is tab.save_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 4).widget() is tab.new_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 5).widget() is tab.rename_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 6).widget() is tab.save_source_btn
         assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.resources_resolve_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
         assert tab.schedule_source_label.text() == "HF Daily Schedule:"
+        assert tab.new_source_btn.text() == "New Schedule"
+        assert tab.rename_source_btn.text() == "Rename Schedule"
         assert tab.save_source_btn.text() == "Save / Update Schedule"
         assert tab.delete_source_btn.text() == "Delete Schedule"
         assert tab.save_btn.text() == "Assign with RF Guard"
+        assert tab.resources_set_label.text() == "Library:"
+        assert tab.resources_set_combo.itemText(0) == "All schedules"
+        assert tab.resources_group_filter.placeholderText() == "Search schedule, group, band, time..."
+        assert tab.add_to_schedule_default_action.text() == "Add Selected Rows"
+        assert tab.add_selected_resource_action.text() == "Add Selected Rows"
+        assert tab.add_filtered_resource_action.text() == "Add Filtered Rows"
         assert tab.move_to_resources_btn.isHidden() is True
         assert tab.resources_delete_btn.isHidden() is True
         assert tab.daily_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
@@ -472,7 +595,9 @@ def test_phase7_hf_daily_action_rows_reflow_at_compact_width(monkeypatch, tmp_pa
 
         assert tab._responsive_layout_mode == "wide"
         assert tab._daily_action_layout.itemAtPosition(0, 2).widget() is tab.schedule_source_combo
-        assert tab._daily_action_layout.itemAtPosition(0, 6).widget() is tab.save_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 5).widget() is tab.new_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 6).widget() is tab.rename_source_btn
+        assert tab._daily_action_layout.itemAtPosition(0, 7).widget() is tab.save_source_btn
         assert tab._daily_action_layout.itemAtPosition(1, 3).widget() is tab.resources_resolve_btn
         assert tab._daily_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
     finally:
@@ -1133,6 +1258,18 @@ def test_phase7_station_health_keeps_refresh_out_of_title_header() -> None:
     assert "action_row.addWidget(self.refresh_btn" in action_block
 
 
+def test_phase7_station_health_accepts_runtime_observability_provider() -> None:
+    source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "set_runtime_item_provider" in source
+    assert "extra_items=runtime_items" in source
+    assert "job_status_snapshot()" in main_source
+    assert "get_status_poll_metrics()" in main_source
+    assert "JS8ApiClientRegistry.status_dicts()" in main_source
+    assert "runtime_observability_items(" in main_source
+
+
 def test_phase7_map_hides_legacy_visible_plan_context_prose() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("self._map_support_card = QFrame")]
@@ -1196,11 +1333,16 @@ def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() 
     source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("self.frequency_plan_summary_label")]
     header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("layout.addLayout(header)")]
-    plan_block = build_block[build_block.index("plan_workspace = QHBoxLayout()") :]
+    plan_block = build_block[build_block.index("plan_workspace = QVBoxLayout()") :]
 
     assert "header.addWidget(self.time_toggle_btn)" not in header_block
     assert "self.plan_context_label.setVisible(False)" in build_block
-    assert "plan_workspace.addWidget(self.time_toggle_btn)" in plan_block
+    assert "view_workspace.addWidget(self.time_toggle_btn)" in plan_block
+    assert "plan_select_row.addWidget(self.save_plan_btn)" in plan_block
+    assert "source_workspace.addWidget(self.save_sop_plan_btn)" in plan_block
+    assert "source_workspace.addWidget(self.build_sop_layer_btn)" in plan_block
+    assert "view_workspace.addWidget(self.review_rf_guard_btn)" in plan_block
+    assert "view_workspace.addWidget(self.assign_plan_btn)" in plan_block
 
 
 def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
@@ -1245,6 +1387,7 @@ def test_phase7_controlfreq_restores_wide_splitter_sizes_after_compact(monkeypat
     app = QApplication.instance() or QApplication([])
 
     from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHeaderView
 
     from freqinout.gui import controlfreq_tab as controlfreq_mod
 
@@ -1350,6 +1493,15 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_suspend_btn.setObjectName("stationCommandSuspend")' in source
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
     assert 'self.station_command_duration_combo.setObjectName("stationCommandDuration")' in source
+    assert 'self.station_command_radio_summary_label = QLabel("Radios")' in source
+    assert 'self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)' in source
+    assert 'self.station_command_radio_summary_scroll.setWidgetResizable(True)' in source
+    assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
+    assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
+    assert "def _refresh_station_command_radio_summary(self, choices: list[object], selected_id: int) -> None:" in source
+    assert "def _refresh_station_command_radio_admin(self, choices: list[object], selected_id: int) -> None:" in source
+    assert "self._refresh_station_command_radio_summary(choices, selected_id)" in source
+    assert "self._refresh_station_command_radio_admin(choices, selected_id)" in source
     assert "refresh_hold_duration_combo(self.station_command_duration_combo, self.settings, self._active_runtime_profile)" in source
     assert "Duration for QSY Suspend." in source
     assert "self.station_command_layout = QGridLayout(self.station_command_bar)" in source
@@ -1368,6 +1520,10 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "layout.addWidget(self.station_command_health_label, 1, 0)" in source
     assert "layout.addWidget(self.station_command_health_widget, 1, 1)" in source
     assert "layout.addWidget(self.station_command_next_label, 1, 3, 1, 7)" in source
+    assert "layout.addWidget(self.station_command_radio_summary_label, 2, 0)" in source
+    assert "layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 10)" in source
+    assert "layout.addWidget(self.station_command_radio_admin_btn, 2, 11, 1, 2)" in source
+    assert "layout.addWidget(self.station_command_radio_admin_panel, 3, 0, 1, 13)" in source
     assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert 'self.station_command_health_label = QLabel("Health:")' in source
@@ -1413,6 +1569,27 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_health_widget.mousePressEvent = self._on_station_command_health_clicked" in source
 
 
+def test_main_window_compacts_rf_guard_unknown_peer_reason() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "def _rf_guard_status_reason" in source
+    assert 'return f"RF Guard: verify {peer_name}"' in source
+    assert 'return f"RF Guard: {peer_name}"' in source
+    assert "rf_conflict_peer_status_unknown" in source
+    assert "rf_conflict_peer_status_stale" in source
+
+
+def test_main_window_surfaces_stale_companion_status_compactly() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "scheduler_companion_status = scheduler.get_status_summary(live=False, refresh=False)" in source
+    assert "scheduler_companion_status=scheduler_companion_status" in source
+    assert "js8_status_stale = bool(status.get(\"js8_status_stale\"))" in source
+    assert "varac_status_stale = bool(status.get(\"varac_status_stale\"))" in source
+    assert 'reasons.append("Verify JS8Call")' in source
+    assert 'reasons.append("Verify VarAC")' in source
+
+
 def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
@@ -1442,6 +1619,14 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
     window.station_command_hold_btn = QPushButton("QSY Suspend")
     window.station_command_suspend_btn = QPushButton("Suspend Scheduler")
     window.station_command_resume_btn = QPushButton("Resume Schedule")
+    window.station_command_radio_summary_label = QLabel("Radios")
+    window.station_command_radio_summary_scroll = QScrollArea()
+    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
+    window.station_command_radio_summary_scroll.setWidget(window.station_command_radio_summary_widget)
+    window.station_command_radio_admin_btn = QPushButton("All Radios")
+    window.station_command_radio_admin_panel = QWidget()
+    window.station_command_radio_admin_layout = QVBoxLayout(window.station_command_radio_admin_panel)
 
     try:
         window.station_command_bar.resize(900, 120)
@@ -1462,6 +1647,10 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(3, 0).widget() is window.station_command_health_label
         assert window.station_command_layout.itemAtPosition(3, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(3, 2).widget() is window.station_command_next_label
+        assert window.station_command_layout.itemAtPosition(4, 0).widget() is window.station_command_radio_summary_label
+        assert window.station_command_layout.itemAtPosition(4, 1).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(4, 4).widget() is window.station_command_radio_admin_btn
+        assert window.station_command_layout.itemAtPosition(5, 0).widget() is window.station_command_radio_admin_panel
 
         window.station_command_bar.resize(1300, 120)
         MainWindow._apply_station_command_bar_layout(window)
@@ -1483,6 +1672,10 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(1, 0).widget() is window.station_command_health_label
         assert window.station_command_layout.itemAtPosition(1, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(1, 3).widget() is window.station_command_next_label
+        assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_radio_summary_label
+        assert window.station_command_layout.itemAtPosition(2, 1).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(2, 11).widget() is window.station_command_radio_admin_btn
+        assert window.station_command_layout.itemAtPosition(3, 0).widget() is window.station_command_radio_admin_panel
     finally:
         window.station_command_bar.deleteLater()
         app.processEvents()
@@ -1667,23 +1860,97 @@ def test_phase7_dropdown_checklist_summarizes_multi_select(monkeypatch) -> None:
         app.processEvents()
 
 
+def test_phase7_dropdown_checklist_supports_grouped_sections(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.dropdown_checklist import DropdownChecklist
+
+    widget = DropdownChecklist("Operating Group")
+    try:
+        widget.set_grouped_options(
+            [
+                ("Configured Groups", [("MAGNET", "MAGNET (Configured)")]),
+                ("Other CommStat Groups", [("MR08", "MR08 (Other CommStat)"), ("MR09", "MR09 (Other CommStat)")]),
+            ]
+        )
+
+        header_widgets = [
+            action.defaultWidget()
+            for action in widget.menu().actions()
+            if hasattr(action, "defaultWidget") and action.defaultWidget() is not None
+        ]
+        assert any("Configured Groups" in child.text() for w in header_widgets for child in w.findChildren(QLabel))
+        assert any("Other CommStat Groups" in child.text() for w in header_widgets for child in w.findChildren(QLabel))
+        other_buttons = [
+            child
+            for w in header_widgets
+            for child in w.findChildren(QPushButton)
+            if child.text() in {"All", "None"}
+        ]
+        assert {btn.text() for btn in other_buttons} == {"All", "None"}
+        clear_other = next(btn for btn in other_buttons if btn.text() == "None")
+        assert widget.text() == "Operating Group: All"
+        assert widget.selected_values() == {"MAGNET", "MR08", "MR09"}
+
+        clear_other.click()
+
+        assert widget.selected_values() == {"MAGNET"}
+        assert widget.text() == "Operating Group: 1 selected"
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_messages_workspace_filters_are_below_title_without_context_sentence() -> None:
     source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
 
     assert 'self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")' in source
     assert 'self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")' in source
+    assert 'inbox_body.setObjectName("messagesInboxBody")' in source
+    assert "MESSAGE_INBOX_BODY_MIN_WIDTH = 1320" in source
+    assert "inbox_body.setMinimumWidth(MESSAGE_INBOX_BODY_MIN_WIDTH)" in source
+    assert "inbox_body.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)" in source
+    assert 'self.inbox_body_scroll.setObjectName("messagesInboxBodyScroll")' in source
+    assert "self.inbox_body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
+    assert "self.inbox_body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
+    assert "self.messages_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.inbox_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.inbox_controls_panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))" in source
-    assert 'self.operating_group_filter = DropdownChecklist("Operating Group")' in source
-    assert 'self.source_filter = DropdownChecklist("Sources")' in source
+    assert 'self.operating_group_filter = DropdownChecklist("")' in source
+    assert 'self.source_filter = DropdownChecklist("Source")' in source
     assert 'self._make_combo_searchable(self.type_filter, "Message Type")' in source
     assert 'self.operating_group_filter.setObjectName("messageOperatingGroupFilter")' in source
     assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
+    assert 'self.message_funnel_widget.setObjectName("messageInboxFunnelBar")' in source
+    assert "MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 1260" in source
+    assert "self.message_funnel_widget.setMinimumWidth(MESSAGE_INBOX_FUNNEL_MIN_WIDTH)" in source
+    assert "self.message_funnel_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in source
+    assert "funnel_layout.addWidget(self.operating_group_filter, 2)" in source
+    assert "funnel_layout.addWidget(self.source_filter, 2)" in source
+    assert "self.received_filter.setFixedWidth(180)" in source
+    assert "self.advanced_filters_btn.setMinimumWidth(140)" in source
+    assert "funnel_layout.addWidget(self.received_filter)" in source
+    assert "funnel_layout.addWidget(self.advanced_filters_btn)" in source
     assert "self._inbox_actions_layout = QGridLayout()" in source
     assert "(self.inbox_actions_heading, 0, 0, 1, 2)" in source
-    assert "(self.type_filter, 8, 1)" in source
-    assert "(self.operating_group_filter, 12, 0, 1, 2)" in source
-    assert "(self.source_filter, 13, 0, 1, 2)" in source
+    assert '(self.inbox_actions_heading = QLabel("Inbox Tools")' not in source
+    assert 'self.inbox_actions_heading = QLabel("Inbox Tools")' in source
+    assert 'self.more_actions_btn = QPushButton("More Actions")' in source
+    assert 'self.more_actions_menu.addAction("Select Matching Rows")' not in source
+    assert 'self.more_actions_menu.addMenu("Select Older Than")' not in source
+    assert 'self.more_actions_menu.addAction("Clear Selection")' not in source
+    assert 'self.more_actions_menu.addAction("Delete Selected")' not in source
+    assert "(self.refresh_btn, 1, 0)" in source
+    assert "(self.message_check_combo, 1, 1)" in source
+    assert "(self.type_filter, 4, 1)" in source
+    assert "(self.operating_group_filter, 12, 0, 1, 2)" not in source
+    assert "(self.source_filter, 13, 0, 1, 2)" not in source
+    assert "(self.advanced_filters_btn, 6, 0, 1, 2)" not in source
+    assert "MESSAGE_INBOX_FOCUS_MIN_WIDTH = 980" in source
+    assert "self.inbox_focus_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in source
+    assert "self.inbox_focus_widget.setVisible(not compose_active)" in source
+    assert "self.message_funnel_widget.setVisible(not compose_active)" in source
     assert "self.messages_header.setVisible(False)" in source
     assert 'fallback_text="Messages uses the current radio and Frequency Plan context' not in source
     assert "self.plan_context_label.setVisible(False)" in source
@@ -1738,12 +2005,28 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
     try:
         assert tab.inbox_controls_panel.objectName() == "messagesInboxControlPanel"
         assert tab.inbox_controls_scroll.objectName() == "messagesInboxControlScroll"
+        assert tab.inbox_body.objectName() == "messagesInboxBody"
+        assert tab.inbox_body.minimumWidth() >= 980
+        assert tab.inbox_body_scroll.objectName() == "messagesInboxBodyScroll"
+        assert tab.inbox_body_scroll.widget() is tab.inbox_body
+        assert tab.inbox_body_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.inbox_body_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.message_funnel_widget.objectName() == "messageInboxFunnelBar"
         assert tab.inbox_controls_scroll.widget() is tab.inbox_controls_panel
         assert tab.inbox_controls_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.inbox_controls_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert tab.messages_table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.inbox_body.minimumWidth() >= 1320
+        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.message_funnel_widget.minimumWidth() >= 1260
+        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.inbox_focus_widget.minimumWidth() >= 980
+        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
         assert tab.compose_open_source_btn.text() == "Open Form Folder"
         assert tab.type_filter.isEditable()
         assert tab.messages_header.isVisible() is False
+        assert tab.show_all_message_groups_chk.isCheckable()
+        assert tab.show_all_message_groups_chk.text() == "Configured"
 
         tab.show_compose_from_navigation()
         app.processEvents()
@@ -1771,8 +2054,15 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         tab._message_rows = rows
         tab._refresh_message_filters(rows)
 
-        assert tab.source_filter.text() == "Sources: All"
-        assert tab.operating_group_filter.text() == "Operating Group: All"
+        assert tab.source_filter.text() == "Source: All"
+        assert tab.operating_group_filter.text() == "All"
+        assert tab._is_filter_active() is False
+        assert tab._filters_active() is False
+        tab.show_all_message_groups_chk.setChecked(True)
+        app.processEvents()
+        assert tab.show_all_message_groups_chk.text() == "All Groups"
+        source_values = {value for value, _label in tab._message_source_options([])}
+        assert {"js8", "varac"} <= source_values
         assert tab._row_matches_workspace_filters(rows[0]) is True
 
         tab.source_filter.set_selected_values(["sitrep"])
@@ -1787,6 +2077,8 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         tab.source_filter.set_selected_values(["sitrep"])
         tab.operating_group_filter.set_selected_values(["HF NETS"])
 
+        assert tab._is_filter_active() is True
+        assert tab._filters_active() is True
         assert tab._row_matches_workspace_filters(rows[1]) is True
         assert tab._row_matches_workspace_filters(rows[2]) is False
 
@@ -1794,6 +2086,68 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
 
         assert tab.source_filter.all_selected() is True
         assert tab.operating_group_filter.all_selected() is True
+        assert tab.show_all_message_groups_chk.text() == "Configured"
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_messages_group_filter_prioritizes_configured_groups_without_callsigns(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import message_viewer_tab as msg_mod
+
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_clock_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_js8_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_pending_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_setup_bbs_auto_archive_timer", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_initial_refresh", lambda self: None)
+    monkeypatch.setattr(msg_mod.MessageViewerTab, "_refresh_compose_forms", lambda self: None)
+
+    tab = msg_mod.MessageViewerTab()
+    try:
+        monkeypatch.setattr(tab, "_configured_message_group_names", lambda: {"MAGNET", "S2 UNDERGROUND"})
+        monkeypatch.setattr(
+            tab,
+            "_commstat_group_state",
+            lambda: SimpleNamespace(
+                active_groups=["MR08"],
+                configured_groups=["MR08", "MR09", "W0IFM", "W9BVM"],
+            ),
+        )
+        rows = [
+            msg_mod.UnifiedMessage("SitRep", "INFO", "K7ETC", "MAGNET", 5, "5", "CommStat", "commstat", SimpleNamespace()),
+            msg_mod.UnifiedMessage("SitRep", "INFO", "K7ETC", "MR08", 4, "4", "CommStat", "commstat", SimpleNamespace()),
+            msg_mod.UnifiedMessage("SitRep", "INFO", "K7ETC", "MR09", 3, "3", "CommStat", "commstat", SimpleNamespace()),
+            msg_mod.UnifiedMessage("SitRep", "INFO", "K7ETC", "W0IFM", 2, "2", "CommStat", "commstat", SimpleNamespace()),
+            msg_mod.UnifiedMessage("SitRep", "INFO", "K7ETC", "W9BVM>", 1, "1", "CommStat", "commstat", SimpleNamespace()),
+        ]
+        tab._message_rows = rows
+        tab._inbox_focus = "commstat"
+        tab._refresh_workspace_filter_options(rows)
+
+        focused_sections = tab._message_group_option_sections(rows)
+        assert focused_sections[0][0] == "Configured Groups"
+        assert focused_sections[0][1] == [("MAGNET", "MAGNET")]
+        assert focused_sections[1] == ("CommStat Active Groups", [("MR08", "MR08")])
+        focused_options = {value for _section, options in focused_sections for value, _label in options}
+        assert "S2 UNDERGROUND" not in focused_options
+        assert "MR09" not in focused_options
+        assert "W0IFM" not in focused_options
+        assert "W9BVM" not in focused_options
+
+        tab.show_all_message_groups_chk.setChecked(True)
+        app.processEvents()
+
+        expanded_sections = tab._message_group_option_sections(rows)
+        expanded_options = {value for _section, options in expanded_sections for value, _label in options}
+        assert "MR09" in expanded_options
+        assert "W0IFM" not in expanded_options
+        assert "W9BVM" not in expanded_options
+        assert tab.operating_group_filter.selected_values() == {"MAGNET", "MR08"}
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -1825,11 +2179,25 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         compact_layout = tab._inbox_actions_layout
         assert tab._responsive_layout_mode == "compact"
         assert compact_layout.itemAtPosition(0, 0).widget() is tab.inbox_actions_heading
-        assert compact_layout.itemAtPosition(8, 1).widget() is tab.type_filter
-        assert compact_layout.itemAtPosition(12, 0).widget() is tab.operating_group_filter
-        assert compact_layout.itemAtPosition(16, 0).widget() is tab.inbox_check_label
-        assert compact_layout.itemAtPosition(18, 0).widget() is tab.inbox_bbs_heading
+        assert tab.inbox_actions_heading.text() == "Inbox Tools"
+        assert tab.more_actions_btn.text() == "More Actions"
+        assert compact_layout.itemAtPosition(1, 0).widget() is tab.refresh_btn
+        assert compact_layout.itemAtPosition(1, 1).widget() is tab.message_check_combo
+        assert compact_layout.itemAtPosition(4, 1).widget() is tab.type_filter
+        assert compact_layout.itemAtPosition(10, 0).widget() is tab.inbox_bbs_heading
+        assert tab.mark_all_read_btn.parentWidget() is None
+        assert tab.advanced_filters_btn.parentWidget() is tab.message_funnel_widget
+        assert tab.operating_group_filter.parentWidget() is tab.message_funnel_widget
+        assert tab.source_filter.parentWidget() is tab.message_funnel_widget
         assert tab.compose_splitter.orientation() == Qt.Vertical
+        tab._set_message_table_display_profile("field_report")
+        header = tab.messages_table.horizontalHeader()
+        assert header.sectionResizeMode(1) == QHeaderView.Stretch
+        assert header.sectionResizeMode(6) == QHeaderView.Interactive
+        assert tab.messages_table.columnWidth(1) >= 280
+        assert tab.messages_table.columnWidth(5) <= 120
+        assert tab.messages_table.columnWidth(6) <= 90
+        assert tab.messages_table.minimumWidth() >= 930
 
         tab.resize(900, 560)
         tab.show()
@@ -1837,6 +2205,19 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         app.processEvents()
         assert tab.inbox_controls_panel.minimumHeight() >= 420
         assert tab.inbox_controls_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.inbox_body_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.inbox_body.minimumWidth() >= 1320
+        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.message_funnel_widget.minimumWidth() >= 1260
+        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.inbox_focus_widget.minimumWidth() >= 980
+        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.operating_group_filter.minimumWidth() >= 220
+        assert tab.source_filter.minimumWidth() >= 220
+        assert tab.show_all_message_groups_chk.minimumWidth() >= 112
+        assert tab.advanced_filters_btn.minimumWidth() >= 140
+        assert tab._inbox_focus_buttons["forms"].minimumWidth() >= 120
+        assert tab._inbox_focus_buttons["commstat"].minimumWidth() >= 100
         assert tab.refresh_btn.minimumHeight() >= 24
         assert tab.type_filter.minimumHeight() >= 24
 
@@ -1847,10 +2228,20 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         wide_layout = tab._inbox_actions_layout
         assert tab._responsive_layout_mode == "wide"
         assert wide_layout.itemAtPosition(0, 0).widget() is tab.inbox_actions_heading
-        assert wide_layout.itemAtPosition(8, 1).widget() is tab.type_filter
-        assert wide_layout.itemAtPosition(12, 0).widget() is tab.operating_group_filter
-        assert wide_layout.itemAtPosition(16, 0).widget() is tab.inbox_check_label
-        assert wide_layout.itemAtPosition(18, 0).widget() is tab.inbox_bbs_heading
+        assert wide_layout.itemAtPosition(1, 0).widget() is tab.refresh_btn
+        assert wide_layout.itemAtPosition(1, 1).widget() is tab.message_check_combo
+        assert wide_layout.itemAtPosition(4, 1).widget() is tab.type_filter
+        assert wide_layout.itemAtPosition(10, 0).widget() is tab.inbox_bbs_heading
+        tab._set_message_table_display_profile("form_message")
+        assert header.sectionResizeMode(1) == QHeaderView.Stretch
+        assert header.sectionResizeMode(6) == QHeaderView.Interactive
+        assert tab.messages_table.columnWidth(1) >= 420
+        assert tab.messages_table.columnWidth(6) <= 90
+        assert tab.messages_table.minimumWidth() >= 960
+        tab._set_message_table_display_profile("intel_report")
+        assert header.sectionResizeMode(1) == QHeaderView.Stretch
+        assert tab.messages_table.columnWidth(1) >= 180
+        assert tab.messages_table.columnWidth(5) <= 120
         assert tab.compose_splitter.orientation() == Qt.Horizontal
     finally:
         tab.deleteLater()
@@ -1980,6 +2371,8 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
     window.station_command_health_leds = {}
     window.station_command_health_text_labels = {}
+    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
     window.settings = FakeSettings()
     window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
     window.scheduler = SimpleNamespace(current_schedule_entry={"frequency": "14.115", "group": "MAGNET", "band": "20M"})
@@ -2002,6 +2395,13 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert window.station_command_now_label.toolTip() == "MAGNET 20M: 14.115.000 20M"
     assert window.station_command_state_label.text() == "Manual Hold"
     assert window.station_command_next_label.text() == "Next: Plan: Net Plan"
+    summary_buttons = window.station_command_radio_summary_widget.findChildren(QPushButton)
+    assert [button.text() for button in summary_buttons] == [
+        "DX10 | MAGNET 40M",
+        "icom | MAGNET 20M | Manual Hold",
+        "Spare Rig | unavailable | Configured inactive",
+    ]
+    assert [button.isChecked() for button in summary_buttons] == [False, True, False]
     assert window.station_command_qsy_btn.isEnabled() is True
     assert window.station_command_freq_combo.currentText() == "MAGNET 20M"
     assert window.station_command_freq_combo.itemData(
@@ -2039,8 +2439,72 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
         window.station_command_resume_btn,
         window.station_command_health_widget,
         window.station_command_health_label,
+        window.station_command_radio_summary_widget,
     ):
         widget.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_station_command_all_radio_admin_opens_assignment_for_radio(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeSettings:
+        def all(self):
+            return {"operating_groups": []}
+
+        def get(self, _key, default=None):
+            return default
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window._station_command_radio_admin_expanded = True
+    window.station_command_radio_admin_panel = QWidget()
+    window.station_command_radio_admin_layout = QVBoxLayout(window.station_command_radio_admin_panel)
+    window.station_command_radio_admin_btn = QPushButton("All Radios")
+    opened: list[tuple] = []
+    assigned: list[tuple] = []
+    window.open_settings_section = lambda *args, **kwargs: opened.append((args, kwargs))
+    window.settings_tab = SimpleNamespace(
+        open_schedule_assignment_editor=lambda **kwargs: assigned.append(tuple(sorted(kwargs.items())))
+    )
+    window._open_station_health_detail = lambda **_kwargs: None
+    window._activate_station_command_radio = lambda _ident: True
+    window._refresh_station_command_bar = lambda *args, **kwargs: None
+
+    snapshots = [
+        SimpleNamespace(
+            device_profile_id=7,
+            name="FIO-B",
+            current_frequency_label="7.115 MHz",
+            current_band="40M",
+            current_group="MAGNET",
+            status_summary="On Schedule",
+            assigned_frequency_plan_name="Magnet Main Plan",
+            scheduler_enabled=True,
+            runtime_active=True,
+            ptt_active=False,
+            shared_ptt_blocked=False,
+        )
+    ]
+
+    try:
+        MainWindow._refresh_station_command_radio_admin(window, snapshots, 0)
+        rows = window.station_command_radio_admin_panel.findChildren(QFrame, "stationCommandRadioAdminRow")
+        assert len(rows) == 1
+        buttons = rows[0].findChildren(QPushButton)
+        assert [button.text() for button in buttons] == ["Select", "Assign Plan", "Health"]
+
+        buttons[1].click()
+        app.processEvents()
+
+        assert opened == [(("schedule_assignments",), {"radio_id": 7, "settings_nav_context": "radios"})]
+        assert assigned == [((("device_profile_id", 7),))]
+    finally:
+        window.station_command_radio_admin_panel.deleteLater()
+        window.station_command_radio_admin_btn.deleteLater()
         app.processEvents()
 
 
@@ -2283,6 +2747,52 @@ def test_phase7_station_command_qsy_target_refresh_preserves_operator_selection(
     assert window.station_command_freq_combo.currentData()["group"] == "S2 UNDERGROUND"
 
     window.station_command_freq_combo.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_command_now_ignores_other_radio_scheduler_entry(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "AMRRON", "band": "40M", "mode": "Digi", "frequency": "7.110"},
+                    {"group": "MAGNET", "band": "40M", "mode": "Digi", "frequency": "7.115"},
+                ]
+            }
+
+    class FakeScheduler:
+        current_source = "HF"
+        current_schedule_entry = {
+            "target_device_profile_id": 2,
+            "frequency": "7.110",
+            "group": "AMRRON",
+            "band": "40M",
+            "mode": "Digi",
+        }
+
+        def _primary_manual_control_radio_id(self):
+            return 2
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.scheduler = FakeScheduler()
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_selected_profile_id = 1
+    snapshot = SimpleNamespace(
+        device_profile_id=1,
+        current_frequency_label="7.115 MHz",
+        current_band="40M",
+        current_group="MAGNET",
+    )
+
+    assert MainWindow._station_command_now_text(window, snapshot) == "MAGNET 40M"
+
     app.processEvents()
 
 

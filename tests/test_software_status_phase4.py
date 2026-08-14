@@ -572,10 +572,12 @@ def test_js8_shadow_comparison_status_reuses_native_shadow_cache(monkeypatch):
             return bool(self.supported.get(str(command or "").strip().upper(), False))
 
     class FakeJS8Client:
+        init_count = 0
         probe_count = 0
         request_count = 0
 
         def __init__(self, endpoint, **_kwargs):
+            type(self).init_count += 1
             self.endpoint = endpoint
             self.last_error = ""
 
@@ -615,6 +617,7 @@ def test_js8_shadow_comparison_status_reuses_native_shadow_cache(monkeypatch):
     )
 
     assert FakeJS8Client.probe_count == 1
+    assert FakeJS8Client.init_count == 1
     assert first["native"]["busy"] is True
     assert second["native"]["busy"] is True
     assert second["comparisons"]["busy"]["legacy"] is False

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,30 @@ def test_scheduler_stop_disconnects_qt_callbacks_and_start_reconnects(monkeypatc
 
         assert engine._timer_connected is True
         assert engine._scheduler_thread_call_connected is True
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_exposes_status_poll_metrics(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=60_000)
+    try:
+        engine._status_poll_coordinator.get_snapshot(
+            "scheduler:primary:rig_frequency",
+            lambda: {"frequency_hz": 7_115_000},
+        )
+        engine._status_poll_coordinator.get_snapshot(
+            "scheduler:primary:rig_frequency",
+            lambda: {"frequency_hz": 14_115_000},
+        )
+
+        metrics = engine.get_status_poll_metrics()
+
+        assert metrics["snapshot_count"] == 1
+        assert metrics["polls_started"] == 1
+        assert metrics["polls_succeeded"] == 1
+        assert metrics["cache_hits"] == 1
     finally:
         _shutdown_engine(engine)
 
@@ -427,6 +452,84 @@ def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_sta
         _shutdown_engine(engine)
 
 
+def test_scheduler_status_summary_surfaces_stale_companion_status(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=60_000)
+    try:
+        monkeypatch.setattr(engine, "_maybe_refresh_external_status_snapshot", lambda *, force=False: None)
+        engine._last_js8_status_stale = True
+        engine._last_js8_status_detail = "JS8Call API timeout"
+        engine._last_varac_status_stale = True
+        engine._last_varac_status_detail = "VarAC log scan is stale"
+
+        status = engine.get_status_summary(live=False)
+
+        assert status["js8_status_stale"] is True
+        assert status["js8_status_detail"] == "JS8Call API timeout"
+        assert status["varac_status_stale"] is True
+        assert status["varac_status_detail"] == "VarAC log scan is stale"
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_status_summary_can_be_read_without_refreshing_companions(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=60_000)
+    try:
+        calls: list[bool] = []
+        monkeypatch.setattr(engine, "_maybe_refresh_external_status_snapshot", lambda *, force=False: calls.append(bool(force)))
+
+        status = engine.get_status_summary(live=False, refresh=False)
+
+        assert isinstance(status, dict)
+        assert calls == []
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_rf_guard_merge_preserves_peer_verify_status() -> None:
+    local_guard = {
+        "warning": True,
+        "guard_mode": "block",
+        "blocked": True,
+        "summary": "RF Safety Guard: antenna block.",
+        "detail": "Local antenna group blocks 40M.",
+        "signature": "local|block",
+    }
+    peer_guard = {
+        "warning": True,
+        "guard_mode": "block",
+        "blocked": True,
+        "summary": "RF Guard: verify FIO-B",
+        "detail": "FIO-B shares NORTH MAST.",
+        "signature": "peer|unknown|block",
+        "peer_name": "FIO-B",
+        "peer_status_unknown": True,
+        "peer_status_stale": False,
+        "peer_status_detail": "peer status is unknown",
+    }
+
+    merged = SchedulerEngine._strictest_coordination_conflict_status(local_guard, peer_guard)
+
+    assert merged["blocked"] is True
+    assert merged["peer_name"] == "FIO-B"
+    assert merged["peer_status_unknown"] is True
+    assert merged["peer_status_stale"] is False
+    assert merged["peer_status_detail"] == "peer status is unknown"
+    assert "Local antenna group blocks 40M." in merged["detail"]
+    assert "FIO-B shares NORTH MAST." in merged["detail"]
+
+
+def test_scheduler_background_status_clears_js8_stale_when_js8_not_relevant() -> None:
+    source = Path("freqinout/core/scheduler_engine.py").read_text(encoding="utf-8")
+    js8_block = source[source.index('if control_mode == "JS8CALL" or js8_offset_check_active:') : source.index("return out", source.index('if control_mode == "JS8CALL" or js8_offset_check_active:'))]
+
+    assert 'else:\n                    out["js8_status_stale"] = False' in js8_block
+    assert 'out["js8_status_detail"] = ""' in js8_block
+
+
 def test_scheduler_blocks_schedule_transition_for_unsupported_antenna_band(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
@@ -701,6 +804,68 @@ def test_scheduler_peer_block_wins_over_local_antenna_warning(monkeypatch, tmp_p
         assert status["rf_conflict_warning"] is True
         assert status["rf_conflict_summary"] == "RF Safety Guard: Protected Receiver blocks same-band overlap."
         assert "Prevent Band Overlap group NORTH MAST" in status["rf_conflict_detail"]
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_status_summary_surfaces_unknown_rf_guard_peer(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
+    assert primary is not None
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 14_070_000
+
+        def get_ptt(self):
+            return False
+
+    class _Manager:
+        def evaluate_primary_rf_conflict(self, *, target_band="", target_frequency_hz=None, source="", force=False):
+            return SimpleNamespace(
+                peer_device_profile_id=22,
+                peer_name="Unverified Peer",
+                peer_band="",
+                peer_frequency_hz=None,
+                target_band=target_band,
+                target_frequency_hz=target_frequency_hz,
+                same_band=False,
+                same_frequency=False,
+                shared_antenna_groups=[],
+                shared_amplifier_groups=[],
+                shared_frontend_groups=[],
+                shared_band_overlap_groups=["NORTH MAST"],
+                shared_advanced_frequency_groups=[],
+                guard_mode="block",
+                blocked=True,
+                summary="RF conflict: Unverified Peer on unverified peer tuning for target 40M.",
+                detail="FIO cannot verify that radio's current frequency.",
+                signature="1|HF|40M|7078000|22|NORTH-MAST|peer_unknown|block",
+                peer_status_unknown=True,
+                peer_status_stale=False,
+                peer_status_detail="peer status is unknown",
+            )
+
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None, station_runtime_manager=_Manager())
+    try:
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(engine, "_js8_busy_ok", lambda: True)
+        monkeypatch.setattr(engine, "_varac_busy_ok", lambda status=None: True)
+        monkeypatch.setattr(engine, "_should_delay_for_fldigi", lambda **kwargs: (False, None))
+        monkeypatch.setattr(engine, "_net_corrections_suppressed", lambda: False)
+
+        engine._apply_schedule_entry({"frequency": "7.078", "band": "40M", "mode": "Digi", "vfo": "A"}, "HF")
+
+        status = engine.get_status_summary()
+        assert status["rf_conflict_warning"] is True
+        assert status["rf_conflict_peer_name"] == "Unverified Peer"
+        assert status["rf_conflict_peer_status_unknown"] is True
+        assert status["rf_conflict_peer_status_stale"] is False
+        assert status["rf_conflict_peer_status_detail"] == "peer status is unknown"
     finally:
         _shutdown_engine(engine)
 

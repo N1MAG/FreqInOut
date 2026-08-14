@@ -65,7 +65,7 @@ def test_operational_projection_builds_side_by_side_group_sop_and_resource_lanes
 
     lanes = {lane.lane_key: lane for lane in projection.lanes}
     assert set(lanes) == {"group:OPS", "sop:7", "group:AUX"}
-    assert projection.source_refs() == ["hf_daily", "hf_nets", "net_resources", "sop"]
+    assert projection.source_refs() == ["hf_daily", "hf_nets", "net_resources", "sop", "sop_schedule_layer:7"]
     assert "40M:7.110" in projection.frequency_refs()
     assert set(projection.group_refs()) == {"OPS", "COUNTY", "AUX"}
 
@@ -273,7 +273,7 @@ def test_operational_projection_payload_saves_as_sop_schedule_plan(tmp_path) -> 
     assert refs[0]["source"] == "SOP"
     assert refs[0]["lane_key"] == "sop:7"
     assert refs[0]["action_label"] == "Call NCS"
-    assert json.loads(str(saved["source_refs_json"])) == ["sop"]
+    assert json.loads(str(saved["source_refs_json"])) == ["sop", "sop_schedule_layer:7"]
 
 
 def test_operational_projection_from_saved_refs_preserves_plan_ref_index() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -127,6 +128,106 @@ def test_commstat3_plain_message_becomes_first_class_message(tmp_path: Path) -> 
             "INFO",
             "General advisory update for station staffing and local conditions.",
         )
+    finally:
+        local_conn.close()
+
+
+def test_commstat3_plain_rf_message_keeps_js8_text_provenance_without_statrep_projection(tmp_path: Path) -> None:
+    source_db = tmp_path / "traffic.db3"
+    _create_commstat3_db(source_db)
+    conn = sqlite3.connect(source_db)
+    try:
+        conn.execute(
+            """
+            INSERT INTO messages(datetime, date, freq, db, source, msg_id, from_callsign, target, message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-05-01 10:01:00",
+                "2026-05-01",
+                7110000.0,
+                30,
+                1,
+                "M101",
+                "N0DDK",
+                "@MAGNET",
+                "Plain JS8 traffic that is not a StatRep form.",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    local_conn = sqlite3.connect(":memory:")
+    try:
+        _ensure_local_tables(local_conn)
+        stats = _ingest_commstat3(local_conn, source_db, max_rows=50)
+        assert stats["rows_scanned"] == 1
+        assert stats["events_inserted"] == 0
+        assert local_conn.execute("SELECT COUNT(*) FROM sitrep_source_events").fetchone()[0] == 0
+
+        row = local_conn.execute(
+            """
+            SELECT artifact_kind, transport_mode, reach_mode, origin_path, body_text, payload_json
+            FROM commstat_artifacts
+            """
+        ).fetchone()
+        assert row[:5] == (
+            "MESSAGE",
+            "js8",
+            "rf_observed",
+            "rf",
+            "Plain JS8 traffic that is not a StatRep form.",
+        )
+        payload = json.loads(row[5])
+        assert payload["reach_mode"] == "rf_observed"
+        assert payload["origin_path"] == "rf"
+    finally:
+        local_conn.close()
+
+
+def test_commstat3_plain_js8_relay_message_keeps_route_provenance_without_group_promotion(tmp_path: Path) -> None:
+    source_db = tmp_path / "traffic.db3"
+    _create_commstat3_db(source_db)
+    conn = sqlite3.connect(source_db)
+    try:
+        conn.execute(
+            """
+            INSERT INTO messages(datetime, date, freq, db, source, msg_id, from_callsign, target, message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-05-01 10:04:00",
+                "2026-05-01",
+                7110000.0,
+                30,
+                1,
+                "M102",
+                "N1MAG",
+                "K7RIE>",
+                "N1MAG: K7RIE>KC7WOK Relay status update.",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    local_conn = sqlite3.connect(":memory:")
+    try:
+        _ensure_local_tables(local_conn)
+        stats = _ingest_commstat3(local_conn, source_db, max_rows=50)
+        assert stats["events_inserted"] == 0
+        row = local_conn.execute(
+            """
+            SELECT artifact_kind, report_group, target, transport_mode, reach_mode, payload_json
+            FROM commstat_artifacts
+            """
+        ).fetchone()
+        assert row[:5] == ("MESSAGE", "", "K7RIE>", "js8", "rf_observed")
+        payload = json.loads(row[5])
+        assert payload["relay_origin"] == "N1MAG"
+        assert payload["relay_via"] == "K7RIE"
+        assert payload["relay_to"] == "KC7WOK"
     finally:
         local_conn.close()
 

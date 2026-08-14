@@ -15,6 +15,9 @@ Required behavior:
   clipped slivers.
 - Horizontal scrolling is avoided for control panels unless the content is an
   intentionally wide data grid.
+- Dense inbox/table workspaces may preserve a wider designed body width and use
+  horizontal scrolling when shrinking would clip filters, focus buttons, or
+  operator-critical table columns.
 - Responsive layouts should prefer stacked/vertical control groups over shrinking
   controls below their usable size.
 - Dense workspaces with many categories should use a stable left navigation rail

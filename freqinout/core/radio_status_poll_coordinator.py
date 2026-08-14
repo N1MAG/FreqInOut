@@ -33,6 +33,35 @@ class RadioStatusSnapshot:
         return not self.stale and not self.errors and self.age_seconds(now=now) <= float(ttl_seconds)
 
 
+@dataclass(frozen=True)
+class RadioStatusPollMetrics:
+    snapshot_count: int = 0
+    inflight_count: int = 0
+    cache_hits: int = 0
+    backoff_hits: int = 0
+    inflight_hits: int = 0
+    polls_started: int = 0
+    polls_succeeded: int = 0
+    polls_failed: int = 0
+
+    @property
+    def polls_completed(self) -> int:
+        return self.polls_succeeded + self.polls_failed
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "snapshot_count": self.snapshot_count,
+            "inflight_count": self.inflight_count,
+            "cache_hits": self.cache_hits,
+            "backoff_hits": self.backoff_hits,
+            "inflight_hits": self.inflight_hits,
+            "polls_started": self.polls_started,
+            "polls_succeeded": self.polls_succeeded,
+            "polls_failed": self.polls_failed,
+            "polls_completed": self.polls_completed,
+        }
+
+
 class RadioStatusPollCoordinator:
     """
     TTL/backoff owner for radio status reads.
@@ -55,11 +84,30 @@ class RadioStatusPollCoordinator:
         self._lock = threading.RLock()
         self._snapshots: Dict[str, RadioStatusSnapshot] = {}
         self._inflight: set[str] = set()
+        self._cache_hits = 0
+        self._backoff_hits = 0
+        self._inflight_hits = 0
+        self._polls_started = 0
+        self._polls_succeeded = 0
+        self._polls_failed = 0
 
     def latest_snapshot(self, radio_id: object) -> Optional[RadioStatusSnapshot]:
         key = self._radio_key(radio_id)
         with self._lock:
             return self._snapshots.get(key)
+
+    def metrics_snapshot(self) -> RadioStatusPollMetrics:
+        with self._lock:
+            return RadioStatusPollMetrics(
+                snapshot_count=len(self._snapshots),
+                inflight_count=len(self._inflight),
+                cache_hits=self._cache_hits,
+                backoff_hits=self._backoff_hits,
+                inflight_hits=self._inflight_hits,
+                polls_started=self._polls_started,
+                polls_succeeded=self._polls_succeeded,
+                polls_failed=self._polls_failed,
+            )
 
     def invalidate(self, radio_id: object | None = None) -> None:
         with self._lock:
@@ -84,10 +132,13 @@ class RadioStatusPollCoordinator:
                 and not force
                 and cached.is_fresh_enough(self.ttl_seconds, now=now)
             ):
+                self._cache_hits += 1
                 return cached
             if cached is not None and cached.backoff_until and now < float(cached.backoff_until):
+                self._backoff_hits += 1
                 return self._mark_stale(cached, now=now, source="backoff")
             if key in self._inflight:
+                self._inflight_hits += 1
                 if cached is not None:
                     return self._mark_stale(cached, now=now, source="poll", refresh_pending=True)
                 return RadioStatusSnapshot(
@@ -98,12 +149,17 @@ class RadioStatusPollCoordinator:
                     refresh_pending=True,
                 )
             self._inflight.add(key)
+            self._polls_started += 1
 
         try:
             raw = dict(poller() or {})
             snapshot = self._snapshot_from_mapping(key, raw, generated_at=self._time_fn())
+            with self._lock:
+                self._polls_succeeded += 1
         except Exception as exc:
             snapshot = self._error_snapshot(key, cached, exc, generated_at=self._time_fn())
+            with self._lock:
+                self._polls_failed += 1
         finally:
             with self._lock:
                 self._inflight.discard(key)

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from freqinout.core.message_file_scanner import FileRecord, IMAGE_EXTS
-from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.message_intelligence import analyze_commstat_fields, analyze_spotter_text
 from freqinout.core.observation_projection import (
     observation_from_local_report,
     observation_from_message_intelligence,
@@ -19,6 +19,7 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 LOCAL_REPORT_SOURCE_KEY = "local_operator_reports"
 SPOTTER_TRAFFIC_SOURCE_KEY = "spotter_traffic"
+COMMSTAT_ARTIFACT_SOURCE_KEY = "commstat_artifacts"
 FORM_FILE_ORIGINS = {"flmsg", "flamp"}
 
 
@@ -27,17 +28,20 @@ def backfill_observations(
     *,
     include_local_reports: bool = True,
     include_spotter_traffic: bool = True,
+    include_commstat_artifacts: bool = True,
     batch_limit: int = 500,
 ) -> dict[str, int]:
     conn = connect_sqlite(db_path)
     try:
         ensure_observation_schema(conn)
-        counts = {"local_reports": 0, "spotter_traffic": 0}
+        counts = {"local_reports": 0, "spotter_traffic": 0, "commstat_artifacts": 0}
         with conn:
             if include_local_reports:
                 counts["local_reports"] = _backfill_local_reports(conn, batch_limit=batch_limit)
             if include_spotter_traffic:
                 counts["spotter_traffic"] = _backfill_spotter_traffic(conn, batch_limit=batch_limit)
+            if include_commstat_artifacts:
+                counts["commstat_artifacts"] = _backfill_commstat_artifacts(conn, batch_limit=batch_limit)
         return counts
     finally:
         conn.close()
@@ -232,6 +236,143 @@ def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> 
     return count
 
 
+def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int) -> int:
+    if not table_exists(conn, "commstat_artifacts"):
+        return 0
+    last_id = _checkpoint_id(conn, COMMSTAT_ARTIFACT_SOURCE_KEY)
+    columns = _table_columns(conn, "commstat_artifacts")
+    select_columns = [
+        "id",
+        "artifact_key",
+        "artifact_kind",
+        "subtype",
+        "event_ts_utc",
+        "from_call",
+        "target",
+        "report_group",
+        "grid",
+        "state_code",
+        "scope",
+        "transport_mode",
+        "reach_mode",
+        "origin_path",
+        "status_label",
+        "alert_color",
+        "title",
+        "body_text",
+        "remarks_text",
+        "source_first",
+        "source_last",
+        "sources_json",
+        "source_refs_json",
+        "external_ids_json",
+        "payload_json",
+    ]
+    projection = ", ".join(_select_expr(name, columns) for name in select_columns)
+    rows = conn.execute(
+        f"""
+        SELECT {projection}
+        FROM commstat_artifacts
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (last_id, max(1, int(batch_limit or 500))),
+    ).fetchall()
+    count = 0
+    last_seen = last_id
+    for row in rows:
+        artifact = dict(zip(select_columns, row))
+        artifact_id = _int_or_none(artifact.get("id")) or 0
+        last_seen = max(last_seen, artifact_id)
+        if artifact_id <= 0:
+            continue
+        info = analyze_commstat_fields(
+            artifact_kind=artifact.get("artifact_kind"),
+            title=artifact.get("title"),
+            body=artifact.get("body_text"),
+            from_call=artifact.get("from_call"),
+            target=artifact.get("target"),
+            report_group=artifact.get("report_group"),
+            state=artifact.get("state_code"),
+            grid=artifact.get("grid"),
+            scope=artifact.get("scope"),
+            status=artifact.get("status_label"),
+            alert_color=artifact.get("alert_color"),
+            subtype=artifact.get("subtype"),
+            remarks=artifact.get("remarks_text"),
+            transport=artifact.get("transport_mode"),
+            source_family="CommStat",
+            event_utc=artifact.get("event_ts_utc"),
+        )
+        if not _commstat_artifact_has_observation_signal(artifact, info):
+            continue
+        upsert_observation_conn(
+            conn,
+            observation_from_message_intelligence(
+                info,
+                source_ref=f"commstat_artifacts:{artifact_id}",
+                source_family="commstat",
+                source_app="CommStat",
+                received_utc=str(artifact.get("event_ts_utc") or ""),
+                event_utc=str(artifact.get("event_ts_utc") or ""),
+                status=str(artifact.get("status_label") or "").strip().upper(),
+                urgency=str(artifact.get("alert_color") or "").strip().upper(),
+                extra_provenance={
+                    "backfill_source": "commstat_artifacts",
+                    "artifact_key": str(artifact.get("artifact_key") or "").strip(),
+                    "artifact_kind": str(artifact.get("artifact_kind") or "").strip().upper(),
+                    "subtype": str(artifact.get("subtype") or "").strip().upper(),
+                    "transport_mode": str(artifact.get("transport_mode") or "").strip(),
+                    "reach_mode": str(artifact.get("reach_mode") or "").strip(),
+                    "origin_path": str(artifact.get("origin_path") or "").strip(),
+                    "source_first": str(artifact.get("source_first") or "").strip(),
+                    "source_last": str(artifact.get("source_last") or "").strip(),
+                    "sources": _json_list(artifact.get("sources_json")),
+                    "source_refs": _json_list(artifact.get("source_refs_json")),
+                    "external_ids": _json_list(artifact.get("external_ids_json")),
+                },
+            ),
+        )
+        count += 1
+    if rows:
+        _set_checkpoint(conn, COMMSTAT_ARTIFACT_SOURCE_KEY, last_id=last_seen)
+    return count
+
+
+def _commstat_artifact_has_observation_signal(artifact: Mapping[str, Any], info) -> bool:
+    kind = str(artifact.get("artifact_kind") or "").strip().upper()
+    if kind in {"STATREP", "ALERT"}:
+        return True
+    status = str(artifact.get("status_label") or "").strip().upper()
+    alert = str(artifact.get("alert_color") or "").strip().upper()
+    elevated = status not in {"", "INFO", "READ", "NEW", "GREEN", "OK", "NORMAL", "NOT REPORTED"} or alert in {
+        "RED",
+        "YELLOW",
+        "ORANGE",
+    }
+    return bool(
+        info.operator_attention
+        and (
+            _has_content_topic_evidence(info)
+            or info.state
+            or info.grid
+            or str(artifact.get("report_group") or "").strip()
+            or str(artifact.get("scope") or "").strip()
+            or elevated
+        )
+    )
+
+
+def _has_content_topic_evidence(info) -> bool:
+    for values in getattr(info, "topic_evidence", {}).values():
+        for value in values:
+            label = str(value or "").split(":", 1)[0].strip().lower()
+            if label and label not in {"kind", "source", "transport"}:
+                return True
+    return False
+
+
 def _read_text_head(path: Path, *, limit: int) -> str:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -340,6 +481,17 @@ def _json_mapping(value: object) -> Mapping[str, Any]:
     except Exception:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1] or "").strip().lower() for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _select_expr(name: str, columns: set[str]) -> str:
+    clean = str(name or "").strip()
+    if clean.lower() in columns:
+        return clean
+    return f"NULL AS {clean}"
 
 
 def _int_or_none(value: object) -> int | None:

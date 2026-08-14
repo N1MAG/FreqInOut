@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.ingest_source_model import stable_source_id
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, newer_timestamp_text
 
@@ -17,6 +18,7 @@ TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
 PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
 _INGEST_LOCK = threading.Lock()
 _LAST_RUN_MONO = 0.0
+_LAST_RUN_MONO_BY_SOURCE: Dict[str, float] = {}
 _MIN_INGEST_INTERVAL_SECONDS = 8.0
 
 VMAIL_FOLDER_FALLBACK = {
@@ -171,6 +173,7 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS varac_messages (
+            ingest_source_key TEXT NOT NULL DEFAULT 'legacy',
             id INTEGER,
             guid TEXT,
             source TEXT,
@@ -193,7 +196,7 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             urgent INTEGER DEFAULT 0,
             has_attachment INTEGER DEFAULT 0,
             via_callsign TEXT,
-            PRIMARY KEY (source, id)
+            PRIMARY KEY (ingest_source_key, source, id)
         )
         """
     )
@@ -230,7 +233,8 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             snr REAL,
             band TEXT,
             freq_hz REAL,
-            source TEXT
+            source TEXT,
+            ingest_source_key TEXT DEFAULT 'legacy'
         )
         """
     )
@@ -411,10 +415,35 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
         ON varac_sync_table_counts(table_name, run_started_ts)
         """
     )
+    cur.execute("PRAGMA table_info(varac_sync_status)")
+    sync_cols = {row[1] for row in cur.fetchall()}
+    for col_name, col_type in (
+        ("ingest_source_key", "TEXT"),
+        ("ingest_scope", "TEXT"),
+        ("ingest_source_label", "TEXT"),
+        ("cluster_name", "TEXT"),
+        ("cluster_public_id", "TEXT"),
+    ):
+        if col_name not in sync_cols:
+            cur.execute(f"ALTER TABLE varac_sync_status ADD COLUMN {col_name} {col_type}")
+    _ensure_varac_messages_source_scope(conn)
     cur.execute("PRAGMA table_info(varac_messages)")
     cols = {row[1] for row in cur.fetchall()}
+    if "ingest_source_key" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN ingest_source_key TEXT DEFAULT 'legacy'")
     if "flag_state" not in cols:
         cur.execute("ALTER TABLE varac_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
+
+    cur.execute("PRAGMA table_info(varac_links)")
+    link_cols = {row[1] for row in cur.fetchall()}
+    if "ingest_source_key" not in link_cols:
+        cur.execute("ALTER TABLE varac_links ADD COLUMN ingest_source_key TEXT DEFAULT 'legacy'")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_varac_links_source_ts
+        ON varac_links(ingest_source_key, ts)
+        """
+    )
     if "folder_label" not in cols:
         cur.execute("ALTER TABLE varac_messages ADD COLUMN folder_label TEXT")
     if "urgent" not in cols:
@@ -429,7 +458,100 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
         ON varac_messages(folder_label)
         """
     )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_varac_messages_ingest_source_ts
+        ON varac_messages(ingest_source_key, ts)
+        """
+    )
     conn.commit()
+
+
+def _ensure_varac_messages_source_scope(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    info = cur.execute("PRAGMA table_info(varac_messages)").fetchall()
+    columns = [str(row[1] or "") for row in info]
+    pk_columns = [str(row[1] or "") for row in sorted((row for row in info if int(row[5] or 0)), key=lambda row: int(row[5] or 0))]
+    if pk_columns == ["ingest_source_key", "source", "id"]:
+        return
+    if not columns:
+        return
+    tmp_name = "varac_messages_legacy_source_scope"
+    cur.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+    cur.execute(f"ALTER TABLE varac_messages RENAME TO {tmp_name}")
+    cur.execute(
+        """
+        CREATE TABLE varac_messages (
+            ingest_source_key TEXT NOT NULL DEFAULT 'legacy',
+            id INTEGER,
+            guid TEXT,
+            source TEXT,
+            msg_type TEXT,
+            from_call TEXT,
+            to_call TEXT,
+            subject TEXT,
+            body TEXT,
+            ts REAL,
+            band TEXT,
+            freq_hz REAL,
+            snr REAL,
+            read_status INTEGER,
+            folder TEXT,
+            file_path TEXT,
+            vmail_guid TEXT,
+            is_deleted INTEGER DEFAULT 0,
+            flag_state INTEGER DEFAULT 0,
+            folder_label TEXT,
+            urgent INTEGER DEFAULT 0,
+            has_attachment INTEGER DEFAULT 0,
+            via_callsign TEXT,
+            PRIMARY KEY (ingest_source_key, source, id)
+        )
+        """
+    )
+    target_columns = [
+        "id",
+        "guid",
+        "source",
+        "msg_type",
+        "from_call",
+        "to_call",
+        "subject",
+        "body",
+        "ts",
+        "band",
+        "freq_hz",
+        "snr",
+        "read_status",
+        "folder",
+        "file_path",
+        "vmail_guid",
+        "is_deleted",
+        "flag_state",
+        "folder_label",
+        "urgent",
+        "has_attachment",
+        "via_callsign",
+    ]
+    select_exprs = []
+    for column in target_columns:
+        if column in columns:
+            select_exprs.append(column)
+        elif column in {"is_deleted", "flag_state", "urgent", "has_attachment"}:
+            select_exprs.append(f"0 AS {column}")
+        else:
+            select_exprs.append(f"'' AS {column}")
+    ingest_expr = "COALESCE(ingest_source_key, 'legacy')" if "ingest_source_key" in columns else "'legacy'"
+    cur.execute(
+        f"""
+        INSERT OR REPLACE INTO varac_messages (
+            ingest_source_key, {", ".join(target_columns)}
+        )
+        SELECT {ingest_expr}, {", ".join(select_exprs)}
+          FROM {tmp_name}
+        """
+    )
+    cur.execute(f"DROP TABLE IF EXISTS {tmp_name}")
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -441,14 +563,21 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _get_last_id(conn: sqlite3.Connection, table: str) -> int:
+def _scoped_table_key(table: str, ingest_source_key: str = "") -> str:
+    source_key = str(ingest_source_key or "").strip()
+    if not source_key or source_key == "legacy":
+        return str(table or "")
+    return f"{source_key}:{str(table or '')}"
+
+
+def _get_last_id(conn: sqlite3.Connection, table: str, ingest_source_key: str = "") -> int:
     cur = conn.cursor()
-    cur.execute("SELECT last_id FROM varac_ingest_state WHERE table_name=?", (table,))
+    cur.execute("SELECT last_id FROM varac_ingest_state WHERE table_name=?", (_scoped_table_key(table, ingest_source_key),))
     row = cur.fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def _set_last_id(conn: sqlite3.Connection, table: str, last_id: int) -> None:
+def _set_last_id(conn: sqlite3.Connection, table: str, last_id: int, ingest_source_key: str = "") -> None:
     cur = conn.cursor()
     cur.execute(
         """
@@ -456,7 +585,7 @@ def _set_last_id(conn: sqlite3.Connection, table: str, last_id: int) -> None:
         VALUES (?, ?)
         ON CONFLICT(table_name) DO UPDATE SET last_id=excluded.last_id
         """,
-        (table, int(last_id)),
+        (_scoped_table_key(table, ingest_source_key), int(last_id)),
     )
 
 
@@ -466,6 +595,11 @@ def _record_sync_status(
     run_started_ts: float,
     run_finished_ts: float,
     varac_db_path: str,
+    ingest_source_key: str = "legacy",
+    ingest_scope: str = "local",
+    ingest_source_label: str = "",
+    cluster_name: str = "",
+    cluster_public_id: str = "",
     success: bool,
     rows_scanned: int,
     rows_written: int,
@@ -476,8 +610,9 @@ def _record_sync_status(
     cur.execute(
         """
         INSERT OR REPLACE INTO varac_sync_status
-            (run_started_ts, run_finished_ts, varac_db_path, success, rows_scanned, rows_written, error_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (run_started_ts, run_finished_ts, varac_db_path, success, rows_scanned, rows_written, error_text,
+             ingest_source_key, ingest_scope, ingest_source_label, cluster_name, cluster_public_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             float(run_started_ts),
@@ -487,6 +622,11 @@ def _record_sync_status(
             int(rows_scanned),
             int(rows_written),
             (error_text or "").strip()[:500],
+            str(ingest_source_key or "legacy"),
+            str(ingest_scope or "local"),
+            str(ingest_source_label or ""),
+            str(cluster_name or ""),
+            str(cluster_public_id or ""),
         ),
     )
     for table_name, counts in table_counts.items():
@@ -627,7 +767,16 @@ def _update_traits(
     entry["last_updated_ts"] = time.time()
 
 
-def ingest_varac(settings, *, force: bool = False) -> bool:
+def ingest_varac(
+    settings,
+    *,
+    force: bool = False,
+    ingest_source_key: str = "",
+    ingest_scope: str = "local",
+    ingest_source_label: str = "",
+    cluster_name: str = "",
+    cluster_public_id: str = "",
+) -> bool:
     global _LAST_RUN_MONO
 
     varac_db = _resolve_varac_db_path(settings)
@@ -635,8 +784,11 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
         return False
     if not varac_db.exists():
         return False
+    source_key = str(ingest_source_key or "").strip() or stable_source_id("varac", str(varac_db), prefix="source")
     now_mono = time.monotonic()
-    if not force and (now_mono - float(_LAST_RUN_MONO or 0.0) < _MIN_INGEST_INTERVAL_SECONDS):
+    fallback_last_run = _LAST_RUN_MONO if not str(ingest_source_key or "").strip() else 0.0
+    last_run_mono = float(_LAST_RUN_MONO_BY_SOURCE.get(source_key, fallback_last_run) or 0.0)
+    if not force and (now_mono - last_run_mono < _MIN_INGEST_INTERVAL_SECONDS):
         return True
     if not _INGEST_LOCK.acquire(blocking=False):
         return False
@@ -727,7 +879,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if not _table_exists(varac_conn, table):
                 _note_table(table)
                 return [], cols
-            last_id = 0 if force else _get_last_id(local_conn, table)
+            last_id = 0 if force else _get_last_id(local_conn, table, source_key)
             rows: list[tuple] = []
             used_cols = cols
             candidates = [cols]
@@ -748,7 +900,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if rows:
                 try:
                     last_seen = int(rows[-1][0])
-                    _set_last_id(local_conn, table, last_seen)
+                    _set_last_id(local_conn, table, last_seen, source_key)
                 except Exception:
                     pass
             _note_table(table, scanned=len(rows), watermark=last_seen)
@@ -837,11 +989,12 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             cur_local.execute(
                 """
                 INSERT OR REPLACE INTO varac_messages
-                    (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state)
+                    (ingest_source_key, id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state)
                 VALUES
-                    (?, ?, 'qso', 'QSO', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, 'qso', 'QSO', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    source_key,
                     int(rid),
                     guid or "",
                     callsign,
@@ -865,10 +1018,10 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if other and _is_callsign(other) and _is_callsign(callsign):
                 cur_local.execute(
                     """
-                    INSERT INTO varac_links (ts, origin, destination, snr, band, freq_hz, source)
-                    VALUES (?, ?, ?, ?, ?, ?, 'qso')
+                    INSERT INTO varac_links (ts, origin, destination, snr, band, freq_hz, source, ingest_source_key)
+                    VALUES (?, ?, ?, ?, ?, ?, 'qso', ?)
                     """,
-                    (ts_val, other, callsign, snr_val, band_val, freq_hz),
+                    (ts_val, other, callsign, snr_val, band_val, freq_hz, source_key),
                 )
                 _note_table("qso", written=1)
 
@@ -919,11 +1072,12 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             cur_local.execute(
                 """
                 INSERT OR REPLACE INTO varac_messages
-                    (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, folder_label, urgent, has_attachment, via_callsign)
+                    (ingest_source_key, id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, folder_label, urgent, has_attachment, via_callsign)
                 VALUES
-                    (?, ?, 'vmail', 'VMAIL', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, 'vmail', 'VMAIL', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    source_key,
                     int(rid),
                     guid or "",
                     from_call,
@@ -1021,11 +1175,12 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 cur_local.execute(
                     """
                     INSERT OR REPLACE INTO varac_messages
-                        (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, via_callsign)
+                        (ingest_source_key, id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, via_callsign)
                     VALUES
-                        (?, ?, 'broadcast', 'BROADCAST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (?, ?, ?, 'broadcast', 'BROADCAST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        source_key,
                         int(rid),
                         guid or "",
                         from_call,
@@ -1330,6 +1485,11 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                     run_started_ts=run_started_ts,
                     run_finished_ts=run_finished_ts,
                     varac_db_path=str(varac_db),
+                    ingest_source_key=source_key,
+                    ingest_scope=ingest_scope,
+                    ingest_source_label=ingest_source_label,
+                    cluster_name=cluster_name,
+                    cluster_public_id=cluster_public_id,
                     success=success,
                     rows_scanned=rows_scanned,
                     rows_written=rows_written,
@@ -1350,6 +1510,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
         except Exception:
             pass
         _LAST_RUN_MONO = time.monotonic()
+        _LAST_RUN_MONO_BY_SOURCE[source_key] = _LAST_RUN_MONO
         _INGEST_LOCK.release()
 
     if success and rows_written:

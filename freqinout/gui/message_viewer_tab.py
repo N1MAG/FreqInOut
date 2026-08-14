@@ -19,7 +19,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Sequence, Set
+from typing import Any, Dict, List, Tuple, Optional, Sequence, Set, Mapping
 
 from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal, QObject, QThread
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
@@ -59,10 +59,16 @@ from PySide6.QtWidgets import (
     QFrame,
     QListWidget,
     QListWidgetItem,
+    QTabWidget,
 )
 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+
+
+MESSAGE_INBOX_BODY_MIN_WIDTH = 1320
+MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 1260
+MESSAGE_INBOX_FOCUS_MIN_WIDTH = 980
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -70,6 +76,7 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, table_exists
+from freqinout.core.sqlite_fingerprint import sqlite_identifier, sqlite_table_fingerprint
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.commstat_artifacts import (
     artifact_filter_label,
@@ -78,7 +85,126 @@ from freqinout.core.commstat_artifacts import (
     normalize_commstat_artifact_key,
     tombstone_commstat_artifact,
 )
+from freqinout.core.commstat_delete import (
+    commstat_artifact_key,
+    delete_commstat_artifact,
+)
+from freqinout.core.commstat_config import load_commstat_group_state
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_file_metadata import (
+    delete_file_cache_entries,
+    ensure_message_file_metadata_table,
+    file_metadata_key,
+    form_report_timestamp_from_summary,
+    has_stale_message_file_metadata,
+    load_message_file_metadata_map,
+    remove_file_record_from_groups,
+    save_message_file_metadata_from_rows,
+)
+from freqinout.core.message_form_metadata import (
+    apply_common_l_field_metadata_fallback as _core_apply_common_l_field_metadata_fallback,
+    extract_custom_form_name_text as _core_extract_custom_form_name_text,
+    extract_form_metadata_from_text as _core_extract_form_metadata_from_text,
+    extract_hdr_call_text as _core_extract_hdr_call_text,
+    extract_sender_from_form_text as _core_extract_sender_from_form_text,
+    form_date_summary as _core_form_date_summary,
+    form_label_key as _core_form_label_key,
+    looks_like_form_date_text as _core_looks_like_form_date_text,
+    match_field_text as _core_match_field_text,
+    parse_custom_form_fields_text as _core_parse_custom_form_fields_text,
+)
+from freqinout.core.message_file_presentation import (
+    FileMessageRowCandidate,
+    file_message_row_candidate,
+    file_message_search_text,
+)
+from freqinout.core.message_row_identity import (
+    filter_rows_excluding_identities as _core_filter_rows_excluding_identities,
+    message_row_identity as _core_message_row_identity,
+    message_row_identity_set as _core_message_row_identity_set,
+)
+from freqinout.core.message_source_delete import (
+    delete_js8_inbox_row as _core_delete_js8_inbox_row,
+    delete_js8_local_rows as _core_delete_js8_local_rows,
+    delete_sitrep_store_row as _core_delete_sitrep_store_row,
+    delete_spotter_store_row as _core_delete_spotter_store_row,
+    delete_varac_local_projection as _core_delete_varac_local_projection,
+    sitrep_message_key as _core_sitrep_message_key,
+    soft_delete_varac_source_row as _core_soft_delete_varac_source_row,
+)
+from freqinout.core.message_row_presentation import (
+    MessageRowPresentation,
+    commstat_message_row_presentation,
+    field_report_area_label,
+    field_report_form_label,
+    field_report_group_label,
+    field_report_status_label,
+    js8_message_row_presentation,
+    message_display_profile_for_focus_type,
+    message_display_profile_for_type,
+    message_display_profile_headers,
+    message_row_search_text,
+    relative_age_label,
+    sitrep_message_row_presentation,
+    spotter_mcf_display_label as _core_spotter_mcf_display_label,
+    spotter_message_row_presentation,
+    varac_message_row_presentation,
+)
+from freqinout.core.message_inbox_filters import (
+    InboxFilterCriteria,
+    active_inbox_scope_summary,
+    is_message_group_candidate as _core_is_message_group_candidate,
+    message_group_candidate_set as _core_message_group_candidate_set,
+    message_group_option_sections as _core_message_group_option_sections,
+    message_group_rebuild_selection as _core_message_group_rebuild_selection,
+    message_group_source_map as _core_message_group_source_map,
+    message_group_value as _core_message_group_value,
+    message_source_options as _core_message_source_options,
+    message_source_value as _core_message_source_value,
+    normalize_message_group_filter_value as _core_normalize_message_group_filter_value,
+    primary_message_group_values as _core_primary_message_group_values,
+    row_matches_age_filter as _core_row_matches_age_filter,
+    row_matches_excluded_types as _core_row_matches_excluded_types,
+    row_matches_inbox_criteria as _core_row_matches_inbox_criteria,
+    row_matches_inbox_focus as _core_row_matches_inbox_focus,
+    row_matches_type_filter as _core_row_matches_type_filter,
+    row_matches_workspace_scope as _core_row_matches_workspace_scope,
+    row_search_text as _core_row_search_text,
+)
+from freqinout.core.message_delete_audit import (
+    ensure_message_delete_audit_table,
+    load_message_delete_audit_rows,
+    record_message_delete_audit,
+    safe_audit_text,
+)
+from freqinout.core.message_delete_policy import (
+    bulk_delete_completion_text,
+    bulk_delete_confirmation_text,
+    bulk_delete_sample_lines,
+    collect_deletable_message_rows,
+    commstat_delete_execution_result,
+    delete_audit_action_for_row,
+    delete_effect_label_for_row,
+    delete_effect_tooltip,
+    delete_source_label_for_row,
+    delete_success_result,
+    failed_source_delete_result,
+    message_delete_capability,
+    MessageDeleteExecutionResult,
+    message_delete_result_detail,
+    message_row_summary_line as _core_message_row_summary_line,
+    missing_identity_delete_result,
+    single_delete_confirmation_text,
+    single_delete_failure_warning,
+    single_delete_success_text,
+    summarize_delete_effects,
+    summarize_delete_sources,
+)
+from freqinout.core.operator_groups import OperatorGroupFamily, expand_group_selection, load_operator_group_families
+from freqinout.core.ingest_source_model import stable_source_id
+from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
+from freqinout.core.js8_source_context import resolve_js8_endpoint_context
+from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
 from freqinout.gui.plan_context_label import PlanContextLabel
 from freqinout.core.js8_spotter_forms import (
     discover_spotter_forms,
@@ -91,12 +217,12 @@ from freqinout.core.js8_spotter_forms import (
 from freqinout.core.js8_spotter_decode import (
     decode_spotter_form_text,
     parse_spotter_bracket_fields,
-    summarize_spotter_form_text,
 )
 from freqinout.core.js8_send_service import (
     js8_endpoint_from_radio_profile,
     send_js8_message_guarded,
 )
+from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
 from freqinout.core.js8_msg_auth import MsgAuthKey, encode_short_datecode, sign_js8_text, verify_js8_text
 from freqinout.core.js8_msg_auth_store import (
@@ -126,15 +252,14 @@ from freqinout.core.message_intelligence import (
 )
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.sitrep_metadata import (
-    parse_filter_subtype_label,
     source_family_display_label,
     source_families_from_sources,
     subtype_filter_label,
     subtype_label,
     transport_label,
 )
+from freqinout.core.commstat_sitrep import commstat_reach_label
 from freqinout.utils.timezones import get_timezone
-from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_config import bbs_summary_text
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory
 from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, FlampRelayStore, load_vault_locations
@@ -191,7 +316,6 @@ from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 from freqinout.gui.dropdown_checklist import DropdownChecklist
-from freqinout.radio_interface.js8_api_client import JS8ApiClient
 
 
 IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
@@ -242,19 +366,11 @@ RECEIVED_FILTER_CHOICES = [
     ("Last 6 hours", 6 * 60 * 60),
     ("Last 24 hours", 24 * 60 * 60),
     ("Last 7 days", 7 * 24 * 60 * 60),
+    ("Older than 2 weeks", -14 * 24 * 60 * 60),
+    ("Older than 1 month", -30 * 24 * 60 * 60),
+    ("Older than 2 months", -60 * 24 * 60 * 60),
+    ("Older than 6 months", -180 * 24 * 60 * 60),
 ]
-MESSAGE_SOURCE_LABELS = {
-    "js8": "JS8Call",
-    "spotter": "JS8Spotter",
-    "varac": "VarAC",
-    "flmsg": "FLMSG",
-    "flamp": "FLAmp",
-    "bbs": "BBS",
-    "sitrep": "SitRep",
-    "commstat": "CommStat",
-}
-
-
 def _safe_js8_text(value: object, *, limit: int = JS8_SAFE_TEXT_LIMIT, upper: bool = False) -> str:
     try:
         if value is None:
@@ -313,25 +429,97 @@ def _read_text_head(path: Path, limit: int = 4096) -> str:
 
 
 def _extract_custom_form_name_text(text: str) -> str:
-    if not text:
-        return ""
-    m = re.search(r"CUSTOM_FORM,([A-Za-z0-9_.-]+)", text, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else ""
+    return _core_extract_custom_form_name_text(text)
 
 
 def _parse_custom_form_fields_text(text: str) -> Dict[str, str]:
-    fields: Dict[str, str] = {}
+    return _core_parse_custom_form_fields_text(text)
+
+
+def _looks_like_group_or_call_text(value: object) -> bool:
+    text = str(value or "").strip().upper()
     if not text:
-        return fields
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or "," not in line:
-            continue
-        key, val = line.split(",", 1)
-        key = key.strip().upper()
-        if re.fullmatch(r"L\d{1,2}[A-Z]?", key):
-            fields[key] = val.strip()
-    return fields
+        return False
+    return bool(
+        re.fullmatch(r"@?[A-Z0-9_-]{2,}", text)
+        or re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,5}(?:/[A-Z0-9]{1,4})?", text)
+    )
+
+
+def _looks_like_callsign_text(value: object) -> bool:
+    text = str(value or "").strip().upper()
+    return bool(re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,5}(?:/[A-Z0-9]{1,4})?", text))
+
+
+def _clean_js8_route_target(value: object) -> str:
+    text = str(value or "").strip().upper()
+    while text.startswith("@"):
+        text = text[1:].strip()
+    return text.rstrip(">").strip()
+
+
+def _is_js8_relay_marker(value: object) -> bool:
+    return str(value or "").strip().endswith(">")
+
+
+def _js8_relay_route_display(to_value: object, *texts: object) -> str:
+    raw_to = str(to_value or "").strip().upper()
+    relay = _clean_js8_route_target(raw_to)
+    if not relay or not raw_to.endswith(">"):
+        return normalize_group_name(raw_to) or raw_to
+    hay = " ".join(str(text or "") for text in texts if text)
+    if hay:
+        pattern = rf"\b{re.escape(relay)}>\s*(@?[A-Z0-9_-]{{2,}})\b"
+        m = re.search(pattern, hay, flags=re.IGNORECASE)
+        if m:
+            target = normalize_group_name(m.group(1))
+            if target and target != relay:
+                return f"{target} via {relay}"
+    return f"via {relay}"
+
+
+def _looks_like_form_date_text(value: object) -> bool:
+    return _core_looks_like_form_date_text(value)
+
+
+def _apply_common_l_field_metadata_fallback(meta: Dict[str, str], fields: Mapping[str, str]) -> None:
+    _core_apply_common_l_field_metadata_fallback(meta, fields)
+
+
+def _extract_form_metadata_from_text(
+    text: str,
+    path: Path,
+    *,
+    template_title_for_form,
+    template_labels_for_form,
+) -> Dict[str, str]:
+    return _core_extract_form_metadata_from_text(
+        text,
+        path,
+        template_title_for_form=template_title_for_form,
+        template_labels_for_form=template_labels_for_form,
+    )
+
+
+def _fallback_custom_form_labels(fields: Mapping[str, str]) -> List[Tuple[str, str]]:
+    keys = {str(k or "").strip().upper() for k in fields}
+    if {"L05", "L06"}.issubset(keys):
+        return [
+            ("L01", "To"),
+            ("L02", "From"),
+            ("L03", "Precedence"),
+            ("L04", "Date/Msg ID"),
+            ("L05", "Subject"),
+            ("L06", "Message"),
+        ]
+    if {"L01", "L02", "L03", "L04"}.issubset(keys):
+        return [
+            ("L01", "To"),
+            ("L02", "From"),
+            ("L03", "Subject"),
+            ("L04", "Message"),
+        ]
+    return []
 
 
 def _strip_html_text(text: str) -> str:
@@ -349,33 +537,15 @@ def _extract_template_title_text(template: str) -> str:
 
 
 def _match_field_text(text: str, pattern: str) -> str:
-    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-    return m.group(1).strip().replace("\r\n", "\n") if m else ""
+    return _core_match_field_text(text, pattern)
 
 
 def _extract_hdr_call_text(text: str, marker: str) -> str:
-    if not text:
-        return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    for idx, line in enumerate(lines):
-        if line.lower().startswith(str(marker or "").lower()):
-            for nxt in lines[idx + 1 :]:
-                match = re.search(r"\b@?[A-Z]{1,2}\d[A-Z0-9]{1,5}\b|\b@[A-Z0-9_-]{2,}\b", nxt.upper())
-                if match:
-                    return match.group(0).strip().upper()
-            break
-    return ""
+    return _core_extract_hdr_call_text(text, marker)
 
 
 def _extract_sender_from_form_text(text: str, path: Path) -> str:
-    sender = _extract_hdr_call_text(text, ":hdr_fm:")
-    if sender:
-        return sender
-    for tok in re.split(r"[-_\\s]+", path.stem):
-        up = tok.strip().upper()
-        if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
-            return up
-    return ""
+    return _core_extract_sender_from_form_text(text, path)
 
 
 def _title_from_filename_path(path: Path) -> str:
@@ -394,23 +564,20 @@ def _title_from_filename_path(path: Path) -> str:
     return title or stem
 
 
+def _spotter_mcf_display_label(code: object, title: object = "") -> str:
+    return _core_spotter_mcf_display_label(code, title)
+
+
 def _form_label_key(label: object) -> str:
-    text = str(label or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return _core_form_label_key(label)
 
 
 def _form_date_summary(value: str) -> str:
-    txt = str(value or "").strip()
-    if not txt:
-        return ""
-    m = re.search(r"\b(\d{6})[-_]?(\d{4})z?\b", txt, flags=re.IGNORECASE)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}z"
-    m = re.search(r"\b(\d{8})[-_]?(\d{4,6})z?\b", txt, flags=re.IGNORECASE)
-    if m:
-        return f"{m.group(1)}-{m.group(2)[:4]}z"
-    return txt[:24]
+    return _core_form_date_summary(value)
+
+
+def _form_report_ts_from_date_summary(value: object) -> float:
+    return form_report_timestamp_from_summary(value)
 
 
 @dataclass(frozen=True)
@@ -434,6 +601,11 @@ class JS8Message:
     state: str  # UNREAD / READ
     read_ts: float = 0.0
     flag_state: int = 0
+    source_key: str = ""
+    source_id: int = 0
+    source_radio_id: str = ""
+    js8_instance_id: str = ""
+    source_path: str = ""
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -618,6 +790,7 @@ class _RowsBuildWorker(QObject):
         sitrep_messages: List["SitrepMessage"],
         commstat_messages: List["CommStatArtifact"],
         files: Dict[str, List[FileRecord]],
+        file_metadata_map: Dict[tuple, Dict[str, object]],
         read_state_map: Dict[tuple, tuple[str, float, int]],
         signature_state_map: Dict[tuple, Dict[str, object]],
         spotter_auth_state_map: Dict[int, Dict[str, object]],
@@ -646,6 +819,7 @@ class _RowsBuildWorker(QObject):
             "flamp": list(files.get("flamp", [])),
             "bbs": list(files.get("bbs", [])),
         }
+        self._file_metadata_map = dict(file_metadata_map or {})
         self._read_state_map = dict(read_state_map)
         self._signature_state_map = dict(signature_state_map or {})
         self._spotter_auth_state_map = dict(spotter_auth_state_map or {})
@@ -663,26 +837,6 @@ class _RowsBuildWorker(QObject):
         self._sitrep_show_raw_duplicates = bool(sitrep_show_raw_duplicates)
         self._force = bool(force)
         self._generation = int(generation)
-
-    @staticmethod
-    def _compose_search_text(
-        msg_type: str,
-        status: str,
-        from_call: str,
-        to_call: str,
-        rcv_display: str,
-        title: str,
-    ) -> str:
-        return " ".join(
-            [
-                str(msg_type or ""),
-                str(status or ""),
-                str(from_call or ""),
-                str(to_call or ""),
-                str(rcv_display or ""),
-                str(title or ""),
-            ]
-        ).lower()
 
     def _form_visible_in_messages(self, msg_type: object) -> bool:
         text = str(msg_type or "").strip()
@@ -983,62 +1137,12 @@ class _RowsBuildWorker(QObject):
 
     def _extract_form_file_metadata(self, rec: FileRecord) -> Dict[str, str]:
         text = _read_text_head(rec.path, 131072)
-        if not text:
-            return {}
-        meta: Dict[str, str] = {"_raw_head": text}
-        from_call = _extract_sender_from_form_text(text, rec.path)
-        if from_call:
-            meta["from"] = from_call
-        to_call = _extract_hdr_call_text(text, ":hdr_to:")
-        if to_call:
-            meta["to"] = to_call
-        subject = _match_field_text(text, r":sub:\s*(.*?)\s*(?=:)")
-        if subject:
-            meta["subject"] = subject
-        form_name = _extract_custom_form_name_text(text)
-        fields = _parse_custom_form_fields_text(text)
-        if form_name and fields:
-            title = self._template_title_for_custom_form(form_name)
-            if title:
-                meta["form_title"] = title
-            for key, label in self._template_labels_for_custom_form(form_name):
-                value = fields.get(str(key or "").strip().upper(), "").strip()
-                if not value:
-                    continue
-                label_key = _form_label_key(label)
-                if label_key in {"from", "from call", "from callsign", "sender", "sender callsign"}:
-                    meta["from"] = value.strip().upper()
-                elif label_key in {"to", "to call", "to callsign", "destination", "recipient", "group"}:
-                    meta["to"] = value.strip().upper()
-                elif "date" in label_key and ("msg" in label_key or "message" in label_key or "time" in label_key):
-                    meta["date_summary"] = _form_date_summary(value)
-                elif label_key in {"subject", "title", "incident", "report title"}:
-                    meta.setdefault("subject", value)
-                elif label_key in {"state", "st"}:
-                    meta.setdefault("state", value)
-                elif label_key in {"grid", "gr", "maidenhead", "grid square"}:
-                    meta.setdefault("grid", value)
-                elif label_key in {"message", "body", "comments", "remarks", "narrative"}:
-                    meta.setdefault("body", value)
-        if "date_summary" not in meta:
-            for pattern in (
-                r"\b(\d{6}[-_]\d{4}z?)\b",
-                r"\b(\d{8}[-_]\d{4,6}z?)\b",
-            ):
-                m = re.search(pattern, text, flags=re.IGNORECASE)
-                if m:
-                    meta["date_summary"] = _form_date_summary(m.group(1))
-                    break
-        title_parts = []
-        if meta.get("form_title"):
-            title_parts.append(meta["form_title"])
-        elif meta.get("subject"):
-            title_parts.append(meta["subject"])
-        if meta.get("date_summary"):
-            title_parts.append(meta["date_summary"])
-        if title_parts:
-            meta["title"] = " - ".join(title_parts)
-        return meta
+        return _extract_form_metadata_from_text(
+            text,
+            rec.path,
+            template_title_for_form=self._template_title_for_custom_form,
+            template_labels_for_form=self._template_labels_for_custom_form,
+        )
 
     def _extract_sender_from_file(self, rec: FileRecord) -> str:
         cache_key = (str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
@@ -1061,6 +1165,10 @@ class _RowsBuildWorker(QObject):
     @staticmethod
     def _signature_key(rec: FileRecord) -> tuple:
         return (str(rec.origin or "").strip().lower(), str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
+
+    @staticmethod
+    def _file_metadata_key(rec: FileRecord) -> tuple:
+        return file_metadata_key(rec)
 
     @staticmethod
     def _is_auth_verifiable_file(rec: FileRecord) -> bool:
@@ -1117,6 +1225,8 @@ class _RowsBuildWorker(QObject):
     def run(self) -> None:
         start = time.perf_counter()
         rows: List[UnifiedMessage] = []
+        file_metadata_hits = 0
+        file_parse_count = 0
         dedupe_raw_spotter = bool(self._sitrep_dedupe_enabled and not self._sitrep_show_raw_duplicates)
         sitrep_report_keys: set[str] = set()
         sitrep_render_keys: set[str] = set()
@@ -1127,36 +1237,19 @@ class _RowsBuildWorker(QObject):
                     sitrep_report_keys.add(key)
 
         for msg in self._js8_messages:
-            msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
-            if not self._form_visible_in_messages(msg_type):
+            presentation = js8_message_row_presentation(
+                msg,
+                form_title_lookup=self._form_titles,
+                alert_predicate=self._form_is_alert,
+            )
+            if not self._form_visible_in_messages(presentation.msg_type):
                 continue
-            status = "READ" if msg.state.upper() == "READ" else "NEW"
-            if status != "READ" and self._form_is_alert(msg_type):
-                status = "ALERT"
-            rcv_ts = float(msg.utc_ts or 0.0)
-            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
-            title = ""
-            if msg.msg_type.startswith("F!"):
-                form_id = msg.msg_type[2:].strip()
-                title = self._form_titles.get(form_id, "")
-            if not title:
-                title = (msg.decoded_text or msg.raw_text or "").strip()
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            from_call = (msg.from_call or "").strip().upper()
-            to_call = MessageTableModel._strip_group_marker(msg.to_call)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.utc_str)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=from_call,
-                    to_call=to_call,
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="js8",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -1165,92 +1258,37 @@ class _RowsBuildWorker(QObject):
                 spotter_key = self._spotter_message_report_key(msg)
                 if spotter_key and spotter_key in sitrep_report_keys:
                     continue
-            msg_type = msg.msg_type or "F!"
-            if not self._form_visible_in_messages(msg_type):
+            presentation = spotter_message_row_presentation(
+                msg,
+                form_title_lookup=self._form_titles,
+                alert_predicate=self._form_is_alert,
+            )
+            if not self._form_visible_in_messages(presentation.msg_type):
                 continue
-            status = "READ" if msg.state.upper() == "READ" else "NEW"
-            if status != "READ" and self._form_is_alert(msg_type):
-                status = "ALERT"
-            rcv_ts = float(msg.utc_ts or 0.0)
-            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
-            title = ""
-            if msg_type.startswith("F!"):
-                form_id = msg_type[2:].strip()
-                title = self._form_titles.get(form_id, "")
-            intelligence = analyze_spotter_text(
-                msg.raw_text,
-                form_name=title or msg_type,
-                from_call=msg.from_call,
-                to_call=msg.to_call,
-            )
-            title = (
-                intelligence.summary
-                or summarize_spotter_form_text(msg.raw_text, form_title=title)
-                or title
-                or (msg.decoded_text or msg.raw_text or "").strip()
-            )
-            title = MessageTableModel._strip_group_markers_in_display_text(title)
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            from_call = (msg.from_call or "").strip().upper()
-            to_call = MessageTableModel._strip_group_marker(msg.to_call)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.utc_str)
             auth_state, auth_detail, auth_trusted = self._spotter_auth_row_state(msg)
             expect_decision, expect_detail = self._spotter_expect_row_state(msg)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=from_call,
-                    to_call=to_call,
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="spotter",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
                     auth_state=auth_state,
                     auth_detail=auth_detail,
                     auth_trusted=auth_trusted,
                     expect_decision=expect_decision,
                     expect_detail=expect_detail,
-                    topics=tuple(intelligence.topics),
-                    actionable=bool(intelligence.actionable),
-                    search_text=self._compose_search_text(
-                        msg_type,
-                        status,
-                        from_call,
-                        to_call,
-                        rcv_display,
-                        " ".join([title, " ".join(intelligence.topics), intelligence.state, intelligence.grid]),
-                    ),
                 )
             )
 
         for msg in self._varac_messages:
-            msg_type = "VarAC"
-            status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
-            rcv_ts = float(msg.ts or 0.0)
-            rcv_display = self._format_rcv_display(rcv_ts, None)
-            if (msg.msg_type or "").upper() == "VMAIL":
-                title_base = (msg.subject or "").strip()
-            else:
-                title_base = (msg.subject or msg.body or "").strip()
-            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            from_call = (msg.from_call or "").strip().upper()
-            to_call = MessageTableModel._strip_group_marker(msg.to_call)
+            presentation = varac_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, None)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=from_call,
-                    to_call=to_call,
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="varac",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -1261,126 +1299,24 @@ class _RowsBuildWorker(QObject):
                     continue
                 if ui_key:
                     sitrep_render_keys.add(ui_key)
-            rcv_ts = float(msg.event_ts or 0.0)
-            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
-            from_call = (msg.from_call or "").strip().upper()
-            to_call = MessageTableModel._strip_group_marker(msg.target)
-            overall = (msg.overall_status or "").strip().lower()
-            scope = (msg.scope or "").strip()
-            title_parts = [msg.subtype_label]
-            if scope:
-                title_parts.append(scope)
-            if overall:
-                title_parts.append(overall.upper())
-            title = " | ".join([p for p in title_parts if p]) or "SitRep"
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            source_label = (msg.source_family_label or "").strip()
+            presentation = sitrep_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
             rows.append(
-                UnifiedMessage(
-                    msg_type="SitRep",
-                    status="INFO",
-                    from_call=from_call,
-                    to_call=to_call,
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="sitrep",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
-                    search_text=self._compose_search_text(
-                        "SitRep",
-                        "INFO",
-                        from_call,
-                        to_call,
-                        rcv_display,
-                        " ".join(
-                            part
-                            for part in (
-                                title,
-                                msg.subtype_label,
-                                source_label,
-                                msg.transport_label,
-                                msg.report_group,
-                                msg.state_code,
-                                msg.remarks_text,
-                                msg.brevity_code,
-                                msg.brevity_summary,
-                            )
-                            if part
-                        ),
-                    ),
+                    rcv_display=rcv_display,
                 )
             )
 
         for msg in self._commstat_messages:
-            rcv_ts = float(msg.event_ts or 0.0)
-            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
-            from_call = (msg.from_call or "").strip().upper()
-            status = str(msg.status_label or "INFO").strip().upper() or "INFO"
-            intelligence = analyze_commstat_fields(
-                artifact_kind=msg.artifact_kind,
-                title=msg.title,
-                body=msg.body_text,
-                from_call=msg.from_call,
-                target=msg.target,
-                report_group=msg.report_group,
-                state=msg.state_code,
-                grid=msg.grid,
-                scope=msg.scope,
-                status=msg.status_label,
-                alert_color=msg.alert_color,
-                subtype=msg.subtype,
-                remarks=msg.remarks_text,
-                transport=msg.transport_label,
-                source_family=msg.source_family_label,
-                event_utc=msg.event_ts_utc,
-            )
-            msg_type = intelligence.form_name or artifact_kind_label(msg.artifact_kind)
-            title = MessageTableModel._strip_group_markers_in_display_text(
-                intelligence.summary or str(msg.title or "").strip() or msg_type
-            )
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            to_call = intelligence.to_call or MessageTableModel._strip_group_marker(msg.target)
+            presentation = commstat_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=from_call,
-                    to_call=to_call,
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="commstat",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
-                    topics=tuple(intelligence.topics),
-                    actionable=bool(intelligence.actionable),
-                    search_text=self._compose_search_text(
-                        msg_type,
-                        status,
-                        from_call,
-                        to_call,
-                        rcv_display,
-                        " ".join(
-                            part
-                            for part in (
-                                title,
-                                " ".join(intelligence.topics),
-                                intelligence.state,
-                                intelligence.grid,
-                                msg.report_group,
-                                msg.transport_label,
-                                msg.source_family_label,
-                                msg.body_text,
-                                msg.remarks_text,
-                                msg.alert_color,
-                                msg.status_label,
-                                msg.grid,
-                                msg.state_code,
-                            )
-                            if part
-                        ),
-                    ),
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -1388,72 +1324,32 @@ class _RowsBuildWorker(QObject):
             for rec in recs:
                 status = self._file_status(rec)
                 is_image = rec.path.suffix.lower() in IMAGE_EXTS
-                form_meta = {} if is_image else self._extract_form_file_metadata(rec)
-                intelligence = None
-                if not is_image:
-                    intelligence = analyze_form_text(
-                        form_meta.get("_raw_head", ""),
-                        form_name=form_meta.get("form_title", ""),
-                        source_type=origin,
-                        path=rec.path,
-                        fields=form_meta,
-                    )
-                from_call = "" if is_image else (
-                    (intelligence.from_call if intelligence else "")
-                    or form_meta.get("from")
-                    or self._extract_sender_from_file(rec)
+                cached_meta = self._file_metadata_map.get(self._file_metadata_key(rec), {}) if not is_image else {}
+                candidate = file_message_row_candidate(
+                    rec,
+                    origin,
+                    status=status,
+                    is_image=is_image,
+                    is_transport_form=not is_image,
+                    cached_meta=cached_meta,
+                    form_meta_loader=lambda rec=rec: self._extract_form_file_metadata(rec),
+                    fallback_from_loader=lambda rec=rec: self._extract_sender_from_file(rec),
                 )
-                to_call = "" if is_image else ((intelligence.to_call if intelligence else "") or form_meta.get("to", ""))
-                title = (
-                    "Image Received"
-                    if is_image
-                    else (
-                        (intelligence.summary if intelligence else "")
-                        or form_meta.get("title")
-                        or _title_from_filename_path(rec.path)
-                    )
-                )
-                rcv_ts = float(rec.mtime or 0.0)
-                rcv_display = self._format_rcv_display(rcv_ts, None)
-                msg_type = origin.upper() if origin != "varac" else "VarAC"
-                if origin == "flmsg":
-                    msg_type = "FLMSG"
-                elif origin == "bbs":
-                    msg_type = "BBS"
+                if candidate.used_cache:
+                    file_metadata_hits += 1
+                elif not is_image:
+                    file_parse_count += 1
+                rcv_display = self._format_rcv_display(candidate.rcv_ts, None)
                 auth_state, auth_detail, auth_trusted = self._signature_row_state(rec)
                 rows.append(
-                    UnifiedMessage(
-                        msg_type=msg_type,
-                        status=status,
-                        from_call=from_call,
-                        to_call=to_call,
-                        rcv_ts=rcv_ts,
-                        rcv_display=rcv_display,
-                        title=title,
+                    unified_file_message_from_candidate(
+                        candidate,
                         origin=origin,
                         payload=rec,
-                        search_text=self._compose_search_text(
-                            msg_type,
-                            status,
-                            from_call,
-                            to_call,
-                            rcv_display,
-                            " ".join(
-                                part
-                                for part in (
-                                    title,
-                                    " ".join(intelligence.topics) if intelligence else "",
-                                    intelligence.state if intelligence else "",
-                                    intelligence.grid if intelligence else "",
-                                )
-                                if part
-                            ),
-                        ),
+                        rcv_display=rcv_display,
                         auth_state=auth_state,
                         auth_detail=auth_detail,
                         auth_trusted=auth_trusted,
-                        topics=tuple(intelligence.topics) if intelligence else (),
-                        actionable=bool(intelligence.actionable) if intelligence else False,
                     )
                 )
 
@@ -1464,6 +1360,8 @@ class _RowsBuildWorker(QObject):
                 "rows": rows,
                 "elapsed_ms": elapsed_ms,
                 "sender_cache_updates": dict(self._sender_cache_updates),
+                "file_metadata_hits": file_metadata_hits,
+                "file_parse_count": file_parse_count,
                 "generation": self._generation,
                 "force": self._force,
             }
@@ -1634,6 +1532,7 @@ class VarACMessage:
     vmail_guid: str
     flag_state: int = 0
     has_attachment: int = 0
+    source_key: str = "legacy"
 
 
 @dataclass
@@ -1695,6 +1594,8 @@ class CommStatArtifact:
     scope: str
     transport_mode: str
     transport_label: str
+    reach_mode: str
+    reach_label: str
     status_label: str
     alert_color: str
     title: str
@@ -1730,6 +1631,88 @@ class UnifiedMessage:
     expect_detail: str = ""
     topics: Tuple[str, ...] = ()
     actionable: bool = False
+    display_type: str = ""
+    report_ts: float = 0.0
+    age_ts_source: str = ""
+
+
+def unified_file_message_from_candidate(
+    candidate: FileMessageRowCandidate,
+    *,
+    origin: object,
+    payload: FileRecord,
+    rcv_display: str,
+    auth_state: str = "",
+    auth_detail: str = "",
+    auth_trusted: bool = False,
+) -> UnifiedMessage:
+    return UnifiedMessage(
+        msg_type=candidate.msg_type,
+        status=candidate.status,
+        from_call=candidate.from_call,
+        to_call=candidate.to_call,
+        rcv_ts=candidate.rcv_ts,
+        rcv_display=rcv_display,
+        title=candidate.title,
+        origin=str(origin or ""),
+        payload=payload,
+        search_text=file_message_search_text(
+            candidate.msg_type,
+            candidate.status,
+            candidate.from_call,
+            candidate.to_call,
+            rcv_display,
+            candidate.search_detail,
+        ),
+        auth_state=auth_state,
+        auth_detail=auth_detail,
+        auth_trusted=auth_trusted,
+        topics=candidate.topics,
+        actionable=candidate.actionable,
+        display_type=candidate.display_type,
+        report_ts=candidate.report_ts,
+        age_ts_source=candidate.age_ts_source,
+    )
+
+
+def unified_message_from_presentation(
+    presentation: MessageRowPresentation,
+    *,
+    payload: object,
+    rcv_display: str,
+    auth_state: str = "",
+    auth_detail: str = "",
+    auth_trusted: bool = False,
+    expect_decision: str = "",
+    expect_detail: str = "",
+) -> UnifiedMessage:
+    return UnifiedMessage(
+        msg_type=presentation.msg_type,
+        status=presentation.status,
+        from_call=presentation.from_call,
+        to_call=presentation.to_call,
+        rcv_ts=presentation.rcv_ts,
+        rcv_display=rcv_display,
+        title=presentation.title,
+        origin=presentation.origin,
+        payload=payload,
+        search_text=message_row_search_text(
+            presentation.msg_type,
+            presentation.status,
+            presentation.from_call,
+            presentation.to_call,
+            rcv_display,
+            presentation.search_detail,
+        ),
+        auth_state=auth_state,
+        auth_detail=auth_detail,
+        auth_trusted=auth_trusted,
+        expect_decision=expect_decision,
+        expect_detail=expect_detail,
+        topics=presentation.topics,
+        actionable=presentation.actionable,
+        display_type=presentation.display_type,
+    )
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -1740,7 +1723,7 @@ class MessageTableModel(QAbstractTableModel):
         self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
         self._display_profile = "triage"
-        self._headers = ["", "Type", "Status", "From", "To", "Received", "Message", ""]
+        self._headers = ["", "Type", "Status", "From", "To", "Age", "Message", ""]
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -1780,6 +1763,19 @@ class MessageTableModel(QAbstractTableModel):
                     return self._field_report_area(row)
                 if col == 6:
                     return self._relative_age(row.rcv_ts)
+            elif self._display_profile == "form_message":
+                if col == 1:
+                    return self._cell_text(row, "message")
+                if col == 2:
+                    return self._cell_text(row, "type")
+                if col == 3:
+                    return self._cell_text(row, "status")
+                if col == 4:
+                    return self._cell_text(row, "from")
+                if col == 5:
+                    return self._cell_text(row, "to")
+                if col == 6:
+                    return self._relative_age(row.rcv_ts)
             else:
                 if col == 1:
                     return self._cell_text(row, "type")
@@ -1790,9 +1786,7 @@ class MessageTableModel(QAbstractTableModel):
                 if col == 4:
                     return self._cell_text(row, "to")
                 if col == 5:
-                    if self._display_profile == "form_message":
-                        return self._relative_age(row.rcv_ts)
-                    return self._cell_text(row, "received")
+                    return self._relative_age(row.rcv_ts)
                 if col == 6:
                     return self._cell_text(row, "message")
             if col == 7:
@@ -1818,7 +1812,7 @@ class MessageTableModel(QAbstractTableModel):
             return None
         if role == Qt.ToolTipRole and col in (1, 6):
             details = [
-                str(row.title or "").strip() if col == 6 else "",
+                str(row.title or "").strip() if col in (1, 6) else "",
                 str(getattr(row, "auth_detail", "") or "").strip(),
                 str(getattr(row, "expect_detail", "") or "").strip(),
             ]
@@ -1855,21 +1849,12 @@ class MessageTableModel(QAbstractTableModel):
 
     def set_time_header(self, label: str) -> None:
         idx = 6 if self._display_profile in {"field_report", "intel_report"} else 5
-        self._headers[idx] = "Age" if self._display_profile in {"field_report", "intel_report", "form_message"} else label
+        self._headers[idx] = "Age"
         self.headerDataChanged.emit(Qt.Horizontal, idx, idx)
 
     def set_display_profile(self, profile: str, time_label: str) -> None:
-        profile = str(profile or "triage").strip().lower()
-        if profile not in {"triage", "field_report", "intel_report", "form_message"}:
-            profile = "triage"
-        if profile == "field_report":
-            headers = ["", "MCF", "Status", "From", "To", "State / Grid", "Age", ""]
-        elif profile == "intel_report":
-            headers = ["", "Kind", "Status", "From", "To", "State / Grid", "Age", ""]
-        elif profile == "form_message":
-            headers = ["", "Type", "Status", "From", "To", "Age", "Message", ""]
-        else:
-            headers = ["", "Type", "Status", "From", "To", str(time_label or "Received"), "Message", ""]
+        profile, header_tuple = message_display_profile_headers(profile)
+        headers = list(header_tuple)
         changed = profile != self._display_profile or headers != self._headers
         self._display_profile = profile
         if changed:
@@ -1905,33 +1890,29 @@ class MessageTableModel(QAbstractTableModel):
 
     @staticmethod
     def _field_report_form(row: UnifiedMessage) -> str:
-        payload = row.payload
-        if isinstance(payload, SitrepMessage):
-            return payload.subtype_label or payload.subtype or row.msg_type
-        if isinstance(payload, CommStatArtifact):
-            return row.msg_type or artifact_kind_label(payload.artifact_kind)
-        return row.msg_type or ""
+        return field_report_form_label(row)
 
     @staticmethod
     def _field_report_status(row: UnifiedMessage) -> str:
-        payload = row.payload
-        if isinstance(payload, SitrepMessage):
-            overall = str(payload.overall_status or "").strip()
-            return overall.upper() if overall else row.status
-        if isinstance(payload, CommStatArtifact):
-            alert = str(payload.alert_color or "").strip().upper()
-            if alert:
-                return alert
-        return row.status or ""
+        return field_report_status_label(row)
 
     @staticmethod
     def _field_report_group(row: UnifiedMessage) -> str:
-        payload = row.payload
-        if isinstance(payload, SitrepMessage):
-            return MessageTableModel._strip_group_marker(payload.report_group or payload.target or row.to_call)
-        if isinstance(payload, CommStatArtifact):
-            return MessageTableModel._strip_group_marker(payload.report_group or payload.target or row.to_call)
-        return row.to_call or ""
+        return field_report_group_label(row, MessageTableModel._display_to)
+
+    @staticmethod
+    def _display_to(row: UnifiedMessage, value: object = None) -> str:
+        raw = row.to_call if value is None else value
+        payload = getattr(row, "payload", None)
+        return _js8_relay_route_display(
+            raw,
+            getattr(payload, "raw_text", ""),
+            getattr(payload, "decoded_text", ""),
+            getattr(payload, "body_text", ""),
+            getattr(payload, "remarks_text", ""),
+            row.title,
+            row.search_text,
+        )
 
     @staticmethod
     def _strip_group_marker(value: object) -> str:
@@ -1944,42 +1925,11 @@ class MessageTableModel(QAbstractTableModel):
 
     @staticmethod
     def _field_report_area(row: UnifiedMessage) -> str:
-        payload = row.payload
-        if isinstance(payload, SitrepMessage):
-            return MessageTableModel._sitrep_area(payload)
-        if isinstance(payload, SpotterMessage):
-            return MessageTableModel._spotter_area(payload)
-        if isinstance(payload, CommStatArtifact):
-            state = str(payload.state_code or "").strip().upper()
-            grid = str(payload.grid or "").strip().upper()
-            scope = str(payload.scope or "").strip()
-            if state and grid:
-                return f"{state} / {grid}"
-            if state and scope:
-                return f"{state} / {scope}"
-            return grid or state or scope
-        return ""
+        return field_report_area_label(row)
 
     @staticmethod
     def _relative_age(ts: object) -> str:
-        try:
-            age = max(0.0, datetime.datetime.now(datetime.timezone.utc).timestamp() - float(ts or 0.0))
-        except Exception:
-            return ""
-        if age < 60:
-            return "now"
-        minutes = int(age // 60)
-        if minutes < 60:
-            return f"{minutes} min"
-        hours = minutes // 60
-        rem_minutes = minutes % 60
-        if hours < 24:
-            return f"{hours}:{rem_minutes:02d} h"
-        days = hours // 24
-        if days < 90:
-            return f"{days} day" if days == 1 else f"{days} days"
-        months = max(1, days // 30)
-        return f"{months} mo"
+        return relative_age_label(ts)
 
     def _cell_text(self, row: UnifiedMessage, field: str) -> str:
         if self._display_profile in {"field_report", "intel_report"}:
@@ -1996,13 +1946,15 @@ class MessageTableModel(QAbstractTableModel):
             if field == "message":
                 return self._field_report_area(row)
         if field == "type":
+            if self._display_profile == "form_message":
+                return row.display_type or row.msg_type
             return row.msg_type
         if field == "status":
             return row.status
         if field == "from":
             return row.from_call
         if field == "to":
-            return row.to_call
+            return self._display_to(row)
         if field == "received":
             return row.rcv_display
         if field == "message":
@@ -2125,29 +2077,7 @@ class MessageTableModel(QAbstractTableModel):
 
     @staticmethod
     def _row_key(row: UnifiedMessage) -> tuple | None:
-        payload = row.payload
-        if isinstance(payload, JS8Message):
-            msg_id = int(getattr(payload, "msg_id", 0) or 0)
-            return ("js8", msg_id) if msg_id > 0 else None
-        if isinstance(payload, SpotterMessage):
-            msg_id = int(getattr(payload, "spotter_id", 0) or 0)
-            return ("spotter", msg_id) if msg_id > 0 else None
-        if isinstance(payload, VarACMessage):
-            msg_id = int(getattr(payload, "msg_id", 0) or 0)
-            source = str(getattr(payload, "source", "") or "")
-            return ("varac", source, msg_id) if msg_id > 0 and source else None
-        if isinstance(payload, FileRecord):
-            return ("file", payload.origin, str(payload.path), float(payload.mtime), int(payload.size))
-        if isinstance(payload, SitrepMessage):
-            event_id = int(getattr(payload, "event_id", 0) or 0)
-            if event_id > 0:
-                return ("sitrep", event_id)
-            report_key = str(getattr(payload, "report_key", "") or "").strip().lower()
-            return ("sitrep", report_key) if report_key else None
-        if isinstance(payload, CommStatArtifact):
-            artifact_key = normalize_commstat_artifact_key(getattr(payload, "artifact_key", ""))
-            return ("commstat", artifact_key) if artifact_key else None
-        return None
+        return _core_message_row_identity(row)
 
 
 class MessageActionDelegate(QStyledItemDelegate):
@@ -2357,7 +2287,10 @@ class MessageActionDelegate(QStyledItemDelegate):
         if row is None:
             return False
         rect = option.rect
-        pos = event.position().toPoint()
+        if hasattr(event, "position"):
+            pos = event.position().toPoint()
+        else:
+            pos = event.pos()
         fm = option.fontMetrics
         parent_widget = self.parent()
         live_bbs_row = self._is_live_bbs_file_row(row)
@@ -2389,7 +2322,7 @@ class MessageActionDelegate(QStyledItemDelegate):
                 or parent_widget._is_row_relay_copy_action_enabled(row)
             )
         )
-        _view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
+        view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
             rect,
             fm,
             live_bbs_row,
@@ -2579,6 +2512,10 @@ class MessageViewerTab(QWidget):
         self._excluded_msg_types: set[str] = self._normalize_excluded_msg_types(
             cfg.get("excluded_msg_types", [])
         )
+        self._inbox_focus: str = str(cfg.get("inbox_focus", "all") or "all").strip().lower()
+        if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "varac"}:
+            self._inbox_focus = "all"
+        self._advanced_filters_visible: bool = bool(cfg.get("advanced_filters_visible", False))
         self._available_type_filters: List[str] = []
         self._responsive_layout_mode = "wide"
         self._responsive_compact_width = 1200
@@ -2588,7 +2525,7 @@ class MessageViewerTab(QWidget):
             p = msg_paths.get(origin, "")
             if p:
                 self.watch_dirs.append({"path": p, "origin": origin})
-        if not self.watch_dirs:
+        if not self.watch_dirs and not self._multi_radio_message_path_entries():
             self.watch_dirs = DEFAULT_WATCH_DIRS
         fldigi_log_path = (self.settings.get("fldigi_log_path", "") or "").strip()
         if fldigi_log_path:
@@ -2651,6 +2588,7 @@ class MessageViewerTab(QWidget):
         self._compose_signing_key_error: str = ""
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
+        self._locally_deleted_row_keys: set[tuple] = set()
         self._filters_initialized = False
         self._has_active_view = False
         self._default_sort_column = 5
@@ -2703,7 +2641,14 @@ class MessageViewerTab(QWidget):
         self._varac_attachment_scan_requested: set[int] = set()
         self._js8_ingest_interval_sec: float = 20.0
         self._last_js8_ingest_ts: float = 0.0
+        self._local_js8_schema_ready_path: str = ""
         self._js8_display_snapshot_fp: Optional[Tuple[Tuple[str, int, int], ...]] = None
+        self._background_ingest_controller = None
+        self._js8_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
+        self._varac_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
+        self._spotter_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
+        self._sitrep_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
+        self._commstat_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
         self._file_refresh_interval_sec: float = 60.0
         self._last_file_refresh_ts: float = 0.0
         self._sender_cache: Dict[tuple, str] = {}
@@ -2733,6 +2678,7 @@ class MessageViewerTab(QWidget):
         self._load_watch_dirs_from_db()
         self._clear_backlog_on_upgrade()
         self._ensure_read_state_table()
+        self._ensure_message_delete_audit_table()
         self._ensure_spotter_table()
         self._ensure_fldigi_sender_table()
         self._ensure_file_scan_cache_table()
@@ -2761,6 +2707,35 @@ class MessageViewerTab(QWidget):
         self._setup_js8_timer()
         self._setup_pending_timer()
         self._setup_message_check_timer()
+
+    def _multi_radio_message_path_entries(self) -> List[Dict[str, str]]:
+        """Return enabled radio-scoped message folders for inbox scanning and form discovery."""
+        entries: List[Dict[str, str]] = []
+        try:
+            profiles = list(self._multi_radio_store.list_device_profiles())
+        except Exception:
+            profiles = []
+        for profile in profiles:
+            if not self._compose_profile_bool(profile, "enabled"):
+                continue
+            radio_id = str(profile.get("id", "") or profile.get("system_key", "") or "").strip()
+            radio_name = self._compose_profile_text(profile, "name") or radio_id or "Radio"
+            for origin, key in (
+                ("flmsg", "flmsg_message_path"),
+                ("flamp", "flamp_message_path"),
+                ("varac", "varac_incoming_path"),
+            ):
+                path = self._compose_profile_text(profile, key)
+                if path:
+                    entries.append(
+                        {
+                            "origin": origin,
+                            "path": path,
+                            "source_id": stable_source_id(origin, radio_id or radio_name, path, prefix="ingest"),
+                            "source_label": f"{radio_name} {origin.upper()}",
+                        }
+                    )
+        return entries
 
     # ---------- DB helpers ----------
 
@@ -2837,6 +2812,16 @@ class MessageViewerTab(QWidget):
                 )
                 """
             )
+            for column, col_type in (
+                ("source_key", "TEXT"),
+                ("source_radio_id", "TEXT"),
+                ("js8_instance_id", "TEXT"),
+                ("source_path", "TEXT"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE autoquery_backlog ADD COLUMN {column} {col_type}")
+                except Exception:
+                    pass
             conn.commit()
             conn.close()
         except Exception as e:
@@ -2871,6 +2856,17 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to ensure read state table: %s", e)
+
+    def _ensure_message_delete_audit_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(db_path) as conn:
+                ensure_message_delete_audit_table(conn)
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure delete audit table: %s", e)
 
     def _ensure_spotter_table(self) -> None:
         db_path = self._db_path()
@@ -2953,10 +2949,17 @@ class MessageViewerTab(QWidget):
                     path TEXT NOT NULL,
                     mtime REAL NOT NULL,
                     size INTEGER NOT NULL,
+                    source_id TEXT,
+                    source_label TEXT,
                     PRIMARY KEY (origin, path)
                 )
                 """
             )
+            for col_name, col_def in (("source_id", "TEXT"), ("source_label", "TEXT")):
+                try:
+                    cur.execute(f"ALTER TABLE message_scan_cache ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS message_scan_cache_meta (
@@ -2976,10 +2979,35 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_scan_cache_origin_mtime ON message_scan_cache(origin, mtime DESC)"
             )
+            ensure_message_file_metadata_table(conn)
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to ensure file scan cache table: %s", e)
+
+    def _save_message_file_metadata_from_rows(self, rows: Sequence[UnifiedMessage]) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        save_message_file_metadata_from_rows(db_path, rows, ensure_scan_cache_table=self._ensure_file_scan_cache_table)
+
+    def _load_message_file_metadata_map(
+        self,
+        records: Dict[str, List[FileRecord]],
+    ) -> Dict[tuple, Dict[str, object]]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return {}
+        return load_message_file_metadata_map(db_path, records, ensure_scan_cache_table=self._ensure_file_scan_cache_table)
+
+    def _has_stale_message_file_metadata(self) -> bool:
+        db_path_fn = getattr(self, "_db_path", None)
+        if not callable(db_path_fn):
+            return False
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return False
+        return has_stale_message_file_metadata(db_path, self.files)
 
     def _ensure_signature_cache_table(self) -> None:
         db_path = self._db_path()
@@ -3221,12 +3249,14 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to save signature cache batch: %s", e)
 
     def _watch_dirs_signature(self, watch_dirs: List[Dict]) -> str:
-        parts: List[tuple[str, str]] = []
+        parts: List[tuple[str, str, str, str]] = []
         for entry in watch_dirs:
             origin = str(entry.get("origin", "") or "").strip().lower()
             path = str(entry.get("path", "") or "").strip()
+            source_id = str(entry.get("source_id", "") or "").strip()
+            source_label = str(entry.get("source_label", "") or "").strip()
             if origin and path:
-                parts.append((origin, path))
+                parts.append((origin, path, source_id, source_label))
         parts.sort()
         return json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
 
@@ -3235,7 +3265,7 @@ class MessageViewerTab(QWidget):
         if not db_path or not db_path.exists():
             return False
         self._ensure_file_scan_cache_table()
-        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        sig = self._watch_dirs_signature(self._effective_watch_dirs(include_source_metadata=True))
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -3251,7 +3281,7 @@ class MessageViewerTab(QWidget):
                 self._scan_cache_saved_ts = float(row[0]) if row and row[0] is not None else 0.0
             except Exception:
                 self._scan_cache_saved_ts = 0.0
-            cur.execute("SELECT origin, path, mtime, size FROM message_scan_cache")
+            cur.execute("SELECT origin, path, mtime, size, COALESCE(source_id, ''), COALESCE(source_label, '') FROM message_scan_cache")
             rows = cur.fetchall()
             cur.execute("SELECT dir_path, mtime FROM message_scan_cache_dirs")
             dir_rows = cur.fetchall()
@@ -3271,7 +3301,7 @@ class MessageViewerTab(QWidget):
                 continue
 
         out: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
-        for origin, path, mtime, size in rows:
+        for origin, path, mtime, size, source_id, source_label in rows:
             origin_norm = str(origin or "").strip().lower()
             if origin_norm not in out:
                 continue
@@ -3288,6 +3318,8 @@ class MessageViewerTab(QWidget):
                     origin=origin_norm,
                     size=int(size or 0),
                     mtime=float(mtime or 0.0),
+                    source_id=str(source_id or ""),
+                    source_label=str(source_label or ""),
                 )
             )
         total = 0
@@ -3315,9 +3347,9 @@ class MessageViewerTab(QWidget):
         if not db_path:
             return
         self._ensure_file_scan_cache_table()
-        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        sig = self._watch_dirs_signature(self._effective_watch_dirs(include_source_metadata=True))
         saved_ts = time.time()
-        payload: List[tuple[str, str, float, int]] = []
+        payload: List[tuple[str, str, float, int, str, str]] = []
         dir_payload: List[tuple[str, float]] = []
         for origin, recs in records.items():
             origin_norm = str(origin or "").strip().lower()
@@ -3330,6 +3362,8 @@ class MessageViewerTab(QWidget):
                         str(rec.path),
                         float(rec.mtime or 0.0),
                         int(rec.size or 0),
+                        str(getattr(rec, "source_id", "") or ""),
+                        str(getattr(rec, "source_label", "") or ""),
                     )
                 )
         for dir_path, mtime in (dir_mtimes or {}).items():
@@ -3347,7 +3381,10 @@ class MessageViewerTab(QWidget):
             cur.execute("DELETE FROM message_scan_cache_dirs")
             if payload:
                 cur.executemany(
-                    "INSERT OR REPLACE INTO message_scan_cache(origin, path, mtime, size) VALUES (?, ?, ?, ?)",
+                    """
+                    INSERT OR REPLACE INTO message_scan_cache(origin, path, mtime, size, source_id, source_label)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
                     payload,
                 )
             if dir_payload:
@@ -3383,7 +3420,7 @@ class MessageViewerTab(QWidget):
         if not db_path:
             return
         self._ensure_file_scan_cache_table()
-        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        sig = self._watch_dirs_signature(self._effective_watch_dirs(include_source_metadata=True))
         saved_ts = time.time()
         dir_payload: List[tuple[str, float]] = []
         for dir_path, mtime in (dir_mtimes or {}).items():
@@ -3476,7 +3513,7 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _read_state_key(origin: str, rec: FileRecord) -> tuple:
-        return (origin, str(rec.path), float(rec.mtime), int(rec.size))
+        return file_metadata_key(FileRecord(path=rec.path, origin=origin or rec.origin, size=rec.size, mtime=rec.mtime))
 
     def _load_read_state_map(self) -> Dict[tuple, tuple[str, float, int]]:
         db_path = self._db_path()
@@ -3498,7 +3535,14 @@ class MessageViewerTab(QWidget):
             return {}
         out: Dict[tuple, tuple[str, float, int]] = {}
         for origin, path, mtime, size, status, read_ts, flag_state in rows:
-            key = (origin, path, float(mtime or 0.0), int(size or 0))
+            key = file_metadata_key(
+                FileRecord(
+                    path=Path(str(path)),
+                    origin=str(origin or ""),
+                    size=int(size or 0),
+                    mtime=float(mtime or 0.0),
+                )
+            )
             out[key] = (
                 str(status or "").upper(),
                 float(read_ts or 0.0),
@@ -3512,6 +3556,9 @@ class MessageViewerTab(QWidget):
         if state and state[0]:
             return state[0]
         return "NEW"
+
+    def _file_status(self, rec: FileRecord) -> str:
+        return str(self._get_read_state(rec) or "NEW").upper()
 
     def _get_flag_state(self, rec: FileRecord) -> int:
         key = self._read_state_key(rec.origin, rec)
@@ -3529,7 +3576,7 @@ class MessageViewerTab(QWidget):
         self._queue_persist_op(
             "file_read_state",
             (
-                rec.origin,
+                str(rec.origin or "").strip().lower(),
                 str(rec.path),
                 float(rec.mtime),
                 int(rec.size),
@@ -4011,7 +4058,7 @@ class MessageViewerTab(QWidget):
         self.local_label = QLabel()
         self.utc_label.setVisible(False)
         self.local_label.setVisible(False)
-        self.time_toggle_btn = QPushButton("Times: Local" if self._show_local_time else "Times: UTC")
+        self.time_toggle_btn = QPushButton("Time Display: Local" if self._show_local_time else "Time Display: UTC")
         self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         layout.addLayout(header)
@@ -4089,30 +4136,42 @@ class MessageViewerTab(QWidget):
         self.received_filter = QComboBox()
         for label, seconds in RECEIVED_FILTER_CHOICES:
             self.received_filter.addItem(label, seconds)
-        self.received_filter.setToolTip("Limit visible messages to a recent receive window.")
+        self.received_filter.setToolTip(
+            "Filter by message age. Use recent windows for triage or older-than windows before cleanup/delete."
+        )
         self.received_filter.currentIndexChanged.connect(self._on_filter_changed)
         fit_combo_box_to_contents(self.received_filter)
 
-        self.operating_group_filter = DropdownChecklist("Operating Group")
+        self.operating_group_filter = DropdownChecklist("")
         self.operating_group_filter.setObjectName("messageOperatingGroupFilter")
         self.operating_group_filter.setToolTip("Show messages for all or selected operating groups.")
         self.operating_group_filter.selectionChanged.connect(self._on_filter_changed)
         self.operating_group_filter.set_options([("unassigned", "Unassigned")])
+        self.show_all_message_groups_chk = QPushButton("All Groups")
+        self.show_all_message_groups_chk.setObjectName("messageShowAllGroups")
+        self.show_all_message_groups_chk.setCheckable(True)
+        self.show_all_message_groups_chk.setToolTip(
+            "Expand Operating Group to every discovered group. Leave off to focus on FIO and CommStat configured groups."
+        )
+        self.show_all_message_groups_chk.setChecked(False)
+        self.show_all_message_groups_chk.toggled.connect(self._on_show_all_message_groups_changed)
+        self._update_show_all_message_groups_style()
 
-        self.source_filter = DropdownChecklist("Sources")
+        self.source_filter = DropdownChecklist("Source")
         self.source_filter.setObjectName("messageSourceFilter")
         self.source_filter.setToolTip("Show messages from all or selected message sources.")
         self.source_filter.selectionChanged.connect(self._on_filter_changed)
         self.source_filter.set_options(self._message_source_options([]))
 
         self.refresh_btn = QPushButton("Refresh Now")
+        self.refresh_btn.setToolTip("Refresh messages now. The adjacent interval controls automatic inbox checks.")
         self.refresh_btn.clicked.connect(self._on_refresh_now)
 
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
         self.export_btn.setVisible(False)
 
-        self.more_actions_btn = QPushButton("More...")
+        self.more_actions_btn = QPushButton("More Actions")
         self.more_actions_menu = QMenu(self.more_actions_btn)
         self.more_export_pdf_action = self.more_actions_menu.addAction("Export to PDF")
         self.more_export_pdf_action.triggered.connect(self._export_pdf)
@@ -4122,13 +4181,12 @@ class MessageViewerTab(QWidget):
             self.more_export_selected_action.triggered.connect(self._export_selected_csv)
         else:
             self.more_export_selected_action.setEnabled(False)
-        self.more_delete_selected_action = self.more_actions_menu.addAction("Delete Selected")
-        self.more_delete_selected_action.triggered.connect(self._delete_selected_messages)
-        self.more_actions_menu.addSeparator()
         self.more_copy_selected_summary_action = self.more_actions_menu.addAction("Copy Selected Summary")
         self.more_copy_selected_summary_action.triggered.connect(self._copy_selected_messages_summary)
         self.more_copy_summary_action = self.more_actions_menu.addAction("Copy Summary")
         self.more_copy_summary_action.triggered.connect(self._copy_messages_support_summary)
+        self.more_message_maintenance_action = self.more_actions_menu.addAction("Message Maintenance...")
+        self.more_message_maintenance_action.triggered.connect(self._open_message_maintenance)
         self.more_inbox_help_action = self.more_actions_menu.addAction("Inbox Help")
         self.more_inbox_help_action.triggered.connect(self._open_messages_help)
         self.more_actions_menu.aboutToShow.connect(self._refresh_more_actions_menu)
@@ -4154,8 +4212,8 @@ class MessageViewerTab(QWidget):
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         self.delete_selected_btn.setVisible(False)
 
-        self.view_spotter_map_btn = QPushButton("View Spotter Map")
-        self.view_spotter_map_btn.setToolTip("Open the Map focused on Spotter and SitRep field reports.")
+        self.view_spotter_map_btn = QPushButton("View HF Reports Map")
+        self.view_spotter_map_btn.setToolTip("Open the Map focused on HF-derived Spotter, SitRep, and field reports.")
         self.view_spotter_map_btn.clicked.connect(self._request_spotter_map_view)
         self.view_spotter_map_btn.setVisible(False)
 
@@ -4165,7 +4223,7 @@ class MessageViewerTab(QWidget):
         self.mark_all_read_btn.clicked.connect(self._mark_all_filtered_read)
         self.mark_all_read_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
 
-        self.inbox_actions_heading = QLabel("Actions")
+        self.inbox_actions_heading = QLabel("Inbox Tools")
         self.inbox_actions_heading.setStyleSheet("font-weight: bold;")
         self.inbox_filters_heading = QLabel("Filters")
         self.inbox_filters_heading.setStyleSheet("font-weight: bold;")
@@ -4194,6 +4252,28 @@ class MessageViewerTab(QWidget):
         self.export_selected_btn.setEnabled(False)
         self.export_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         self.export_selected_btn.setVisible(False)
+        self.bulk_selection_bar = QFrame()
+        self.bulk_selection_bar.setObjectName("messageBulkSelectionBar")
+        self.bulk_selection_bar.setFrameShape(QFrame.StyledPanel)
+        bulk_layout = QHBoxLayout(self.bulk_selection_bar)
+        bulk_layout.setContentsMargins(10, 6, 10, 6)
+        bulk_layout.setSpacing(8)
+        self.bulk_selection_label = QLabel("0 selected")
+        self.bulk_selection_label.setStyleSheet("font-weight: bold;")
+        self.bulk_mark_read_btn = QPushButton("Mark Read")
+        self.bulk_mark_read_btn.clicked.connect(self._mark_selected_read)
+        self.bulk_delete_btn = QPushButton("Delete")
+        self.bulk_delete_btn.clicked.connect(self._delete_selected_messages)
+        self.bulk_clear_btn = QPushButton("Clear Selection")
+        self.bulk_clear_btn.clicked.connect(self._clear_message_selection)
+        for btn in (self.bulk_mark_read_btn, self.bulk_delete_btn, self.bulk_clear_btn):
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        bulk_layout.addWidget(self.bulk_selection_label)
+        bulk_layout.addStretch()
+        bulk_layout.addWidget(self.bulk_mark_read_btn)
+        bulk_layout.addWidget(self.bulk_delete_btn)
+        bulk_layout.addWidget(self.bulk_clear_btn)
+        self.bulk_selection_bar.setVisible(False)
 
         compose_wrap = QWidget()
         compose_wrap.setLayout(compose_row)
@@ -4242,10 +4322,21 @@ class MessageViewerTab(QWidget):
         self.inbox_controls_scroll.setWidget(self.inbox_controls_panel)
         inbox_root.addWidget(self.inbox_controls_scroll, 0)
         inbox_body = QWidget()
+        inbox_body.setObjectName("messagesInboxBody")
+        inbox_body.setMinimumWidth(MESSAGE_INBOX_BODY_MIN_WIDTH)
+        inbox_body.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.inbox_body = inbox_body
         body = QVBoxLayout(inbox_body)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(6)
-        inbox_root.addWidget(inbox_body, 1)
+        self.inbox_body_scroll = QScrollArea()
+        self.inbox_body_scroll.setObjectName("messagesInboxBodyScroll")
+        self.inbox_body_scroll.setWidgetResizable(True)
+        self.inbox_body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.inbox_body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.inbox_body_scroll.setFrameShape(QFrame.NoFrame)
+        self.inbox_body_scroll.setWidget(inbox_body)
+        inbox_root.addWidget(self.inbox_body_scroll, 1)
         self.messages_mode_stack.addWidget(self.inbox_page)
 
         self.pending_box = QGroupBox("Pending JS8 MSGs")
@@ -4290,6 +4381,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.messages_table.setAlternatingRowColors(True)
         self.messages_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.messages_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         msg_header = MessageHeaderWithCheckbox(Qt.Horizontal, self.messages_table)
         self.messages_table.setHorizontalHeader(msg_header)
         msg_header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -4310,6 +4402,8 @@ class MessageViewerTab(QWidget):
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
+        self.messages_table.doubleClicked.connect(self._on_message_table_activated)
+        self.messages_table.activated.connect(self._on_message_table_activated)
 
         self._update_time_ui()
         self._actions_delegate = MessageActionDelegate(self, QColor(resolve_theme(self.settings)["danger"]))
@@ -4371,6 +4465,45 @@ class MessageViewerTab(QWidget):
         self.clear_filters_btn.setFont(self.pending_count.font())
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.clear_filters_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        self.message_funnel_widget = QWidget()
+        self.message_funnel_widget.setObjectName("messageInboxFunnelBar")
+        funnel_layout = QHBoxLayout(self.message_funnel_widget)
+        funnel_layout.setContentsMargins(0, 0, 0, 4)
+        funnel_layout.setSpacing(8)
+        self.message_group_filter_label = QLabel("Groups")
+        self.message_group_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_source_filter_label = QLabel("Sources")
+        self.message_source_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_age_filter_label = QLabel("Age")
+        self.message_age_filter_label.setStyleSheet("font-weight: bold;")
+        self.operating_group_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.operating_group_filter.setMinimumWidth(220)
+        self.show_all_message_groups_chk.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.show_all_message_groups_chk.setMinimumWidth(112)
+        self.source_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.source_filter.setMinimumWidth(220)
+        self.received_filter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.received_filter.setFixedWidth(180)
+        self.clear_filters_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.clear_filters_btn.setFixedWidth(138)
+        self.advanced_filters_btn = QPushButton("Advanced Filters")
+        self.advanced_filters_btn.setCheckable(True)
+        self.advanced_filters_btn.setChecked(bool(self._advanced_filters_visible))
+        self.advanced_filters_btn.setToolTip("Show detailed filters for time, type, status, sender, group, and source.")
+        self.advanced_filters_btn.clicked.connect(self._toggle_advanced_filters)
+        self.advanced_filters_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.advanced_filters_btn.setMinimumWidth(140)
+        self.message_funnel_widget.setMinimumWidth(MESSAGE_INBOX_FUNNEL_MIN_WIDTH)
+        self.message_funnel_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        funnel_layout.addWidget(self.message_group_filter_label)
+        funnel_layout.addWidget(self.operating_group_filter, 2)
+        funnel_layout.addWidget(self.show_all_message_groups_chk)
+        funnel_layout.addWidget(self.message_source_filter_label)
+        funnel_layout.addWidget(self.source_filter, 2)
+        funnel_layout.addWidget(self.message_age_filter_label)
+        funnel_layout.addWidget(self.received_filter)
+        funnel_layout.addWidget(self.clear_filters_btn)
+        funnel_layout.addWidget(self.advanced_filters_btn)
         self.exclude_types_btn = QPushButton("Hide Types")
         self.exclude_types_btn.setMinimumWidth(130)
         self.exclude_types_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -4389,7 +4522,35 @@ class MessageViewerTab(QWidget):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self._on_filter_changed)
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
+        self.inbox_focus_widget = QWidget()
+        focus_layout = QHBoxLayout(self.inbox_focus_widget)
+        focus_layout.setContentsMargins(0, 0, 0, 4)
+        focus_layout.setSpacing(6)
+        self.inbox_focus_label = QLabel("Focus")
+        self.inbox_focus_label.setStyleSheet("font-weight: bold;")
+        focus_layout.addWidget(self.inbox_focus_label)
+        self._inbox_focus_buttons: Dict[str, QPushButton] = {}
+        for key, label, tip in self._inbox_focus_options():
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _checked=False, focus_key=key: self._set_inbox_focus(focus_key))
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            try:
+                btn.setMinimumWidth(max(100, int(btn.fontMetrics().horizontalAdvance(label) + 34)))
+            except Exception:
+                pass
+            self._inbox_focus_buttons[key] = btn
+            focus_layout.addWidget(btn)
+        focus_layout.addStretch()
+        self.inbox_focus_widget.setMinimumWidth(MESSAGE_INBOX_FOCUS_MIN_WIDTH)
+        self.inbox_focus_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        messages_layout.insertWidget(1, self.inbox_focus_widget)
+        messages_layout.insertWidget(2, self.message_funnel_widget)
+        messages_layout.insertWidget(4, self.bulk_selection_bar)
+
         self._arrange_inbox_action_controls(compact=False)
+        self._sync_inbox_focus_buttons()
         self._build_messages_header()
         self._apply_accessibility_width_guards()
         fit_child_combo_boxes(self)
@@ -4435,23 +4596,17 @@ class MessageViewerTab(QWidget):
         self.message_check_status_label.setWordWrap(True)
         for widget in (
             self.refresh_btn,
-            self.mark_all_read_btn,
-            self.delete_selected_btn,
             self.view_spotter_map_btn,
             self.more_actions_btn,
             self.bbs_status_btn,
             self.bbs_manage_btn,
             self.time_toggle_btn,
-            self.received_filter,
             self.message_check_combo,
-            self.operating_group_filter,
-            self.source_filter,
             self.type_filter,
             self.status_filter,
             self.from_filter,
             self.to_filter,
             self.exclude_types_btn,
-            self.clear_filters_btn,
         ):
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             try:
@@ -4460,33 +4615,24 @@ class MessageViewerTab(QWidget):
                 pass
         placements = [
             (self.inbox_actions_heading, 0, 0, 1, 2),
-            (self.refresh_btn, 1, 0, 1, 2),
-            (self.mark_all_read_btn, 2, 0, 1, 2),
-            (self.delete_selected_btn, 3, 0, 1, 2),
-            (self.view_spotter_map_btn, 4, 0, 1, 2),
-            (self.more_actions_btn, 5, 0, 1, 2),
-            (self.inbox_filters_heading, 6, 0, 1, 2),
-            (self.inbox_received_label, 7, 0),
-            (self.received_filter, 7, 1),
-            (self.inbox_message_type_label, 8, 0),
-            (self.type_filter, 8, 1),
-            (self.inbox_status_label, 9, 0),
-            (self.status_filter, 9, 1),
-            (self.inbox_from_label, 10, 0),
-            (self.from_filter, 10, 1),
-            (self.inbox_to_label, 11, 0),
-            (self.to_filter, 11, 1),
-            (self.operating_group_filter, 12, 0, 1, 2),
-            (self.source_filter, 13, 0, 1, 2),
-            (self.exclude_types_btn, 14, 0, 1, 2),
-            (self.clear_filters_btn, 15, 0, 1, 2),
-            (self.inbox_check_label, 16, 0),
-            (self.message_check_combo, 16, 1),
-            (self.time_toggle_btn, 17, 0, 1, 2),
-            (self.inbox_bbs_heading, 18, 0, 1, 2),
-            (self.bbs_status_btn, 19, 0, 1, 2),
-            (self.bbs_manage_btn, 20, 0, 1, 2),
-            (self.message_check_status_label, 21, 0, 1, 2),
+            (self.refresh_btn, 1, 0),
+            (self.message_check_combo, 1, 1),
+            (self.view_spotter_map_btn, 2, 0, 1, 2),
+            (self.more_actions_btn, 3, 0, 1, 2),
+            (self.inbox_message_type_label, 4, 0),
+            (self.type_filter, 4, 1),
+            (self.inbox_status_label, 5, 0),
+            (self.status_filter, 5, 1),
+            (self.inbox_from_label, 6, 0),
+            (self.from_filter, 6, 1),
+            (self.inbox_to_label, 7, 0),
+            (self.to_filter, 7, 1),
+            (self.exclude_types_btn, 8, 0, 1, 2),
+            (self.time_toggle_btn, 9, 0, 1, 2),
+            (self.inbox_bbs_heading, 10, 0, 1, 2),
+            (self.bbs_status_btn, 11, 0, 1, 2),
+            (self.bbs_manage_btn, 12, 0, 1, 2),
+            (self.message_check_status_label, 13, 0, 1, 2),
         ]
         for item in placements:
             widget, row, col, *span = item
@@ -4499,6 +4645,76 @@ class MessageViewerTab(QWidget):
             self.inbox_controls_panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))
         except Exception:
             pass
+        self._sync_advanced_filter_visibility()
+
+    @staticmethod
+    def _inbox_focus_options() -> List[Tuple[str, str, str]]:
+        return [
+            ("all", "All", "Show all message traffic."),
+            ("new", "New", "Show unread or alerting traffic."),
+            ("forms", "FLMSG/FLAMP", "Show Fast Light forms and FLAmp files."),
+            ("spotter", "Spotter", "Show JS8Spotter MCF forms."),
+            ("commstat", "CommStat", "Show CommStat-derived messages and reports."),
+            ("js8call", "JS8Call", "Show raw JS8Call messages that are not Spotter MCF forms."),
+            ("varac", "VarAC", "Show VarAC messages."),
+        ]
+
+    def _set_inbox_focus(self, focus: str) -> None:
+        focus = str(focus or "all").strip().lower()
+        valid = {key for key, _label, _tip in self._inbox_focus_options()}
+        if focus not in valid:
+            focus = "all"
+        if focus == self._inbox_focus:
+            self._sync_inbox_focus_buttons()
+            return
+        self._inbox_focus = focus
+        self._sync_inbox_focus_buttons()
+        self._unfreeze_table()
+        self._apply_message_filters()
+        self._save_settings()
+
+    def _sync_inbox_focus_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        for key, btn in getattr(self, "_inbox_focus_buttons", {}).items():
+            active = key == self._inbox_focus
+            btn.blockSignals(True)
+            btn.setChecked(active)
+            btn.blockSignals(False)
+            btn.setStyleSheet(button_style("primary" if active else "muted", theme))
+
+    def _toggle_advanced_filters(self) -> None:
+        self._advanced_filters_visible = bool(self.advanced_filters_btn.isChecked())
+        self._sync_advanced_filter_visibility()
+        self._save_settings()
+
+    def _sync_advanced_filter_visibility(self) -> None:
+        visible = bool(getattr(self, "_advanced_filters_visible", False))
+        if hasattr(self, "advanced_filters_btn"):
+            self.advanced_filters_btn.blockSignals(True)
+            self.advanced_filters_btn.setChecked(visible)
+            self.advanced_filters_btn.blockSignals(False)
+            self.advanced_filters_btn.setText("Hide Advanced Filters" if visible else "Advanced Filters")
+            self.advanced_filters_btn.setStyleSheet(
+                button_style("secondary" if visible else "muted", resolve_theme(self.settings))
+            )
+        widgets = [
+            getattr(self, "inbox_filters_heading", None),
+            getattr(self, "inbox_received_label", None),
+            getattr(self, "inbox_message_type_label", None),
+            getattr(self, "type_filter", None),
+            getattr(self, "inbox_status_label", None),
+            getattr(self, "status_filter", None),
+            getattr(self, "inbox_from_label", None),
+            getattr(self, "from_filter", None),
+            getattr(self, "inbox_to_label", None),
+            getattr(self, "to_filter", None),
+            getattr(self, "exclude_types_btn", None),
+        ]
+        for widget in widgets:
+            if widget is not None:
+                widget.setVisible(visible)
+        if hasattr(self, "clear_filters_btn"):
+            self.clear_filters_btn.setVisible(True)
 
     def _setup_clock_timer(self) -> None:
         if self._clock_timer is not None:
@@ -4527,7 +4743,7 @@ class MessageViewerTab(QWidget):
         local_day = now_local.strftime("%a")
         self.local_label.setText(now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {local_abbr}"))
         if hasattr(self, "time_toggle_btn"):
-            self.time_toggle_btn.setText("Times: Local" if self._show_local_time else "Times: UTC")
+            self.time_toggle_btn.setText("Time Display: Local" if self._show_local_time else "Time Display: UTC")
 
     def _build_compose_page(self) -> QWidget:
         page = QWidget()
@@ -5977,21 +6193,28 @@ class MessageViewerTab(QWidget):
             widget.setStyleSheet(button_style("muted", theme))
         if hasattr(self, "_compose_tools_row"):
             self._compose_tools_row.setVisible(compose_active)
+        self._update_show_all_message_groups_style()
         for widget in (
             self.received_filter,
             self.message_check_combo,
             self.operating_group_filter,
+            self.show_all_message_groups_chk,
             self.source_filter,
             self.message_check_status_label,
             self.refresh_btn,
-            self.mark_all_read_btn,
             self.more_actions_btn,
         ):
             widget.setVisible(not compose_active)
+        if hasattr(self, "mark_all_read_btn"):
+            self.mark_all_read_btn.setVisible(False)
         for widget in (self.scan_combo, self.export_btn, self.export_selected_btn, self.delete_selected_btn):
             widget.setVisible(False)
         if hasattr(self, "_inbox_actions_row"):
             self._inbox_actions_row.setVisible(not compose_active)
+        if hasattr(self, "inbox_focus_widget"):
+            self.inbox_focus_widget.setVisible(not compose_active)
+        if hasattr(self, "message_funnel_widget"):
+            self.message_funnel_widget.setVisible(not compose_active)
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setVisible(True)
         if hasattr(self, "bbs_status_btn"):
@@ -6056,12 +6279,169 @@ class MessageViewerTab(QWidget):
 
     def _refresh_more_actions_menu(self) -> None:
         selected = len(self._messages_model.selected_rows()) if hasattr(self, "_messages_model") else 0
+        visible = len(self._messages_model.rows()) if hasattr(self, "_messages_model") else 0
         if hasattr(self, "more_export_selected_action"):
             self.more_export_selected_action.setEnabled(bool(self._export_selected_available) and selected > 0)
-        if hasattr(self, "more_delete_selected_action"):
-            self.more_delete_selected_action.setEnabled(selected > 0)
         if hasattr(self, "more_copy_selected_summary_action"):
             self.more_copy_selected_summary_action.setEnabled(selected > 0)
+        if hasattr(self, "more_actions_btn"):
+            if selected:
+                self.more_actions_btn.setToolTip(f"{selected} selected. Open for export, summaries, maintenance, and help.")
+            else:
+                self.more_actions_btn.setToolTip("Open message export, summaries, maintenance, and help.")
+
+    def _select_visible_messages(self) -> None:
+        if not self._is_filter_active():
+            QMessageBox.information(
+                self,
+                "Select Matching Rows",
+                "Apply a focus, group, source, age, search, or advanced filter before selecting matching rows.",
+            )
+            return
+        rows = self._messages_model.rows() if hasattr(self, "_messages_model") else []
+        deletable = self._collect_deletable_rows(rows)
+        if not deletable:
+            QMessageBox.information(self, "Select Matching Rows", "No selectable matching messages are visible.")
+            return
+        self._messages_model.set_selected_for_rows(deletable, True)
+        self._update_bulk_delete_buttons()
+        if hasattr(self, "message_check_status_label"):
+            self.message_check_status_label.setText(
+                f"Selected {len(deletable)} visible message(s) matching: {self._active_message_scope_summary()}."
+            )
+
+    def _select_cleanup_age_window(self, age_seconds: int) -> None:
+        if not hasattr(self, "received_filter"):
+            return
+        target = int(age_seconds or 0)
+        if target >= 0:
+            return
+        idx = self.received_filter.findData(target)
+        if idx < 0:
+            return
+        self._unfreeze_table()
+        self.received_filter.setCurrentIndex(idx)
+        self._apply_message_filters()
+        self._select_visible_messages()
+
+    def _clear_message_selection(self) -> None:
+        if hasattr(self, "_messages_model"):
+            self._messages_model.clear_selection()
+        self._update_bulk_delete_buttons()
+
+    def _load_message_delete_audit_rows(self, *, limit: int = 250) -> List[Dict[str, Any]]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return []
+        try:
+            return load_message_delete_audit_rows(db_path, limit=limit)
+        except Exception as e:
+            log.debug("MessageViewer: failed to load delete audit rows: %s", e)
+            return []
+
+    def _load_hidden_commstat_rows(self, *, limit: int = 250) -> List[Dict[str, Any]]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return []
+        try:
+            capped = max(1, min(int(limit or 250), 1000))
+            with connect_sqlite(db_path, timeout=1.0) as conn:
+                ensure_commstat_artifact_deletion_tables(conn)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT deleted_ts, artifact_kind, from_call, target, title, event_ts, reason, artifact_key
+                    FROM commstat_artifact_deletions
+                    ORDER BY deleted_ts DESC
+                    LIMIT ?
+                    """,
+                    (capped,),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            log.debug("MessageViewer: failed to load hidden CommStat rows: %s", e)
+            return []
+
+    def _populate_maintenance_table(
+        self,
+        table: QTableWidget,
+        *,
+        headers: Sequence[str],
+        rows: Sequence[Sequence[object]],
+    ) -> None:
+        table.setColumnCount(len(headers))
+        table.setRowCount(len(rows))
+        table.setHorizontalHeaderLabels([str(h) for h in headers])
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setAlternatingRowColors(True)
+        table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                table.setItem(r, c, QTableWidgetItem(str(value or "")))
+        header = table.horizontalHeader()
+        for idx in range(max(0, len(headers) - 1)):
+            header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+        if headers:
+            header.setSectionResizeMode(len(headers) - 1, QHeaderView.Stretch)
+
+    def _open_message_maintenance(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Message Maintenance")
+        dialog.resize(980, 560)
+        root = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Review recent delete activity and messages hidden from FIO views. "
+            "This is for troubleshooting and cleanup review; the Inbox remains the primary operating view."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        tabs = QTabWidget()
+        audit_table = QTableWidget()
+        hidden_table = QTableWidget()
+        audit_rows = self._load_message_delete_audit_rows(limit=300)
+        self._populate_maintenance_table(
+            audit_table,
+            headers=["When", "Result", "Source", "Action", "From", "To", "Message", "Detail"],
+            rows=[
+                (
+                    self._fmt_ts(float(row.get("audit_ts") or 0.0)),
+                    str(row.get("result", "") or "").upper(),
+                    row.get("source", ""),
+                    row.get("action", ""),
+                    row.get("from_call", ""),
+                    row.get("to_call", ""),
+                    row.get("title", ""),
+                    row.get("detail", ""),
+                )
+                for row in audit_rows
+            ],
+        )
+        hidden_rows = self._load_hidden_commstat_rows(limit=300)
+        self._populate_maintenance_table(
+            hidden_table,
+            headers=["Hidden", "Type", "From", "To", "Message", "Reason"],
+            rows=[
+                (
+                    self._fmt_ts(float(row.get("deleted_ts") or 0.0)),
+                    artifact_filter_label(str(row.get("artifact_kind", "") or "")) or row.get("artifact_kind", ""),
+                    row.get("from_call", ""),
+                    MessageTableModel._strip_group_marker(row.get("target", "")),
+                    row.get("title", "") or row.get("artifact_key", ""),
+                    row.get("reason", ""),
+                )
+                for row in hidden_rows
+            ],
+        )
+        tabs.addTab(audit_table, f"Delete Audit ({len(audit_rows)})")
+        tabs.addTab(hidden_table, f"Hidden CommStat ({len(hidden_rows)})")
+        root.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+        dialog.exec()
 
     def _copy_selected_messages_summary(self) -> None:
         rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
@@ -6083,18 +6463,7 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _message_row_summary_line(row: UnifiedMessage) -> str:
-        route = " -> ".join(part for part in (row.from_call, row.to_call) if str(part or "").strip())
-        age = MessageTableModel._relative_age(row.rcv_ts)
-        topics = ", ".join(row.topics or ())
-        parts = [
-            str(row.msg_type or row.origin or "Message").strip(),
-            str(row.status or "").strip(),
-            age,
-            route,
-            str(row.title or "").strip(),
-            f"Topics: {topics}" if topics else "",
-        ]
-        return " | ".join(part for part in parts if part)
+        return _core_message_row_summary_line(row)
 
     def _status_chip_html(self, text: str, role: str = "neutral") -> str:
         palette = {
@@ -6656,33 +7025,30 @@ class MessageViewerTab(QWidget):
             self._set_compose_status(f"{radio_target.label} is not configured for JS8Call send.", role="warning")
             return
         endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
-        client = JS8ApiClient(endpoint, auto_reconnect=False, timeout_s=1.0, name=f"Compose-{radio_target.radio_id}")
-        try:
-            result = send_js8_message_guarded(client, command, timeout_s=0.6)
-            if not result.sent:
-                issue_codes = [issue.code for issue in result.preflight.issues]
-                if issue_codes == ["target_state_unknown"]:
-                    detail = result.preflight.issues[0].detail
-                    confirm = QMessageBox.question(
-                        self,
-                        "JS8Call Target State Unverified",
-                        f"{detail}\n\nSend anyway to {endpoint.host}:{endpoint.port}?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No,
+        client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+        result = send_js8_message_guarded(client, command, timeout_s=0.6)
+        if not result.sent:
+            issue_codes = [issue.code for issue in result.preflight.issues]
+            if issue_codes == ["target_state_unknown"]:
+                detail = result.preflight.issues[0].detail
+                confirm = QMessageBox.question(
+                    self,
+                    "JS8Call Target State Unverified",
+                    f"{detail}\n\nSend anyway to {endpoint.host}:{endpoint.port}?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if confirm == QMessageBox.Yes:
+                    result = send_js8_message_guarded(
+                        client,
+                        command,
+                        timeout_s=0.6,
+                        allow_uncertain_target_state=True,
                     )
-                    if confirm == QMessageBox.Yes:
-                        result = send_js8_message_guarded(
-                            client,
-                            command,
-                            timeout_s=0.6,
-                            allow_uncertain_target_state=True,
-                        )
-                if not result.sent:
-                    self._set_compose_status(result.detail, role="warning")
-                    return
-            self._set_compose_status(f"Sent JS8Spotter message via {radio_target.label}: {command}", role="success")
-        finally:
-            client.stop()
+            if not result.sent:
+                self._set_compose_status(result.detail, role="warning")
+                return
+        self._set_compose_status(f"Sent JS8Spotter message via {radio_target.label}: {command}", role="success")
     def _save_compose_js8_expect(self) -> None:
         if self._compose_template_kind != "spotter":
             self._set_compose_status("Select a JS8Spotter form before saving to Expect.", role="warning")
@@ -6840,35 +7206,10 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _row_matches_type_filter(row: UnifiedMessage, type_sel: str) -> bool:
-        type_sel = str(type_sel or "").strip()
-        if type_sel in ("", "MSG Type..."):
-            return True
-        if type_sel == "CommStat":
-            return bool((row.origin or "").strip().lower() == "commstat")
-        if type_sel.startswith("CommStat/"):
-            if (row.origin or "").strip().lower() != "commstat":
-                return False
-            payload = getattr(row, "payload", None)
-            row_kind = str(getattr(payload, "artifact_kind", "") or "").strip().upper()
-            label = artifact_filter_label(row_kind)
-            return label == type_sel
-        if type_sel == "Spotter":
-            return bool((row.msg_type or "").startswith("F!"))
-        if type_sel == "SitRep":
-            return row.msg_type == "SitRep"
-        if type_sel.startswith("SitRep/"):
-            subtype = parse_filter_subtype_label(type_sel)
-            if row.msg_type != "SitRep":
-                return False
-            row_subtype = str(getattr(row.payload, "subtype", "") or "").strip().upper()
-            return row_subtype == subtype
-        return row.msg_type == type_sel
+        return _core_row_matches_type_filter(row, type_sel)
 
     def _row_matches_excluded_type(self, row: UnifiedMessage) -> bool:
-        for label in self._excluded_msg_types:
-            if self._row_matches_type_filter(row, label):
-                return True
-        return False
+        return _core_row_matches_excluded_types(row, self._excluded_msg_types)
 
     def _rebuild_excluded_types_menu(self, type_vals: List[str]) -> None:
         if not hasattr(self, "_exclude_types_menu") or self._exclude_types_menu is None:
@@ -7021,6 +7362,104 @@ class MessageViewerTab(QWidget):
             + sum(len(v) for v in self.files.values())
         )
 
+    @staticmethod
+    def _source_text_hash(value: object) -> int:
+        return hash(str(value or "")) & 0xFFFFFFFF
+
+    @staticmethod
+    def _message_row_source_identity(msg: object) -> Tuple[object, ...]:
+        return (
+            str(getattr(msg, "source_key", "") or ""),
+            str(getattr(msg, "source_id", "") or ""),
+            str(getattr(msg, "source_radio_id", "") or ""),
+            str(getattr(msg, "js8_instance_id", "") or ""),
+            str(getattr(msg, "source_path", "") or ""),
+        )
+
+    def _message_sources_fingerprint(self) -> Tuple[object, ...]:
+        return (
+            ("files", self._files_records_fingerprint(self.files)),
+            (
+                "js8",
+                tuple(
+                    sorted(
+                        (
+                            self._message_row_source_identity(msg),
+                            int(msg.msg_id or 0),
+                            str(msg.state or "").upper(),
+                            int(float(msg.utc_ts or 0.0) * 1000.0),
+                            int(msg.flag_state or 0),
+                            self._source_text_hash(msg.raw_text),
+                        )
+                        for msg in self.js8_messages
+                    )
+                ),
+            ),
+            (
+                "spotter",
+                tuple(
+                    sorted(
+                        (
+                            self._message_row_source_identity(msg),
+                            int(msg.spotter_id or 0),
+                            str(msg.state or "").upper(),
+                            int(float(msg.utc_ts or 0.0) * 1000.0),
+                            int(msg.flag_state or 0),
+                            self._source_text_hash(msg.raw_text),
+                        )
+                        for msg in self.spotter_messages
+                    )
+                ),
+            ),
+            (
+                "varac",
+                tuple(
+                    sorted(
+                        (
+                            str(msg.source or ""),
+                            int(msg.msg_id or 0),
+                            str(msg.guid or ""),
+                            int(float(msg.ts or 0.0) * 1000.0),
+                            int(msg.read_status or 0),
+                            int(msg.flag_state or 0),
+                            self._source_text_hash(msg.subject),
+                        )
+                        for msg in self.varac_messages
+                    )
+                ),
+            ),
+            (
+                "sitrep",
+                tuple(
+                    sorted(
+                        (
+                            int(msg.event_id or 0),
+                            str(msg.report_key or ""),
+                            int(float(msg.updated_ts or msg.event_ts or 0.0) * 1000.0),
+                            str(msg.overall_status or ""),
+                            self._source_text_hash(msg.remarks_text),
+                        )
+                        for msg in self.sitrep_messages
+                    )
+                ),
+            ),
+            (
+                "commstat",
+                tuple(
+                    sorted(
+                        (
+                            int(msg.artifact_id or 0),
+                            str(msg.artifact_key or ""),
+                            int(float(msg.updated_ts or msg.event_ts or 0.0) * 1000.0),
+                            str(msg.status_label or ""),
+                            self._source_text_hash(msg.title),
+                        )
+                        for msg in self.commstat_messages
+                    )
+                ),
+            ),
+        )
+
     def _on_visible_message_check_timer(self) -> None:
         if self._visible_message_check_inflight:
             self._message_check_status_text = "Still checking..."
@@ -7028,13 +7467,16 @@ class MessageViewerTab(QWidget):
             return
         self._visible_message_check_inflight = True
         before_count = self._message_source_count()
+        before_fp = self._message_sources_fingerprint()
         self._message_check_status_text = "Checking..."
         self._update_message_check_status()
         try:
             self._refresh_js8_messages(force=False, rebuild=False)
             self._refresh_varac_messages(force=False, rebuild=False)
             self._load_message_sources_from_local(force=False)
-            self._populate_messages_table(force=False)
+            after_fp = self._message_sources_fingerprint()
+            if after_fp != before_fp:
+                self._populate_messages_table(force=False)
             self._refresh_pending_backlog()
             after_count = self._message_source_count()
             delta = max(0, int(after_count - before_count))
@@ -7089,11 +7531,15 @@ class MessageViewerTab(QWidget):
         self._update_message_check_status()
         self._set_loading(True)
         before_count = self._message_source_count()
+        before_fp = self._message_sources_fingerprint()
         try:
             self._refresh_files(force=True)
             self._refresh_js8_messages(force=True, rebuild=False)
             self._refresh_varac_messages(force=True, rebuild=False)
-            self._populate_messages_table(force=True)
+            after_fp = self._message_sources_fingerprint()
+            stale_file_metadata = self._has_stale_message_file_metadata()
+            if after_fp != before_fp or stale_file_metadata or not self._message_rows:
+                self._populate_messages_table(force=True)
             after_count = self._message_source_count()
             delta = max(0, int(after_count - before_count))
             self._message_check_status_text = f"{delta} new message{'s' if delta != 1 else ''}" if delta else "No new messages"
@@ -7220,9 +7666,12 @@ class MessageViewerTab(QWidget):
                 )
                 if should_refresh_files:
                     self._refresh_files(force=force)
+                before_fp = self._message_sources_fingerprint()
                 self._refresh_js8_messages(force=force, rebuild=False)
                 self._refresh_varac_messages(force=force, rebuild=False)
-                self._populate_messages_table(force=force)
+                after_fp = self._message_sources_fingerprint()
+                if after_fp != before_fp or force or not self._message_rows:
+                    self._populate_messages_table(force=force)
                 self._refresh_pending_backlog()
                 self._last_activation_refresh_ts = time.time()
             finally:
@@ -7497,7 +7946,7 @@ class MessageViewerTab(QWidget):
 
     # ---------- Scanning ----------
 
-    def _effective_watch_dirs(self) -> List[Dict]:
+    def _effective_watch_dirs(self, *, include_source_metadata: bool = False) -> List[Dict]:
         out: List[Dict] = []
         seen: set[tuple[str, str]] = set()
         for entry in self.watch_dirs:
@@ -7508,19 +7957,61 @@ class MessageViewerTab(QWidget):
             key = (origin, path)
             if key in seen:
                 continue
-            out.append({"origin": origin, "path": path})
+            row = {"origin": origin, "path": path}
+            if include_source_metadata:
+                row.update(
+                    {
+                        "source_id": str(entry.get("source_id", "") or ""),
+                        "source_label": str(entry.get("source_label", "") or ""),
+                    }
+                )
+            out.append(row)
+            seen.add(key)
+        for entry in self._multi_radio_message_path_entries():
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            path = str(entry.get("path", "") or "").strip()
+            if not origin or not path:
+                continue
+            key = (origin, path)
+            if key in seen:
+                continue
+            row = {"origin": origin, "path": path}
+            if include_source_metadata:
+                row.update(
+                    {
+                        "source_id": str(entry.get("source_id", "") or ""),
+                        "source_label": str(entry.get("source_label", "") or ""),
+                    }
+                )
+            out.append(row)
             seen.add(key)
         bbs_dir = (self.settings.get("varac_bbs_dir", "") or "").strip()
         if bbs_dir:
             key = ("bbs", bbs_dir)
             if key not in seen:
-                out.append({"origin": "bbs", "path": bbs_dir})
+                row = {"origin": "bbs", "path": bbs_dir}
+                if include_source_metadata:
+                    row.update(
+                        {
+                            "source_id": stable_source_id("bbs", bbs_dir, prefix="ingest"),
+                            "source_label": "BBS",
+                        }
+                    )
+                out.append(row)
                 seen.add(key)
         archive_dir = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
         if archive_dir:
             key = ("bbs", archive_dir)
             if key not in seen:
-                out.append({"origin": "bbs", "path": archive_dir})
+                row = {"origin": "bbs", "path": archive_dir}
+                if include_source_metadata:
+                    row.update(
+                        {
+                            "source_id": stable_source_id("bbs-archive", archive_dir, prefix="ingest"),
+                            "source_label": "BBS Archive",
+                        }
+                    )
+                out.append(row)
                 seen.add(key)
         return out
 
@@ -7653,9 +8144,10 @@ class MessageViewerTab(QWidget):
             return
         base_records = None if force else self.files
         base_dir_mtimes = None if force else self._scan_dir_mtime_cache
+        scan_watch_dirs = self._effective_watch_dirs(include_source_metadata=True)
         self._file_scan_thread = QThread(self)
         self._file_scan_worker = _FileScanWorker(
-            watch_dirs,
+            scan_watch_dirs,
             force,
             base_records=base_records,
             base_dir_mtimes=base_dir_mtimes,
@@ -7781,48 +8273,50 @@ class MessageViewerTab(QWidget):
                 now - float(self._last_js8_ingest_ts) >= self._js8_ingest_interval_sec
             )
             display_fp_before = self._js8_display_fingerprint()
-            # First ingest any new messages into local cache, then load from local cache for display
+            self._load_structured_message_projections(force=force, rebuild=False)
+            loaded_fp = self._js8_display_fingerprint()
+            background_requested = False
             if should_ingest:
-                try:
-                    self._ingest_js8_messages()
-                except Exception as e:
-                    log.debug("MessageViewer: JS8 ingest failed: %s", e)
-                try:
-                    self._ingest_spotter_from_directed()
-                except Exception as e:
-                    log.debug("MessageViewer: spotter ingest failed: %s", e)
+                background_requested = self._request_background_ingest("message_cache", force=force)
+                if not background_requested:
+                    try:
+                        self._ingest_js8_runtime_messages()
+                    except Exception as e:
+                        log.debug("MessageViewer: JS8 runtime message ingest failed: %s", e)
                 self._last_js8_ingest_ts = now
+                if not background_requested:
+                    self._load_structured_message_projections(force=True, rebuild=False)
             display_fp_after = self._js8_display_fingerprint()
-            if (
-                not force
-                and self._js8_display_snapshot_fp is not None
-                and display_fp_after == self._js8_display_snapshot_fp
-                and display_fp_after == display_fp_before
-            ):
+            if not force and self._js8_display_snapshot_fp == display_fp_after and loaded_fp == display_fp_before:
                 return
-            try:
-                self._load_js8_from_local(force=force, rebuild=False)
-            except Exception as e:
-                log.debug("MessageViewer: JS8 local load failed: %s", e)
-            try:
-                self._load_spotter_from_db(force=force, rebuild=False)
-            except Exception as e:
-                log.debug("MessageViewer: spotter load failed: %s", e)
-            try:
-                self._load_sitrep_from_local(force=force, rebuild=False)
-            except Exception as e:
-                log.debug("MessageViewer: sitrep load failed: %s", e)
-            try:
-                self._load_commstat_from_local(force=force, rebuild=False)
-            except Exception as e:
-                log.debug("MessageViewer: CommStat local load failed: %s", e)
             self._js8_display_snapshot_fp = display_fp_after
-            if rebuild:
+            if rebuild and (force or display_fp_after != display_fp_before or not getattr(self, "_message_rows", [])):
                 self._populate_messages_table(force=force)
+
+    def _load_structured_message_projections(self, force: bool = False, rebuild: bool = False) -> None:
+        try:
+            self._load_js8_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: JS8 local load failed: %s", e)
+        try:
+            self._load_spotter_from_db(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: spotter load failed: %s", e)
+        try:
+            self._load_sitrep_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: sitrep load failed: %s", e)
+        try:
+            self._load_commstat_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: CommStat local load failed: %s", e)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
     def _refresh_sitrep_messages(self, force: bool = False, rebuild: bool = True) -> None:
         if self._is_shutting_down:
             return
+        before_fp = self._message_sources_fingerprint()
         try:
             self._load_sitrep_from_local(force=force, rebuild=False)
         except Exception as e:
@@ -7831,7 +8325,8 @@ class MessageViewerTab(QWidget):
             self._load_commstat_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: CommStat refresh failed: %s", e)
-        if rebuild:
+        after_fp = self._message_sources_fingerprint()
+        if rebuild and (force or after_fp != before_fp or not getattr(self, "_message_rows", [])):
             self._populate_messages_table(force=force)
 
     def _update_fldigi_senders(self, records: Dict[str, List[FileRecord]]) -> None:
@@ -7884,21 +8379,32 @@ class MessageViewerTab(QWidget):
     def _refresh_varac_messages(self, force: bool = False, rebuild: bool = True) -> None:
         if self._is_shutting_down:
             return
+        before_fp = self._message_sources_fingerprint()
         now = time.time()
         should_ingest = bool(force) or (
             now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec
         )
+        background_requested = False
         if should_ingest:
-            try:
-                ingest_varac(self.settings)
-                self._last_varac_ingest_ts = now
-            except Exception as e:
-                log.debug("MessageViewer: VarAC ingest failed: %s", e)
+            background_requested = self._request_background_ingest("varac")
+            if not background_requested:
+                try:
+                    result = ingest_varac_for_runtime_sources(self.settings)
+                    if result.used_runtime_sources:
+                        log.debug(
+                            "MessageViewer: VarAC runtime ingest refreshed %s/%s source(s)",
+                            result.sources_succeeded,
+                            result.sources_attempted,
+                        )
+                except Exception as e:
+                    log.debug("MessageViewer: VarAC ingest failed: %s", e)
+            self._last_varac_ingest_ts = now
         try:
             self._load_varac_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: VarAC load failed: %s", e)
-        if rebuild:
+        after_fp = self._message_sources_fingerprint()
+        if rebuild and (force or background_requested or after_fp != before_fp or not getattr(self, "_message_rows", [])):
             self._populate_messages_table(force=force)
 
     def _cycle_flag_state(self, payload: object) -> None:
@@ -7951,10 +8457,17 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                "UPDATE varac_messages SET flag_state=? WHERE source=? AND id=?",
-                (int(flag_state), msg.source, int(msg.msg_id)),
-            )
+            source_key = str(getattr(msg, "source_key", "") or "").strip()
+            if source_key and self._table_has_column(conn, "varac_messages", "ingest_source_key"):
+                cur.execute(
+                    "UPDATE varac_messages SET flag_state=? WHERE ingest_source_key=? AND source=? AND id=?",
+                    (int(flag_state), source_key, msg.source, int(msg.msg_id)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE varac_messages SET flag_state=? WHERE source=? AND id=?",
+                    (int(flag_state), msg.source, int(msg.msg_id)),
+                )
             conn.commit()
             conn.close()
         except Exception as e:
@@ -7991,6 +8504,30 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update file flag: %s", e)
 
+    @staticmethod
+    def _sqlite_identifier(name: str) -> str:
+        return sqlite_identifier(name)
+
+    def _local_projection_fingerprint(
+        self,
+        tables: Sequence[str],
+        db_path: str | Path | None = None,
+    ) -> Tuple[Tuple[str, ...], ...]:
+        if db_path is None:
+            db_path = self._db_path()
+        return sqlite_table_fingerprint(db_path, tables)
+
+    def _can_skip_local_projection_load(
+        self,
+        cache_attr: str,
+        fingerprint: Tuple[Tuple[str, ...], ...],
+        *,
+        force: bool,
+    ) -> bool:
+        if force or not fingerprint:
+            return False
+        return getattr(self, cache_attr, None) == fingerprint
+
     def _load_varac_from_local(self, force: bool = False, rebuild: bool = True) -> None:
         db_path = self._db_path()
         msgs: List[VarACMessage] = []
@@ -7999,13 +8536,19 @@ class MessageViewerTab(QWidget):
             if rebuild:
                 self._populate_messages_table(force=force)
             return
+        fingerprint = self._local_projection_fingerprint(("varac_messages",))
+        if self._can_skip_local_projection_load("_varac_local_snapshot_fp", fingerprint, force=force):
+            return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
+            has_source_key = self._table_has_column(conn, "varac_messages", "ingest_source_key")
+            source_key_expr = "COALESCE(ingest_source_key, 'legacy')" if has_source_key else "'legacy'"
             cur.execute(
-                """
+                f"""
                 SELECT id, guid, source, msg_type, from_call, to_call, subject, body,
-                       ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state, has_attachment
+                       ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state, has_attachment,
+                       {source_key_expr} AS ingest_source_key
                 FROM varac_messages
                 WHERE COALESCE(is_deleted, 0) = 0
                 ORDER BY ts DESC
@@ -8038,9 +8581,11 @@ class MessageViewerTab(QWidget):
                 vmail_guid=(r[14] or ""),
                 flag_state=int(r[16] or 0),
                 has_attachment=int(r[17] or 0),
+                source_key=str(r[18] or "legacy"),
             )
             msgs.append(msg)
         self.varac_messages = msgs
+        self._varac_local_snapshot_fp = fingerprint or None
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -8070,6 +8615,9 @@ class MessageViewerTab(QWidget):
             self.sitrep_messages = msgs
             if rebuild:
                 self._populate_messages_table(force=force)
+            return
+        fingerprint = self._local_projection_fingerprint(("sitrep_events",))
+        if self._can_skip_local_projection_load("_sitrep_local_snapshot_fp", fingerprint, force=force):
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -8141,6 +8689,7 @@ class MessageViewerTab(QWidget):
             )
             msgs.append(msg)
         self.sitrep_messages = msgs
+        self._sitrep_local_snapshot_fp = fingerprint or None
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -8151,6 +8700,9 @@ class MessageViewerTab(QWidget):
             self.commstat_messages = msgs
             if rebuild:
                 self._populate_messages_table(force=force)
+            return
+        fingerprint = self._local_projection_fingerprint(("commstat_artifacts", "commstat_artifact_deletions"))
+        if self._can_skip_local_projection_load("_commstat_local_snapshot_fp", fingerprint, force=force):
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -8169,7 +8721,7 @@ class MessageViewerTab(QWidget):
                 f"""
                 SELECT ca.id, ca.artifact_key, ca.artifact_kind, ca.subtype, ca.event_ts, ca.event_ts_utc,
                        ca.from_call, ca.target, ca.report_group, ca.grid, ca.state_code, ca.scope,
-                       ca.transport_mode, ca.status_label, ca.alert_color, ca.title, ca.body_text, ca.remarks_text,
+                       ca.transport_mode, ca.reach_mode, ca.status_label, ca.alert_color, ca.title, ca.body_text, ca.remarks_text,
                        ca.source_first, ca.source_last, ca.source_count, ca.sources_json, ca.source_refs_json,
                        ca.external_ids_json, ca.payload_json, ca.updated_ts
                 FROM commstat_artifacts ca
@@ -8185,10 +8737,10 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load CommStat artifacts: %s", e)
             rows = []
         for r in rows:
-            sources_json = str(r[21] or "")
+            sources_json = str(r[22] or "")
             source_candidates = self._safe_json_array_loads(sources_json)
             if not source_candidates:
-                source_candidates = [str(r[18] or "").strip().upper(), str(r[19] or "").strip().upper()]
+                source_candidates = [str(r[19] or "").strip().upper(), str(r[20] or "").strip().upper()]
             msg = CommStatArtifact(
                 artifact_id=int(r[0] or 0),
                 artifact_key=str(r[1] or ""),
@@ -8204,23 +8756,26 @@ class MessageViewerTab(QWidget):
                 scope=str(r[11] or "").strip(),
                 transport_mode=str(r[12] or "").strip().lower(),
                 transport_label=transport_label(r[12]),
-                status_label=str(r[13] or "").strip().upper(),
-                alert_color=str(r[14] or "").strip().upper(),
-                title=str(r[15] or "").strip(),
-                body_text=str(r[16] or "").strip(),
-                remarks_text=str(r[17] or "").strip(),
+                reach_mode=str(r[13] or "").strip().lower(),
+                reach_label=commstat_reach_label(r[13]),
+                status_label=str(r[14] or "").strip().upper(),
+                alert_color=str(r[15] or "").strip().upper(),
+                title=str(r[16] or "").strip(),
+                body_text=str(r[17] or "").strip(),
+                remarks_text=str(r[18] or "").strip(),
                 source_family_label=source_family_display_label(source_families_from_sources(source_candidates)),
-                source_first=str(r[18] or "").strip().upper(),
-                source_last=str(r[19] or "").strip().upper(),
-                source_count=int(r[20] or 0),
+                source_first=str(r[19] or "").strip().upper(),
+                source_last=str(r[20] or "").strip().upper(),
+                source_count=int(r[21] or 0),
                 sources_json=sources_json,
-                source_refs_json=str(r[22] or ""),
-                external_ids_json=str(r[23] or ""),
-                payload_json=str(r[24] or ""),
-                updated_ts=float(r[25] or 0.0),
+                source_refs_json=str(r[23] or ""),
+                external_ids_json=str(r[24] or ""),
+                payload_json=str(r[25] or ""),
+                updated_ts=float(r[26] or 0.0),
             )
             msgs.append(msg)
         self.commstat_messages = msgs
+        self._commstat_local_snapshot_fp = fingerprint or None
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -8237,11 +8792,14 @@ class MessageViewerTab(QWidget):
         if not db_path or not db_path.exists():
             self._pending_rows = []
             return []
+        self._ensure_backlog_table()
         try:
             rows = fetch_all(
                 db_path,
                 """
-                SELECT callsign, msg_id, status, last_attempt_ts, created_ts
+                SELECT callsign, msg_id, status, last_attempt_ts, created_ts,
+                       COALESCE(source_key, ''), COALESCE(source_radio_id, ''),
+                       COALESCE(js8_instance_id, ''), COALESCE(source_path, '')
                 FROM autoquery_backlog
                 WHERE kind='MSG'
                 ORDER BY created_ts DESC
@@ -8262,6 +8820,10 @@ class MessageViewerTab(QWidget):
                     "msg_id": str(row[1] or "").strip(),
                     "status": (row[2] or "PENDING").strip().upper(),
                     "last_seen_ts": float(row[3] or row[4] or 0.0),
+                    "source_key": str(row[5] or "").strip(),
+                    "source_radio_id": str(row[6] or "").strip(),
+                    "js8_instance_id": str(row[7] or "").strip(),
+                    "source_path": str(row[8] or "").strip(),
                 }
             )
         self._pending_rows = out
@@ -8315,8 +8877,9 @@ class MessageViewerTab(QWidget):
                 retrieved_btn.setEnabled(True)
                 retrieved_btn.setStyleSheet(button_style("warning", theme))
 
-            get_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_get(c, m))
-            retrieved_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_mark_retrieved(c, m))
+            row_context = dict(row)
+            get_btn.clicked.connect(lambda _, ctx=row_context: self._on_pending_get_row(ctx))
+            retrieved_btn.clicked.connect(lambda _, ctx=row_context: self._on_pending_mark_retrieved_row(ctx))
             action_layout.addWidget(get_btn)
             action_layout.addWidget(retrieved_btn)
             action_layout.addStretch()
@@ -8540,11 +9103,19 @@ class MessageViewerTab(QWidget):
                     spotter_id, read_ts = payload
                     self._persist_spotter_read(int(spotter_id), float(read_ts))
                 elif op == "varac_read":
-                    source, msg_id = payload
-                    self._persist_varac_read(str(source), int(msg_id))
+                    source, msg_id, source_key = (*payload, "")[:3]
+                    self._persist_varac_read(str(source), int(msg_id), str(source_key))
                 elif op == "js8_read":
-                    msg_id, utc_ts, read_ts, sync_flag = payload
-                    self._persist_js8_read(int(msg_id), float(utc_ts), float(read_ts), bool(sync_flag))
+                    msg_id, utc_ts, read_ts, sync_flag, source_id, source_path, source_key = (*payload, 0, "", "")[:7]
+                    self._persist_js8_read(
+                        int(msg_id),
+                        float(utc_ts),
+                        float(read_ts),
+                        bool(sync_flag),
+                        source_id=int(source_id or 0),
+                        source_path=str(source_path or ""),
+                        source_key=str(source_key or ""),
+                    )
             except Exception as e:
                 log.debug("MessageViewer: deferred persist op failed (%s): %s", op, e)
 
@@ -8593,31 +9164,55 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update spotter read state: %s", e)
 
-    def _persist_varac_read(self, source: str, msg_id: int) -> None:
+    def _persist_varac_read(self, source: str, msg_id: int, source_key: str = "") -> None:
         db_path = self._db_path()
         if not db_path or not db_path.exists():
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
-                (source, int(msg_id)),
-            )
+            source_key = str(source_key or "").strip()
+            if source_key and self._table_has_column(conn, "varac_messages", "ingest_source_key"):
+                cur.execute(
+                    "UPDATE varac_messages SET read_status=1 WHERE ingest_source_key=? AND source=? AND id=?",
+                    (source_key, source, int(msg_id)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
+                    (source, int(msg_id)),
+                )
             conn.commit()
             conn.close()
         except Exception:
             pass
 
-    def _persist_js8_read(self, msg_id: int, utc_ts: float, read_ts: float, sync_flag: bool) -> None:
+    def _persist_js8_read(
+        self,
+        msg_id: int,
+        utc_ts: float,
+        read_ts: float,
+        sync_flag: bool,
+        *,
+        source_id: int = 0,
+        source_path: str = "",
+        source_key: str = "",
+    ) -> None:
         try:
-            self._save_js8_state(msg_id, "READ", utc_ts, read_ts=read_ts)
+            self._save_js8_state(
+                source_id or msg_id,
+                "READ",
+                utc_ts,
+                read_ts=read_ts,
+                source_key=source_key,
+                source_id=source_id or msg_id,
+            )
             self._update_local_read(msg_id, read_ts)
         except Exception as e:
             log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
         if sync_flag:
             try:
-                ok = self._mark_js8call_inbox_read_by_id(msg_id)
+                ok = self._mark_js8call_inbox_read_by_id(source_id or msg_id, inbox_path=source_path)
                 if not ok:
                     log.debug(
                         "MessageViewer: JS8Call inbox mark READ failed (msg_id=%s)",
@@ -8641,7 +9236,7 @@ class MessageViewerTab(QWidget):
         self.pending_table.setMinimumHeight(total)
         self.pending_table.setMaximumHeight(total)
 
-    def _pending_set_status(self, callsign: str, msg_id: str, status: str) -> None:
+    def _pending_set_status(self, callsign: str, msg_id: str, status: str, source_key: str = "") -> None:
         db_path = self._backlog_db_path()
         if not db_path:
             return
@@ -8653,15 +9248,16 @@ class MessageViewerTab(QWidget):
                 UPDATE autoquery_backlog
                 SET status=?, last_attempt_ts=?
                 WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                  AND COALESCE(source_key, '')=COALESCE(?, '')
                 """,
-                (status.upper(), time.time(), callsign, msg_id or ""),
+                (status.upper(), time.time(), callsign, msg_id or "", str(source_key or "").strip()),
             )
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to set pending status: %s", e)
 
-    def _pending_delete(self, callsign: str, msg_id: str) -> None:
+    def _pending_delete(self, callsign: str, msg_id: str, source_key: str = "") -> None:
         db_path = self._backlog_db_path()
         if not db_path:
             return
@@ -8672,8 +9268,9 @@ class MessageViewerTab(QWidget):
                 """
                 DELETE FROM autoquery_backlog
                 WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                  AND COALESCE(source_key, '')=COALESCE(?, '')
                 """,
-                (callsign, msg_id or ""),
+                (callsign, msg_id or "", str(source_key or "").strip()),
             )
             conn.commit()
             conn.close()
@@ -8699,6 +9296,11 @@ class MessageViewerTab(QWidget):
         return int((delta + 59) // 60)
 
     def _on_pending_get(self, callsign: str, msg_id: str) -> None:
+        self._on_pending_get_row({"callsign": callsign, "msg_id": msg_id})
+
+    def _on_pending_get_row(self, row: Mapping[str, object]) -> None:
+        callsign = str(row.get("callsign", "") or "").strip().upper()
+        msg_id = str(row.get("msg_id", "") or "").strip()
         if not callsign or not msg_id:
             return
         mycall = self._my_callsign()
@@ -8726,40 +9328,94 @@ class MessageViewerTab(QWidget):
         )
         if resp != QMessageBox.Yes:
             return
-        if self._send_js8_message(text):
-            self._pending_set_status(callsign, msg_id, "WAITING")
+        if self._send_js8_message(text, source_context=row):
+            self._pending_set_status(callsign, msg_id, "WAITING", str(row.get("source_key", "") or ""))
         self._update_pending_table()
 
     def _on_pending_mark_retrieved(self, callsign: str, msg_id: str) -> None:
+        self._on_pending_mark_retrieved_row({"callsign": callsign, "msg_id": msg_id})
+
+    def _on_pending_mark_retrieved_row(self, row: Mapping[str, object]) -> None:
+        callsign = str(row.get("callsign", "") or "").strip().upper()
+        msg_id = str(row.get("msg_id", "") or "").strip()
+        source_key = str(row.get("source_key", "") or "").strip()
         if not callsign or not msg_id:
             return
         if self.settings.get("js8_inbox_mark_retrieved_sync", False):
-            ok = self._mark_js8call_inbox_read(callsign, msg_id)
+            ok = self._mark_js8call_inbox_read(
+                callsign,
+                msg_id,
+                inbox_path=str(row.get("source_path", "") or "").strip() or None,
+            )
             if not ok:
                 log.debug(
                     "MessageViewer: JS8Call inbox mark READ failed (callsign=%s msg_id=%s)",
                     callsign,
                     msg_id,
                 )
-        self._pending_delete(callsign, msg_id)
+        self._pending_delete(callsign, msg_id, source_key)
         self._update_pending_table()
 
-    def _send_js8_message(self, text: str) -> bool:
-        import socket
+    def _send_js8_message(self, text: str, *, source_context: Mapping[str, object] | None = None) -> bool:
+        endpoint, source_label = self._pending_js8_endpoint(source_context or {})
+        host = endpoint.host
+        port = endpoint.port
+        try:
+            client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+            result = send_js8_message_guarded(
+                client,
+                text,
+                timeout_s=0.6,
+                allow_uncertain_target_state=True,
+            )
+            if result.sent:
+                log.info("MessageViewer: sent JS8 TX.SEND_MESSAGE to %s text=%s", source_label, text)
+                return True
+            log.warning("MessageViewer: JS8 send blocked for %s: %s", source_label, result.detail)
+        except Exception as e:
+            log.error("MessageViewer: failed to send JS8 message to %s text=%s err=%s", source_label, text, e)
+        return False
+
+    def _pending_js8_endpoint(self, source_context: Mapping[str, object]) -> tuple[JS8ApiEndpoint, str]:
+        radio_id = str(source_context.get("source_radio_id", "") or "").strip()
+        js8_id = str(source_context.get("js8_instance_id", "") or "").strip()
+        source_key = str(source_context.get("source_key", "") or "").strip()
+        resolved = resolve_js8_endpoint_context(self.settings, source_context=source_context)
+        if resolved:
+            host = str(resolved.get("host", "") or "127.0.0.1").strip() or "127.0.0.1"
+            try:
+                port = int(resolved.get("port", 2442) or 2442)
+            except Exception:
+                port = 2442
+            label = str(resolved.get("label", "") or source_key or js8_id or radio_id or f"{host}:{port}").strip()
+            return JS8ApiEndpoint(host, port), label
+        try:
+            profiles = MultiRadioStore().list_profiles(enabled_only=False)
+        except Exception:
+            profiles = []
+        radio_id_lc = radio_id.lower()
+        js8_id_lc = js8_id.lower()
+        for profile in profiles:
+            profile_radio = str(profile.get("id", "") or profile.get("radio_profile_id", "") or "").strip()
+            profile_js8 = str(profile.get("js8_instance_id", "") or profile.get("name", "") or profile_radio).strip()
+            if radio_id and profile_radio.lower() != radio_id_lc:
+                continue
+            if js8_id and profile_js8.lower() != js8_id_lc:
+                continue
+            host = str(profile.get("js8_host") or self.settings.get("js8_host", "") or "127.0.0.1").strip() or "127.0.0.1"
+            try:
+                port = int(profile.get("js8_port") or self.settings.get("js8_port", 2442) or 2442)
+            except Exception:
+                port = 2442
+            label = str(profile.get("name") or profile_js8 or profile_radio or source_key or f"{host}:{port}").strip()
+            return JS8ApiEndpoint(host, port), label
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\r\n"
-        try:
-            with socket.create_connection((host, port), timeout=2) as s:
-                s.sendall(payload.encode("utf-8"))
-            log.info("MessageViewer: sent JS8 TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
-            return True
-        except Exception as e:
-            log.error("MessageViewer: failed to send JS8 message to %s:%s text=%s err=%s", host, port, text, e)
-            return False
+        label = source_key or js8_id or radio_id or f"{host}:{port}"
+        return JS8ApiEndpoint(host, port), label
 
     def _my_callsign(self) -> str:
         return (
@@ -8832,14 +9488,14 @@ class MessageViewerTab(QWidget):
         mode = self._current_time_mode()
         tz_name, tz_abbr = self._current_timezone_label()
         if mode == "UTC":
-            self.time_toggle_btn.setText("Times: UTC")
-            self._messages_model.set_time_header("Received (UTC)")
+            self.time_toggle_btn.setText("Time Display: UTC")
+            self._messages_model.set_time_header("Age")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
             )
         else:
-            self.time_toggle_btn.setText("Times: Local")
-            self._messages_model.set_time_header(f"Received ({tz_abbr})")
+            self.time_toggle_btn.setText("Time Display: Local")
+            self._messages_model.set_time_header("Age")
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", f"Last Seen ({tz_abbr})", "Status", "Actions"]
             )
@@ -8871,7 +9527,7 @@ class MessageViewerTab(QWidget):
         local_day = now_local.strftime("%a")
         self.local_label.setText(now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {local_abbr}"))
         if hasattr(self, "time_toggle_btn"):
-            self.time_toggle_btn.setText("Times: Local" if self._show_local_time else "Times: UTC")
+            self.time_toggle_btn.setText("Time Display: Local" if self._show_local_time else "Time Display: UTC")
 
     def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
         if theme is None:
@@ -9120,6 +9776,7 @@ class MessageViewerTab(QWidget):
             "sitrep_messages": list(self.sitrep_messages),
             "commstat_messages": list(self.commstat_messages),
             "files": {k: list(v) for k, v in self.files.items()},
+            "file_metadata_map": self._load_message_file_metadata_map(self.files),
             "read_state_map": dict(self._read_state_map),
             "signature_state_map": signature_map,
             "spotter_auth_state_map": self._spotter_msg_auth_state_map(),
@@ -9164,6 +9821,7 @@ class MessageViewerTab(QWidget):
             sitrep_messages=snapshot.get("sitrep_messages", []),  # type: ignore[arg-type]
             commstat_messages=snapshot.get("commstat_messages", []),  # type: ignore[arg-type]
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
+            file_metadata_map=snapshot.get("file_metadata_map", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
             signature_state_map=snapshot.get("signature_state_map", {}),  # type: ignore[arg-type]
             spotter_auth_state_map=snapshot.get("spotter_auth_state_map", {}),  # type: ignore[arg-type]
@@ -9211,8 +9869,11 @@ class MessageViewerTab(QWidget):
         rows = data.get("rows", [])
         if not isinstance(rows, list):
             rows = []
+        if self._locally_deleted_row_keys:
+            rows = _core_filter_rows_excluding_identities(rows, self._locally_deleted_row_keys)
         self._retag_bbs_archive_rows(rows)
         self._message_rows = rows
+        self._save_message_file_metadata_from_rows(rows)
         sender_updates = data.get("sender_cache_updates", {})
         if isinstance(sender_updates, dict):
             self._sender_cache.update(sender_updates)
@@ -9226,7 +9887,12 @@ class MessageViewerTab(QWidget):
                 "messages.build_rows",
                 build_ms,
                 settings=self.settings,
-                meta={"rows": len(rows), "force": bool(data.get("force", False))},
+                meta={
+                    "rows": len(rows),
+                    "force": bool(data.get("force", False)),
+                    "file_metadata_hits": int(data.get("file_metadata_hits", 0) or 0),
+                    "file_parse_count": int(data.get("file_parse_count", 0) or 0),
+                },
                 min_ms=5.0,
             )
         if self._freeze_messages_table and not bool(data.get("force", False)):
@@ -9239,22 +9905,39 @@ class MessageViewerTab(QWidget):
         self._start_signature_verification(force=bool(data.get("force", False)))
         log.debug("MessageViewer: built %d unified messages", len(rows))
 
+    def _remember_locally_deleted_row(self, row: UnifiedMessage) -> None:
+        key = MessageTableModel._row_key(row)
+        if key is not None:
+            self._locally_deleted_row_keys.add(key)
+
+    def _remember_locally_deleted_key(self, key: tuple | None) -> None:
+        if key is not None:
+            self._locally_deleted_row_keys.add(key)
+
+    def _remove_deleted_rows_from_current_view(self, rows: List[UnifiedMessage]) -> None:
+        keys = _core_message_row_identity_set(rows)
+        if not keys:
+            return
+        self._message_rows = _core_filter_rows_excluding_identities(self._message_rows, keys)
+        self._render_messages_table(_core_filter_rows_excluding_identities(self._messages_model.rows(), keys))
+
     def _refresh_message_filters(self, rows: List[UnifiedMessage]) -> None:
         type_vals = sorted({r.msg_type for r in rows if r.msg_type})
         status_vals = sorted({r.status for r in rows if r.status})
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
         spotter_forms = sorted({t for t in type_vals if re.match(r"^F![0-9]{3}[A-Z]?$", t)})
-        commstat_kinds = sorted(
-            {
-                str(getattr(r.payload, "artifact_kind", "") or "").strip().upper()
-                for r in rows
-                if (r.origin or "").strip().lower() == "commstat"
-            }
-        )
-        commstat_kinds = [k for k in commstat_kinds if k]
-        commstat_type_labels = {artifact_kind_label(k) for k in commstat_kinds}
-        base_types = sorted([t for t in type_vals if t not in spotter_forms and t not in commstat_type_labels])
+        has_commstat = any((r.origin or "").strip().lower() == "commstat" for r in rows)
+        has_js8call = any((r.origin or "").strip().lower() == "js8" for r in rows)
+        has_forms = any(str(r.msg_type or "").strip().upper() in {"FLMSG", "FLAMP"} for r in rows)
+        grouped_types = set(spotter_forms)
+        if has_commstat:
+            grouped_types.update(t for t in type_vals if str(t or "").startswith("CommStat"))
+        if has_js8call:
+            grouped_types.update(t for t in type_vals if str(t or "").strip().upper() in {"JS8", "JS8 MSG", "JS8CALL"})
+        if has_forms:
+            grouped_types.update(t for t in type_vals if str(t or "").strip().upper() in {"FLMSG", "FLAMP"})
+        base_types = sorted([t for t in type_vals if t not in grouped_types])
         sitrep_subtypes = sorted(
             {
                 str(getattr(r.payload, "subtype", "") or "").strip().upper()
@@ -9267,6 +9950,12 @@ class MessageViewerTab(QWidget):
             type_vals = base_types + ["Spotter"]
         else:
             type_vals = base_types
+        if has_forms and "FLMSG/FLAMP" not in type_vals:
+            type_vals.append("FLMSG/FLAMP")
+        if has_commstat and "CommStat" not in type_vals:
+            type_vals.append("CommStat")
+        if has_js8call and "JS8Call" not in type_vals:
+            type_vals.append("JS8Call")
         if sitrep_subtypes:
             if "SitRep" in type_vals:
                 idx = type_vals.index("SitRep") + 1
@@ -9275,15 +9964,8 @@ class MessageViewerTab(QWidget):
                 idx = len(type_vals)
             sitrep_filters = [subtype_filter_label(s) for s in sitrep_subtypes]
             type_vals[idx:idx] = sitrep_filters
-        if commstat_kinds:
-            if "CommStat" not in type_vals:
-                type_vals.append("CommStat")
-            commstat_filters = [artifact_filter_label(k) for k in commstat_kinds]
-            if "CommStat" in type_vals:
-                insert_at = type_vals.index("CommStat") + 1
-            else:
-                insert_at = len(type_vals)
-            type_vals[insert_at:insert_at] = commstat_filters
+        preferred_order = ["FLMSG/FLAMP", "Spotter", "CommStat", "JS8Call", "VarAC", "SitRep"]
+        type_vals = sorted(type_vals, key=lambda value: (preferred_order.index(value) if value in preferred_order else 99, value))
         if any(getattr(r.payload, "flag_state", 0) == 1 or bool(getattr(r, "actionable", False)) for r in rows):
             if "Action Needed" not in status_vals:
                 status_vals.append("Action Needed")
@@ -9351,51 +10033,45 @@ class MessageViewerTab(QWidget):
         self._refresh_workspace_filter_options(rows)
         self._update_excluded_types_button_state()
 
+    def _current_inbox_filter_criteria(self, *, now_ts: float | None = None) -> InboxFilterCriteria:
+        return InboxFilterCriteria(
+            focus=str(getattr(self, "_inbox_focus", "all") or "all").strip().lower(),
+            type_sel=self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type...",
+            status_sel=self.status_filter.currentText() if hasattr(self, "status_filter") else "Status...",
+            from_sel=self.from_filter.currentText() if hasattr(self, "from_filter") else "",
+            to_sel=self.to_filter.currentText() if hasattr(self, "to_filter") else "",
+            age_filter_seconds=self.received_filter.currentData() if hasattr(self, "received_filter") else 0,
+            search_query=(self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower(),
+            excluded_types=frozenset(
+                str(v or "").strip() for v in getattr(self, "_excluded_msg_types", set()) if str(v or "").strip()
+            ),
+            now_ts=now_ts,
+        )
+
+    @staticmethod
+    def _ensure_row_search_text(row: UnifiedMessage) -> None:
+        if not row.search_text:
+            row.search_text = _core_row_search_text(row)
+
+    def _row_matches_inbox_criteria(self, row: UnifiedMessage, criteria: InboxFilterCriteria) -> bool:
+        if criteria.search_query:
+            self._ensure_row_search_text(row)
+        return _core_row_matches_inbox_criteria(row, criteria)
+
     def _apply_message_filters(self) -> None:
         rows = self._message_rows
-        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
-        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
-        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
-        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
-        rcv_query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
-        apply_hidden_types = type_sel in ("", "MSG Type...")
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
+        type_sel = criteria.type_sel
 
         filtered = []
         for row in rows:
             if not self._row_matches_workspace_filters(row):
                 continue
-            if not self._row_matches_type_filter(row, type_sel):
+            if not self._row_matches_inbox_criteria(row, criteria):
                 continue
-            if apply_hidden_types and self._excluded_msg_types and self._row_matches_excluded_type(row):
-                continue
-            if status_sel != "Status...":
-                if status_sel == "Action Needed":
-                    if getattr(row.payload, "flag_state", 0) != 1 and not bool(getattr(row, "actionable", False)):
-                        continue
-                elif row.status != status_sel:
-                    continue
-            if from_sel and row.from_call != from_sel:
-                continue
-            if to_sel and row.to_call != to_sel:
-                continue
-            if rcv_query:
-                hay = row.search_text
-                if not hay:
-                    hay = " ".join(
-                        [
-                            row.msg_type or "",
-                            row.status or "",
-                            row.from_call or "",
-                            row.to_call or "",
-                            row.rcv_display or "",
-                            row.title or "",
-                        ]
-                    ).lower()
-                    row.search_text = hay
-                if rcv_query not in hay:
-                    continue
             filtered.append(row)
-        self._set_message_table_display_profile(self._message_display_profile_for_type(type_sel))
+        self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
         if (
             type_sel == "BBS"
             and self._sort_column == self._default_sort_column
@@ -9407,47 +10083,45 @@ class MessageViewerTab(QWidget):
         self._render_messages_table(filtered)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
+        self._refresh_workspace_filter_options(self._rows_for_group_filter_options(rows))
         selected_groups = self._selected_message_groups()
         selected_sources = self._selected_message_sources()
         log.debug(
-            "MessageViewer: filters type=%s hidden=%d status=%s from=%s to=%s rcv=%s groups=%s sources=%s => %d rows",
-            type_sel,
-            len(self._excluded_msg_types) if apply_hidden_types else 0,
-            status_sel,
-            from_sel,
-            to_sel,
-            rcv_query or "ALL",
+            "MessageViewer: filters focus=%s age=%s type=%s hidden=%d status=%s from=%s to=%s rcv=%s groups=%s sources=%s => %d rows",
+            criteria.focus,
+            criteria.age_filter_seconds,
+            criteria.type_sel,
+            len(criteria.excluded_types) if criteria.applies_hidden_types else 0,
+            criteria.status_sel,
+            criteria.from_sel,
+            criteria.to_sel,
+            criteria.search_query or "ALL",
             sorted(selected_groups) if selected_groups is not None else ["ALL"],
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             len(filtered),
         )
 
+    def _rows_for_group_filter_options(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
+        option_rows: List[UnifiedMessage] = []
+        for row in rows:
+            sources = self._selected_message_sources()
+            if sources is not None and self._message_source_value(row) not in sources:
+                continue
+            if not self._row_matches_inbox_criteria(row, criteria):
+                continue
+            option_rows.append(row)
+        return option_rows
+
+    def _message_display_profile_for_current_view(self, type_sel: object) -> str:
+        return message_display_profile_for_focus_type(getattr(self, "_inbox_focus", "all"), type_sel)
+
     def _message_display_profile_for_type(self, type_sel: object) -> str:
-        text = str(type_sel or "").strip()
-        if not text or text == "MSG Type...":
-            return "triage"
-        if text == "Spotter" or re.match(r"^F![0-9]{3}[A-Z]?$", text):
-            return "field_report"
-        if text == "SitRep" or text.startswith("SitRep/"):
-            return "intel_report"
-        if text == "CommStat" or text.startswith("CommStat/"):
-            return "intel_report"
-        if text.upper() in {"FLMSG", "FLAMP"}:
-            return "form_message"
-        return "triage"
+        return message_display_profile_for_type(type_sel)
 
     def _current_messages_time_header(self) -> str:
-        try:
-            mode = self._current_time_mode()
-            if mode == "UTC":
-                return "Received (UTC)"
-            tz_name = self.settings.get("timezone", "UTC") or "UTC"
-            tz = get_timezone(tz_name)
-            now = datetime.datetime.now(tz)
-            tz_abbr = now.strftime("%Z") or "Local"
-            return f"Received ({tz_abbr})"
-        except Exception:
-            return "Received"
+        return "Age"
 
     def _set_message_table_display_profile(self, profile: str) -> None:
         if not hasattr(self, "_messages_model"):
@@ -9472,35 +10146,69 @@ class MessageViewerTab(QWidget):
                 return
             except Exception as exc:
                 log.debug("MessageViewer: open_spotter_map failed: %s", exc)
-        QMessageBox.information(self, "View Spotter Map", "The Map view is not available in this runtime profile.")
+        QMessageBox.information(self, "View HF Reports Map", "The Map view is not available in this runtime profile.")
 
     def _apply_message_table_profile_widths(self) -> None:
         profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"
+        try:
+            header = self.messages_table.horizontalHeader()
+            for idx in range(8):
+                if idx == 0:
+                    header.setSectionResizeMode(idx, QHeaderView.Fixed)
+                elif idx == 7:
+                    header.setSectionResizeMode(idx, QHeaderView.Fixed)
+                else:
+                    header.setSectionResizeMode(idx, QHeaderView.Interactive)
+            stretch_col = 1 if profile in {"field_report", "intel_report", "form_message"} else 6
+            header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)
+        except Exception:
+            pass
         if profile == "field_report":
-            widths = {0: 32, 1: 86, 2: 88, 3: 104, 4: 120, 5: 240, 6: 92, 7: 142}
+            widths = {0: 32, 1: 280, 2: 76, 3: 104, 4: 112, 5: 112, 6: 78, 7: 136}
+            min_width = 930
+        elif profile == "intel_report":
+            widths = {0: 32, 1: 180, 2: 82, 3: 104, 4: 112, 5: 120, 6: 78, 7: 136}
+            min_width = 850
         elif profile == "form_message":
-            widths = {0: 32, 1: 86, 2: 88, 3: 116, 4: 116, 5: 92, 6: 320, 7: 142}
+            widths = {0: 32, 1: 420, 2: 104, 3: 82, 4: 104, 5: 112, 6: 78, 7: 136}
+            min_width = 960
         else:
-            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 148, 7: 142}
+            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 78, 7: 136}
+            min_width = 850
         for idx, width in widths.items():
             try:
                 self.messages_table.setColumnWidth(idx, width)
             except Exception:
                 pass
         try:
+            self.messages_table.setMinimumWidth(min_width)
+        except Exception:
+            pass
+        try:
             self._sync_header_widths()
         except Exception:
             pass
 
     def _refresh_workspace_filter_options(self, rows: List[UnifiedMessage]) -> None:
+        group_option_rows = rows
+        if self._show_all_message_groups_enabled() and not group_option_rows and self._message_rows:
+            group_option_rows = self._message_rows
         if hasattr(self, "operating_group_filter"):
-            selected_groups = None
-            if not self.operating_group_filter.all_selected():
-                selected_groups = sorted(self.operating_group_filter.selected_values())
-            self.operating_group_filter.set_options(
-                self._message_group_options(rows),
+            commstat_state = self._commstat_group_state()
+            group_sources = self._message_group_source_map(group_option_rows)
+            selected_groups, select_all_when_empty = _core_message_group_rebuild_selection(
+                group_sources,
+                current_selected=self.operating_group_filter.selected_values(),
+                current_all_selected=self.operating_group_filter.all_selected(),
+                fio_configured_groups=self._configured_message_group_names(),
+                commstat_active_groups=self._message_group_candidate_set(commstat_state.active_groups),
+                commstat_configured_groups=self._message_group_candidate_set(commstat_state.configured_groups),
+                show_all_groups=self._show_all_message_groups_enabled(),
+            )
+            self.operating_group_filter.set_grouped_options(
+                self._message_group_option_sections_from_sources(group_sources),
                 selected_values=selected_groups,
-                select_all_when_empty=selected_groups is None,
+                select_all_when_empty=select_all_when_empty,
             )
         if hasattr(self, "source_filter"):
             selected_sources = None
@@ -9513,34 +10221,123 @@ class MessageViewerTab(QWidget):
             )
 
     def _message_source_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
-        origins = {self._message_source_value(row) for row in rows}
-        if not origins:
-            origins = set(MESSAGE_SOURCE_LABELS)
-        return [
-            (origin, MESSAGE_SOURCE_LABELS.get(origin, origin.upper()))
-            for origin in sorted(origin for origin in origins if origin)
-        ]
+        return _core_message_source_options(rows)
 
     def _message_group_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
-        groups = {self._message_group_value(row) for row in rows}
-        if not groups:
-            groups = {"unassigned"}
         options: list[tuple[str, str]] = []
-        for group in sorted(group for group in groups if group):
-            label = "Unassigned" if group == "unassigned" else group
-            options.append((group, label))
+        for _section, section_options in self._message_group_option_sections(rows):
+            options.extend(section_options)
         return options
 
+    def _primary_message_group_values(self, rows: List[UnifiedMessage]) -> set[str]:
+        fio_configured_groups = self._configured_message_group_names()
+        commstat_state = self._commstat_group_state()
+        return _core_primary_message_group_values(
+            self._message_group_source_map(rows),
+            fio_configured_groups=fio_configured_groups,
+            commstat_active_groups=self._message_group_candidate_set(commstat_state.active_groups),
+            commstat_configured_groups=self._message_group_candidate_set(commstat_state.configured_groups),
+        )
+
+    def _message_group_source_map(self, rows: List[UnifiedMessage]) -> dict[str, set[str]]:
+        pairs: list[tuple[str, str]] = []
+        for row in rows:
+            group = self._message_group_value(row)
+            if group:
+                pairs.append((group, self._message_source_value(row)))
+        return _core_message_group_source_map(pairs, family_map=self._operator_group_family_map())
+
+    def _message_group_option_sections(self, rows: List[UnifiedMessage]) -> list[tuple[str, list[tuple[str, str]]]]:
+        return self._message_group_option_sections_from_sources(self._message_group_source_map(rows))
+
+    def _message_group_option_sections_from_sources(
+        self,
+        group_sources: dict[str, set[str]],
+    ) -> list[tuple[str, list[tuple[str, str]]]]:
+        fio_configured_groups = self._configured_message_group_names()
+        commstat_state = self._commstat_group_state()
+        commstat_active_groups = self._message_group_candidate_set(commstat_state.active_groups)
+        commstat_configured_groups = self._message_group_candidate_set(commstat_state.configured_groups)
+        show_all_groups = self._show_all_message_groups_enabled()
+        return _core_message_group_option_sections(
+            group_sources,
+            fio_configured_groups=fio_configured_groups,
+            commstat_active_groups=commstat_active_groups,
+            commstat_configured_groups=commstat_configured_groups,
+            show_all_groups=show_all_groups,
+        )
+
+    def _show_all_message_groups_enabled(self) -> bool:
+        return bool(
+            getattr(getattr(self, "show_all_message_groups_chk", None), "isChecked", lambda: False)()
+        )
+
+    def _commstat_group_state(self):
+        try:
+            return load_commstat_group_state(self.settings)
+        except Exception:
+            return load_commstat_group_state({})
+
+    def _configured_message_group_names(self) -> set[str]:
+        groups: set[str] = set()
+        for key in ("operating_groups", "local_net_profiles"):
+            try:
+                records = self.settings.get(key, []) or []
+            except Exception:
+                records = []
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                group = self._normalize_message_group_filter_value(
+                    record.get("group") or record.get("group_name") or record.get("name") or ""
+                )
+                if group:
+                    groups.add(group)
+        return groups
+
+    @classmethod
+    def _message_group_candidate_set(cls, values: object) -> set[str]:
+        return _core_message_group_candidate_set(values)
+
+    @staticmethod
+    def _is_message_group_candidate(value: object, *, configured_groups: set[str] | None = None) -> bool:
+        return _core_is_message_group_candidate(value, configured_groups=configured_groups)
+
+    def _operator_group_family_map(self) -> dict[str, OperatorGroupFamily]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return {}
+        try:
+            stat = db_path.stat()
+            fp = (str(db_path), float(stat.st_mtime), int(stat.st_size))
+        except Exception:
+            fp = (str(db_path), 0.0, 0)
+        cache_fp = getattr(self, "_operator_group_family_fp", None)
+        cache = getattr(self, "_operator_group_family_cache", None)
+        if cache_fp == fp and isinstance(cache, dict):
+            return cache
+        families = load_operator_group_families(db_path)
+        self._operator_group_family_fp = fp
+        self._operator_group_family_cache = families
+        return families
+
+    def _expanded_selected_message_groups(self) -> Optional[Set[str]]:
+        groups = self._selected_message_groups()
+        if groups is None:
+            return None
+        return expand_group_selection(groups, self._operator_group_family_map())
+
+    @staticmethod
+    def _normalize_message_group_filter_value(value: object) -> str:
+        return _core_normalize_message_group_filter_value(value)
+
     def _message_source_value(self, row: UnifiedMessage) -> str:
-        return str(getattr(row, "origin", "") or "").strip().lower()
+        return _core_message_source_value(row)
 
     def _message_group_value(self, row: UnifiedMessage) -> str:
-        payload = getattr(row, "payload", None)
-        for attr in ("report_group", "group", "operating_group"):
-            value = normalize_group_name(getattr(payload, attr, "") if payload is not None else "")
-            if value:
-                return value
-        return "unassigned"
+        return _core_message_group_value(row, configured_groups=self._configured_message_group_names())
 
     def _selected_message_sources(self) -> Optional[Set[str]]:
         if hasattr(self, "source_filter"):
@@ -9551,19 +10348,38 @@ class MessageViewerTab(QWidget):
 
     def _selected_message_groups(self) -> Optional[Set[str]]:
         if hasattr(self, "operating_group_filter"):
-            if self.operating_group_filter.all_selected():
+            if self.operating_group_filter.all_selected() and self._show_all_message_groups_enabled():
                 return None
             return self.operating_group_filter.selected_values()
         return None
 
-    def _row_matches_workspace_filters(self, row: UnifiedMessage) -> bool:
-        sources = self._selected_message_sources()
-        if sources is not None and self._message_source_value(row) not in sources:
+    def _message_group_filter_active(self) -> bool:
+        if not hasattr(self, "operating_group_filter"):
             return False
-        groups = self._selected_message_groups()
-        if groups is not None and self._message_group_value(row) not in groups:
+        selected = self._selected_message_groups()
+        if selected is None:
+            return False
+        if self._show_all_message_groups_enabled() and selected == self._primary_message_group_values(self._message_rows):
+            return False
+        if not self._show_all_message_groups_enabled() and self.operating_group_filter.all_selected():
             return False
         return True
+
+    def _row_matches_workspace_filters(self, row: UnifiedMessage) -> bool:
+        return _core_row_matches_workspace_scope(
+            row,
+            selected_sources=self._selected_message_sources(),
+            selected_groups=self._expanded_selected_message_groups(),
+            configured_groups=self._configured_message_group_names(),
+        )
+
+    @staticmethod
+    def _row_matches_age_filter(row: UnifiedMessage, age_filter_seconds: object, *, now_ts: float | None = None) -> bool:
+        return _core_row_matches_age_filter(row, age_filter_seconds, now_ts=now_ts)
+
+    def _row_matches_inbox_focus(self, row: UnifiedMessage) -> bool:
+        focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
+        return _core_row_matches_inbox_focus(row, focus)
 
     def _is_filter_or_sort_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
@@ -9580,9 +10396,13 @@ class MessageViewerTab(QWidget):
             return True
         if self._selected_message_sources() is not None:
             return True
-        if self._selected_message_groups() is not None:
+        if self._message_group_filter_active():
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
+            return True
+        if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != 0:
+            return True
+        if str(getattr(self, "_inbox_focus", "all") or "all") != "all":
             return True
         if (
             self._sort_column != self._default_sort_column
@@ -9605,25 +10425,7 @@ class MessageViewerTab(QWidget):
         return False
 
     def _is_filter_active(self) -> bool:
-        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
-        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
-        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
-        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
-        if type_sel not in ("", "MSG Type..."):
-            return True
-        if status_sel not in ("", "Status..."):
-            return True
-        if from_sel:
-            return True
-        if to_sel:
-            return True
-        if self._selected_message_sources() is not None:
-            return True
-        if self._selected_message_groups() is not None:
-            return True
-        if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
-            return True
-        return False
+        return self._filters_active()
 
     def _apply_message_filters_preserve_scroll(self) -> None:
         if not hasattr(self, "messages_table"):
@@ -9677,6 +10479,8 @@ class MessageViewerTab(QWidget):
             and self.to_filter.currentText() in ("",)
             and self._selected_message_sources() is None
             and self._selected_message_groups() is None
+            and str(getattr(self, "_inbox_focus", "all") or "all") == "all"
+            and int(self.received_filter.currentData() or 0) == 0
             and not self.rcv_search.text().strip()
         ):
             return
@@ -9685,6 +10489,13 @@ class MessageViewerTab(QWidget):
         self.from_filter.blockSignals(True)
         self.to_filter.blockSignals(True)
         self.rcv_search.blockSignals(True)
+        self.received_filter.blockSignals(True)
+        if hasattr(self, "show_all_message_groups_chk"):
+            self.show_all_message_groups_chk.blockSignals(True)
+            self.show_all_message_groups_chk.setChecked(False)
+        self._inbox_focus = "all"
+        self._sync_inbox_focus_buttons()
+        self.received_filter.setCurrentIndex(0)
         self.type_filter.setCurrentText("MSG Type...")
         self.status_filter.setCurrentText("Status...")
         self.from_filter.setCurrentText("")
@@ -9695,15 +10506,56 @@ class MessageViewerTab(QWidget):
                 [value for value, _label in self._message_source_options(self._message_rows)]
             )
         if hasattr(self, "operating_group_filter"):
-            self.operating_group_filter.set_selected_values(
-                [value for value, _label in self._message_group_options(self._message_rows)]
+            self.operating_group_filter.set_grouped_options(
+                self._message_group_option_sections(self._message_rows),
+                selected_values=None,
+                select_all_when_empty=True,
             )
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
         self.from_filter.blockSignals(False)
         self.to_filter.blockSignals(False)
         self.rcv_search.blockSignals(False)
+        self.received_filter.blockSignals(False)
+        if hasattr(self, "show_all_message_groups_chk"):
+            self.show_all_message_groups_chk.blockSignals(False)
+            self._update_show_all_message_groups_style()
         self._apply_message_filters()
+
+    def _on_show_all_message_groups_changed(self, *_args) -> None:
+        self._update_show_all_message_groups_style()
+        if hasattr(self, "operating_group_filter"):
+            commstat_state = self._commstat_group_state()
+            group_sources = self._message_group_source_map(self._message_rows)
+            selected_values, select_all_when_empty = _core_message_group_rebuild_selection(
+                group_sources,
+                current_selected=self.operating_group_filter.selected_values(),
+                current_all_selected=self.operating_group_filter.all_selected(),
+                fio_configured_groups=self._configured_message_group_names(),
+                commstat_active_groups=self._message_group_candidate_set(commstat_state.active_groups),
+                commstat_configured_groups=self._message_group_candidate_set(commstat_state.configured_groups),
+                show_all_groups=self._show_all_message_groups_enabled(),
+                prefer_primary=self._show_all_message_groups_enabled(),
+            )
+            self.operating_group_filter.set_grouped_options(
+                self._message_group_option_sections_from_sources(group_sources),
+                selected_values=selected_values,
+                select_all_when_empty=select_all_when_empty,
+            )
+        self._on_filter_changed()
+
+    def _update_show_all_message_groups_style(self) -> None:
+        if not hasattr(self, "show_all_message_groups_chk"):
+            return
+        theme = resolve_theme(self.settings)
+        role = "secondary" if self._show_all_message_groups_enabled() else "muted"
+        self.show_all_message_groups_chk.setStyleSheet(button_style(role, theme))
+        self.show_all_message_groups_chk.setText("All Groups" if self._show_all_message_groups_enabled() else "Configured")
+        self.show_all_message_groups_chk.setToolTip(
+            "Operating Group list is expanded to every discovered group."
+            if self._show_all_message_groups_enabled()
+            else "Operating Group list is focused on configured and CommStat active groups."
+        )
 
     def _on_filter_changed(self) -> None:
         self._unfreeze_table()
@@ -9714,8 +10566,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setUpdatesEnabled(False)
         self._messages_model.set_rows(rows)
         if not self._has_active_view:
-            self.info_label.setText("No file selected")
-            self.viewer.clear()
+            self._clear_message_detail_view("No file selected")
             self.current_record = None
             self.current_js8 = None
             self.current_sitrep = None
@@ -9724,22 +10575,101 @@ class MessageViewerTab(QWidget):
         self._update_bulk_delete_buttons()
         self._update_mark_all_read_style()
 
+    def _message_row_from_index(self, index: QModelIndex) -> UnifiedMessage | None:
+        if not index.isValid() or not hasattr(self, "_messages_model"):
+            return None
+        row = index.data(Qt.UserRole)
+        if isinstance(row, UnifiedMessage):
+            return row
+        try:
+            model_row = int(index.row())
+        except Exception:
+            return None
+        rows = self._messages_model.rows()
+        if 0 <= model_row < len(rows):
+            return rows[model_row]
+        return None
+
+    def _on_message_table_activated(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        # Column 0 is selection and column 7 has explicit View/Delete actions.
+        if index.column() in {0, 7}:
+            return
+        row = self._message_row_from_index(index)
+        if row is not None:
+            self._on_view_message(row)
+
     def _update_bulk_delete_buttons(self) -> None:
         theme = resolve_theme(self.settings)
-        count = len(self._messages_model.selected_rows())
+        rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
+        count = len(rows)
         has_selection = count > 0
+        unread_count = sum(1 for row in rows if (row.status or "").upper() != "READ")
+        delete_tooltip = self._delete_effect_tooltip(rows)
         if hasattr(self, "delete_selected_btn"):
-            self.delete_selected_btn.setEnabled(has_selection)
-            self.delete_selected_btn.setVisible(has_selection)
-            role = "eligible_danger" if has_selection else "muted"
-            self.delete_selected_btn.setStyleSheet(button_style(role, theme))
+            # Keep the legacy left-rail delete button out of the normal Inbox
+            # flow. Bulk actions live inline above the table so selection does
+            # not create a sudden red action surface away from the messages.
+            self.delete_selected_btn.setEnabled(False)
+            self.delete_selected_btn.setVisible(False)
+            self.delete_selected_btn.setStyleSheet(button_style("muted", theme))
         if hasattr(self, "export_selected_btn"):
             self.export_selected_btn.setEnabled(has_selection)
             role = "eligible_warning" if has_selection else "muted"
             self.export_selected_btn.setStyleSheet(button_style(role, theme))
+        if hasattr(self, "bulk_selection_bar"):
+            self.bulk_selection_bar.setVisible(has_selection)
+            self.bulk_selection_bar.setStyleSheet(
+                "QFrame#messageBulkSelectionBar {"
+                f"background-color: {theme.get('surface_alt', '#E8EDF3')};"
+                f"border: 1px solid {theme.get('border', '#CCD6E0')};"
+                "border-radius: 6px;"
+                "}"
+            )
+            self.bulk_selection_bar.setToolTip(delete_tooltip)
+        if hasattr(self, "bulk_selection_label"):
+            source_summary = self._summarize_types(rows) if rows else ""
+            label = f"{count} selected"
+            if source_summary:
+                label = f"{label} | {source_summary}"
+            self.bulk_selection_label.setText(label)
+            self.bulk_selection_label.setToolTip(delete_tooltip)
+        if hasattr(self, "bulk_mark_read_btn"):
+            self.bulk_mark_read_btn.setEnabled(unread_count > 0)
+            self.bulk_mark_read_btn.setText(f"Mark Read ({unread_count})" if unread_count else "Mark Read")
+            self.bulk_mark_read_btn.setToolTip(
+                "Mark selected unread messages as READ." if unread_count else "Selected messages are already read."
+            )
+            self.bulk_mark_read_btn.setStyleSheet(button_style("eligible_warning" if unread_count else "muted", theme))
+        if hasattr(self, "bulk_delete_btn"):
+            self.bulk_delete_btn.setEnabled(has_selection)
+            self.bulk_delete_btn.setStyleSheet(button_style("eligible_danger" if has_selection else "muted", theme))
+            self.bulk_delete_btn.setToolTip(delete_tooltip)
+        if hasattr(self, "bulk_clear_btn"):
+            self.bulk_clear_btn.setEnabled(has_selection)
+            self.bulk_clear_btn.setStyleSheet(button_style("muted", theme))
         self._refresh_more_actions_menu()
         self._sync_select_all_checkbox()
         self._update_mark_all_read_style()
+
+    def _mark_selected_read(self) -> None:
+        rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
+        unread_rows = [row for row in rows if (row.status or "").upper() != "READ"]
+        if not unread_rows:
+            if hasattr(self, "message_check_status_label"):
+                self.message_check_status_label.setText("Selected messages are already read.")
+            return
+        changed = self._mark_rows_read_bulk(unread_rows)
+        if changed > 0:
+            self._messages_model.clear_selection()
+            self._apply_message_filters_preserve_scroll()
+            if hasattr(self, "message_check_status_label"):
+                self.message_check_status_label.setText(f"Marked {changed} selected message(s) as READ.")
+        else:
+            self._update_bulk_delete_buttons()
+            if hasattr(self, "message_check_status_label"):
+                self.message_check_status_label.setText("No selected messages were updated.")
 
     def _delete_selected_messages(self) -> None:
         rows = self._messages_model.selected_rows()
@@ -9753,142 +10683,320 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _collect_deletable_rows(rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
-        out: List[UnifiedMessage] = []
-        for row in rows:
-            if MessageTableModel._row_key(row) is not None:
-                out.append(row)
-        return out
+        return list(collect_deletable_message_rows(rows))
 
     @staticmethod
     def _summarize_types(rows: List[UnifiedMessage]) -> str:
-        counts: Dict[str, int] = {}
-        for row in rows:
-            label = (row.msg_type or row.origin or "").strip() or "Unknown"
-            counts[label] = counts.get(label, 0) + 1
-        parts = [f"{k}: {counts[k]}" for k in sorted(counts)]
-        return ", ".join(parts)
+        return summarize_delete_sources(rows)
 
     def _confirm_bulk_delete(self, rows: List[UnifiedMessage], prompt: str) -> bool:
-        summary = self._summarize_types(rows)
-        msg = f"{prompt}\n\n{len(rows)} messages\n{summary}"
+        msg = self._bulk_delete_confirmation_text(rows, prompt)
         resp = QMessageBox.question(self, "Delete Messages", msg, QMessageBox.Yes | QMessageBox.No)
         return resp == QMessageBox.Yes
 
+    @staticmethod
+    def _delete_source_label(row: UnifiedMessage) -> str:
+        return delete_source_label_for_row(row)
+
+    @staticmethod
+    def _delete_effect_label(row: UnifiedMessage) -> str:
+        return delete_effect_label_for_row(row)
+
+    @staticmethod
+    def _summarize_delete_effects(rows: Sequence[UnifiedMessage]) -> str:
+        return summarize_delete_effects(rows)
+
+    @staticmethod
+    def _delete_effect_tooltip(rows: Sequence[UnifiedMessage]) -> str:
+        return delete_effect_tooltip(rows)
+
+    def _current_age_filter_label(self) -> str:
+        if not hasattr(self, "received_filter"):
+            return ""
+        try:
+            if int(self.received_filter.currentData() or 0) == 0:
+                return ""
+        except Exception:
+            return ""
+        return str(self.received_filter.currentText() or "").strip()
+
+    def _active_message_scope_summary(self) -> str:
+        focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
+        focus_labels = {key: label for key, label, _tip in self._inbox_focus_options()}
+        return active_inbox_scope_summary(
+            focus=focus,
+            focus_labels=focus_labels,
+            groups=self._selected_message_groups() if self._message_group_filter_active() else None,
+            sources=self._selected_message_sources(),
+            age_label=self._current_age_filter_label(),
+            search_query=(self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip(),
+            type_sel=self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type...",
+            status_sel=self.status_filter.currentText() if hasattr(self, "status_filter") else "Status...",
+            from_sel=self.from_filter.currentText() if hasattr(self, "from_filter") else "",
+            to_sel=self.to_filter.currentText() if hasattr(self, "to_filter") else "",
+        )
+
+    @staticmethod
+    def _bulk_delete_sample_lines(rows: Sequence[UnifiedMessage], *, limit: int = 8) -> List[str]:
+        return bulk_delete_sample_lines(rows, limit=limit)
+
+    @staticmethod
+    def _bulk_delete_confirmation_text(rows: Sequence[UnifiedMessage], prompt: str = "Delete selected messages?") -> str:
+        return bulk_delete_confirmation_text(rows, prompt=prompt)
+
+    @staticmethod
+    def _bulk_delete_completion_text(
+        *,
+        deleted: int,
+        skipped: int,
+        failed: int,
+        source_summary: str,
+        detail_counts: Dict[str, int],
+    ) -> str:
+        return bulk_delete_completion_text(
+            deleted=deleted,
+            skipped=skipped,
+            failed=failed,
+            source_summary=source_summary,
+            detail_counts=detail_counts,
+        )
+
+    @staticmethod
+    def _single_delete_confirmation_text(row: UnifiedMessage, prompt: str = "Delete this message?") -> str:
+        return single_delete_confirmation_text(row, prompt=prompt)
+
+    def _confirm_single_delete(self, row: UnifiedMessage, prompt: str = "Delete this message?") -> bool:
+        msg = self._single_delete_confirmation_text(row, prompt)
+        resp = QMessageBox.question(self, "Delete Message", msg, QMessageBox.Yes | QMessageBox.No)
+        return resp == QMessageBox.Yes
+
+    @staticmethod
+    def _single_delete_success_text(row: UnifiedMessage, *, hidden: bool = False) -> str:
+        return single_delete_success_text(row, hidden=hidden)
+
+    def _finalize_single_delete_success(self, row: UnifiedMessage, outcome: MessageDeleteExecutionResult) -> None:
+        self._record_message_delete_audit(
+            row,
+            result="deleted",
+            detail=message_delete_result_detail(row.payload, outcome.detail_key),
+            batch_id="single",
+        )
+        self._remember_locally_deleted_row(row)
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(self, "Delete Message", self._single_delete_success_text(row, hidden=outcome.hidden))
+
+    def _clear_message_detail_view(self, label: str = "No message selected") -> None:
+        self._has_active_view = False
+        self.info_label.setText(label)
+        self.viewer.clear()
+
+    @staticmethod
+    def _delete_audit_row_key(row: UnifiedMessage) -> str:
+        key = MessageTableModel._row_key(row)
+        try:
+            return json.dumps(key, default=str, separators=(",", ":")) if key is not None else ""
+        except Exception:
+            return str(key or "")
+
+    @staticmethod
+    def _delete_audit_safe_text(value: object, *, limit: int = 160) -> str:
+        return safe_audit_text(value, limit=limit)
+
+    @staticmethod
+    def _delete_audit_action(row: UnifiedMessage) -> str:
+        return delete_audit_action_for_row(row)
+
+    @staticmethod
+    def _delete_audit_row_for_payload(payload: object) -> UnifiedMessage:
+        if isinstance(payload, FileRecord):
+            return UnifiedMessage(
+                msg_type=str(payload.origin or "File").upper(),
+                status="",
+                from_call="",
+                to_call="",
+                rcv_ts=float(payload.mtime or 0.0),
+                rcv_display="",
+                title=payload.path.name,
+                origin=str(payload.origin or "file"),
+                payload=payload,
+            )
+        if isinstance(payload, JS8Message):
+            return unified_message_from_presentation(
+                js8_message_row_presentation(payload),
+                payload=payload,
+                rcv_display="",
+            )
+        if isinstance(payload, SpotterMessage):
+            return unified_message_from_presentation(
+                spotter_message_row_presentation(payload),
+                payload=payload,
+                rcv_display="",
+            )
+        if isinstance(payload, VarACMessage):
+            return unified_message_from_presentation(
+                varac_message_row_presentation(payload),
+                payload=payload,
+                rcv_display="",
+            )
+        if isinstance(payload, SitrepMessage):
+            return unified_message_from_presentation(
+                sitrep_message_row_presentation(payload),
+                payload=payload,
+                rcv_display="",
+            )
+        if isinstance(payload, CommStatArtifact):
+            return unified_message_from_presentation(
+                commstat_message_row_presentation(payload),
+                payload=payload,
+                rcv_display="",
+            )
+        return UnifiedMessage("Message", "", "", "", 0.0, "", "", "message", payload)
+
+    def _record_message_delete_audit(
+        self,
+        row: UnifiedMessage,
+        *,
+        result: str,
+        detail: str = "",
+        batch_id: str = "",
+    ) -> None:
+        if not isinstance(row, UnifiedMessage):
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            record_message_delete_audit(
+                db_path,
+                batch_id=str(batch_id or ""),
+                source=self._delete_source_label(row),
+                action=self._delete_audit_action(row),
+                result=str(result or "").strip().lower() or "unknown",
+                row_key=self._delete_audit_row_key(row),
+                from_call=row.from_call,
+                to_call=row.to_call,
+                title=row.title,
+                detail=detail,
+            )
+        except Exception as e:
+            log.debug("MessageViewer: failed to record delete audit: %s", e)
+
+    def _execute_message_delete(self, row: UnifiedMessage) -> MessageDeleteExecutionResult:
+        payload = row.payload
+        if isinstance(payload, JS8Message):
+            msg_id = int(getattr(payload, "msg_id", 0) or 0)
+            if msg_id <= 0:
+                return missing_identity_delete_result()
+            if not self._delete_js8_inbox_row(payload):
+                return failed_source_delete_result(payload)
+            self._delete_js8_local_row(payload)
+            self.js8_messages = [m for m in self.js8_messages if not self._same_js8_message(m, payload)]
+            if self.current_js8 and self._same_js8_message(self.current_js8, payload):
+                self.current_js8 = None
+                self._clear_message_detail_view()
+            return delete_success_result()
+        if isinstance(payload, VarACMessage):
+            msg_id = int(getattr(payload, "msg_id", 0) or 0)
+            if msg_id <= 0:
+                return missing_identity_delete_result()
+            if not self._soft_delete_varac_row(payload):
+                return failed_source_delete_result(payload)
+            self._delete_varac_local_row(payload)
+            self.varac_messages = [m for m in self.varac_messages if not self._same_varac_message(m, payload)]
+            if (
+                self.current_record is None
+                and self.current_js8 is None
+                and self.current_sitrep is None
+                and self.current_commstat is None
+            ):
+                self._clear_message_detail_view()
+            return delete_success_result()
+        if isinstance(payload, SpotterMessage):
+            msg_id = int(getattr(payload, "spotter_id", 0) or 0)
+            if msg_id <= 0:
+                return missing_identity_delete_result()
+            if not self._delete_spotter_row(msg_id):
+                return failed_source_delete_result(payload)
+            self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
+            if (
+                self.current_js8 is None
+                and self.current_record is None
+                and self.current_sitrep is None
+                and self.current_commstat is None
+            ):
+                self._clear_message_detail_view()
+            return delete_success_result()
+        if isinstance(payload, SitrepMessage):
+            if not self._delete_sitrep_row(payload):
+                return failed_source_delete_result(payload)
+            msg_key = self._sitrep_message_key(payload)
+            self.sitrep_messages = [
+                m for m in self.sitrep_messages if self._sitrep_message_key(m) != msg_key
+            ]
+            if self.current_sitrep and self._sitrep_message_key(self.current_sitrep) == msg_key:
+                self.current_sitrep = None
+                self._clear_message_detail_view()
+            return delete_success_result()
+        if isinstance(payload, CommStatArtifact):
+            result = self._delete_commstat_row(payload)
+            outcome = commstat_delete_execution_result(result)
+            if outcome.result != "deleted":
+                return outcome
+            msg_key = self._commstat_message_key(payload)
+            self.commstat_messages = [
+                m for m in self.commstat_messages if self._commstat_message_key(m) != msg_key
+            ]
+            if self.current_commstat and self._commstat_message_key(self.current_commstat) == msg_key:
+                self.current_commstat = None
+                self._clear_message_detail_view()
+            return outcome
+        if isinstance(payload, FileRecord):
+            if not payload.path.exists():
+                return missing_identity_delete_result()
+            if not self._send_to_recycle_bin(payload.path):
+                return failed_source_delete_result(payload)
+            log.info("MessageViewer: deleted file %s", payload.path)
+            self._remove_file_record(payload)
+            return delete_success_result()
+        return missing_identity_delete_result()
+
     def _bulk_delete_rows(self, rows: List[UnifiedMessage]) -> None:
+        batch_id = f"bulk-{int(time.time() * 1000)}-{len(rows)}"
         deleted = 0
         failed = 0
         skipped = 0
+        deleted_rows: List[UnifiedMessage] = []
+        detail_counts: Dict[str, int] = {}
         for row in rows:
             payload = row.payload
-            if isinstance(payload, JS8Message):
-                msg_id = int(getattr(payload, "msg_id", 0) or 0)
-                if msg_id <= 0:
-                    skipped += 1
-                    continue
-                if not self._delete_js8_inbox_row(msg_id):
-                    failed += 1
-                    continue
-                self._delete_js8_local_row(msg_id)
-                self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
-                if self.current_js8 and self.current_js8.msg_id == msg_id:
-                    self.current_js8 = None
-                    self._has_active_view = False
-                    self.info_label.setText("No message selected")
-                    self.viewer.clear()
+            outcome = self._execute_message_delete(row)
+            if outcome.result == "deleted":
                 deleted += 1
-            elif isinstance(payload, VarACMessage):
-                msg_id = int(getattr(payload, "msg_id", 0) or 0)
-                if msg_id <= 0:
-                    skipped += 1
-                    continue
-                if not self._soft_delete_varac_row(payload):
-                    failed += 1
-                    continue
-                self._delete_varac_local_row(payload)
-                self.varac_messages = [
-                    m for m in self.varac_messages if m.msg_id != msg_id or m.source != payload.source
-                ]
-                if (
-                    self.current_record is None
-                    and self.current_js8 is None
-                    and self.current_sitrep is None
-                    and self.current_commstat is None
-                ):
-                    self._has_active_view = False
-                    self.info_label.setText("No message selected")
-                    self.viewer.clear()
-                deleted += 1
-            elif isinstance(payload, SpotterMessage):
-                msg_id = int(getattr(payload, "spotter_id", 0) or 0)
-                if msg_id <= 0:
-                    skipped += 1
-                    continue
-                if not self._delete_spotter_row(msg_id):
-                    failed += 1
-                    continue
-                self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-                if (
-                    self.current_js8 is None
-                    and self.current_record is None
-                    and self.current_sitrep is None
-                    and self.current_commstat is None
-                ):
-                    self._has_active_view = False
-                    self.info_label.setText("No message selected")
-                    self.viewer.clear()
-                deleted += 1
-            elif isinstance(payload, SitrepMessage):
-                if not self._delete_sitrep_row(payload):
-                    failed += 1
-                    continue
-                self.sitrep_messages = [
-                    m for m in self.sitrep_messages if self._sitrep_message_key(m) != self._sitrep_message_key(payload)
-                ]
-                if self.current_sitrep and self._sitrep_message_key(self.current_sitrep) == self._sitrep_message_key(payload):
-                    self.current_sitrep = None
-                    self._has_active_view = False
-                    self.info_label.setText("No message selected")
-                    self.viewer.clear()
-                deleted += 1
-            elif isinstance(payload, CommStatArtifact):
-                result = self._delete_commstat_row(payload)
-                if result == "skipped":
-                    skipped += 1
-                    continue
-                if result != "deleted":
-                    failed += 1
-                    continue
-                self.commstat_messages = [
-                    m for m in self.commstat_messages if self._commstat_message_key(m) != self._commstat_message_key(payload)
-                ]
-                if self.current_commstat and self._commstat_message_key(self.current_commstat) == self._commstat_message_key(payload):
-                    self.current_commstat = None
-                    self._has_active_view = False
-                    self.info_label.setText("No message selected")
-                    self.viewer.clear()
-                deleted += 1
-            elif isinstance(payload, FileRecord):
-                if not payload.path.exists():
-                    skipped += 1
-                    continue
-                ok = self._send_to_recycle_bin(payload.path)
-                if not ok:
-                    failed += 1
-                    continue
-                self._remove_file_record(payload)
-                deleted += 1
-            else:
+                detail_counts[outcome.detail_key] = detail_counts.get(outcome.detail_key, 0) + 1
+                if outcome.deleted_row:
+                    deleted_rows.append(row)
+                self._record_message_delete_audit(row, result="deleted", detail=message_delete_result_detail(payload, outcome.detail_key), batch_id=batch_id)
+            elif outcome.result == "skipped":
                 skipped += 1
+                self._record_message_delete_audit(row, result="skipped", detail=message_delete_result_detail(payload, outcome.detail_key), batch_id=batch_id)
+            else:
+                failed += 1
+                self._record_message_delete_audit(row, result="failed", detail=message_delete_result_detail(payload, outcome.detail_key), batch_id=batch_id)
+        for row in deleted_rows:
+            self._remember_locally_deleted_row(row)
         self._messages_model.clear_selection()
         self._unfreeze_table()
+        self._remove_deleted_rows_from_current_view(deleted_rows)
         self._populate_messages_table(force=True)
         summary = self._summarize_types(rows)
-        action_word = "Hidden/deleted" if any(isinstance(row.payload, CommStatArtifact) for row in rows) else "Deleted"
-        details = f"{action_word} {deleted} messages.\n{summary}"
-        if skipped:
-            details = f"{details}\nSkipped: {skipped}"
-        if failed:
-            details = f"{details}\nFailed: {failed}"
+        details = self._bulk_delete_completion_text(
+            deleted=deleted,
+            skipped=skipped,
+            failed=failed,
+            source_summary=summary,
+            detail_counts=detail_counts,
+        )
         QMessageBox.information(self, "Delete Messages", details)
 
     def _mark_rows_read_bulk(self, rows: List[UnifiedMessage]) -> int:
@@ -9941,17 +11049,18 @@ class MessageViewerTab(QWidget):
         return changed
 
     def _mark_js8_rows_read_bulk(self, msgs: List[JS8Message], read_ts: float) -> None:
-        dedup: Dict[int, JS8Message] = {}
+        dedup: Dict[tuple[str, int, int], JS8Message] = {}
         for msg in msgs:
             if msg.msg_id > 0:
-                dedup[int(msg.msg_id)] = msg
+                source_key = str(getattr(msg, "source_key", "") or "").strip()
+                native_id = int(getattr(msg, "source_id", 0) or getattr(msg, "msg_id", 0) or 0)
+                dedup[(source_key, native_id, int(msg.msg_id))] = msg
         if not dedup:
             return
-        pairs = [(mid, dedup[mid].utc_ts or 0.0) for mid in sorted(dedup.keys())]
-        self._save_js8_state_bulk(pairs, read_ts)
-        self._update_local_read_bulk(sorted(dedup.keys()), read_ts)
+        self._save_js8_state_bulk(list(dedup.values()), read_ts)
+        self._update_local_read_bulk(sorted({int(msg.msg_id) for msg in dedup.values()}), read_ts)
         if self.settings.get("js8_inbox_mark_retrieved_sync", False):
-            updated = self._mark_js8call_inbox_read_by_ids(sorted(dedup.keys()))
+            updated = self._mark_js8call_inbox_read_messages(list(dedup.values()))
             log.debug(
                 "MessageViewer: mark-all JS8 inbox sync updated %s/%s rows",
                 updated,
@@ -9986,18 +11095,39 @@ class MessageViewerTab(QWidget):
             msg.read_ts = read_ts
 
     def _mark_varac_rows_read_bulk(self, msgs: List[VarACMessage]) -> None:
-        pairs = sorted({(str(msg.source or ""), int(msg.msg_id)) for msg in msgs if int(msg.msg_id or 0) > 0})
-        if not pairs:
+        triples = sorted(
+            {
+                (str(getattr(msg, "source_key", "") or ""), str(msg.source or ""), int(msg.msg_id))
+                for msg in msgs
+                if int(msg.msg_id or 0) > 0
+            }
+        )
+        pairs = [(source, msg_id) for source_key, source, msg_id in triples if not source_key]
+        keyed = [(source_key, source, msg_id) for source_key, source, msg_id in triples if source_key]
+        if not triples:
             return
+        if not keyed:
+            pairs = [(source, msg_id) for _source_key, source, msg_id in triples]
+        if not pairs:
+            pairs = []
         db_path = self._db_path()
         if db_path and db_path.exists():
             try:
                 conn = sqlite3.connect(db_path)
                 cur = conn.cursor()
-                cur.executemany(
-                    "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
-                    pairs,
-                )
+                has_source_key = self._table_has_column(conn, "varac_messages", "ingest_source_key")
+                if keyed and has_source_key:
+                    cur.executemany(
+                        "UPDATE varac_messages SET read_status=1 WHERE ingest_source_key=? AND source=? AND id=?",
+                        keyed,
+                    )
+                elif keyed:
+                    pairs.extend((source, msg_id) for _source_key, source, msg_id in keyed)
+                if pairs:
+                    cur.executemany(
+                        "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
+                        pairs,
+                    )
                 conn.commit()
                 conn.close()
             except Exception as e:
@@ -10020,7 +11150,7 @@ class MessageViewerTab(QWidget):
             self._read_state_map[key] = ("READ", float(read_ts), int(flag_state))
             rows.append(
                 (
-                    rec.origin,
+                    str(rec.origin or "").strip().lower(),
                     str(rec.path),
                     float(rec.mtime),
                     int(rec.size),
@@ -10048,11 +11178,11 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: bulk file read-state update failed: %s", e)
 
-    def _save_js8_state_bulk(self, rows: List[Tuple[int, float]], read_ts: float) -> None:
+    def _save_js8_state_bulk(self, msgs: List[JS8Message], read_ts: float) -> None:
         db_path = self._local_js8_db()
         if not db_path:
             return
-        if not rows:
+        if not msgs:
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -10060,10 +11190,33 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
             )
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+            except Exception:
+                pass
+            rows = []
+            for msg in msgs:
+                source_key = str(getattr(msg, "source_key", "") or "").strip()
+                native_id = int(getattr(msg, "source_id", 0) or getattr(msg, "msg_id", 0) or 0)
+                if native_id <= 0:
+                    continue
+                rows.append(
+                    (
+                        self._js8_state_row_id(native_id, source_key),
+                        float(getattr(msg, "utc_ts", 0.0) or 0.0),
+                        float(read_ts),
+                        source_key,
+                        native_id,
+                    )
+                )
             cur.executemany(
-                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, 'READ', ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET state='READ', last_seen=excluded.last_seen, read_ts=excluded.read_ts",
-                [(int(msg_id), float(last_seen or 0.0), float(read_ts)) for msg_id, last_seen in rows],
+                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts, source_key, source_id) VALUES (?, 'READ', ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET state='READ', last_seen=excluded.last_seen, read_ts=excluded.read_ts, source_key=excluded.source_key, source_id=excluded.source_id",
+                rows,
             )
             conn.commit()
             conn.close()
@@ -10177,6 +11330,27 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: bulk JS8Call inbox mark READ failed: %s", e)
         return updated_count
+
+    def _mark_js8call_inbox_read_messages(self, msgs: List[JS8Message]) -> int:
+        by_path: Dict[str, List[int]] = {}
+        legacy_ids: List[int] = []
+        for msg in msgs or []:
+            native_id = int(getattr(msg, "source_id", 0) or getattr(msg, "msg_id", 0) or 0)
+            if native_id <= 0:
+                continue
+            source_path = str(getattr(msg, "source_path", "") or "").strip()
+            if source_path:
+                by_path.setdefault(source_path, []).append(native_id)
+            else:
+                legacy_ids.append(native_id)
+        updated = 0
+        for source_path, ids in by_path.items():
+            for row_id in sorted(set(ids)):
+                if self._mark_js8call_inbox_read_by_id(row_id, inbox_path=source_path):
+                    updated += 1
+        if legacy_ids:
+            updated += self._mark_js8call_inbox_read_by_ids(sorted(set(legacy_ids)))
+        return updated
 
     def _build_messages_header(self) -> None:
         while self.messages_header_layout.count():
@@ -10392,12 +11566,12 @@ class MessageViewerTab(QWidget):
         header = self.messages_table.horizontalHeader()
         fallback_widths = {
             0: 32,
-            1: 76,
-            2: 82,
+            1: 164,
+            2: 88,
             3: 104,
-            4: 104,
-            5: 148,
-            6: 120,
+            4: 120,
+            5: 160,
+            6: 92,
             7: 142,
         }
         for idx, widget in enumerate(self._header_cells):
@@ -10427,13 +11601,23 @@ class MessageViewerTab(QWidget):
             or self.status_filter.currentText() not in ("", "Status...")
             or self.from_filter.currentText() not in ("",)
             or self.to_filter.currentText() not in ("",)
+            or self._selected_message_sources() is not None
+            or self._message_group_filter_active()
+            or int(self.received_filter.currentData() or 0) != 0
             or bool(self.rcv_search.text().strip())
         )
 
     def _update_clear_filters_style(self) -> None:
         theme = resolve_theme(self.settings)
-        role = "eligible_warning" if self._filters_active() else "muted"
+        active = self._filters_active()
+        role = "eligible_warning" if active else "muted"
         self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+        self.clear_filters_btn.setToolTip(
+            f"Clear active message filters: {self._active_message_scope_summary()}."
+            if active
+            else "No message filters are active."
+        )
+        self.clear_filters_btn.setVisible(True)
 
     def _mark_all_read_eligibility(self) -> tuple[bool, str]:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
@@ -10442,8 +11626,8 @@ class MessageViewerTab(QWidget):
         rows = self._messages_model.rows()
         if not rows:
             return False, "No messages in current filtered view."
-        if type_sel == "Spotter":
-            if any(not re.match(r"^F![0-9]{3}[A-Z]?$", (r.msg_type or "")) for r in rows):
+        if type_sel in {"Spotter", "CommStat", "JS8Call", "FLMSG/FLAMP"}:
+            if any(not self._row_matches_type_filter(r, type_sel) for r in rows):
                 return False, "Filtered rows are not scoped to one message type."
         else:
             if any((r.msg_type or "") != type_sel for r in rows):
@@ -10502,7 +11686,8 @@ class MessageViewerTab(QWidget):
         if not isinstance(header, MessageHeaderWithCheckbox):
             return
         rows = self._messages_model.rows()
-        keys = [MessageTableModel._row_key(r) for r in rows]
+        selectable_rows = self._collect_deletable_rows(rows)
+        keys = [MessageTableModel._row_key(r) for r in selectable_rows]
         keys = [k for k in keys if k is not None]
         enabled = self._is_filter_active() and bool(keys)
         if not keys:
@@ -10528,7 +11713,8 @@ class MessageViewerTab(QWidget):
         if state_val == Qt.PartiallyChecked.value:
             return
         target = state_val == Qt.Checked.value
-        self._messages_model.set_selected_for_rows(rows, target)
+        rows_to_update = self._collect_deletable_rows(rows) if target else rows
+        self._messages_model.set_selected_for_rows(rows_to_update, target)
         self._update_bulk_delete_buttons()
 
     def _sort_rows(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
@@ -10548,6 +11734,20 @@ class MessageViewerTab(QWidget):
                     return MessageTableModel._field_report_group(row)
                 if col == 5:
                     return MessageTableModel._field_report_area(row)
+                if col == 6:
+                    return row.rcv_ts or 0.0
+                return row.rcv_ts or 0.0
+            if profile == "form_message":
+                if col == 1:
+                    return row.title or ""
+                if col == 2:
+                    return row.display_type or row.msg_type or ""
+                if col == 3:
+                    return row.status or ""
+                if col == 4:
+                    return row.from_call or ""
+                if col == 5:
+                    return row.to_call or ""
                 if col == 6:
                     return row.rcv_ts or 0.0
                 return row.rcv_ts or 0.0
@@ -10585,34 +11785,19 @@ class MessageViewerTab(QWidget):
                     sitrep_report_keys.add(key)
 
         for msg in self.js8_messages:
-            msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
-            if not self._form_visible_in_messages(msg_type):
+            presentation = js8_message_row_presentation(
+                msg,
+                form_title_lookup=self._load_form_title,
+                alert_predicate=self._form_is_alert,
+            )
+            if not self._form_visible_in_messages(presentation.msg_type):
                 continue
-            status = "READ" if msg.state.upper() == "READ" else "NEW"
-            if status != "READ" and self._form_is_alert(msg_type):
-                status = "ALERT"
-            rcv_ts = msg.utc_ts or 0.0
-            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
-            title = ""
-            if msg.msg_type.startswith("F!"):
-                form_id = msg.msg_type[2:].strip()
-                title = self._load_form_title(form_id)
-            if not title:
-                title = (msg.decoded_text or msg.raw_text or "").strip()
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
-            auth_map = self._spotter_msg_auth_state_for_message(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.utc_str)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=(msg.from_call or "").strip().upper(),
-                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="js8",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -10621,37 +11806,21 @@ class MessageViewerTab(QWidget):
                 spotter_key = _RowsBuildWorker._spotter_message_report_key(msg)
                 if spotter_key and spotter_key in sitrep_report_keys:
                     continue
-            msg_type = msg.msg_type or "F!"
-            if not self._form_visible_in_messages(msg_type):
-                continue
-            status = "READ" if msg.state.upper() == "READ" else "NEW"
-            if status != "READ" and self._form_is_alert(msg_type):
-                status = "ALERT"
-            rcv_ts = msg.utc_ts or 0.0
-            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
-            title = ""
-            if msg_type.startswith("F!"):
-                form_id = msg_type[2:].strip()
-                title = self._load_form_title(form_id)
-            summary = summarize_spotter_form_text(msg.raw_text, form_title=title)
-            title = MessageTableModel._strip_group_markers_in_display_text(
-                summary or title or (msg.decoded_text or msg.raw_text or "").strip()
+            presentation = spotter_message_row_presentation(
+                msg,
+                form_title_lookup=self._load_form_title,
+                alert_predicate=self._form_is_alert,
             )
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
+            if not self._form_visible_in_messages(presentation.msg_type):
+                continue
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.utc_str)
             auth_map = self._spotter_msg_auth_state_for_message(msg)
             expect_map = self._spotter_expect_state_for_message(msg)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=(msg.from_call or "").strip().upper(),
-                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="spotter",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
                     auth_state=str(auth_map.get("status", "") or ""),
                     auth_detail=str(auth_map.get("detail", "") or ""),
                     auth_trusted=bool(auth_map.get("trusted", False)),
@@ -10661,28 +11830,13 @@ class MessageViewerTab(QWidget):
             )
 
         for msg in self.varac_messages:
-            msg_type = "VarAC"
-            status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
-            rcv_ts = msg.ts or 0.0
-            rcv_display = self._format_rcv_display(rcv_ts, None)
-            if (msg.msg_type or "").upper() == "VMAIL":
-                title_base = (msg.subject or "").strip()
-            else:
-                title_base = (msg.subject or msg.body or "").strip()
-            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
+            presentation = varac_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, None)
             rows.append(
-                UnifiedMessage(
-                    msg_type=msg_type,
-                    status=status,
-                    from_call=(msg.from_call or "").strip().upper(),
-                    to_call=MessageTableModel._strip_group_marker(msg.to_call),
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="varac",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -10693,71 +11847,24 @@ class MessageViewerTab(QWidget):
                     continue
                 if ui_key:
                     sitrep_render_keys.add(ui_key)
-            rcv_ts = msg.event_ts or 0.0
-            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
-            overall = (msg.overall_status or "").strip().lower()
-            scope = (msg.scope or "").strip()
-            title_parts = [msg.subtype]
-            if scope:
-                title_parts.append(scope)
-            if overall:
-                title_parts.append(overall.upper())
-            title = " | ".join([p for p in title_parts if p]) or "SitRep"
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
+            presentation = sitrep_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
             rows.append(
-                UnifiedMessage(
-                    msg_type="SitRep",
-                    status="INFO",
-                    from_call=(msg.from_call or "").strip().upper(),
-                    to_call=MessageTableModel._strip_group_marker(msg.target),
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="sitrep",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
                 )
             )
 
         for msg in self.commstat_messages:
-            rcv_ts = msg.event_ts or 0.0
-            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
-            intelligence = analyze_commstat_fields(
-                artifact_kind=msg.artifact_kind,
-                title=msg.title,
-                body=msg.body_text,
-                from_call=msg.from_call,
-                target=msg.target,
-                report_group=msg.report_group,
-                state=msg.state_code,
-                grid=msg.grid,
-                scope=msg.scope,
-                status=msg.status_label,
-                alert_color=msg.alert_color,
-                subtype=msg.subtype,
-                remarks=msg.remarks_text,
-                transport=msg.transport_label,
-                source_family=msg.source_family_label,
-                event_utc=msg.event_ts_utc,
-            )
-            title = MessageTableModel._strip_group_markers_in_display_text(
-                intelligence.summary or str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
-            )
-            if len(title) > 60:
-                title = title[:57].rstrip() + "..."
+            presentation = commstat_message_row_presentation(msg)
+            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
             rows.append(
-                UnifiedMessage(
-                    msg_type=intelligence.form_name or artifact_kind_label(msg.artifact_kind),
-                    status=str(msg.status_label or "INFO").strip().upper() or "INFO",
-                    from_call=(msg.from_call or "").strip().upper(),
-                    to_call=intelligence.to_call or MessageTableModel._strip_group_marker(msg.target),
-                    rcv_ts=rcv_ts,
-                    rcv_display=rcv_display,
-                    title=title,
-                    origin="commstat",
+                unified_message_from_presentation(
+                    presentation,
                     payload=msg,
-                    topics=tuple(intelligence.topics),
-                    actionable=bool(intelligence.actionable),
+                    rcv_display=rcv_display,
                 )
             )
 
@@ -10765,28 +11872,18 @@ class MessageViewerTab(QWidget):
             for rec in recs:
                 status = self._get_read_state(rec)
                 is_image = self._is_image_file(rec.path)
-                intelligence: MessageIntelligence | None = None
-                if not is_image and self._is_transport_form_ext(rec.path.suffix.lower()):
-                    head = _read_text_head(rec.path, 131072)
-                    intelligence = analyze_form_text(
-                        head,
-                        form_name="",
-                        source_type=rec.origin,
-                        path=rec.path,
-                        fields=self._extract_form_file_metadata(rec),
-                    )
-                from_call = "" if is_image else (intelligence.from_call if intelligence else self._extract_sender_from_file(rec))
-                to_call = "" if is_image else (intelligence.to_call if intelligence else "")
-                title = "Image Received" if is_image else (intelligence.summary if intelligence else rec.path.name)
-                if len(title) > 60:
-                    title = title[:57].rstrip() + "..."
-                rcv_ts = rec.mtime or 0.0
-                rcv_display = self._format_rcv_display(rcv_ts, None)
-                msg_type = origin.upper() if origin != "varac" else "VarAC"
-                if origin == "flmsg":
-                    msg_type = "FLMSG"
-                elif origin == "bbs":
-                    msg_type = "BBS"
+                cached_meta = self._file_metadata_map.get(file_metadata_key(rec), {}) if not is_image else {}
+                candidate = file_message_row_candidate(
+                    rec,
+                    origin,
+                    status=status,
+                    is_image=is_image,
+                    is_transport_form=not is_image and self._is_transport_form_ext(rec.path.suffix.lower()),
+                    cached_meta=cached_meta,
+                    form_meta_loader=lambda rec=rec: self._extract_form_file_metadata(rec),
+                    fallback_from_loader=lambda rec=rec: self._extract_sender_from_file(rec),
+                )
+                rcv_display = self._format_rcv_display(candidate.rcv_ts, None)
                 auth_state = ""
                 auth_detail = ""
                 auth_trusted = False
@@ -10794,21 +11891,14 @@ class MessageViewerTab(QWidget):
                     sig_state = self._signature_state_for_record(rec)
                     auth_state, auth_detail, auth_trusted = self._derive_auth_ui(sig_state)
                 rows.append(
-                    UnifiedMessage(
-                        msg_type=msg_type,
-                        status=status,
-                        from_call=from_call,
-                        to_call=to_call,
-                        rcv_ts=rcv_ts,
-                        rcv_display=rcv_display,
-                        title=title,
+                    unified_file_message_from_candidate(
+                        candidate,
                         origin=origin,
                         payload=rec,
+                        rcv_display=rcv_display,
                         auth_state=auth_state,
                         auth_detail=auth_detail,
                         auth_trusted=auth_trusted,
-                        topics=tuple(intelligence.topics) if intelligence else (),
-                        actionable=bool(intelligence.actionable) if intelligence else False,
                     )
                 )
 
@@ -10822,6 +11912,7 @@ class MessageViewerTab(QWidget):
                         row.to_call or "",
                         row.rcv_display or "",
                         row.title or "",
+                        row.display_type or "",
                         " ".join(row.topics or ()),
                         "actionable" if row.actionable else "",
                     ]
@@ -10864,8 +11955,20 @@ class MessageViewerTab(QWidget):
                 self.current_sitrep = None
                 self.current_commstat = None
                 self.current_record = row.payload
-                self._load_content(row.payload)
-                self._set_read_state(row.payload, "READ", row_ref=row)
+                try:
+                    self._load_content(row.payload)
+                except Exception as exc:
+                    log.exception("MessageViewer: failed to load file message %s", row.payload.path)
+                    self.info_label.setText(f"{row.payload.path.name} - could not load")
+                    self.viewer.setAcceptRichText(False)
+                    self.viewer.setPlainText(
+                        "FIO could not display this message file.\n\n"
+                        f"File: {row.payload.path}\n"
+                        f"Error: {exc}"
+                    )
+                    return
+                else:
+                    self._set_read_state(row.payload, "READ", row_ref=row)
             elif isinstance(row.payload, VarACMessage):
                 self.current_js8 = None
                 self.current_record = None
@@ -10952,11 +12055,25 @@ class MessageViewerTab(QWidget):
                 log.debug("MessageViewer: using custom forms override %s", p)
                 return p
         msg_paths = self.settings.get("message_paths", {}) or {}
+        candidates: List[str] = []
         for origin in ("flmsg", "flamp"):
             base = (msg_paths.get(origin) or "").strip()
+            if base:
+                candidates.append(base)
+        for entry in self._multi_radio_message_path_entries():
+            if str(entry.get("origin", "") or "").strip().lower() in {"flmsg", "flamp"}:
+                base = str(entry.get("path", "") or "").strip()
+                if base:
+                    candidates.append(base)
+        seen: set[str] = set()
+        for base in candidates:
             if not base:
                 continue
             p = Path(base)
+            norm = os.path.normcase(os.path.normpath(str(p)))
+            if norm in seen:
+                continue
+            seen.add(norm)
             for parent in [p] + list(p.parents):
                 name = parent.name.lower()
                 if name in {"nbems.files", ".nbems"}:
@@ -10969,6 +12086,49 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: using custom forms fallback %s", fallback)
         return fallback if fallback.exists() else None
 
+    def _resolve_custom_form_template_path(self, form_name: str) -> Optional[Path]:
+        safe_name = Path(str(form_name or "").strip()).name
+        if not safe_name:
+            return None
+        search_dirs: List[Path] = []
+        primary = self._resolve_custom_forms_path()
+        if primary is not None:
+            search_dirs.append(primary)
+        try:
+            msg_paths = self.settings.get("message_paths", {}) or {}
+        except Exception:
+            msg_paths = {}
+        roots: List[str] = []
+        if isinstance(msg_paths, dict):
+            roots.extend(str(msg_paths.get(origin, "") or "").strip() for origin in ("flmsg", "flamp"))
+        roots.extend(
+            str(entry.get("path", "") or "").strip()
+            for entry in self._multi_radio_message_path_entries()
+            if str(entry.get("origin", "") or "").strip().lower() in {"flmsg", "flamp"}
+        )
+        seen_dirs = {os.path.normcase(os.path.normpath(str(directory))) for directory in search_dirs}
+        for base in roots:
+            if not base:
+                continue
+            p = Path(base)
+            for parent in [p] + list(p.parents):
+                if parent.name.lower() not in {"nbems.files", ".nbems"}:
+                    continue
+                cand_dir = parent / "CUSTOM"
+                norm = os.path.normcase(os.path.normpath(str(cand_dir)))
+                if norm in seen_dirs:
+                    continue
+                seen_dirs.add(norm)
+                search_dirs.append(cand_dir)
+        for directory in search_dirs:
+            try:
+                candidate = directory / safe_name
+            except Exception:
+                continue
+            if candidate.exists():
+                return candidate
+        return None
+
     @staticmethod
     def _extract_custom_form_name(text: str) -> str:
         return _extract_custom_form_name_text(text)
@@ -10976,6 +12136,35 @@ class MessageViewerTab(QWidget):
     @staticmethod
     def _parse_custom_form_fields(text: str) -> Dict[str, str]:
         return _parse_custom_form_fields_text(text)
+
+    def _template_labels_for_custom_form(self, form_name: str) -> List[Tuple[str, str]]:
+        template_path = self._resolve_custom_form_template_path(form_name)
+        if template_path is None:
+            return []
+        try:
+            template = template_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return []
+        return self._extract_template_labels(template)
+
+    def _template_title_for_custom_form(self, form_name: str) -> str:
+        template_path = self._resolve_custom_form_template_path(form_name)
+        if template_path is None:
+            return ""
+        try:
+            template = template_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+        return self._extract_title_from_template(template)
+
+    def _extract_form_file_metadata(self, rec: FileRecord) -> Dict[str, str]:
+        text = _read_text_head(rec.path, 131072)
+        return _extract_form_metadata_from_text(
+            text,
+            rec.path,
+            template_title_for_form=self._template_title_for_custom_form,
+            template_labels_for_form=self._template_labels_for_custom_form,
+        )
 
     @staticmethod
     def _apply_form_fields(template: str, fields: Dict[str, str]) -> str:
@@ -11310,22 +12499,18 @@ class MessageViewerTab(QWidget):
     def _delete_file_record(self, rec: FileRecord) -> None:
         if not rec or not rec.path.exists():
             return
+        audit_row = self._delete_audit_row_for_payload(rec)
         title = "Delete File"
-        details = (
-            f"Move this file to the Recycle Bin?\n\n"
-            f"{rec.path}\n"
-            f"Size: {rec.size} bytes\n"
-            f"Modified: {self._fmt_mtime(rec.mtime)}"
-        )
-        resp = QMessageBox.question(self, title, details, QMessageBox.Yes | QMessageBox.No)
-        if resp != QMessageBox.Yes:
+        if not self._confirm_single_delete(audit_row, "Delete this file-backed message?"):
             return
-        ok = self._send_to_recycle_bin(rec.path)
-        if not ok:
-            QMessageBox.warning(self, title, "Failed to move file to the Recycle Bin.")
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(rec, outcome.detail_key), batch_id="single")
+            if outcome.result == "failed":
+                QMessageBox.warning(self, title, outcome.warning or "Failed to move file to the Recycle Bin.")
             return
-        log.info("MessageViewer: deleted file %s", rec.path)
-        self._remove_file_record(rec)
+        self._record_message_delete_audit(audit_row, result="deleted", detail=message_delete_result_detail(rec, outcome.detail_key), batch_id="single")
+        self._remember_locally_deleted_row(audit_row)
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 
@@ -12013,42 +13198,20 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
 
     def _remove_file_record(self, rec: FileRecord) -> None:
-        origin = rec.origin
-        if origin in self.files:
-            self.files[origin] = [r for r in self.files[origin] if r.path != rec.path]
+        origin = str(rec.origin or "").strip().lower()
+        self.files = remove_file_record_from_groups(self.files, rec)
         key = self._read_state_key(origin, rec)
         self._read_state_map.pop(key, None)
         db_path = self._db_path()
         if db_path and db_path.exists():
-            try:
-                conn = sqlite3.connect(db_path)
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    DELETE FROM message_read_state
-                    WHERE origin=? AND path=? AND mtime=? AND size=?
-                    """,
-                    (origin, str(rec.path), float(rec.mtime), int(rec.size)),
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            delete_file_cache_entries(db_path, rec)
         if self.current_record and self.current_record.path == rec.path:
             self.current_record = None
-            self._has_active_view = False
-            self.info_label.setText("No file selected")
-            self.viewer.clear()
+            self._clear_message_detail_view("No file selected")
 
     @staticmethod
     def _sitrep_message_key(msg: SitrepMessage | None) -> tuple[str, int | str] | None:
-        if not isinstance(msg, SitrepMessage):
-            return None
-        event_id = int(getattr(msg, "event_id", 0) or 0)
-        if event_id > 0:
-            return ("sitrep", event_id)
-        report_key = str(getattr(msg, "report_key", "") or "").strip().lower()
-        return ("sitrep", report_key) if report_key else None
+        return _core_sitrep_message_key(msg) if isinstance(msg, SitrepMessage) else None
 
     @staticmethod
     def _commstat_message_key(msg: CommStatArtifact | None) -> tuple[str, str] | None:
@@ -12061,213 +13224,125 @@ class MessageViewerTab(QWidget):
     def _commstat_tombstone_key(msg: CommStatArtifact | None) -> str:
         if not isinstance(msg, CommStatArtifact):
             return ""
-        return normalize_commstat_artifact_key(getattr(msg, "artifact_key", ""))
+        return commstat_artifact_key(msg)
 
     def _delete_sitrep_row(self, msg: SitrepMessage) -> bool:
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return False
-        key = self._sitrep_message_key(msg)
-        if key is None:
-            return False
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            if isinstance(key[1], int):
-                cur.execute("DELETE FROM sitrep_events WHERE id=?", (int(key[1]),))
-            else:
-                cur.execute("DELETE FROM sitrep_events WHERE report_key=?", (str(key[1]),))
-            deleted = int(cur.rowcount or 0) > 0
-            conn.commit()
-            conn.close()
-            return deleted
-        except Exception as e:
-            log.debug("MessageViewer: failed to delete SitRep %s: %s", key, e)
-            return False
+        return _core_delete_sitrep_store_row(self._db_path(), msg)
 
     def _delete_sitrep_message(self, msg: SitrepMessage) -> None:
         if not msg:
             return
+        audit_row = self._delete_audit_row_for_payload(msg)
         label = str(getattr(msg, "report_key", "") or "").strip() or f"event {int(getattr(msg, 'event_id', 0) or 0)}"
-        resp = QMessageBox.question(
-            self,
-            "Delete Message",
-            f"Delete SitRep {label}?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if resp != QMessageBox.Yes:
+        if not self._confirm_single_delete(audit_row, f"Delete SitRep {label}?"):
             return
-        if not self._delete_sitrep_row(msg):
-            QMessageBox.warning(self, "Delete Message", f"Failed to delete SitRep {label}.")
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(msg, outcome.detail_key), batch_id="single")
+            QMessageBox.warning(
+                self,
+                "Delete Message",
+                single_delete_failure_warning(msg, outcome, fallback=f"Failed to delete SitRep {label}."),
+            )
             return
-        msg_key = self._sitrep_message_key(msg)
-        self.sitrep_messages = [m for m in self.sitrep_messages if self._sitrep_message_key(m) != msg_key]
-        if self.current_sitrep and self._sitrep_message_key(self.current_sitrep) == msg_key:
-            self.current_sitrep = None
-            self._has_active_view = False
-            self.info_label.setText("No message selected")
-            self.viewer.clear()
-        self._unfreeze_table()
-        self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", f"SitRep {label} deleted")
+        self._finalize_single_delete_success(audit_row, outcome)
 
     def _delete_commstat_row(self, msg: CommStatArtifact) -> str:
         db_path = self._db_path()
         if not db_path or not db_path.exists():
             return "failed"
-        artifact_key = self._commstat_tombstone_key(msg)
-        if not artifact_key:
+        result = delete_commstat_artifact(db_path, msg)
+        if not result.artifact_key:
             log.warning(
                 "MessageViewer: cannot hide CommStat artifact without artifact_key id=%s title=%s",
                 getattr(msg, "artifact_id", 0),
                 getattr(msg, "title", ""),
             )
             return "skipped"
-        try:
-            with connect_sqlite(db_path, timeout=2.0) as conn:
-                ensure_commstat_artifact_deletion_tables(conn)
-                tombstoned = tombstone_commstat_artifact(
-                    conn,
-                    artifact_key=artifact_key,
-                    artifact_kind=getattr(msg, "artifact_kind", ""),
-                    from_call=getattr(msg, "from_call", ""),
-                    target=getattr(msg, "target", ""),
-                    title=getattr(msg, "title", ""),
-                    event_ts=getattr(msg, "event_ts", 0.0),
-                    reason="message_viewer_delete",
-                )
-                if not tombstoned:
-                    return "skipped"
-                conn.execute("DELETE FROM commstat_artifacts WHERE artifact_key=?", (artifact_key,))
-                conn.commit()
-            return "deleted"
-        except Exception as e:
-            log.warning("MessageViewer: failed to hide CommStat artifact %s: %s", artifact_key, e)
-            return "failed"
+        return result.result
 
     def _delete_commstat_message(self, msg: CommStatArtifact) -> None:
         if not msg:
             return
+        audit_row = self._delete_audit_row_for_payload(msg)
         label = str(getattr(msg, "title", "") or "").strip() or str(getattr(msg, "artifact_key", "") or "").strip()
         if not label:
             label = f"artifact {int(getattr(msg, 'artifact_id', 0) or 0)}"
-        resp = QMessageBox.question(
-            self,
-            "Delete Message",
-            f"Hide this CommStat item from FIO Messages?\n\n{label}\n\nThis does not delete it from CommStat.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if resp != QMessageBox.Yes:
+        if not self._confirm_single_delete(audit_row, f"Delete CommStat item {label}?"):
             return
-        result = self._delete_commstat_row(msg)
-        if result == "skipped":
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(msg, outcome.detail_key), batch_id="single")
             QMessageBox.warning(
                 self,
                 "Delete Message",
-                "FIO could not hide this CommStat item because it does not have a stable message identity.",
+                single_delete_failure_warning(msg, outcome, fallback="FIO could not delete this CommStat item."),
             )
             return
-        if result != "deleted":
-            QMessageBox.warning(
-                self,
-                "Delete Message",
-                "FIO could not hide this CommStat item. The message database was busy or unavailable. Try Refresh Now and delete it again.",
-            )
-            return
-        msg_key = self._commstat_message_key(msg)
-        self.commstat_messages = [m for m in self.commstat_messages if self._commstat_message_key(m) != msg_key]
-        if self.current_commstat and self._commstat_message_key(self.current_commstat) == msg_key:
-            self.current_commstat = None
-            self._has_active_view = False
-            self.info_label.setText("No message selected")
-            self.viewer.clear()
-        self._unfreeze_table()
-        self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", "CommStat item hidden from FIO Messages.")
+        self._finalize_single_delete_success(audit_row, outcome)
 
     def _delete_js8_message(self, msg: JS8Message) -> None:
         if not msg:
             return
+        audit_row = self._delete_audit_row_for_payload(msg)
         msg_id = int(getattr(msg, "msg_id", 0) or 0)
         if msg_id <= 0:
             return
-        deleted = self._delete_js8_inbox_row(msg_id)
-        if not deleted:
-            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+        if not self._confirm_single_delete(audit_row, f"Delete JS8Call message {msg_id}?"):
             return
-        self._delete_js8_local_row(msg_id)
-        self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
-        if self.current_js8 and self.current_js8.msg_id == msg_id:
-            self.current_js8 = None
-            self._has_active_view = False
-            self.info_label.setText("No message selected")
-            self.viewer.clear()
-        self._unfreeze_table()
-        self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(msg, outcome.detail_key), batch_id="single")
+            if outcome.result == "failed":
+                QMessageBox.warning(
+                    self,
+                    "Delete Message",
+                    single_delete_failure_warning(msg, outcome, fallback=f"Failed to delete Message {msg_id}."),
+                )
+            return
+        self._finalize_single_delete_success(audit_row, outcome)
 
     def _delete_varac_message(self, msg: VarACMessage) -> None:
         if not msg:
             return
+        audit_row = self._delete_audit_row_for_payload(msg)
         msg_id = int(getattr(msg, "msg_id", 0) or 0)
         if msg_id <= 0:
             return
-        resp = QMessageBox.question(
-            self,
-            "Delete Message",
-            f"Delete VarAC message {msg_id}?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if resp != QMessageBox.Yes:
+        if not self._confirm_single_delete(audit_row, f"Delete VarAC message {msg_id}?"):
             return
-        if not self._soft_delete_varac_row(msg):
-            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(msg, outcome.detail_key), batch_id="single")
+            if outcome.result == "failed":
+                QMessageBox.warning(
+                    self,
+                    "Delete Message",
+                    single_delete_failure_warning(msg, outcome, fallback=f"Failed to delete Message {msg_id}."),
+                )
             return
-        self._delete_varac_local_row(msg)
-        self.varac_messages = [m for m in self.varac_messages if m.msg_id != msg_id or m.source != msg.source]
-        if (
-            self.current_record is None
-            and self.current_js8 is None
-            and self.current_sitrep is None
-            and self.current_commstat is None
-        ):
-            self._has_active_view = False
-            self.info_label.setText("No message selected")
-            self.viewer.clear()
-        self._unfreeze_table()
-        self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+        self._finalize_single_delete_success(audit_row, outcome)
 
     def _delete_spotter_message(self, msg: SpotterMessage) -> None:
         if not msg:
             return
+        audit_row = self._delete_audit_row_for_payload(msg)
         msg_id = int(getattr(msg, "spotter_id", 0) or 0)
         if msg_id <= 0:
             return
-        resp = QMessageBox.question(
-            self,
-            "Delete Message",
-            f"Delete Spotter message {msg_id}?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if resp != QMessageBox.Yes:
+        if not self._confirm_single_delete(audit_row, f"Delete Spotter message {msg_id}?"):
             return
-        if not self._delete_spotter_row(msg_id):
-            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+        outcome = self._execute_message_delete(audit_row)
+        if outcome.result != "deleted":
+            self._record_message_delete_audit(audit_row, result=outcome.result, detail=message_delete_result_detail(msg, outcome.detail_key), batch_id="single")
+            if outcome.result == "failed":
+                QMessageBox.warning(
+                    self,
+                    "Delete Message",
+                    single_delete_failure_warning(msg, outcome, fallback=f"Failed to delete Message {msg_id}."),
+                )
             return
-        self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-        if (
-            self.current_js8 is None
-            and self.current_record is None
-            and self.current_sitrep is None
-            and self.current_commstat is None
-        ):
-            self._has_active_view = False
-            self.info_label.setText("No message selected")
-            self.viewer.clear()
-        self._unfreeze_table()
-        self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+        self._finalize_single_delete_success(audit_row, outcome)
 
     def _resolve_varac_db_path(self) -> Path | None:
         raw_db = (self.settings.get("varac_db_path", "") or "").strip()
@@ -12285,107 +13360,91 @@ class MessageViewerTab(QWidget):
                 continue
         return None
 
-    def _soft_delete_varac_row(self, msg: VarACMessage) -> bool:
-        db_path = self._resolve_varac_db_path()
-        if not db_path or not db_path.exists():
-            return False
-        table = msg.source
-        if table not in {"qso", "vmail", "broadcast"}:
-            return False
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(f"UPDATE {table} SET is_deleted=1 WHERE id=?", (int(msg.msg_id),))
-            if table == "vmail" and msg.vmail_guid:
+    def _resolve_varac_db_path_for_message(self, msg: VarACMessage) -> Path | None:
+        source_key = str(getattr(msg, "source_key", "") or "").strip()
+        db_path = self._db_path()
+        if source_key and db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
                 try:
-                    cur.execute("UPDATE vmail_attachment SET is_deleted=1 WHERE vmail_guid=?", (msg.vmail_guid,))
-                except Exception:
-                    pass
-            conn.commit()
-            conn.close()
-            return True
-        except Exception as e:
-            log.debug("MessageViewer: failed to soft delete VarAC row %s/%s: %s", table, msg.msg_id, e)
-            return False
+                    if self._table_has_column(conn, "varac_sync_status", "ingest_source_key"):
+                        row = conn.execute(
+                            """
+                            SELECT varac_db_path
+                              FROM varac_sync_status
+                             WHERE COALESCE(ingest_source_key, '')=?
+                               AND COALESCE(varac_db_path, '') <> ''
+                          ORDER BY COALESCE(run_finished_ts, run_started_ts) DESC, run_started_ts DESC
+                             LIMIT 1
+                            """,
+                            (source_key,),
+                        ).fetchone()
+                        if row and str(row[0] or "").strip():
+                            candidate = Path(str(row[0] or "").strip()).expanduser()
+                            if candidate.exists():
+                                return candidate
+                finally:
+                    conn.close()
+            except Exception as exc:
+                log.debug("MessageViewer: failed to resolve VarAC source DB for %s: %s", source_key, exc)
+        return self._resolve_varac_db_path()
+
+    def _soft_delete_varac_row(self, msg: VarACMessage) -> bool:
+        return _core_soft_delete_varac_source_row(
+            self._resolve_varac_db_path_for_message(msg),
+            source_table=getattr(msg, "source", ""),
+            msg_id=int(getattr(msg, "msg_id", 0) or 0),
+            vmail_guid=getattr(msg, "vmail_guid", ""),
+        )
 
     def _delete_varac_local_row(self, msg: VarACMessage) -> None:
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "DELETE FROM varac_messages WHERE source=? AND id=?",
-                (msg.source, int(msg.msg_id)),
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: failed to delete local varac row %s/%s: %s", msg.source, msg.msg_id, e)
+        _core_delete_varac_local_projection(
+            self._db_path(),
+            source=getattr(msg, "source", ""),
+            msg_id=int(getattr(msg, "msg_id", 0) or 0),
+            ingest_source_key=getattr(msg, "source_key", ""),
+        )
 
     def _delete_spotter_row(self, msg_id: int) -> bool:
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return False
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM spotter_traffic WHERE id=?", (int(msg_id),))
-            conn.commit()
-            conn.close()
-            return True
-        except Exception as e:
-            log.debug("MessageViewer: failed to delete spotter row %s: %s", msg_id, e)
-            return False
+        return _core_delete_spotter_store_row(self._db_path(), msg_id)
 
-    def _delete_js8_inbox_row(self, msg_id: int) -> bool:
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
-            return False
-        try:
-            conn = sqlite3.connect(inbox_path, timeout=1.0)
-            cur = conn.cursor()
-            cur.execute("PRAGMA busy_timeout = 1000")
-            tables = ["inbox_v1", "inbox"]
-            deleted = False
-            for table in tables:
-                try:
-                    cur.execute("PRAGMA table_info(%s)" % table)
-                    cols = {str(r[1]).lower() for r in cur.fetchall()}
-                except Exception:
-                    continue
-                try:
-                    if "id" in cols:
-                        cur.execute(f"DELETE FROM {table} WHERE id=?", (int(msg_id),))
-                        if cur.rowcount:
-                            deleted = True
-                    else:
-                        cur.execute(f"DELETE FROM {table} WHERE rowid=?", (int(msg_id),))
-                        if cur.rowcount:
-                            deleted = True
-                except Exception:
-                    continue
-            conn.commit()
-            conn.close()
-            return deleted
-        except Exception as e:
-            log.debug("MessageViewer: failed to delete inbox row %s: %s", msg_id, e)
-            return False
+    @staticmethod
+    def _same_js8_message(left: JS8Message, right: JS8Message) -> bool:
+        left_key = str(getattr(left, "source_key", "") or "").strip()
+        right_key = str(getattr(right, "source_key", "") or "").strip()
+        left_source_id = int(getattr(left, "source_id", 0) or 0)
+        right_source_id = int(getattr(right, "source_id", 0) or 0)
+        if left_key or right_key:
+            return left_key == right_key and left_source_id == right_source_id
+        return int(getattr(left, "msg_id", 0) or 0) == int(getattr(right, "msg_id", 0) or 0)
 
-    def _delete_js8_local_row(self, msg_id: int) -> None:
-        db_path = self._local_js8_db()
-        if not db_path or not Path(db_path).exists():
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM js8_messages WHERE id=?", (int(msg_id),))
-            cur.execute("DELETE FROM js8_inbox_state WHERE id=?", (int(msg_id),))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: failed to delete local js8 row %s: %s", msg_id, e)
+    @staticmethod
+    def _same_varac_message(left: VarACMessage, right: VarACMessage) -> bool:
+        left_key = str(getattr(left, "source_key", "") or "").strip()
+        right_key = str(getattr(right, "source_key", "") or "").strip()
+        if left_key or right_key:
+            return (
+                left_key == right_key
+                and str(getattr(left, "source", "") or "") == str(getattr(right, "source", "") or "")
+                and int(getattr(left, "msg_id", 0) or 0) == int(getattr(right, "msg_id", 0) or 0)
+            )
+        return (
+            str(getattr(left, "source", "") or "") == str(getattr(right, "source", "") or "")
+            and int(getattr(left, "msg_id", 0) or 0) == int(getattr(right, "msg_id", 0) or 0)
+        )
+
+    def _delete_js8_inbox_row(self, msg: JS8Message) -> bool:
+        native_id = int(getattr(msg, "source_id", 0) or getattr(msg, "msg_id", 0) or 0)
+        source_path = str(getattr(msg, "source_path", "") or "").strip()
+        return _core_delete_js8_inbox_row(Path(source_path) if source_path else self._inbox_path(), native_id)
+
+    def _delete_js8_local_row(self, msg: JS8Message) -> None:
+        _core_delete_js8_local_rows(
+            self._local_js8_db(),
+            int(getattr(msg, "msg_id", 0) or 0),
+            source_key=getattr(msg, "source_key", ""),
+            source_id=getattr(msg, "source_id", 0),
+        )
 
     @staticmethod
     def _send_to_recycle_bin(path: Path) -> bool:
@@ -12521,7 +13580,10 @@ class MessageViewerTab(QWidget):
             if cached_view is not None:
                 is_html, content, info, open_path, open_label = cached_view
                 self._set_open_external_path(open_path, label=open_label)
-                self.info_label.setText(self._compose_info_with_signature(rec, info))
+                if self._is_transport_form_ext(rec.path.suffix.lower()):
+                    self.info_label.setText(str(info or ""))
+                else:
+                    self.info_label.setText(self._compose_info_with_signature(rec, info))
                 if is_html:
                     self.viewer.setAcceptRichText(True)
                     self.viewer.setHtml(content)
@@ -12584,10 +13646,9 @@ class MessageViewerTab(QWidget):
             elif self._is_transport_form_ext(ext):
                 lower = data.lower()
                 form_name = self._extract_custom_form_name(data)
-                forms_dir = self._resolve_custom_forms_path()
-                if form_name and forms_dir:
-                    template_path = forms_dir / form_name
-                    if template_path.exists():
+                if form_name:
+                    template_path = self._resolve_custom_form_template_path(form_name)
+                    if template_path is not None and template_path.exists():
                         log.debug(
                             "MessageViewer: rendering custom form %s for %s",
                             template_path.name,
@@ -12611,11 +13672,27 @@ class MessageViewerTab(QWidget):
                     else:
                         log.debug(
                             "MessageViewer: custom form template missing %s for %s",
-                            template_path,
+                            form_name,
                             rec.path.name,
                         )
                 if not is_html:
-                    if "<blankform>" in lower or "blank_form_v5." in lower:
+                    fields = self._parse_custom_form_fields(data)
+                    if form_name and fields:
+                        log.debug("MessageViewer: rendering custom form fields without template for %s", rec.path.name)
+                        meta = _extract_form_metadata_from_text(
+                            data[:131072],
+                            rec.path,
+                            template_title_for_form=lambda _name: "",
+                            template_labels_for_form=lambda _name: [],
+                        )
+                        fallback_title = meta.get("subject") or form_name
+                        content = self._render_custom_form_fields(
+                            fields,
+                            _fallback_custom_form_labels(fields),
+                            fallback_title,
+                        )
+                        is_html = True
+                    elif "<blankform>" in lower or "blank_form_v5." in lower:
                         log.debug("MessageViewer: parsed blank form for %s", rec.path.name)
                         content = self._parse_blank_form_content(data)
                         is_html = True
@@ -12651,9 +13728,11 @@ class MessageViewerTab(QWidget):
             sig_detail = self._signature_detail_for_record(rec)
             if self._is_transport_form_ext(ext):
                 intelligence = self._file_record_intelligence(rec, data, form_title=rendered_form_title)
+                report_ts = _form_report_ts_from_date_summary(intelligence.date_summary)
                 detail_lines = self._message_intelligence_header(
                     intelligence,
                     timestamp=self._fmt_mtime(rec.mtime),
+                    report_timestamp=report_ts,
                     status=self._file_status(rec),
                     source=self._file_origin_label(rec),
                 )
@@ -12663,15 +13742,16 @@ class MessageViewerTab(QWidget):
                     (("Signature / Hash", sig_detail),),
                 )
                 if is_html:
-                    detail_html = "<pre style='font-family: sans-serif; white-space: pre-wrap;'>" + html.escape(
-                        "\n".join(detail_lines)
-                    ) + "</pre>"
+                    detail_html = self._detail_lines_to_html(detail_lines)
                     content = detail_html + "<hr>" + str(content)
                 else:
                     self._append_text_body(detail_lines, "Decoded Message", content)
                     content = "\n".join(detail_lines)
                 info = intelligence.summary or info
-            self.info_label.setText(self._compose_info_with_signature(rec, info))
+            if self._is_transport_form_ext(ext):
+                self.info_label.setText(info)
+            else:
+                self.info_label.setText(self._compose_info_with_signature(rec, info))
             if is_html:
                 self.viewer.setAcceptRichText(True)
                 self.viewer.setHtml(content)
@@ -12980,9 +14060,11 @@ class MessageViewerTab(QWidget):
         info: MessageIntelligence,
         *,
         timestamp: str = "",
+        report_timestamp: float = 0.0,
         status: str = "",
         source: str = "",
     ) -> List[str]:
+        report_display = self._fmt_ts(float(report_timestamp or 0.0))
         lines = [
             info.summary or info.subject or info.form_name or "Message",
             "",
@@ -12996,6 +14078,7 @@ class MessageViewerTab(QWidget):
                 ("Subject", info.subject),
                 ("Form", info.form_name),
                 ("Date/Msg ID", info.date_summary),
+                ("Report Date", report_display),
                 ("Received", timestamp),
                 ("Status", status),
                 ("State", info.state),
@@ -13015,6 +14098,70 @@ class MessageViewerTab(QWidget):
         if lines and lines[-1] != "":
             lines.append("")
         lines.extend([title, text])
+
+    @staticmethod
+    def _detail_lines_to_html(lines: Sequence[str]) -> str:
+        title = str(lines[0] if lines else "Message").strip() or "Message"
+        html_parts = [
+            "<style>",
+            ".fio-message-summary { font-family: sans-serif; margin-bottom: 10px; }",
+            ".fio-message-title { font-weight: 700; font-size: 16px; margin-bottom: 8px; }",
+            ".fio-message-section { margin: 8px 0 10px; }",
+            ".fio-message-section-title { font-weight: 700; margin-bottom: 4px; }",
+            ".fio-message-fields { border-collapse: collapse; }",
+            ".fio-message-key { font-weight: 700; padding: 2px 14px 2px 0; white-space: nowrap; vertical-align: top; }",
+            ".fio-message-value { padding: 2px 0; vertical-align: top; }",
+            ".fio-message-body { white-space: pre-wrap; margin-top: 4px; }",
+            "</style>",
+            "<div class='fio-message-summary'>",
+            f"<div class='fio-message-title'>{html.escape(title)}</div>",
+        ]
+        section_open = False
+        table_open = False
+        def close_table() -> None:
+            nonlocal table_open
+            if table_open:
+                html_parts.append("</table>")
+                table_open = False
+
+        for raw in list(lines)[1:]:
+            line = str(raw or "")
+            stripped = line.strip()
+            if not stripped:
+                close_table()
+                if section_open:
+                    html_parts.append("</div>")
+                    section_open = False
+                continue
+            if line.startswith("  ") and ":" in stripped:
+                key, value = stripped.split(":", 1)
+                if not section_open:
+                    html_parts.append("<div class='fio-message-section'>")
+                    section_open = True
+                if not table_open:
+                    html_parts.append("<table class='fio-message-fields'>")
+                    table_open = True
+                html_parts.append(
+                    "<tr>"
+                    f"<td class='fio-message-key'>{html.escape(key)}:</td>"
+                    f"<td class='fio-message-value'>{html.escape(value.strip())}</td>"
+                    "</tr>"
+                )
+                continue
+            close_table()
+            if section_open:
+                html_parts.append("</div>")
+                section_open = False
+            html_parts.append(
+                "<div class='fio-message-section'>"
+                f"<div class='fio-message-section-title'>{html.escape(stripped)}</div>"
+            )
+            section_open = True
+        close_table()
+        if section_open:
+            html_parts.append("</div>")
+        html_parts.append("</div>")
+        return "".join(html_parts)
 
     def _file_record_intelligence(self, rec: FileRecord, data: str, form_title: str = "") -> MessageIntelligence:
         meta = self._extract_form_file_metadata(rec)
@@ -13047,6 +14194,7 @@ class MessageViewerTab(QWidget):
             subtype=msg.subtype,
             remarks=msg.remarks_text,
             transport=msg.transport_label,
+            reach=msg.reach_label,
             source_family=msg.source_family_label,
             event_utc=msg.event_ts_utc,
         )
@@ -13157,6 +14305,7 @@ class MessageViewerTab(QWidget):
                     ("Scope", msg.scope),
                     ("Subtype", msg.subtype),
                     ("Receipt", msg.transport_label),
+                    ("Reach", msg.reach_label),
                 ),
             )
             self._append_text_body(lines, "Message", msg.body_text or "--")
@@ -13174,6 +14323,7 @@ class MessageViewerTab(QWidget):
                 f"{artifact_kind_label(msg.artifact_kind)} {msg.from_call} -> {msg.target}"
                 + (f" | {msg.source_family_label}" if msg.source_family_label else "")
                 + (f" | {msg.transport_label}" if msg.transport_label else "")
+                + (f" | {msg.reach_label}" if msg.reach_label else "")
             )
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(lines))
@@ -13182,11 +14332,12 @@ class MessageViewerTab(QWidget):
         if not msg or msg.read_status:
             return
         msg.read_status = 1
-        self._queue_persist_op("varac_read", (str(msg.source or ""), int(msg.msg_id)))
+        self._queue_persist_op(
+            "varac_read",
+            (str(msg.source or ""), int(msg.msg_id), str(getattr(msg, "source_key", "") or "")),
+        )
         self._refresh_table_after_read(
-            lambda row: isinstance(row.payload, VarACMessage)
-            and int(getattr(row.payload, "msg_id", 0) or 0) == int(msg.msg_id)
-            and str(getattr(row.payload, "source", "") or "") == str(msg.source or ""),
+            lambda row: isinstance(row.payload, VarACMessage) and self._same_varac_message(row.payload, msg),
             row_ref=row_ref,
         )
 
@@ -13320,8 +14471,14 @@ class MessageViewerTab(QWidget):
         except Exception:
             return False
 
-    def _mark_js8call_inbox_read(self, callsign: str, msg_id: str) -> bool:
-        inbox_path = self._inbox_path()
+    def _mark_js8call_inbox_read(
+        self,
+        callsign: str,
+        msg_id: str,
+        *,
+        inbox_path: str | Path | None = None,
+    ) -> bool:
+        inbox_path = Path(inbox_path) if inbox_path else self._inbox_path()
         if not inbox_path or not inbox_path.exists():
             return False
         callsign = (callsign or "").strip().upper()
@@ -13399,9 +14556,9 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: JS8Call inbox update failed: %s", e)
         return False
 
-    def _mark_js8call_inbox_read_by_id(self, row_id: int) -> bool:
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
+    def _mark_js8call_inbox_read_by_id(self, row_id: int, *, inbox_path: str | Path | None = None) -> bool:
+        path = Path(inbox_path) if inbox_path else self._inbox_path()
+        if not path or not path.exists():
             return False
         if row_id is None:
             return False
@@ -13414,7 +14571,7 @@ class MessageViewerTab(QWidget):
             ("inbox", "message"),
         ]
         try:
-            conn = sqlite3.connect(inbox_path, timeout=1.0)
+            conn = sqlite3.connect(path, timeout=1.0)
             cur = conn.cursor()
             cur.execute("PRAGMA busy_timeout = 1000")
             for table, col in candidates:
@@ -13624,6 +14781,9 @@ class MessageViewerTab(QWidget):
                 float(msg.utc_ts or 0.0),
                 float(ts),
                 bool(self.settings.get("js8_inbox_mark_retrieved_sync", False)),
+                int(getattr(msg, "source_id", 0) or 0),
+                str(getattr(msg, "source_path", "") or ""),
+                str(getattr(msg, "source_key", "") or ""),
             ),
         )
         msg.state = "READ"
@@ -13794,7 +14954,7 @@ class MessageViewerTab(QWidget):
 
     # ---------- JS8 state persistence (local DB) ---------- #
 
-    def _load_js8_state_map(self) -> Dict[int, Tuple[str, float]]:
+    def _load_js8_state_map(self, *, source_key: str = "") -> Dict[int, Tuple[str, float]]:
         db_path = self._local_js8_db()
         if not db_path or not db_path.exists():
             return {}
@@ -13804,7 +14964,22 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
             )
-            cur.execute("SELECT id, state, read_ts FROM js8_inbox_state")
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+            except Exception:
+                pass
+            source_txt = str(source_key or "").strip()
+            if source_txt:
+                cur.execute(
+                    "SELECT COALESCE(source_id, id), state, read_ts FROM js8_inbox_state WHERE COALESCE(source_key, '')=?",
+                    (source_txt,),
+                )
+            else:
+                cur.execute("SELECT id, state, read_ts FROM js8_inbox_state WHERE COALESCE(source_key, '')=''")
             rows = cur.fetchall()
             conn.close()
             return {int(r[0]): ((r[1] or "").upper(), float(r[2] or 0.0)) for r in rows if r and r[0] is not None}
@@ -13812,7 +14987,28 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load js8 state map: %s", e)
             return {}
 
-    def _save_js8_state(self, msg_id: int, state: str, last_seen_ts: float = 0.0, read_ts: float = 0.0) -> None:
+    @staticmethod
+    def _js8_state_row_id(native_id: object, source_key: str = "") -> int:
+        try:
+            native_int = int(native_id or 0)
+        except Exception:
+            native_int = 0
+        source_txt = str(source_key or "").strip()
+        if not source_txt:
+            return native_int
+        digest_src = f"{source_txt}|{native_int}"
+        return int(hashlib.sha1(digest_src.encode("utf-8", errors="ignore")).hexdigest()[:15], 16)
+
+    def _save_js8_state(
+        self,
+        msg_id: int,
+        state: str,
+        last_seen_ts: float = 0.0,
+        read_ts: float = 0.0,
+        *,
+        source_key: str = "",
+        source_id: int = 0,
+    ) -> None:
         db_path = self._local_js8_db()
         if not db_path:
             return
@@ -13822,10 +15018,28 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
             )
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+            except Exception:
+                pass
+            try:
+                cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+            except Exception:
+                pass
+            source_txt = str(source_key or "").strip()
+            native_id = int(source_id or msg_id or 0)
+            row_id = self._js8_state_row_id(native_id, source_txt)
             cur.execute(
-                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET state=excluded.state, last_seen=excluded.last_seen, read_ts=excluded.read_ts",
-                (int(msg_id), state.upper(), float(last_seen_ts or 0.0), float(read_ts or 0.0)),
+                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts, source_key, source_id) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET state=excluded.state, last_seen=excluded.last_seen, read_ts=excluded.read_ts, source_key=excluded.source_key, source_id=excluded.source_id",
+                (
+                    int(row_id),
+                    state.upper(),
+                    float(last_seen_ts or 0.0),
+                    float(read_ts or 0.0),
+                    source_txt,
+                    native_id,
+                ),
             )
             conn.commit()
             conn.close()
@@ -13883,6 +15097,22 @@ class MessageViewerTab(QWidget):
             cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
         except Exception:
             pass
+        for column, col_type in (
+            ("source_key", "TEXT"),
+            ("source_id", "INTEGER"),
+            ("source_radio_id", "TEXT"),
+            ("js8_instance_id", "TEXT"),
+            ("source_path", "TEXT"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE js8_messages ADD COLUMN {column} {col_type}")
+            except Exception:
+                pass
+        try:
+            cur.execute("UPDATE js8_messages SET source_key='' WHERE source_key IS NULL")
+            cur.execute("UPDATE js8_messages SET source_id=id WHERE source_id IS NULL")
+        except Exception:
+            pass
         try:
             cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
         except Exception:
@@ -13891,6 +15121,17 @@ class MessageViewerTab(QWidget):
             cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
         except Exception:
             pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_key TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN source_id INTEGER")
+        except Exception:
+            pass
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_js8_messages_source_native ON js8_messages(source_key, source_id)"
+        )
         conn.commit()
         conn.close()
 
@@ -13964,6 +15205,11 @@ class MessageViewerTab(QWidget):
                 state=(_safe_js8_text(r[8], limit=JS8_SAFE_FIELD_LIMIT, upper=True) or "UNREAD"),  # type: ignore[index]
                 read_ts=_safe_js8_float(r[9], 0.0),  # type: ignore[index]
                 flag_state=int(_safe_js8_int(r[10], 0) or 0),  # type: ignore[index]
+                source_key=_safe_js8_text(r[11] if len(r) > 11 else "", limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[arg-type,index]
+                source_id=int(_safe_js8_int(r[12] if len(r) > 12 else 0, 0) or 0),  # type: ignore[arg-type,index]
+                source_radio_id=_safe_js8_text(r[13] if len(r) > 13 else "", limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[arg-type,index]
+                js8_instance_id=_safe_js8_text(r[14] if len(r) > 14 else "", limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[arg-type,index]
+                source_path=_safe_js8_text(r[15] if len(r) > 15 else "", limit=JS8_SAFE_TEXT_LIMIT),  # type: ignore[arg-type,index]
             )
         except Exception as e:
             log.debug("MessageViewer: skipped malformed local JS8 cache row: %s", e)
@@ -14052,6 +15298,7 @@ class MessageViewerTab(QWidget):
             decoded_text=_safe_js8_text(decoded, limit=JS8_SAFE_TEXT_LIMIT),
             state=eff_state,
             read_ts=read_ts,
+            source_id=rid,
         )
 
     def _insert_js8_local(self, msg: JS8Message) -> None:
@@ -14138,20 +15385,27 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to update local read state: %s", e)
 
     def _load_js8_from_local(self, force: bool = False, rebuild: bool = True) -> None:
-        self._ensure_local_js8_tables()
         db_path = self._local_js8_db()
         msgs: List[JS8Message] = []
+        db_key = os.path.normcase(os.path.normpath(str(db_path))) if db_path else ""
+        if db_path and getattr(self, "_local_js8_schema_ready_path", "") != db_key:
+            self._ensure_local_js8_tables()
+            self._local_js8_schema_ready_path = db_key
         if not db_path or not Path(db_path).exists():
             self.js8_messages = msgs
             if rebuild:
                 self._populate_messages_table(force=force)
+            return
+        fingerprint = self._local_projection_fingerprint(("js8_messages",), db_path=db_path)
+        if self._can_skip_local_projection_load("_js8_local_snapshot_fp", fingerprint, force=force):
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts, flag_state
+                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts, flag_state,
+                       source_key, source_id, source_radio_id, js8_instance_id, source_path
                 FROM js8_messages
                 WHERE utc_ts IS NULL OR utc_ts >= ?
                 """,
@@ -14178,9 +15432,14 @@ class MessageViewerTab(QWidget):
                     if new_decoded:
                         msg.decoded_text = new_decoded
                         self._update_local_decoded(msg.msg_id, new_decoded)
+                        fingerprint = tuple()
             msgs.append(msg)
         msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
         self.js8_messages = msgs
+        self._js8_local_snapshot_fp = fingerprint or self._local_projection_fingerprint(
+            ("js8_messages",),
+            db_path=db_path,
+        )
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -14193,6 +15452,9 @@ class MessageViewerTab(QWidget):
                 self._populate_messages_table(force=force)
             return
         self._ensure_spotter_table()
+        fingerprint = self._local_projection_fingerprint(("spotter_traffic",))
+        if self._can_skip_local_projection_load("_spotter_local_snapshot_fp", fingerprint, force=force):
+            return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -14245,11 +15507,68 @@ class MessageViewerTab(QWidget):
                     self._update_spotter_decoded(msg.spotter_id, new_decoded)
             msgs.append(msg)
         self.spotter_messages = msgs
+        self._spotter_local_snapshot_fp = fingerprint or None
         if rebuild:
             self._populate_messages_table(force=force)
 
     def _ingest_js8_messages(self) -> None:
         MessageIngestor(self.settings).ingest_js8_messages()
+
+    def _request_background_ingest(self, *kinds: str, force: bool = False) -> bool:
+        parent = self.parent()
+        controller = getattr(parent, "background_ingest", None)
+        if controller is None:
+            return False
+        try:
+            if hasattr(controller, "is_running") and not controller.is_running():
+                return False
+            self._connect_background_ingest_notifications(controller)
+            if hasattr(controller, "request_refresh"):
+                request_kinds = tuple(kinds) + (("force",) if force else tuple())
+                controller.request_refresh(*request_kinds)
+                return True
+        except Exception as exc:
+            log.debug("MessageViewer: background ingest request failed: %s", exc)
+        return False
+
+    def _connect_background_ingest_notifications(self, controller: object) -> None:
+        if self._background_ingest_controller is controller:
+            return
+        signal = getattr(controller, "job_finished", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_background_ingest_finished)
+            self._background_ingest_controller = controller
+        except Exception as exc:
+            log.debug("MessageViewer: background ingest signal connect failed: %s", exc)
+
+    def _on_background_ingest_finished(self, job_name: str) -> None:
+        if self._is_shutting_down:
+            return
+        name = str(job_name or "").strip().lower()
+        try:
+            if name == "messages":
+                self._load_js8_from_local(force=True, rebuild=False)
+                self._load_spotter_from_db(force=True, rebuild=False)
+                self._load_sitrep_from_local(force=True, rebuild=False)
+                self._load_commstat_from_local(force=True, rebuild=False)
+                self._populate_messages_table(force=True)
+            elif name == "varac":
+                self._load_varac_from_local(force=True, rebuild=False)
+                self._populate_messages_table(force=True)
+        except Exception as exc:
+            log.debug("MessageViewer: background projection reload failed for %s: %s", name, exc)
+
+    def _ingest_js8_runtime_messages(self) -> None:
+        result = ingest_js8_messages_for_runtime_sources(self.settings, evaluate_expect=False)
+        if result.used_runtime_sources:
+            log.debug(
+                "MessageViewer: JS8 runtime message ingest refreshed inbox=%s spotter=%s inserted=%s",
+                result.js8_inbox_sources,
+                result.spotter_sources,
+                result.spotter_inserted,
+            )
 
     def _spotter_offset_key(self) -> str:
         return "spotter_directed_offset"
@@ -14446,6 +15765,8 @@ class MessageViewerTab(QWidget):
             data["scan_minutes"] = self.scan_minutes
             data["visible_check_seconds"] = int(self._visible_check_interval_sec or 0)
             data["excluded_msg_types"] = sorted(self._excluded_msg_types)
+            data["inbox_focus"] = str(getattr(self, "_inbox_focus", "all") or "all")
+            data["advanced_filters_visible"] = bool(getattr(self, "_advanced_filters_visible", False))
             data["mode"] = self._messages_mode
             if hasattr(self.settings, "set"):
                 self.settings.set("message_viewer", data)

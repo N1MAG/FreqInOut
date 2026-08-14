@@ -5,7 +5,14 @@ import sqlite3
 from pathlib import Path
 
 from freqinout.core import sitrep_ingest
-from freqinout.core.commstat_sitrep import parse_commstat_message
+from freqinout.core.commstat_sitrep import (
+    commstat_origin_path,
+    commstat_reach_label,
+    commstat_reach_mode,
+    commstat_transport_label,
+    parse_commstat_message,
+    transport_mode_for_source,
+)
 from freqinout.core.sitrep_metadata import source_family_label
 from freqinout.core.sitrep_ingest import _ensure_local_tables, _ingest_commstat3, _ingest_imported_js8spotter_archive
 
@@ -146,6 +153,34 @@ def test_parse_commstat_internet_marker_sets_internet_transport(tmp_path: Path) 
     assert parsed["status_payload"]["status"] == "111111111111"
 
 
+def test_commstat_reach_mode_distinguishes_rf_limited_and_maximum() -> None:
+    assert commstat_origin_path(1) == "rf"
+    assert commstat_reach_mode(1, global_id=0) == "rf_observed"
+    assert transport_mode_for_source(1, global_id=0) == "js8"
+
+    assert commstat_origin_path(1) == "rf"
+    assert commstat_reach_mode(1, global_id=42) == "maximum_reach"
+    assert transport_mode_for_source(1, global_id=42) == "js8+internet"
+
+    assert commstat_origin_path(2) == "commstat_server"
+    assert commstat_reach_mode(2) == "maximum_reach_relay"
+    assert transport_mode_for_source(2) == "internet"
+
+    assert commstat_origin_path(3) == "internet_only"
+    assert commstat_reach_mode(3) == "internet_only"
+    assert transport_mode_for_source(3) == "internet"
+
+
+def test_commstat_reach_and_transport_labels_are_operator_readable() -> None:
+    assert commstat_reach_label("rf_observed") == "Limited Reach (RF only)"
+    assert commstat_reach_label("maximum_reach") == "Maximum Reach (RF + Internet)"
+    assert commstat_reach_label("maximum_reach_relay") == "Maximum Reach relay"
+    assert commstat_reach_label("internet_only") == "Internet only"
+    assert commstat_transport_label("js8") == "JS8/RF"
+    assert commstat_transport_label("js8+internet") == "JS8/RF + Internet"
+    assert commstat_transport_label("internet") == "Internet"
+
+
 def test_ingest_commstat3_messages_only_populates_metadata(tmp_path: Path) -> None:
     _write_brevity_assets(tmp_path)
     source_db = tmp_path / "traffic.db3"
@@ -219,16 +254,17 @@ def test_ingest_commstat3_statrep_populates_transport_and_geo(tmp_path: Path) ->
         conn.execute(
             """
             INSERT INTO statrep(
-                datetime, date, freq, db, source, sr_id, from_callsign, target, grid, scope,
+                global_id, datetime, date, freq, db, source, sr_id, from_callsign, target, grid, scope,
                 map, power, water, med, telecom, travel, internet, fuel, food, crime, civil, political, comments
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                99,
                 "2026-04-09 16:40:42",
                 "2026-04-09",
                 7110000.0,
                 30,
-                2,
+                1,
                 "R40",
                 "W8APP",
                 "@AMRRON",
@@ -261,11 +297,22 @@ def test_ingest_commstat3_statrep_populates_transport_and_geo(tmp_path: Path) ->
 
         row = local_conn.execute(
             """
-            SELECT report_group, transport_mode, state_code, state_confidence, geo_confidence
+            SELECT report_group, transport_mode, reach_mode, origin_path, state_code, state_confidence, geo_confidence,
+                   raw_payload
             FROM sitrep_source_events
             """
         ).fetchone()
-        assert row == ("AMRRON", "internet", "MI", "explicit", "grid6")
+        assert row[:7] == ("AMRRON", "js8+internet", "maximum_reach", "rf", "MI", "explicit", "grid6")
+        assert json.loads(row[7])["global_id"] == 99
+
+        artifact = local_conn.execute(
+            """
+            SELECT transport_mode, reach_mode, origin_path, payload_json
+            FROM commstat_artifacts
+            """
+        ).fetchone()
+        assert artifact[:3] == ("js8+internet", "maximum_reach", "rf")
+        assert json.loads(artifact[3])["reach_mode"] == "maximum_reach"
     finally:
         local_conn.close()
 

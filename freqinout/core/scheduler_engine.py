@@ -381,7 +381,11 @@ class SchedulerEngine(QObject):
         self._status_snapshot_timeout_reported: bool = False
         self._last_js8_shadow_comparison: Dict[str, object] = {}
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
+        self._last_varac_status_stale: bool = False
+        self._last_varac_status_detail: str = ""
         self._last_js8_busy: bool = False
+        self._last_js8_status_stale: bool = False
+        self._last_js8_status_detail: str = ""
         self._last_ptt_active: bool = False
         self._fldigi_mode_cache: Optional[str] = None
         self._fldigi_mode_cache_ts: float = 0.0
@@ -1258,6 +1262,10 @@ class SchedulerEngine(QObject):
                     )
                     if not varac_snapshot.errors:
                         out["varac_status"] = dict(varac_snapshot.varac_status or {})
+                    out["varac_status_stale"] = bool(varac_snapshot.stale)
+                    out["varac_status_detail"] = "; ".join(
+                        str(value) for value in (varac_snapshot.errors or {}).values() if str(value or "").strip()
+                    )
                 except Exception as e:
                     log.debug("SchedulerEngine: background VarAC status failed: %s", e)
                 if rig is not None:
@@ -1320,8 +1328,15 @@ class SchedulerEngine(QObject):
                         if legacy_readings:
                             shadow = self._software_status.js8_shadow_comparison_status(legacy_readings=legacy_readings)
                             out["js8_shadow_comparison"] = dict(shadow)
+                        out["js8_status_stale"] = bool(js8_snapshot.stale)
+                        out["js8_status_detail"] = "; ".join(
+                            str(value) for value in (js8_snapshot.errors or {}).values() if str(value or "").strip()
+                        )
                     except Exception as e:
                         log.debug("SchedulerEngine: background JS8Call status failed: %s", e)
+                else:
+                    out["js8_status_stale"] = False
+                    out["js8_status_detail"] = ""
                 return out
             finally:
                 try:
@@ -1344,6 +1359,8 @@ class SchedulerEngine(QObject):
                 varac_status = data.get("varac_status")
                 if isinstance(varac_status, dict):
                     self._last_varac_status = dict(varac_status)
+                    self._last_varac_status_stale = bool(data.get("varac_status_stale"))
+                    self._last_varac_status_detail = str(data.get("varac_status_detail") or "").strip()
                 ptt_known = bool(data.get("rig_ptt_known", False))
                 if ptt_known:
                     self._last_ptt_active = bool(data.get("rig_ptt", False))
@@ -1368,6 +1385,9 @@ class SchedulerEngine(QObject):
                     self._status_js8_offset_hz = int(js8_offset)
                     self._status_js8_offset_ts = time.time()
                 self._last_js8_busy = bool(data.get("js8_busy", self._last_js8_busy))
+                if "js8_status_stale" in data:
+                    self._last_js8_status_stale = bool(data.get("js8_status_stale"))
+                    self._last_js8_status_detail = str(data.get("js8_status_detail") or "").strip()
                 shadow = data.get("js8_shadow_comparison")
                 if isinstance(shadow, dict):
                     self._last_js8_shadow_comparison = dict(shadow)
@@ -3414,7 +3434,7 @@ class SchedulerEngine(QObject):
         state.off_schedule = any(flags.values())
         return state
 
-    def get_status_summary(self, *, live: bool = False) -> Dict[str, object]:
+    def get_status_summary(self, *, live: bool = False, refresh: bool = True) -> Dict[str, object]:
         now_cache = time.time()
         if (
             not live
@@ -3428,7 +3448,7 @@ class SchedulerEngine(QObject):
         entry = self.current_schedule_entry or {}
         if live:
             self._maybe_refresh_external_status_snapshot(force=True)
-        else:
+        elif refresh:
             self._maybe_refresh_external_status_snapshot()
         actual_state = self._read_station_actual_state(force=False, control_mode=control_mode, allow_poll=False)
         off_state = (
@@ -3485,11 +3505,15 @@ class SchedulerEngine(QObject):
             "off_schedule_flags": flags,
             "varac_waiting": bool(varac_status.get("waiting_for_frequency")),
             "js8_busy": js8_busy,
+            "js8_status_stale": bool(self._last_js8_status_stale),
+            "js8_status_detail": str(self._last_js8_status_detail or "").strip(),
             "fldigi_busy": fldigi_busy,
             "fldigi_busy_reason": fldigi_busy_reason,
             "fldigi_busy_check_pending": bool(self._fldigi_busy_check_in_flight),
             "fldigi_busy_checked_at": fldigi_result.get("checked_ts"),
             "varac_busy": bool(varac_status.get("busy")),
+            "varac_status_stale": bool(self._last_varac_status_stale),
+            "varac_status_detail": str(self._last_varac_status_detail or "").strip(),
             "ptt_active": ptt_active,
             "ptt_state_known": bool(actual_state.flrig_ptt_known),
             "ptt_state_stale": bool(actual_state.flrig_ptt_stale),
@@ -3503,6 +3527,9 @@ class SchedulerEngine(QObject):
             "rf_conflict_detail": str(coordination_conflict.get("detail", "") or "").strip(),
             "rf_conflict_signature": str(coordination_conflict.get("signature", "") or "").strip(),
             "rf_conflict_peer_name": str(coordination_conflict.get("peer_name", "") or "").strip(),
+            "rf_conflict_peer_status_unknown": bool(coordination_conflict.get("peer_status_unknown")),
+            "rf_conflict_peer_status_stale": bool(coordination_conflict.get("peer_status_stale")),
+            "rf_conflict_peer_status_detail": str(coordination_conflict.get("peer_status_detail", "") or "").strip(),
             "suspended_until": suspended_until,
             "auto_resume_utc": auto_resume_utc,
             "auto_resume_source": auto_resume_source,
@@ -5344,6 +5371,9 @@ class SchedulerEngine(QObject):
         self._status_flrig_retry_ts = float(snapshot.backoff_until or 0.0)
         return self._status_flrig_ptt
 
+    def get_status_poll_metrics(self) -> Dict[str, int]:
+        return self._status_poll_coordinator.metrics_snapshot().as_dict()
+
     def _shared_ptt_lock_status(self, *, force: bool = False) -> Dict[str, object]:
         manager = getattr(self, "station_runtime_manager", None)
         if manager is None or not hasattr(manager, "shared_ptt_lock_snapshot"):
@@ -5444,6 +5474,9 @@ class SchedulerEngine(QObject):
                     "frequency_delta_hz": getattr(snapshot, "frequency_delta_hz", None),
                     "guard_mode": str(getattr(snapshot, "guard_mode", "") or "prompt").strip().lower() or "prompt",
                     "blocked": bool(getattr(snapshot, "blocked", False)),
+                    "peer_status_unknown": bool(getattr(snapshot, "peer_status_unknown", False)),
+                    "peer_status_stale": bool(getattr(snapshot, "peer_status_stale", False)),
+                    "peer_status_detail": str(getattr(snapshot, "peer_status_detail", "") or "").strip(),
                 }
         return self._strictest_coordination_conflict_status(guard_status, runtime_status)
 
@@ -5509,6 +5542,17 @@ class SchedulerEngine(QObject):
             if part
         )
         combined["blocked"] = cls._coordination_guard_rank(preferred) >= 3
+        combined["peer_status_unknown"] = bool(preferred.get("peer_status_unknown")) or bool(other.get("peer_status_unknown"))
+        combined["peer_status_stale"] = bool(preferred.get("peer_status_stale")) or bool(other.get("peer_status_stale"))
+        peer_status_details = [
+            str(preferred.get("peer_status_detail") or "").strip(),
+            str(other.get("peer_status_detail") or "").strip(),
+        ]
+        combined["peer_status_detail"] = " ".join(
+            part for idx, part in enumerate(peer_status_details) if part and part not in peer_status_details[:idx]
+        ).strip()
+        if not str(combined.get("peer_name", "") or "").strip():
+            combined["peer_name"] = str(other.get("peer_name", "") or "").strip()
         return combined
 
     @staticmethod

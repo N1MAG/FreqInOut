@@ -11,6 +11,7 @@ from freqinout.core.schedule_targeting import normalize_schedule_target_fields
 
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 DAY_UPPER = tuple(day.upper() for day in DAY_NAMES)
+SOP_SCHEDULE_LAYER_DEPENDENCY_PREFIX = "sop_schedule_layer"
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,16 @@ class BlendedScheduleProjection:
             refs.append("hf_nets")
         if self.source_counts.get("SOP", 0):
             refs.append("sop")
-        return refs
+            for segment in self.source_segments:
+                if segment.source != "SOP":
+                    continue
+                try:
+                    profile_id = int(segment.raw.get("sop_profile_id") or segment.raw.get("profile_id") or 0)
+                except Exception:
+                    profile_id = 0
+                if profile_id > 0:
+                    refs.append(f"{SOP_SCHEDULE_LAYER_DEPENDENCY_PREFIX}:{profile_id}")
+        return list(dict.fromkeys(refs))
 
     def frequency_refs(self) -> List[str]:
         refs: List[str] = []

@@ -60,6 +60,32 @@ def test_message_compose_exposes_spotter_as_guarded_form_family() -> None:
     assert '"msg_auth_sign_callsign": self._compose_operator_callsign()' in source
     assert '"msg_auth_include_datecode"' in source
     assert '"msg_auth_datecode": stored_datecode' in source
+    assert "JS8ApiClientRegistry.get" in source
+    assert "JS8ApiClient(" not in source
+
+
+def test_js8_ncs_send_uses_shared_guarded_api_client() -> None:
+    source = (ROOT / "freqinout/gui/js8call_net_control_tab.py").read_text(encoding="utf-8")
+
+    assert "send_js8_message_guarded" in source
+    assert "JS8ApiClientRegistry.get" in source
+    assert "socket.create_connection" not in source
+    assert "TX.SEND_MESSAGE" in source
+
+
+def test_js8_workflow_modules_do_not_create_ad_hoc_api_clients_or_raw_send_sockets() -> None:
+    workflow_paths = [
+        ROOT / "freqinout/gui/message_viewer_tab.py",
+        ROOT / "freqinout/gui/js8call_net_control_tab.py",
+        ROOT / "freqinout/core/js8_expect_runtime.py",
+    ]
+    for path in workflow_paths:
+        source = path.read_text(encoding="utf-8")
+        assert "socket.create_connection" not in source, str(path)
+        assert "JS8ApiClient(" not in source, str(path)
+
+    expect_source = (ROOT / "freqinout/core/js8_expect_runtime.py").read_text(encoding="utf-8")
+    assert "JS8ApiClientRegistry.get" in expect_source
 
 
 def test_message_auth_settings_explain_msgauth_scope_and_credit() -> None:
@@ -124,15 +150,16 @@ def test_message_auth_settings_explain_msgauth_scope_and_credit() -> None:
 
 def test_message_inbox_uses_adaptive_spotter_sitrep_views() -> None:
     source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+    row_source = (ROOT / "freqinout/core/message_row_presentation.py").read_text(encoding="utf-8")
 
     assert "set_display_profile" in source
     assert '"field_report"' in source
     assert "_message_display_profile_for_type" in source
-    assert 'text == "Spotter"' in source
-    assert 'text == "SitRep" or text.startswith("SitRep/")' in source
-    assert 're.match(r"^F![0-9]{3}[A-Z]?$", text)' in source
-    assert 'headers = ["", "MCF", "Status", "From", "To", "State / Grid", "Age", ""]' in source
-    assert "parse_spotter_bracket_fields" in source
+    assert 'text == "Spotter"' in row_source
+    assert 'text == "SitRep" or text.startswith("SitRep/")' in row_source
+    assert 're.match(r"^F![0-9]{3}[A-Z]?$", text)' in row_source
+    assert '"MCF", "Status", "From", "To", "State / Grid", "Age"' in row_source
+    assert "parse_spotter_bracket_fields" in row_source
     assert "_field_report_area" in source
     assert "_field_report_status" in source
     assert "_relative_age" in source
@@ -141,6 +168,8 @@ def test_message_inbox_uses_adaptive_spotter_sitrep_views() -> None:
 def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries() -> None:
     source = (ROOT / "freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     intel_source = (ROOT / "freqinout/core/message_intelligence.py").read_text(encoding="utf-8")
+    filter_source = (ROOT / "freqinout/core/message_inbox_filters.py").read_text(encoding="utf-8")
+    row_source = (ROOT / "freqinout/core/message_row_presentation.py").read_text(encoding="utf-8")
 
     assert "from freqinout.core.message_intelligence import (" in source
     assert "MessageIntelligence" in source
@@ -148,10 +177,18 @@ def test_message_inbox_uses_shared_message_intelligence_for_topics_and_summaries
     assert "analyze_spotter_text(" in source
     assert "analyze_form_text(" in source
     assert "analyze_commstat_fields(" in source
-    assert "topics=tuple(intelligence.topics)" in source
-    assert "actionable=bool(intelligence.actionable)" in source
-    assert 'type_vals = base_types + ["Spotter"]' in source
-    assert 'not bool(getattr(row, "actionable", False))' in source
+    assert "from freqinout.core.message_row_presentation import (" in source
+    assert "spotter_message_row_presentation" in source
+    assert "commstat_message_row_presentation" in source
+    assert "topics=tuple(intelligence.topics)" in row_source
+    assert "actionable=bool(intelligence.actionable)" in row_source
+    assert 'preferred_order = ["FLMSG/FLAMP", "Spotter", "CommStat", "JS8Call", "VarAC", "SitRep"]' in source
+    assert "InboxFilterCriteria" in source
+    assert "row_matches_inbox_criteria as _core_row_matches_inbox_criteria" in source
+    assert "class InboxFilterCriteria" in filter_source
+    assert "def row_matches_inbox_criteria" in filter_source
+    assert 'status_sel == "Action Needed"' in filter_source
+    assert 'getattr(row, "actionable", False)' in filter_source
     assert "TOPIC_TAXONOMY" in intel_source
     assert '"General Intel"' in intel_source
     assert '"Infrastructure"' in intel_source
@@ -179,6 +216,16 @@ def test_message_inbox_delegates_visible_ingest_to_shared_ingestor() -> None:
     assert "MessageIngestor(self.settings).ingest_spotter_from_directed()" in spotter_body
     assert "sqlite3.connect(inbox_path)" not in js8_body
     assert "directed_path.open" not in spotter_body
+
+
+def test_background_spotter_ingest_preserves_source_identity() -> None:
+    source = (ROOT / "freqinout/core/background_ingest.py").read_text(encoding="utf-8")
+    body = source.split("def _run_multi_radio_spotter_ingest", 1)[1].split("def _run_js8_link_indexer", 1)[0]
+
+    assert "directed_source_id" in body
+    assert "source_key=directed_source_id" in body
+    assert 'f"spotter_directed_offset_{directed_source_id}"' in body
+    assert 'f"spotter_directed_offset_radio_{radio_id}"' in body
 
 
 def test_global_search_indexes_imported_js8spotter_history() -> None:

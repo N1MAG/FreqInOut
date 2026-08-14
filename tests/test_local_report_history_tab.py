@@ -41,6 +41,7 @@ def test_local_report_history_renders_report_table_and_readable_detail(monkeypat
 
     assert tab.table.rowCount() == 1
     assert tab.table.columnCount() == 6
+    assert tab.view_local_map_btn.text() == "View Local Reports Map"
     assert tab.summary_total_label.text() == "Reports: 1"
     assert tab.summary_priority_label.text() == "Priority/Emergency: 1"
     assert tab.summary_filters_label.text() == "Filters: none"
@@ -234,3 +235,5 @@ def test_main_window_registers_local_reports_separate_from_hf_operator_history()
     assert '("Local Reports", self.local_report_history_tab)' in text
     assert '("Local Reports", "Local Reports")' in text
     assert "self.local_operator_tab.local_reports_requested.connect(self.open_local_reports)" in text
+    assert "self.local_report_history_tab.local_reports_map_requested" in text
+    assert "def open_local_reports_map(self) -> None:" in text

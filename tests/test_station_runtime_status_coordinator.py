@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
-from freqinout.core.station_runtime_manager import DeviceRuntime
+from freqinout.core.station_runtime_manager import DeviceRuntime, StationRuntimeManager
 
 
 class _Rig:
@@ -124,3 +124,17 @@ def test_device_runtime_stop_invalidates_coordinator_status() -> None:
 
     assert runtime.current_frequency_hz() == 14_115_000
     assert rig.frequency_calls == 2
+
+
+def test_station_runtime_manager_exposes_status_poll_metrics() -> None:
+    manager = StationRuntimeManager(store=object())
+
+    manager._status_poll_coordinator.get_snapshot("device:11:frequency", lambda: {"frequency_hz": 7_115_000})
+    manager._status_poll_coordinator.get_snapshot("device:11:frequency", lambda: {"frequency_hz": 14_115_000})
+
+    metrics = manager.get_status_poll_metrics()
+
+    assert metrics["snapshot_count"] == 1
+    assert metrics["polls_started"] == 1
+    assert metrics["polls_succeeded"] == 1
+    assert metrics["cache_hits"] == 1

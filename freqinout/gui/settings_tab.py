@@ -75,6 +75,22 @@ from freqinout.core.config_migration_preview import (
     build_single_rig_upgrade_preview,
 )
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
+from freqinout.core.operator_groups import (
+    group_access_summary,
+    group_family_label,
+    load_operator_group_families,
+    trusted_callsigns_for_groups,
+    trusted_operator_details_for_groups,
+)
+from freqinout.core.varac_bbs_sources import (
+    append_group_source_selection,
+    group_source_selections_json,
+    group_source_summary_text,
+    has_group_source,
+    normalize_group_source_selections,
+    remove_group_source_indexes,
+    roster_refresh_plan,
+)
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.js8_msg_auth import generate_msg_auth_secret_key
@@ -659,6 +675,7 @@ class SettingsTab(QWidget):
         self._varac_cluster_members_table_loading = False
         self._varac_bbs_lookup_rows: List[Dict[str, str]] = []
         self._varac_bbs_lookup_by_callsign: Dict[str, Dict[str, str]] = {}
+        self._varac_bbs_allowed_group_sources: List[Dict[str, object]] = []
         self._varac_bbs_vault_locations_cache: List[Dict[str, object]] = []
         self._varac_bbs_vault_selected_location_id = ""
         self._varac_bbs_vault_runtime_state_cache: Dict[str, object] = {}
@@ -837,6 +854,13 @@ class SettingsTab(QWidget):
                 values.append(callsign)
         return format_callsign_list(values)
 
+    def _varac_bbs_allowed_callsign_set(self) -> set[str]:
+        return {
+            self._normalize_varac_bbs_callsign(entry)
+            for entry in self._varac_bbs_selected_callsigns_text().split(",")
+            if self._normalize_varac_bbs_callsign(entry)
+        }
+
     def _refresh_varac_bbs_callsign_actions(self) -> None:
         has_text = bool(
             hasattr(self, "varac_bbs_callsign_lookup_edit")
@@ -893,6 +917,418 @@ class SettingsTab(QWidget):
         self._set_varac_bbs_allowed_callsigns(values)
         self.varac_bbs_callsign_lookup_edit.clear()
         self._mark_settings_dirty()
+
+    def _add_varac_bbs_allowed_callsigns(self, callsigns: Sequence[object]) -> int:
+        current = self._varac_bbs_allowed_callsign_set()
+        added = 0
+        for raw in callsigns:
+            callsign = self._normalize_varac_bbs_callsign(raw)
+            if not callsign or callsign in current:
+                continue
+            current.add(callsign)
+            added += 1
+        if added:
+            self._set_varac_bbs_allowed_callsigns(sorted(current))
+            self._mark_settings_dirty()
+        return added
+
+    def _normalize_varac_bbs_group_source_selections(self, value: object) -> List[Dict[str, object]]:
+        return normalize_group_source_selections(value)
+
+    def _set_varac_bbs_group_source_selections(self, value: object) -> None:
+        self._varac_bbs_allowed_group_sources = self._normalize_varac_bbs_group_source_selections(value)
+        self._refresh_varac_bbs_group_source_summary()
+
+    def _varac_bbs_group_source_summary_text(self) -> str:
+        return group_source_summary_text(getattr(self, "_varac_bbs_allowed_group_sources", []))
+
+    def _varac_bbs_has_saved_group_source(self) -> bool:
+        return has_group_source(getattr(self, "_varac_bbs_allowed_group_sources", []))
+
+    def _refresh_varac_bbs_group_source_summary(self) -> None:
+        has_source = self._varac_bbs_has_saved_group_source()
+        text = self._varac_bbs_group_source_summary_text()
+        tooltip = (
+            "Saved roster source used by Refresh From Roster. VarAC.ini is changed only when you explicitly write/sync BBS settings."
+            if has_source
+            else "Use Add Group Family after importing an HF Operator roster to make this allowlist refreshable from roster data."
+        )
+        if hasattr(self, "varac_bbs_group_source_label"):
+            self.varac_bbs_group_source_label.setText(text)
+            self.varac_bbs_group_source_label.setToolTip(tooltip)
+        if hasattr(self, "varac_bbs_refresh_roster_btn"):
+            self.varac_bbs_refresh_roster_btn.setEnabled(has_source)
+            self.varac_bbs_refresh_roster_btn.setToolTip(
+                "Rebuild BBS Allowed Callsigns from the saved group family/subgroup source and current trusted roster."
+                if has_source
+                else "No roster source is saved yet. Use Add Group Family first."
+            )
+        if hasattr(self, "varac_bbs_manage_source_btn"):
+            self.varac_bbs_manage_source_btn.setEnabled(has_source)
+            self.varac_bbs_manage_source_btn.setToolTip(
+                "Review or remove saved roster sources used by Refresh From Roster."
+                if has_source
+                else "No roster source is saved yet. Use Add Group Family first."
+            )
+
+    def _remove_varac_bbs_group_source_indexes(self, indexes: Sequence[int]) -> int:
+        kept, removed = remove_group_source_indexes(
+            getattr(self, "_varac_bbs_allowed_group_sources", []),
+            indexes,
+        )
+        if not removed:
+            return 0
+        self._set_varac_bbs_group_source_selections(kept)
+        self._mark_settings_dirty()
+        return removed
+
+    def _manage_varac_bbs_group_sources(self) -> None:
+        rows = self._normalize_varac_bbs_group_source_selections(
+            getattr(self, "_varac_bbs_allowed_group_sources", [])
+        )
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Manage BBS Source",
+                "No roster source is saved for this BBS allowlist yet. Use Add Group Family first.",
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage BBS Roster Source")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        intro = QLabel("These saved roster sources drive future Refresh From Roster updates. Removing a source does not remove current allowed callsigns.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        table = QTableWidget(0, 3, dlg)
+        table.setHorizontalHeaderLabels(["Family", "Groups", "Mode"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setMinimumHeight(220)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 130)
+        table.setColumnWidth(1, 280)
+        layout.addWidget(table)
+
+        def refresh_table() -> None:
+            current_rows = self._normalize_varac_bbs_group_source_selections(
+                getattr(self, "_varac_bbs_allowed_group_sources", [])
+            )
+            table.setRowCount(len(current_rows))
+            for row_idx, row in enumerate(current_rows):
+                family = str(row.get("family", "") or "").strip().upper()
+                groups = ", ".join(
+                    str(group or "").strip().upper()
+                    for group in (row.get("groups", []) if isinstance(row.get("groups", []), Sequence) else [])
+                    if str(group or "").strip()
+                )
+                mode = str(row.get("mode", "trusted_callsigns") or "trusted_callsigns").replace("_", " ").title()
+                table.setItem(row_idx, 0, QTableWidgetItem(family))
+                table.setItem(row_idx, 1, QTableWidgetItem(groups or family))
+                table.setItem(row_idx, 2, QTableWidgetItem(mode))
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        remove_btn = QPushButton("Remove Selected Source")
+        remove_btn.setToolTip("Remove selected roster source intent. Current allowed callsigns are not removed.")
+        action_row.addWidget(remove_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        def remove_selected() -> None:
+            selected_rows = sorted({idx.row() for idx in table.selectionModel().selectedRows()}, reverse=True)
+            removed = self._remove_varac_bbs_group_source_indexes(selected_rows)
+            if removed:
+                refresh_table()
+                remove_btn.setEnabled(False)
+                if not self._varac_bbs_has_saved_group_source():
+                    dlg.accept()
+
+        table.itemSelectionChanged.connect(lambda: remove_btn.setEnabled(bool(table.selectionModel().selectedRows())))
+        remove_btn.clicked.connect(remove_selected)
+        remove_btn.setEnabled(False)
+        refresh_table()
+        dlg.exec()
+
+    def _varac_bbs_group_source_selections_json(self) -> str:
+        return group_source_selections_json(getattr(self, "_varac_bbs_allowed_group_sources", []))
+
+    def _append_varac_bbs_group_source_selection(self, family: object, groups: Sequence[object]) -> None:
+        updated = append_group_source_selection(
+            getattr(self, "_varac_bbs_allowed_group_sources", []),
+            family,
+            groups,
+        )
+        if updated != self._normalize_varac_bbs_group_source_selections(
+            getattr(self, "_varac_bbs_allowed_group_sources", [])
+        ):
+            self._set_varac_bbs_group_source_selections(updated)
+            self._mark_settings_dirty()
+
+    def _varac_bbs_roster_refresh_plan(self, families: Mapping[str, object]) -> Dict[str, object]:
+        return roster_refresh_plan(
+            getattr(self, "_varac_bbs_allowed_group_sources", []),
+            sorted(self._varac_bbs_allowed_callsign_set()),
+            families,
+        )
+
+    def _refresh_varac_bbs_access_from_roster(self) -> None:
+        sources = self._normalize_varac_bbs_group_source_selections(
+            getattr(self, "_varac_bbs_allowed_group_sources", [])
+        )
+        if not sources:
+            QMessageBox.information(
+                self,
+                "Refresh BBS Access",
+                "No group source has been saved for this BBS allowlist yet. Use Add Group Family first.",
+            )
+            return
+        families = load_operator_group_families(self._operator_group_family_db_path())
+        if not families:
+            QMessageBox.information(
+                self,
+                "Refresh BBS Access",
+                "No roster-derived group families are available yet. Import an HF Operator roster first.",
+            )
+            return
+        plan = self._varac_bbs_roster_refresh_plan(families)
+        desired = list(plan.get("desired", []) or [])
+        added = list(plan.get("added", []) or [])
+        removed = list(plan.get("removed", []) or [])
+        unchanged = list(plan.get("unchanged", []) or [])
+        missing = list(plan.get("missing_families", []) or [])
+        groups = list(plan.get("groups", []) or [])
+        if not desired and not missing:
+            QMessageBox.information(
+                self,
+                "Refresh BBS Access",
+                "The saved group source did not resolve to any trusted roster callsigns.",
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Refresh BBS Access from Roster")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        group_text = ", ".join(groups) if groups else "saved group sources"
+        summary = QLabel(
+            f"Refresh BBS access from {group_text}: {len(added)} add, {len(removed)} remove, {len(unchanged)} unchanged."
+        )
+        summary.setWordWrap(True)
+        summary.setStyleSheet("font-weight: 700;")
+        layout.addWidget(summary)
+        if missing:
+            missing_label = QLabel(
+                "Missing roster families will be skipped: " + ", ".join(missing)
+            )
+            missing_label.setWordWrap(True)
+            layout.addWidget(missing_label)
+
+        rows: List[Tuple[str, str]] = (
+            [("Add", callsign) for callsign in added]
+            + [("Remove", callsign) for callsign in removed]
+            + [("Keep", callsign) for callsign in unchanged]
+        )
+        table = QTableWidget(len(rows), 2, dlg)
+        table.setHorizontalHeaderLabels(["Change", "Callsign"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setMinimumHeight(260)
+        for row_idx, (change, callsign) in enumerate(rows):
+            table.setItem(row_idx, 0, QTableWidgetItem(change))
+            table.setItem(row_idx, 1, QTableWidgetItem(callsign))
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 110)
+        layout.addWidget(table)
+
+        note = QLabel("Update replaces the current BBS Allowed Callsigns with the trusted callsigns resolved from the saved group source. VarAC.ini is not changed until you write/sync it.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        update_btn = buttons.addButton("Update Allowlist", QDialogButtonBox.AcceptRole)
+        update_btn.setEnabled(bool(desired))
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._set_varac_bbs_allowed_callsigns(desired)
+        self._mark_settings_dirty()
+        QMessageBox.information(
+            self,
+            "Refresh BBS Access",
+            f"Updated BBS Allowed Callsigns from roster: {len(added)} added, {len(removed)} removed, {len(unchanged)} unchanged.",
+        )
+
+    def _operator_group_family_db_path(self) -> Path:
+        return get_config_dir() / "config" / "freqinout_nets.db"
+
+    def _add_varac_bbs_group_family_callsigns(self) -> None:
+        families = load_operator_group_families(self._operator_group_family_db_path())
+        if not families:
+            QMessageBox.information(
+                self,
+                "Add Group Family",
+                "No roster-derived group families are available yet. Import an HF Operator roster first.",
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add Group Family to BBS Access")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        intro = QLabel("Choose a roster group family, then select the subgroup(s) that should have BBS access.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        combo = QComboBox()
+        for parent, family in families.items():
+            combo.addItem(group_family_label(parent, families), parent)
+        layout.addWidget(combo)
+
+        subgroup_list = QListWidget()
+        subgroup_list.setSelectionMode(QAbstractItemView.NoSelection)
+        subgroup_list.setMinimumHeight(150)
+        layout.addWidget(subgroup_list)
+
+        preview = QLabel()
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+
+        review_btn = QPushButton("Review Callsigns")
+        review_btn.setToolTip("Show the exact trusted callsigns that will be added for the selected subgroup(s).")
+        layout.addWidget(review_btn)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Add Trusted Callsigns")
+        layout.addWidget(buttons)
+
+        current = self._varac_bbs_allowed_callsign_set()
+
+        def selected_groups() -> list[str]:
+            groups: list[str] = []
+            for idx in range(subgroup_list.count()):
+                item = subgroup_list.item(idx)
+                if item and item.checkState() == Qt.Checked:
+                    group = str(item.data(Qt.UserRole) or "").strip()
+                    if group:
+                        groups.append(group)
+            return groups
+
+        def refresh_subgroups() -> None:
+            subgroup_list.blockSignals(True)
+            subgroup_list.clear()
+            parent = str(combo.currentData() or "")
+            family = families.get(parent)
+            members = list(family.members if family is not None else ())
+            child_members = [member for member in members if member != parent]
+            options = child_members or ([parent] if parent else [])
+            for idx, group in enumerate(options):
+                callsigns = trusted_callsigns_for_groups([group], families)
+                summary = group_access_summary([group], families, max_items=2)
+                suffix = f" - {summary}" if summary else ""
+                item = QListWidgetItem(f"{group} - {len(callsigns)} trusted{suffix}")
+                item.setData(Qt.UserRole, group)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if idx == 0 else Qt.Unchecked)
+                subgroup_list.addItem(item)
+            subgroup_list.blockSignals(False)
+            refresh_preview()
+
+        def refresh_preview() -> None:
+            parent = str(combo.currentData() or "")
+            groups = selected_groups()
+            callsigns = trusted_callsigns_for_groups(groups, families)
+            new_callsigns = [callsign for callsign in callsigns if callsign not in current]
+            summary = group_access_summary(groups, families)
+            sample = ", ".join(new_callsigns[:12])
+            if len(new_callsigns) > 12:
+                sample += f", +{len(new_callsigns) - 12} more"
+            group_label = ", ".join(groups) or parent
+            if not groups:
+                text = "Select at least one subgroup."
+            elif not callsigns:
+                text = f"{group_label}: no trusted callsigns found. Mark operators trusted in HF Operators before adding."
+            elif not new_callsigns:
+                text = f"{group_label}: all {len(callsigns)} trusted callsign(s) are already allowed."
+            else:
+                text = f"{group_label}: {len(new_callsigns)} new trusted callsign(s) will be added. {sample}"
+            if summary:
+                text += f"\n{summary}"
+            preview.setText(text)
+            buttons.button(QDialogButtonBox.Ok).setEnabled(bool(new_callsigns))
+            review_btn.setEnabled(bool(callsigns))
+
+        def review_callsigns() -> None:
+            groups = selected_groups()
+            rows = trusted_operator_details_for_groups(groups, families)
+            if not rows:
+                QMessageBox.information(
+                    dlg,
+                    "Review Callsigns",
+                    "No trusted callsigns are available for the selected subgroup(s).",
+                )
+                return
+            review = QDialog(dlg)
+            review.setWindowTitle("Review BBS Callsigns")
+            review_layout = QVBoxLayout(review)
+            review_layout.setContentsMargins(16, 14, 16, 14)
+            review_layout.setSpacing(8)
+            title = QLabel(f"{len(rows)} trusted callsign(s) for {', '.join(groups)}")
+            title.setStyleSheet("font-weight: 700;")
+            review_layout.addWidget(title)
+            table = QTableWidget(len(rows), 4, review)
+            table.setHorizontalHeaderLabels(["Callsign", "Role", "Tier", "State"])
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSelectionMode(QAbstractItemView.NoSelection)
+            table.setMinimumWidth(520)
+            table.setMinimumHeight(260)
+            for row_idx, (callsign, role, tier, state) in enumerate(rows):
+                for col_idx, value in enumerate((callsign, role, tier, state)):
+                    table.setItem(row_idx, col_idx, QTableWidgetItem(str(value or "")))
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+            table.horizontalHeader().setStretchLastSection(True)
+            table.setColumnWidth(0, 130)
+            table.setColumnWidth(1, 120)
+            table.setColumnWidth(2, 80)
+            review_layout.addWidget(table)
+            close_buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            close_buttons.rejected.connect(review.reject)
+            review_layout.addWidget(close_buttons)
+            review.exec()
+
+        combo.currentIndexChanged.connect(lambda _idx: refresh_subgroups())
+        subgroup_list.itemChanged.connect(lambda _item: refresh_preview())
+        review_btn.clicked.connect(review_callsigns)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        refresh_subgroups()
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+        groups_to_add = selected_groups()
+        selected_family = str(combo.currentData() or "").strip().upper()
+        added = self._add_varac_bbs_allowed_callsigns(trusted_callsigns_for_groups(groups_to_add, families))
+        self._append_varac_bbs_group_source_selection(selected_family, groups_to_add)
+        group_summary = ", ".join(groups_to_add) or str(combo.currentData() or "")
+        QMessageBox.information(
+            self,
+            "Add Group Family",
+            f"Added {added} trusted callsign(s) from {group_summary} to BBS Allowed Callsigns. FIO will remember this group source for roster refresh.",
+        )
 
     def _remove_selected_varac_bbs_allowed_callsigns(self) -> None:
         if not hasattr(self, "varac_bbs_callsigns_list"):
@@ -3563,8 +3999,7 @@ class SettingsTab(QWidget):
         schedule_assignments_layout = QVBoxLayout(schedule_assignments_container)
         schedule_assignments_layout.setSpacing(8)
         schedule_assignments_hint = QLabel(
-            "Schedules and Frequency Plans define where and when radios should operate. Build them in FreqPlanner, "
-            "then assign them here to the selected radio or any configured radio."
+            "Assign one built Frequency Plan to the radio that should follow it. RF Guard checks run before the assignment is saved."
         )
         schedule_assignments_hint.setWordWrap(True)
         schedule_assignments_layout.addWidget(schedule_assignments_hint)
@@ -3578,15 +4013,14 @@ class SettingsTab(QWidget):
             self.schedule_assignments_guidance_status_label,
             title="Schedule Assignment",
             text=(
-                "This is intentionally separate from Operating Model assignment. Operating Models control how FIO behaves; "
-                "Schedules control where and when the radio should be. RF Safety Guard checks run before schedule assignment is saved."
+                "Choose a radio and Frequency Plan, then save with RF Guard before the schedule changes."
             ),
             level="info",
         )
         schedule_assignments_layout.addWidget(self.schedule_assignments_guidance_card)
 
         schedule_actions = QHBoxLayout()
-        self.assign_schedule_btn = QPushButton("Assign Schedule")
+        self.assign_schedule_btn = QPushButton("Assign with RF Guard")
         self.assign_schedule_btn.clicked.connect(self._assign_frequency_plan_to_selected_radios)
         self.refresh_schedule_assignments_btn = QPushButton("Refresh")
         self.refresh_schedule_assignments_btn.clicked.connect(self._refresh_schedule_assignments_table)
@@ -3603,28 +4037,33 @@ class SettingsTab(QWidget):
         self.schedule_assignment_editor_summary_label = QLabel()
         self.schedule_assignment_editor_summary_label.setWordWrap(True)
         editor_layout.addWidget(self.schedule_assignment_editor_summary_label, 0, 0, 1, 6)
-        editor_layout.addWidget(QLabel("Frequency Plan:"), 1, 0)
+        editor_layout.addWidget(QLabel("Radio:"), 1, 0)
+        self.schedule_assignment_radio_combo = QComboBox()
+        self.schedule_assignment_radio_combo.setMinimumWidth(240)
+        self.schedule_assignment_radio_combo.currentIndexChanged.connect(self._on_schedule_assignment_radio_changed)
+        editor_layout.addWidget(self.schedule_assignment_radio_combo, 1, 1, 1, 2)
+        editor_layout.addWidget(QLabel("Frequency Plan:"), 1, 3)
         self.schedule_assignment_plan_combo = QComboBox()
         self.schedule_assignment_plan_combo.currentIndexChanged.connect(self._update_schedule_assignment_editor_hint)
-        editor_layout.addWidget(self.schedule_assignment_plan_combo, 1, 1, 1, 3)
-        editor_layout.addWidget(QLabel("State:"), 1, 4)
+        editor_layout.addWidget(self.schedule_assignment_plan_combo, 1, 4, 1, 2)
+        editor_layout.addWidget(QLabel("State:"), 2, 0)
         self.schedule_assignment_state_combo = QComboBox()
         self.schedule_assignment_state_combo.addItem("Active", "active")
         self.schedule_assignment_state_combo.addItem("Temporary Override", "temporary_override")
         self.schedule_assignment_state_combo.currentIndexChanged.connect(self._update_schedule_assignment_editor_hint)
-        editor_layout.addWidget(self.schedule_assignment_state_combo, 1, 5)
-        editor_layout.addWidget(QLabel("Reason:"), 2, 0)
+        editor_layout.addWidget(self.schedule_assignment_state_combo, 2, 1, 1, 2)
+        editor_layout.addWidget(QLabel("Reason:"), 2, 3)
         self.schedule_assignment_reason_edit = QLineEdit()
         self.schedule_assignment_reason_edit.setPlaceholderText("Optional operator note")
-        editor_layout.addWidget(self.schedule_assignment_reason_edit, 2, 1, 1, 3)
-        editor_layout.addWidget(QLabel("Ends UTC:"), 2, 4)
+        editor_layout.addWidget(self.schedule_assignment_reason_edit, 2, 4, 1, 2)
+        editor_layout.addWidget(QLabel("Ends UTC:"), 3, 0)
         self.schedule_assignment_ends_edit = QLineEdit()
         self.schedule_assignment_ends_edit.setPlaceholderText("Optional metadata")
-        editor_layout.addWidget(self.schedule_assignment_ends_edit, 2, 5)
+        editor_layout.addWidget(self.schedule_assignment_ends_edit, 3, 1, 1, 2)
         self.schedule_assignment_editor_hint_label = QLabel()
         self.schedule_assignment_editor_hint_label.setWordWrap(True)
-        editor_layout.addWidget(self.schedule_assignment_editor_hint_label, 3, 0, 1, 6)
-        self.schedule_assignment_editor_save_btn = QPushButton("Save Assignment")
+        editor_layout.addWidget(self.schedule_assignment_editor_hint_label, 3, 3, 1, 3)
+        self.schedule_assignment_editor_save_btn = QPushButton("Save with RF Guard")
         self.schedule_assignment_editor_save_btn.clicked.connect(self._save_schedule_assignment_editor)
         self.schedule_assignment_editor_cancel_btn = QPushButton("Cancel")
         self.schedule_assignment_editor_cancel_btn.clicked.connect(self._hide_schedule_assignment_editor)
@@ -5835,6 +6274,24 @@ class SettingsTab(QWidget):
         self.varac_bbs_remove_callsign_btn = QPushButton("Remove Selected")
         bbs_callsigns_lookup_row.addWidget(self.varac_bbs_remove_callsign_btn)
         bbs_callsigns_layout.addLayout(bbs_callsigns_lookup_row)
+        bbs_roster_actions_row = QHBoxLayout()
+        bbs_roster_actions_row.setContentsMargins(0, 0, 0, 0)
+        bbs_roster_actions_row.setSpacing(8)
+        self.varac_bbs_add_group_family_btn = QPushButton("Add Group Family")
+        self.varac_bbs_add_group_family_btn.setToolTip(
+            "Add trusted callsigns from a roster-derived operating group family, such as MAGNET and its child regions."
+        )
+        bbs_roster_actions_row.addWidget(self.varac_bbs_add_group_family_btn)
+        self.varac_bbs_refresh_roster_btn = QPushButton("Refresh From Roster")
+        self.varac_bbs_refresh_roster_btn.setToolTip(
+            "Rebuild BBS Allowed Callsigns from the saved group family/subgroup source and current trusted roster."
+        )
+        bbs_roster_actions_row.addWidget(self.varac_bbs_refresh_roster_btn)
+        self.varac_bbs_manage_source_btn = QPushButton("Manage Source")
+        self.varac_bbs_manage_source_btn.setToolTip("Review or remove saved roster sources used by Refresh From Roster.")
+        bbs_roster_actions_row.addWidget(self.varac_bbs_manage_source_btn)
+        bbs_roster_actions_row.addStretch()
+        bbs_callsigns_layout.addLayout(bbs_roster_actions_row)
         self.varac_bbs_callsigns_list = QListWidget()
         self.varac_bbs_callsigns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.varac_bbs_callsigns_list.setMaximumHeight(108)
@@ -5844,13 +6301,23 @@ class SettingsTab(QWidget):
         )
         bbs_callsigns_hint.setWordWrap(True)
         bbs_callsigns_layout.addWidget(bbs_callsigns_hint)
+        self.varac_bbs_group_source_label = QLabel(self._varac_bbs_group_source_summary_text())
+        self.varac_bbs_group_source_label.setWordWrap(True)
+        self.varac_bbs_group_source_label.setToolTip(
+            "Saved roster source used by Refresh From Roster. VarAC.ini is changed only when you explicitly write/sync BBS settings."
+        )
+        bbs_callsigns_layout.addWidget(self.varac_bbs_group_source_label)
         self.varac_bbs_callsign_lookup_edit.textChanged.connect(lambda _text: self._refresh_varac_bbs_callsign_actions())
         self.varac_bbs_callsign_lookup_edit.returnPressed.connect(self._add_varac_bbs_allowed_callsign)
         self.varac_bbs_add_callsign_btn.clicked.connect(self._add_varac_bbs_allowed_callsign)
+        self.varac_bbs_add_group_family_btn.clicked.connect(self._add_varac_bbs_group_family_callsigns)
+        self.varac_bbs_refresh_roster_btn.clicked.connect(self._refresh_varac_bbs_access_from_roster)
+        self.varac_bbs_manage_source_btn.clicked.connect(self._manage_varac_bbs_group_sources)
         self.varac_bbs_remove_callsign_btn.clicked.connect(self._remove_selected_varac_bbs_allowed_callsigns)
         self.varac_bbs_callsigns_list.itemSelectionChanged.connect(self._refresh_varac_bbs_callsign_actions)
         self._reload_varac_bbs_operator_lookup()
         self._refresh_varac_bbs_callsign_actions()
+        self._refresh_varac_bbs_group_source_summary()
         bbs_settings_v.addWidget(bbs_callsigns_wrap)
 
         bbs_sync_status_row = QHBoxLayout()
@@ -9177,6 +9644,7 @@ class SettingsTab(QWidget):
             self.varac_bbs_announce_chk.setChecked(bool(data.get("varac_bbs_announce_enabled", False)))
         if hasattr(self, "varac_bbs_callsigns_list"):
             self._set_varac_bbs_allowed_callsigns(data.get("varac_bbs_allowed_callsigns", ""))
+        self._set_varac_bbs_group_source_selections(data.get("varac_bbs_allowed_group_sources", ""))
         if hasattr(self, "varac_guard_enabled_chk"):
             self.varac_guard_enabled_chk.setChecked(bool(data.get("varac_guard_enabled", False)))
         if hasattr(self, "varac_guard_mode_combo"):
@@ -9580,6 +10048,7 @@ class SettingsTab(QWidget):
             self.varac_bbs_announce_chk.isChecked() if hasattr(self, "varac_bbs_announce_chk") else False
         )
         data["varac_bbs_allowed_callsigns"] = self._varac_bbs_selected_callsigns_text()
+        data["varac_bbs_allowed_group_sources"] = self._varac_bbs_group_source_selections_json()
         data["varac_guard_enabled"] = bool(
             self.varac_guard_enabled_chk.isChecked() if hasattr(self, "varac_guard_enabled_chk") else False
         )
@@ -13365,6 +13834,7 @@ class SettingsTab(QWidget):
             "varac_bbs_enabled": bool(int(profile.get("varac_bbs_enabled", 0) or 0) == 1),
             "varac_bbs_limit_access_enabled": bool(int(profile.get("varac_bbs_limit_access_enabled", 0) or 0) == 1),
             "varac_bbs_allowed_callsigns": str(profile.get("varac_bbs_allowed_callsigns", "") or "").strip(),
+            "varac_bbs_allowed_group_sources": str(profile.get("varac_bbs_allowed_group_sources", "") or "").strip(),
             "varac_bbs_announce_enabled": bool(int(profile.get("varac_bbs_announce_enabled", 0) or 0) == 1),
             "varac_bbs_auto_archive_enabled": bool(int(profile.get("varac_bbs_auto_archive_enabled", 0) or 0) == 1),
             "varac_bbs_auto_archive_days": str(profile.get("varac_bbs_auto_archive_days", 14) or 14),
@@ -13448,6 +13918,7 @@ class SettingsTab(QWidget):
             "varac_bbs_enabled": bool(self.varac_bbs_enabled_chk.isChecked()),
             "varac_bbs_limit_access_enabled": bool(self.varac_bbs_limit_access_chk.isChecked()),
             "varac_bbs_allowed_callsigns": self._varac_bbs_selected_callsigns_text(),
+            "varac_bbs_allowed_group_sources": self._varac_bbs_group_source_selections_json(),
             "varac_bbs_announce_enabled": bool(self.varac_bbs_announce_chk.isChecked()),
             "varac_bbs_auto_archive_enabled": bool(self.varac_bbs_auto_archive_chk.isChecked()),
             "varac_bbs_auto_archive_days": self.varac_bbs_archive_days_combo.currentText().strip() or "14",
@@ -13539,6 +14010,7 @@ class SettingsTab(QWidget):
             self.varac_bbs_enabled_chk.setChecked(bool(state.get("varac_bbs_enabled", False)))
             self.varac_bbs_limit_access_chk.setChecked(bool(state.get("varac_bbs_limit_access_enabled", False)))
             self._set_varac_bbs_allowed_callsigns(state.get("varac_bbs_allowed_callsigns", ""))
+            self._set_varac_bbs_group_source_selections(state.get("varac_bbs_allowed_group_sources", ""))
             self.varac_bbs_announce_chk.setChecked(bool(state.get("varac_bbs_announce_enabled", False)))
             self.varac_bbs_auto_archive_chk.setChecked(bool(state.get("varac_bbs_auto_archive_enabled", False)))
             self.varac_bbs_archive_days_combo.setCurrentText(str(state.get("varac_bbs_auto_archive_days", "14") or "14"))
@@ -13862,6 +14334,7 @@ class SettingsTab(QWidget):
                 "varac_bbs_enabled": bool(state.get("varac_bbs_enabled", False)),
                 "varac_bbs_limit_access_enabled": bool(state.get("varac_bbs_limit_access_enabled", False)),
                 "varac_bbs_allowed_callsigns": _txt("varac_bbs_allowed_callsigns"),
+                "varac_bbs_allowed_group_sources": _txt("varac_bbs_allowed_group_sources"),
                 "varac_bbs_announce_enabled": bool(state.get("varac_bbs_announce_enabled", False)),
                 "varac_bbs_auto_archive_enabled": bool(state.get("varac_bbs_auto_archive_enabled", False)),
                 "varac_bbs_auto_archive_days": _num("varac_bbs_auto_archive_days", 14),
@@ -16163,15 +16636,11 @@ class SettingsTab(QWidget):
         if not hasattr(self, "schedule_assignments_table"):
             return []
         selected: List[Dict[str, Any]] = []
-        for row in range(self.schedule_assignments_table.rowCount()):
-            wrapper = self.schedule_assignments_table.cellWidget(row, 0)
-            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
-            if chk is None or not chk.isChecked():
-                continue
-            try:
-                device_profile_id = int(chk.property("device_profile_id") or 0)
-            except Exception:
-                continue
+        seen_device_ids: set[int] = set()
+
+        def append_assignment_for_device(device_profile_id: int) -> None:
+            if device_profile_id <= 0 or device_profile_id in seen_device_ids:
+                return
             match = next(
                 (
                     dict(item)
@@ -16182,11 +16651,50 @@ class SettingsTab(QWidget):
             )
             if match is not None:
                 selected.append(match)
+                seen_device_ids.add(device_profile_id)
+
+        for row in range(self.schedule_assignments_table.rowCount()):
+            wrapper = self.schedule_assignments_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                device_profile_id = int(chk.property("device_profile_id") or 0)
+            except Exception:
+                continue
+            append_assignment_for_device(device_profile_id)
+        if selected:
+            return selected
+        selection_model = self.schedule_assignments_table.selectionModel()
+        selected_rows = selection_model.selectedRows() if selection_model is not None else []
+        for index in selected_rows:
+            row = int(index.row())
+            wrapper = self.schedule_assignments_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            try:
+                device_profile_id = int(chk.property("device_profile_id") or 0) if chk is not None else 0
+            except Exception:
+                device_profile_id = 0
+            if device_profile_id <= 0 and 0 <= row < len(getattr(self, "schedule_assignments", [])):
+                try:
+                    device_profile_id = int(self.schedule_assignments[row].get("device_profile_id", 0) or 0)
+                except Exception:
+                    device_profile_id = 0
+            append_assignment_for_device(device_profile_id)
         return selected
 
     def _set_schedule_assignment_guidance(self, title: str, text: str, level: str = "info") -> None:
         if not hasattr(self, "schedule_assignments_guidance_card"):
             return
+        editor_visible = bool(
+            hasattr(self, "schedule_assignment_editor_panel")
+            and self.schedule_assignment_editor_panel.isVisible()
+        )
+        if editor_visible and str(level or "").strip().lower() in {"info", "success"}:
+            self.schedule_assignments_guidance_card.setVisible(False)
+            self._refresh_fit_content_section_height(getattr(self, "schedule_assignments_section_group", None))
+            return
+        self.schedule_assignments_guidance_card.setVisible(True)
         self._set_guidance_card_state(
             self.schedule_assignments_guidance_card,
             self.schedule_assignments_guidance_title_label,
@@ -16214,11 +16722,85 @@ class SettingsTab(QWidget):
             None,
         )
 
+    def _schedule_assignment_row_for_device_id(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            target_id = int(device_profile_id)
+        except Exception:
+            target_id = 0
+        if target_id <= 0:
+            return None
+        return next(
+            (
+                dict(row)
+                for row in getattr(self, "schedule_assignments", [])
+                if isinstance(row, dict) and int(row.get("device_profile_id", 0) or 0) == target_id
+            ),
+            None,
+        )
+
+    def _default_schedule_assignment_radio_id(self) -> int:
+        rows = [row for row in getattr(self, "schedule_assignments", []) if isinstance(row, dict)]
+        for key in ("runtime_active", "runtime_primary"):
+            for row in rows:
+                try:
+                    if int(row.get(key, 0) or 0) == 1:
+                        radio_id = int(row.get("device_profile_id", 0) or 0)
+                        if radio_id > 0:
+                            return radio_id
+                except Exception:
+                    continue
+        if rows:
+            try:
+                return int(rows[0].get("device_profile_id", 0) or 0)
+            except Exception:
+                return 0
+        return 0
+
     def _hide_schedule_assignment_editor(self) -> None:
         if hasattr(self, "schedule_assignment_editor_panel"):
             self.schedule_assignment_editor_panel.setVisible(False)
         self.schedule_assignment_editor_rows = []
         self._refresh_fit_content_section_height(getattr(self, "schedule_assignments_section_group", None))
+
+    def _refresh_schedule_assignment_editor_summary(self) -> None:
+        if not hasattr(self, "schedule_assignment_editor_summary_label"):
+            return
+        rows = [row for row in getattr(self, "schedule_assignment_editor_rows", []) if isinstance(row, dict)]
+        if not rows:
+            self.schedule_assignment_editor_summary_label.setText("Choose the radio and Frequency Plan to assign.")
+            return
+        row = rows[0]
+        name = str(row.get("device_name", "") or f"Radio {int(row.get('device_profile_id', 0) or 0)}").strip()
+        current_plan = str(row.get("frequency_plan_name", "") or "Unassigned").strip()
+        self.schedule_assignment_editor_summary_label.setText(
+            f"Assign a Frequency Plan to {name or 'the selected radio'}. Current assignment: {current_plan}."
+        )
+
+    def _on_schedule_assignment_radio_changed(self, *_args) -> None:
+        if getattr(self, "_schedule_assignment_radio_combo_loading", False):
+            return
+        if not hasattr(self, "schedule_assignment_radio_combo"):
+            return
+        try:
+            device_profile_id = int(self.schedule_assignment_radio_combo.currentData() or 0)
+        except Exception:
+            device_profile_id = 0
+        row = self._schedule_assignment_row_for_device_id(device_profile_id)
+        self.schedule_assignment_editor_rows = [row] if row is not None else []
+        if row is not None:
+            try:
+                current_plan_id = int(row.get("frequency_plan_id") or 0)
+            except Exception:
+                current_plan_id = 0
+            if current_plan_id > 0 and hasattr(self, "schedule_assignment_plan_combo"):
+                idx = self.schedule_assignment_plan_combo.findData(current_plan_id)
+                if idx >= 0:
+                    self.schedule_assignment_plan_combo.setCurrentIndex(idx)
+            state = str(row.get("assignment_state", "") or "active").strip().lower()
+            state_idx = self.schedule_assignment_state_combo.findData(state)
+            self.schedule_assignment_state_combo.setCurrentIndex(state_idx if state_idx >= 0 else 0)
+        self._refresh_schedule_assignment_editor_summary()
+        self._update_schedule_assignment_editor_hint()
 
     def _update_schedule_assignment_editor_hint(self) -> None:
         if not hasattr(self, "schedule_assignment_editor_hint_label"):
@@ -16240,10 +16822,16 @@ class SettingsTab(QWidget):
             bits.append("Temporary Override applies immediately. Ends UTC is metadata in this checkpoint.")
         else:
             bits.append("Active assignments become the current schedule plan for the selected radio immediately.")
-        bits.append("RF Safety Guard checks run before this schedule assignment is saved.")
+        bits.append("Save with RF Guard runs the assignment check before the radio schedule changes.")
         self.schedule_assignment_editor_hint_label.setText(" ".join(bits))
 
-    def _show_schedule_assignment_editor(self, selected_devices: List[Dict[str, Any]]) -> None:
+    def _show_schedule_assignment_editor(
+        self,
+        selected_devices: List[Dict[str, Any]],
+        *,
+        preferred_plan_id: int = 0,
+        preferred_device_profile_id: int = 0,
+    ) -> None:
         try:
             self.frequency_plans = list(self.multi_radio_store.list_frequency_plans())
         except Exception:
@@ -16263,22 +16851,46 @@ class SettingsTab(QWidget):
                 "warning",
             )
             return
-        self.schedule_assignment_editor_rows = [dict(row) for row in selected_devices if isinstance(row, dict)]
-        names = [
-            str(row.get("device_name", "") or f"Radio {int(row.get('device_profile_id', 0) or 0)}").strip()
-            for row in self.schedule_assignment_editor_rows
-        ]
-        names = [name for name in names if name]
-        target_text = ", ".join(names[:3])
-        if len(names) > 3:
-            target_text += f", +{len(names) - 3}"
-        self.schedule_assignment_editor_summary_label.setText(
-            f"Assign one Frequency Plan to {len(self.schedule_assignment_editor_rows)} selected radio"
-            f"{'s' if len(self.schedule_assignment_editor_rows) != 1 else ''}: {target_text or 'selected radio'}."
-        )
+        selected_rows = [dict(row) for row in selected_devices if isinstance(row, dict)]
+        try:
+            target_device_id = int(preferred_device_profile_id or 0)
+        except Exception:
+            target_device_id = 0
+        if target_device_id <= 0 and selected_rows:
+            try:
+                target_device_id = int(selected_rows[0].get("device_profile_id", 0) or 0)
+            except Exception:
+                target_device_id = 0
+        if target_device_id <= 0:
+            target_device_id = self._default_schedule_assignment_radio_id()
+        target_row = self._schedule_assignment_row_for_device_id(target_device_id)
+        if target_row is None and selected_rows:
+            target_row = selected_rows[0]
+        self.schedule_assignment_editor_rows = [target_row] if target_row is not None else []
 
-        current_plan_id = 0
-        if len(self.schedule_assignment_editor_rows) == 1:
+        if hasattr(self, "schedule_assignment_radio_combo"):
+            self._schedule_assignment_radio_combo_loading = True
+            self.schedule_assignment_radio_combo.blockSignals(True)
+            self.schedule_assignment_radio_combo.clear()
+            for assignment in getattr(self, "schedule_assignments", []):
+                if not isinstance(assignment, dict):
+                    continue
+                radio_id = int(assignment.get("device_profile_id", 0) or 0)
+                if radio_id <= 0:
+                    continue
+                label = str(assignment.get("device_name", "") or f"Radio {radio_id}").strip()
+                current = str(assignment.get("frequency_plan_name", "") or "Unassigned").strip()
+                self.schedule_assignment_radio_combo.addItem(f"{label} - {current}", radio_id)
+            if target_device_id > 0:
+                idx = self.schedule_assignment_radio_combo.findData(target_device_id)
+                if idx >= 0:
+                    self.schedule_assignment_radio_combo.setCurrentIndex(idx)
+            self.schedule_assignment_radio_combo.blockSignals(False)
+            self._schedule_assignment_radio_combo_loading = False
+        self._refresh_schedule_assignment_editor_summary()
+
+        current_plan_id = int(preferred_plan_id or 0)
+        if current_plan_id <= 0 and len(self.schedule_assignment_editor_rows) == 1:
             try:
                 current_plan_id = int(self.schedule_assignment_editor_rows[0].get("frequency_plan_id") or 0)
             except Exception:
@@ -16312,6 +16924,27 @@ class SettingsTab(QWidget):
             "info",
         )
         self._refresh_fit_content_section_height(getattr(self, "schedule_assignments_section_group", None))
+
+    def open_schedule_assignment_editor(self, *, plan_id: int = 0, device_profile_id: int = 0) -> bool:
+        if not hasattr(self, "schedule_assignments_table"):
+            return False
+        group = getattr(self, "schedule_assignments_section_group", None)
+        if group is not None:
+            self._select_settings_section_group(group)
+        self._refresh_schedule_assignments_table(refresh_section_titles=False)
+        selected_device_id = int(device_profile_id or 0)
+        if selected_device_id <= 0:
+            selected_device_id = self._default_schedule_assignment_radio_id()
+        selected = []
+        row = self._schedule_assignment_row_for_device_id(selected_device_id)
+        if row is not None:
+            selected = [row]
+        self._show_schedule_assignment_editor(
+            selected,
+            preferred_plan_id=int(plan_id or 0),
+            preferred_device_profile_id=selected_device_id,
+        )
+        return True
 
     def _save_schedule_assignment_editor(self) -> None:
         selected = [row for row in getattr(self, "schedule_assignment_editor_rows", []) if isinstance(row, dict)]
@@ -16349,7 +16982,7 @@ class SettingsTab(QWidget):
                     ends_utc=ends_value,
                 )
         except ValueError as exc:
-            self._set_schedule_assignment_guidance("Schedule Assignment", str(exc), "warning")
+            self._set_schedule_assignment_guidance("RF Guard Blocked Assignment", str(exc), "warning")
             return
         except Exception:
             log.exception("Failed updating schedule assignments.")
@@ -16359,10 +16992,26 @@ class SettingsTab(QWidget):
                 "danger",
             )
             return
-        self._hide_schedule_assignment_editor()
+        saved_device_id = 0
+        try:
+            saved_device_id = int(selected[0].get("device_profile_id", 0) or 0)
+        except Exception:
+            saved_device_id = 0
         self._refresh_multi_radio_tables()
+        self._refresh_schedule_assignments_table(refresh_section_titles=False)
+        refreshed_row = self._schedule_assignment_row_for_device_id(saved_device_id)
+        self._show_schedule_assignment_editor(
+            [refreshed_row] if refreshed_row is not None else selected[:1],
+            preferred_plan_id=int(plan_id or 0),
+            preferred_device_profile_id=saved_device_id,
+        )
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
+        self._set_schedule_assignment_guidance(
+            "Schedule Assignment Saved",
+            f"Saved with RF Guard for {len(selected)} radio{'s' if len(selected) != 1 else ''}.",
+            "success",
+        )
         self._publish_settings_action_feedback(
             status="succeeded",
             summary=f"Updated schedule assignment for {len(selected)} radio{'s' if len(selected) != 1 else ''}.",
@@ -16372,12 +17021,9 @@ class SettingsTab(QWidget):
     def _assign_frequency_plan_to_selected_radios(self) -> None:
         selected = self._selected_schedule_assignment_rows()
         if not selected:
-            self._set_schedule_assignment_guidance(
-                "Schedule Assignment",
-                "Select one or more radios in the table before assigning a Frequency Plan.",
-                "warning",
-            )
-            return
+            selected_id = self._default_schedule_assignment_radio_id()
+            row = self._schedule_assignment_row_for_device_id(selected_id)
+            selected = [row] if row is not None else []
         self._show_schedule_assignment_editor(selected)
 
     def _refresh_schedule_assignments_table(self, *, refresh_section_titles: bool = True) -> None:
@@ -16468,7 +17114,7 @@ class SettingsTab(QWidget):
         else:
             self._set_schedule_assignment_guidance(
                 "Schedule Assignment",
-                "Assign built Frequency Plans to radios here. RF Safety Guard checks run before schedule assignment is saved.",
+                "Assign built Frequency Plans to radios here. Save with RF Guard checks the selected radio before the schedule changes.",
                 "info",
             )
         if refresh_section_titles:

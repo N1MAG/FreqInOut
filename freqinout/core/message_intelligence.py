@@ -218,8 +218,13 @@ def analyze_form_text(
     date_summary = _form_date_summary(
         _first_nonempty(
             parsed_fields.get("date_summary"),
-            _match_field(raw, r"\b(\d{6}[-_]\d{4}z?)\b"),
-            _match_field(raw, r"\b(\d{8}[-_]\d{4,6}z?)\b"),
+            _field_after_label(raw, "Date/Msg ID"),
+            _field_after_label(raw, "Date/Time/Msg ID"),
+            _field_after_label(raw, "Date Time Msg ID"),
+            _field_after_label(raw, "DTG"),
+            _field_after_label(raw, "Date"),
+            _match_field(raw, r"\b(\d{6}[-_\sT]?\d{4,6}z?)\b"),
+            _match_field(raw, r"\b(\d{8}[-_\sT]?\d{4,6}z?)\b"),
         )
     )
     form_title = str(form_name or parsed_fields.get("form_title", "") or "").strip()
@@ -312,6 +317,7 @@ def analyze_commstat_fields(
     brevity_code: object = "",
     brevity_summary: object = "",
     transport: object = "",
+    reach: object = "",
     source_family: object = "CommStat",
     event_utc: object = "",
 ) -> MessageIntelligence:
@@ -339,6 +345,7 @@ def analyze_commstat_fields(
             subtype,
             scope,
             transport,
+            reach,
             source_family,
         )
         if str(part or "").strip()
@@ -354,6 +361,7 @@ def analyze_commstat_fields(
             ("subtype", subtype),
             ("scope", scope),
             ("transport", transport),
+            ("reach", reach),
             ("source", source_family),
         )
     )
@@ -384,6 +392,7 @@ def analyze_commstat_fields(
         "scope": str(scope or "").strip(),
         "subtype": str(subtype or "").strip(),
         "transport": str(transport or "").strip(),
+        "reach": str(reach or "").strip(),
         "source": str(source_family or "").strip(),
     }
     info = MessageIntelligence(
@@ -553,10 +562,10 @@ def _form_date_summary(value: object) -> str:
     txt = str(value or "").strip()
     if not txt:
         return ""
-    match = re.search(r"\b(\d{6})[-_]?(\d{4})z?\b", txt, flags=re.IGNORECASE)
+    match = re.search(r"\b(\d{6})[-_\sT]?(\d{4,6})z?\b", txt, flags=re.IGNORECASE)
     if match:
-        return f"{match.group(1)}-{match.group(2)}z"
-    match = re.search(r"\b(\d{8})[-_]?(\d{4,6})z?\b", txt, flags=re.IGNORECASE)
+        return f"{match.group(1)}-{match.group(2)[:4]}z"
+    match = re.search(r"\b(\d{8})[-_\sT]?(\d{4,6})z?\b", txt, flags=re.IGNORECASE)
     if match:
         return f"{match.group(1)}-{match.group(2)[:4]}z"
     return txt[:24]
@@ -623,8 +632,12 @@ def _looks_like_form_label(value: str) -> bool:
     if not text or len(text) > 48:
         return False
     return text in {
+        "date/msg id",
+        "date msg id",
         "date/time/msg id",
         "date time msg id",
+        "dtg",
+        "date",
         "to",
         "from",
         "msg precedence",

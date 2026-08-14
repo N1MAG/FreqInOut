@@ -47,6 +47,8 @@ class FileRecord:
     origin: str
     size: int = 0
     mtime: float = 0.0
+    source_id: str = ""
+    source_label: str = ""
 
     def display_name(self) -> str:
         return self.path.name
@@ -111,6 +113,9 @@ class MessageFileScanner:
         allowed_exts: Optional[set[str]],
         out_map: Dict[str, Dict[str, FileRecord]],
         dir_mtimes: Dict[str, float],
+        *,
+        source_id: str = "",
+        source_label: str = "",
     ) -> None:
         try:
             dir_mtimes[self._norm_path(base)] = float(base.stat().st_mtime)
@@ -121,7 +126,15 @@ class MessageFileScanner:
                 for dent in entries:
                     try:
                         if dent.is_dir(follow_symlinks=False):
-                            self._full_scan_recursive(Path(dent.path), origin, allowed_exts, out_map, dir_mtimes)
+                            self._full_scan_recursive(
+                                Path(dent.path),
+                                origin,
+                                allowed_exts,
+                                out_map,
+                                dir_mtimes,
+                                source_id=source_id,
+                                source_label=source_label,
+                            )
                             continue
                         if not dent.is_file(follow_symlinks=False):
                             continue
@@ -133,7 +146,14 @@ class MessageFileScanner:
                         if allowed_exts and suffix not in allowed_exts:
                             continue
                         stat = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin=origin, size=stat.st_size, mtime=stat.st_mtime)
+                        rec = FileRecord(
+                            path=Path(dent.path),
+                            origin=origin,
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            source_id=source_id,
+                            source_label=source_label,
+                        )
                         out_map[origin][self._norm_path(rec.path)] = rec
                     except OSError:
                         continue
@@ -145,6 +165,9 @@ class MessageFileScanner:
         base: Path,
         out_map: Dict[str, Dict[str, FileRecord]],
         dir_mtimes: Dict[str, float],
+        *,
+        source_id: str = "",
+        source_label: str = "",
     ) -> None:
         try:
             dir_mtimes[self._norm_path(base)] = float(base.stat().st_mtime)
@@ -162,7 +185,14 @@ class MessageFileScanner:
                         if suffix not in SUPPORTED_EXT:
                             continue
                         stat = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=stat.st_size, mtime=stat.st_mtime)
+                        rec = FileRecord(
+                            path=Path(dent.path),
+                            origin="bbs",
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            source_id=source_id,
+                            source_label=source_label,
+                        )
                         out_map["bbs"][self._norm_path(rec.path)] = rec
                     except OSError:
                         continue
@@ -179,6 +209,9 @@ class MessageFileScanner:
         seen_files: Dict[str, set[str]],
         changed_dirs: Dict[str, set[str]],
         reused_dirs: Dict[str, set[str]],
+        *,
+        source_id: str = "",
+        source_label: str = "",
     ) -> None:
         base_norm = self._norm_path(base)
         try:
@@ -205,6 +238,8 @@ class MessageFileScanner:
                                 seen_files,
                                 changed_dirs,
                                 reused_dirs,
+                                source_id=source_id,
+                                source_label=source_label,
                             )
                             continue
                         if not dent.is_file(follow_symlinks=False):
@@ -217,7 +252,14 @@ class MessageFileScanner:
                         if allowed_exts and suffix not in allowed_exts:
                             continue
                         stat = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin=origin, size=stat.st_size, mtime=stat.st_mtime)
+                        rec = FileRecord(
+                            path=Path(dent.path),
+                            origin=origin,
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            source_id=source_id,
+                            source_label=source_label,
+                        )
                         key = self._norm_path(rec.path)
                         out_map[origin][key] = rec
                         seen_files[origin].add(key)
@@ -234,6 +276,9 @@ class MessageFileScanner:
         seen_files: Dict[str, set[str]],
         changed_dirs: Dict[str, set[str]],
         reused_dirs: Dict[str, set[str]],
+        *,
+        source_id: str = "",
+        source_label: str = "",
     ) -> None:
         base_norm = self._norm_path(base)
         try:
@@ -258,7 +303,14 @@ class MessageFileScanner:
                         if suffix not in SUPPORTED_EXT:
                             continue
                         stat = dent.stat()
-                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=stat.st_size, mtime=stat.st_mtime)
+                        rec = FileRecord(
+                            path=Path(dent.path),
+                            origin="bbs",
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            source_id=source_id,
+                            source_label=source_label,
+                        )
                         key = self._norm_path(rec.path)
                         out_map["bbs"][key] = rec
                         seen_files["bbs"].add(key)
@@ -284,13 +336,23 @@ class MessageFileScanner:
             path = str(entry.get("path", "") or "").strip()
             if not path:
                 continue
+            source_id = str(entry.get("source_id", "") or "").strip()
+            source_label = str(entry.get("source_label", "") or "").strip()
             base = Path(path)
             if not base.exists():
                 continue
             if origin == "bbs":
-                self._full_scan_bbs(base, records_map, dir_mtimes)
+                self._full_scan_bbs(base, records_map, dir_mtimes, source_id=source_id, source_label=source_label)
             else:
-                self._full_scan_recursive(base, origin, ORIGIN_EXTS.get(origin), records_map, dir_mtimes)
+                self._full_scan_recursive(
+                    base,
+                    origin,
+                    ORIGIN_EXTS.get(origin),
+                    records_map,
+                    dir_mtimes,
+                    source_id=source_id,
+                    source_label=source_label,
+                )
         return self._finalize_maps(records_map), dir_mtimes
 
     def _run_incremental(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
@@ -306,6 +368,8 @@ class MessageFileScanner:
                     origin=origin_norm,
                     size=int(rec.size or 0),
                     mtime=float(rec.mtime or 0.0),
+                    source_id=str(getattr(rec, "source_id", "") or ""),
+                    source_label=str(getattr(rec, "source_label", "") or ""),
                 )
 
         dir_mtimes: Dict[str, float] = {}
@@ -321,13 +385,24 @@ class MessageFileScanner:
             path = str(entry.get("path", "") or "").strip()
             if not path:
                 continue
+            source_id = str(entry.get("source_id", "") or "").strip()
+            source_label = str(entry.get("source_label", "") or "").strip()
             base = Path(path)
             base_norm = self._norm_path(base)
             if not base.exists():
                 missing_roots[origin].add(base_norm)
                 continue
             if origin == "bbs":
-                self._scan_changed_bbs(base, records_map, dir_mtimes, seen_files, changed_dirs, reused_dirs)
+                self._scan_changed_bbs(
+                    base,
+                    records_map,
+                    dir_mtimes,
+                    seen_files,
+                    changed_dirs,
+                    reused_dirs,
+                    source_id=source_id,
+                    source_label=source_label,
+                )
             else:
                 self._scan_changed_recursive(
                     base,
@@ -338,6 +413,8 @@ class MessageFileScanner:
                     seen_files,
                     changed_dirs,
                     reused_dirs,
+                    source_id=source_id,
+                    source_label=source_label,
                 )
 
         for origin, path_map in records_map.items():

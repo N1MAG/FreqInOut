@@ -102,11 +102,21 @@ def ensure_js8_callsign_stats(conn: sqlite3.Connection, *, rebuild_if_empty: boo
             callsign TEXT PRIMARY KEY,
             last_seen_ts REAL,
             last_band TEXT,
-            last_freq_hz REAL
+            last_freq_hz REAL,
+            last_source_id TEXT,
+            last_app_instance_id TEXT,
+            last_source_radio_id TEXT
         )
         """
     )
+    cur.execute("PRAGMA table_info(js8_callsign_stats)")
+    cols = {str(row[1] or "") for row in cur.fetchall()}
+    for name in ("last_source_id", "last_app_instance_id", "last_source_radio_id"):
+        if name not in cols:
+            cur.execute(f"ALTER TABLE js8_callsign_stats ADD COLUMN {name} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_last_seen ON js8_callsign_stats(last_seen_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_source ON js8_callsign_stats(last_source_id, last_seen_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_radio ON js8_callsign_stats(last_source_radio_id, last_seen_ts)")
     if rebuild_if_empty and _table_has_rows(conn, "js8_links") and not _table_has_rows(conn, "js8_callsign_stats"):
         rebuild_js8_callsign_stats(conn)
 
@@ -119,12 +129,45 @@ def _table_has_rows(conn: sqlite3.Connection, table_name: str) -> bool:
         return False
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        return {str(row[1] or "") for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _js8_links_stats_select_sql(conn: sqlite3.Connection) -> str:
+    cols = _table_columns(conn, "js8_links")
+    source_id = "source_id" if "source_id" in cols else "'' AS source_id"
+    app_instance_id = "app_instance_id" if "app_instance_id" in cols else "'' AS app_instance_id"
+    source_radio_id = "source_radio_id" if "source_radio_id" in cols else "'' AS source_radio_id"
+    return f"""
+        SELECT ts, origin, destination, band, freq_hz, {source_id}, {app_instance_id}, {source_radio_id}
+          FROM js8_links
+    """
+
+
+def _coerce_js8_activity_row(row: Tuple) -> Tuple[object, object, object, object, str, str, str]:
+    values = tuple(row or ())
+    padded = (*values, "", "", "")[:7]
+    return (
+        padded[0],
+        padded[1],
+        padded[2],
+        padded[3],
+        str(padded[4] or "").strip(),
+        str(padded[5] or "").strip(),
+        str(padded[6] or "").strip(),
+    )
+
+
 def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
     ensure_js8_callsign_stats(conn, rebuild_if_empty=False)
-    stats: Dict[str, Tuple[float, str, Optional[float]]] = {}
+    stats: Dict[str, Tuple[float, str, Optional[float], str, str, str]] = {}
     try:
-        cur = conn.execute("SELECT ts, origin, destination, band, freq_hz FROM js8_links")
-        for ts, origin, destination, band, freq_hz in cur.fetchall():
+        select_sql = _js8_links_stats_select_sql(conn)
+        cur = conn.execute(select_sql)
+        for ts, origin, destination, band, freq_hz, source_id, app_instance_id, source_radio_id in cur.fetchall():
             ts_val = parse_utc_timestamp(ts)
             if ts_val is None or ts_val <= 0:
                 continue
@@ -138,15 +181,25 @@ def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
                     continue
                 existing = stats.get(callsign)
                 if existing is None or ts_val > existing[0]:
-                    stats[callsign] = (ts_val, band_val, freq_val)
+                    stats[callsign] = (
+                        ts_val,
+                        band_val,
+                        freq_val,
+                        str(source_id or "").strip(),
+                        str(app_instance_id or "").strip(),
+                        str(source_radio_id or "").strip(),
+                    )
         conn.execute("DELETE FROM js8_callsign_stats")
         if stats:
             conn.executemany(
                 """
-                INSERT INTO js8_callsign_stats (callsign, last_seen_ts, last_band, last_freq_hz)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO js8_callsign_stats (
+                    callsign, last_seen_ts, last_band, last_freq_hz,
+                    last_source_id, last_app_instance_id, last_source_radio_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                [(cs, entry[0], entry[1], entry[2]) for cs, entry in stats.items()],
+                [(cs, entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]) for cs, entry in stats.items()],
             )
         return len(stats)
     except Exception as exc:
@@ -156,11 +209,12 @@ def rebuild_js8_callsign_stats(conn: sqlite3.Connection) -> int:
 
 def record_js8_activity_batch(
     conn: sqlite3.Connection,
-    rows: Iterable[Tuple[str, object, str, object]],
+    rows: Iterable[Tuple],
 ) -> int:
     ensure_js8_callsign_stats(conn, rebuild_if_empty=False)
-    latest: Dict[str, Tuple[float, str, Optional[float]]] = {}
-    for callsign, ts, band, freq_hz in rows:
+    latest: Dict[str, Tuple[float, str, Optional[float], str, str, str]] = {}
+    for row in rows:
+        callsign, ts, band, freq_hz, source_id, app_instance_id, source_radio_id = _coerce_js8_activity_row(row)
         cs = _clean_callsign(callsign)
         ts_val = parse_utc_timestamp(ts)
         if not cs or ts_val is None or ts_val <= 0:
@@ -172,13 +226,23 @@ def record_js8_activity_batch(
             freq_val = None
         current = latest.get(cs)
         if current is None or ts_val > current[0]:
-            latest[cs] = (ts_val, band_val, freq_val)
+            latest[cs] = (
+                ts_val,
+                band_val,
+                freq_val,
+                str(source_id or "").strip(),
+                str(app_instance_id or "").strip(),
+                str(source_radio_id or "").strip(),
+            )
     if not latest:
         return 0
     conn.executemany(
         """
-        INSERT INTO js8_callsign_stats (callsign, last_seen_ts, last_band, last_freq_hz)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO js8_callsign_stats (
+            callsign, last_seen_ts, last_band, last_freq_hz,
+            last_source_id, last_app_instance_id, last_source_radio_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(callsign) DO UPDATE SET
             last_seen_ts=CASE
                 WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
@@ -200,9 +264,33 @@ def record_js8_activity_batch(
                      AND js8_callsign_stats.last_freq_hz IS NULL
                     THEN excluded.last_freq_hz
                 ELSE js8_callsign_stats.last_freq_hz
+            END,
+            last_source_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_source_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_source_id, '') = ''
+                    THEN excluded.last_source_id
+                ELSE js8_callsign_stats.last_source_id
+            END,
+            last_app_instance_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_app_instance_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_app_instance_id, '') = ''
+                    THEN excluded.last_app_instance_id
+                ELSE js8_callsign_stats.last_app_instance_id
+            END,
+            last_source_radio_id=CASE
+                WHEN COALESCE(excluded.last_seen_ts, 0) > COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                    THEN excluded.last_source_radio_id
+                WHEN COALESCE(excluded.last_seen_ts, 0) = COALESCE(js8_callsign_stats.last_seen_ts, 0)
+                     AND COALESCE(js8_callsign_stats.last_source_radio_id, '') = ''
+                    THEN excluded.last_source_radio_id
+                ELSE js8_callsign_stats.last_source_radio_id
             END
         """,
-        [(cs, entry[0], entry[1], entry[2]) for cs, entry in latest.items()],
+        [(cs, entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]) for cs, entry in latest.items()],
     )
     return len(latest)
 

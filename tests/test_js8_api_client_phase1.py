@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pytest
+from PySide6.QtCore import QCoreApplication
 
 from freqinout.radio_interface.js8_api_client import (
     JS8ApiClient,
@@ -17,6 +18,8 @@ from freqinout.radio_interface.js8_api_client import (
     JS8ApiMessage,
     classify_js8_capability_mode,
 )
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
+from freqinout.radio_interface.js8_status import JS8ControlClient
 
 
 class _FakeJs8Server:
@@ -128,6 +131,28 @@ def test_registry_returns_one_client_per_endpoint() -> None:
         JS8ApiClientRegistry.shutdown_all()
 
 
+def test_registry_status_snapshot_reports_managed_endpoints() -> None:
+    JS8ApiClientRegistry.shutdown_all()
+    endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+
+    JS8ApiClientRegistry.get(endpoint, auto_reconnect=False)
+    snapshots = JS8ApiClientRegistry.status_snapshot()
+    rows = JS8ApiClientRegistry.status_dicts()
+
+    try:
+        assert len(snapshots) == 1
+        assert snapshots[0].endpoint == endpoint
+        assert snapshots[0].key == endpoint.key
+        assert snapshots[0].running is False
+        assert snapshots[0].connected is False
+        assert snapshots[0].listener_count == 0
+        assert snapshots[0].pending_request_count == 0
+        assert rows == [snapshots[0].as_dict()]
+        assert rows[0]["key"] == "127.0.0.1:2442"
+    finally:
+        JS8ApiClientRegistry.shutdown_all()
+
+
 def test_registry_can_remove_one_endpoint() -> None:
     JS8ApiClientRegistry.shutdown_all()
     endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
@@ -140,6 +165,44 @@ def test_registry_can_remove_one_endpoint() -> None:
         assert first is not second
     finally:
         JS8ApiClientRegistry.shutdown_all()
+
+
+def test_rx_hub_can_start_two_native_api_endpoints() -> None:
+    app = QCoreApplication.instance() or QCoreApplication([])
+    server_a = _FakeJs8Server(
+        {},
+        greeting={"type": "RIG.PTT", "value": "", "params": {"PTT": False}},
+    )
+    server_b = _FakeJs8Server(
+        {},
+        greeting={"type": "RX.ACTIVITY", "value": "B", "params": {"FROM": "N0BBB"}},
+    )
+    seen_a: List[dict] = []
+    seen_b: List[dict] = []
+    hub_a = JS8RxHub.instance(server_a.host, server_a.port)
+    hub_b = JS8RxHub.instance(server_b.host, server_b.port)
+    try:
+        hub_a.register_listener(lambda messages: seen_a.extend(messages))
+        hub_b.register_listener(lambda messages: seen_b.extend(messages))
+
+        assert hub_a.start(server_a.host, server_a.port) is True
+        assert hub_b.start(server_b.host, server_b.port) is True
+
+        deadline = time.time() + 1.0
+        while time.time() < deadline and (not seen_a or not seen_b):
+            hub_a._poll_queue()
+            hub_b._poll_queue()
+            app.processEvents()
+            time.sleep(0.02)
+
+        assert [msg["type"] for msg in seen_a] == ["RIG.PTT"]
+        assert [msg["value"] for msg in seen_b] == ["B"]
+        assert hub_a.ptt_active() is False
+    finally:
+        JS8RxHub.shutdown_all()
+        JS8ApiClientRegistry.shutdown_all()
+        server_a.stop()
+        server_b.stop()
 
 
 def test_native_client_request_matches_response_by_id() -> None:
@@ -163,6 +226,34 @@ def test_native_client_request_matches_response_by_id() -> None:
         assert "_ID" in server.received[0]["params"]
     finally:
         client.stop()
+        server.stop()
+
+
+def test_js8_control_client_uses_native_endpoint_for_frequency_control() -> None:
+    server = _FakeJs8Server(
+        {
+            "RIG.GET_FREQ": lambda request: _response(
+                "RIG.FREQ",
+                request,
+                {"DIAL": 7078000, "FREQ": 7079950, "OFFSET": 1950},
+            ),
+        }
+    )
+    client = JS8ControlClient(host=server.host, port=server.port)
+    try:
+        assert client.set_frequency(7078000, offset_hz=1950) is True
+        assert client.get_frequency() == 7078000
+        assert client.get_offset() == 1950
+
+        deadline = time.time() + 1.0
+        while not any(row["type"] == "RIG.SET_FREQ" for row in server.received) and time.time() < deadline:
+            time.sleep(0.02)
+        set_rows = [row for row in server.received if row["type"] == "RIG.SET_FREQ"]
+        assert set_rows
+        assert set_rows[-1]["params"]["DIAL"] == 7078000
+        assert set_rows[-1]["params"]["OFFSET"] == 1950
+    finally:
+        JS8ApiClientRegistry.shutdown_all()
         server.stop()
 
 

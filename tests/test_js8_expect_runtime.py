@@ -10,7 +10,7 @@ from freqinout.core.js8_expect_runtime import (
     set_expect_automation_runtime_state,
 )
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.radio_interface.js8_api_client import JS8ApiClient
+from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiClientRegistry
 
 
 class _Client:
@@ -153,6 +153,49 @@ def test_expect_automation_resolves_source_profile_and_caches_client(monkeypatch
     assert coordinator.last_status.ok is True
     coordinator.close()
     assert created[0].stopped is True
+
+
+def test_expect_automation_source_js8_instance_match_is_case_tolerant(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(monkeypatch, tmp_path)
+    coordinator = ExpectAutomationCoordinator(
+        settings,
+        profiles=[{"id": 8, "name": "FIO-B", "js8_instance_id": "FIO-B", "js8_host": "127.0.0.2", "js8_port": 2444}],
+        require_guard_preflight=False,
+        client_factory=lambda endpoint: _Client(endpoint),
+    )
+
+    client = coordinator.client_for_source("8", "fio-b")
+
+    assert client is not None
+    assert client.endpoint.host == "127.0.0.2"
+    assert client.endpoint.port == 2444
+
+
+def test_expect_automation_default_client_factory_uses_shared_js8_registry(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(monkeypatch, tmp_path)
+    created: list[_Client] = []
+
+    def fake_get(endpoint, **kwargs):
+        client = _Client(endpoint)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(JS8ApiClientRegistry, "get", staticmethod(fake_get))
+    coordinator = ExpectAutomationCoordinator(
+        settings,
+        profiles=[{"id": 8, "js8_instance_id": "fio-b", "js8_host": "127.0.0.2", "js8_port": 2444}],
+        guard_preflight=lambda radio_id, js8_id, profile: True,
+    )
+
+    first = coordinator.client_for_source("8", "fio-b")
+    second = coordinator.client_for_source("8", "fio-b")
+
+    assert first is second
+    assert len(created) == 1
+    assert first.endpoint.host == "127.0.0.2"
+    assert first.endpoint.port == 2444
+    coordinator.close()
+    assert created[0].stopped is False
 
 
 def test_expect_automation_guard_callback_can_block_source(monkeypatch, tmp_path: Path) -> None:

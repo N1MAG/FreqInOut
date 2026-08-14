@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import os
+import json
 from pathlib import Path
 
-from freqinout.core.multi_radio_store import MultiRadioStore
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QPushButton
+
+from freqinout.core.multi_radio_store import MultiRadioStore, set_multi_rig_migration_version
+from freqinout.core.operator_groups import OperatorGroupFamily
+from freqinout.core.varac_bbs_sources import (
+    append_group_source_selection,
+    group_source_selections_json,
+    group_source_summary_text,
+    remove_group_source_indexes,
+    roster_refresh_plan,
+)
 from freqinout.core.varac_bbs_config import (
     get_varac_ini_sync_state,
     load_varac_bbs_config,
@@ -11,6 +25,11 @@ from freqinout.core.varac_bbs_config import (
     varac_ini_sync_state_to_json,
     write_varac_bbs_config,
 )
+from freqinout.gui.settings_tab import SettingsTab
+
+
+def _app():
+    return QApplication.instance() or QApplication([])
 
 
 def test_load_varac_bbs_config_reads_bbs_section(tmp_path: Path) -> None:
@@ -73,6 +92,8 @@ def test_varac_path_to_host_path_infers_wineprefix_from_ini_path(tmp_path: Path,
 
 def test_multi_radio_store_persists_and_projects_varac_bbs_access_fields(tmp_path: Path) -> None:
     store = MultiRadioStore(db_path=tmp_path / "freqinout.db")
+    with store._connect() as conn:
+        set_multi_rig_migration_version(conn)
     saved = store.save_device_profile(
         {
             "name": "Desk Radio",
@@ -86,6 +107,7 @@ def test_multi_radio_store_persists_and_projects_varac_bbs_access_fields(tmp_pat
             "varac_bbs_enabled": 1,
             "varac_bbs_limit_access_enabled": 1,
             "varac_bbs_allowed_callsigns": "K7RIE,KG5RKW,W8UFO",
+            "varac_bbs_allowed_group_sources": '[{"family":"MAGNET","groups":["MR08"],"mode":"trusted_callsigns"}]',
             "varac_bbs_announce_enabled": 1,
         }
     )
@@ -95,6 +117,9 @@ def test_multi_radio_store_persists_and_projects_varac_bbs_access_fields(tmp_pat
     assert projected["varac_bbs_enabled"] is True
     assert projected["varac_bbs_limit_access_enabled"] is True
     assert projected["varac_bbs_allowed_callsigns"] == "K7RIE,KG5RKW,W8UFO"
+    assert projected["varac_bbs_allowed_group_sources"] == (
+        '[{"family":"MAGNET","groups":["MR08"],"mode":"trusted_callsigns"}]'
+    )
     assert projected["varac_bbs_announce_enabled"] is True
 
 
@@ -103,6 +128,170 @@ def test_messages_bbs_status_text_is_runtime_projected_context(tmp_path: Path) -
 
     assert "runtime-projected default context" in text
     assert "VarAC BBS (runtime-projected default context):" in text
+
+
+def test_settings_bbs_add_group_family_callsigns_dedupes_allowed_list() -> None:
+    _app()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.varac_bbs_callsigns_list = QListWidget()
+    tab._varac_bbs_lookup_by_callsign = {}
+    dirty = []
+    tab._mark_settings_dirty = lambda: dirty.append(True)
+
+    SettingsTab._set_varac_bbs_allowed_callsigns(tab, ["K7ETC"])
+    added = SettingsTab._add_varac_bbs_allowed_callsigns(tab, ["K7ETC", "KC1VXQ", "@@@", "N0CALL/P"])
+
+    assert added == 2
+    assert SettingsTab._varac_bbs_selected_callsigns_text(tab) == "K7ETC,KC1VXQ,N0CALL"
+    assert dirty == [True]
+
+
+def test_settings_bbs_group_source_selection_merges_for_roster_refresh() -> None:
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._varac_bbs_allowed_group_sources = []
+    dirty = []
+    tab._mark_settings_dirty = lambda: dirty.append(True)
+
+    SettingsTab._append_varac_bbs_group_source_selection(tab, "MAGNET", ["MR08", "MR01"])
+    SettingsTab._append_varac_bbs_group_source_selection(tab, "magnet", ["MR08", "MRHUB"])
+
+    stored = json.loads(SettingsTab._varac_bbs_group_source_selections_json(tab))
+    assert stored == [
+        {
+            "family": "MAGNET",
+            "groups": ["MR01", "MR08", "MRHUB"],
+            "mode": "trusted_callsigns",
+        }
+    ]
+    assert dirty == [True, True]
+
+    clone = SettingsTab.__new__(SettingsTab)
+    SettingsTab._set_varac_bbs_group_source_selections(clone, json.dumps(stored))
+    assert SettingsTab._varac_bbs_group_source_selections_json(clone) == SettingsTab._varac_bbs_group_source_selections_json(tab)
+
+
+def test_varac_bbs_source_core_merges_summarizes_and_removes_sources() -> None:
+    sources = append_group_source_selection([], "MAGNET", ["MR08", "MR01"])
+    sources = append_group_source_selection(sources, "magnet", ["MR08", "MRHUB"])
+
+    assert json.loads(group_source_selections_json(sources)) == [
+        {
+            "family": "MAGNET",
+            "groups": ["MR01", "MR08", "MRHUB"],
+            "mode": "trusted_callsigns",
+        }
+    ]
+    assert group_source_summary_text(sources) == "Roster source: MAGNET / MR01, MR08, MRHUB"
+    kept, removed = remove_group_source_indexes(sources, [0])
+    assert removed == 1
+    assert kept == []
+
+
+def test_settings_bbs_group_source_summary_is_operator_readable() -> None:
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._varac_bbs_allowed_group_sources = []
+    assert SettingsTab._varac_bbs_group_source_summary_text(tab) == (
+        "Roster source: none. Allowed callsigns are manual or synced from VarAC.ini."
+    )
+
+    SettingsTab._set_varac_bbs_group_source_selections(
+        tab,
+        [{"family": "MAGNET", "groups": ["MR08", "MRHUB"], "mode": "trusted_callsigns"}],
+    )
+    assert SettingsTab._varac_bbs_group_source_summary_text(tab) == "Roster source: MAGNET / MR08, MRHUB"
+
+
+def test_settings_bbs_roster_refresh_button_tracks_saved_source_state() -> None:
+    _app()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._varac_bbs_allowed_group_sources = []
+    tab.varac_bbs_group_source_label = QLabel()
+    tab.varac_bbs_refresh_roster_btn = QPushButton("Refresh From Roster")
+    tab.varac_bbs_manage_source_btn = QPushButton("Manage Source")
+
+    SettingsTab._refresh_varac_bbs_group_source_summary(tab)
+    assert not tab.varac_bbs_refresh_roster_btn.isEnabled()
+    assert not tab.varac_bbs_manage_source_btn.isEnabled()
+    assert "No roster source" in tab.varac_bbs_refresh_roster_btn.toolTip()
+
+    SettingsTab._set_varac_bbs_group_source_selections(
+        tab,
+        [{"family": "MAGNET", "groups": ["MR08"], "mode": "trusted_callsigns"}],
+    )
+    assert tab.varac_bbs_refresh_roster_btn.isEnabled()
+    assert tab.varac_bbs_manage_source_btn.isEnabled()
+    assert tab.varac_bbs_group_source_label.text() == "Roster source: MAGNET / MR08"
+
+
+def test_settings_bbs_allowed_callsigns_actions_are_split_into_manual_and_roster_rows() -> None:
+    text = (Path(__file__).resolve().parents[1] / "freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    manual_row_idx = text.index("bbs_callsigns_lookup_row = QHBoxLayout()")
+    roster_row_idx = text.index("bbs_roster_actions_row = QHBoxLayout()")
+    list_idx = text.index("self.varac_bbs_callsigns_list = QListWidget()")
+
+    assert manual_row_idx < roster_row_idx < list_idx
+    assert text.index("bbs_callsigns_lookup_row.addWidget(self.varac_bbs_remove_callsign_btn)") < roster_row_idx
+    assert text.index("bbs_roster_actions_row.addWidget(self.varac_bbs_add_group_family_btn)") > roster_row_idx
+    assert text.index("bbs_roster_actions_row.addWidget(self.varac_bbs_refresh_roster_btn)") > roster_row_idx
+    assert text.index("bbs_roster_actions_row.addWidget(self.varac_bbs_manage_source_btn)") > roster_row_idx
+
+
+def test_settings_bbs_remove_group_source_keeps_allowed_callsigns() -> None:
+    _app()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.varac_bbs_callsigns_list = QListWidget()
+    tab._varac_bbs_lookup_by_callsign = {}
+    tab._varac_bbs_allowed_group_sources = [
+        {"family": "MAGNET", "groups": ["MR08"], "mode": "trusted_callsigns"},
+        {"family": "AMRRON", "groups": ["AMRRON"], "mode": "trusted_callsigns"},
+    ]
+    dirty = []
+    tab._mark_settings_dirty = lambda: dirty.append(True)
+    SettingsTab._set_varac_bbs_allowed_callsigns(tab, ["K7ETC", "KC1VXQ"])
+
+    removed = SettingsTab._remove_varac_bbs_group_source_indexes(tab, [0])
+
+    assert removed == 1
+    assert SettingsTab._varac_bbs_selected_callsigns_text(tab) == "K7ETC,KC1VXQ"
+    assert json.loads(SettingsTab._varac_bbs_group_source_selections_json(tab)) == [
+        {"family": "MAGNET", "groups": ["MR08"], "mode": "trusted_callsigns"}
+    ]
+    assert dirty == [True]
+
+
+def test_settings_bbs_roster_refresh_plan_adds_and_removes_from_saved_group_source() -> None:
+    _app()
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.varac_bbs_callsigns_list = QListWidget()
+    tab._varac_bbs_lookup_by_callsign = {}
+    tab._varac_bbs_allowed_group_sources = [
+        {"family": "MAGNET", "groups": ["MR08"], "mode": "trusted_callsigns"}
+    ]
+    SettingsTab._set_varac_bbs_allowed_callsigns(tab, ["K7ETC", "OLD1"])
+    families = {
+        "MAGNET": OperatorGroupFamily(
+            parent="MAGNET",
+            members=("MAGNET", "MR08"),
+            trusted_callsigns=("K7ETC", "KC1VXQ"),
+            total_callsigns=3,
+            trusted_callsigns_by_group=(
+                ("MAGNET", ("K7ETC", "KC1VXQ")),
+                ("MR08", ("K7ETC", "KC1VXQ")),
+            ),
+        )
+    }
+
+    plan = SettingsTab._varac_bbs_roster_refresh_plan(tab, families)
+
+    assert plan["groups"] == ["MR08"]
+    assert plan["desired"] == ["K7ETC", "KC1VXQ"]
+    assert plan["added"] == ["KC1VXQ"]
+    assert plan["removed"] == ["OLD1"]
+    assert plan["unchanged"] == ["K7ETC"]
+
+    core_plan = roster_refresh_plan(tab._varac_bbs_allowed_group_sources, ["K7ETC", "OLD1"], families)
+    assert core_plan["added"] == ["KC1VXQ"]
+    assert core_plan["removed"] == ["OLD1"]
 
 
 def test_multi_rig_varac_bbs_write_back_preserves_other_sections_and_tracks_sync_state(tmp_path: Path) -> None:

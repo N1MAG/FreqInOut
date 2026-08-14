@@ -150,3 +150,56 @@ def test_empty_radio_id_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="radio_id"):
         coordinator.get_snapshot("", lambda: {})
+
+
+def test_metrics_track_cache_poll_backoff_and_failure_paths() -> None:
+    now = [100.0]
+    coordinator = RadioStatusPollCoordinator(ttl_seconds=2.0, retry_seconds=5.0, time_fn=lambda: now[0])
+
+    coordinator.get_snapshot("radio_1", lambda: {"frequency_hz": 7_115_000})
+    coordinator.get_snapshot("radio_1", lambda: {"frequency_hz": 14_115_000})
+    now[0] = 103.0
+
+    def failing_poller():
+        raise RuntimeError("radio offline")
+
+    coordinator.get_snapshot("radio_1", failing_poller)
+    now[0] = 104.0
+    coordinator.get_snapshot("radio_1", failing_poller)
+
+    metrics = coordinator.metrics_snapshot()
+
+    assert metrics.snapshot_count == 1
+    assert metrics.inflight_count == 0
+    assert metrics.cache_hits == 1
+    assert metrics.backoff_hits == 1
+    assert metrics.polls_started == 2
+    assert metrics.polls_succeeded == 1
+    assert metrics.polls_failed == 1
+    assert metrics.polls_completed == 2
+    assert metrics.as_dict()["polls_completed"] == 2
+
+
+def test_metrics_track_single_flight_reuse() -> None:
+    coordinator = RadioStatusPollCoordinator(ttl_seconds=0.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_poller():
+        started.set()
+        assert release.wait(timeout=2.0)
+        return {"frequency_hz": 7_115_000}
+
+    thread = threading.Thread(target=lambda: coordinator.get_snapshot("radio_1", slow_poller))
+    thread.start()
+    assert started.wait(timeout=2.0)
+
+    coordinator.get_snapshot("radio_1", slow_poller)
+    release.set()
+    thread.join(timeout=2.0)
+
+    metrics = coordinator.metrics_snapshot()
+
+    assert metrics.inflight_hits == 1
+    assert metrics.polls_started == 1
+    assert metrics.polls_succeeded == 1

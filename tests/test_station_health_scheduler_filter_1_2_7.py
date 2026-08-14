@@ -49,6 +49,49 @@ def test_station_health_shows_latest_success_and_issue_log(monkeypatch):
     assert filtered[1]["_station_health_kind"] == "issue"
 
 
+def test_station_health_treats_rf_guard_events_as_operator_attention(monkeypatch):
+    import freqinout.core.station_health_summary as summary_module
+
+    events = [
+        {
+            "id": 6,
+            "event_type": "status",
+            "code": "already_applied",
+            "action": "Schedule entry already applied",
+            "detail": "latest success",
+        },
+        {
+            "id": 5,
+            "event_type": "blocked",
+            "code": "rf_safety_guard_block",
+            "action": "Blocked schedule change by RF Safety Guard",
+            "detail": "FIO cannot verify that radio's current frequency.",
+        },
+        {
+            "id": 4,
+            "event_type": "warning",
+            "code": "rf_safety_guard_warning",
+            "action": "Continuing schedule change after RF Safety Guard warn-only notice",
+            "detail": "Peer radio shares a configured RF resource.",
+        },
+    ]
+    monkeypatch.setattr(summary_module, "load_recent_scheduler_events", lambda limit=25: list(events))
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={},
+        include_scheduler_events=True,
+    )
+
+    filtered = result["recent_scheduler_events"]
+    assert [item["code"] for item in filtered] == [
+        "already_applied",
+        "rf_safety_guard_block",
+        "rf_safety_guard_warning",
+    ]
+    assert filtered[1]["_station_health_kind"] == "issue"
+    assert filtered[2]["_station_health_kind"] == "issue"
+
+
 def test_fldigi_busy_check_history_is_not_a_station_issue():
     import freqinout.core.station_health_summary as summary_module
 

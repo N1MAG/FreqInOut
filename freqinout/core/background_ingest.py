@@ -9,7 +9,12 @@ from typing import Callable, Dict, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.ingest_health import source_health_key
+from freqinout.core.ingest_refresh_planner import ingest_sources_fingerprint, plan_ingest_refresh
 from freqinout.core.js8_expect_runtime import ExpectAutomationCoordinator, GuardPreflightCallback
+from freqinout.core.js8_runtime_messages import inbox_path_for_directed_source, inbox_path_from_profile
+from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
+from freqinout.core.ingest_source_model import IngestSourceDescriptor, IngestSourceInventory, js8_ingest_sources
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.multi_rig_runtime_status import (
@@ -88,6 +93,7 @@ class BackgroundIngestController(QObject):
     _VARAC_VAULT_DEGRADED_INTERVAL_MS = 60_000
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
     _controller_thread_call = Signal(object)
+    job_finished = Signal(str)
 
     def __init__(self, settings: SettingsManager, *, expect_guard_preflight: Optional[GuardPreflightCallback] = None):
         super().__init__()
@@ -111,6 +117,15 @@ class BackgroundIngestController(QObject):
         self._job_skipped_counts: Dict[str, int] = {}
         self._job_started_at: Dict[str, float] = {}
         self._job_timeout_warned: set[str] = set()
+        self._job_refresh_fingerprints: Dict[str, tuple[object, ...]] = {}
+        self._job_refresh_last_run_ts: Dict[str, float] = {}
+        self._job_refresh_skip_reasons: Dict[str, str] = {}
+        self._job_refresh_decisions: Dict[str, Dict[str, object]] = {}
+        self._job_skip_reasons: Dict[str, str] = {}
+        self._source_skip_reasons: Dict[str, Dict[str, object]] = {}
+        self._runtime_inventory_cache: Optional[IngestSourceInventory] = None
+        self._runtime_inventory_cache_ts: float = 0.0
+        self._runtime_inventory_cache_ttl_sec: float = 5.0
         self._job_watchdog_timer: Optional[QTimer] = None
         self._health = get_dependency_health_registry()
         self._running = False
@@ -360,7 +375,74 @@ class BackgroundIngestController(QObject):
                 activity_timer.stop()
 
     def refresh_runtime_settings(self) -> None:
+        self._runtime_inventory_cache = None
+        self._runtime_inventory_cache_ts = 0.0
         self.request_varac_vault_refresh("settings_saved")
+
+    def is_running(self) -> bool:
+        return bool(self._running)
+
+    def job_status_snapshot(self, *, now_ts: Optional[float] = None) -> Dict[str, object]:
+        now = time.time() if now_ts is None else float(now_ts)
+        with self._executor_lock:
+            queued_jobs = {
+                str(name): {
+                    "done": bool(future.done()),
+                    "running_for_sec": max(0.0, now - float(self._job_started_at.get(name, now) or now)),
+                }
+                for name, future in self._job_futures.items()
+            }
+            worker_active = self._executor is not None
+        with self._realtime_executor_lock:
+            realtime_jobs = {
+                str(name): {
+                    "done": bool(future.done()),
+                    "running_for_sec": max(0.0, now - float(self._job_started_at.get(name, now) or now)),
+                }
+                for name, future in self._realtime_job_futures.items()
+            }
+            realtime_worker_active = self._realtime_executor is not None
+        return {
+            "running": bool(self._running),
+            "queued_jobs": queued_jobs,
+            "realtime_jobs": realtime_jobs,
+            "skipped_counts": dict(self._job_skipped_counts),
+            "skip_reasons": dict(self._job_skip_reasons),
+            "source_skip_reasons": dict(self._source_skip_reasons),
+            "refresh_skip_reasons": dict(self._job_refresh_skip_reasons),
+            "refresh_decisions": dict(self._job_refresh_decisions),
+            "timeout_warned": tuple(sorted(self._job_timeout_warned)),
+            "worker_active": worker_active,
+            "realtime_worker_active": realtime_worker_active,
+            "runtime_inventory_cached": self._runtime_inventory_cache is not None,
+            "runtime_inventory_cache_age_sec": (
+                max(0.0, time.monotonic() - float(self._runtime_inventory_cache_ts or 0.0))
+                if self._runtime_inventory_cache is not None
+                else 0.0
+            ),
+        }
+
+    def request_refresh(self, *kinds: str) -> None:
+        requested = {str(kind or "").strip().lower() for kind in kinds if str(kind or "").strip()}
+        force = bool(requested.intersection({"force", "forced", "manual"}))
+        requested.difference_update({"force", "forced", "manual"})
+        if not requested:
+            requested = {"js8_links", "messages", "varac", "sitreps", "propagation"}
+        if "js8" in requested:
+            requested.add("js8_links")
+            requested.add("messages")
+        if "js8_links" in requested:
+            self._ingest_js8_links(force=force)
+        if "message_cache" in requested:
+            self._ingest_messages(include_observation_backfill=False, force=force)
+        elif "messages" in requested:
+            self._ingest_messages(include_observation_backfill=True, force=force)
+        if "varac" in requested:
+            self._ingest_varac(force=force)
+        if "sitreps" in requested:
+            self._ingest_sitreps(force=force)
+        if "propagation" in requested or "prop_outcomes" in requested:
+            self._ingest_prop_outcomes()
 
     def _submit_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
@@ -368,7 +450,7 @@ class BackgroundIngestController(QObject):
         health_key = self._job_health_key(job_name)
         may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
         if not may_run:
-            self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+            self._record_job_skip(job_name, "backoff")
             log.debug(
                 "BackgroundIngest: backing off %s for %.1fs",
                 job_name,
@@ -378,7 +460,7 @@ class BackgroundIngestController(QObject):
         with self._executor_lock:
             future = self._job_futures.get(job_name)
             if future is not None and not future.done():
-                self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+                self._record_job_skip(job_name, "already_running")
                 log.debug("BackgroundIngest: job already running, skipping trigger: %s", job_name)
                 return
             executor = self._ensure_executor()
@@ -430,6 +512,7 @@ class BackgroundIngestController(QObject):
             future.result()
         except Exception as e:
             log.debug("BackgroundIngest: %s future failed: %s", job_name, e)
+        self._queue_controller_thread_call(lambda name=job_name: self.job_finished.emit(name))
 
     def _submit_realtime_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
@@ -437,7 +520,7 @@ class BackgroundIngestController(QObject):
         health_key = self._job_health_key(job_name)
         may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
         if not may_run:
-            self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+            self._record_job_skip(job_name, "backoff")
             if job_name == "varac_vault":
                 self._update_varac_vault_timer_state()
             log.debug(
@@ -449,7 +532,7 @@ class BackgroundIngestController(QObject):
         with self._realtime_executor_lock:
             future = self._realtime_job_futures.get(job_name)
             if future is not None and not future.done():
-                self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+                self._record_job_skip(job_name, "already_running")
                 return
             executor = self._ensure_realtime_executor()
             self._job_started_at[job_name] = time.time()
@@ -501,8 +584,66 @@ class BackgroundIngestController(QObject):
             )
             log.warning("BackgroundIngest: %s has been running for %.1fs", job_name, elapsed)
 
-    def _ingest_js8_links(self) -> None:
-        self._submit_job("js8_links", self._run_js8_links_job)
+    def _record_job_skip(self, job_name: str, reason: str) -> None:
+        name = str(job_name or "").strip() or "unknown"
+        reason_txt = str(reason or "").strip() or "skipped"
+        self._job_skipped_counts[name] = self._job_skipped_counts.get(name, 0) + 1
+        self._job_skip_reasons[name] = reason_txt
+
+    def _record_source_skip(
+        self,
+        health_key: str,
+        source: IngestSourceDescriptor,
+        reason: str,
+        health: Optional[Dict[str, object]] = None,
+        *,
+        source_type: str = "",
+        path: str = "",
+    ) -> None:
+        key = str(health_key or "").strip() or source_health_key(source)
+        health_data = dict(health or {})
+        self._source_skip_reasons[key] = {
+            "reason": str(reason or "skipped").strip() or "skipped",
+            "label": source.label,
+            "family": source.family,
+            "source_type": str(source_type or source.source_type or "").strip(),
+            "source_id": source.source_id,
+            "radio_id": source.radio_id,
+            "app_instance_id": source.app_instance_id,
+            "path": str(path or source.path or "").strip(),
+            "endpoint": source.endpoint,
+            "cooldown_remaining_sec": float(health_data.get("cooldown_remaining_sec") or 0.0),
+            "skipped_at_ts": time.time(),
+        }
+
+    def _clear_source_skip(self, health_key: str) -> None:
+        key = str(health_key or "").strip()
+        if key:
+            self._source_skip_reasons.pop(key, None)
+
+    def _ingest_js8_links(self, *, force: bool = False) -> None:
+        decision = self._source_backed_refresh_decision(
+            job_name="js8_links",
+            family="js8call",
+            source_types=("file",),
+            force=force,
+            max_quiet_sec=900.0,
+        )
+        if not decision.should_run:
+            self._job_refresh_decisions["js8_links"] = decision.as_dict()
+            self._record_job_skip("js8_links", decision.reason)
+            self._job_refresh_skip_reasons["js8_links"] = decision.reason
+            log.debug("BackgroundIngest: skipping JS8 links ingest; refresh fingerprint %s", decision.reason)
+            return
+
+        def job() -> None:
+            self._run_js8_links_job()
+            self._job_refresh_fingerprints["js8_links"] = decision.fingerprint
+            self._job_refresh_last_run_ts["js8_links"] = time.time()
+            self._job_refresh_decisions["js8_links"] = decision.as_dict()
+            self._job_refresh_skip_reasons.pop("js8_links", None)
+
+        self._submit_job("js8_links", job)
 
     def _run_js8_links_job(self) -> None:
         worker_settings = self._new_worker_settings()
@@ -510,7 +651,7 @@ class BackgroundIngestController(QObject):
             db_path = worker_settings.config_dir / "freqinout_nets.db"
             indexer = JS8LogLinkIndexer(worker_settings, db_path)
             last_ts = float(worker_settings.get("js8_links_last_load_utc", 0) or 0)
-            count = indexer.update(since_ts=last_ts if last_ts > 0 else None)
+            count = self._run_js8_links_for_sources(indexer, last_ts=last_ts)
             latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
             try:
                 worker_settings.set("js8_links_last_load_utc", latest_ts)
@@ -523,30 +664,261 @@ class BackgroundIngestController(QObject):
         finally:
             worker_settings.close()
 
-    def _ingest_messages(self) -> None:
-        self._submit_job("messages", self._run_messages_job)
+    def _run_js8_links_for_sources(self, indexer: JS8LogLinkIndexer, *, last_ts: float = 0.0) -> int:
+        inventory = self._runtime_ingest_inventory()
+        instances = [instance for instance in inventory.app_instances if instance.family == "js8call"]
+        if not instances:
+            return indexer.update(since_ts=last_ts if last_ts > 0 else None)
+        total = 0
+        for instance in instances:
+            source_by_role = {
+                str(source.metadata.get("role", "") or ""): source
+                for source in js8_ingest_sources(instance)
+                if source.source_type == "file"
+            }
+            directed_source = source_by_role.get("directed")
+            if directed_source is None or not directed_source.path:
+                continue
+            health_key = source_health_key(directed_source)
+            may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+            if not may_run:
+                self._record_source_skip(health_key, directed_source, "backoff", health)
+                continue
+            started_at = time.time()
+            try:
+                counts = indexer.update_from_ingest_sources(
+                    source_by_role.values(),
+                    since_ts=last_ts if last_ts > 0 else None,
+                )
+                inserted = sum(int(value or 0) for value in counts.values())
+                total += inserted
+                self._health.record_success(
+                    health_key,
+                    owner="BackgroundIngest",
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    slow_ms=5000.0,
+                    metadata={
+                        "label": directed_source.label,
+                        "family": directed_source.family,
+                        "source_type": directed_source.source_type,
+                        "path": directed_source.path,
+                        "inserted": inserted,
+                    },
+                )
+                self._clear_source_skip(health_key)
+            except Exception as exc:
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error=str(exc),
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    metadata={
+                        "label": directed_source.label,
+                        "family": directed_source.family,
+                        "source_type": directed_source.source_type,
+                        "path": directed_source.path,
+                    },
+                )
+                log.debug(
+                    "BackgroundIngest: js8_links source ingest failed for %s: %s",
+                    directed_source.label,
+                    exc,
+                )
+        return total
 
-    def _run_messages_job(self) -> None:
+    def _runtime_ingest_inventory(self) -> IngestSourceInventory:
+        now = time.monotonic()
+        cached = self._runtime_inventory_cache
+        if cached is not None and (now - float(self._runtime_inventory_cache_ts or 0.0)) < self._runtime_inventory_cache_ttl_sec:
+            return cached
+        inventory = active_runtime_ingest_inventory()
+        self._runtime_inventory_cache = inventory
+        self._runtime_inventory_cache_ts = now
+        return inventory
+
+    def _ingest_messages(self, *, include_observation_backfill: bool = True, force: bool = False) -> None:
+        decision = self._message_ingest_refresh_decision(
+            include_observation_backfill=include_observation_backfill,
+            force=force,
+        )
+        if not decision.should_run:
+            self._job_refresh_decisions["messages"] = decision.as_dict()
+            self._record_job_skip("messages", decision.reason)
+            self._job_refresh_skip_reasons["messages"] = decision.reason
+            log.debug("BackgroundIngest: skipping messages ingest; refresh fingerprint %s", decision.reason)
+            return
+
+        def job() -> None:
+            self._run_messages_job(include_observation_backfill=include_observation_backfill)
+            self._job_refresh_fingerprints["messages"] = decision.fingerprint
+            self._job_refresh_last_run_ts["messages"] = time.time()
+            self._job_refresh_decisions["messages"] = decision.as_dict()
+            self._job_refresh_skip_reasons.pop("messages", None)
+
+        self._submit_job(
+            "messages",
+            job,
+        )
+
+    def _message_ingest_refresh_decision(
+        self,
+        *,
+        include_observation_backfill: bool,
+        force: bool,
+    ):
+        inventory = self._runtime_ingest_inventory()
+        sources = tuple(source for source in inventory.sources_for_family("js8call") if source.source_type in {"file", "api"})
+        realtime_present = any(source.source_type == "api" for source in sources)
+        fingerprint = ingest_sources_fingerprint(sources, families=("js8call",), source_types=("file", "api"))
+        if len(fingerprint) <= 1:
+            # Legacy single-profile settings may still have JS8 paths even when the multi-rig
+            # inventory is empty, so do not suppress the old ingest path on that basis.
+            return plan_ingest_refresh(
+                fingerprint,
+                previous_fingerprint=None,
+                force=force,
+                realtime_source_present=realtime_present,
+            )
+        quiet_sec = 300.0 if include_observation_backfill else 0.0
+        return plan_ingest_refresh(
+            fingerprint,
+            previous_fingerprint=self._job_refresh_fingerprints.get("messages"),
+            last_run_ts=float(self._job_refresh_last_run_ts.get("messages", 0.0) or 0.0),
+            force=force,
+            max_quiet_sec=quiet_sec,
+            realtime_source_present=realtime_present,
+        )
+
+    def _run_messages_job(self, *, include_observation_backfill: bool = True) -> None:
         worker_settings = self._new_worker_settings()
-        msg_ingest = MessageIngestor(worker_settings)
         try:
-            msg_ingest.ingest_js8_messages()
-        except Exception as e:
-            log.debug("BackgroundIngest: JS8 inbox ingest failed: %s", e)
-        try:
-            msg_ingest.ingest_spotter_from_directed()
-        except Exception as e:
-            log.debug("BackgroundIngest: spotter ingest failed: %s", e)
-        try:
-            self._run_multi_radio_spotter_ingest()
-        except Exception as e:
-            log.debug("BackgroundIngest: multi-radio spotter ingest failed: %s", e)
-        try:
-            self._run_observation_backfill(worker_settings)
-        except Exception as e:
-            log.debug("BackgroundIngest: observation backfill failed: %s", e)
+            msg_ingest = MessageIngestor(worker_settings)
+            has_runtime_js8 = bool([instance for instance in self._runtime_ingest_inventory().app_instances if instance.family == "js8call"])
+            if has_runtime_js8:
+                try:
+                    self._run_multi_radio_js8_message_ingest()
+                except Exception as e:
+                    log.debug("BackgroundIngest: multi-radio JS8 inbox ingest failed: %s", e)
+            else:
+                try:
+                    msg_ingest.ingest_js8_messages()
+                except Exception as e:
+                    log.debug("BackgroundIngest: JS8 inbox ingest failed: %s", e)
+                try:
+                    msg_ingest.ingest_spotter_from_directed()
+                except Exception as e:
+                    log.debug("BackgroundIngest: spotter ingest failed: %s", e)
+            try:
+                self._run_multi_radio_spotter_ingest()
+            except Exception as e:
+                log.debug("BackgroundIngest: multi-radio spotter ingest failed: %s", e)
+            if include_observation_backfill:
+                try:
+                    self._run_observation_backfill(worker_settings)
+                except Exception as e:
+                    log.debug("BackgroundIngest: observation backfill failed: %s", e)
         finally:
             worker_settings.close()
+
+    def _run_multi_radio_js8_message_ingest(self) -> None:
+        inventory = self._runtime_ingest_inventory()
+        instances = [instance for instance in inventory.app_instances if instance.family == "js8call"]
+        if not instances:
+            return
+        store = MultiRadioStore()
+        profiles = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in self._active_js8_spotter_profiles()}
+        for instance in instances:
+            profile = profiles.get(str(instance.radio_id or ""))
+            if profile is None:
+                continue
+            source_by_role = {
+                str(source.metadata.get("role", "") or ""): source
+                for source in js8_ingest_sources(instance)
+            }
+            directed_source = source_by_role.get("directed")
+            if directed_source is None:
+                continue
+            inbox_source = source_by_role.get("inbox")
+            health_source = inbox_source or directed_source
+            health_key = f"{source_health_key(health_source)}:inbox"
+            inbox_path = inbox_path_from_profile(profile) or inbox_path_for_directed_source(directed_source)
+            if inbox_path is None:
+                log.debug(
+                    "BackgroundIngest: skipping JS8 inbox ingest for %s; no source-specific inbox path",
+                    health_source.label,
+                )
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error="source-specific inbox path missing",
+                    metadata={
+                        "label": health_source.label,
+                        "family": health_source.family,
+                        "source_type": "js8-inbox",
+                        "path": str(health_source.path or directed_source.path or ""),
+                    },
+                )
+                self._record_source_skip(
+                    health_key,
+                    health_source,
+                    "missing",
+                    source_type="js8-inbox",
+                    path=str(health_source.path or directed_source.path or ""),
+                )
+                continue
+            may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+            if not may_run:
+                self._record_source_skip(
+                    health_key,
+                    health_source,
+                    "backoff",
+                    health,
+                    source_type="js8-inbox",
+                    path=str(inbox_path),
+                )
+                continue
+            started_at = time.time()
+            profile_settings = _DeviceProfileVaultSettings(profile, self._new_worker_settings(), store)
+            try:
+                ingestor = MessageIngestor(profile_settings)  # type: ignore[arg-type]
+                ingestor.ingest_js8_messages(
+                    inbox_path=inbox_path,
+                    source_radio_id=instance.radio_id,
+                    js8_instance_id=str(instance.metadata.get("js8_instance_id", "") or instance.source_id),
+                    source_key=instance.source_id,
+                )
+                self._health.record_success(
+                    health_key,
+                    owner="BackgroundIngest",
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    slow_ms=5000.0,
+                    metadata={
+                        "label": health_source.label,
+                        "family": health_source.family,
+                        "source_type": "js8-inbox",
+                        "path": str(inbox_path),
+                    },
+                )
+                self._clear_source_skip(health_key)
+            except Exception as exc:
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error=str(exc),
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    metadata={
+                        "label": health_source.label,
+                        "family": health_source.family,
+                        "source_type": "js8-inbox",
+                        "path": str(inbox_path),
+                    },
+                )
+                log.debug("BackgroundIngest: JS8 inbox source ingest failed for %s: %s", health_source.label, exc)
+            finally:
+                try:
+                    profile_settings.fallback_settings.close()
+                except Exception:
+                    pass
 
     def _run_observation_backfill(self, worker_settings: SettingsManager) -> None:
         try:
@@ -582,6 +954,12 @@ class BackgroundIngestController(QObject):
         profiles = self._active_js8_spotter_profiles()
         if not profiles:
             return
+        inventory = self._runtime_ingest_inventory()
+        directed_sources_by_radio = {
+            str(source.radio_id or ""): source
+            for source in inventory.sources_for_family("js8call")
+            if source.source_type == "file" and str(source.metadata.get("role", "") or "") == "directed"
+        }
         store = MultiRadioStore()
         worker_settings = self._new_worker_settings()
         coordinator = ExpectAutomationCoordinator(
@@ -591,9 +969,45 @@ class BackgroundIngestController(QObject):
         )
         for profile in profiles:
             radio_id = int(profile.get("id", 0) or 0)
-            directed = str(profile.get("js8_directed_path", "") or "").strip()
+            directed_source = directed_sources_by_radio.get(str(radio_id))
+            directed = str((directed_source.path if directed_source is not None else "") or profile.get("js8_directed_path", "") or "").strip()
             if radio_id <= 0 or not directed:
                 continue
+            directed_source_id = str(getattr(directed_source, "source_id", "") or "").strip() if directed_source is not None else ""
+            health_key = f"{source_health_key(directed_source)}:spotter" if directed_source is not None else ""
+            if health_key:
+                may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+                if not may_run:
+                    self._record_source_skip(
+                        health_key,
+                        directed_source,
+                        "backoff",
+                        health,
+                        source_type="spotter-directed",
+                        path=directed,
+                    )
+                    continue
+                if not Path(directed).expanduser().exists():
+                    self._health.record_failure(
+                        health_key,
+                        owner="BackgroundIngest",
+                        error="source path missing",
+                        metadata={
+                            "label": directed_source.label,
+                            "family": directed_source.family,
+                            "source_type": "spotter-directed",
+                            "path": directed_source.path,
+                        },
+                    )
+                    self._record_source_skip(
+                        health_key,
+                        directed_source,
+                        "missing",
+                        source_type="spotter-directed",
+                        path=directed,
+                    )
+                    continue
+            started_at = time.time()
             profile_settings = _DeviceProfileVaultSettings(profile, self._new_worker_settings(), store)
             try:
                 ingestor = MessageIngestor(
@@ -601,14 +1015,43 @@ class BackgroundIngestController(QObject):
                     expect_dispatch_client_factory=coordinator.client_factory_for_ingest(),
                     expect_auto_reply_enabled=coordinator.runtime_unattended_enabled(),
                 )
-                ingestor.ingest_spotter_from_directed(
+                inserted = ingestor.ingest_spotter_from_directed(
                     directed_path=Path(directed).expanduser(),
                     source_radio_id=radio_id,
                     js8_instance_id=str(profile.get("js8_instance_id", "") or profile.get("name", "") or radio_id),
-                    offset_key=f"spotter_directed_offset_radio_{radio_id}",
+                    source_key=directed_source_id,
+                    offset_key=f"spotter_directed_offset_{directed_source_id}" if directed_source_id else f"spotter_directed_offset_radio_{radio_id}",
                     evaluate_expect=True,
                 )
+                if health_key and directed_source is not None:
+                    self._health.record_success(
+                        health_key,
+                        owner="BackgroundIngest",
+                        duration_ms=(time.time() - started_at) * 1000.0,
+                        slow_ms=5000.0,
+                        metadata={
+                            "label": directed_source.label,
+                            "family": directed_source.family,
+                            "source_type": "spotter-directed",
+                            "path": directed_source.path,
+                            "inserted": int(inserted or 0),
+                        },
+                    )
+                    self._clear_source_skip(health_key)
             except Exception as exc:
+                if health_key and directed_source is not None:
+                    self._health.record_failure(
+                        health_key,
+                        owner="BackgroundIngest",
+                        error=str(exc),
+                        duration_ms=(time.time() - started_at) * 1000.0,
+                        metadata={
+                            "label": directed_source.label,
+                            "family": directed_source.family,
+                            "source_type": "spotter-directed",
+                            "path": directed_source.path,
+                        },
+                    )
                 log.debug("BackgroundIngest: spotter ingest failed for radio %s: %s", radio_id, exc)
             finally:
                 try:
@@ -623,8 +1066,51 @@ class BackgroundIngestController(QObject):
             except Exception:
                 pass
 
-    def _ingest_varac(self) -> None:
-        self._submit_job("varac", self._run_varac_job)
+    def _ingest_varac(self, *, force: bool = False) -> None:
+        decision = self._source_backed_refresh_decision(
+            job_name="varac",
+            family="varac",
+            source_types=("sqlite",),
+            force=force,
+            max_quiet_sec=600.0,
+        )
+        if not decision.should_run:
+            self._job_refresh_decisions["varac"] = decision.as_dict()
+            self._record_job_skip("varac", decision.reason)
+            self._job_refresh_skip_reasons["varac"] = decision.reason
+            log.debug("BackgroundIngest: skipping VarAC ingest; refresh fingerprint %s", decision.reason)
+            return
+
+        def job() -> None:
+            self._run_varac_job()
+            self._job_refresh_fingerprints["varac"] = decision.fingerprint
+            self._job_refresh_last_run_ts["varac"] = time.time()
+            self._job_refresh_decisions["varac"] = decision.as_dict()
+            self._job_refresh_skip_reasons.pop("varac", None)
+
+        self._submit_job("varac", job)
+
+    def _source_backed_refresh_decision(
+        self,
+        *,
+        job_name: str,
+        family: str,
+        source_types: tuple[str, ...],
+        force: bool,
+        max_quiet_sec: float,
+    ):
+        inventory = self._runtime_ingest_inventory()
+        sources = tuple(source for source in inventory.sources_for_family(family) if source.source_type in source_types)
+        fingerprint = ingest_sources_fingerprint(sources, families=(family,), source_types=source_types)
+        if len(fingerprint) <= 1:
+            return plan_ingest_refresh(fingerprint, previous_fingerprint=None, force=force)
+        return plan_ingest_refresh(
+            fingerprint,
+            previous_fingerprint=self._job_refresh_fingerprints.get(job_name),
+            last_run_ts=float(self._job_refresh_last_run_ts.get(job_name, 0.0) or 0.0),
+            force=force,
+            max_quiet_sec=max_quiet_sec,
+        )
 
     def _ingest_varac_vault(self) -> None:
         self._update_varac_vault_timer_state()
@@ -742,11 +1228,92 @@ class BackgroundIngestController(QObject):
     def _run_varac_job(self) -> None:
         worker_settings = self._new_worker_settings()
         try:
-            ingest_varac(worker_settings)
+            inventory = self._runtime_ingest_inventory()
+            varac_sources = list(inventory.sources_for_family("varac"))
+            if not varac_sources:
+                ingest_varac(worker_settings)
+                return
+            store = MultiRadioStore()
+            profiles_by_id = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in self._active_varac_profiles()}
+            for source in varac_sources:
+                profile = profiles_by_id.get(str(source.radio_id or ""))
+                if profile is None:
+                    continue
+                profile_settings = _DeviceProfileVaultSettings(profile, worker_settings, store)
+                health_key = source_health_key(source)
+                may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+                if not may_run:
+                    self._record_source_skip(health_key, source, "backoff", health)
+                    continue
+                started_at = time.time()
+                try:
+                    success = ingest_varac(
+                        profile_settings,
+                        ingest_source_key=source.source_id,
+                        ingest_scope="runtime-active",
+                        ingest_source_label=source.label,
+                    )
+                    if success:
+                        self._health.record_success(
+                            health_key,
+                            owner="BackgroundIngest",
+                            duration_ms=(time.time() - started_at) * 1000.0,
+                            slow_ms=5000.0,
+                            metadata={
+                                "label": source.label,
+                                "family": source.family,
+                                "source_type": source.source_type,
+                                "path": source.path,
+                            },
+                        )
+                        self._clear_source_skip(health_key)
+                    else:
+                        self._health.record_failure(
+                            health_key,
+                            owner="BackgroundIngest",
+                            error="VarAC source ingest did not complete",
+                            duration_ms=(time.time() - started_at) * 1000.0,
+                            metadata={
+                                "label": source.label,
+                                "family": source.family,
+                                "source_type": source.source_type,
+                                "path": source.path,
+                            },
+                        )
+                except Exception as exc:
+                    self._health.record_failure(
+                        health_key,
+                        owner="BackgroundIngest",
+                        error=str(exc),
+                        duration_ms=(time.time() - started_at) * 1000.0,
+                        metadata={
+                            "label": source.label,
+                            "family": source.family,
+                            "source_type": source.source_type,
+                            "path": source.path,
+                        },
+                    )
+                    log.debug("BackgroundIngest: VarAC source ingest failed for %s: %s", source.label, exc)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
         finally:
             worker_settings.close()
+
+    def _active_varac_profiles(self) -> list[Dict[str, object]]:
+        try:
+            store = MultiRadioStore()
+            runtime_status = build_multi_rig_runtime_status(store)
+            if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
+                return []
+            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
+        except Exception:
+            return []
+        return [
+            profile
+            for profile in profiles
+            if self._truthy(profile.get("use_varac", False), False)
+            and str(profile.get("varac_db_path", "") or profile.get("varac_path", "") or "").strip()
+        ]
 
     def _run_varac_vault_job(self) -> object:
         worker_settings = self._new_worker_settings()
@@ -805,20 +1372,25 @@ class BackgroundIngestController(QObject):
         finally:
             worker_settings.close()
 
-    def _ingest_sitreps(self) -> None:
-        self._submit_job("sitreps", self._run_sitreps_job)
+    def _ingest_sitreps(self, *, force: bool = False) -> None:
+        self._submit_job("sitreps", lambda: self._run_sitreps_job(force=force))
 
-    def _run_sitreps_job(self) -> None:
+    def _run_sitreps_job(self, *, force: bool = False) -> None:
         worker_settings = self._new_worker_settings()
         try:
-            stats = ingest_sitreps(worker_settings, max_rows_per_source=500)
-            if int(stats.get("events_inserted", 0)) > 0:
-                log.debug(
-                    "BackgroundIngest: sitrep ingest scanned=%s inserted=%s errors=%s",
-                    stats.get("rows_scanned", 0),
-                    stats.get("events_inserted", 0),
-                    stats.get("errors", 0),
-                )
+            if self._should_run_legacy_sitrep_ingest(force=force):
+                stats = ingest_sitreps(worker_settings, max_rows_per_source=500)
+                if int(stats.get("events_inserted", 0)) > 0:
+                    log.debug(
+                        "BackgroundIngest: sitrep ingest scanned=%s inserted=%s errors=%s",
+                        stats.get("rows_scanned", 0),
+                        stats.get("events_inserted", 0),
+                        stats.get("errors", 0),
+                    )
+            else:
+                self._record_job_skip("sitreps:legacy", "unchanged")
+                self._job_refresh_skip_reasons["sitreps:legacy"] = "unchanged"
+            self._run_commstat_source_sitrep_ingest(worker_settings, force=force)
             fused = fuse_sitreps(worker_settings, max_rows=1000)
             if int(fused.get("events_upserted", 0)) > 0 or int(fused.get("latest_updated", 0)) > 0:
                 log.debug(
@@ -832,6 +1404,102 @@ class BackgroundIngestController(QObject):
             log.debug("BackgroundIngest: sitrep ingest failed: %s", e)
         finally:
             worker_settings.close()
+
+    def _should_run_legacy_sitrep_ingest(self, *, force: bool = False) -> bool:
+        decision = self._source_backed_refresh_decision(
+            job_name="sitreps:legacy",
+            family="js8call",
+            source_types=("file",),
+            force=force,
+            max_quiet_sec=900.0,
+        )
+        if decision.should_run:
+            self._job_refresh_fingerprints["sitreps:legacy"] = decision.fingerprint
+            self._job_refresh_last_run_ts["sitreps:legacy"] = time.time()
+            self._job_refresh_decisions["sitreps:legacy"] = decision.as_dict()
+            self._job_refresh_skip_reasons.pop("sitreps:legacy", None)
+            return True
+        self._job_refresh_decisions["sitreps:legacy"] = decision.as_dict()
+        return False
+
+    def _run_commstat_source_sitrep_ingest(self, worker_settings: SettingsManager, *, force: bool = False) -> None:
+        inventory = self._runtime_ingest_inventory()
+        commstat_sources = list(inventory.sources_for_family("commstat"))
+        if not commstat_sources:
+            return
+        decision = self._source_backed_refresh_decision(
+            job_name="sitreps:commstat",
+            family="commstat",
+            source_types=("sqlite",),
+            force=force,
+            max_quiet_sec=900.0,
+        )
+        if not decision.should_run:
+            self._job_refresh_decisions["sitreps:commstat"] = decision.as_dict()
+            self._record_job_skip("sitreps:commstat", decision.reason)
+            self._job_refresh_skip_reasons["sitreps:commstat"] = decision.reason
+            return
+        store = MultiRadioStore()
+        profiles_by_id = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in store.list_runtime_active_device_profiles()}
+        for source in commstat_sources:
+            profile = dict(profiles_by_id.get(str(source.radio_id or ""), {}) or {})
+            if not profile:
+                continue
+            profile.update(
+                {
+                    "commstat_db_path": source.path,
+                    "commstat3_db_path": source.path,
+                    "sitrep_ingest_js8spotter_enabled": False,
+                    "sitrep_ingest_commstat3_enabled": True,
+                    "sitrep_ingest_commstat23_enabled": False,
+                }
+            )
+            health_key = source_health_key(source)
+            may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+            if not may_run:
+                self._record_source_skip(health_key, source, "backoff", health)
+                continue
+            started_at = time.time()
+            profile_settings = _DeviceProfileVaultSettings(profile, worker_settings, store)
+            try:
+                stats = ingest_sitreps(
+                    profile_settings,
+                    max_rows_per_source=500,
+                    ingest_scope_key=source.source_id,
+                )
+                self._health.record_success(
+                    health_key,
+                    owner="BackgroundIngest",
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    slow_ms=5000.0,
+                    metadata={
+                        "label": source.label,
+                        "family": source.family,
+                        "source_type": source.source_type,
+                        "path": source.path,
+                        "rows_scanned": int(stats.get("rows_scanned", 0) or 0),
+                        "events_inserted": int(stats.get("events_inserted", 0) or 0),
+                    },
+                )
+                self._clear_source_skip(health_key)
+            except Exception as exc:
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error=str(exc),
+                    duration_ms=(time.time() - started_at) * 1000.0,
+                    metadata={
+                        "label": source.label,
+                        "family": source.family,
+                        "source_type": source.source_type,
+                        "path": source.path,
+                    },
+                )
+                log.debug("BackgroundIngest: CommStat source SitRep ingest failed for %s: %s", source.label, exc)
+        self._job_refresh_fingerprints["sitreps:commstat"] = decision.fingerprint
+        self._job_refresh_last_run_ts["sitreps:commstat"] = time.time()
+        self._job_refresh_decisions["sitreps:commstat"] = decision.as_dict()
+        self._job_refresh_skip_reasons.pop("sitreps:commstat", None)
 
     def _ingest_prop_outcomes(self) -> None:
         self._submit_job("prop_outcomes", self._run_prop_outcomes_job)

@@ -351,24 +351,33 @@
     </tbody>
   </table>
 
-  <h2 id="freqplanner">FreqPlanner</h2>
-  <p><strong>Purpose</strong>: read-only visual planner for Frequency Plan coverage across HF, Net, and SOP-effective schedule windows.</p>
-  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the whole week at a glance. Use it after Frequency Plan edits, after SOP changes, or whenever you want to see coverage and congestion without reading every source row.</p>
+  <h2 id="freqplanner">Plan Manager</h2>
+  <p><strong>Purpose</strong>: build, review, edit, and assign named Frequency Plans from HF Daily, HF Nets, and SOP condition layers.</p>
+  <p><strong>Why you use it</strong>: Plan Manager is the easiest place to answer where to be, when to be there, and what to do when you get there. Use it to select saved Daily and Net schedules, layer in SOP guidance, review the effective windows, and run RF Guard before relying on a plan operationally.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: validate Frequency Plan structure after editing <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, <a href="#sop-builder">SOP Builder</a>, or plan assignment in Settings.</li>
-    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the source schedule, SOP, or Settings plan-assignment surfaces rather than expecting FreqPlanner to be the editing surface.</li>
+    <li><strong>Best use</strong>: select an HF Daily baseline, select an HF Nets overlay, add SOP layers when needed, then save the result as a named Frequency Plan.</li>
+    <li><strong>Editing model</strong>: selecting an Effective Window or Pattern Summary row opens an inline editor that explains what each update will affect. Use <code>Update Plan Only</code> for a plan-local change, or update the HF Daily/HF Net source only when the selected window maps cleanly to one saved source row.</li>
+    <li><strong>Assignment model</strong>: assign plans from Settings so RF Guard can check the selected radio before the schedule becomes operational.</li>
   </ul>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time axis labels.</td></tr>
-      <tr><td><code>Showing Band/Showing Frequency</code></td><td>Toggles day-cell display between band names and frequency values.</td></tr>
+      <tr><td><code>Frequency Plan</code></td><td>Select an existing plan or type a name for a new one. The adjacent state cue shows <code>New</code>, <code>Saved</code>, <code>Modified</code>, or <code>SOP Plan</code>.</td></tr>
+      <tr><td><code>New Plan</code>, <code>Create Plan</code> / <code>Save Plan</code> / <code>Update Plan</code>, <code>Rename Plan</code>, <code>Delete Plan</code></td><td>Create a separate plan, save/update the visible layer blend, rename without changing windows, or remove the selected Frequency Plan.</td></tr>
+      <tr><td><code>Save SOP Plan</code> / <code>Update SOP Plan</code></td><td>Appears only when a saved SOP Schedule Plan is selected in the SOP layer selector or when the selected plan itself is an SOP Schedule Plan.</td></tr>
+      <tr><td><code>Assign with RF Guard</code></td><td>Appears when a saved plan is not assigned to a radio. Opens Settings so the final radio assignment can be checked by RF Guard.</td></tr>
+      <tr><td><code>Assigned in Settings</code></td><td>Appears when the selected plan is already linked to one or more radios. Use it to review or change that assignment.</td></tr>
+      <tr><td><code>HF Daily</code>, <code>HF Nets</code>, <code>SOP</code></td><td>Choose the saved Daily baseline, Net overlay, and optional SOP Schedule Plan to blend into the visible plan. Loading a saved plan restores these component choices.</td></tr>
+      <tr><td><code>Effective Windows</code></td><td>Shows the readable sequence of actual operating windows after Daily, Nets, and SOP layers are combined.</td></tr>
+      <tr><td><code>Pattern Summary</code></td><td>Groups repeated windows into simple patterns such as daily band windows or weekly net windows.</td></tr>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time labels.</td></tr>
+      <tr><td><code>Band/Freq: Band</code> / <code>Band/Freq: Freq</code></td><td>Toggles the combined band/frequency column between band emphasis and frequency emphasis.</td></tr>
       <tr><td>Band color chips</td><td>Click a chip to choose color; dialog includes <code>Reset Default</code>.</td></tr>
     </tbody>
   </table>
-  <p><strong>Planner columns</strong>: <code>UTC Hour</code>, <code>Local Time (TZ)</code>, <code>Sunday</code> ... <code>Saturday</code>.</p>
+  <p><strong>Effective Windows columns</strong>: <code>Day</code>, <code>Group / Net / SOP</code>, <code>Band/Freq</code>, <code>Time</code>, <code>Mode</code>, <code>Layer</code>, <code>What It Means</code>.</p>
 
   <h2 id="messages">Messages</h2>
   <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
@@ -822,11 +831,13 @@
       <tr><th>Control</th><th>What It Does</th></tr>
     </thead>
     <tbody>
+      <tr><td><code>HF Daily Schedule</code></td><td>Selects and immediately loads a saved Daily schedule, or accepts a typed name for a new one.</td></tr>
+      <tr><td><code>New Schedule</code>, <code>Save / Update Schedule</code>, <code>Rename Schedule</code>, <code>Delete Schedule</code></td><td>Create a separate named schedule, persist row edits, rename without changing rows, or remove the selected saved schedule.</td></tr>
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display timezone for Day/Start/End columns.</td></tr>
       <tr><td>QSY dropdown + <code>Hold</code> + <code>QSY + Hold</code></td><td>Manual tune helper from schedule context with a temporary scheduler hold.</td></tr>
       <tr><td><code>Add Row</code></td><td>Adds a new editable active schedule row.</td></tr>
       <tr><td><code>Delete Selected</code></td><td>Removes selected active rows.</td></tr>
-      <tr><td><code>Move Selected to Resources</code></td><td>Moves selected active rows into Schedule Resources.</td></tr>
+      <tr><td><code>Add Selected Rows</code></td><td>Copies reusable Daily Row Library rows into the schedule being edited. Library rows stay saved.</td></tr>
       <tr><td><code>Resolve Conflicts</code></td><td>Shows conflict summary/actions when overlaps are detected (button appears only when conflicts exist).</td></tr>
       <tr><td><code>Show Effective Schedule</code></td><td>Read-only derived view that appears only while an HF SOP is active. It shows the actual HF/SOP runtime segments the scheduler will follow.</td></tr>
       <tr><td><code>Import/Export</code> (nested)</td><td><code>Import HF Schedule</code> and <code>Export HF Schedule</code>.</td></tr>
@@ -836,19 +847,19 @@
   <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>.</p>
   <p>Rows are shown in time sequence by default to simplify conflict review.</p>
 
-  <h3 id="hf-daily-resources">Schedule Resources Section</h3>
+  <h3 id="hf-daily-resources">Daily Row Library Section</h3>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
     </thead>
     <tbody>
-      <tr><td>Set filter + text filter</td><td>Filters resource rows by set and text query.</td></tr>
-      <tr><td><code>Add to Active Schedule</code> (nested)</td><td><code>Add Selected to Active Schedule</code> or <code>Add Filtered to Active Schedule</code>.</td></tr>
-      <tr><td><code>Delete Selected</code></td><td>Deletes selected resource rows from Schedule Resources.</td></tr>
-      <tr><td><code>Refresh</code></td><td>Reloads resource table.</td></tr>
+      <tr><td>Library filter + text filter</td><td>Filters reusable rows by saved schedule and text query.</td></tr>
+      <tr><td><code>Add Selected Rows</code> / <code>Add Filtered Rows</code></td><td>Copies library rows into the HF Daily schedule being edited. The library rows are not moved or changed.</td></tr>
+      <tr><td><code>Delete Library Rows</code></td><td>Deletes selected reusable rows from the Daily Row Library.</td></tr>
+      <tr><td><code>Refresh</code></td><td>Reloads the library table.</td></tr>
     </tbody>
   </table>
-  <p><strong>Schedule Resources columns</strong>: <code>Select</code>, <code>Set</code>, <code>Day</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Source</code>, <code>Updated (UTC)</code>, <code>Conflict</code>.</p>
+  <p><strong>Daily Row Library columns</strong>: <code>Select</code>, <code>Schedule</code>, <code>Day</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Saved From</code>, <code>Age</code>, <code>Conflict</code>.</p>
 
   <h3 id="hf-daily-sop-status">SOP Schedule Status (HF)</h3>
   <p>This section summarizes active/inactive HF SOP status and conflict indicators, including quick SOP activation/deactivation buttons by group.</p>
@@ -880,6 +891,15 @@
     <li><strong>Cross-tab interaction</strong>: saved net rows influence Frequency Plan coverage, ControlFreq outlook, scheduler decisions, net-control workflows, and policy prompts when SOP windows overlap.</li>
     <li><strong>Why a separate tab exists</strong>: net operations usually need more structure than ordinary HF presence, so FreqInOut keeps the planning surface separate from HF Daily on purpose.</li>
   </ul>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Net Schedule</code></td><td>Selects and immediately loads a saved Net schedule, or accepts a typed name for a new one.</td></tr>
+      <tr><td><code>New Schedule</code>, <code>Save Schedule</code>, <code>Rename Schedule</code>, <code>Delete Schedule</code></td><td>Create a separate named net schedule, persist row edits, rename without changing rows, or remove the selected saved net schedule.</td></tr>
+    </tbody>
+  </table>
 
   <h3 id="hf-nets-schedule">Net Schedule Section</h3>
   <table>
@@ -890,29 +910,29 @@
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display timezone for day/time columns.</td></tr>
       <tr><td><code>Add Row</code></td><td>Adds a net schedule row.</td></tr>
       <tr><td><code>Delete Selected</code></td><td>Removes selected schedule rows.</td></tr>
-      <tr><td><code>Move Selected to Resources</code></td><td>Moves selected rows back to resource catalog.</td></tr>
+      <tr><td><code>Save Selected to Library</code></td><td>Copies selected schedule rows into the reusable Net Row Library. The schedule rows stay in place.</td></tr>
       <tr><td><code>Export Net Schedule</code></td><td>Exports net schedule data.</td></tr>
       <tr><td><code>Manage Net/SOP Policies</code></td><td>Opens policy manager dialog for saved Net/SOP conflict policies.</td></tr>
-      <tr><td><code>Save Net Schedule</code></td><td>Persists net schedule rows.</td></tr>
+      <tr><td><code>Save Schedule</code></td><td>Saves the visible rows as the selected named HF Net schedule, or creates a new named schedule for Plan Manager.</td></tr>
     </tbody>
   </table>
   <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>.</p>
   <p><strong>Recurrence values</strong>: <code>Weekly</code>, <code>Daily</code>, <code>Periodic</code>. Periodic rows use <code>Weeks of Month</code>.</p>
 
-  <h3 id="hf-nets-resources">Net Resources Section</h3>
+  <h3 id="hf-nets-resources">Net Row Library Section</h3>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
     </thead>
     <tbody>
-      <tr><td>Set + Search filters</td><td>Filters resource catalog rows.</td></tr>
-      <tr><td><code>Add to Net Schedule</code> (nested)</td><td><code>Add Selected to Net Schedule</code> or <code>Add Filtered to Net Schedule</code>.</td></tr>
-      <tr><td><code>Manage Net Resources</code> (nested)</td><td><code>Import JSON...</code> and <code>Export New Resource File</code>.</td></tr>
-      <tr><td><code>Edit Selected Resource</code></td><td>Edits selected resource entry.</td></tr>
-      <tr><td><code>Delete Selected Resources</code></td><td>Deletes selected resource entries.</td></tr>
+      <tr><td>Library + Search filters</td><td>Filters reusable net rows by library/set and text query.</td></tr>
+      <tr><td><code>Add Selected Rows</code> / <code>Add Filtered Rows</code></td><td>Copies library rows into the HF Net schedule being edited. The library rows are not moved or changed.</td></tr>
+      <tr><td><code>Import/Export</code> (nested)</td><td><code>Import JSON...</code> and <code>Export New Resource File</code>.</td></tr>
+      <tr><td><code>Edit Library Row</code></td><td>Edits the selected reusable row.</td></tr>
+      <tr><td><code>Delete Library Rows</code></td><td>Deletes selected reusable rows from the Net Row Library.</td></tr>
     </tbody>
   </table>
-  <p><strong>Net Resources columns</strong>: <code>Source</code>, <code>Set</code>, <code>Day (UTC)</code>, <code>Recurrence</code>, <code>Weeks</code>, <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Coverage</code>, <code>Comment</code>, <code>Updated (UTC)</code>.</p>
+  <p><strong>Net Row Library columns</strong>: <code>From</code>, <code>Library</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks</code>, <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early</code>, <code>FLDigi</code>, <code>Offset</code>, <code>Net Name</code>, <code>Coverage</code>, <code>Comment</code>, <code>Age</code>.</p>
 
   <h3 id="hf-nets-policy-manager">Manage Net/SOP Policies Dialog</h3>
   <p><strong>Columns</strong>: <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>SOP</code>, <code>Net</code>, <code>Policy</code>, <code>State</code>, <code>Updated</code>.</p>

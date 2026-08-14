@@ -110,6 +110,7 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_bbs_enabled",
         "varac_bbs_limit_access_enabled",
         "varac_bbs_allowed_callsigns",
+        "varac_bbs_allowed_group_sources",
         "varac_bbs_announce_enabled",
         "varac_bbs_vault_enabled",
         "varac_bbs_vault_managed_root",
@@ -230,6 +231,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_limit_access_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_allowed_callsigns TEXT,
+            varac_bbs_allowed_group_sources TEXT,
             varac_bbs_announce_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_auto_archive_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_auto_archive_days INTEGER NOT NULL DEFAULT 14,
@@ -330,6 +332,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_limit_access_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_allowed_callsigns": "TEXT",
+            "varac_bbs_allowed_group_sources": "TEXT",
             "varac_bbs_announce_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_auto_archive_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_auto_archive_days": "INTEGER NOT NULL DEFAULT 14",
@@ -3447,6 +3450,12 @@ def _legacy_settings_projection_from_device(
         if use_varac
         else False,
         "varac_bbs_allowed_callsigns": _coerce_text(device_profile.get("varac_bbs_allowed_callsigns", ""), "") if use_varac else "",
+        "varac_bbs_allowed_group_sources": _coerce_text(
+            device_profile.get("varac_bbs_allowed_group_sources", ""),
+            "",
+        )
+        if use_varac
+        else "",
         "varac_bbs_announce_enabled": bool(
             _coerce_bool_int(device_profile.get("varac_bbs_announce_enabled", 0), False)
         )
@@ -3816,6 +3825,7 @@ def _seed_device_defaults(
             False,
         ),
         "varac_bbs_allowed_callsigns": _settings_text(settings_values, "varac_bbs_allowed_callsigns", ""),
+        "varac_bbs_allowed_group_sources": _settings_text(settings_values, "varac_bbs_allowed_group_sources", ""),
         "varac_bbs_announce_enabled": _coerce_bool_int(
             settings_values.get("varac_bbs_announce_enabled"),
             False,
@@ -4257,6 +4267,7 @@ def mirror_legacy_settings_into_runtime_active_device(
             False,
         ),
         "varac_bbs_allowed_callsigns": _settings_text(settings_values, "varac_bbs_allowed_callsigns", ""),
+        "varac_bbs_allowed_group_sources": _settings_text(settings_values, "varac_bbs_allowed_group_sources", ""),
         "varac_bbs_announce_enabled": _coerce_bool_int(
             settings_values.get("varac_bbs_announce_enabled"),
             False,
@@ -4680,6 +4691,13 @@ class MultiRadioStore:
                 payload.get(
                     "varac_bbs_allowed_callsigns",
                     (existing or {}).get("varac_bbs_allowed_callsigns", ""),
+                ),
+                "",
+            ),
+            "varac_bbs_allowed_group_sources": _coerce_text(
+                payload.get(
+                    "varac_bbs_allowed_group_sources",
+                    (existing or {}).get("varac_bbs_allowed_group_sources", ""),
                 ),
                 "",
             ),

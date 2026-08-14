@@ -10,6 +10,11 @@ from PySide6.QtCore import QObject, QTimer, QCoreApplication
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.radio_interface.js8_api_client import (
+    JS8ApiClientRegistry,
+    JS8ApiEndpoint,
+    JS8ApiMessage,
+)
 
 JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
 if JS8NET_PATH.exists():
@@ -94,6 +99,15 @@ def _safe_js8_hub_message(msg: object) -> Optional[dict]:
     return out
 
 
+def _js8_hub_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on", "ptt", "tx"}
+
+
 class JS8RxHub(QObject):
     """
     Single-consumer hub for js8net.rx_queue with listener fan-out.
@@ -112,6 +126,10 @@ class JS8RxHub(QObject):
         self._timer.timeout.connect(self._poll_queue)
         self._max_msgs = 200
         self._net_started = False
+        self._using_native_api = False
+        self._api_client = None
+        self._api_listener_registered = False
+        self._api_queue: "queue.Queue[dict]" = queue.Queue()
         self._host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self._port = int(port or 2442)
         self._last_rx_activity_ts: float = 0.0
@@ -143,14 +161,19 @@ class JS8RxHub(QObject):
             self._listeners.remove(cb)
         if not self._listeners and self._timer.isActive():
             self._timer.stop()
+            self._detach_api_listener()
 
     def start(self, host: Optional[str] = None, port: Optional[int] = None) -> bool:
-        if js8net is None:
-            return False
         if host is not None:
             self._host = str(host or "").strip() or self._host
         if port is not None:
             self._port = int(port)
+        if self._start_native_api():
+            if not self._timer.isActive():
+                self._timer.start()
+            return True
+        if js8net is None:
+            return False
         if not self._net_started:
             if not self._js8call_running():
                 return False
@@ -167,6 +190,7 @@ class JS8RxHub(QObject):
                 self._timer.stop()
         except Exception:
             pass
+        self._detach_api_listener()
         self._listeners.clear()
         try:
             self.deleteLater()
@@ -192,34 +216,77 @@ class JS8RxHub(QObject):
         except Exception:
             return True
 
-    def _poll_queue(self) -> None:
-        if js8net is None or not hasattr(js8net, "rx_queue"):
-            return
-        messages: List[dict] = []
-        lock = getattr(js8net, "rx_lock", None)
-        acquired = False
+    def _start_native_api(self) -> bool:
         try:
-            if lock:
-                lock.acquire()
-                acquired = True
-            while True:
-                try:
-                    msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
-                except queue.Empty:
-                    break
-                except Exception:
-                    break
-                safe_msg = _safe_js8_hub_message(msg)
-                if safe_msg is not None:
-                    messages.append(safe_msg)
-                if len(messages) >= self._max_msgs:
-                    break
-        finally:
-            if lock and acquired:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
+            endpoint = JS8ApiEndpoint(self._host, int(self._port))
+            client = JS8ApiClientRegistry.get(endpoint, timeout_s=0.8, auto_reconnect=True)
+            if self._api_client is not client:
+                self._detach_api_listener()
+                self._api_client = client
+            if not self._api_listener_registered:
+                client.add_listener(self._on_api_message)
+                self._api_listener_registered = True
+            if not client.start():
+                return False
+            self._using_native_api = True
+            self._net_started = True
+            return True
+        except Exception:
+            self._using_native_api = False
+            return False
+
+    def _detach_api_listener(self) -> None:
+        client = self._api_client
+        if client is not None and self._api_listener_registered:
+            try:
+                client.remove_listener(self._on_api_message)
+            except Exception:
+                pass
+        self._api_listener_registered = False
+
+    def _on_api_message(self, message: JS8ApiMessage) -> None:
+        safe = _safe_js8_hub_message(message.to_dict() if hasattr(message, "to_dict") else message)
+        if safe is None:
+            return
+        try:
+            self._api_queue.put_nowait(safe)
+        except queue.Full:
+            pass
+
+    def _poll_queue(self) -> None:
+        messages: List[dict] = []
+        while len(messages) < self._max_msgs:
+            try:
+                messages.append(self._api_queue.get_nowait())
+            except queue.Empty:
+                break
+            except Exception:
+                break
+        if not messages and not self._using_native_api and js8net is not None and hasattr(js8net, "rx_queue"):
+            lock = getattr(js8net, "rx_lock", None)
+            acquired = False
+            try:
+                if lock:
+                    lock.acquire()
+                    acquired = True
+                while True:
+                    try:
+                        msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
+                    except queue.Empty:
+                        break
+                    except Exception:
+                        break
+                    safe_msg = _safe_js8_hub_message(msg)
+                    if safe_msg is not None:
+                        messages.append(safe_msg)
+                    if len(messages) >= self._max_msgs:
+                        break
+            finally:
+                if lock and acquired:
+                    try:
+                        lock.release()
+                    except Exception:
+                        pass
         if not messages:
             return
         now_ts = time.time()
@@ -233,9 +300,9 @@ class JS8RxHub(QObject):
                 self._last_ptt_ts = now_ts
                 params = msg.get("params") or {}
                 if isinstance(params, dict) and "PTT" in params:
-                    self._ptt_active = bool(params.get("PTT"))
+                    self._ptt_active = _js8_hub_truthy(params.get("PTT"))
                 else:
-                    self._ptt_active = str(msg.get("value") or "").lower() == "on"
+                    self._ptt_active = _js8_hub_truthy(msg.get("value"))
         for cb in list(self._listeners):
             try:
                 cb(messages)

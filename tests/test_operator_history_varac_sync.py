@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from freqinout.core.varac_callsign_tags import (
@@ -79,6 +80,53 @@ def test_operator_history_theme_styles_row_checkbox_indicator(monkeypatch, tmp_p
     assert "border: 1px solid" in style
     assert "background-color" in style
     assert app is not None
+
+
+def test_operator_history_keeps_role_tier_near_callsign_and_scrolls_horizontally(monkeypatch, tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    (profile / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(profile))
+    QApplication.instance() or QApplication([])
+    tab = OperatorHistoryTab()
+    try:
+        headers = [
+            tab.table.horizontalHeaderItem(idx).text()
+            for idx in range(tab.table.columnCount())
+        ]
+
+        assert headers[:5] == ["", "Callsign", "Role", "Tier", "SitRep"]
+        assert headers[OperatorHistoryTab.COL_LAST_SEEN] == "Last Seen"
+        assert "First Seen" not in headers
+        assert tab.table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+        assert tab.table.horizontalHeader().stretchLastSection() is False
+    finally:
+        tab.deleteLater()
+
+
+def test_operator_history_age_summary_uses_days_without_hours() -> None:
+    now = 1_700_000_000.0
+    assert OperatorHistoryTab._age_text_from_epoch(now - (2 * 86400 + 6 * 3600), now=now) == "2d"
+    assert OperatorHistoryTab._age_text_from_epoch(now - (5 * 3600 + 12 * 60), now=now) == "5h 12m"
+
+
+def test_operator_history_import_group_options_use_configured_operating_groups() -> None:
+    tab = OperatorHistoryTab.__new__(OperatorHistoryTab)
+    tab.settings = _DummySettings(
+        {
+            "operating_groups": [
+                {"group": "MAGNET"},
+                {"group_name": "AMRRON"},
+                {"name": "S2 UNDERGROUND"},
+                {"group": "MAGNET"},
+            ]
+        }
+    )
+
+    assert OperatorHistoryTab._configured_import_group_options(tab) == [
+        "MAGNET",
+        "AMRRON",
+        "S2 UNDERGROUND",
+    ]
 
 
 def test_manage_menu_includes_sync_to_varac(monkeypatch, tmp_path: Path) -> None:

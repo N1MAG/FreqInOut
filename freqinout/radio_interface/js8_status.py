@@ -15,6 +15,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub, ensure_js8net_started
 
 log = logging.getLogger(__name__)
@@ -148,15 +149,52 @@ class JS8ControlClient(JS8StatusClient):
                 return False
         return True
 
+    def _native_client(self):
+        endpoint = JS8ApiEndpoint(self.host, self._get_port())
+        return JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+
+    @staticmethod
+    def _freq_hz_from_response(response: object) -> Optional[int]:
+        params = getattr(response, "params", {}) or {}
+        value = getattr(response, "value", "") or ""
+        for key in ("DIAL", "FREQ", "FREQUENCY"):
+            if isinstance(params, dict) and key in params:
+                try:
+                    return int(float(params.get(key) or 0))
+                except Exception:
+                    continue
+        try:
+            return int(float(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _offset_hz_from_response(response: object) -> Optional[int]:
+        params = getattr(response, "params", {}) or {}
+        if isinstance(params, dict) and "OFFSET" in params:
+            try:
+                return int(float(params.get("OFFSET") or 0))
+            except Exception:
+                return None
+        return None
+
     def set_frequency(self, dial_hz: int, offset_hz: Optional[int] = None) -> bool:
         """
-        Set JS8Call dial (and optional audio offset) via js8net.
+        Set JS8Call dial (and optional audio offset) using the endpoint-scoped native API.
         """
+        dial_hz = int(dial_hz)
+        off = int(offset_hz) if offset_hz is not None else 0
+        try:
+            client = self._native_client()
+            if client.start():
+                client.send("RIG.SET_FREQ", params={"DIAL": dial_hz, "OFFSET": off})
+                log.info("JS8ControlClient set dial=%d Hz%s via native API", dial_hz, "" if offset_hz is None else f" offset={off} Hz")
+                return True
+        except Exception as exc:
+            log.debug("JS8ControlClient native set_frequency failed; trying js8net fallback: %s", exc)
         try:
             if not self._ensure_net():
                 return False
-            dial_hz = int(dial_hz)
-            off = int(offset_hz) if offset_hz is not None else 0
             js8net.set_freq(dial_hz, off)
             log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={off} Hz")
             return True
@@ -168,6 +206,15 @@ class JS8ControlClient(JS8StatusClient):
         """
         Return current JS8Call dial frequency in Hz, or None on failure.
         """
+        try:
+            client = self._native_client()
+            if client.start():
+                response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ", "STATION.STATUS"), timeout_s=0.8)
+                freq = self._freq_hz_from_response(response)
+                if freq is not None:
+                    return freq
+        except Exception as exc:
+            log.debug("JS8ControlClient native get_frequency failed; trying js8net fallback: %s", exc)
         try:
             if not self._ensure_net():
                 return None
@@ -184,6 +231,15 @@ class JS8ControlClient(JS8StatusClient):
         """
         Return current JS8Call audio offset in Hz, or None on failure.
         """
+        try:
+            client = self._native_client()
+            if client.start():
+                response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ", "STATION.STATUS"), timeout_s=0.8)
+                offset = self._offset_hz_from_response(response)
+                if offset is not None:
+                    return offset
+        except Exception as exc:
+            log.debug("JS8ControlClient native get_offset failed; trying js8net fallback: %s", exc)
         try:
             if not self._ensure_net():
                 return None

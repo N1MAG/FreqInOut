@@ -430,29 +430,7 @@ class SoftwareStatusService:
                 endpoint,
                 last_error="JS8Call API capability check is waiting for cooldown",
             )
-        started = time.monotonic()
-        status = self._js8_capability_offline_status(endpoint)
-        client = JS8ApiClient(endpoint, timeout_s=0.4, auto_reconnect=False)
-        try:
-            if client.start():
-                snapshot = client.probe_capabilities(timeout_s=0.4)
-                status.update(
-                    {
-                        "connected": bool(snapshot.connected),
-                        "mode": str(snapshot.mode or "offline"),
-                        "version": str(snapshot.version or ""),
-                        "supported": dict(snapshot.supported),
-                        "errors": dict(snapshot.errors),
-                        "last_error": client.last_error,
-                    }
-                )
-            else:
-                status["last_error"] = client.last_error or "JS8Call TCP API not reachable"
-        except Exception as exc:
-            status["last_error"] = str(exc or "JS8Call capability probe failed")
-        finally:
-            client.stop()
-        elapsed_ms = (time.monotonic() - started) * 1000.0
+        status, elapsed_ms = self._probe_js8_capability(endpoint, timeout_s=0.4)
         metadata = {
             "capability_mode": status.get("mode", "offline"),
             "version": status.get("version", ""),
@@ -476,6 +454,42 @@ class SoftwareStatusService:
             )
         type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(status))
         return status
+
+    def _probe_js8_capability(
+        self,
+        endpoint: JS8ApiEndpoint,
+        *,
+        timeout_s: float = 0.4,
+        client: Optional[JS8ApiClient] = None,
+        stop_client: bool = True,
+    ) -> tuple[Dict[str, object], float]:
+        started = time.monotonic()
+        status = self._js8_capability_offline_status(endpoint)
+        probe_client = client or JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+        try:
+            if probe_client.start():
+                snapshot = probe_client.probe_capabilities(timeout_s=float(timeout_s))
+                status.update(
+                    {
+                        "connected": bool(snapshot.connected),
+                        "mode": str(snapshot.mode or "offline"),
+                        "version": str(snapshot.version or ""),
+                        "supported": dict(snapshot.supported),
+                        "errors": dict(snapshot.errors),
+                        "last_error": probe_client.last_error,
+                    }
+                )
+            else:
+                status["last_error"] = probe_client.last_error or "JS8Call TCP API not reachable"
+        except Exception as exc:
+            status["last_error"] = str(exc or "JS8Call capability probe failed")
+        finally:
+            if client is None or stop_client:
+                try:
+                    probe_client.stop()
+                except Exception:
+                    pass
+        return status, (time.monotonic() - started) * 1000.0
 
     def _js8_shadow_busy_state(self, ptt_active: Optional[bool], queue_depth: Optional[int]) -> Optional[bool]:
         if ptt_active is True:
@@ -556,11 +570,55 @@ class SoftwareStatusService:
                 return dict(cached_status)
 
         started_at = time.monotonic()
-        capability = self.js8_api_capability_status(
-            port_override=port,
-            host_override=host,
-            force=force,
-        )
+        capability_cache = type(self)._shared_js8_capability_cache.get(cache_key)
+        capability: Dict[str, object] | None = None
+        client: Optional[JS8ApiClient] = None
+        if not force and capability_cache:
+            capability_ts, capability_status = capability_cache
+            connected = bool(capability_status.get("connected"))
+            ttl = self._js8_capability_success_ttl_sec if connected else self._js8_capability_failure_ttl_sec
+            if (now - float(capability_ts or 0.0)) < ttl:
+                capability = dict(capability_status)
+        if capability is None:
+            health_key = self._health_key(("JS8CALL", endpoint.host.lower(), int(endpoint.port), "capability"))
+            allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+            if not allowed and capability_cache:
+                capability = dict(capability_cache[1])
+            elif not allowed:
+                capability = self._js8_capability_offline_status(
+                    endpoint,
+                    last_error="JS8Call API capability check is waiting for cooldown",
+                )
+            else:
+                client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+                capability, capability_elapsed_ms = self._probe_js8_capability(
+                    endpoint,
+                    timeout_s=timeout_s,
+                    client=client,
+                    stop_client=False,
+                )
+                metadata = {
+                    "capability_mode": capability.get("mode", "offline"),
+                    "version": capability.get("version", ""),
+                    "endpoint": capability.get("endpoint", ""),
+                    "action": self._js8_capability_action(capability, running=True),
+                }
+                if bool(capability.get("connected")):
+                    self._health.record_success(
+                        health_key,
+                        owner="SoftwareStatusService",
+                        duration_ms=capability_elapsed_ms,
+                        metadata=metadata,
+                    )
+                else:
+                    self._health.record_failure(
+                        health_key,
+                        owner="SoftwareStatusService",
+                        error=str(capability.get("last_error") or "JS8Call TCP API not reachable"),
+                        duration_ms=capability_elapsed_ms,
+                        metadata=metadata,
+                    )
+                type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(capability))
         supported = dict(capability.get("supported") or {})
         errors: Dict[str, str] = dict(capability.get("errors") or {})
         native: Dict[str, object] = {
@@ -581,9 +639,15 @@ class SoftwareStatusService:
         }
 
         if native["connected"]:
-            client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
             try:
-                if client.start():
+                if client is None:
+                    client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+                    client_started = client.start()
+                else:
+                    client_started = True
+                if client_started:
+                    if client is None:
+                        raise RuntimeError("JS8 diagnostic client unavailable")
                     if supported.get("RIG.GET_FREQ"):
                         try:
                             response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ", "STATION.STATUS"), timeout_s=timeout_s)
@@ -620,7 +684,8 @@ class SoftwareStatusService:
                         except Exception as exc:
                             errors["TX.GET_QUEUE_DEPTH"] = self._js8_shadow_error_text(exc, limit=512)
             finally:
-                client.stop()
+                if client is not None:
+                    client.stop()
 
         native["busy"] = self._js8_shadow_busy_state(native.get("ptt_active"), native.get("queue_depth"))
         native["elapsed_ms"] = round((time.monotonic() - started_at) * 1000.0, 1)

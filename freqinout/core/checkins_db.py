@@ -13,7 +13,8 @@ from freqinout.core.operator_activity import newer_timestamp_text
 
 TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
 PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
-ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"}
+ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "ALT-HUB", "NCS", "ANCS", "PEER"}
+GROUP_ROLE_ALIASES = {"ALT-HUB": "HUB-ALT"}
 OPERATOR_CHECKINS_COLUMNS = {
     "callsign",
     "name",
@@ -30,6 +31,10 @@ OPERATOR_CHECKINS_COLUMNS = {
     "checkin_count",
     "groups_json",
     "trusted",
+    "timezone",
+    "tier",
+    "roster_parent_group",
+    "roster_region",
 }
 
 
@@ -50,7 +55,11 @@ def _operator_checkins_create_ddl(table_name: str) -> str:
             last_role TEXT,
             checkin_count INTEGER DEFAULT 0,
             groups_json TEXT,
-            trusted INTEGER DEFAULT 0
+            trusted INTEGER DEFAULT 0,
+            timezone TEXT,
+            tier TEXT,
+            roster_parent_group TEXT,
+            roster_region TEXT
         )
     """
 
@@ -81,6 +90,7 @@ def _normalize_groups_list(values: List[object]) -> List[str]:
 
 def _normalize_group_role(value: object) -> str:
     role = str(value or "").strip().upper()
+    role = GROUP_ROLE_ALIASES.get(role, role)
     return role if role in ALLOWED_GROUP_ROLES else ""
 
 
@@ -104,7 +114,21 @@ def _operator_checkins_select_expr(legacy_cols: set[str], column: str) -> str:
     if column == "first_seen_utc":
         sources = [name for name in ("first_seen_utc", "last_seen_utc", "date_added") if name in legacy_cols]
         return f"COALESCE({', '.join(sources)}, '')" if sources else "''"
-    if column in {"name", "state", "grid", "group1", "group2", "group3", "group_role", "last_net", "last_role"}:
+    if column in {
+        "name",
+        "state",
+        "grid",
+        "group1",
+        "group2",
+        "group3",
+        "group_role",
+        "last_net",
+        "last_role",
+        "timezone",
+        "tier",
+        "roster_parent_group",
+        "roster_region",
+    }:
         return f"COALESCE({column}, '')" if column in legacy_cols else "''"
     if column == "last_seen_utc":
         return "COALESCE(last_seen_utc, '')" if "last_seen_utc" in legacy_cols else "''"
@@ -123,6 +147,8 @@ def _repair_operator_checkins_data(cur: sqlite3.Cursor) -> None:
         """
         UPDATE operator_checkins
            SET group_role = CASE
+                WHEN TRIM(UPPER(COALESCE(group_role, ''))) = 'ALT-HUB'
+                    THEN 'HUB-ALT'
                 WHEN TRIM(UPPER(COALESCE(group_role, ''))) IN ('HUB','HUB-ALT','NCS','ANCS','PEER')
                     THEN TRIM(UPPER(COALESCE(group_role, '')))
                 ELSE ''
@@ -202,6 +228,10 @@ def ensure_operator_checkins_schema(conn: sqlite3.Connection, *, repair_data: bo
                 "checkin_count",
                 "groups_json",
                 "trusted",
+                "timezone",
+                "tier",
+                "roster_parent_group",
+                "roster_region",
             ]
             select_exprs = [_operator_checkins_select_expr(legacy_cols, column) for column in ordered_columns]
             cur.execute(
@@ -227,6 +257,10 @@ def ensure_operator_checkins_schema(conn: sqlite3.Connection, *, repair_data: bo
         ("last_seen_utc", "TEXT"),
         ("last_net", "TEXT"),
         ("last_role", "TEXT"),
+        ("timezone", "TEXT"),
+        ("tier", "TEXT"),
+        ("roster_parent_group", "TEXT"),
+        ("roster_region", "TEXT"),
     ):
         if missing_col not in cols:
             cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {missing_col} {ddl}")
@@ -465,6 +499,10 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
             last_seen = str(entry.get("last_seen_utc") or "").strip()
             first_seen = str(entry.get("first_seen_utc") or "").strip()
             trusted_raw = entry.get("trusted")
+            timezone = str(entry.get("timezone") or "").strip()
+            tier = str(entry.get("tier") or "").strip()
+            roster_parent_group = normalize_group_name(entry.get("roster_parent_group"))
+            roster_region = normalize_group_name(entry.get("roster_region"))
 
             provided_groups: List[str] = []
             groups_json_raw = entry.get("groups_json")
@@ -491,7 +529,8 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
             cur.execute(
                 """
                 SELECT name, state, grid, group1, group2, group3, group_role,
-                       first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                       first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted,
+                       timezone, tier, roster_parent_group, roster_region
                 FROM operator_checkins
                 WHERE callsign=?
                 """,
@@ -512,6 +551,10 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                     existing_count,
                     existing_groups_json,
                     existing_trusted,
+                    existing_timezone,
+                    existing_tier,
+                    existing_roster_parent,
+                    existing_roster_region,
                 ) = existing
             else:
                 existing_name = ""
@@ -524,6 +567,10 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                 existing_count = 0
                 existing_groups_json = None
                 existing_trusted = 0
+                existing_timezone = ""
+                existing_tier = ""
+                existing_roster_parent = ""
+                existing_roster_region = ""
 
             name_out = name or str(existing_name or "").strip()
             state_out = state or str(existing_state or "").strip().upper()
@@ -556,13 +603,19 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                 except Exception:
                     trusted_out = existing_trusted_int
 
+            timezone_out = timezone or str(existing_timezone or "").strip()
+            tier_out = tier or str(existing_tier or "").strip()
+            roster_parent_out = roster_parent_group or normalize_group_name(existing_roster_parent)
+            roster_region_out = roster_region or normalize_group_name(existing_roster_region)
+
             cur.execute(
                 """
                 INSERT INTO operator_checkins
                     (callsign, name, state, grid, group1, group2, group3, group_role,
                      first_seen_utc, last_seen_utc, last_net, last_role,
-                     checkin_count, groups_json, trusted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     checkin_count, groups_json, trusted, timezone, tier,
+                     roster_parent_group, roster_region)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(callsign) DO UPDATE SET
                     name=excluded.name,
                     state=excluded.state,
@@ -577,7 +630,11 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                     last_role=excluded.last_role,
                     checkin_count=excluded.checkin_count,
                     groups_json=excluded.groups_json,
-                    trusted=excluded.trusted
+                    trusted=excluded.trusted,
+                    timezone=excluded.timezone,
+                    tier=excluded.tier,
+                    roster_parent_group=excluded.roster_parent_group,
+                    roster_region=excluded.roster_region
                 """,
                 (
                     cs,
@@ -595,6 +652,10 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                     int(existing_count or 0),
                     groups_json_out,
                     trusted_out,
+                    timezone_out,
+                    tier_out,
+                    roster_parent_out,
+                    roster_region_out,
                 ),
             )
     except Exception as e:
@@ -624,7 +685,7 @@ def get_all_operators() -> List[Dict[str, Any]]:
             """
             SELECT callsign, name, state, grid, group1, group2, group3, group_role,
                    first_seen_utc, last_seen_utc, last_net, last_role, checkin_count,
-                   groups_json, trusted
+                   groups_json, trusted, timezone, tier, roster_parent_group, roster_region
             FROM operator_checkins
             ORDER BY callsign COLLATE NOCASE
             """
@@ -646,6 +707,10 @@ def get_all_operators() -> List[Dict[str, Any]]:
             count,
             groups_json,
             trusted,
+            timezone,
+            tier,
+            roster_parent_group,
+            roster_region,
         ) in cur.fetchall():
             rows.append(
                 {
@@ -664,6 +729,10 @@ def get_all_operators() -> List[Dict[str, Any]]:
                     "checkin_count": count or 0,
                     "groups_json": groups_json,
                     "trusted": trusted if trusted is not None else 0,
+                    "timezone": timezone or "",
+                    "tier": tier or "",
+                    "roster_parent_group": roster_parent_group or "",
+                    "roster_region": roster_region or "",
                 }
             )
         conn.close()

@@ -6,7 +6,6 @@ import sqlite3
 import time
 import json
 import queue
-import socket
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 
@@ -43,7 +42,12 @@ from freqinout.core.js8_spotter_forms import (
     legacy_default_forms_for,
 )
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
+from freqinout.core.js8_ncs_offsets import ncs_offset_keys_for_directed_path
+from freqinout.core.js8_send_service import send_js8_message_guarded
+from freqinout.core.js8_source_context import resolve_js8_source_context
 from freqinout.utils.timezones import get_timezone
+from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
@@ -133,6 +137,8 @@ class JS8CallNetControlTab(QWidget):
         self._directed_path: Path | None = None
         self._last_directed_size: int = 0
         self._startup_directed_size: int = 0
+        self._directed_offset_key: str = ""
+        self._all_offset_key: str = ""
 
         self._all_calls_seen: Set[str] = set()
         self._queried_msg_ids: Set[str] = set()
@@ -146,6 +152,11 @@ class JS8CallNetControlTab(QWidget):
         self._js8_rx_timer: QTimer | None = None
         self._js8_rx_hub: JS8RxHub | None = None
         self._js8_rx_registered = False
+        self._js8_live_source_context_cache: Dict[str, object] = {
+            "endpoint": "",
+            "expires": 0.0,
+            "context": {},
+        }
         self._last_rx_ts: float = 0.0
         self._pending_grid_queries: List[tuple[Optional[float], str]] = []
         self._grid_waiting: bool = False
@@ -211,23 +222,30 @@ class JS8CallNetControlTab(QWidget):
 
     def _send_js8_message(self, text: str) -> bool:
         """
-        Send a one-shot TX.SEND_MESSAGE to JS8Call over the TCP API.
+        Send through the shared endpoint-scoped JS8 API client with safety preflight.
         """
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\r\n"
         try:
-            with socket.create_connection((host, port), timeout=3) as sock:
-                sock.sendall(payload.encode("utf-8"))
-            self._last_tx_ts = time.time()
-            log.info("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
-            return True
+            endpoint = JS8ApiEndpoint(host, port)
+            client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
+            result = send_js8_message_guarded(
+                client,
+                text,
+                timeout_s=0.6,
+                allow_uncertain_target_state=True,
+            )
+            if result.sent:
+                self._last_tx_ts = time.time()
+                log.info("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
+                return True
+            log.warning("JS8CallNetControl: JS8 send blocked for %s:%s: %s", host, port, result.detail)
         except Exception as e:
             log.error("JS8CallNetControl: failed TX.SEND_MESSAGE to %s:%s text=%s err=%s", host, port, text, e)
-            return False
+        return False
 
     # ---------------- UI ---------------- #
 
@@ -440,10 +458,14 @@ class JS8CallNetControlTab(QWidget):
             p = Path(directed_path)
             if p.exists() and p.is_file():
                 self._directed_path = p
+                self._refresh_ncs_offset_keys()
                 try:
                     size_now = p.stat().st_size
                     self._startup_directed_size = size_now
-                    saved_off = int(data.get("js8_directed_offset", 0) or 0)
+                    saved_off = self._settings_int(
+                        self._directed_offset_key,
+                        self._settings_int("js8_directed_offset", 0),
+                    )
                     if saved_off <= 0:
                         self._last_directed_size = size_now
                     else:
@@ -452,14 +474,21 @@ class JS8CallNetControlTab(QWidget):
                     self._startup_directed_size = 0
             else:
                 self._directed_path = None
+                self._directed_offset_key = ""
+                self._all_offset_key = ""
                 log.warning("JS8CallNetControl: js8_directed_path not found: %s", directed_path)
         else:
             self._directed_path = None
+            self._directed_offset_key = ""
+            self._all_offset_key = ""
         if self._directed_path:
             try:
                 all_path = self._directed_path.parent / "ALL.TXT"
                 size_now = all_path.stat().st_size if all_path.exists() else 0
-                saved_all = int(data.get("js8_all_offset", 0) or 0)
+                saved_all = self._settings_int(
+                    self._all_offset_key,
+                    self._settings_int("js8_all_offset", 0),
+                )
                 if saved_all <= 0:
                     self._last_all_size = size_now
                 else:
@@ -497,6 +526,37 @@ class JS8CallNetControlTab(QWidget):
             self.group_spotter_btn.setEnabled(False)
             self.single_spotter_btn.setEnabled(False)
         fit_combo_box_to_contents(self.spotter_combo)
+
+    def _refresh_ncs_offset_keys(self):
+        if not self._directed_path:
+            self._directed_offset_key = ""
+            self._all_offset_key = ""
+            return
+        try:
+            inventory = active_runtime_ingest_inventory()
+        except Exception:
+            inventory = None
+        keys = ncs_offset_keys_for_directed_path(self._directed_path, inventory=inventory)
+        self._directed_offset_key = keys.directed_offset_key
+        self._all_offset_key = keys.all_offset_key
+
+    def _settings_int(self, key: object, default: int = 0) -> int:
+        key_txt = str(key or "").strip()
+        if not key_txt:
+            return int(default or 0)
+        try:
+            return int(self.settings.get(key_txt, default) or default)
+        except Exception:
+            return int(default or 0)
+
+    def _save_ncs_offset(self, key: object, value: int):
+        key_txt = str(key or "").strip()
+        if not key_txt:
+            return
+        try:
+            self.settings.set(key_txt, int(value))
+        except Exception:
+            pass
 
     def _save_refresh_setting(self):
         try:
@@ -544,6 +604,28 @@ class JS8CallNetControlTab(QWidget):
             self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
             self._js8_rx_registered = True
         self._js8_rx_hub.start(host, port)
+
+    def _js8_live_source_context(self) -> Dict[str, str]:
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442)
+        except Exception:
+            port = 2442
+        endpoint = f"{host}:{port}".strip().lower()
+        cache = getattr(self, "_js8_live_source_context_cache", {}) or {}
+        if (
+            str(cache.get("endpoint", "") or "") == endpoint
+            and float(cache.get("expires", 0.0) or 0.0) > time.time()
+            and isinstance(cache.get("context"), dict)
+        ):
+            return dict(cache.get("context") or {})
+        context = resolve_js8_source_context(self.settings, host=host, port=port)
+        self._js8_live_source_context_cache = {
+            "endpoint": endpoint,
+            "expires": time.time() + 30.0,
+            "context": context,
+        }
+        return context
 
     def _update_timer_interval(self):
         if self._poll_timer:
@@ -1130,10 +1212,7 @@ class JS8CallNetControlTab(QWidget):
                             )
 
                     self._last_directed_size = int(last_pos)
-                    try:
-                        self.settings.set("js8_directed_offset", int(self._last_directed_size))
-                    except Exception:
-                        pass
+                    self._save_ncs_offset(self._directed_offset_key, self._last_directed_size)
             except Exception as e:
                 log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
                 return
@@ -1189,10 +1268,7 @@ class JS8CallNetControlTab(QWidget):
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
                 self._last_all_size = int(last_pos)
-                try:
-                    self.settings.set("js8_all_offset", int(self._last_all_size))
-                except Exception:
-                    pass
+                self._save_ncs_offset(self._all_offset_key, self._last_all_size)
         except Exception as e:
             log.error("JS8CallNetControl: failed reading ALL.TXT: %s", e)
             return
@@ -2562,9 +2638,15 @@ class JS8CallNetControlTab(QWidget):
             return
         self._polling_rx = True
         try:
+            source_context = self._js8_live_source_context()
             try:
                 if any("F!" in str((msg.get("params", {}) or {}).get("TEXT") or msg.get("value") or "").upper() for msg in messages if isinstance(msg, dict)):
-                    MessageIngestor(self.settings).ingest_spotter_from_js8_events(messages)
+                    MessageIngestor(self.settings).ingest_spotter_from_js8_events(
+                        messages,
+                        source_radio_id=source_context.get("source_radio_id", ""),
+                        js8_instance_id=source_context.get("js8_instance_id", ""),
+                        source_key=source_context.get("source_id", ""),
+                    )
             except Exception as exc:
                 log.debug("JS8CallNetControl: Spotter live ingest failed: %s", exc)
             for msg in messages:

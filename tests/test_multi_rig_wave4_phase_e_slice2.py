@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 import pytest
 
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.radio_status_poll_coordinator import RadioStatusSnapshot
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
@@ -385,6 +386,251 @@ def test_station_runtime_manager_preserves_warn_band_overlap_conflict(monkeypatc
     assert conflict.blocked is False
     assert conflict.guard_mode == "warn"
     assert conflict.shared_band_overlap_groups == ["NORTH MAST"]
+
+
+def test_station_runtime_manager_blocks_when_shared_peer_frequency_unknown(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    secondary = store.save_device_profile(
+        {
+            "name": "Unverified Peer",
+            "control_backend": "manual",
+            "runtime_primary": 0,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_runtime_primary_device_profile(int(primary["id"]))
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: None
+        if int(self.profile.get("id", 0) or 0) == int(secondary["id"])
+        else 7_078_000,
+    )
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(
+        target_band="40M",
+        target_frequency_hz=7_078_000,
+        source="HF",
+        force=True,
+    )
+
+    assert conflict is not None
+    assert conflict.blocked is True
+    assert conflict.guard_mode == "block"
+    assert conflict.peer_name == "Unverified Peer"
+    assert conflict.peer_frequency_hz is None
+    assert conflict.peer_status_unknown is True
+    assert "unverified peer tuning" in conflict.summary
+    assert "cannot verify that radio's current frequency" in conflict.detail
+    assert conflict.shared_band_overlap_groups == ["NORTH MAST"]
+
+
+def test_station_runtime_manager_warns_when_shared_peer_frequency_unknown_and_guard_warn(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    secondary = store.save_device_profile(
+        {
+            "name": "Unverified Peer",
+            "control_backend": "manual",
+            "runtime_primary": 0,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_runtime_primary_device_profile(int(primary["id"]))
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: None
+        if int(self.profile.get("id", 0) or 0) == int(secondary["id"])
+        else 7_078_000,
+    )
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(
+        target_band="40M",
+        target_frequency_hz=7_078_000,
+        source="HF",
+        force=True,
+    )
+
+    assert conflict is not None
+    assert conflict.blocked is False
+    assert conflict.guard_mode == "warn"
+    assert conflict.peer_status_unknown is True
+
+
+def test_station_runtime_manager_blocks_when_shared_peer_frequency_stale(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    secondary = store.save_device_profile(
+        {
+            "name": "Stale Peer",
+            "control_backend": "manual",
+            "runtime_primary": 0,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_runtime_primary_device_profile(int(primary["id"]))
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+    monkeypatch.setattr(
+        DeviceRuntime,
+        "current_frequency_hz",
+        lambda self, force=False: 3_585_000
+        if int(self.profile.get("id", 0) or 0) == int(secondary["id"])
+        else 7_078_000,
+    )
+
+    def _latest_snapshot(self, key):
+        if str(key) == f"device:{int(secondary['id'])}:frequency":
+            return RadioStatusSnapshot(
+                radio_id=str(key),
+                generated_at=0.0,
+                frequency_hz=3_585_000,
+                stale=True,
+                source="cache",
+            )
+        return None
+
+    monkeypatch.setattr("freqinout.core.radio_status_poll_coordinator.RadioStatusPollCoordinator.latest_snapshot", _latest_snapshot)
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(
+        target_band="40M",
+        target_frequency_hz=7_078_000,
+        source="HF",
+        force=True,
+    )
+
+    assert conflict is not None
+    assert conflict.blocked is True
+    assert conflict.peer_status_unknown is True
+    assert conflict.peer_status_stale is True
+    assert conflict.peer_status_detail == "last peer frequency check is stale"
+    assert "Peer status: last peer frequency check is stale" in conflict.detail
+
+
+def test_station_runtime_manager_leads_with_known_conflict_when_another_peer_is_unknown(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.save_device_profile(
+        {
+            "name": "Primary Rig",
+            "control_backend": "flrig",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "block",
+        }
+    )
+    known = store.save_device_profile(
+        {
+            "name": "Known Peer",
+            "control_backend": "manual",
+            "runtime_primary": 0,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    unknown = store.save_device_profile(
+        {
+            "name": "A Unknown Peer",
+            "control_backend": "manual",
+            "runtime_primary": 0,
+            "runtime_active": 1,
+            "band_overlap_guard_group": "North Mast",
+            "band_overlap_guard_mode": "warn",
+        }
+    )
+    store.set_runtime_primary_device_profile(int(primary["id"]))
+    store.set_device_profile_runtime_active(int(known["id"]), True)
+    store.set_device_profile_runtime_active(int(unknown["id"]), True)
+    monkeypatch.setattr(SoftwareStatusService, "status_snapshot", _idle_status_snapshot)
+
+    def _frequency(self, force=False):
+        device_id = int(self.profile.get("id", 0) or 0)
+        if device_id == int(known["id"]):
+            return 7_110_000
+        if device_id == int(unknown["id"]):
+            return None
+        return 7_078_000
+
+    monkeypatch.setattr(DeviceRuntime, "current_frequency_hz", _frequency)
+
+    manager = StationRuntimeManager(store=store, settings=settings)
+    manager.sync_with_store()
+
+    conflict = manager.evaluate_primary_rf_conflict(
+        target_band="40M",
+        target_frequency_hz=7_078_000,
+        source="HF",
+        force=True,
+    )
+
+    assert conflict is not None
+    assert conflict.peer_name == "Known Peer"
+    assert conflict.peer_status_unknown is True
+    assert "Known Peer" in conflict.summary
+    assert "Other active peers: A Unknown Peer" in conflict.detail
+    assert "Peer status: peer status is unknown" in conflict.detail
 
 
 def test_station_runtime_manager_blocks_advanced_close_frequency_guard(monkeypatch, tmp_path):

@@ -100,19 +100,75 @@ def normalize_commstat_text(text: object) -> str:
     return out
 
 
-def transport_mode_for_source(source_value: object, raw_message: object = "") -> str:
+def _positive_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except Exception:
+        return 0
+
+
+def transport_mode_for_source(source_value: object, raw_message: object = "", *, global_id: object = 0) -> str:
     txt = str(raw_message or "").upper()
     if any(marker in txt for marker in ("{&%3}", "{F%3}", "{%%3}", "{^%3}")):
         return "internet"
-    try:
-        src = int(source_value or 0)
-    except Exception:
-        src = 0
+    src = _positive_int(source_value)
     if src == 1:
+        if _positive_int(global_id) > 0:
+            return "js8+internet"
         return "js8"
     if src in {2, 3}:
         return "internet"
     return "unknown"
+
+
+def commstat_origin_path(source_value: object) -> str:
+    src = _positive_int(source_value)
+    if src == 1:
+        return "rf"
+    if src == 2:
+        return "commstat_server"
+    if src == 3:
+        return "internet_only"
+    return "unknown"
+
+
+def commstat_reach_mode(source_value: object, *, global_id: object = 0, raw_message: object = "") -> str:
+    src = _positive_int(source_value)
+    txt = str(raw_message or "").upper()
+    has_server_marker = any(marker in txt for marker in ("{&%3}", "{F%3}", "{%%3}", "{^%3}"))
+    if src == 1:
+        if _positive_int(global_id) > 0:
+            return "maximum_reach"
+        return "rf_observed"
+    if src == 2:
+        return "maximum_reach_relay"
+    if src == 3 or has_server_marker:
+        return "internet_only"
+    return "unknown"
+
+
+def commstat_reach_label(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == "rf_observed":
+        return "Limited Reach (RF only)"
+    if mode == "maximum_reach":
+        return "Maximum Reach (RF + Internet)"
+    if mode == "maximum_reach_relay":
+        return "Maximum Reach relay"
+    if mode == "internet_only":
+        return "Internet only"
+    return "Unknown reach"
+
+
+def commstat_transport_label(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == "js8":
+        return "JS8/RF"
+    if mode == "js8+internet":
+        return "JS8/RF + Internet"
+    if mode == "internet":
+        return "Internet"
+    return "Unknown transport"
 
 
 def report_group_for_target(target: object) -> str:
@@ -179,6 +235,7 @@ def parse_commstat_message(
     *,
     target_hint: object = "",
     source_value: object = "",
+    global_id: object = 0,
     asset_dir: Optional[Path] = None,
 ) -> Optional[Dict[str, object]]:
     raw_text = str(message_text or "")
@@ -190,6 +247,7 @@ def parse_commstat_message(
         raw_message=raw_text,
         target_hint=target_hint,
         source_value=source_value,
+        global_id=global_id,
         asset_dir=asset_dir,
     )
     if parsed is not None:
@@ -199,6 +257,7 @@ def parse_commstat_message(
         raw_message=raw_text,
         target_hint=target_hint,
         source_value=source_value,
+        global_id=global_id,
         asset_dir=asset_dir,
     )
 
@@ -209,6 +268,7 @@ def _parse_standard_statrep_message(
     raw_message: str,
     target_hint: object,
     source_value: object,
+    global_id: object,
     asset_dir: Optional[Path],
 ) -> Optional[Dict[str, object]]:
     is_forwarded = "{F%}" in text
@@ -245,7 +305,9 @@ def _parse_standard_statrep_message(
         },
         "metadata": {
             "report_group": report_group,
-            "transport_mode": transport_mode_for_source(source_value, raw_message or text),
+            "transport_mode": transport_mode_for_source(source_value, raw_message or text, global_id=global_id),
+            "origin_path": commstat_origin_path(source_value),
+            "reach_mode": commstat_reach_mode(source_value, global_id=global_id, raw_message=raw_message or text),
             "remarks_text": remarks_text,
             "brevity_code": brevity_code,
             "brevity_summary": brevity_summary,
@@ -258,6 +320,9 @@ def _parse_standard_statrep_message(
             "message": text,
             "remarks": remarks_text,
             "forwarded": bool(is_forwarded),
+            "origin_path": commstat_origin_path(source_value),
+            "reach_mode": commstat_reach_mode(source_value, global_id=global_id, raw_message=raw_message or text),
+            "global_id": _positive_int(global_id),
         },
     }
 
@@ -268,6 +333,7 @@ def _parse_fcode_message(
     raw_message: str,
     target_hint: object,
     source_value: object,
+    global_id: object,
     asset_dir: Optional[Path],
 ) -> Optional[Dict[str, object]]:
     parsed = _match_fcode(text, "F!304", 8)
@@ -292,7 +358,9 @@ def _parse_fcode_message(
         },
         "metadata": {
             "report_group": report_group,
-            "transport_mode": transport_mode_for_source(source_value, raw_message or text),
+            "transport_mode": transport_mode_for_source(source_value, raw_message or text, global_id=global_id),
+            "origin_path": commstat_origin_path(source_value),
+            "reach_mode": commstat_reach_mode(source_value, global_id=global_id, raw_message=raw_message or text),
             "remarks_text": remarks_text,
             "brevity_code": brevity_code,
             "brevity_summary": brevity_summary,
@@ -304,6 +372,9 @@ def _parse_fcode_message(
             "message": text,
             "remarks": remarks_text,
             "form_id": form_id,
+            "origin_path": commstat_origin_path(source_value),
+            "reach_mode": commstat_reach_mode(source_value, global_id=global_id, raw_message=raw_message or text),
+            "global_id": _positive_int(global_id),
         },
     }
 
