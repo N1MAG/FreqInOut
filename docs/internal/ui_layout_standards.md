@@ -41,6 +41,11 @@ is organized as one stable card per active radio. Do not rely on a `primary
 radio` concept in the operator-facing control model; a radio is either active
 and managed, or inactive and out of the command surface.
 
+The card model is used for one or more active radios. A single active radio may
+use the available width, but it must still be the same card interaction model
+used when a second radio is activated. Activating or deactivating a radio should
+not switch to a different legacy control-strip layout.
+
 The `Now` hero should prefer the operator-facing operating group and band, such
 as `MAGNET 40M` or `S2/GHOSTNET 20M`, rather than the raw frequency. Exact
 frequency, mode, and mismatch detail belong in the tooltip. If no operating
@@ -67,6 +72,11 @@ multi-active-radio configuration, the command is skipped and surfaced as a
 health/routing issue; it must not fall back to a singleton FLRig, RigCtl, or
 JS8Call client. Singleton fallback is only acceptable for an unambiguous
 single-active-radio compatibility path.
+
+Saving a radio profile must preserve endpoint fields for linked app instances
+when those endpoint fields were not part of the user edit. A profile-name,
+activation, schedule-assignment, or health-setting save must not default a linked
+FLRig/FLDigi/JS8Call row back to standard ports.
 
 Action semantics:
 

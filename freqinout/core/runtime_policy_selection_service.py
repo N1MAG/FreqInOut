@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 from freqinout.core.multi_radio_store import (
     EFFECTIVE_ASSIGNMENT_STATES,
     MultiRadioStore,
-    project_runtime_active_device_to_legacy_settings,
+    project_runtime_active_device_to_legacy_settings_if_single_active,
 )
 from freqinout.core.multi_rig_runtime_status import (
     STARTUP_FRESH_DEFAULT_READY,
@@ -472,7 +472,7 @@ class DurableRuntimeSelectionService:
                 raise SelectionWriteError("Observer / SDR radios cannot be primary runtime radios.")
             self._set_primary_id_direct(conn, device_id)
             conn.commit()
-            project_runtime_active_device_to_legacy_settings(conn, int(device_id))
+            project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_id))
         return self.state(build_multi_rig_runtime_status(self.store))
 
     def set_active_runtime_radios(
@@ -524,7 +524,7 @@ class DurableRuntimeSelectionService:
             primary_id = self._refresh_primary_after_active_change(conn)
             conn.commit()
             if primary_id is not None:
-                project_runtime_active_device_to_legacy_settings(conn, int(primary_id))
+                project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(primary_id))
         return self.state(build_multi_rig_runtime_status(self.store))
 
     def remove_from_active_runtime(
@@ -545,7 +545,7 @@ class DurableRuntimeSelectionService:
             primary_id = self._refresh_primary_after_active_change(conn)
             conn.commit()
             if primary_id is not None:
-                project_runtime_active_device_to_legacy_settings(conn, int(primary_id))
+                project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(primary_id))
         return self.state(build_multi_rig_runtime_status(self.store))
 
     def activate_discovered_radios(

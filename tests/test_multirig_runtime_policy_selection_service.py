@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,49 @@ def test_controlfreq_and_main_window_use_primary_selection(tmp_path):
     selection = DurableRuntimeSelectionService(store)
 
     assert selection.primary_runtime_radio_id() == radio_shared_state_id(first["id"])
+
+
+def test_primary_selection_does_not_project_legacy_endpoints_when_multiple_radios_active(tmp_path):
+    store = _store(tmp_path)
+    first = _radio(store, "radio_a", "FIO-A", active=True, primary=True, display_order=1)
+    second = _radio(store, "radio_b", "FIO-B", active=True, display_order=2)
+    store.save_device_profile({**first, "flrig_port": 12345})
+    store.save_device_profile({**second, "flrig_port": 12346})
+    with store.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)", ("flrig_port", json.dumps(7777)))
+        conn.commit()
+
+    selection = DurableRuntimeSelectionService(store)
+    selection.set_primary_runtime_radio(radio_shared_state_id(second["id"]), source=SOURCE_RUNTIME_POLICY)
+
+    with store.connect() as conn:
+        value = conn.execute("SELECT value FROM kv WHERE key='flrig_port'").fetchone()[0]
+    assert json.loads(value) == 7777
+    assert int((store.get_device_profile(int(first["id"])) or {}).get("flrig_port", 0) or 0) == 12345
+    assert int((store.get_device_profile(int(second["id"])) or {}).get("flrig_port", 0) or 0) == 12346
+
+
+def test_active_radio_selection_does_not_project_legacy_endpoints_when_multiple_radios_active(tmp_path):
+    store = _store(tmp_path)
+    first = _radio(store, "radio_a", "FIO-A", active=True, primary=True, display_order=1)
+    second = _radio(store, "radio_b", "FIO-B", active=False, display_order=2)
+    store.save_device_profile({**first, "flrig_port": 12345})
+    store.save_device_profile({**second, "flrig_port": 12346})
+    with store.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)", ("flrig_port", json.dumps(7777)))
+        conn.commit()
+
+    selection = DurableRuntimeSelectionService(store)
+    selection.set_active_runtime_radios(
+        (radio_shared_state_id(first["id"]), radio_shared_state_id(second["id"])),
+        source=SOURCE_SCHEDULER,
+    )
+
+    with store.connect() as conn:
+        value = conn.execute("SELECT value FROM kv WHERE key='flrig_port'").fetchone()[0]
+    assert json.loads(value) == 7777
+    assert int((store.get_device_profile(int(first["id"])) or {}).get("flrig_port", 0) or 0) == 12345
+    assert int((store.get_device_profile(int(second["id"])) or {}).get("flrig_port", 0) or 0) == 12346
 
 
 def test_write_authority_rules_are_enforced(tmp_path):

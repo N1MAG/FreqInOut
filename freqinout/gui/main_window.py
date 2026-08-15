@@ -2111,6 +2111,8 @@ class MainWindow(QMainWindow):
         signature_changed = force or signature != self._hold_state_signature
         self._hold_state_snapshot = snapshot
         self._hold_state_signature = signature
+        card_controls = getattr(self, "_station_command_radio_tile_controls", None)
+        cards_active = isinstance(card_controls, Mapping) and bool(card_controls)
         if sync_combos:
             self._sync_hold_duration_combos()
             if snapshot.get("active"):
@@ -2122,7 +2124,11 @@ class MainWindow(QMainWindow):
             if signature_changed:
                 self._broadcast_hold_state(snapshot)
                 self._apply_active_hold_status_panel(snapshot)
-                self._refresh_station_command_bar(force=False)
+                if cards_active and not force:
+                    self._update_station_command_hold_button_labels(snapshot)
+                    self._update_station_command_radio_tile_hold_controls(snapshot)
+                else:
+                    self._refresh_station_command_bar(force=False)
             elif snapshot.get("active"):
                 self._broadcast_hold_state(snapshot)
                 self._update_station_command_hold_button_labels(snapshot)
@@ -2136,7 +2142,11 @@ class MainWindow(QMainWindow):
         if signature_changed:
             self._broadcast_hold_state(snapshot)
             self._refresh_scheduler_status_panel()
-            self._refresh_station_command_bar(force=False)
+            if cards_active and not force:
+                self._update_station_command_hold_button_labels(snapshot)
+                self._update_station_command_radio_tile_hold_controls(snapshot)
+            else:
+                self._refresh_station_command_bar(force=False)
         elif was_active:
             self._broadcast_hold_state(snapshot)
             self._update_station_command_hold_button_labels(snapshot)
@@ -5817,7 +5827,7 @@ class MainWindow(QMainWindow):
             choices = getattr(self, "_station_command_last_choices", []) or []
         except Exception:
             choices = []
-        if isinstance(choices, list) and len(choices) >= 2:
+        if isinstance(choices, list) and choices:
             try:
                 snapshot = suspend_snapshot(self.settings, allow_reload=False)
             except Exception:
@@ -6218,6 +6228,8 @@ class MainWindow(QMainWindow):
             width = 660
         if width <= 0:
             width = 660
+        if int(count or 1) <= 1:
+            return max(430, min(900, width))
         gaps = max(0, int(count or 1) - 1) * 6
         available = max(220, width - gaps)
         return max(240, min(430, available // max(1, int(count or 1))))
@@ -6283,69 +6295,52 @@ class MainWindow(QMainWindow):
             layout.addWidget(empty)
             layout.addStretch(1)
             return
-        if len(visible_choices) >= 2:
-            if len(visible_choices) <= 2:
-                self._station_command_radio_page = 0
-                page_choices = visible_choices
-            else:
-                page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)
-            signature = (
-                "tiles",
-                int(selected_id or 0),
-                int(getattr(self, "_station_command_radio_page", 0) or 0),
-                len(visible_choices),
-                self._station_command_radio_card_width(len(page_choices)),
-                tuple(
-                    (
-                        self._station_command_snapshot_id(snapshot),
-                        self._station_command_snapshot_name(snapshot),
-                        self._station_command_now_text_for_summary(snapshot, selected_id),
-                        self._station_command_compact_state_text(self._station_command_state_text(snapshot)),
-                        self._station_command_next_text(snapshot),
-                        self._station_command_plan_name_for_snapshot(snapshot),
-                        tuple(
-                            sorted(
-                                (
-                                    str(meta.get("group") or "").strip().upper(),
-                                    str(meta.get("band") or "").strip().upper(),
-                                    f"{float(meta.get('freq') or 0.0):.6f}",
-                                )
-                                for meta in self._station_command_plan_qsy_options(snapshot).values()
-                            )
-                        ),
-                        str(self._station_command_health_summary_for_profile(snapshot).get("state", "")),
-                        self._station_command_scheduler_manual_qsy_active_for_radio(
-                            self._station_command_snapshot_id(snapshot)
-                        ),
-                        self._station_command_scheduler_suspended_manually_for_radio(
-                            self._station_command_snapshot_id(snapshot)
-                        ),
-                        self._station_command_timed_suspend_active_for_radio(
-                            self._station_command_snapshot_id(snapshot)
-                        ),
-                    )
-                    for snapshot in page_choices
-                ),
-            )
-            if signature == getattr(self, "_station_command_radio_summary_signature", None):
-                return
-            self._station_command_radio_summary_signature = signature
+        if len(visible_choices) <= 2:
+            self._station_command_radio_page = 0
+            page_choices = visible_choices
         else:
-            signature = (
-                "chips",
-                int(selected_id or 0),
-                tuple(
-                    (
-                        self._station_command_snapshot_id(snapshot),
-                        self._station_command_radio_summary_text(snapshot, selected_id),
-                        self._station_command_compact_state_text(self._station_command_state_text(snapshot)),
-                    )
-                    for snapshot in visible_choices
-                ),
-            )
-            if signature == getattr(self, "_station_command_radio_summary_signature", None):
-                return
-            self._station_command_radio_summary_signature = signature
+            page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)
+        signature = (
+            "tiles",
+            int(selected_id or 0),
+            int(getattr(self, "_station_command_radio_page", 0) or 0),
+            len(visible_choices),
+            self._station_command_radio_card_width(len(page_choices)),
+            tuple(
+                (
+                    self._station_command_snapshot_id(snapshot),
+                    self._station_command_snapshot_name(snapshot),
+                    self._station_command_now_text_for_summary(snapshot, selected_id),
+                    self._station_command_compact_state_text(self._station_command_state_text(snapshot)),
+                    self._station_command_next_text(snapshot),
+                    self._station_command_plan_name_for_snapshot(snapshot),
+                    tuple(
+                        sorted(
+                            (
+                                str(meta.get("group") or "").strip().upper(),
+                                str(meta.get("band") or "").strip().upper(),
+                                f"{float(meta.get('freq') or 0.0):.6f}",
+                            )
+                            for meta in self._station_command_plan_qsy_options(snapshot).values()
+                        )
+                    ),
+                    str(self._station_command_health_summary_for_profile(snapshot).get("state", "")),
+                    self._station_command_scheduler_manual_qsy_active_for_radio(
+                        self._station_command_snapshot_id(snapshot)
+                    ),
+                    self._station_command_scheduler_suspended_manually_for_radio(
+                        self._station_command_snapshot_id(snapshot)
+                    ),
+                    self._station_command_timed_suspend_active_for_radio(
+                        self._station_command_snapshot_id(snapshot)
+                    ),
+                )
+                for snapshot in page_choices
+            ),
+        )
+        if signature == getattr(self, "_station_command_radio_summary_signature", None):
+            return
+        self._station_command_radio_summary_signature = signature
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
@@ -6353,27 +6348,7 @@ class MainWindow(QMainWindow):
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}
-        if len(visible_choices) >= 2:
-            self._refresh_station_command_radio_tiles(page_choices, selected_id)
-            return
-        for snapshot in visible_choices:
-            ident = self._station_command_snapshot_id(snapshot)
-            button = QPushButton(self._station_command_radio_summary_text(snapshot, selected_id), self.station_command_radio_summary_widget)
-            button.setObjectName("stationCommandRadioSummaryChip")
-            button.setCheckable(True)
-            button.setChecked(ident > 0 and ident == int(selected_id or 0))
-            button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            button.setToolTip(self._station_command_radio_summary_tooltip(snapshot, selected_id))
-            state_text = self._station_command_compact_state_text(self._station_command_state_text(snapshot))
-            self._style_station_command_radio_summary_button(
-                button,
-                selected=bool(ident > 0 and ident == int(selected_id or 0)),
-                state_text=state_text,
-            )
-            if ident > 0:
-                button.clicked.connect(lambda _checked=False, profile_id=ident: self._on_station_command_summary_radio_clicked(profile_id))
-            layout.addWidget(button)
-        layout.addStretch(1)
+        self._refresh_station_command_radio_tiles(page_choices, selected_id)
 
     def _station_command_for_radio(self, device_profile_id: int, callback: Callable[[], None]) -> Callable[..., None]:
         def run(*_args: object) -> None:
@@ -7171,8 +7146,9 @@ class MainWindow(QMainWindow):
 
         selected = self._station_command_selected_snapshot(choices)
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        card_mode = len(choices) >= 1
         multi_active = len(choices) >= 2
-        if multi_active and not force and bool(getattr(self, "_station_command_multi_mode_active", False)):
+        if card_mode and not force and bool(getattr(self, "_station_command_multi_mode_active", False)):
             if selected is not None and selected_id > 0:
                 self._station_command_selected_profile_id = int(selected_id)
             page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
@@ -7241,17 +7217,17 @@ class MainWindow(QMainWindow):
             self.station_command_next_label.setText("Next: none")
             tooltip = "No configured radio is available for station commands."
         self._refresh_station_command_health(selected, selected_id)
-        self._station_command_multi_mode_active = multi_active
+        self._station_command_multi_mode_active = card_mode
         if getattr(self, "station_command_radio_summary_label", None) is not None:
-            self.station_command_radio_summary_label.setText("Active Radios" if multi_active else "Radios")
-            self.station_command_radio_summary_label.setVisible(not multi_active)
+            self.station_command_radio_summary_label.setText("Active Radios" if card_mode else "Radios")
+            self.station_command_radio_summary_label.setVisible(False)
         if getattr(self, "station_command_radio_summary_scroll", None) is not None:
-            self.station_command_radio_summary_scroll.setFixedHeight(188 if multi_active else 42)
+            self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)
             self.station_command_radio_summary_scroll.setVisible(True)
         page_choices: list[object] = []
         page = 0
         page_count = 1
-        if multi_active:
+        if card_mode:
             page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
         for btn, direction, label in (
             (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
@@ -7259,13 +7235,13 @@ class MainWindow(QMainWindow):
         ):
             if btn is None:
                 continue
-            show_page_control = multi_active and len(choices) > 2 and page_count > 1
+            show_page_control = card_mode and len(choices) > 2 and page_count > 1
             btn.setVisible(show_page_control)
             btn.setEnabled((page > 0) if direction < 0 else (page < page_count - 1))
             btn.setText(f"{label} {page + 1}/{page_count}" if page_count > 1 else label)
         if getattr(self, "station_command_radio_admin_btn", None) is not None:
-            self.station_command_radio_admin_btn.setVisible(not multi_active)
-        if multi_active and getattr(self, "station_command_radio_admin_panel", None) is not None:
+            self.station_command_radio_admin_btn.setVisible(False)
+        if card_mode and getattr(self, "station_command_radio_admin_panel", None) is not None:
             self._station_command_radio_admin_expanded = False
             self.station_command_radio_admin_panel.setVisible(False)
         for widget in (
@@ -7288,7 +7264,7 @@ class MainWindow(QMainWindow):
             getattr(self, "station_command_next_label", None),
         ):
             if widget is not None:
-                widget.setVisible(not multi_active)
+                widget.setVisible(not card_mode)
         self._refresh_station_command_radio_summary(choices, selected_id)
         self._refresh_station_command_radio_admin(choices, selected_id)
         try:
@@ -7333,7 +7309,7 @@ class MainWindow(QMainWindow):
         self.station_command_suspend_btn.setToolTip(f"{tooltip} Suspend scheduled frequency changes until Resume Schedule without changing the radio.")
         self.station_command_resume_btn.setToolTip(f"{tooltip} Resume scheduled frequency changes.")
         self._update_station_command_hold_button_labels(hold_snapshot)
-        if multi_active:
+        if card_mode:
             for widget in (
                 getattr(self, "station_command_radio_label", None),
                 getattr(self, "station_command_radio_combo", None),

@@ -11290,6 +11290,7 @@ Performance and stability:
 ## Addendum: Multi-Radio Control Bar Scheduler Authority (2026-08-14)
 
 The global control bar is the operator's always-visible schedule-control surface. When more than one radio is active, each active radio is represented by its own card; the old single selected-radio control strip is informationally subordinate to the cards and must not be the source of truth for another radio.
+The same card model is used when exactly one radio is active. A one-radio station may give the card more width, but it must not fall back to a separate legacy strip with different state or routing behavior.
 
 Source of truth:
 - Each card displays current group/band, next group/band, assigned Frequency Plan, and health from the active schedule lane for that radio.
@@ -11297,6 +11298,7 @@ Source of truth:
 - QSY options in a card are limited to that radio's assigned plan/lane rows. A card for an AmRRON plan must not show or apply MagNet-only choices unless those rows are part of the assigned plan.
 - Plan names are displayed without a redundant trailing `Plan` where space is constrained.
 - Radio software settings are owned by the selected radio profile. Staged Settings-tab state must carry the source radio id it was captured from, and FIO must reject endpoint-bearing staged saves when that source id does not match the destination radio. Saving FIO-B software settings must never mutate FIO-A FLRig/FLDigi/JS8Call endpoints.
+- Radio Profile saves that do not explicitly edit software endpoints must preserve the existing linked JS8Call/Fast Light endpoint rows. Missing fields in a profile payload are not permission to write default ports such as `12345`, `7362`, or `2442` over a configured radio/app instance.
 
 Health:
 - Off Schedule is an operator-facing health state. If the scheduler detects frequency/VFO/mode/offset drift for a radio, that radio's card health shows `Off Schedule` with warning styling and the health menu lists the off-schedule items.
@@ -11311,6 +11313,7 @@ Command routing:
 - Legacy flat settings may only be projected from a runtime profile automatically when there is one active radio. In multi-active operation, explicit per-radio profile rows and their linked app-instance rows are the source of truth; compatibility projection must not rewrite global `flrig_port`, `fldigi_port`, or `js8_port` from a hidden primary/default selection.
 - Follow-on integration updates after a successful rig command, such as JS8Call frequency/offset alignment, are also target-scoped. If the target radio has no JS8Call client, FIO skips that optional alignment instead of touching another radio's JS8Call instance.
 - Manual QSY, Timed QSY, Timed Suspend, Indefinite Suspend, and Resume UI state are radio-scoped in the control bar. Updating one card must not clear the visual/manual state of another card.
+- Timed QSY, Timed Suspend, Indefinite Suspend, Resume, and countdown ticks update existing card controls in place. They must not rebuild the station command card layout or show transient global confirmation panels; visible card state is the confirmation.
 - Timed QSY and Timed Suspend persist hold state against the target radio's durable manual-control row. Schedule application checks the target radio's hold state before sending commands; a timed suspend on FIO-B must not hold or resume FIO-A.
 - Resume from a radio card clears only that radio's manual/timed state unless invoked through a legacy global control path. RF Guard still runs before a resume can force the assigned schedule back onto the radio.
 - The control bar must not set or depend on a `primary radio` mental model for normal operator control. A radio is active or inactive; active cards are first-class operating lanes.

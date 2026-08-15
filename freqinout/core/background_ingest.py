@@ -76,7 +76,9 @@ class _DeviceProfileVaultSettings:
         self.profile[key] = value
         if key in {"varac_bbs_vault_runtime_state_v1", "varac_bbs_vault_last_summary"}:
             try:
-                self.store.save_device_profile(self.profile)
+                profile_id = int(self.profile.get("id", 0) or 0)
+                if profile_id > 0:
+                    self.store.save_device_profile({"id": profile_id, key: value})
             except Exception as exc:
                 log.debug("BackgroundIngest: failed to persist VarAC vault profile state: %s", exc)
 
@@ -1336,7 +1338,14 @@ class BackgroundIngestController(QObject):
                             "Managed Vault skipped: duplicate live BBS directory is configured on more than one active radio."
                         )
                         try:
-                            store.save_device_profile(profile)
+                            profile_id = int(profile.get("id", 0) or 0)
+                            if profile_id > 0:
+                                store.save_device_profile(
+                                    {
+                                        "id": profile_id,
+                                        "varac_bbs_vault_last_summary": profile["varac_bbs_vault_last_summary"],
+                                    }
+                                )
                         except Exception as exc:
                             log.debug("BackgroundIngest: failed to persist duplicate BBS warning for %s: %s", profile_name, exc)
                         log.warning("BackgroundIngest: VarAC vault skipped duplicate live BBS directory for %s", profile_name)

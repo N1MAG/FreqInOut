@@ -19668,6 +19668,19 @@ class SettingsTab(QWidget):
         payload = dict(values)
         radio_name = str(payload.get("name", (existing or {}).get("name", "Radio")) or "Radio").strip() or "Radio"
         target_backend = str(payload.get("control_backend", (existing or {}).get("control_backend", "")) or "").strip().lower()
+        existing_profile = existing or {}
+
+        def _profile_text(key: str, default: str = "") -> str:
+            value = payload.get(key, existing_profile.get(key, default))
+            return str(value if value is not None else default).strip()
+
+        def _profile_int(key: str, default: int) -> int:
+            value = payload.get(key, existing_profile.get(key, default))
+            try:
+                return int(str(value if value is not None else default).strip() or default)
+            except Exception:
+                return default
+
         if is_active_edit and target_backend not in SUPPORTED_RUNTIME_CONTROL_BACKENDS:
             QMessageBox.warning(
                 self,
@@ -19699,14 +19712,14 @@ class SettingsTab(QWidget):
                 js8_values = {
                     "id": existing_js8_id or None,
                     "name": f"{radio_name} JS8",
-                    "host": str(payload.get("js8_host", "") or "").strip() or "127.0.0.1",
-                    "port": int(str(payload.get("js8_port", "") or "2442") or "2442"),
-                    "profile_path": str(payload.get("js8_profile_path", "") or "").strip(),
-                    "directed_path": str(payload.get("js8_directed_path", "") or "").strip(),
-                    "forms_path": str(payload.get("js8_forms_path", "") or "").strip(),
-                    "install_path": str(payload.get("js8_install_path", "") or "").strip(),
-                    "spotter_launch_path": str(payload.get("spotter_launch_path", "") or "").strip(),
-                    "commstat_launch_path": str(payload.get("commstat_launch_path", "") or "").strip(),
+                    "host": _profile_text("js8_host", "127.0.0.1") or "127.0.0.1",
+                    "port": _profile_int("js8_port", 2442),
+                    "profile_path": _profile_text("js8_profile_path"),
+                    "directed_path": _profile_text("js8_directed_path"),
+                    "forms_path": _profile_text("js8_forms_path"),
+                    "install_path": _profile_text("js8_install_path"),
+                    "spotter_launch_path": _profile_text("spotter_launch_path"),
+                    "commstat_launch_path": _profile_text("commstat_launch_path"),
                 }
                 js8_saved = self.multi_radio_store.save_js8_instance(js8_values)
                 payload["js8_instance_id"] = int(js8_saved.get("id", 0) or 0)
@@ -19729,14 +19742,14 @@ class SettingsTab(QWidget):
                 fast_values = {
                     "id": existing_fast_id or None,
                     "name": f"{radio_name} Fast Light",
-                    "flrig_path": str(payload.get("flrig_path", "") or "").strip(),
-                    "flrig_host": str(payload.get("flrig_host", "") or "").strip() or "127.0.0.1",
-                    "flrig_port": int(str(payload.get("flrig_port", "") or "12345") or "12345"),
-                    "fldigi_path": str(payload.get("fldigi_path", "") or "").strip(),
-                    "fldigi_host": str(payload.get("fldigi_host", "") or "").strip()
-                    or str(payload.get("flrig_host", "") or "").strip()
+                    "flrig_path": _profile_text("flrig_path"),
+                    "flrig_host": _profile_text("flrig_host", "127.0.0.1") or "127.0.0.1",
+                    "flrig_port": _profile_int("flrig_port", 12345),
+                    "fldigi_path": _profile_text("fldigi_path"),
+                    "fldigi_host": _profile_text("fldigi_host")
+                    or _profile_text("flrig_host")
                     or "127.0.0.1",
-                    "fldigi_port": int(str(payload.get("fldigi_port", "") or "7362") or "7362"),
+                    "fldigi_port": _profile_int("fldigi_port", 7362),
                 }
                 fast_saved = self.multi_radio_store.save_fast_light_config(fast_values)
                 payload["fast_light_config_id"] = int(fast_saved.get("id", 0) or 0)

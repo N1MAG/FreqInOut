@@ -2952,7 +2952,10 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "if signature_changed:" in hold_block
     assert "elif was_active:" in hold_block
     assert "self._update_station_command_radio_tile_hold_controls(snapshot)" in hold_block
-    assert "self._apply_active_hold_status_panel(snapshot)\n                self._refresh_station_command_bar(force=False)" in hold_block
+    assert "cards_active = isinstance(card_controls, Mapping) and bool(card_controls)" in hold_block
+    assert "if cards_active and not force:" in hold_block
+    assert "self._apply_active_hold_status_panel(snapshot)" in hold_block
+    assert "self._update_station_command_hold_button_labels(snapshot)" in hold_block
     assert "statusBar().showMessage" in source[
         source.index("def _publish_station_command_feedback")
         : source.index("def _on_station_command_hold_duration_changed")
@@ -2977,8 +2980,8 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "self._change_station_command_radio_page(1)" in source
     assert "getattr(self.station_command_bar, \"width\", lambda: 0)() or self.width() or 0" in source
     assert ".viewport()" not in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
-    assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if multi_active else 42)" in refresh_block
-    assert "widget.setVisible(not multi_active)" in refresh_block
+    assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block
+    assert "widget.setVisible(not card_mode)" in refresh_block
     assert "widget.setVisible(False)" in refresh_block
     assert 'tile.setProperty("selected", "true" if selected else "false")' in tile_block
     assert "QFrame#stationCommandRadioTile[selected=\\\"true\\\"]" in source
@@ -3233,6 +3236,161 @@ def test_phase7_station_command_card_qsy_options_are_assigned_plan_scoped(monkey
         combo.deleteLater()
 
     app.processEvents()
+
+
+def test_phase7_station_command_bar_uses_card_for_single_active_radio(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    monkeypatch.setattr(main_mod, "suspend_snapshot", lambda *_args, **_kwargs: {"active": False})
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "AMRRON", "band": "20M", "freq": "14.110", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "40M", "freq": "7.110", "mode": "Digi"},
+                ]
+            }
+
+        def get(self, _key, default=None):
+            return default
+
+    class FakeStore:
+        def list_runtime_active_device_profiles(self):
+            return [
+                {
+                    "id": 2,
+                    "name": "FIO-B",
+                    "device_class": "tx_rx",
+                    "control_backend": "flrig",
+                    "runtime_active": 1,
+                    "runtime_primary": 0,
+                    "current_frequency_label": "",
+                }
+            ]
+
+        def list_device_profiles(self):
+            return self.list_runtime_active_device_profiles()
+
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 20,
+                    "name": "AmRRON Plan",
+                    "schedule_refs_json": (
+                        '[{"group":"AMRRON","band":"20M","frequency":"14.110","day":"ALL","start":"00:00","end":"23:59"},'
+                        '{"group":"AMRRON","band":"40M","frequency":"7.110","day":"ALL","start":"23:59","end":"00:00"}]'
+                    ),
+                    "frequency_refs_json": "[]",
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.multi_radio_store = FakeStore()
+    window.station_runtime_manager = SimpleNamespace(get_runtime_snapshots=lambda force=False: [])
+    window.scheduler = SimpleNamespace(current_schedule_entry={}, current_source="")
+    window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
+    window.action_feedback_service = None
+    window._station_command_selected_profile_id = None
+    window._station_command_bar_loading = False
+    window._station_command_multi_mode_active = False
+    window._station_command_radio_page = 0
+    window._station_command_radio_summary_signature = None
+    window._station_command_radio_tile_controls = {}
+    window._station_command_card_qsy_pending_keys = {}
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    window._station_command_lane_cache_data = None
+    window._station_command_lane_cache_expires = 0.0
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_scheduler_suspended_manual = False
+    window._station_command_scheduler_suspended_manual_profile_id = 0
+    window._station_command_timed_suspend_profile_id = 0
+    window._active_runtime_profile = None
+    window.station_command_bar = QFrame()
+    window.station_command_bar.resize(1200, 220)
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_radio_label = QLabel("Radio")
+    window.station_command_radio_separator = QFrame()
+    window.station_command_now_caption = QLabel("Now")
+    window.station_command_now_label = QLabel()
+    window.station_command_state_label = QLabel()
+    window.station_command_now_separator = QFrame()
+    window.station_command_action_label = QLabel("Action")
+    window.station_command_freq_combo = QComboBox()
+    window.station_command_next_label = QLabel()
+    window.station_command_health_label = QLabel("Health:")
+    window.station_command_health_widget = QWidget()
+    window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
+    window.station_command_health_leds = {}
+    window.station_command_health_text_labels = {}
+    window.station_command_duration_combo = QComboBox()
+    window.station_command_qsy_btn = QPushButton("QSY Now")
+    window.station_command_hold_btn = QPushButton("QSY Suspend")
+    window.station_command_suspend_btn = QPushButton("Suspend Scheduler")
+    window.station_command_resume_btn = QPushButton("Resume Schedule")
+    window.station_command_radio_summary_label = QLabel("Radios")
+    window.station_command_radio_summary_scroll = QWidget()
+    window.station_command_radio_summary_widget = window.station_command_radio_summary_scroll
+    window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
+    window.station_command_radio_prev_btn = QPushButton("Prev")
+    window.station_command_radio_next_btn = QPushButton("Next")
+    window.station_command_radio_admin_btn = QPushButton("All Radios")
+    window.station_command_radio_admin_panel = QWidget()
+    window.station_command_radio_admin_layout = QVBoxLayout(window.station_command_radio_admin_panel)
+
+    try:
+        MainWindow._refresh_station_command_bar(window, force=True)
+        app.processEvents()
+
+        assert window._station_command_multi_mode_active is True
+        assert window.station_command_radio_combo.isVisible() is False
+        assert window.station_command_now_label.isVisible() is False
+        assert window.station_command_radio_admin_btn.isVisible() is False
+        tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
+        assert len(tiles) == 1
+        combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        assert combo is not None
+        assert [combo.itemText(index) for index in range(combo.count())] == ["AMRRON 20M", "AMRRON 40M"]
+        assert combo.currentText() == "AMRRON 20M"
+    finally:
+        for widget in (
+            window.station_command_bar,
+            window.station_command_radio_combo,
+            window.station_command_radio_label,
+            window.station_command_radio_separator,
+            window.station_command_now_caption,
+            window.station_command_now_label,
+            window.station_command_state_label,
+            window.station_command_now_separator,
+            window.station_command_action_label,
+            window.station_command_freq_combo,
+            window.station_command_next_label,
+            window.station_command_health_label,
+            window.station_command_health_widget,
+            window.station_command_duration_combo,
+            window.station_command_qsy_btn,
+            window.station_command_hold_btn,
+            window.station_command_suspend_btn,
+            window.station_command_resume_btn,
+            window.station_command_radio_summary_label,
+            window.station_command_radio_summary_scroll,
+            window.station_command_radio_prev_btn,
+            window.station_command_radio_next_btn,
+            window.station_command_radio_admin_btn,
+            window.station_command_radio_admin_panel,
+        ):
+            widget.deleteLater()
+        app.processEvents()
 
 
 def test_phase7_station_command_active_lanes_override_stale_global_scheduler_state(monkeypatch) -> None:

@@ -177,6 +177,80 @@ def test_settings_add_radio_marks_first_radio_active_before_projection() -> None
     assert "sync_runtime_active_device_to_legacy_settings" in persist_block
 
 
+def test_radio_profile_save_preserves_linked_endpoints_when_fields_omitted(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    store = MultiRadioStore(settings_db_path())
+    fast = store.save_fast_light_config(
+        {
+            "name": "FIO-B Fast Light",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7363,
+        }
+    )
+    js8 = store.save_js8_instance(
+        {
+            "name": "FIO-B JS8",
+            "host": "127.0.0.1",
+            "port": 2443,
+            "profile_path": "/tmp/js8/fio-b/save",
+            "directed_path": "/tmp/js8/fio-b/save/DIRECTED.TXT",
+        }
+    )
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_js8call": 1,
+            "fast_light_config_id": int(fast["id"]),
+            "js8_instance_id": int(js8["id"]),
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7363,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2443,
+            "js8_profile_path": "/tmp/js8/fio-b/save",
+            "js8_directed_path": "/tmp/js8/fio-b/save/DIRECTED.TXT",
+        }
+    )
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = store
+    tab._confirm_runtime_projection_override = lambda _title: True
+    tab._refresh_multi_radio_tables = lambda *args, **kwargs: None
+    tab._refresh_runtime_projection_ui = lambda *args, **kwargs: None
+    tab._emit_device_profiles_changed = lambda *args, **kwargs: None
+    tab._set_save_button_state = lambda *args, **kwargs: None
+    tab._settings_dirty = False
+
+    ok = tab._persist_device_profile(
+        {
+            "id": int(profile["id"]),
+            "name": "FIO-B Renamed",
+            "control_backend": "flrig",
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_js8call": 1,
+        },
+        existing=profile,
+    )
+
+    assert ok is True
+    updated = store.get_device_profile(int(profile["id"])) or {}
+    assert int(updated.get("flrig_port", 0) or 0) == 12346
+    assert int(updated.get("fldigi_port", 0) or 0) == 7363
+    assert int(updated.get("js8_port", 0) or 0) == 2443
+    assert updated.get("js8_directed_path") == "/tmp/js8/fio-b/save/DIRECTED.TXT"
+
+
 def test_coerce_json_mapping_accepts_stored_json_text() -> None:
     assert _coerce_json_mapping("") == {}
     assert _coerce_json_mapping("{}") == {}
