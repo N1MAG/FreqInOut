@@ -4913,13 +4913,7 @@ class MainWindow(QMainWindow):
         ident = self._station_command_snapshot_id(snapshot)
         if ident <= 0:
             return "", ""
-        lane_group, lane_band = self._station_command_lane_current_group_band(ident)
-        if lane_group:
-            return lane_group, lane_band
-        plan = self._station_command_assigned_plan_for_radio(ident)
-        if not isinstance(plan, Mapping):
-            return "", ""
-        refs = self._station_command_parse_json_list(plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
+        refs = self._station_command_assigned_plan_refs_for_radio(ident)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         for ref in refs:
             if not self._station_command_ref_active_now(ref, now_utc):
@@ -4928,19 +4922,28 @@ class MainWindow(QMainWindow):
             band = str(ref.get("band") or "").strip().upper()
             if group:
                 return group, band
+        if refs:
+            for ref in refs:
+                group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
+                band = str(ref.get("band") or "").strip().upper()
+                if group:
+                    return group, band
+            return "", ""
+        lane_group, lane_band = self._station_command_lane_current_group_band(ident)
+        if lane_group:
+            return lane_group, lane_band
         return "", ""
 
     def _station_command_assigned_plan_next_group_band(self, snapshot: object) -> tuple[str, str]:
         ident = self._station_command_snapshot_id(snapshot)
         if ident <= 0:
             return "", ""
-        lane_group, lane_band = self._station_command_lane_next_group_band(ident)
-        if lane_group:
-            return lane_group, lane_band
-        plan = self._station_command_assigned_plan_for_radio(ident)
-        if not isinstance(plan, Mapping):
+        refs = self._station_command_assigned_plan_refs_for_radio(ident)
+        if not refs:
+            lane_group, lane_band = self._station_command_lane_next_group_band(ident)
+            if lane_group:
+                return lane_group, lane_band
             return "", ""
-        refs = self._station_command_parse_json_list(plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_group, current_band = self._station_command_assigned_plan_group_band(snapshot)
         current_key = (current_group.strip().upper(), current_band.strip().upper())
@@ -5013,12 +5016,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+    def _station_command_assigned_plan_refs_for_radio(self, device_profile_id: int) -> list[dict[str, object]]:
+        plan = self._station_command_assigned_plan_for_radio(device_profile_id)
+        if not isinstance(plan, Mapping):
+            return []
+        refs: list[dict[str, object]] = []
+        for key in ("schedule_refs_json", "frequency_refs_json"):
+            refs.extend(self._station_command_parse_json_ref_items(plan.get(key, "[]")))
+        return refs
+
     def _station_command_assigned_plan_name_for_radio(self, device_profile_id: int) -> str:
-        lane = self._station_command_lane_for_radio(device_profile_id)
-        if isinstance(lane, Mapping):
-            name = str(lane.get("frequency_plan_name") or "").strip()
-            if name:
-                return name
         plan = self._station_command_assigned_plan_for_radio(device_profile_id)
         if isinstance(plan, Mapping):
             name = str(plan.get("name") or "").strip()
@@ -5033,6 +5040,11 @@ class MainWindow(QMainWindow):
                     return name
         except Exception:
             pass
+        lane = self._station_command_lane_for_radio(device_profile_id)
+        if isinstance(lane, Mapping):
+            name = str(lane.get("frequency_plan_name") or "").strip()
+            if name:
+                return name
         return ""
 
     def _station_command_active_schedule_lanes(self, *, force: bool = False) -> dict[int, dict[str, object]]:
@@ -5481,6 +5493,7 @@ class MainWindow(QMainWindow):
 
     def _station_command_preferred_qsy_key(self, selected: object | None) -> str:
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        has_assigned_refs = False
         manual_meta = (
             self._station_command_manual_qsy_meta_for_radio(selected_id)
             if selected_id > 0
@@ -5494,29 +5507,53 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         if selected_id > 0:
-            lane = self._station_command_lane_for_radio(selected_id)
-            entry = lane.get("current_entry") if isinstance(lane, Mapping) else None
-            if isinstance(entry, Mapping):
+            refs = self._station_command_assigned_plan_refs_for_radio(selected_id)
+            has_assigned_refs = bool(refs)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            for ref in refs:
+                if not self._station_command_ref_active_now(ref, now_utc):
+                    continue
                 try:
-                    freq = self._station_command_parse_frequency(entry.get("frequency"))
+                    freq = self._station_command_parse_frequency(
+                        ref.get("frequency") or ref.get("freq") or ref.get("frequency_mhz")
+                    )
                     if freq is not None:
                         return f"{freq:.6f}"
                 except Exception:
                     pass
+            for ref in refs:
+                try:
+                    freq = self._station_command_parse_frequency(
+                        ref.get("frequency") or ref.get("freq") or ref.get("frequency_mhz")
+                    )
+                    if freq is not None:
+                        return f"{freq:.6f}"
+                except Exception:
+                    pass
+            if not refs:
+                lane = self._station_command_lane_for_radio(selected_id)
+                entry = lane.get("current_entry") if isinstance(lane, Mapping) else None
+                if isinstance(entry, Mapping):
+                    try:
+                        freq = self._station_command_parse_frequency(entry.get("frequency"))
+                        if freq is not None:
+                            return f"{freq:.6f}"
+                    except Exception:
+                        pass
         try:
             sched = getattr(self, "scheduler", None)
             entry = getattr(sched, "current_schedule_entry", {}) if sched is not None else {}
             if isinstance(entry, Mapping):
                 if selected_id > 0:
                     entry_id = self._station_command_scheduler_entry_radio_id(entry)
-                    if entry_id > 0 and entry_id != selected_id:
+                    if entry_id <= 0 or entry_id != selected_id:
                         raise ValueError("scheduler entry belongs to another radio")
                 freq = self._station_command_parse_frequency(entry.get("frequency"))
                 if freq is not None:
                     return f"{freq:.6f}"
         except Exception:
             pass
-        if selected is not None:
+        if selected is not None and (selected_id <= 0 or not has_assigned_refs):
             try:
                 freq = self._station_command_parse_frequency(
                     self._station_command_value(selected, "current_frequency_label", "")
@@ -6489,11 +6526,10 @@ class MainWindow(QMainWindow):
 
     def _station_command_plan_qsy_options(self, snapshot: object | None) -> dict[str, dict[str, object]]:
         ident = self._station_command_snapshot_id(snapshot) if snapshot is not None else 0
-        lane_rows = self._station_command_lane_schedule_rows(ident) if ident > 0 else []
-        if lane_rows:
-            lookup = self._station_command_operating_group_qsy_lookup()
-            options: dict[str, dict[str, object]] = {}
-            for item in lane_rows:
+        lookup = self._station_command_operating_group_qsy_lookup()
+        options: dict[str, dict[str, object]] = {}
+        if ident > 0:
+            for item in self._station_command_assigned_plan_refs_for_radio(ident):
                 meta = self._station_command_qsy_meta_from_plan_ref(item, lookup)
                 if not meta:
                     continue
@@ -6511,28 +6547,23 @@ class MainWindow(QMainWindow):
                 options.setdefault(option_key, meta)
             if options:
                 return options
-        plan = self._station_command_assigned_plan_for_radio(ident) if ident > 0 else None
-        if not isinstance(plan, Mapping):
-            return {}
-        lookup = self._station_command_operating_group_qsy_lookup()
-        options: dict[str, dict[str, object]] = {}
-        for key in ("schedule_refs_json", "frequency_refs_json"):
-            for item in self._station_command_parse_json_ref_items(plan.get(key, "[]")):
-                meta = self._station_command_qsy_meta_from_plan_ref(item, lookup)
-                if not meta:
-                    continue
-                try:
-                    freq_key = f"{float(meta.get('freq')):.6f}"
-                except Exception:
-                    continue
-                option_key = "|".join(
-                    (
-                        str(meta.get("group") or "").strip().upper(),
-                        str(meta.get("band") or "").strip().upper(),
-                        freq_key,
-                    )
+        lane_rows = self._station_command_lane_schedule_rows(ident) if ident > 0 else []
+        for item in lane_rows:
+            meta = self._station_command_qsy_meta_from_plan_ref(item, lookup)
+            if not meta:
+                continue
+            try:
+                freq_key = f"{float(meta.get('freq')):.6f}"
+            except Exception:
+                continue
+            option_key = "|".join(
+                (
+                    str(meta.get("group") or "").strip().upper(),
+                    str(meta.get("band") or "").strip().upper(),
+                    freq_key,
                 )
-                options.setdefault(option_key, meta)
+            )
+            options.setdefault(option_key, meta)
         return options
 
     def _station_command_qsy_meta_from_plan_ref(
@@ -6700,7 +6731,7 @@ class MainWindow(QMainWindow):
             next_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             next_label.setToolTip(f"Next: {next_text}\nPlan: {plan_text}\nClick Change Plan to manage assignment.")
 
-            qsy_btn = QPushButton("Manual QSY" if manual_qsy_active else "QSY", tile)
+            qsy_btn = QPushButton("QSY", tile)
             qsy_btn.setMinimumWidth(76)
             qsy_btn.setMaximumWidth(96)
             qsy_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target.")
@@ -6856,7 +6887,7 @@ class MainWindow(QMainWindow):
                     manual_qsy_active=manual_active,
                     timed_qsy_active=timed_qsy,
                 )
-                qsy_button.setText("Manual QSY" if manual_active else "QSY")
+                qsy_button.setText("QSY")
                 qsy_button.setEnabled(action_state.qsy_enabled)
                 timer_button.setEnabled(action_state.timed_qsy_enabled)
                 qsy_button.setStyleSheet(button_style(action_state.qsy_role, theme))
@@ -6974,7 +7005,7 @@ class MainWindow(QMainWindow):
                     manual_qsy_active=manual_qsy_active,
                     timed_qsy_active=timed_qsy_active,
                 )
-                qsy_btn.setText("Manual QSY" if manual_qsy_active else "QSY")
+                qsy_btn.setText("QSY")
                 qsy_btn.setEnabled(action_state.qsy_enabled)
                 qsy_btn.setStyleSheet(button_style(action_state.qsy_role, theme))
             if isinstance(timer_btn, QToolButton):

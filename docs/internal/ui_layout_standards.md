@@ -37,11 +37,9 @@ Acceptance check for future UI slices:
 ## Station Command Bar
 
 The station command bar is the primary always-visible radio control surface. It
-is organized as three readable zones:
-
-- `Radio`: selected command radio.
-- `Now`: current or commanded operating target.
-- `Action`: manual QSY and scheduler control actions.
+is organized as one stable card per active radio. Do not rely on a `primary
+radio` concept in the operator-facing control model; a radio is either active
+and managed, or inactive and out of the command surface.
 
 The `Now` hero should prefer the operator-facing operating group and band, such
 as `MAGNET 40M` or `S2/GHOSTNET 20M`, rather than the raw frequency. Exact
@@ -54,35 +52,43 @@ may be presented as `S2/GHOSTNET` in this control surface because that is the
 more operator-recognizable label; the underlying stored group name remains
 unchanged.
 
+Each radio card uses that radio's saved frequency-plan assignment as the
+authoritative source for the displayed target, next target, plan name, and QSY
+option list. Runtime scheduler lanes, radio snapshots, and app-reported
+frequencies are fallback or mismatch signals; they must not override another
+radio's assigned plan. This prevents one FLRig, RigCtl, JS8Call, or SDR path from
+leaking into another radio's card.
+
 Action semantics:
 
-- `QSY Now`: immediately commands the selected manual QSY target and places the
-  scheduler into manual QSY state. Scheduled changes are suspended until the
-  operator uses `Resume Schedule` or the scheduler explicitly transitions to a
-  new active schedule entry.
-- `QSY Suspend`: immediately commands the selected manual QSY target and applies
-  a timed scheduler suspension for the selected duration.
-- `Suspend Scheduler`: indefinitely suspends scheduled frequency changes without
-  changing the radio frequency. This supports manual control from FLRig, another
-  app, or the radio itself. It is cleared only by `Resume Schedule`.
-- `Resume Schedule`: clears manual QSY or timed scheduler suspension and returns
-  control to the active schedule.
+- `QSY`: immediately commands the selected manual QSY target and places only
+  that radio into manual QSY state. Scheduled changes for that radio are
+  suspended until the operator uses `Resume` or the scheduler explicitly
+  transitions to a new active schedule entry.
+- `Timed QSY`: commands the selected manual QSY target and applies a timed
+  scheduler suspension for the selected duration. Include `Indefinite` as an
+  option for operator-controlled manual duration.
+- `Timed Suspend`: suspends scheduled frequency changes for the selected
+  duration without changing the radio frequency. This supports manual control
+  from FLRig, another app, or the radio itself. Include `Indefinite` as an
+  option for manual control until the operator resumes.
+- `Resume`: clears manual QSY or timed scheduler suspension and returns control
+  to the active schedule.
 
-When manual QSY is active, `Resume Schedule` must be enabled and visually
-highlighted. The state label should show `Manual QSY` so the operator knows the
-station is intentionally off the configured schedule. If the radio is not fully
-configured or has not yet reported the new frequency, the hero should continue
-to show the commanded QSY target; the tooltip should disclose the radio-reported
-frequency if it differs.
+When manual QSY is active, `Resume` must be enabled and visually highlighted.
+The `QSY` button text remains stable so it does not resize or clip; button color
+and the highlighted `Resume` action carry the state. If the radio is not fully
+configured or has not yet reported the new frequency, the target field should
+continue to show the commanded QSY target; the tooltip should disclose the
+radio-reported frequency if it differs.
 
-When timed scheduler suspension from `QSY Suspend` is active, the `QSY Suspend`
-button label should carry the countdown so the timed state is visible where the
-operator acted. Use compact minute labels while there is ample time left, such
-as `QSY Suspend 30m`. Under 10 minutes, switch to `MM:SS`, such as
-`QSY Suspend 09:42`. Restore the default button label when the timed suspension
-expires or the user resumes the schedule. Button tooltips should include the
-local resume time. `Suspend Scheduler` is not timed and should not display a
-countdown.
+When timed QSY or timed suspend is active, only the button that initiated the
+state should be highlighted. Its label should carry the countdown so the timed
+state is visible where the operator acted. Use compact minute labels while there
+is ample time left, such as `28m | Extend`. Under 10 minutes, switch to
+`MM:SS | Extend`, such as `09:42 | Extend`. Restore the default button label
+when the timed state expires or the user resumes the schedule. Button tooltips
+should include the local resume time.
 
 In compact layouts, QSY actions should stack as paired controls:
 

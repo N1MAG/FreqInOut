@@ -122,24 +122,29 @@ Recurring resources and SOP layers must honor `Weekly`, `Daily`, `Periodic`, and
 
 ## Station Command Bar And Manual QSY
 
-Schedule assignment and RF Guard review should treat top-bar manual QSY as an
-operator override of the configured schedule. `QSY Now` is not a transient tune
-while schedule automation continues. It commands the selected manual target and
-places the scheduler into manual QSY state. While this state is active, the
-station is intentionally off the configured schedule until `Resume Schedule` is
-used or the scheduler explicitly transitions to a new active schedule entry.
+Schedule assignment and RF Guard review should treat station-card manual QSY as
+an operator override of the configured schedule for exactly one radio. `QSY` is
+not a transient tune while schedule automation continues. It commands the
+selected manual target and places that radio into manual QSY state. While this
+state is active, the station is intentionally off the configured schedule until
+`Resume` is used or the scheduler explicitly transitions to a new active
+schedule entry.
 
-The command bar presents the operator-facing group and band as the primary
-target, with exact frequency/mode in the tooltip. This is intentional: users
-assign and operate by group/band in the center-of-gravity workflow, while RF
-Guard and scheduler internals continue to use exact frequency metadata. If the
-radio cannot yet report the newly commanded frequency, the UI should preserve
-the commanded target and disclose any mismatch in the tooltip rather than
-snapping back to the previous scheduled target.
+The command bar presents one card per active radio. Each card uses that radio's
+assigned plan as the authoritative source for target, next target, and QSY
+choices. Scheduler lanes and radio/app snapshots are runtime status signals and
+must not override another radio's assigned plan. The card presents the
+operator-facing group and band as the primary target, with exact frequency/mode
+in the tooltip. This is intentional: users assign and operate by group/band in
+the center-of-gravity workflow, while RF Guard and scheduler internals continue
+to use exact frequency metadata. If the radio cannot yet report the newly
+commanded frequency, the UI should preserve the commanded target and disclose
+any mismatch in the tooltip rather than snapping back to the previous scheduled
+target.
 
-`Resume Schedule` is the visible recovery action from manual QSY or timed
-suspension. It must be enabled and highlighted when the station is off schedule
-because of manual QSY.
+`Resume` is the visible recovery action from manual QSY or timed suspension. It
+must be enabled and highlighted when the station is off schedule because of
+manual QSY.
 
 ## UI Direction
 
