@@ -715,35 +715,38 @@ class SchedulerEngine(QObject):
         entry: Optional[Dict],
     ) -> Tuple[Optional[RigControlClient], Optional[JS8ControlClient], Optional[object], object, Optional[int]]:
         radio_id = self._entry_manual_control_radio_id(entry)
-        rig = self.rig
-        js8 = self.js8
-        varac = self.varac
-        settings: object = self.settings
+        if not radio_id:
+            return self.rig, self.js8, self.varac, self.settings, None
         manager = getattr(self, "station_runtime_manager", None)
+        if manager is None:
+            return self.rig, self.js8, self.varac, self.settings, radio_id
+        has_runtime_lookup = hasattr(manager, "get_runtime_for_device") or hasattr(manager, "_runtimes")
+        if not has_runtime_lookup:
+            return self.rig, self.js8, self.varac, self.settings, radio_id
         runtime = None
-        if radio_id and manager is not None:
-            try:
-                if hasattr(manager, "get_runtime_for_device"):
-                    runtime = manager.get_runtime_for_device(int(radio_id))
-                elif hasattr(manager, "_runtimes"):
-                    runtime = getattr(manager, "_runtimes", {}).get(int(radio_id))
-            except Exception as exc:
-                log.debug("SchedulerEngine: failed resolving runtime for radio %s: %s", radio_id, exc)
-                runtime = None
-        if runtime is not None:
-            runtime_rig = getattr(runtime, "rig_client", None)
-            runtime_js8 = getattr(runtime, "js8_control_client", None)
-            runtime_varac = getattr(runtime, "varac_status_client", None)
-            runtime_settings = getattr(runtime, "settings_proxy", None)
-            if runtime_rig is not None:
-                rig = runtime_rig
-            if runtime_js8 is not None:
-                js8 = runtime_js8
-            if runtime_varac is not None:
-                varac = runtime_varac
-            if runtime_settings is not None:
-                settings = runtime_settings
-        return rig, js8, varac, settings, radio_id
+        try:
+            if hasattr(manager, "get_runtime_for_device"):
+                runtime = manager.get_runtime_for_device(int(radio_id))
+            elif hasattr(manager, "_runtimes"):
+                runtime = getattr(manager, "_runtimes", {}).get(int(radio_id))
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed resolving runtime for radio %s: %s", radio_id, exc)
+            runtime = None
+        if runtime is None:
+            log.warning(
+                "SchedulerEngine: no runtime found for targeted radio %s; refusing to use fallback control client.",
+                radio_id,
+            )
+            return None, None, None, self.settings, radio_id
+
+        runtime_settings = getattr(runtime, "settings_proxy", None) or self.settings
+        return (
+            getattr(runtime, "rig_client", None),
+            getattr(runtime, "js8_control_client", None),
+            getattr(runtime, "varac_status_client", None),
+            runtime_settings,
+            radio_id,
+        )
 
     def _cached_control_mode(self) -> str:
         mode = (self.settings.get("control_via", "FLRig") or "FLRig").upper()
@@ -1741,6 +1744,7 @@ class SchedulerEngine(QObject):
         control_mode: str,
         rig_client: Optional[RigControlClient] = None,
         js8_client: Optional[JS8ControlClient] = None,
+        allow_global_fallback: bool = True,
         entry_key: Tuple,
         source: str,
         freq_hz: int,
@@ -1831,11 +1835,47 @@ class SchedulerEngine(QObject):
             js8_offset=js8_offset,
         )
 
+        target_js8 = js8_client if not allow_global_fallback else (js8_client or self.js8)
+        target_rig = rig_client if not allow_global_fallback else (rig_client or self.rig)
+        if control_mode == "JS8CALL" and target_js8 is None:
+            log.warning("SchedulerEngine: targeted JS8Call control requested but no JS8 client is available.")
+            self._pending_entry_key = None
+            self._record_scheduler_event(
+                "skip",
+                "missing_target_control_client",
+                source=source,
+                action="Control action skipped because the selected radio has no JS8Call control client",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+                control_mode=control_mode,
+            )
+            return False
+        if control_mode in {"FLRIG", "RIGCTLD"} and target_rig is None:
+            log.warning("SchedulerEngine: targeted %s control requested but no rig client is available.", control_mode)
+            self._pending_entry_key = None
+            self._record_scheduler_event(
+                "skip",
+                "missing_target_control_client",
+                source=source,
+                action="Control action skipped because the selected radio has no rig control client",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+                control_mode=control_mode,
+            )
+            return False
+
         def _task() -> bool:
             ok = False
             if control_mode == "JS8CALL":
                 try:
-                    target_js8 = js8_client or self.js8
                     if target_js8:
                         if js8_offset is None:
                             current_off = target_js8.get_offset()
@@ -1845,7 +1885,6 @@ class SchedulerEngine(QObject):
                 except Exception as e:
                     log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
             else:
-                target_rig = rig_client or self.rig
                 cmd = FrequencyCommand(
                     band=band,
                     rig_hz=freq_hz,
@@ -1863,12 +1902,10 @@ class SchedulerEngine(QObject):
             if ok and control_mode in {"FLRIG", "RIGCTLD"}:
                 if auto_tune and control_mode == "FLRIG":
                     try:
-                        target_rig = rig_client or self.rig
                         if target_rig and hasattr(target_rig, "tune"):
                             target_rig.tune()
                     except Exception as e:
                         log.error("SchedulerEngine: error invoking rig.tune(): %s", e)
-                target_js8 = js8_client or self.js8
                 if target_js8:
                     try:
                         if js8_offset is None:
@@ -6838,6 +6875,7 @@ class SchedulerEngine(QObject):
             control_mode=control_mode,
             rig_client=rig_client,
             js8_client=js8_client,
+            allow_global_fallback=target_radio_id is None or rig_client is self.rig,
             entry_key=entry_key,
             source=source,
             freq_hz=freq_hz,

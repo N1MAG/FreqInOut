@@ -11304,6 +11304,9 @@ Health:
 Command routing:
 - All card actions carry `target_device_profile_id`.
 - Scheduler command dispatch resolves rig/JS8/VarAC/settings clients from the targeted runtime profile before sending frequency commands. A FIO-A card action must not command FIO-B, and a FIO-B card action must not command FIO-A.
+- Targeted command dispatch is fail-closed. When a multi-radio runtime lookup exists but the target radio has no resolved FLRig, RigCtlD, or JS8Call control client for its configured backend, FIO records/skips the command rather than falling back to any global/default/primary client.
+- FLRig, RigCtlD, and JS8Call frequency-control clients are radio-scoped by configured endpoint. Two radios configured to different FLRig XML-RPC ports must produce two independent clients and a QSY on one radio must never send to both ports.
+- Follow-on integration updates after a successful rig command, such as JS8Call frequency/offset alignment, are also target-scoped. If the target radio has no JS8Call client, FIO skips that optional alignment instead of touching another radio's JS8Call instance.
 - Manual QSY, Timed QSY, Timed Suspend, Indefinite Suspend, and Resume UI state are radio-scoped in the control bar. Updating one card must not clear the visual/manual state of another card.
 - Timed QSY and Timed Suspend persist hold state against the target radio's durable manual-control row. Schedule application checks the target radio's hold state before sending commands; a timed suspend on FIO-B must not hold or resume FIO-A.
 - Resume from a radio card clears only that radio's manual/timed state unless invoked through a legacy global control path. RF Guard still runs before a resume can force the assigned schedule back onto the radio.

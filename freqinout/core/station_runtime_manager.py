@@ -432,7 +432,7 @@ class DeviceRuntime:
             except Exception as exc:
                 log.debug("DeviceRuntime: failed building rig client for %s: %s", self.profile.get("name", ""), exc)
                 self.rig_client = None
-        if self.is_primary:
+        if self.is_primary or backend == "js8call":
             try:
                 host = str(self.settings_proxy.get("js8_host", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
                 port = int(self.settings_proxy.get("js8_port", 2442) or 2442)
@@ -440,6 +440,7 @@ class DeviceRuntime:
             except Exception as exc:
                 log.debug("DeviceRuntime: failed building JS8 client for %s: %s", self.profile.get("name", ""), exc)
                 self.js8_control_client = None
+        if self.is_primary:
             try:
                 self.varac_status_client = VarACStatusClient(settings=self.settings_proxy)
             except Exception as exc:
