@@ -2883,6 +2883,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._off_schedule_prompt = None
+            self._off_schedule_prompt_key = None
 
     def _on_off_schedule_cleared(self) -> None:
         self._dismiss_off_schedule_prompt()
@@ -2918,6 +2919,31 @@ class MainWindow(QMainWindow):
         refresh_hold_duration_combo(combo, self.settings, getattr(self, "_active_runtime_profile", None))
         return combo
 
+    def _radio_name_for_device_profile_id(self, device_profile_id: int | None) -> str:
+        try:
+            ident = int(device_profile_id or 0)
+        except Exception:
+            ident = 0
+        if ident <= 0:
+            return "Radio"
+        try:
+            for snapshot in self._station_command_radio_choices():
+                if self._station_command_snapshot_id(snapshot) == ident:
+                    return self._station_command_snapshot_name(snapshot)
+        except Exception:
+            pass
+        try:
+            store = getattr(self, "multi_radio_store", None)
+            profiles = store.list_device_profiles() if store is not None and hasattr(store, "list_device_profiles") else []
+            for profile in profiles:
+                if int(profile.get("id", 0) or 0) == ident:
+                    name = str(profile.get("name") or "").strip()
+                    if name:
+                        return name
+        except Exception:
+            pass
+        return f"Radio {ident}"
+
     def _attach_prompt_hold_duration_row(self, msg: QMessageBox, combo: QComboBox) -> None:
         try:
             row = QWidget(msg)
@@ -2934,14 +2960,18 @@ class MainWindow(QMainWindow):
     def _on_off_schedule_detected(self, payload: dict) -> None:
         if self._shutting_down:
             return
-        self._dismiss_off_schedule_prompt()
         items = payload.get("items") if isinstance(payload, dict) else None
         items = items if isinstance(items, list) else []
         if not items:
             return
         try:
+            target_radio_id = int((payload or {}).get("device_profile_id") or 0)
+        except Exception:
+            target_radio_id = 0
+        radio_id = target_radio_id
+        try:
             entry = payload.get("entry") if isinstance(payload, Mapping) else {}
-            radio_id = self._station_command_scheduler_entry_radio_id(entry) if isinstance(entry, Mapping) else 0
+            radio_id = target_radio_id or (self._station_command_scheduler_entry_radio_id(entry) if isinstance(entry, Mapping) else 0)
             if radio_id > 0:
                 state = getattr(self, "_station_command_off_schedule_by_radio", None)
                 if not isinstance(state, dict):
@@ -2952,21 +2982,30 @@ class MainWindow(QMainWindow):
                 self._refresh_station_command_bar(force=False)
         except Exception:
             pass
+        target_radio_id = target_radio_id or radio_id
+        prompt_key = (int(target_radio_id or 0), tuple(str(item) for item in items))
+        active_key = getattr(self, "_off_schedule_prompt_key", None)
+        if getattr(self, "_off_schedule_prompt", None) is not None and active_key == prompt_key:
+            return
+        self._dismiss_off_schedule_prompt()
         msg = QMessageBox(self)
         msg.setWindowTitle("Off Schedule")
+        radio_name = self._radio_name_for_device_profile_id(target_radio_id)
         if len(items) == 1:
             text = f"{items[0]} Off Schedule"
         elif len(items) == 2:
             text = f"{items[0]} and {items[1]} are Off Schedule"
         else:
             text = f"{', '.join(items[:-1])}, and {items[-1]} are Off Schedule"
+        text = f"{radio_name}: {text}"
         msg.setText(text)
-        apply_btn = msg.addButton("Resume Sched.", QMessageBox.AcceptRole)
+        apply_btn = msg.addButton(f"Resume {radio_name}", QMessageBox.AcceptRole)
         ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
-        suspend_btn = msg.addButton("Pause Schedule", QMessageBox.DestructiveRole)
+        suspend_btn = msg.addButton(f"Pause {radio_name}", QMessageBox.DestructiveRole)
         hold_combo = self._build_prompt_hold_duration_combo(msg)
         self._attach_prompt_hold_duration_row(msg, hold_combo)
         self._off_schedule_prompt = msg
+        self._off_schedule_prompt_key = prompt_key
         auto_applied = {"done": False}
 
         def _auto_apply():
@@ -2974,7 +3013,7 @@ class MainWindow(QMainWindow):
                 return
             auto_applied["done"] = True
             try:
-                self.scheduler.resolve_off_schedule("apply", items=items)
+                self.scheduler.resolve_off_schedule("apply", items=items, target_device_profile_id=target_radio_id)
             except Exception:
                 pass
             try:
@@ -2998,12 +3037,12 @@ class MainWindow(QMainWindow):
         clicked = msg.clickedButton()
         if clicked == apply_btn:
             try:
-                self.scheduler.resolve_off_schedule("apply", items=items)
+                self.scheduler.resolve_off_schedule("apply", items=items, target_device_profile_id=target_radio_id)
             except Exception:
                 pass
         elif clicked == ignore_btn:
             try:
-                self.scheduler.resolve_off_schedule("ignore", items=items)
+                self.scheduler.resolve_off_schedule("ignore", items=items, target_device_profile_id=target_radio_id)
             except Exception:
                 pass
         elif clicked == suspend_btn:
@@ -3011,11 +3050,17 @@ class MainWindow(QMainWindow):
                 mins = selected_hold_duration(hold_combo, self.settings, getattr(self, "_active_runtime_profile", None))
                 set_hold_duration_default(self.settings, mins)
                 self._sync_hold_duration_combos()
-                self.scheduler.resolve_off_schedule("suspend", items=items, minutes=mins)
+                self.scheduler.resolve_off_schedule(
+                    "suspend",
+                    items=items,
+                    minutes=mins,
+                    target_device_profile_id=target_radio_id,
+                )
                 self.on_hold_state_changed(force_reload=True)
             except Exception:
                 pass
         self._off_schedule_prompt = None
+        self._off_schedule_prompt_key = None
 
     def _on_varac_wait_detected(self, payload: dict) -> None:
         if self._shutting_down:

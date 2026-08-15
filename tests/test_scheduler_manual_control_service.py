@@ -524,12 +524,27 @@ def test_scheduler_prompt_frequency_mode_holds_before_command(monkeypatch, tmp_p
         monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
         monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
         monkeypatch.setattr(engine, "_queue_control_action", lambda **kwargs: queued.append((kwargs["source"], kwargs["freq_hz"])) or True)
+        monkeypatch.setattr(
+            engine,
+            "_control_context_for_entry",
+            lambda _entry: (engine.rig, None, None, settings, 8),
+        )
 
-        engine._apply_schedule_entry({"frequency": "14.110", "band": "20M", "mode": "Digi"}, "HF")
+        engine._apply_schedule_entry(
+            {
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "target_scope": "device_profile",
+                "target_device_profile_id": 8,
+            },
+            "HF",
+        )
 
         assert queued == []
         assert emitted
         assert emitted[-1]["items"] == ["Frequency"]
+        assert emitted[-1]["device_profile_id"] == 8
         assert engine._prompt_active is True
     finally:
         _shutdown_engine(engine)

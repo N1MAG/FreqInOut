@@ -4,7 +4,7 @@ import datetime
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -3497,6 +3497,82 @@ def test_phase7_station_command_health_marks_off_schedule_as_health_category(mon
     assert summary["state"] == "warn"
     assert summary["issues"][0][1] == "Off Schedule"
     assert "Frequency" in summary["tooltip"]
+
+    app.processEvents()
+
+
+def test_phase7_off_schedule_prompt_names_and_resolves_target_radio(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    calls = []
+    prompt_text = {}
+
+    class FakeMessageBox(QObject):
+        AcceptRole = 0
+        RejectRole = 1
+        DestructiveRole = 2
+
+        def __init__(self, _parent=None):
+            super().__init__()
+            self._clicked = None
+
+        def close(self):
+            return None
+
+        def setWindowTitle(self, value):
+            prompt_text["title"] = value
+
+        def setText(self, value):
+            prompt_text["text"] = value
+
+        def addButton(self, label, _role):
+            button = object()
+            if self._clicked is None:
+                self._clicked = button
+                prompt_text["apply_label"] = label
+            return button
+
+        def exec(self):
+            return 0
+
+        def clickedButton(self):
+            return self._clicked
+
+    monkeypatch.setattr(main_mod, "QMessageBox", FakeMessageBox)
+
+    window = MainWindow.__new__(MainWindow)
+    window._shutting_down = False
+    window.settings = SimpleNamespace()
+    window.scheduler = SimpleNamespace(resolve_off_schedule=lambda *args, **kwargs: calls.append((args, kwargs)))
+    window._station_command_radio_choices = lambda: [
+        SimpleNamespace(device_profile_id=1, name="FIO-A"),
+        SimpleNamespace(device_profile_id=2, name="FIO-B"),
+    ]
+    window._station_command_off_schedule_by_radio = {}
+    window._station_command_radio_summary_signature = None
+    window._refresh_station_command_bar = lambda *args, **kwargs: None
+    window._build_prompt_hold_duration_combo = lambda _parent: QComboBox()
+    window._attach_prompt_hold_duration_row = lambda *_args, **_kwargs: None
+    window._sync_hold_duration_combos = lambda: None
+    window.on_hold_state_changed = lambda *args, **kwargs: None
+
+    MainWindow._on_off_schedule_detected(
+        window,
+        {
+            "device_profile_id": 2,
+            "items": ["Frequency"],
+            "entry": {"target_scope": "device_profile", "target_device_profile_id": 2},
+        },
+    )
+
+    assert prompt_text["title"] == "Off Schedule"
+    assert prompt_text["text"] == "FIO-B: Frequency Off Schedule"
+    assert prompt_text["apply_label"] == "Resume FIO-B"
+    assert calls == [(("apply",), {"items": ["Frequency"], "target_device_profile_id": 2})]
 
     app.processEvents()
 

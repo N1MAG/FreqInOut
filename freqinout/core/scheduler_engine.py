@@ -342,6 +342,7 @@ class SchedulerEngine(QObject):
         self._prompt_active: bool = False
         self._prompt_items: List[str] = []
         self._prompt_entry_key: Optional[Tuple] = None
+        self._frequency_prompt_last_by_entry: Dict[Tuple, float] = {}
         self._prompt_state = {
             "frequency": {"last_prompt_ts": 0.0},
             "mode": {"last_prompt_ts": 0.0},
@@ -3975,7 +3976,14 @@ class SchedulerEngine(QObject):
             self._prompt_items = []
             self._last_fldigi_offset_prompt_sig = None
             return
-        entry_key = (entry.get("frequency"), entry.get("band"), entry.get("mode"), entry.get("group_name"))
+        entry_radio_id = self._entry_manual_control_radio_id(entry)
+        entry_key = (
+            entry_radio_id,
+            entry.get("frequency"),
+            entry.get("band"),
+            entry.get("mode"),
+            entry.get("group_name"),
+        )
         now_ts = time.time()
         if self._prompt_entry_key and entry_key != self._prompt_entry_key:
             self._prompt_active = False
@@ -4079,7 +4087,7 @@ class SchedulerEngine(QObject):
                 self._prompt_state["fldigi_offset"]["last_prompt_ts"] = now_ts
             elif item == "Offset":
                 self._prompt_state["offset"]["last_prompt_ts"] = now_ts
-        self.off_schedule_detected.emit({"entry": entry, "items": items})
+        self.off_schedule_detected.emit({"entry": entry, "items": items, "device_profile_id": entry_radio_id})
         self._last_fldigi_offset_prompt_sig = fldigi_offset_prompt_sig if bool(flags.get("fldigi_offset")) else None
         self._last_off_schedule_flags = dict(flags)
 
@@ -4100,12 +4108,23 @@ class SchedulerEngine(QObject):
         if not want_freq_change or not bool(off_state.flags.get("frequency")):
             return False
         now_ts = time.time()
-        entry_key = (source,) + self._entry_transition_signature(entry)
-        should_emit = (not self._prompt_active) or self._prompt_entry_key != entry_key or "Frequency" not in self._prompt_items
+        radio_id = self._entry_manual_control_radio_id(entry)
+        entry_key = (source, radio_id) + self._entry_transition_signature(entry)
+        interval = self._prompt_interval_minutes("freq_prompt_interval")
+        prompt_times = getattr(self, "_frequency_prompt_last_by_entry", None)
+        if not isinstance(prompt_times, dict):
+            prompt_times = {}
+            self._frequency_prompt_last_by_entry = prompt_times
+        last_prompt_ts = float(prompt_times.get(entry_key) or 0.0)
+        prompt_due = now_ts - last_prompt_ts >= interval * 60
+        same_prompt = self._prompt_active and self._prompt_entry_key == entry_key and "Frequency" in self._prompt_items
+        should_emit = (not same_prompt) and prompt_due
         self._prompt_active = True
         self._prompt_items = ["Frequency"]
         self._prompt_entry_key = entry_key
-        self._prompt_state["frequency"]["last_prompt_ts"] = now_ts
+        if should_emit:
+            prompt_times[entry_key] = now_ts
+            self._prompt_state["frequency"]["last_prompt_ts"] = now_ts
         self._last_off_schedule_flags = dict(off_state.flags)
         self._clear_coordination_prompt()
         self._record_scheduler_event(
@@ -4119,7 +4138,14 @@ class SchedulerEngine(QObject):
             throttle_sec=30.0,
         )
         if should_emit:
-            self.off_schedule_detected.emit({"entry": entry, "items": ["Frequency"]})
+            self.off_schedule_detected.emit(
+                {
+                    "entry": entry,
+                    "items": ["Frequency"],
+                    "device_profile_id": radio_id,
+                    "source": source,
+                }
+            )
         self.active_entry_changed.emit(entry, source)
         return True
 
@@ -4128,15 +4154,24 @@ class SchedulerEngine(QObject):
         action: str,
         items: Optional[List[str]] = None,
         minutes: Optional[int] = None,
+        target_device_profile_id: Optional[int] = None,
     ) -> None:
         self._prompt_active = False
         self._prompt_items = []
         fldigi_items = {"Mode", "FLDigi Mode", "FLDigi Offset"}
+        radio_id = None
+        try:
+            radio_id = int(target_device_profile_id or 0) or None
+        except Exception:
+            radio_id = None
         if action == "suspend":
             if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
             self._reset_prompt_timers(items=items)
-            self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
+            self._suspend_for_minutes(
+                self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()),
+                target_device_profile_id=radio_id,
+            )
             return
         if action == "ignore":
             if items and any(item in fldigi_items for item in items):
@@ -4146,13 +4181,25 @@ class SchedulerEngine(QObject):
         if action != "apply":
             return
         entry = self.current_schedule_entry or {}
+        source = self.current_source
+        if radio_id is not None:
+            lane_source, lane_entry = self._active_schedule_entry_for_radio(radio_id, force=True)
+            if lane_entry:
+                source = lane_source or source
+                entry = lane_entry
         if not entry:
             return
         apply_items = items or []
+        if apply_items:
+            self._reset_prompt_timers(items=apply_items)
         if "Frequency" in apply_items:
+            if radio_id is not None:
+                entry = dict(entry)
+                entry["target_scope"] = "device_profile"
+                entry["target_device_profile_id"] = radio_id
             self._apply_schedule_entry(
                 entry,
-                self.current_source,
+                source,
                 force=True,
                 ignore_wait_prompt=True,
                 apply_js8_offset=False,

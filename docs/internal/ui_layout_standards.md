@@ -104,6 +104,12 @@ Action semantics:
 - `Resume`: clears manual QSY or timed scheduler suspension and returns control
   to the active schedule.
 
+Off-schedule prompts are part of radio health and must be radio-scoped. The
+prompt title/text must identify the affected radio, and every action from the
+prompt must pass that same `device_profile_id` back to the scheduler. Prompt
+throttling is keyed by radio and schedule row so one off-schedule radio cannot
+spam repeated prompts or suppress another radio's first actionable prompt.
+
 When manual QSY is active, `Resume` must be enabled and visually highlighted.
 The `QSY` button text remains stable so it does not resize or clip; button color
 and the highlighted `Resume` action carry the state. If the radio is not fully
