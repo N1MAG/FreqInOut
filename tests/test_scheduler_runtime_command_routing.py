@@ -182,7 +182,7 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
         def get_state(self, radio_id: int):
             return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
 
-    applied: list[tuple[dict[str, object], str]] = []
+    applied: list[tuple[dict[str, object], str, dict[str, object]]] = []
     scheduler = SchedulerEngine.__new__(SchedulerEngine)
     scheduler._manual_control_service = FakeManualControlService()
     scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
@@ -211,7 +211,9 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
             },
         },
     ]
-    scheduler._apply_schedule_entry = lambda entry, source, **kwargs: applied.append((dict(entry), source))
+    scheduler._apply_schedule_entry = lambda entry, source, **kwargs: applied.append(
+        (dict(entry), source, dict(kwargs))
+    )
 
     handled = SchedulerEngine._apply_active_schedule_lanes(
         scheduler,
@@ -220,10 +222,11 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
     )
 
     assert handled is True
-    assert [(entry["target_device_profile_id"], entry["group_name"], source) for entry, source in applied] == [
+    assert [(entry["target_device_profile_id"], entry["group_name"], source) for entry, source, _kwargs in applied] == [
         (8, "MAGNET", "HF"),
         (9, "AMRRON", "HF"),
     ]
+    assert all(kwargs["ignore_wait_prompt"] is True for _entry, _source, kwargs in applied)
 
 
 def test_per_radio_flrig_clients_use_configured_ports() -> None:

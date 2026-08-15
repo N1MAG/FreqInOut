@@ -5567,6 +5567,7 @@ class SchedulerEngine(QObject):
                 now_utc=now_utc,
                 force=force,
                 scheduler_transition=force,
+                ignore_wait_prompt=force,
             )
         return bool(lanes)
 

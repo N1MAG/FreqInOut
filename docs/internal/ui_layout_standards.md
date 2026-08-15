@@ -83,6 +83,18 @@ scheduler fields, card metadata, or legacy global hold state from another radio.
 Legacy/global keys may remain only as a one-radio compatibility boundary for
 older surfaces when the durable manual-control service is not available.
 
+Scheduler startup semantics:
+
+- When FIO starts and the scheduler is enabled for active radios, the scheduler
+  performs one forced per-radio lane apply so every assigned plan takes control
+  of its configured radio immediately.
+- That startup apply bypasses the frequency-control wait prompt because launch
+  establishes the scheduler's baseline authority. RF Guard/coordination checks
+  and radio-scoped routing still apply.
+- After startup, normal schedule ticks and user actions follow the configured
+  frequency-control behavior, including Prompt, wait, activity, and manual
+  control rules.
+
 Saving a radio profile must preserve endpoint fields for linked app instances
 when those endpoint fields were not part of the user edit. A profile-name,
 activation, schedule-assignment, or health-setting save must not default a linked
