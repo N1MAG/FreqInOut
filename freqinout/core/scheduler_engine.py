@@ -426,6 +426,7 @@ class SchedulerEngine(QObject):
             "fldigi_offset": False,
             "vfo": False,
         }
+        self._off_schedule_prompt_grace_until_by_radio: Dict[int, float] = {}
         self._fldigi_available_cache: Optional[bool] = None
         self._fldigi_available_ts: float = 0.0
         self._fldigi_busy_entry_key: Optional[Tuple] = None
@@ -3953,6 +3954,30 @@ class SchedulerEngine(QObject):
             if key and key in self._prompt_state:
                 self._prompt_state[key]["last_prompt_ts"] = ts
 
+    def _set_off_schedule_prompt_grace(self, radio_id: Optional[int], *, seconds: float = 3.0) -> None:
+        if not isinstance(radio_id, int) or radio_id <= 0:
+            return
+        grace_map = getattr(self, "_off_schedule_prompt_grace_until_by_radio", None)
+        if not isinstance(grace_map, dict):
+            grace_map = {}
+            self._off_schedule_prompt_grace_until_by_radio = grace_map
+        grace_map[radio_id] = max(float(grace_map.get(radio_id) or 0.0), time.time() + max(float(seconds), 0.0))
+
+    def _off_schedule_prompt_in_grace(self, radio_id: Optional[int]) -> bool:
+        if not isinstance(radio_id, int) or radio_id <= 0:
+            return False
+        grace_map = getattr(self, "_off_schedule_prompt_grace_until_by_radio", None)
+        if not isinstance(grace_map, dict):
+            return False
+        until_ts = float(grace_map.get(radio_id) or 0.0)
+        if until_ts <= 0.0:
+            return False
+        now_ts = time.time()
+        if now_ts >= until_ts:
+            grace_map.pop(radio_id, None)
+            return False
+        return True
+
     def _maybe_prompt_enforcement(self) -> None:
         if not self._scheduler_enabled():
             self._prompt_active = False
@@ -3997,6 +4022,8 @@ class SchedulerEngine(QObject):
                 pass
             return
         self._prompt_entry_key = entry_key
+        if self._off_schedule_prompt_in_grace(entry_radio_id):
+            return
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         if self._scheduling_suspended(now_utc):
             return
@@ -4109,6 +4136,10 @@ class SchedulerEngine(QObject):
             return False
         now_ts = time.time()
         radio_id = self._entry_manual_control_radio_id(entry)
+        if self._off_schedule_prompt_in_grace(radio_id):
+            self._last_off_schedule_flags = dict(off_state.flags)
+            self.active_entry_changed.emit(entry, source)
+            return True
         entry_key = (source, radio_id) + self._entry_transition_signature(entry)
         interval = self._prompt_interval_minutes("freq_prompt_interval")
         prompt_times = getattr(self, "_frequency_prompt_last_by_entry", None)
@@ -7154,5 +7185,7 @@ class SchedulerEngine(QObject):
                 if self._control_future is not None and not self._control_future.done():
                     self._force_retry_after_control = True
                 self._schedule_forced_retry()
+        elif want_freq_change and source in ("HF", "NET", "SOP"):
+            self._set_off_schedule_prompt_grace(target_radio_id)
         # Update UI state immediately regardless of control action.
         self.active_entry_changed.emit(effective_entry, source)

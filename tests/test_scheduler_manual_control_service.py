@@ -577,6 +577,52 @@ def test_scheduler_prompt_frequency_mode_holds_before_command(monkeypatch, tmp_p
         _shutdown_engine(engine)
 
 
+def test_scheduler_prompt_grace_suppresses_false_prompt_after_apply(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    settings.set("freq_enforcement_mode", "Prompt")
+
+    now = [1_000.0]
+    monkeypatch.setattr(scheduler_engine_module.time, "time", lambda: now[0])
+
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        emitted: list[dict[str, object]] = []
+        engine.off_schedule_detected.connect(lambda payload: emitted.append(dict(payload)))
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_fldigi_available", lambda: False)
+        monkeypatch.setattr(engine, "_js8_offset_authority_active", lambda *_args, **_kwargs: False)
+
+        entry = {
+            "frequency": "14.110",
+            "band": "20M",
+            "mode": "Digi",
+            "group_name": "AMRRON",
+            "target_scope": "device_profile",
+            "target_device_profile_id": 8,
+        }
+        engine.current_schedule_entry = dict(entry)
+        engine._status_flrig_freq_hz = 7_115_000
+        engine._status_flrig_freq_ts = now[0]
+        engine._status_summary_external_ts = now[0]
+        engine._set_off_schedule_prompt_grace(8, seconds=3.0)
+
+        engine._maybe_prompt_enforcement()
+
+        assert emitted == []
+        assert engine._prompt_active is False
+
+        now[0] += 4.0
+        engine._maybe_prompt_enforcement()
+
+        assert emitted
+        assert emitted[-1]["items"] == ["Frequency"]
+        assert emitted[-1]["device_profile_id"] == 8
+    finally:
+        _shutdown_engine(engine)
+
+
 def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_state(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()

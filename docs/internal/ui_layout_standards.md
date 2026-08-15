@@ -98,6 +98,11 @@ Scheduler startup semantics:
 - After startup, normal schedule ticks and user actions follow the configured
   frequency-control behavior, including Prompt, wait, activity, and manual
   control rules.
+- After FIO queues a scheduler-controlled frequency command for a radio, that
+  radio gets a short prompt grace period so stale pre-command status cannot
+  create a false off-schedule prompt. The grace is radio-scoped and expires
+  quickly; if fresh verification still shows the radio off schedule, normal
+  prompt behavior resumes.
 
 Saving a radio profile must preserve endpoint fields for linked app instances
 when those endpoint fields were not part of the user edit. A profile-name,
