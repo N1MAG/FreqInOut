@@ -5140,12 +5140,49 @@ class MainWindow(QMainWindow):
             device_profile_id=int(device_profile_id or 0),
         )
 
+    def _station_command_manual_control_state_for_radio(self, device_profile_id: int) -> object | None:
+        try:
+            radio_id = int(device_profile_id or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return None
+        try:
+            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
+            return service.get_state(radio_id) if service is not None and hasattr(service, "get_state") else None
+        except Exception:
+            return None
+
+    def _station_command_manual_control_service_available(self) -> bool:
+        service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
+        return service is not None and hasattr(service, "get_state")
+
+    @staticmethod
+    def _station_command_manual_state_has_qsy_target(state: object | None) -> bool:
+        target = getattr(state, "manual_target", None)
+        if target is None:
+            return False
+        try:
+            return int(getattr(target, "frequency_hz", 0) or 0) > 0
+        except Exception:
+            return False
+
     def _station_command_scheduler_manual_qsy_active_for_radio(self, device_profile_id: int) -> bool:
         try:
             ident = int(device_profile_id or 0)
         except Exception:
             return False
         if ident <= 0:
+            return False
+        state = self._station_command_manual_control_state_for_radio(ident)
+        if state is not None:
+            state_name = str(getattr(state, "state", "") or "").strip()
+            if state_name == "manual_qsy":
+                return True
+            if state_name == "manual_hold" and self._station_command_manual_state_has_qsy_target(state):
+                return True
+            return False
+        if self._station_command_manual_control_service_available():
             return False
         if self._station_command_manual_qsy_meta_for_radio(ident):
             return True
@@ -5223,16 +5260,39 @@ class MainWindow(QMainWindow):
         except Exception:
             self._station_command_manual_qsy_profile_id = None
 
-    def _station_command_clear_manual_qsy_meta(self) -> None:
+    def _station_command_clear_manual_qsy_meta(self, target_device_profile_id: int | None = None) -> None:
+        if target_device_profile_id is not None:
+            try:
+                target_id = int(target_device_profile_id or 0)
+                stored_id = int(getattr(self, "_station_command_manual_qsy_profile_id", 0) or 0)
+            except Exception:
+                target_id = 0
+                stored_id = 0
+            if target_id > 0 and stored_id not in {0, target_id}:
+                return
         self._station_command_manual_qsy_meta = None
         self._station_command_manual_qsy_profile_id = None
 
+    def _station_command_clear_pending_qsy_for_radio(self, device_profile_id: int | None) -> None:
+        try:
+            radio_id = int(device_profile_id or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return
+        pending = getattr(self, "_station_command_card_qsy_pending_keys", None)
+        if isinstance(pending, dict):
+            pending.pop(radio_id, None)
+
     def _station_command_scheduler_suspended_manually_for_radio(self, device_profile_id: int) -> bool:
         try:
-            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
-            state = service.get_state(int(device_profile_id or 0)) if service is not None and hasattr(service, "get_state") else None
+            state = self._station_command_manual_control_state_for_radio(int(device_profile_id or 0))
             if state is not None and getattr(state, "state", "") == "manual_suspend":
                 return True
+            if state is not None:
+                return False
+            if self._station_command_manual_control_service_available():
+                return False
             return scheduler_suspended_manually_for_radio(
                 device_profile_id=int(device_profile_id or 0),
                 suspended_manual=getattr(self, "_station_command_scheduler_suspended_manual", False),
@@ -5268,8 +5328,7 @@ class MainWindow(QMainWindow):
         if radio_id <= 0:
             return {"active": False, "until": None, "remaining_sec": None}
         try:
-            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
-            state = service.get_state(radio_id) if service is not None and hasattr(service, "get_state") else None
+            state = self._station_command_manual_control_state_for_radio(radio_id)
         except Exception:
             state = None
         if state is not None and getattr(state, "state", "") in {"manual_hold", "manual_qsy"}:
@@ -5775,7 +5834,7 @@ class MainWindow(QMainWindow):
                 target_device_profile_id=target_id,
             )
             if mins > 0:
-                self._station_command_clear_manual_qsy_meta()
+                self._station_command_clear_manual_qsy_meta(target_id)
             try:
                 self._station_command_timed_suspend_profile_id = int(target_id or 0)
             except Exception:
@@ -5832,7 +5891,9 @@ class MainWindow(QMainWindow):
         except TypeError:
             ok = resume_schedule_hold(self, self.settings)
         if ok:
-            self._station_command_clear_manual_qsy_meta()
+            self._station_command_clear_manual_qsy_meta(target_profile_id)
+            self._station_command_clear_pending_qsy_for_radio(target_profile_id)
+            self._invalidate_station_command_lane_cache()
             self._station_command_set_scheduler_suspended_manual(False, target_device_profile_id=target_profile_id)
             self._station_command_timed_suspend_profile_id = 0
         self._publish_station_command_feedback(
@@ -5841,7 +5902,7 @@ class MainWindow(QMainWindow):
             summary="Schedule resumed." if ok else "Resume blocked.",
             detail="" if ok else "RF Guard or scheduler state prevented resume.",
         )
-        self._refresh_station_command_controls_after_state_change()
+        self._refresh_station_command_bar(force=True)
 
     def _refresh_station_command_controls_after_state_change(self) -> None:
         try:
@@ -6283,13 +6344,13 @@ class MainWindow(QMainWindow):
         except Exception:
             theme = {}
         state = str(state_text or "").strip().lower()
-        role = "info" if selected else "muted"
+        role = "muted" if state in {"inactive", "configured inactive", "not enabled"} else "info"
         if state in {"ptt active", "rf guard blocked", "blocked", "error", "failed"}:
             role = "danger"
         elif state in {"manual hold", "manual qsy", "scheduler suspended", "needs review", "warning", "warn"}:
             role = "warning"
         font = button.font()
-        font.setBold(bool(selected))
+        font.setBold(True)
         button.setFont(font)
         button.setStyleSheet(button_style(role, theme))
 

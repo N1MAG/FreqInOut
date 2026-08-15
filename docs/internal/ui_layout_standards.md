@@ -77,8 +77,11 @@ Radio cards and radio-scoped scheduler lanes must not read or write legacy
 global manual-control keys such as `schedule_suspend_until` when a
 `device_profile_id` is known. Timed QSY, Timed Suspend, Indefinite Suspend, and
 Resume use durable `SchedulerManualControlState` rows for the selected radio.
+When the durable manual-control service exists, a missing row for a radio means
+that radio is not in manual control; it must not inherit stale singleton
+scheduler fields, card metadata, or legacy global hold state from another radio.
 Legacy/global keys may remain only as a one-radio compatibility boundary for
-older surfaces.
+older surfaces when the durable manual-control service is not available.
 
 Saving a radio profile must preserve endpoint fields for linked app instances
 when those endpoint fields were not part of the user edit. A profile-name,
@@ -116,11 +119,7 @@ is ample time left, such as `28m | Extend`. Under 10 minutes, switch to
 when the timed state expires or the user resumes the schedule. Button tooltips
 should include the local resume time.
 
-In compact layouts, QSY actions should stack as paired controls:
-
-- `QSY Now` above `QSY Suspend`.
-- `Suspend Scheduler` above `Resume Schedule`.
-
-The hold-duration selector belongs on the suspend row because it affects
-`QSY Suspend`, not the immediate `QSY Now` command or indefinite
-`Suspend Scheduler` action.
+In compact layouts, retain the same card command model. `QSY`, `Timed QSY`,
+`Timed Suspend`, `Resume`, and `Change Plan` may reflow or resize, but they
+must not change into the older single-radio control-strip wording or share
+state with another card.

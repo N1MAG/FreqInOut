@@ -174,6 +174,58 @@ def test_targeted_resume_applies_target_radio_lane_not_shared_current_entry() ->
     assert scheduler.current_schedule_entry["group_name"] == "AMRRON"
 
 
+def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    applied: list[tuple[dict[str, object], str]] = []
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.current_schedule_entry = {
+        "group_name": "LEGACY",
+        "frequency": "7.000",
+        "target_device_profile_id": 99,
+    }
+    scheduler.active_schedule_lanes = lambda force=False, now_utc=None: [
+        {
+            "device_profile_id": 8,
+            "current_source": "HF",
+            "current_entry": {
+                "group_name": "MAGNET",
+                "band": "20M",
+                "frequency": "14.115",
+            },
+        },
+        {
+            "device_profile_id": 9,
+            "current_source": "HF",
+            "current_entry": {
+                "group_name": "AMRRON",
+                "band": "20M",
+                "frequency": "14.110",
+            },
+        },
+    ]
+    scheduler._apply_schedule_entry = lambda entry, source, **kwargs: applied.append((dict(entry), source))
+
+    handled = SchedulerEngine._apply_active_schedule_lanes(
+        scheduler,
+        now_utc=datetime.datetime.now(datetime.timezone.utc),
+        force=True,
+    )
+
+    assert handled is True
+    assert [(entry["target_device_profile_id"], entry["group_name"], source) for entry, source in applied] == [
+        (8, "MAGNET", "HF"),
+        (9, "AMRRON", "HF"),
+    ]
+
+
 def test_per_radio_flrig_clients_use_configured_ports() -> None:
     from freqinout.core.station_runtime_manager import DeviceSettingsProxy
     from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings

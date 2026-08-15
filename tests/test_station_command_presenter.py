@@ -40,7 +40,7 @@ def test_qsy_action_state_enables_changed_frequency() -> None:
     assert state.timed_qsy_role == "info"
 
 
-def test_qsy_action_state_does_not_highlight_manual_state_without_new_selection() -> None:
+def test_qsy_action_state_highlights_manual_state_without_new_selection() -> None:
     state = qsy_action_state(
         selected_meta={"freq": 14.115},
         preferred_key="7.115000",
@@ -51,7 +51,9 @@ def test_qsy_action_state_does_not_highlight_manual_state_without_new_selection(
     )
 
     assert state.qsy_enabled is False
+    assert state.timed_qsy_enabled is True
     assert state.qsy_role == "muted"
+    assert state.timed_qsy_role == "warning"
 
 
 def test_scheduler_action_state_labels_timed_and_indefinite_suspend() -> None:

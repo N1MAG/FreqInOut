@@ -984,8 +984,13 @@ class SchedulerEngine(QObject):
         self._maybe_refresh_external_status_snapshot(force=True)
         self._apply_js8_offset_startup()
         # Perform an immediate evaluation so UI sees something right away.
+        # In multi-radio mode, assigned plan lanes are the source of truth;
+        # the legacy singleton evaluator is only a fallback when no radio
+        # lanes are active.
         try:
-            self._evaluate(now_utc=datetime.datetime.now(datetime.timezone.utc))
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            if not self._apply_active_schedule_lanes(now_utc=now_utc, force=True):
+                self._evaluate(now_utc=now_utc)
         except Exception as e:
             log.error("SchedulerEngine initial evaluate failed: %s", e)
 
@@ -4194,7 +4199,8 @@ class SchedulerEngine(QObject):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         try:
             self._maybe_refresh_external_status_snapshot()
-            self._evaluate(now_utc=now_utc)
+            if not self._apply_active_schedule_lanes(now_utc=now_utc):
+                self._evaluate(now_utc=now_utc)
             self._maybe_apply_fldigi()
             self._maybe_prompt_enforcement()
         except Exception as e:
@@ -5481,6 +5487,41 @@ class SchedulerEngine(QObject):
             row["target_device_profile_id"] = target_id
             return str(lane.get("current_source") or "NONE"), row
         return "", {}
+
+    def _apply_active_schedule_lanes(
+        self,
+        *,
+        now_utc: datetime.datetime,
+        force: bool = False,
+    ) -> bool:
+        lanes = self.active_schedule_lanes(force=force, now_utc=now_utc)
+        for lane in lanes:
+            if not isinstance(lane, dict):
+                continue
+            try:
+                radio_id = int(lane.get("device_profile_id") or 0)
+            except Exception:
+                radio_id = 0
+            if radio_id <= 0:
+                continue
+            source = str(lane.get("current_source") or "NONE")
+            entry = lane.get("current_entry")
+            if not isinstance(entry, dict) or not entry:
+                continue
+            suspended, _until = self._scheduling_suspended_for_radio(radio_id, now_utc)
+            if suspended:
+                continue
+            row = dict(entry)
+            row["target_scope"] = "device_profile"
+            row["target_device_profile_id"] = radio_id
+            self._apply_schedule_entry(
+                row,
+                source,
+                now_utc=now_utc,
+                force=force,
+                scheduler_transition=force,
+            )
+        return bool(lanes)
 
     def _evaluate(self, now_utc: datetime.datetime, force: bool = False) -> None:
         """

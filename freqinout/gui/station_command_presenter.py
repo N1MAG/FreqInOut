@@ -42,12 +42,13 @@ def qsy_action_state(
     changed = bool(selection_changed and selected_key)
     enabled_base = int(radio_id or 0) > 0 and armed
     qsy_enabled = enabled_base and changed
-    timed_qsy_enabled = enabled_base and (changed or timed_qsy_active)
+    qsy_active = bool(manual_qsy_active or timed_qsy_active)
+    timed_qsy_enabled = enabled_base and (changed or qsy_active)
     return QsyActionState(
         qsy_enabled=qsy_enabled,
         timed_qsy_enabled=timed_qsy_enabled,
         qsy_role="info" if changed else "muted",
-        timed_qsy_role="warning" if timed_qsy_active else ("info" if changed else "muted"),
+        timed_qsy_role="warning" if qsy_active else ("info" if changed else "muted"),
     )
 
 

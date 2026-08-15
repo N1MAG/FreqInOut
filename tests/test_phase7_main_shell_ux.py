@@ -3919,6 +3919,82 @@ def test_phase7_station_command_card_indefinite_suspend_is_radio_scoped(monkeypa
     app.processEvents()
 
 
+def test_phase7_station_command_manual_state_is_radio_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.shared_state import SchedulerManualControlState, SchedulerManualTarget
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeManualControlService:
+        def get_state(self, radio_id):
+            if int(radio_id) == 8:
+                return SchedulerManualControlState(
+                    radio_profile_id="radio_8",
+                    state="manual_hold",
+                    manual_target=SchedulerManualTarget(frequency_hz=14_115_000, source_action="qsy"),
+                    hold_until_utc=(
+                        datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(minutes=30)
+                    )
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                )
+            if int(radio_id) == 9:
+                return SchedulerManualControlState(radio_profile_id="radio_9", state="on_schedule")
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    window = MainWindow.__new__(MainWindow)
+    window.scheduler = SimpleNamespace(
+        _manual_control_service=FakeManualControlService(),
+        current_source="QSY",
+        _manual_qsy_active=True,
+        current_schedule_entry={"target_device_profile_id": 8},
+    )
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+
+    assert MainWindow._station_command_scheduler_manual_qsy_active_for_radio(window, 8) is True
+    assert MainWindow._station_command_scheduler_manual_qsy_active_for_radio(window, 9) is False
+    assert MainWindow._station_command_timed_suspend_active_for_radio(window, 8) is False
+
+    app.processEvents()
+
+
+def test_phase7_station_command_manual_service_suppresses_legacy_cross_radio_state(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.shared_state import SchedulerManualControlState
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeManualControlService:
+        def get_state(self, radio_id):
+            if int(radio_id) == 8:
+                return SchedulerManualControlState(radio_profile_id="radio_8", state="manual_qsy")
+            return None
+
+    window = MainWindow.__new__(MainWindow)
+    window.scheduler = SimpleNamespace(
+        _manual_control_service=FakeManualControlService(),
+        current_source="QSY",
+        _manual_qsy_active=True,
+        current_schedule_entry={"target_device_profile_id": 8},
+    )
+    window._station_command_manual_qsy_meta = {"target_device_profile_id": 8, "frequency": "14.115"}
+    window._station_command_manual_qsy_profile_id = 8
+    window._station_command_scheduler_suspended_manual = True
+    window._station_command_scheduler_suspended_manual_profile_id = 8
+    window._station_command_selected_profile_id = 9
+
+    assert MainWindow._station_command_scheduler_manual_qsy_active_for_radio(window, 8) is True
+    assert MainWindow._station_command_scheduler_manual_qsy_active_for_radio(window, 9) is False
+    assert MainWindow._station_command_scheduler_suspended_manually_for_radio(window, 9) is False
+
+    app.processEvents()
+
+
 def test_phase7_station_command_card_qsy_uses_card_radio_target(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
