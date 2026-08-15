@@ -980,8 +980,6 @@ class SchedulerEngine(QObject):
         self._shutdown_requested = False
         self._connect_scheduler_thread_call()
         self._connect_timer()
-        if not self.timer.isActive():
-            self.timer.start()
         self._maybe_refresh_external_status_snapshot(force=True)
         self._apply_js8_offset_startup()
         # Perform an immediate evaluation so UI sees something right away.
@@ -994,6 +992,8 @@ class SchedulerEngine(QObject):
                 self._evaluate(now_utc=now_utc)
         except Exception as e:
             log.error("SchedulerEngine initial evaluate failed: %s", e)
+        if not self.timer.isActive():
+            self.timer.start()
 
     def stop(self) -> None:
         """Stop periodic schedule evaluation."""
@@ -5568,6 +5568,10 @@ class SchedulerEngine(QObject):
                 force=force,
                 scheduler_transition=force,
                 ignore_wait_prompt=force,
+                ignore_coordination_prompt=force,
+                ignore_js8_busy=force,
+                ignore_varac_busy=force,
+                ignore_fldigi_busy=force,
             )
         return bool(lanes)
 

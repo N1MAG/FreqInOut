@@ -89,8 +89,12 @@ Scheduler startup semantics:
   performs one forced per-radio lane apply so every assigned plan takes control
   of its configured radio immediately.
 - That startup apply bypasses the frequency-control wait prompt because launch
-  establishes the scheduler's baseline authority. RF Guard/coordination checks
-  and radio-scoped routing still apply.
+  establishes the scheduler's baseline authority. It also bypasses JS8Call,
+  VarAC, and FLDigi receive-busy deferrals; hard PTT/transmit protections,
+  RF Guard block decisions, and radio-scoped routing still apply.
+- The periodic scheduler timer starts only after this startup lane apply returns,
+  so prompt evaluation cannot block launch before the assigned schedules are
+  invoked.
 - After startup, normal schedule ticks and user actions follow the configured
   frequency-control behavior, including Prompt, wait, activity, and manual
   control rules.

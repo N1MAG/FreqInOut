@@ -227,6 +227,10 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
         (9, "AMRRON", "HF"),
     ]
     assert all(kwargs["ignore_wait_prompt"] is True for _entry, _source, kwargs in applied)
+    assert all(kwargs["ignore_coordination_prompt"] is True for _entry, _source, kwargs in applied)
+    assert all(kwargs["ignore_js8_busy"] is True for _entry, _source, kwargs in applied)
+    assert all(kwargs["ignore_varac_busy"] is True for _entry, _source, kwargs in applied)
+    assert all(kwargs["ignore_fldigi_busy"] is True for _entry, _source, kwargs in applied)
 
 
 def test_per_radio_flrig_clients_use_configured_ports() -> None:
