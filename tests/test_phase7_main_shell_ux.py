@@ -2336,6 +2336,15 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
                 },
             ]
 
+        def list_runtime_active_device_profiles(self):
+            return [profile for profile in self.list_device_profiles() if int(profile.get("runtime_active", 0) or 0) == 1]
+
+        def get_device_profile(self, device_profile_id: int):
+            return next(
+                (profile for profile in self.list_device_profiles() if int(profile.get("id", 0) or 0) == int(device_profile_id)),
+                None,
+            )
+
         def set_runtime_primary_device_profile(self, device_profile_id: int):
             self.activated_ids.append(int(device_profile_id))
             return {
@@ -2387,7 +2396,6 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert [window.station_command_radio_combo.itemText(idx) for idx in range(window.station_command_radio_combo.count())] == [
         "DX10 (HF)",
         "icom (HF)",
-        "Spare Rig (HF)",
     ]
     assert window.station_command_radio_combo.currentData() == 2
     assert window.station_command_now_label.text() == "MAGNET 20M"
@@ -2411,17 +2419,8 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     MainWindow._on_station_command_radio_changed(window, 0)
 
     assert window._station_command_selected_profile_id == 1
-    assert window.multi_radio_store.activated_ids[-1] == 1
+    assert window.multi_radio_store.activated_ids == []
     assert window.station_command_now_label.text() == "MAGNET 40M"
-
-    window.station_command_radio_combo.setCurrentIndex(2)
-    MainWindow._on_station_command_radio_changed(window, 2)
-
-    assert window._station_command_selected_profile_id == 4
-    assert window.multi_radio_store.activated_ids[-1] == 4
-    assert window.station_command_now_label.text() == "unavailable"
-    assert window.station_command_state_label.text() == "Configured inactive"
-    assert window.station_command_next_label.text() == "Next: No assigned plan"
 
     for widget in (
         window.station_command_radio_combo,

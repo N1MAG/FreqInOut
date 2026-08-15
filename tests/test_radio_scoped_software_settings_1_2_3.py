@@ -83,6 +83,41 @@ def test_legacy_projection_includes_radio_scoped_software_paths() -> None:
     assert projected["varac_bbs_auto_archive_days"] == 21
 
 
+def test_radio_software_bundle_rejects_cross_profile_staged_state(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.multi_radio_store = MultiRadioStore(settings_db_path())
+    tab._profile_display_name = lambda profile: str(profile.get("name", "Radio"))
+    tab._radio_software_enabled = lambda profile, role: False
+
+    profile = {
+        "id": 8,
+        "name": "FIO-A",
+        "control_backend": "flrig",
+        "flrig_port": 12345,
+    }
+    staged_from_fio_b = {
+        "_source_profile_id": 9,
+        "flrig_port": "12346",
+        "fldigi_host": "127.0.0.1",
+        "fldigi_port": "7363",
+        "js8_host": "127.0.0.1",
+        "js8_port": "2243",
+        "message_paths": {},
+    }
+
+    try:
+        tab._save_radio_software_bundle(profile, staged_from_fio_b)
+    except ValueError as exc:
+        assert "belonged to a different radio" in str(exc)
+    else:
+        raise AssertionError("cross-profile radio software state should be rejected")
+
+
 def test_device_profile_persists_radio_owned_software_fields(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

@@ -3312,6 +3312,22 @@ def _runtime_active_device_profiles(conn: sqlite3.Connection) -> List[Dict[str, 
     return [_resolve_device_profile_links_conn(conn, dict(row)) for row in rows]
 
 
+def _runtime_active_device_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM device_profiles
+         WHERE runtime_active=1
+        """
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0] or 0)
+    except Exception:
+        return 0
+
+
 def _ensure_default_assignment(conn: sqlite3.Connection, device_id: int, operating_profile_id: int) -> None:
     if _effective_assignment_for_device(conn, int(device_id)):
         return
@@ -4236,6 +4252,22 @@ def project_runtime_active_device_to_legacy_settings(
     return updates
 
 
+def project_runtime_active_device_to_legacy_settings_if_single_active(
+    conn: sqlite3.Connection,
+    device_profile_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    ensure_multi_radio_settings_schema(conn)
+    active_count = _runtime_active_device_count(conn)
+    if active_count > 1:
+        log.debug(
+            "MultiRadioStore: skipped legacy settings projection because %s radios are active; "
+            "per-radio endpoint/settings saves remain scoped to device_profiles.",
+            active_count,
+        )
+        return None
+    return project_runtime_active_device_to_legacy_settings(conn, device_profile_id)
+
+
 def mirror_legacy_settings_into_runtime_active_device(
     conn: sqlite3.Connection,
     settings_values: Mapping[str, Any],
@@ -4246,6 +4278,14 @@ def mirror_legacy_settings_into_runtime_active_device(
         return None
     ensure_multi_radio_settings_schema(conn)
     if not is_multi_rig_migration_current(conn):
+        return None
+    active_count = _runtime_active_device_count(conn)
+    if active_count > 1:
+        log.debug(
+            "MultiRadioStore: skipped legacy settings mirror because %s radios are active; "
+            "per-radio endpoint/settings saves must be explicit.",
+            active_count,
+        )
         return None
     active_id = _normalize_runtime_primary_device(conn)
     if active_id is None:
@@ -4978,7 +5018,18 @@ class MultiRadioStore:
 
         _sync_derived_coordination_policies_conn(conn)
         if _coerce_bool_int(payload.get("runtime_active"), False):
-            return MultiRadioStore._set_runtime_active_device_conn(conn, int(saved["id"]))
+            if record["runtime_primary"]:
+                return MultiRadioStore._set_runtime_primary_device_conn(
+                    conn,
+                    int(saved["id"]),
+                    deactivate_others=False,
+                )
+            conn.execute("UPDATE device_profiles SET runtime_active=1 WHERE id=?", (int(saved["id"]),))
+            conn.commit()
+            _normalize_runtime_primary_device(conn)
+            project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(saved["id"]))
+            refreshed = _record_by_id(conn, "device_profiles", int(saved["id"])) or saved
+            return _resolve_device_profile_links_conn(conn, refreshed)
         _normalize_runtime_primary_device(conn)
         return _resolve_device_profile_links_conn(conn, saved)
 
@@ -5015,7 +5066,7 @@ class MultiRadioStore:
             )
         conn.commit()
         _normalize_runtime_primary_device(conn)
-        project_runtime_active_device_to_legacy_settings(conn, int(device_profile_id))
+        project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_profile_id))
         return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
     @staticmethod
@@ -5025,11 +5076,31 @@ class MultiRadioStore:
         *,
         deactivate_others: bool = True,
     ) -> Dict[str, Any]:
-        return MultiRadioStore._set_runtime_primary_device_conn(
-            conn,
-            int(device_profile_id),
-            deactivate_others=deactivate_others,
-        )
+        if deactivate_others:
+            return MultiRadioStore._set_runtime_primary_device_conn(
+                conn,
+                int(device_profile_id),
+                deactivate_others=True,
+            )
+        device = _record_by_id(conn, "device_profiles", int(device_profile_id))
+        if not device:
+            raise KeyError(f"Unknown device profile id: {device_profile_id}")
+        if _coerce_text(device.get("device_class", "tx_rx"), "tx_rx").lower() == "observer":
+            raise ValueError("Observer / SDR device profiles cannot become active transmit/receive radios.")
+        backend = _coerce_text(device.get("control_backend", "manual"), "manual").lower()
+        if backend not in SUPPORTED_RUNTIME_CONTROL_BACKENDS:
+            raise ValueError(f"Cannot activate backend until runtime support exists: {backend}")
+        assignment = _effective_assignment_for_device(conn, int(device_profile_id))
+        if not assignment:
+            operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
+            if not operating:
+                operating = _save_operating_profile_conn(conn, _seed_operating_defaults(_load_kv_settings(conn)))
+            _ensure_default_assignment(conn, int(device_profile_id), int(operating["id"]))
+        conn.execute("UPDATE device_profiles SET runtime_active=1 WHERE id=?", (int(device_profile_id),))
+        conn.commit()
+        _normalize_runtime_primary_device(conn)
+        project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_profile_id))
+        return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
     def get_runtime_active_device_profile(self) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
@@ -5923,7 +5994,7 @@ class MultiRadioStore:
                 current_target_id = int(active_swap.get("target_device_id", 0) or 0)
                 if int(device_profile_id) != current_target_id:
                     raise ValueError("Restore the active Temporary Plan Swap before changing the primary radio.")
-            return self._set_runtime_active_device_conn(conn, int(device_profile_id), deactivate_others=True)
+            return self._set_runtime_active_device_conn(conn, int(device_profile_id), deactivate_others=False)
 
     def set_runtime_primary_device_profile(self, device_profile_id: int) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -5999,7 +6070,7 @@ class MultiRadioStore:
                 conn.commit()
                 primary_id = _normalize_runtime_primary_device(conn)
                 if primary_id == int(device_profile_id):
-                    project_runtime_active_device_to_legacy_settings(conn, int(device_profile_id))
+                    project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_profile_id))
                 return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
             if int(device.get("runtime_primary", 0) or 0) == 1:
@@ -6013,9 +6084,13 @@ class MultiRadioStore:
             conn.commit()
             primary_id = _normalize_runtime_primary_device(conn)
             if primary_id is not None:
-                project_runtime_active_device_to_legacy_settings(conn, int(primary_id))
+                project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(primary_id))
             return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
     def sync_runtime_active_device_to_legacy_settings(self, device_profile_id: int) -> Dict[str, Any]:
         with self._connect() as conn:
             return project_runtime_active_device_to_legacy_settings(conn, int(device_profile_id)) or {}
+
+    def sync_runtime_active_device_to_legacy_settings_if_single_active(self, device_profile_id: int) -> Dict[str, Any]:
+        with self._connect() as conn:
+            return project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_profile_id)) or {}

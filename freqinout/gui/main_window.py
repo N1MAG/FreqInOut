@@ -5830,50 +5830,30 @@ class MainWindow(QMainWindow):
         ident = int(device_profile_id or 0)
         if ident <= 0:
             return False
-        try:
-            current_id = int((getattr(self, "_active_runtime_profile", {}) or {}).get("id", 0) or 0)
-        except Exception:
-            current_id = 0
-        if current_id == ident:
-            return True
-        store = getattr(self, "multi_radio_store", None)
-        if store is None or not hasattr(store, "set_runtime_primary_device_profile"):
-            return False
-        try:
-            profile = store.set_runtime_primary_device_profile(ident)
-        except ValueError as exc:
-            self._publish_station_command_feedback(
-                action_type="select_radio",
-                status="blocked",
-                summary="Radio selection blocked.",
-                detail=str(exc),
-            )
-            return False
-        except Exception as exc:
-            log.debug("MainWindow: station command radio activation failed: %s", exc)
+        choices = self._station_command_active_radio_choices(
+            getattr(self, "_station_command_last_choices", []) or self._station_command_configured_profiles()
+        )
+        profile = next(
+            (
+                choice
+                for choice in choices
+                if self._station_command_snapshot_id(choice) == ident
+            ),
+            None,
+        )
+        if profile is None:
             self._publish_station_command_feedback(
                 action_type="select_radio",
                 status="failed",
                 summary="Radio selection failed.",
-                detail=str(exc) or "Unable to make the selected radio the command target.",
+                detail="Only active, controllable radios can be selected in the control bar.",
             )
             return False
-        if isinstance(profile, dict):
-            self._active_runtime_profile = dict(profile)
         try:
-            if hasattr(self, "_on_runtime_device_profiles_changed"):
-                self._on_runtime_device_profiles_changed()
+            self._active_runtime_profile = dict(profile) if isinstance(profile, Mapping) else profile
         except Exception as exc:
-            log.debug("MainWindow: runtime refresh after station radio selection failed: %s", exc)
-        try:
-            self._publish_station_command_feedback(
-                action_type="select_radio",
-                status="succeeded",
-                summary=f"Command radio selected: {self._station_command_snapshot_name(profile)}.",
-                detail="The top command bar, scheduler, and QSY helpers now use this radio as the primary command target.",
-            )
-        except Exception:
-            pass
+            log.debug("MainWindow: station command radio selection cache failed: %s", exc)
+            return False
         return True
 
     @staticmethod
@@ -6131,7 +6111,7 @@ class MainWindow(QMainWindow):
 
     def _station_command_configured_profiles(self) -> list[dict]:
         try:
-            profiles = list(self.multi_radio_store.list_device_profiles())
+            profiles = list(self.multi_radio_store.list_runtime_active_device_profiles())
         except Exception:
             profiles = []
         return [dict(profile) for profile in profiles if self._station_command_is_controllable_profile(profile)]

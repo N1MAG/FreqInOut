@@ -894,6 +894,152 @@ def test_settings_manager_mirrors_flat_settings_into_runtime_active_device(monke
     assert active["launch_path"] == "C:/Apps/JS8Call"
 
 
+def test_multi_active_legacy_mirror_does_not_overwrite_radio_endpoints(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "runtime_active": True,
+            "runtime_primary": True,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "runtime_active": True,
+        }
+    )
+
+    settings.set_many({"flrig_host": "127.0.0.1", "flrig_port": 12346})
+    profiles = {row["name"]: row for row in store.list_device_profiles()}
+
+    assert {row["name"] for row in store.list_runtime_active_device_profiles()} == {"FIO-A", "FIO-B"}
+    assert profiles["FIO-A"]["id"] == radio_a["id"]
+    assert profiles["FIO-B"]["id"] == radio_b["id"]
+    assert profiles["FIO-A"]["flrig_port"] == 12345
+    assert profiles["FIO-B"]["flrig_port"] == 12346
+
+
+def test_saving_active_profile_preserves_sibling_runtime_and_endpoints(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "runtime_active": True,
+            "runtime_primary": True,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "runtime_active": True,
+        }
+    )
+
+    store.save_device_profile({**radio_b, "name": "FIO-B Updated", "runtime_active": True})
+    profiles = {int(row["id"]): row for row in store.list_device_profiles()}
+
+    assert int(profiles[int(radio_a["id"])]["runtime_active"]) == 1
+    assert int(profiles[int(radio_b["id"])]["runtime_active"]) == 1
+    assert profiles[int(radio_a["id"])]["flrig_port"] == 12345
+    assert profiles[int(radio_b["id"])]["flrig_port"] == 12346
+
+
+def test_runtime_active_selection_does_not_deactivate_existing_active_radios(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "flrig_port": 12345,
+            "runtime_active": True,
+            "runtime_primary": True,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "flrig_port": 12346,
+            "runtime_active": True,
+        }
+    )
+
+    store.set_runtime_active_device_profile(int(radio_b["id"]))
+    profiles = {int(row["id"]): row for row in store.list_device_profiles()}
+
+    assert int(profiles[int(radio_a["id"])]["runtime_active"]) == 1
+    assert int(profiles[int(radio_b["id"])]["runtime_active"]) == 1
+    assert int(profiles[int(radio_a["id"])]["runtime_primary"]) == 1
+    assert int(profiles[int(radio_b["id"])]["runtime_primary"]) == 0
+    assert profiles[int(radio_a["id"])]["flrig_port"] == 12345
+    assert profiles[int(radio_b["id"])]["flrig_port"] == 12346
+
+
+def test_multi_active_runtime_activation_does_not_project_legacy_endpoint(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    settings.set("flrig_port", 12345)
+
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "runtime_active": 0,
+            "runtime_primary": 0,
+        }
+    )
+
+    store.set_runtime_active_device_profile(int(radio_b["id"]))
+    settings.reload()
+    profiles = {int(row["id"]): row for row in store.list_device_profiles()}
+
+    assert int(profiles[int(radio_a["id"])]["runtime_active"]) == 1
+    assert int(profiles[int(radio_b["id"])]["runtime_active"]) == 1
+    assert int(profiles[int(radio_a["id"])]["runtime_primary"]) == 1
+    assert int(profiles[int(radio_b["id"])]["runtime_primary"]) == 0
+    assert settings.get("flrig_port") == 12345
+
+
 def test_linked_records_project_and_mirror(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

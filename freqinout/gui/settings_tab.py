@@ -13840,12 +13840,14 @@ class SettingsTab(QWidget):
         self._refresh_device_assignment_scope_label()
 
     def _radio_software_state_from_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        profile_id = int(profile.get("id", 0) or 0) if isinstance(profile, dict) else 0
         message_paths = {
             "flmsg": str(profile.get("flmsg_message_path", "") or "").strip(),
             "flamp": str(profile.get("flamp_message_path", "") or "").strip(),
             "varac": str(profile.get("varac_incoming_path", "") or "").strip(),
         }
         return {
+            "_source_profile_id": profile_id,
             "js8_host": str(profile.get("js8_host", "") or "").strip() or "127.0.0.1",
             "js8_port": str(profile.get("js8_port", "") or "2442"),
             "js8_offset_hz": str(profile.get("js8_offset_hz", 0) or 0),
@@ -13928,7 +13930,9 @@ class SettingsTab(QWidget):
         }
 
     def _capture_radio_software_view_state(self) -> Dict[str, Any]:
+        source_profile_id = int(self._software_radio_current_id or 0)
         return {
+            "_source_profile_id": source_profile_id,
             "js8_host": self.js8_host_edit.text().strip() or "127.0.0.1",
             "js8_port": self.js8_port_edit.text().strip() or "2442",
             "js8_offset_hz": self.js8_offset_edit.text().strip() or "0",
@@ -14243,6 +14247,34 @@ class SettingsTab(QWidget):
         return primary_id or None
 
     def _save_radio_software_bundle(self, profile: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+        profile_id = int(profile.get("id", 0) or 0)
+        source_profile_id = int(state.get("_source_profile_id", 0) or 0)
+        if profile_id > 0 and source_profile_id > 0 and source_profile_id != profile_id:
+            raise ValueError(
+                "Radio software settings were not saved because a staged edit belonged to a different radio. "
+                "Select the radio again and save that radio's settings."
+            )
+        if profile_id > 0 and source_profile_id <= 0:
+            profile_state = self._radio_software_state_from_profile(profile)
+            endpoint_keys = (
+                "flrig_port",
+                "fldigi_host",
+                "fldigi_port",
+                "js8_host",
+                "js8_port",
+                "js8_directed_path",
+                "js8_forms_path",
+            )
+            changed_endpoint_keys = [
+                key
+                for key in endpoint_keys
+                if str(state.get(key, "") or "").strip() != str(profile_state.get(key, "") or "").strip()
+            ]
+            if changed_endpoint_keys:
+                raise ValueError(
+                    "Radio software endpoint settings were not saved because the staged edit could not be "
+                    "matched to a radio. Select the radio again and save that radio's settings."
+                )
         payload = dict(profile)
         radio_name = self._profile_display_name(profile)
         message_paths = state.get("message_paths", {}) or {}
@@ -14452,7 +14484,7 @@ class SettingsTab(QWidget):
                 self._save_radio_software_bundle(profile, dict(state))
             primary_id = self._runtime_primary_device_profile_id()
             if primary_id:
-                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings(int(primary_id))
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(int(primary_id))
         except ValueError as exc:
             QMessageBox.warning(self, "Radio Software View", str(exc))
             return False
@@ -19749,7 +19781,9 @@ class SettingsTab(QWidget):
 
         if first_radio or is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
             try:
-                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings(int(saved.get("id", 0) or 0))
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings_if_single_active(
+                    int(saved.get("id", 0) or 0)
+                )
             except ValueError as exc:
                 QMessageBox.warning(self, "Radio Profiles", str(exc))
                 self._refresh_multi_radio_tables()
