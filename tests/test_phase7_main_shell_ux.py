@@ -3523,6 +3523,41 @@ def test_phase7_station_command_qsy_now_sets_manual_target_until_resume(monkeypa
     app.processEvents()
 
 
+def test_phase7_station_command_timed_suspend_clears_manual_qsy_marker(monkeypatch) -> None:
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    suspend_calls = []
+    monkeypatch.setattr(
+        main_mod,
+        "suspend_schedule_hold",
+        lambda _window, _settings, **kwargs: suspend_calls.append(dict(kwargs)) or 30,
+    )
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace()
+    window.action_feedback_service = None
+    window._station_command_selected_profile_id = 2
+    window._station_command_manual_qsy_meta = {"freq": 14.110, "target_device_profile_id": 2}
+    window._station_command_manual_qsy_profile_id = 2
+    window._station_command_timed_suspend_profile_id = 0
+    window._selected_station_command_hold_minutes = lambda: 30
+    window._refresh_station_command_controls_after_state_change = lambda *args, **kwargs: None
+
+    MainWindow._on_station_command_timed_suspend_clicked(window)
+
+    assert suspend_calls == [
+        {
+            "minutes": 30,
+            "warn_rf_conflict": True,
+            "target_device_profile_id": 2,
+        }
+    ]
+    assert window._station_command_manual_qsy_meta is None
+    assert window._station_command_manual_qsy_profile_id is None
+    assert window._station_command_timed_suspend_profile_id == 2
+
+
 def test_phase7_station_command_card_qsy_uses_card_radio_target(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])

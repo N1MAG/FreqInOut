@@ -75,6 +75,28 @@ def test_scheduler_action_state_labels_timed_and_indefinite_suspend() -> None:
     assert indefinite.timed_suspend_role == "warning"
 
 
+def test_scheduler_action_state_separates_manual_qsy_from_timed_suspend() -> None:
+    manual_qsy = scheduler_action_state(
+        manual_qsy_active=True,
+        timed_qsy_active=False,
+        timed_suspend_active=False,
+        scheduler_suspended_manual=False,
+        scheduler_state_text="On Schedule",
+    )
+    timed_qsy = scheduler_action_state(
+        timed_qsy_active=True,
+        timed_suspend_active=False,
+        scheduler_suspended_manual=False,
+        scheduler_state_text="Manual QSY",
+    )
+
+    assert manual_qsy.timed_suspend_text == "Timed Suspend"
+    assert manual_qsy.timed_suspend_role == "muted"
+    assert manual_qsy.resume_role == "warning"
+    assert timed_qsy.timed_suspend_role == "muted"
+    assert timed_qsy.resume_role == "warning"
+
+
 def test_station_command_countdown_and_timed_qsy_text() -> None:
     assert countdown_text(75) == "01:15"
     assert countdown_text(900) == "15m"

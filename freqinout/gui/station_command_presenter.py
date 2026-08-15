@@ -53,6 +53,7 @@ def qsy_action_state(
 
 def scheduler_action_state(
     *,
+    manual_qsy_active: bool = False,
     timed_qsy_active: bool,
     timed_suspend_active: bool,
     scheduler_suspended_manual: bool,
@@ -61,7 +62,8 @@ def scheduler_action_state(
     state = str(scheduler_state_text or "").strip().lower()
     suspend_active = timed_suspend_active or scheduler_suspended_manual or state == "scheduler suspended"
     resume_active = (
-        timed_qsy_active
+        manual_qsy_active
+        or timed_qsy_active
         or timed_suspend_active
         or scheduler_suspended_manual
         or state in {"manual hold", "manual qsy", "scheduler suspended"}

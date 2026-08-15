@@ -3668,11 +3668,11 @@ class MainWindow(QMainWindow):
             "}"
             "QToolButton#stationCommandRadioTileTimedSuspend::menu-button,"
             "QToolButton#stationCommandRadioTileSchedulerSuspend::menu-button {"
-            f"border-left: 1px solid {tile_border}; width: 20px;"
+            f"border-left: 1px solid {tile_border}; width: 16px;"
             "}"
             "QToolButton#stationCommandRadioTileTimedSuspend::menu-indicator,"
             "QToolButton#stationCommandRadioTileSchedulerSuspend::menu-indicator {"
-            f"image: url({chevron_path}); width: 10px; height: 7px; right: 5px;"
+            f"image: url({chevron_path}); width: 8px; height: 6px; right: 4px;"
             "}"
         )
         if station_command_bar_style != getattr(self, "_station_command_bar_style_signature", ""):
@@ -5227,9 +5227,15 @@ class MainWindow(QMainWindow):
         return self._station_command_scheduler_suspended_manually_for_radio(active_id)
 
     def _station_command_timed_suspend_active_for_radio(self, device_profile_id: int) -> bool:
+        if self._station_command_scheduler_manual_qsy_active_for_radio(device_profile_id):
+            return False
         hold_snapshot = self._station_command_hold_snapshot_for_radio(device_profile_id)
         if bool(hold_snapshot.get("active")):
-            return True
+            return timed_suspend_active_for_radio(
+                device_profile_id=int(device_profile_id or 0),
+                timed_suspend_profile_id=getattr(self, "_station_command_timed_suspend_profile_id", 0),
+                hold_active=True,
+            )
         try:
             snapshot = suspend_snapshot(self.settings, allow_reload=False)
         except Exception:
@@ -5705,6 +5711,8 @@ class MainWindow(QMainWindow):
                 warn_rf_conflict=True,
                 target_device_profile_id=int(getattr(self, "_station_command_selected_profile_id", 0) or 0) or None,
             )
+            if mins > 0:
+                self._station_command_clear_manual_qsy_meta()
             try:
                 self._station_command_timed_suspend_profile_id = int(
                     getattr(self, "_station_command_selected_profile_id", 0) or 0
@@ -6648,7 +6656,7 @@ class MainWindow(QMainWindow):
             tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             tile_layout = QGridLayout(tile)
             tile_layout.setContentsMargins(8, 7, 8, 7)
-            tile_layout.setHorizontalSpacing(6)
+            tile_layout.setHorizontalSpacing(8)
             tile_layout.setVerticalSpacing(5)
 
             name_btn = QPushButton(self._station_command_snapshot_name(snapshot), tile)
@@ -6693,6 +6701,8 @@ class MainWindow(QMainWindow):
             next_label.setToolTip(f"Next: {next_text}\nPlan: {plan_text}\nClick Change Plan to manage assignment.")
 
             qsy_btn = QPushButton("Manual QSY" if manual_qsy_active else "QSY", tile)
+            qsy_btn.setMinimumWidth(76)
+            qsy_btn.setMaximumWidth(96)
             qsy_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target.")
             qsy_btn.clicked.connect(
                 self._station_command_for_radio_qsy(
@@ -6709,7 +6719,8 @@ class MainWindow(QMainWindow):
             timer_btn.setObjectName("stationCommandRadioTileTimedSuspend")
             timer_btn.setText(timed_qsy_text(timed_qsy_active=timed_qsy_active))
             timer_btn.setPopupMode(QToolButton.MenuButtonPopup)
-            timer_btn.setMinimumWidth(176)
+            timer_btn.setMinimumWidth(128)
+            timer_btn.setMaximumWidth(150)
             timer_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and QSY with a timed scheduler suspend.")
             timer_btn.clicked.connect(
                 self._station_command_for_radio_qsy(
@@ -6757,6 +6768,7 @@ class MainWindow(QMainWindow):
             suspend_btn = QToolButton(tile)
             suspend_btn.setObjectName("stationCommandRadioTileSchedulerSuspend")
             scheduler_actions = scheduler_action_state(
+                manual_qsy_active=manual_qsy_active,
                 timed_qsy_active=timed_qsy_active,
                 timed_suspend_active=timed_suspend_active,
                 scheduler_suspended_manual=scheduler_suspended_manual,
@@ -6764,7 +6776,8 @@ class MainWindow(QMainWindow):
             )
             suspend_btn.setText(scheduler_actions.timed_suspend_text)
             suspend_btn.setPopupMode(QToolButton.MenuButtonPopup)
-            suspend_btn.setMinimumWidth(150)
+            suspend_btn.setMinimumWidth(128)
+            suspend_btn.setMaximumWidth(150)
             suspend_btn.setToolTip(f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}.")
             suspend_btn.setEnabled(ident > 0)
             suspend_btn.clicked.connect(self._station_command_for_radio(ident, self._on_station_command_timed_suspend_clicked))
@@ -6866,7 +6879,7 @@ class MainWindow(QMainWindow):
 
             freq_combo.currentIndexChanged.connect(_on_card_frequency_changed)
             for btn, role in (
-                (qsy_btn, "warning" if manual_qsy_active else "muted"),
+                (qsy_btn, "muted"),
                 (timer_btn, "warning" if timed_qsy_active else "muted"),
                 (suspend_btn, scheduler_actions.timed_suspend_role),
                 (resume_btn, scheduler_actions.resume_role),
@@ -6881,20 +6894,25 @@ class MainWindow(QMainWindow):
                 (assign_btn, "muted"),
             ):
                 btn.setStyleSheet(button_style(role, theme))
-                btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             _update_card_qsy_buttons()
 
             tile_layout.addWidget(name_btn, 0, 0, 1, 3)
             tile_layout.addWidget(health_btn, 0, 3)
             tile_layout.addWidget(freq_combo, 1, 0, 1, 4)
             tile_layout.addWidget(qsy_btn, 2, 0)
-            tile_layout.addWidget(timer_btn, 2, 1, 1, 2)
-            tile_layout.addWidget(suspend_btn, 2, 3)
+            tile_layout.addWidget(timer_btn, 2, 1)
+            tile_layout.addWidget(suspend_btn, 2, 2)
             tile_layout.addWidget(next_label, 3, 0, 1, 4)
             tile_layout.addWidget(resume_btn, 4, 0, 1, 2)
             tile_layout.addWidget(assign_btn, 4, 2, 1, 2)
-            tile_layout.setColumnStretch(1, 1)
+            tile_layout.setColumnStretch(0, 0)
+            tile_layout.setColumnStretch(1, 0)
+            tile_layout.setColumnStretch(2, 0)
             tile_layout.setColumnStretch(3, 1)
+            tile_layout.setColumnMinimumWidth(0, 76)
+            tile_layout.setColumnMinimumWidth(1, 128)
+            tile_layout.setColumnMinimumWidth(2, 128)
             if ident > 0:
                 tile_controls[ident] = {
                     "qsy_btn": qsy_btn,
@@ -6960,7 +6978,7 @@ class MainWindow(QMainWindow):
                 qsy_btn.setEnabled(action_state.qsy_enabled)
                 qsy_btn.setStyleSheet(button_style(action_state.qsy_role, theme))
             if isinstance(timer_btn, QToolButton):
-                timer_btn.setText(f"{countdown} | Extend QSY" if timed_qsy_active and countdown else timed_qsy_text(timed_qsy_active=timed_qsy_active))
+                timer_btn.setText(f"{countdown} | Extend" if timed_qsy_active and countdown else timed_qsy_text(timed_qsy_active=timed_qsy_active))
                 if isinstance(combo, QComboBox):
                     preferred_key = str(combo.property("stationCommandPreferredKey") or "")
                     selected_key = self._station_command_combo_selected_key(combo)
@@ -6984,20 +7002,21 @@ class MainWindow(QMainWindow):
                     timer_btn.setStyleSheet(button_style("warning" if timed_qsy_active else "muted", theme))
             if isinstance(suspend_btn, QToolButton):
                 scheduler_actions = scheduler_action_state(
+                    manual_qsy_active=manual_qsy_active,
                     timed_qsy_active=timed_qsy_active,
                     timed_suspend_active=timed_suspend_active,
                     scheduler_suspended_manual=scheduler_suspended_manual,
                     scheduler_state_text="Scheduler Suspended" if scheduler_suspended_manual else "",
                 )
                 suspend_text = (
-                    f"{countdown} | Extend Suspend"
+                    f"{countdown} | Extend"
                     if timed_suspend_active and countdown
                     else scheduler_actions.timed_suspend_text
                 )
                 suspend_btn.setText(suspend_text)
                 suspend_btn.setStyleSheet(button_style(scheduler_actions.timed_suspend_role, theme))
             if isinstance(resume_btn, QPushButton):
-                resume_active = timed_qsy_active or timed_suspend_active or scheduler_suspended_manual
+                resume_active = manual_qsy_active or timed_qsy_active or timed_suspend_active or scheduler_suspended_manual
                 resume_btn.setEnabled(radio_id > 0 and resume_active)
                 resume_btn.setStyleSheet(button_style("warning" if resume_active else "muted", theme))
 
