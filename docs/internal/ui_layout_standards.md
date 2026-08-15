@@ -59,6 +59,15 @@ frequencies are fallback or mismatch signals; they must not override another
 radio's assigned plan. This prevents one FLRig, RigCtl, JS8Call, or SDR path from
 leaking into another radio's card.
 
+Every command emitted from a radio card must carry the selected
+`device_profile_id` through the scheduler. The scheduler must resolve that
+target to the matching runtime client or the matching configured radio endpoint
+before transmitting. If no target-specific client can be resolved in a
+multi-active-radio configuration, the command is skipped and surfaced as a
+health/routing issue; it must not fall back to a singleton FLRig, RigCtl, or
+JS8Call client. Singleton fallback is only acceptable for an unambiguous
+single-active-radio compatibility path.
+
 Action semantics:
 
 - `QSY`: immediately commands the selected manual QSY target and places only

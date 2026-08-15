@@ -28,7 +28,8 @@ from freqinout.core.schedule_targeting import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.shared_state import BusyEvidence, PttConflictEvidence, SchedulerManualControlState, SchedulerManualTarget
 from freqinout.core.software_status_service import SoftwareStatusService
-from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
+from freqinout.core.station_runtime_manager import DeviceSettingsProxy
+from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient, rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
@@ -719,10 +720,10 @@ class SchedulerEngine(QObject):
             return self.rig, self.js8, self.varac, self.settings, None
         manager = getattr(self, "station_runtime_manager", None)
         if manager is None:
-            return self.rig, self.js8, self.varac, self.settings, radio_id
+            return self._control_context_from_device_profile(radio_id)
         has_runtime_lookup = hasattr(manager, "get_runtime_for_device") or hasattr(manager, "_runtimes")
         if not has_runtime_lookup:
-            return self.rig, self.js8, self.varac, self.settings, radio_id
+            return self._control_context_from_device_profile(radio_id)
         runtime = None
         try:
             if hasattr(manager, "get_runtime_for_device"):
@@ -734,10 +735,10 @@ class SchedulerEngine(QObject):
             runtime = None
         if runtime is None:
             log.warning(
-                "SchedulerEngine: no runtime found for targeted radio %s; refusing to use fallback control client.",
+                "SchedulerEngine: no runtime found for targeted radio %s; trying profile-backed control client.",
                 radio_id,
             )
-            return None, None, None, self.settings, radio_id
+            return self._control_context_from_device_profile(radio_id)
 
         runtime_settings = getattr(runtime, "settings_proxy", None) or self.settings
         return (
@@ -747,6 +748,100 @@ class SchedulerEngine(QObject):
             runtime_settings,
             radio_id,
         )
+
+    def _control_context_from_device_profile(
+        self,
+        radio_id: int,
+    ) -> Tuple[Optional[RigControlClient], Optional[JS8ControlClient], Optional[object], object, Optional[int]]:
+        """
+        Resolve a targeted control context directly from the configured radio.
+
+        Targeted commands must never fall back to the singleton/global rig
+        client. If the runtime manager is rebuilding, missing, or stale, this
+        profile-backed path creates a fresh client for the selected radio's
+        endpoint. If that cannot be done, the caller receives no client and the
+        command is skipped instead of being sent to another radio.
+        """
+        settings_proxy: object = self.settings
+        profile: Optional[Mapping[str, Any]] = None
+        try:
+            store = MultiRadioStore(settings_db_path())
+            loaded = store.get_device_profile(int(radio_id))
+            if isinstance(loaded, Mapping):
+                profile = loaded
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed loading profile for radio %s: %s", radio_id, exc)
+        if not profile:
+            log.warning(
+                "SchedulerEngine: no configured profile found for targeted radio %s; refusing fallback control client.",
+                radio_id,
+            )
+            return None, None, None, settings_proxy, radio_id
+
+        settings_proxy = DeviceSettingsProxy(profile, self.settings)
+        backend = str(profile.get("control_backend", "") or "").strip().lower()
+        rig_client: Optional[RigControlClient] = None
+        js8_client: Optional[JS8ControlClient] = None
+        if backend in {"flrig", "rigctld"}:
+            try:
+                rig_client = rig_control_client_from_settings(settings_proxy)
+            except Exception as exc:
+                log.warning(
+                    "SchedulerEngine: failed building %s control client for radio %s: %s",
+                    backend or "rig",
+                    radio_id,
+                    exc,
+                )
+        elif backend == "js8call":
+            try:
+                host = str(settings_proxy.get("js8_host", "127.0.0.1") or "127.0.0.1")
+                port = int(settings_proxy.get("js8_port", 2442) or 2442)
+                js8_client = JS8ControlClient(host=host, port=port, settings=settings_proxy)
+            except Exception as exc:
+                log.warning(
+                    "SchedulerEngine: failed building JS8Call control client for radio %s: %s",
+                    radio_id,
+                    exc,
+                )
+        else:
+            if self._target_may_use_singleton_control_client(radio_id):
+                return self.rig, self.js8, self.varac, self.settings, radio_id
+            log.warning(
+                "SchedulerEngine: targeted radio %s uses unsupported control backend %r; no command will be sent.",
+                radio_id,
+                backend or "manual",
+            )
+        return rig_client, js8_client, None, settings_proxy, radio_id
+
+    def _target_may_use_singleton_control_client(self, radio_id: int) -> bool:
+        """
+        Compatibility path for single-runtime tests and migrated single-rig use.
+
+        This deliberately rejects multi-active-radio configurations. When two
+        radios are active, the singleton client is ambiguous and using it for a
+        targeted command can key the wrong FLRig/JS8/RigCtl instance.
+        """
+        if self.rig is None and self.js8 is None and self.varac is None:
+            return False
+        try:
+            store = MultiRadioStore(settings_db_path())
+            active = store.list_runtime_active_device_profiles()
+        except Exception as exc:
+            log.debug("SchedulerEngine: could not inspect active radio count for singleton fallback: %s", exc)
+            return False
+        active_ids: List[int] = []
+        for profile in active:
+            try:
+                profile_id = int(profile.get("id") or 0)
+            except Exception:
+                profile_id = 0
+            if profile_id > 0:
+                active_ids.append(profile_id)
+        if not active_ids:
+            return False
+        if len(set(active_ids)) > 1:
+            return False
+        return int(active_ids[0]) == int(radio_id)
 
     def _cached_control_mode(self) -> str:
         mode = (self.settings.get("control_via", "FLRig") or "FLRig").upper()
@@ -6875,7 +6970,7 @@ class SchedulerEngine(QObject):
             control_mode=control_mode,
             rig_client=rig_client,
             js8_client=js8_client,
-            allow_global_fallback=target_radio_id is None or rig_client is self.rig,
+            allow_global_fallback=target_radio_id is None,
             entry_key=entry_key,
             source=source,
             freq_hz=freq_hz,

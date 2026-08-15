@@ -88,6 +88,103 @@ def test_scheduler_control_context_does_not_fallback_when_target_runtime_missing
     assert settings is scheduler.settings
 
 
+def test_scheduler_control_context_builds_target_client_from_store_when_manager_missing(monkeypatch) -> None:
+    import freqinout.core.scheduler_engine as scheduler_mod
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    class FakeStore:
+        def __init__(self, _path) -> None:
+            pass
+
+        def get_device_profile(self, device_profile_id: int):
+            if int(device_profile_id) != 9:
+                return None
+            return {
+                "id": 9,
+                "name": "FIO-B",
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12346,
+            }
+
+    def fake_client_from_settings(settings):
+        return SimpleNamespace(
+            name="profile-rig-b",
+            host=settings.get("flrig_host"),
+            port=int(settings.get("flrig_port")),
+        )
+
+    monkeypatch.setattr(scheduler_mod, "MultiRadioStore", FakeStore)
+    monkeypatch.setattr(scheduler_mod, "rig_control_client_from_settings", fake_client_from_settings)
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.rig = SimpleNamespace(name="global-rig", port=12345)
+    scheduler.js8 = SimpleNamespace(name="global-js8")
+    scheduler.varac = SimpleNamespace(name="global-varac")
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.station_runtime_manager = None
+
+    rig, js8, varac, settings, radio_id = SchedulerEngine._control_context_for_entry(
+        scheduler,
+        {"target_device_profile_id": 9, "frequency": "14.110"},
+    )
+
+    assert radio_id == 9
+    assert rig.name == "profile-rig-b"
+    assert rig.port == 12346
+    assert rig is not scheduler.rig
+    assert js8 is None
+    assert varac is None
+    assert settings.get("control_via") == "FLRig"
+    assert settings.get("flrig_port") == 12346
+
+
+def test_scheduler_control_context_builds_target_client_from_store_when_runtime_missing(monkeypatch) -> None:
+    import freqinout.core.scheduler_engine as scheduler_mod
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    class FakeManager:
+        def get_runtime_for_device(self, device_profile_id: int):
+            return None
+
+    class FakeStore:
+        def __init__(self, _path) -> None:
+            pass
+
+        def get_device_profile(self, device_profile_id: int):
+            if int(device_profile_id) != 8:
+                return None
+            return {
+                "id": 8,
+                "name": "FIO-A",
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12345,
+            }
+
+    def fake_client_from_settings(settings):
+        return SimpleNamespace(port=int(settings.get("flrig_port")))
+
+    monkeypatch.setattr(scheduler_mod, "MultiRadioStore", FakeStore)
+    monkeypatch.setattr(scheduler_mod, "rig_control_client_from_settings", fake_client_from_settings)
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.rig = SimpleNamespace(name="global-rig", port=12346)
+    scheduler.js8 = None
+    scheduler.varac = None
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.station_runtime_manager = FakeManager()
+
+    rig, _js8, _varac, _settings, radio_id = SchedulerEngine._control_context_for_entry(
+        scheduler,
+        {"target_device_profile_id": 8, "frequency": "7.115"},
+    )
+
+    assert radio_id == 8
+    assert rig.port == 12345
+    assert rig is not scheduler.rig
+
+
 def test_scheduler_queue_control_action_dispatches_to_target_rig_client() -> None:
     from freqinout.core.scheduler_engine import SchedulerEngine
 
@@ -200,6 +297,109 @@ def test_scheduler_manual_qsy_resolves_target_runtime_before_queue(monkeypatch) 
         assert queued[0]["rig_client"] is not fallback_rig
         assert queued[0]["allow_global_fallback"] is False
         assert queued[0]["freq_hz"] == 14_110_000
+    finally:
+        scheduler.stop()
+
+
+def test_scheduler_manual_qsy_uses_profile_client_when_manager_missing(monkeypatch) -> None:
+    import freqinout.core.scheduler_engine as scheduler_mod
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    fallback_rig = SimpleNamespace(name="global-rig", port=12345)
+    target_rig = SimpleNamespace(name="profile-rig-b", port=12346)
+
+    class FakeStore:
+        def __init__(self, _path) -> None:
+            pass
+
+        def get_device_profile(self, device_profile_id: int):
+            if int(device_profile_id) != 9:
+                return None
+            return {
+                "id": 9,
+                "name": "FIO-B",
+                "control_backend": "flrig",
+                "flrig_host": "127.0.0.1",
+                "flrig_port": 12346,
+            }
+
+    monkeypatch.setattr(scheduler_mod, "MultiRadioStore", FakeStore)
+    monkeypatch.setattr(scheduler_mod, "rig_control_client_from_settings", lambda _settings: target_rig)
+
+    scheduler = SchedulerEngine(rig=fallback_rig, js8=None, varac=None, fldigi_log=None, station_runtime_manager=None)
+    try:
+        queued: list[dict[str, object]] = []
+        monkeypatch.setattr(scheduler, "_flrig_running", lambda: True)
+        monkeypatch.setattr(scheduler, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(scheduler, "_shared_ptt_lock_status", lambda force=False: {"blocked": False})
+        monkeypatch.setattr(scheduler, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(scheduler, "_js8_busy_ok", lambda: True)
+        monkeypatch.setattr(scheduler, "_varac_busy_ok", lambda status=None: True)
+        monkeypatch.setattr(scheduler, "_should_delay_for_fldigi", lambda **kwargs: (False, None))
+        monkeypatch.setattr(scheduler, "_net_corrections_suppressed", lambda: False)
+        monkeypatch.setattr(scheduler, "_coordination_conflict_status", lambda *args, **kwargs: {})
+        monkeypatch.setattr(scheduler, "_queue_control_action", lambda **kwargs: queued.append(dict(kwargs)) or True)
+
+        scheduler.apply_manual_qsy(
+            {
+                "target_device_profile_id": 9,
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+            }
+        )
+
+        assert len(queued) == 1
+        assert queued[0]["rig_client"] is target_rig
+        assert queued[0]["rig_client"] is not fallback_rig
+        assert queued[0]["allow_global_fallback"] is False
+        assert queued[0]["freq_hz"] == 14_110_000
+    finally:
+        scheduler.stop()
+
+
+def test_scheduler_manual_qsy_target_never_allows_global_fallback_when_runtime_client_is_global(monkeypatch) -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    fallback_rig = SimpleNamespace(name="shared-rig")
+
+    class FakeManager:
+        def get_runtime_for_device(self, device_profile_id: int):
+            if int(device_profile_id) != 9:
+                return None
+            return SimpleNamespace(
+                rig_client=fallback_rig,
+                js8_control_client=None,
+                varac_status_client=None,
+                settings_proxy=SimpleNamespace(get=lambda key, default=None: "FLRig" if key == "control_via" else default),
+            )
+
+    scheduler = SchedulerEngine(rig=fallback_rig, js8=None, varac=None, fldigi_log=None, station_runtime_manager=FakeManager())
+    try:
+        queued: list[dict[str, object]] = []
+        monkeypatch.setattr(scheduler, "_flrig_running", lambda: True)
+        monkeypatch.setattr(scheduler, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(scheduler, "_shared_ptt_lock_status", lambda force=False: {"blocked": False})
+        monkeypatch.setattr(scheduler, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(scheduler, "_js8_busy_ok", lambda: True)
+        monkeypatch.setattr(scheduler, "_varac_busy_ok", lambda status=None: True)
+        monkeypatch.setattr(scheduler, "_should_delay_for_fldigi", lambda **kwargs: (False, None))
+        monkeypatch.setattr(scheduler, "_net_corrections_suppressed", lambda: False)
+        monkeypatch.setattr(scheduler, "_coordination_conflict_status", lambda *args, **kwargs: {})
+        monkeypatch.setattr(scheduler, "_queue_control_action", lambda **kwargs: queued.append(dict(kwargs)) or True)
+
+        scheduler.apply_manual_qsy(
+            {
+                "target_device_profile_id": 9,
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+            }
+        )
+
+        assert len(queued) == 1
+        assert queued[0]["rig_client"] is fallback_rig
+        assert queued[0]["allow_global_fallback"] is False
     finally:
         scheduler.stop()
 
