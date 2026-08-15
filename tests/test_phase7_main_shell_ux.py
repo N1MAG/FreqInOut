@@ -1563,7 +1563,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_hold_btn.clicked.connect(self._on_station_command_qsy_hold_clicked)" in source
     assert "self.station_command_suspend_btn.clicked.connect(self._on_station_command_pause_clicked)" in source
     assert "self.station_command_resume_btn.clicked.connect(self._on_station_command_resume_clicked)" in source
-    assert "self._station_command_set_scheduler_suspended_manual(True)" in source
+    assert "def _station_command_for_radio(" not in source
+    assert "self._station_command_set_scheduler_suspended_manual(True, target_device_profile_id=target_id)" in source
     assert 'self.station_command_state_label.setText("Scheduler Suspended")' in source
     assert "def _on_station_command_health_clicked" in source
     assert "self.station_command_health_widget.setCursor(Qt.PointingHandCursor)" in source
@@ -3858,6 +3859,64 @@ def test_phase7_station_command_timed_suspend_clears_manual_qsy_marker(monkeypat
     assert window._station_command_manual_qsy_meta is None
     assert window._station_command_manual_qsy_profile_id is None
     assert window._station_command_timed_suspend_profile_id == 2
+
+
+def test_phase7_station_command_card_indefinite_suspend_is_radio_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    override_values = []
+    monkeypatch.setattr(main_mod, "set_scheduler_enabled_override", lambda value: override_values.append(value))
+
+    class FakeManualControlService:
+        def __init__(self) -> None:
+            self.suspended = []
+
+        def suspend(self, radio_id, **kwargs):
+            self.suspended.append((radio_id, kwargs))
+
+        def resume(self, radio_id):
+            raise AssertionError("suspend should not resume")
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self._manual_control_service = FakeManualControlService()
+            self.enabled_values = []
+
+        def set_runtime_scheduler_enabled(self, enabled):
+            self.enabled_values.append(enabled)
+
+    feedback = []
+    window = MainWindow.__new__(MainWindow)
+    window.scheduler = FakeScheduler()
+    window.settings = SimpleNamespace()
+    window._station_command_selected_profile_id = 1
+    window._station_command_scheduler_suspended_manual = False
+    window._station_command_scheduler_suspended_manual_profile_id = 0
+    window._station_command_timed_suspend_profile_id = 0
+    window._publish_station_command_feedback = lambda **payload: feedback.append(payload)
+    window._refresh_station_command_controls_after_state_change = lambda *args, **kwargs: None
+
+    MainWindow._on_station_command_pause_clicked(window, 2)
+
+    assert window.scheduler._manual_control_service.suspended == [
+        (
+            2,
+            {
+                "reason_code": "operator_suspend",
+                "operator_source": "main_control_center",
+            },
+        )
+    ]
+    assert window.scheduler.enabled_values == []
+    assert override_values == [None]
+    assert window._station_command_scheduler_suspended_manual_profile_id == 2
+    assert feedback[-1]["summary"] == "Scheduler suspended."
+
+    app.processEvents()
 
 
 def test_phase7_station_command_card_qsy_uses_card_radio_target(monkeypatch) -> None:

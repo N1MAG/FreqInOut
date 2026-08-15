@@ -767,8 +767,9 @@ def set_active_hold_duration(
             scheduler.suspend_schedule(mins)
     else:
         set_suspend_until(settings, until)
-    _SUSPEND_CACHE["ts"] = until.timestamp()
-    _SUSPEND_CACHE["loaded_at"] = time.time()
+    if target_device_profile_id is None:
+        _SUSPEND_CACHE["ts"] = until.timestamp()
+        _SUSPEND_CACHE["loaded_at"] = time.time()
     if notify:
         notify_hold_state_changed(window, force_reload=False)
     return mins
@@ -820,8 +821,9 @@ def resume_schedule_hold(window, settings, *, target_device_profile_id: Optional
         if result is False:
             notify_hold_state_changed(window, force_reload=False)
             return False
-        _SUSPEND_CACHE["ts"] = 0
-        _SUSPEND_CACHE["loaded_at"] = time.time()
+        if target_device_profile_id is None:
+            _SUSPEND_CACHE["ts"] = 0
+            _SUSPEND_CACHE["loaded_at"] = time.time()
         notify_hold_state_changed(window, force_reload=False)
         return True
     set_suspend_until(settings, None)

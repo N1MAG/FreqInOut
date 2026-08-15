@@ -5229,13 +5229,15 @@ class MainWindow(QMainWindow):
 
     def _station_command_scheduler_suspended_manually_for_radio(self, device_profile_id: int) -> bool:
         try:
-            sched = getattr(self, "scheduler", None)
-            override = getattr(sched, "_runtime_scheduler_enabled_override", None) if sched is not None else None
+            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
+            state = service.get_state(int(device_profile_id or 0)) if service is not None and hasattr(service, "get_state") else None
+            if state is not None and getattr(state, "state", "") == "manual_suspend":
+                return True
             return scheduler_suspended_manually_for_radio(
                 device_profile_id=int(device_profile_id or 0),
                 suspended_manual=getattr(self, "_station_command_scheduler_suspended_manual", False),
                 suspended_profile_id=getattr(self, "_station_command_scheduler_suspended_manual_profile_id", 0),
-                runtime_scheduler_enabled_override=override,
+                runtime_scheduler_enabled_override=None,
                 selected_profile_id=getattr(self, "_station_command_selected_profile_id", 0),
             )
         except Exception:
@@ -5252,20 +5254,10 @@ class MainWindow(QMainWindow):
         if self._station_command_scheduler_manual_qsy_active_for_radio(device_profile_id):
             return False
         hold_snapshot = self._station_command_hold_snapshot_for_radio(device_profile_id)
-        if bool(hold_snapshot.get("active")):
-            return timed_suspend_active_for_radio(
-                device_profile_id=int(device_profile_id or 0),
-                timed_suspend_profile_id=getattr(self, "_station_command_timed_suspend_profile_id", 0),
-                hold_active=True,
-            )
-        try:
-            snapshot = suspend_snapshot(self.settings, allow_reload=False)
-        except Exception:
-            snapshot = {}
         return timed_suspend_active_for_radio(
             device_profile_id=int(device_profile_id or 0),
             timed_suspend_profile_id=getattr(self, "_station_command_timed_suspend_profile_id", 0),
-            hold_active=isinstance(snapshot, Mapping) and bool(snapshot.get("active")),
+            hold_active=bool(hold_snapshot.get("active")),
         )
 
     def _station_command_hold_snapshot_for_radio(self, device_profile_id: int) -> dict[str, object]:
@@ -5293,21 +5285,41 @@ class MainWindow(QMainWindow):
                         return {"active": True, "until": until, "remaining_sec": remaining}
                 except Exception:
                     pass
-        try:
-            active_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
-        except Exception:
-            active_id = 0
-        if radio_id == active_id:
-            try:
-                snapshot = suspend_snapshot(self.settings, allow_reload=False)
-            except Exception:
-                snapshot = {}
-            if isinstance(snapshot, Mapping) and bool(snapshot.get("active")):
-                return dict(snapshot)
         return {"active": False, "until": None, "remaining_sec": None}
 
-    def _station_command_set_scheduler_suspended_manual(self, suspended: bool) -> None:
+    def _station_command_set_scheduler_suspended_manual(
+        self,
+        suspended: bool,
+        *,
+        target_device_profile_id: int | None = None,
+    ) -> None:
         value = bool(suspended)
+        try:
+            target_id = int(target_device_profile_id or getattr(self, "_station_command_selected_profile_id", 0) or 0)
+        except Exception:
+            target_id = 0
+        if target_id > 0:
+            try:
+                service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
+                if service is not None:
+                    if value and hasattr(service, "suspend"):
+                        service.suspend(
+                            target_id,
+                            reason_code="operator_suspend",
+                            operator_source="main_control_center",
+                        )
+                    elif not value and hasattr(service, "resume"):
+                        service.resume(target_id)
+            except Exception as exc:
+                log.debug("MainWindow: failed to persist radio-scoped scheduler suspend: %s", exc)
+            self._station_command_scheduler_suspended_manual = value
+            self._station_command_scheduler_suspended_manual_profile_id = target_id if value else 0
+            try:
+                set_scheduler_enabled_override(None)
+            except Exception:
+                pass
+            return
+
         self._station_command_scheduler_suspended_manual = value
         if value:
             try:
@@ -5749,21 +5761,23 @@ class MainWindow(QMainWindow):
         )
         self._refresh_station_command_controls_after_state_change()
 
-    def _on_station_command_timed_suspend_clicked(self) -> None:
+    def _on_station_command_timed_suspend_clicked(self, target_device_profile_id: int | None = None) -> None:
+        try:
+            target_id = int(target_device_profile_id or getattr(self, "_station_command_selected_profile_id", 0) or 0) or None
+        except Exception:
+            target_id = None
         try:
             mins = suspend_schedule_hold(
                 self,
                 self.settings,
                 minutes=self._selected_station_command_hold_minutes(),
                 warn_rf_conflict=True,
-                target_device_profile_id=int(getattr(self, "_station_command_selected_profile_id", 0) or 0) or None,
+                target_device_profile_id=target_id,
             )
             if mins > 0:
                 self._station_command_clear_manual_qsy_meta()
             try:
-                self._station_command_timed_suspend_profile_id = int(
-                    getattr(self, "_station_command_selected_profile_id", 0) or 0
-                )
+                self._station_command_timed_suspend_profile_id = int(target_id or 0)
             except Exception:
                 self._station_command_timed_suspend_profile_id = 0
             self._publish_station_command_feedback(
@@ -5781,9 +5795,13 @@ class MainWindow(QMainWindow):
             )
         self._refresh_station_command_controls_after_state_change()
 
-    def _on_station_command_pause_clicked(self) -> None:
+    def _on_station_command_pause_clicked(self, target_device_profile_id: int | None = None) -> None:
         try:
-            self._station_command_set_scheduler_suspended_manual(True)
+            target_id = int(target_device_profile_id or getattr(self, "_station_command_selected_profile_id", 0) or 0) or None
+        except Exception:
+            target_id = None
+        try:
+            self._station_command_set_scheduler_suspended_manual(True, target_device_profile_id=target_id)
             self._station_command_timed_suspend_profile_id = 0
             self._publish_station_command_feedback(
                 action_type="suspend_schedule",
@@ -5800,8 +5818,11 @@ class MainWindow(QMainWindow):
             )
         self._refresh_station_command_controls_after_state_change()
 
-    def _on_station_command_resume_clicked(self) -> None:
-        target_profile_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0) or None
+    def _on_station_command_resume_clicked(self, target_device_profile_id: int | None = None) -> None:
+        try:
+            target_profile_id = int(target_device_profile_id or getattr(self, "_station_command_selected_profile_id", 0) or 0) or None
+        except Exception:
+            target_profile_id = None
         try:
             ok = resume_schedule_hold(
                 self,
@@ -5812,7 +5833,7 @@ class MainWindow(QMainWindow):
             ok = resume_schedule_hold(self, self.settings)
         if ok:
             self._station_command_clear_manual_qsy_meta()
-            self._station_command_set_scheduler_suspended_manual(False)
+            self._station_command_set_scheduler_suspended_manual(False, target_device_profile_id=target_profile_id)
             self._station_command_timed_suspend_profile_id = 0
         self._publish_station_command_feedback(
             action_type="resume_schedule",
@@ -6350,20 +6371,6 @@ class MainWindow(QMainWindow):
         self._station_command_radio_tile_controls = {}
         self._refresh_station_command_radio_tiles(page_choices, selected_id)
 
-    def _station_command_for_radio(self, device_profile_id: int, callback: Callable[[], None]) -> Callable[..., None]:
-        def run(*_args: object) -> None:
-            ident = int(device_profile_id or 0)
-            if ident <= 0:
-                return
-            previous_id = getattr(self, "_station_command_selected_profile_id", None)
-            self._station_command_selected_profile_id = ident
-            try:
-                callback()
-            finally:
-                self._station_command_selected_profile_id = previous_id
-
-        return run
-
     def _station_command_set_qsy_combo_to_meta(self, meta: Mapping[str, object] | None) -> None:
         combo = getattr(self, "station_command_freq_combo", None)
         if not isinstance(combo, QComboBox) or not isinstance(meta, Mapping):
@@ -6766,12 +6773,16 @@ class MainWindow(QMainWindow):
             suspend_btn.setMaximumWidth(150)
             suspend_btn.setToolTip(f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}.")
             suspend_btn.setEnabled(ident > 0)
-            suspend_btn.clicked.connect(self._station_command_for_radio(ident, self._on_station_command_timed_suspend_clicked))
+            suspend_btn.clicked.connect(
+                lambda _checked=False, radio_id=ident: self._on_station_command_timed_suspend_clicked(radio_id)
+            )
             suspend_menu = QMenu(suspend_btn)
             suspend_menu.setObjectName("stationCommandSchedulerSuspendMenu")
             manual_suspend_action = QAction("Indefinite", suspend_menu)
             manual_suspend_action.setToolTip("Suspend scheduler control until Resume.")
-            manual_suspend_action.triggered.connect(self._station_command_for_radio(ident, self._on_station_command_pause_clicked))
+            manual_suspend_action.triggered.connect(
+                lambda _checked=False, radio_id=ident: self._on_station_command_pause_clicked(radio_id)
+            )
             suspend_menu.addAction(manual_suspend_action)
             suspend_menu.addSeparator()
             for duration_index in range(duration_combo.count()):
@@ -6797,7 +6808,9 @@ class MainWindow(QMainWindow):
             resume_btn = QPushButton("Resume", tile)
             resume_btn.setToolTip(f"Resume scheduled control for {self._station_command_snapshot_name(snapshot)}.")
             resume_btn.setEnabled(ident > 0)
-            resume_btn.clicked.connect(self._station_command_for_radio(ident, self._on_station_command_resume_clicked))
+            resume_btn.clicked.connect(
+                lambda _checked=False, radio_id=ident: self._on_station_command_resume_clicked(radio_id)
+            )
             health_btn = QPushButton("Health", tile)
             health_btn.setObjectName("stationCommandRadioTileHealth")
             health_btn.setToolTip(self._station_command_radio_summary_tooltip(snapshot, selected_id))

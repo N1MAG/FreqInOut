@@ -73,6 +73,13 @@ health/routing issue; it must not fall back to a singleton FLRig, RigCtl, or
 JS8Call client. Singleton fallback is only acceptable for an unambiguous
 single-active-radio compatibility path.
 
+Radio cards and radio-scoped scheduler lanes must not read or write legacy
+global manual-control keys such as `schedule_suspend_until` when a
+`device_profile_id` is known. Timed QSY, Timed Suspend, Indefinite Suspend, and
+Resume use durable `SchedulerManualControlState` rows for the selected radio.
+Legacy/global keys may remain only as a one-radio compatibility boundary for
+older surfaces.
+
 Saving a radio profile must preserve endpoint fields for linked app instances
 when those endpoint fields were not part of the user edit. A profile-name,
 activation, schedule-assignment, or health-setting save must not default a linked

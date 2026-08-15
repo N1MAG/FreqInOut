@@ -1381,7 +1381,9 @@ def test_resume_schedule_hold_rf_safety_warn_only_resumes_without_prompt(monkeyp
 
     events = service.recent(scope="scheduler")
     assert result is True
-    assert scheduler.resume_kwargs == [{"ignore_coordination_prompt": True}]
+    assert scheduler.resume_kwargs == [
+        {"ignore_coordination_prompt": True, "target_device_profile_id": None}
+    ]
     assert len(events) == 1
     assert events[0].action_type == "resume_schedule"
     assert events[0].status == "partial"

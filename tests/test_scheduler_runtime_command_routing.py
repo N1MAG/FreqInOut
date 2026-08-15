@@ -1,7 +1,177 @@
 from __future__ import annotations
 
+import datetime
 from concurrent.futures import Future
 from types import SimpleNamespace
+
+
+def test_scheduler_radio_scoped_suspend_ignores_legacy_global_hold() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    future_ts = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).timestamp()
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.settings = SimpleNamespace(get=lambda key, default=None: future_ts if key == "schedule_suspend_until" else default)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler._manual_qsy_radio_id = None
+
+    suspended, until = SchedulerEngine._scheduling_suspended_for_radio(
+        scheduler,
+        8,
+        datetime.datetime.now(datetime.timezone.utc),
+    )
+
+    assert suspended is False
+    assert until is None
+
+
+def test_scheduler_radio_scoped_manual_suspend_blocks_only_that_radio() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            state = "manual_suspend" if int(radio_id) == 8 else "on_schedule"
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state=state)
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler._manual_qsy_radio_id = None
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    assert SchedulerEngine._scheduling_suspended_for_radio(scheduler, 8, now) == (True, None)
+    assert SchedulerEngine._scheduling_suspended_for_radio(scheduler, 9, now) == (False, None)
+
+
+def test_targeted_qsy_hold_does_not_update_legacy_suspend_cache(monkeypatch) -> None:
+    from freqinout.gui import qsy_helper
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def suspend_schedule(self, minutes, *, target_device_profile_id=None):
+            self.calls.append((minutes, target_device_profile_id))
+
+    class FailOnLegacySettings:
+        def set(self, key, value):
+            raise AssertionError(f"targeted hold should not write legacy setting {key}")
+
+    scheduler = FakeScheduler()
+    window = SimpleNamespace(scheduler=scheduler)
+    qsy_helper._SUSPEND_CACHE["ts"] = None
+    qsy_helper._SUSPEND_CACHE["loaded_at"] = 0.0
+
+    mins = qsy_helper.suspend_schedule_hold(
+        window,
+        FailOnLegacySettings(),
+        30,
+        warn_rf_conflict=False,
+        target_device_profile_id=8,
+    )
+
+    assert mins == 30
+    assert scheduler.calls == [(30, 8)]
+    assert qsy_helper._SUSPEND_CACHE["ts"] is None
+
+
+def test_targeted_resume_applies_target_radio_lane_not_shared_current_entry() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    class FakeManualControlService:
+        def __init__(self) -> None:
+            self.resumed = []
+
+        def resume(self, radio_id: int) -> None:
+            self.resumed.append(int(radio_id))
+
+    class FakeSignal:
+        def emit(self, *args, **kwargs) -> None:
+            return None
+
+    applied: list[tuple[dict[str, object], str, dict[str, object]]] = []
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.current_source = "HF"
+    scheduler.current_schedule_entry = {
+        "frequency": "14.110",
+        "band": "20M",
+        "group_name": "AMRRON",
+        "target_device_profile_id": 9,
+    }
+    scheduler._manual_qsy_active = False
+    scheduler._manual_qsy_entry_key = None
+    scheduler._manual_qsy_radio_id = None
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler._coordination_conflict_status = lambda *args, **kwargs: {}
+    scheduler._coordination_conflict_signature = lambda _conflict: ""
+    scheduler._clear_coordination_prompt = lambda: None
+    scheduler._reset_prompt_timers = lambda: None
+    scheduler._record_scheduler_event = lambda *args, **kwargs: None
+    scheduler._reset_control_if_running = lambda _reason: None
+    scheduler._control_future_stuck = lambda: False
+    scheduler._maybe_apply_fldigi = lambda: None
+    scheduler._schedule_forced_retry = lambda: None
+    scheduler.settings = SimpleNamespace(set=lambda *args, **kwargs: None)
+    scheduler.active_entry_changed = FakeSignal()
+    scheduler._prompt_active = False
+    scheduler._prompt_items = []
+    scheduler._prompt_entry_key = None
+    scheduler._latest_intent = None
+    scheduler._latest_intent_ts = 0.0
+    scheduler._retry_scheduled = False
+    scheduler._control_backoff_until = 0.0
+    scheduler._control_fail_count = 0
+    scheduler._pending_entry_key = None
+    scheduler._force_retry_after_control = False
+    scheduler._forced_retry_attempts_left = 0
+    scheduler._net_resume_apply_once = False
+    scheduler.active_schedule_lanes = lambda force=False: [
+        {
+            "device_profile_id": 8,
+            "current_source": "HF",
+            "current_entry": {
+                "frequency": "14.115",
+                "band": "20M",
+                "group_name": "MAGNET",
+            },
+        },
+        {
+            "device_profile_id": 9,
+            "current_source": "HF",
+            "current_entry": {
+                "frequency": "14.110",
+                "band": "20M",
+                "group_name": "AMRRON",
+            },
+        },
+    ]
+
+    def fake_apply(entry, source, **kwargs):
+        applied.append((dict(entry), source, dict(kwargs)))
+
+    scheduler._apply_schedule_entry = fake_apply
+
+    assert SchedulerEngine.resume_schedule(
+        scheduler,
+        target_device_profile_id=8,
+        ignore_coordination_prompt=True,
+    ) is True
+
+    assert scheduler._manual_control_service.resumed == [8]
+    assert len(applied) == 1
+    entry, source, kwargs = applied[0]
+    assert source == "HF"
+    assert entry["group_name"] == "MAGNET"
+    assert entry["frequency"] == "14.115"
+    assert entry["target_device_profile_id"] == 8
+    assert kwargs["ignore_suspend"] is True
+    assert scheduler.current_schedule_entry["group_name"] == "AMRRON"
 
 
 def test_per_radio_flrig_clients_use_configured_ports() -> None:

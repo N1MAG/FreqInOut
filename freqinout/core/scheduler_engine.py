@@ -1115,6 +1115,10 @@ class SchedulerEngine(QObject):
             return None
         return dt
 
+    def _radio_manual_suspend_active(self, radio_id: Optional[int]) -> bool:
+        state = self._manual_state_for_radio(radio_id)
+        return bool(state is not None and state.state == "manual_suspend")
+
     @staticmethod
     def _normalize_hold_minutes(value: object) -> int:
         try:
@@ -1138,8 +1142,10 @@ class SchedulerEngine(QObject):
         radio_id: Optional[int],
         now_utc: datetime.datetime,
     ) -> tuple[bool, Optional[datetime.datetime]]:
+        if radio_id is not None and self._radio_manual_suspend_active(radio_id):
+            return True, None
         dt = self._radio_suspend_until_dt(radio_id)
-        if dt is None:
+        if dt is None and radio_id is None:
             dt = self._suspend_until_dt()
         return (dt is not None and now_utc < dt), dt
 
@@ -2849,7 +2855,18 @@ class SchedulerEngine(QObject):
         ignore_coordination_prompt: bool = False,
         target_device_profile_id: Optional[int] = None,
     ) -> bool:
+        resume_radio_id = None
+        try:
+            resume_radio_id = int(target_device_profile_id or 0) or None
+        except Exception:
+            resume_radio_id = None
+        source = self.current_source or "NONE"
         entry = self.current_schedule_entry or {}
+        if resume_radio_id is not None:
+            lane_source, lane_entry = self._active_schedule_entry_for_radio(resume_radio_id, force=True)
+            if lane_entry:
+                source = lane_source or source
+                entry = lane_entry
         coordination_conflict = (
             self._coordination_conflict_status(entry, source="RESUME", force=True)
             if isinstance(entry, dict) and entry
@@ -2871,11 +2888,6 @@ class SchedulerEngine(QObject):
             )
             self.active_entry_changed.emit(entry, "RESUME")
             return False
-        resume_radio_id = None
-        try:
-            resume_radio_id = int(target_device_profile_id or 0) or None
-        except Exception:
-            resume_radio_id = None
         if resume_radio_id is None:
             resume_radio_id = self._manual_qsy_radio_id
         try:
@@ -2913,17 +2925,33 @@ class SchedulerEngine(QObject):
         if self._control_future_stuck():
             self._reset_control_executor("resume schedule (stuck control task)")
         self._net_resume_apply_once = True
-        self.apply_current_entry(
-            force=True,
-            ignore_wait_prompt=True,
-            ignore_coordination_prompt=ignore_coordination_prompt,
-            ignore_suspend=True,
-            ignore_net_suppression=True,
-            ignore_js8_busy=True,
-            ignore_varac_busy=True,
-            ignore_fldigi_busy=True,
-            apply_fldigi=True,
-        )
+        if target_device_profile_id is not None and entry:
+            self._apply_schedule_entry(
+                entry,
+                source,
+                now_utc=datetime.datetime.now(datetime.timezone.utc),
+                force=True,
+                ignore_wait_prompt=True,
+                ignore_coordination_prompt=ignore_coordination_prompt,
+                ignore_suspend=True,
+                ignore_net_suppression=True,
+                ignore_js8_busy=True,
+                ignore_varac_busy=True,
+                ignore_fldigi_busy=True,
+                apply_fldigi=True,
+            )
+        else:
+            self.apply_current_entry(
+                force=True,
+                ignore_wait_prompt=True,
+                ignore_coordination_prompt=ignore_coordination_prompt,
+                ignore_suspend=True,
+                ignore_net_suppression=True,
+                ignore_js8_busy=True,
+                ignore_varac_busy=True,
+                ignore_fldigi_busy=True,
+                apply_fldigi=True,
+            )
         self._maybe_apply_fldigi()
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
@@ -5423,6 +5451,36 @@ class SchedulerEngine(QObject):
             )
             lanes.append(out)
         return lanes
+
+    def _active_schedule_entry_for_radio(
+        self,
+        radio_id: Optional[int],
+        *,
+        force: bool = False,
+    ) -> tuple[str, Dict[str, object]]:
+        try:
+            target_id = int(radio_id or 0)
+        except Exception:
+            target_id = 0
+        if target_id <= 0:
+            return "", {}
+        for lane in self.active_schedule_lanes(force=force):
+            if not isinstance(lane, dict):
+                continue
+            try:
+                lane_id = int(lane.get("device_profile_id") or 0)
+            except Exception:
+                lane_id = 0
+            if lane_id != target_id:
+                continue
+            entry = lane.get("current_entry")
+            if not isinstance(entry, dict) or not entry:
+                return str(lane.get("current_source") or "NONE"), {}
+            row = dict(entry)
+            row["target_scope"] = "device_profile"
+            row["target_device_profile_id"] = target_id
+            return str(lane.get("current_source") or "NONE"), row
+        return "", {}
 
     def _evaluate(self, now_utc: datetime.datetime, force: bool = False) -> None:
         """
