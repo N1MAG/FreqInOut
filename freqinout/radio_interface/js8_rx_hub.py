@@ -8,6 +8,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, QCoreApplication
 
+try:  # PySide leaves Python wrappers behind after Qt deletes the C++ object.
+    from shiboken6 import isValid as _qt_is_valid
+except Exception:  # pragma: no cover - shiboken is present with PySide in normal app runs.
+    _qt_is_valid = None
+
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.radio_interface.js8_api_client import (
@@ -108,6 +113,17 @@ def _js8_hub_truthy(value: object) -> bool:
     return text in {"1", "true", "yes", "on", "ptt", "tx"}
 
 
+def _js8_hub_qt_object_valid(obj: object) -> bool:
+    if obj is None:
+        return False
+    if _qt_is_valid is None:
+        return True
+    try:
+        return bool(_qt_is_valid(obj))
+    except Exception:
+        return False
+
+
 class JS8RxHub(QObject):
     """
     Single-consumer hub for js8net.rx_queue with listener fan-out.
@@ -121,9 +137,8 @@ class JS8RxHub(QObject):
         app = QCoreApplication.instance()
         super().__init__(app)
         self._listeners: List[Callable[[List[dict]], None]] = []
-        self._timer = QTimer(self)
-        self._timer.setInterval(1000)
-        self._timer.timeout.connect(self._poll_queue)
+        self._timer: QTimer | None = None
+        self._ensure_timer()
         self._max_msgs = 200
         self._net_started = False
         self._using_native_api = False
@@ -142,12 +157,42 @@ class JS8RxHub(QObject):
         host_txt = str(host or "127.0.0.1").strip() or "127.0.0.1"
         port_num = int(port or 2442)
         key = (host_txt, port_num)
-        if key not in cls._instances:
+        existing = cls._instances.get(key)
+        if existing is not None and not existing.is_valid():
+            cls._instances.pop(key, None)
+            existing = None
+        if existing is None:
             cls._instances[key] = cls(host=host_txt, port=port_num)
         return cls._instances[key]
 
+    def is_valid(self) -> bool:
+        return _js8_hub_qt_object_valid(self)
+
+    def _ensure_timer(self) -> QTimer:
+        timer = getattr(self, "_timer", None)
+        if timer is not None and _js8_hub_qt_object_valid(timer):
+            try:
+                timer.isActive()
+                return timer
+            except RuntimeError:
+                timer = None
+            except Exception:
+                timer = None
+        elif timer is not None:
+            timer = None
+        if not self.is_valid():
+            raise RuntimeError("JS8RxHub Qt object has been deleted")
+        timer = QTimer(self)
+        timer.setInterval(1000)
+        timer.timeout.connect(self._poll_queue)
+        self._timer = timer
+        return timer
+
     def is_active(self) -> bool:
-        return self._timer.isActive()
+        try:
+            return self._ensure_timer().isActive()
+        except Exception:
+            return False
 
     def endpoint(self) -> Tuple[str, int]:
         return (self._host, int(self._port))
@@ -159,18 +204,25 @@ class JS8RxHub(QObject):
     def unregister_listener(self, cb: Callable[[List[dict]], None]) -> None:
         if cb in self._listeners:
             self._listeners.remove(cb)
-        if not self._listeners and self._timer.isActive():
-            self._timer.stop()
+        try:
+            timer = self._ensure_timer()
+            if not self._listeners and timer.isActive():
+                timer.stop()
+                self._detach_api_listener()
+        except Exception:
             self._detach_api_listener()
 
     def start(self, host: Optional[str] = None, port: Optional[int] = None) -> bool:
+        if not self.is_valid():
+            return False
         if host is not None:
             self._host = str(host or "").strip() or self._host
         if port is not None:
             self._port = int(port)
+        timer = self._ensure_timer()
         if self._start_native_api():
-            if not self._timer.isActive():
-                self._timer.start()
+            if not timer.isActive():
+                timer.start()
             return True
         if js8net is None:
             return False
@@ -180,14 +232,15 @@ class JS8RxHub(QObject):
             self._net_started = ensure_js8net_started(self._host, self._port)
             if not self._net_started:
                 return False
-        if not self._timer.isActive():
-            self._timer.start()
+        if not timer.isActive():
+            timer.start()
         return True
 
     def shutdown(self) -> None:
         try:
-            if self._timer.isActive():
-                self._timer.stop()
+            timer = getattr(self, "_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
         except Exception:
             pass
         self._detach_api_listener()

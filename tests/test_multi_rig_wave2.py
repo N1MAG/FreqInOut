@@ -326,6 +326,74 @@ def test_settings_tab_supports_multi_active_profiles_and_primary_selection(monke
         app.processEvents()
 
 
+def test_runtime_command_focus_radio_is_also_active(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "runtime_active": 0,
+            "runtime_primary": 0,
+        }
+    )
+
+    focused = store.set_runtime_primary_device_profile(int(radio_b["id"]))
+
+    assert int(focused["id"]) == int(radio_b["id"])
+    assert int(focused["runtime_primary"]) == 1
+    assert int(focused["runtime_active"]) == 1
+    active_ids = {int(row["id"]) for row in store.list_runtime_active_device_profiles()}
+    assert {int(radio_a["id"]), int(radio_b["id"])} <= active_ids
+
+
+def test_settings_use_radio_refreshes_runtime_projection(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = _qapplication_or_skip()
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+            "runtime_active": 0,
+            "runtime_primary": 0,
+        }
+    )
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self: None)
+
+    tab = SettingsTab()
+    refresh_calls = []
+    monkeypatch.setattr(tab, "_refresh_runtime_projection_ui", lambda **kwargs: refresh_calls.append(dict(kwargs)))
+    try:
+        _select_device_profiles(tab, [int(radio_b["id"])])
+        tab._activate_selected_device_profiles()
+
+        refreshed = store.get_device_profile(int(radio_b["id"]))
+        assert refreshed is not None
+        assert int(refreshed["runtime_active"]) == 1
+        assert refresh_calls == [{"refresh_multi_radio": True, "emit_saved": True}]
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_js8_rx_hub_instances_are_keyed_by_endpoint():
     app = _qapplication_or_skip()
     hub_a = JS8RxHub.instance("127.0.0.1", 2442)

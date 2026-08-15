@@ -392,6 +392,149 @@ def test_scheduler_manual_qsy_persists_primary_radio_manual_state(monkeypatch, t
         _shutdown_engine(engine)
 
 
+def test_scheduler_manual_qsy_persists_target_radio_manual_state(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
+    target = _radio(store, "AmRRON Rig")
+    assert primary is not None
+    service = SchedulerManualControlService(store)
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        engine.apply_manual_qsy(
+            {
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "vfo": "A",
+                "target_device_profile_id": int(target["id"]),
+            }
+        )
+
+        target_state = service.get_state(radio_shared_state_id(target["id"]))
+        primary_state = service.get_state(radio_shared_state_id(primary["id"]))
+        assert target_state.state == "manual_qsy"
+        assert target_state.manual_target is not None
+        assert target_state.manual_target.frequency_hz == 14_110_000
+        assert primary_state.state == "on_schedule"
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_manual_qsy_holds_off_schedule_until_resume(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
+    assert primary is not None
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 14_110_000
+
+        def get_ptt(self):
+            return False
+
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None)
+    try:
+        queued: list[tuple[str, int]] = []
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(engine, "_js8_busy_ok", lambda: True)
+        monkeypatch.setattr(engine, "_varac_busy_ok", lambda status=None: True)
+        monkeypatch.setattr(engine, "_should_delay_for_fldigi", lambda **kwargs: (False, None))
+        monkeypatch.setattr(engine, "_net_corrections_suppressed", lambda: False)
+        monkeypatch.setattr(engine, "_queue_control_action", lambda **kwargs: queued.append((kwargs["source"], kwargs["freq_hz"])) or True)
+
+        target_id = int(primary["id"])
+        engine.apply_manual_qsy(
+            {
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "target_device_profile_id": target_id,
+            }
+        )
+        engine._apply_schedule_entry(
+            {
+                "frequency": "7.110",
+                "band": "40M",
+                "mode": "Digi",
+                "target_device_profile_id": target_id,
+            },
+            "HF",
+            scheduler_transition=True,
+        )
+
+        assert queued == [("QSY", 14_110_000)]
+        assert engine._manual_qsy_active is True
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_timed_qsy_expiry_clears_target_radio_manual_state(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile() or _primary_radio(store)
+    assert primary is not None
+    service = SchedulerManualControlService(store)
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        engine.apply_manual_qsy(
+            {
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "target_device_profile_id": int(primary["id"]),
+            }
+        )
+        engine.settings.set("schedule_suspend_until", 1)
+
+        assert engine._suspend_until_dt() is None
+
+        state = service.get_state(radio_shared_state_id(primary["id"]))
+        assert engine._manual_qsy_active is False
+        assert engine._manual_qsy_radio_id is None
+        assert state.state == "on_schedule"
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_prompt_frequency_mode_holds_before_command(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    settings.set("freq_enforcement_mode", "Prompt")
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 7_115_000
+
+        def get_ptt(self):
+            return False
+
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None)
+    try:
+        queued: list[tuple[str, int]] = []
+        emitted: list[dict[str, object]] = []
+        engine.off_schedule_detected.connect(lambda payload: emitted.append(dict(payload)))
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(engine, "_queue_control_action", lambda **kwargs: queued.append((kwargs["source"], kwargs["freq_hz"])) or True)
+
+        engine._apply_schedule_entry({"frequency": "14.110", "band": "20M", "mode": "Digi"}, "HF")
+
+        assert queued == []
+        assert emitted
+        assert emitted[-1]["items"] == ["Frequency"]
+        assert engine._prompt_active is True
+    finally:
+        _shutdown_engine(engine)
+
+
 def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_state(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
@@ -893,6 +1036,96 @@ def test_scheduler_hold_and_resume_update_primary_radio_manual_state(monkeypatch
         assert resumed.state == "on_schedule"
         assert resumed.manual_target is None
         assert resumed.hold_until_utc is None
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_targeted_hold_does_not_suspend_other_radios(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.get_runtime_primary_device_profile() or _primary_radio(store, "FIO-A")
+    radio_b = _radio(store, "FIO-B")
+    assert radio_a is not None
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 7_115_000
+
+        def get_ptt(self):
+            return False
+
+    service = SchedulerManualControlService(store)
+    engine = SchedulerEngine(rig=_Rig(), js8=None, varac=None, fldigi_log=None)
+    try:
+        queued: list[tuple[str, int]] = []
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_varac_status", lambda: {"busy": False, "waiting_for_frequency": False, "reason": None})
+        monkeypatch.setattr(engine, "_js8_busy_ok", lambda: True)
+        monkeypatch.setattr(engine, "_varac_busy_ok", lambda status=None: True)
+        monkeypatch.setattr(engine, "_should_delay_for_fldigi", lambda **kwargs: (False, None))
+        monkeypatch.setattr(engine, "_net_corrections_suppressed", lambda: False)
+        monkeypatch.setattr(
+            engine,
+            "_queue_control_action",
+            lambda **kwargs: queued.append(
+                (
+                    kwargs["source"],
+                    kwargs["freq_hz"],
+                )
+            )
+            or True,
+        )
+
+        engine.suspend_schedule(30, target_device_profile_id=int(radio_b["id"]))
+
+        held_b = service.get_state(radio_shared_state_id(radio_b["id"]))
+        clear_a = service.get_state(radio_shared_state_id(radio_a["id"]))
+        assert held_b.state == "manual_hold"
+        assert clear_a.state == "on_schedule"
+
+        engine._apply_schedule_entry(
+            {
+                "frequency": "7.115",
+                "band": "40M",
+                "mode": "Digi",
+                "target_device_profile_id": int(radio_a["id"]),
+            },
+            "HF",
+        )
+        engine._apply_schedule_entry(
+            {
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "target_device_profile_id": int(radio_b["id"]),
+            },
+            "HF",
+        )
+
+        assert queued == [("HF", 7_115_000)]
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_targeted_resume_only_clears_target_radio(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.get_runtime_primary_device_profile() or _primary_radio(store, "FIO-A")
+    radio_b = _radio(store, "FIO-B")
+    assert radio_a is not None
+    service = SchedulerManualControlService(store)
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        engine.suspend_schedule(30, target_device_profile_id=int(radio_a["id"]))
+        engine.suspend_schedule(30, target_device_profile_id=int(radio_b["id"]))
+
+        assert engine.resume_schedule(target_device_profile_id=int(radio_a["id"])) is True
+
+        assert service.get_state(radio_shared_state_id(radio_a["id"])).state == "on_schedule"
+        assert service.get_state(radio_shared_state_id(radio_b["id"])).state == "manual_hold"
     finally:
         _shutdown_engine(engine)
 

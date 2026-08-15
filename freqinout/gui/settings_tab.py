@@ -2821,6 +2821,27 @@ class SettingsTab(QWidget):
         self.device_profile_selector_scroll.setMaximumHeight(92)
         self.device_profile_selector_scroll.setWidget(self.device_profile_selector_widget)
         configured_radios_layout.addWidget(self.device_profile_selector_scroll)
+        radio_selector_actions = QHBoxLayout()
+        radio_selector_actions.setContentsMargins(0, 0, 0, 0)
+        radio_selector_actions.setSpacing(8)
+        self.selector_activate_device_profile_btn = QPushButton("Use Radio")
+        self.selector_activate_device_profile_btn.setToolTip("Activate the selected radio so FIO can use it now.")
+        self.selector_activate_device_profile_btn.setAccessibleName("Use selected radio")
+        self.selector_activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
+        self.selector_deactivate_device_profile_btn = QPushButton("Stop Using")
+        self.selector_deactivate_device_profile_btn.setToolTip("Stop using the selected radio without deleting its configuration.")
+        self.selector_deactivate_device_profile_btn.setAccessibleName("Stop using selected radio")
+        self.selector_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)
+        self.selector_set_default_device_profile_btn = QPushButton("Make Default")
+        self.selector_set_default_device_profile_btn.setToolTip("Make the selected radio the station default command radio.")
+        self.selector_set_default_device_profile_btn.setAccessibleName("Make selected radio default")
+        self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
+        radio_selector_actions.addWidget(QLabel("Selected Radio:"))
+        radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
+        radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
+        radio_selector_actions.addWidget(self.selector_set_default_device_profile_btn)
+        radio_selector_actions.addStretch(1)
+        configured_radios_layout.addLayout(radio_selector_actions)
         self.status_group.setVisible(False)
         self.configured_radios_group = configured_radios_group
 
@@ -3140,6 +3161,21 @@ class SettingsTab(QWidget):
         self.device_profile_detail_label = QLabel("Select a radio to edit that radio's settings.")
         self.device_profile_detail_label.setWordWrap(True)
         detail_layout.addWidget(self.device_profile_detail_label)
+        detail_actions = QHBoxLayout()
+        detail_actions.setContentsMargins(0, 0, 0, 0)
+        detail_actions.setSpacing(8)
+        self.profile_activate_device_profile_btn = QPushButton("Use Radio")
+        self.profile_activate_device_profile_btn.setToolTip("Activate the selected radio so FIO can use it now.")
+        self.profile_activate_device_profile_btn.setAccessibleName("Use selected radio from profile")
+        self.profile_activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
+        self.profile_deactivate_device_profile_btn = QPushButton("Stop Using")
+        self.profile_deactivate_device_profile_btn.setToolTip("Stop using the selected radio without deleting its configuration.")
+        self.profile_deactivate_device_profile_btn.setAccessibleName("Stop using selected radio from profile")
+        self.profile_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)
+        detail_actions.addWidget(self.profile_activate_device_profile_btn)
+        detail_actions.addWidget(self.profile_deactivate_device_profile_btn)
+        detail_actions.addStretch(1)
+        detail_layout.addLayout(detail_actions)
 
         radio_identity_content = QWidget()
         radio_identity_layout = QVBoxLayout(radio_identity_content)
@@ -4022,9 +4058,12 @@ class SettingsTab(QWidget):
         schedule_actions = QHBoxLayout()
         self.assign_schedule_btn = QPushButton("Assign with RF Guard")
         self.assign_schedule_btn.clicked.connect(self._assign_frequency_plan_to_selected_radios)
+        self.swap_schedule_plans_btn = QPushButton("Swap Plans with RF Guard")
+        self.swap_schedule_plans_btn.clicked.connect(self._swap_selected_schedule_assignments)
         self.refresh_schedule_assignments_btn = QPushButton("Refresh")
         self.refresh_schedule_assignments_btn.clicked.connect(self._refresh_schedule_assignments_table)
         schedule_actions.addWidget(self.assign_schedule_btn)
+        schedule_actions.addWidget(self.swap_schedule_plans_btn)
         schedule_actions.addWidget(self.refresh_schedule_assignments_btn)
         schedule_actions.addStretch(1)
         schedule_assignments_layout.addLayout(schedule_actions)
@@ -11691,6 +11730,8 @@ class SettingsTab(QWidget):
         self._refresh_radio_specific_section_visibility()
         self._refresh_radio_settings_nav_label()
         self._refresh_radio_context_labels()
+        self._update_device_profiles_hint()
+        self._refresh_multi_rig_status_card()
 
     def _refresh_radio_settings_nav_label(self) -> None:
         if not hasattr(self, "radio_settings_toggle_btn"):
@@ -13604,7 +13645,7 @@ class SettingsTab(QWidget):
         if focused_name:
             hint = f"Selected radio: {focused_name}. " + hint
         if primary:
-            hint += f" Default radio: {primary}."
+            hint += f" Command focus: {primary}."
         if active_profiles:
             hint += f" Active radios: {', '.join(active_profiles)}."
         if observer_count:
@@ -13618,7 +13659,7 @@ class SettingsTab(QWidget):
             for row in self.device_profiles
             if isinstance(row, dict)
         ):
-            hint += " RIGCTLD radios use the configured TCP endpoint when selected as the default radio."
+            hint += " RIGCTLD radios use the configured TCP endpoint when selected as the command focus."
         if ptt_groups:
             hint += f" Shared PTT groups: {', '.join(ptt_groups[:5])}."
         conflict_groups = []
@@ -14466,7 +14507,7 @@ class SettingsTab(QWidget):
 
     def _multi_rig_status_text(self, status: MultiRigRuntimeStatus) -> tuple[str, str, str, str]:
         mode = status.startup_mode
-        primary_name = self._radio_name_by_id(status.primary_device_profile_id) or "Primary radio"
+        primary_name = self._radio_name_by_id(status.primary_device_profile_id) or "Command focus"
         active_count = len(status.active_device_profile_ids)
         if mode == STARTUP_FRESH_DEFAULT_READY:
             return (
@@ -14476,7 +14517,7 @@ class SettingsTab(QWidget):
                 "success",
             )
         if mode == STARTUP_MIGRATED:
-            detail = f"Primary radio: {primary_name}. Active radios: {active_count}."
+            detail = f"Command focus: {primary_name}. Active radios: {active_count}."
             if active_count > 1:
                 detail += " Messages and Map use all active radios by default."
             return (f"{primary_name} - Status", "Multi-Rig is ready.", detail, "success")
@@ -14499,6 +14540,45 @@ class SettingsTab(QWidget):
             "Multi-Rig setup is available when you are ready. Your current settings will be left unchanged until you confirm setup.",
             "info",
         )
+
+    def _selected_radio_multi_rig_status_text(
+        self,
+        profile: Optional[Dict[str, Any]],
+        status: MultiRigRuntimeStatus,
+    ) -> tuple[str, str, str, str] | None:
+        if not isinstance(profile, dict):
+            return None
+        if status.startup_mode not in {STARTUP_MIGRATED, STARTUP_FRESH_DEFAULT_READY}:
+            return None
+        radio_id = int(profile.get("id", 0) or 0)
+        if radio_id <= 0:
+            return None
+        name = self._profile_display_name(profile)
+        enabled = int(profile.get("enabled", 1) or 0) == 1
+        active = int(profile.get("runtime_active", 0) or 0) == 1
+        primary = int(profile.get("runtime_primary", 0) or 0) == 1
+        assignment = self._effective_assignment_map().get(radio_id, {})
+        assignment_name = str(assignment.get("operating_profile_name", "") or "").strip() or "Unassigned"
+        assignment_state = str(assignment.get("assignment_state", "") or "").strip().lower()
+        schedule_text = self._assignment_display_text(assignment_name, assignment_state)
+        state_bits = []
+        state_bits.append("Enabled" if enabled else "Not enabled")
+        state_bits.append("Active" if active else "Inactive")
+        if primary:
+            state_bits.append("Command Focus")
+        summary = f"This is the radio you are editing: {' | '.join(state_bits)}."
+        detail = (
+            f"Schedule: {schedule_text}. "
+            f"Connection: {self._device_endpoint_summary(profile)}. "
+            "Messages and Map still use all active radios by default."
+        )
+        if not enabled:
+            level = "warning"
+        elif active:
+            level = "success"
+        else:
+            level = "info"
+        return (f"{name} - Status", summary, detail, level)
 
     def _style_multi_rig_status_card(self, level: str) -> None:
         if not hasattr(self, "multi_rig_status_card"):
@@ -14537,7 +14617,9 @@ class SettingsTab(QWidget):
         if not hasattr(self, "multi_rig_status_card"):
             return
         status = self._current_multi_rig_runtime_status()
-        title, summary, detail, level = self._multi_rig_status_text(status)
+        selected_profile = self._selected_settings_radio_profile()
+        selected_status = self._selected_radio_multi_rig_status_text(selected_profile, status)
+        title, summary, detail, level = selected_status or self._multi_rig_status_text(status)
         self.multi_rig_status_title_label.setText(title)
         self.multi_rig_status_summary_label.setText(summary)
         self.multi_rig_status_detail_label.setObjectName("multiRigStatusDetail")
@@ -15743,14 +15825,31 @@ class SettingsTab(QWidget):
         self.edit_device_profile_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         self.activate_device_profile_btn.setEnabled(can_activate)
         self.activate_device_profile_btn.setStyleSheet(button_style("info" if can_activate else "muted", theme))
+        if hasattr(self, "selector_activate_device_profile_btn"):
+            self.selector_activate_device_profile_btn.setEnabled(can_activate)
+            self.selector_activate_device_profile_btn.setStyleSheet(button_style("primary" if can_activate else "muted", theme))
+        if hasattr(self, "profile_activate_device_profile_btn"):
+            self.profile_activate_device_profile_btn.setEnabled(can_activate)
+            self.profile_activate_device_profile_btn.setVisible(count == 1)
+            self.profile_activate_device_profile_btn.setStyleSheet(button_style("primary" if can_activate else "muted", theme))
         self.deactivate_device_profile_btn.setEnabled(can_deactivate)
         self.deactivate_device_profile_btn.setStyleSheet(button_style("warning" if can_deactivate else "muted", theme))
+        if hasattr(self, "selector_deactivate_device_profile_btn"):
+            self.selector_deactivate_device_profile_btn.setEnabled(can_deactivate)
+            self.selector_deactivate_device_profile_btn.setStyleSheet(button_style("warning" if can_deactivate else "muted", theme))
+        if hasattr(self, "profile_deactivate_device_profile_btn"):
+            self.profile_deactivate_device_profile_btn.setEnabled(can_deactivate)
+            self.profile_deactivate_device_profile_btn.setVisible(count == 1)
+            self.profile_deactivate_device_profile_btn.setStyleSheet(button_style("warning" if can_deactivate else "muted", theme))
         self.assign_radio_schedule_btn.setEnabled(can_assign_schedule)
         self.assign_radio_schedule_btn.setStyleSheet(button_style("info" if can_assign_schedule else "muted", theme))
         self.restore_radio_schedule_btn.setEnabled(can_restore_schedule)
         self.restore_radio_schedule_btn.setStyleSheet(button_style("warning" if can_restore_schedule else "muted", theme))
         self.set_active_device_profile_btn.setEnabled(can_set_active)
         self.set_active_device_profile_btn.setStyleSheet(button_style("info" if can_set_active else "muted", theme))
+        if hasattr(self, "selector_set_default_device_profile_btn"):
+            self.selector_set_default_device_profile_btn.setEnabled(can_set_active)
+            self.selector_set_default_device_profile_btn.setStyleSheet(button_style("info" if can_set_active else "muted", theme))
         self.delete_device_profile_btn.setEnabled(can_delete)
         self.delete_device_profile_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
 
@@ -16683,6 +16782,84 @@ class SettingsTab(QWidget):
             append_assignment_for_device(device_profile_id)
         return selected
 
+    def _update_schedule_assignment_action_buttons(self) -> None:
+        if not hasattr(self, "assign_schedule_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_schedule_assignment_rows()
+        can_assign = bool(getattr(self, "frequency_plans", []))
+        can_swap = (
+            len(selected) == 2
+            and all(int(row.get("frequency_plan_id") or 0) > 0 for row in selected)
+            and int(selected[0].get("frequency_plan_id") or 0) != int(selected[1].get("frequency_plan_id") or 0)
+        )
+        self.assign_schedule_btn.setEnabled(can_assign)
+        self.assign_schedule_btn.setStyleSheet(button_style("info" if can_assign else "muted", theme))
+        if hasattr(self, "swap_schedule_plans_btn"):
+            self.swap_schedule_plans_btn.setEnabled(can_swap)
+            self.swap_schedule_plans_btn.setStyleSheet(button_style("warning" if can_swap else "muted", theme))
+            if can_swap:
+                first = str(selected[0].get("device_name", "") or "first radio").strip()
+                second = str(selected[1].get("device_name", "") or "second radio").strip()
+                self.swap_schedule_plans_btn.setToolTip(
+                    f"Swap assigned Frequency Plans between {first} and {second}. RF Guard validates the post-swap state before saving."
+                )
+            else:
+                self.swap_schedule_plans_btn.setToolTip(
+                    "Select exactly two radios that already have different assigned Frequency Plans."
+                )
+
+    def _swap_selected_schedule_assignments(self) -> None:
+        selected = self._selected_schedule_assignment_rows()
+        if len(selected) != 2:
+            self._set_schedule_assignment_guidance(
+                "Schedule Assignment",
+                "Select exactly two radios with assigned Frequency Plans to swap.",
+                "warning",
+            )
+            return
+        try:
+            first_id = int(selected[0].get("device_profile_id") or 0)
+            second_id = int(selected[1].get("device_profile_id") or 0)
+        except Exception:
+            first_id = second_id = 0
+        if first_id <= 0 or second_id <= 0 or first_id == second_id:
+            self._set_schedule_assignment_guidance(
+                "Schedule Assignment",
+                "Select two different radios before swapping plans.",
+                "warning",
+            )
+            return
+        try:
+            self.multi_radio_store.swap_assigned_frequency_plans(first_id, second_id)
+        except ValueError as exc:
+            self._set_schedule_assignment_guidance("RF Guard Blocked Plan Swap", str(exc), "warning")
+            return
+        except Exception:
+            log.exception("Failed swapping schedule assignments.")
+            self._set_schedule_assignment_guidance(
+                "Schedule Assignment",
+                "Unable to swap the selected schedule assignments.",
+                "danger",
+            )
+            return
+        self._refresh_multi_radio_tables()
+        self._refresh_schedule_assignments_table(refresh_section_titles=False)
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+        first_name = str(selected[0].get("device_name", "") or "first radio").strip()
+        second_name = str(selected[1].get("device_name", "") or "second radio").strip()
+        self._set_schedule_assignment_guidance(
+            "Schedule Assignment Saved",
+            f"Swapped assigned Frequency Plans between {first_name} and {second_name} with RF Guard.",
+            "success",
+        )
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary=f"Swapped schedule assignments between {first_name} and {second_name}.",
+            action_type="schedule_assignment_swap",
+        )
+
     def _set_schedule_assignment_guidance(self, title: str, text: str, level: str = "info") -> None:
         if not hasattr(self, "schedule_assignments_guidance_card"):
             return
@@ -17080,6 +17257,7 @@ class SettingsTab(QWidget):
                 sel_chk = QCheckBox()
                 sel_chk.setFixedWidth(22)
                 sel_chk.setProperty("device_profile_id", device_profile_id)
+                sel_chk.stateChanged.connect(self._update_schedule_assignment_action_buttons)
                 sel_wrap = QWidget()
                 sel_layout = QHBoxLayout(sel_wrap)
                 sel_layout.setContentsMargins(0, 0, 0, 0)
@@ -17105,6 +17283,7 @@ class SettingsTab(QWidget):
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)
         if table.rowCount() > 0 and table.currentRow() < 0:
             table.selectRow(0)
+        self._update_schedule_assignment_action_buttons()
         if not self.frequency_plans:
             self._set_schedule_assignment_guidance(
                 "Schedule Assignment",
@@ -19657,7 +19836,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Use Now", "Unable to activate the selected radios.")
                 self._refresh_multi_radio_tables()
                 return
-        self._refresh_multi_radio_tables()
+        self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=activated > 0)
         if activated:
             self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")

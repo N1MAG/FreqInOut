@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -46,6 +47,13 @@ from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackService
+from freqinout.core.station_command_state import (
+    manual_qsy_meta_for_radio as station_command_manual_qsy_meta_for_radio,
+    scheduler_entry_radio_id as station_command_scheduler_entry_radio_id,
+    scheduler_manual_qsy_active_for_radio,
+    scheduler_suspended_manually_for_radio,
+    timed_suspend_active_for_radio,
+)
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -94,6 +102,12 @@ from freqinout.gui.help_registry import get_help_context
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.station_health_tab import StationHealthTab
+from freqinout.gui.station_command_presenter import (
+    countdown_text as station_command_countdown_text,
+    qsy_action_state,
+    scheduler_action_state,
+    timed_qsy_text,
+)
 from freqinout.gui.qsy_helper import (
     build_qsy_options,
     load_operating_groups,
@@ -276,6 +290,10 @@ class MainWindow(QMainWindow):
         self._station_command_manual_qsy_meta: dict[str, object] | None = None
         self._station_command_manual_qsy_profile_id: int | None = None
         self._station_command_scheduler_suspended_manual = False
+        self._station_command_timed_suspend_profile_id = 0
+        self._station_command_lane_cache_data: dict[int, dict[str, object]] | None = None
+        self._station_command_lane_cache_expires = 0.0
+        self._station_command_off_schedule_by_radio: dict[int, dict[str, object]] = {}
         self._settings_nav_context = "main"
         self._settings_nav_button_indices: dict[str, int] = {}
         self._messages_nav_context = "inbox"
@@ -634,7 +652,9 @@ class MainWindow(QMainWindow):
         self.station_command_health_widget.setObjectName("stationCommandHealth")
         self.station_command_health_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.station_command_health_widget.setCursor(Qt.PointingHandCursor)
-        self.station_command_health_widget.mousePressEvent = self._on_station_command_health_clicked
+        self.station_command_health_widget.mousePressEvent = (
+            lambda event, widget=self.station_command_health_widget: self._on_station_command_health_clicked(event, anchor=widget)
+        )
         self.station_command_health_layout = QHBoxLayout(self.station_command_health_widget)
         self.station_command_health_layout.setContentsMargins(0, 0, 0, 0)
         self.station_command_health_layout.setSpacing(6)
@@ -673,20 +693,29 @@ class MainWindow(QMainWindow):
         self._station_command_suspend_base_text = "Suspend Scheduler"
         self.station_command_radio_summary_label = QLabel("Radios")
         self.station_command_radio_summary_label.setObjectName("stationCommandRadioSummaryLabel")
-        self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)
+        self.station_command_radio_summary_scroll = QWidget(self.station_command_bar)
         self.station_command_radio_summary_scroll.setObjectName("stationCommandRadioSummaryScroll")
-        self.station_command_radio_summary_scroll.setWidgetResizable(True)
-        self.station_command_radio_summary_scroll.setFrameShape(QFrame.NoFrame)
-        self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.station_command_radio_summary_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.station_command_radio_summary_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.station_command_radio_summary_scroll.setFixedHeight(42)
-        self.station_command_radio_summary_widget = QWidget(self.station_command_radio_summary_scroll)
+        self.station_command_radio_summary_widget = self.station_command_radio_summary_scroll
         self.station_command_radio_summary_widget.setObjectName("stationCommandRadioSummary")
+        self.station_command_radio_summary_widget.setMinimumWidth(0)
+        self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.station_command_radio_summary_layout = QHBoxLayout(self.station_command_radio_summary_widget)
         self.station_command_radio_summary_layout.setContentsMargins(0, 0, 0, 0)
         self.station_command_radio_summary_layout.setSpacing(6)
-        self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)
+        self.station_command_radio_prev_btn = QPushButton("Prev")
+        self.station_command_radio_prev_btn.setObjectName("stationCommandRadioPagePrev")
+        self.station_command_radio_prev_btn.setToolTip("Show previous radios.")
+        self.station_command_radio_prev_btn.clicked.connect(lambda _checked=False: self._change_station_command_radio_page(-1))
+        self.station_command_radio_prev_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.station_command_radio_next_btn = QPushButton("Next")
+        self.station_command_radio_next_btn.setObjectName("stationCommandRadioPageNext")
+        self.station_command_radio_next_btn.setToolTip("Show next radios.")
+        self.station_command_radio_next_btn.clicked.connect(lambda _checked=False: self._change_station_command_radio_page(1))
+        self.station_command_radio_next_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self._station_command_radio_page = 0
+        self._station_command_radio_summary_signature: tuple[object, ...] | None = None
         self.station_command_radio_admin_btn = QPushButton("All Radios")
         self.station_command_radio_admin_btn.setObjectName("stationCommandRadioAdminToggle")
         self.station_command_radio_admin_btn.setToolTip("Show or hide the all-radio status and assignment panel.")
@@ -700,7 +729,7 @@ class MainWindow(QMainWindow):
         self.station_command_radio_admin_panel.setVisible(False)
         self._apply_station_command_bar_layout(force=True)
         try:
-            self.dependency_status_service.snapshot_changed.connect(lambda _snapshot: self._refresh_station_command_bar(force=True))
+            self.dependency_status_service.snapshot_changed.connect(lambda _snapshot: self._refresh_station_command_bar(force=False))
         except Exception:
             pass
         right_layout.addWidget(self.station_command_bar, 0)
@@ -815,7 +844,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.scheduler.off_schedule_cleared.connect(self._dismiss_off_schedule_prompt)
+            self.scheduler.off_schedule_cleared.connect(self._on_off_schedule_cleared)
         except Exception:
             pass
         try:
@@ -1047,6 +1076,8 @@ class MainWindow(QMainWindow):
 
     def _on_action_feedback_event(self, event: ActionFeedbackEvent) -> None:
         if str(event.scope or "").strip().lower() not in self._action_feedback_banner_scopes():
+            return
+        if str(getattr(event, "source_surface", "") or "").strip().lower() == "station_command_bar":
             return
         if not hasattr(self, "action_feedback_banner"):
             return
@@ -2082,26 +2113,34 @@ class MainWindow(QMainWindow):
         self._hold_state_signature = signature
         if sync_combos:
             self._sync_hold_duration_combos()
-        if snapshot.get("active"):
-            try:
-                if not self._hold_state_timer.isActive():
-                    self._hold_state_timer.start()
-            except Exception:
-                pass
+            if snapshot.get("active"):
+                try:
+                    if not self._hold_state_timer.isActive():
+                        self._hold_state_timer.start()
+                except Exception:
+                    pass
             if signature_changed:
                 self._broadcast_hold_state(snapshot)
                 self._apply_active_hold_status_panel(snapshot)
-            self._refresh_station_command_bar(force=False)
+                self._refresh_station_command_bar(force=False)
+            elif snapshot.get("active"):
+                self._broadcast_hold_state(snapshot)
+                self._update_station_command_hold_button_labels(snapshot)
+                self._update_station_command_radio_tile_hold_controls(snapshot)
             return
         try:
             if self._hold_state_timer.isActive():
                 self._hold_state_timer.stop()
         except Exception:
             pass
-        if signature_changed or was_active:
+        if signature_changed:
             self._broadcast_hold_state(snapshot)
             self._refresh_scheduler_status_panel()
             self._refresh_station_command_bar(force=False)
+        elif was_active:
+            self._broadcast_hold_state(snapshot)
+            self._update_station_command_hold_button_labels(snapshot)
+            self._update_station_command_radio_tile_hold_controls(snapshot)
 
     def on_hold_state_changed(self, force_reload: bool = False) -> None:
         snapshot = suspend_snapshot(self.settings, allow_reload=bool(force_reload))
@@ -2149,6 +2188,7 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
         for line in sig:
             lbl = QLabel(line)
@@ -2834,6 +2874,18 @@ class MainWindow(QMainWindow):
                 pass
             self._off_schedule_prompt = None
 
+    def _on_off_schedule_cleared(self) -> None:
+        self._dismiss_off_schedule_prompt()
+        try:
+            self._station_command_off_schedule_by_radio = {}
+        except Exception:
+            pass
+        try:
+            self._station_command_radio_summary_signature = None
+            self._refresh_station_command_bar(force=False)
+        except Exception:
+            pass
+
     def _dismiss_varac_wait_prompt(self) -> None:
         if hasattr(self, "_varac_wait_prompt") and self._varac_wait_prompt is not None:
             try:
@@ -2877,6 +2929,19 @@ class MainWindow(QMainWindow):
         items = items if isinstance(items, list) else []
         if not items:
             return
+        try:
+            entry = payload.get("entry") if isinstance(payload, Mapping) else {}
+            radio_id = self._station_command_scheduler_entry_radio_id(entry) if isinstance(entry, Mapping) else 0
+            if radio_id > 0:
+                state = getattr(self, "_station_command_off_schedule_by_radio", None)
+                if not isinstance(state, dict):
+                    state = {}
+                    self._station_command_off_schedule_by_radio = state
+                state[radio_id] = {"items": list(items), "entry": dict(entry)}
+                self._station_command_radio_summary_signature = None
+                self._refresh_station_command_bar(force=False)
+        except Exception:
+            pass
         msg = QMessageBox(self)
         msg.setWindowTitle("Off Schedule")
         if len(items) == 1:
@@ -3245,12 +3310,12 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._set_screen(idx)
 
-    def _on_station_command_health_clicked(self, event=None) -> None:
+    def _on_station_command_health_clicked(self, event=None, *, anchor: QWidget | None = None) -> None:
         try:
             ident = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
         except Exception:
             ident = 0
-        self._open_station_health_detail(device_profile_id=ident)
+        self._show_station_command_health_menu(device_profile_id=ident, anchor=anchor)
         try:
             if event is not None:
                 event.accept()
@@ -3557,14 +3622,62 @@ class MainWindow(QMainWindow):
         surface = theme.get("station_control_surface", theme.get("surface_alt", "#F6F8FA"))
         text = theme.get("station_control_text", theme.get("text", "#222222"))
         muted = theme.get("station_control_muted", theme.get("text_muted", "#6A737D"))
-        self.station_command_bar.setStyleSheet(
+        tile_surface = theme.get("station_control_tile_surface", theme.get("surface", "#FFFFFF"))
+        tile_selected_surface = theme.get("station_control_tile_selected_surface", theme.get("surface", "#FFFFFF"))
+        tile_border = theme.get("station_control_tile_border", theme.get("border", "#D3D7DD"))
+        tile_selected_border = theme.get("station_control_tile_selected_border", border)
+        chevron_path = (Path(__file__).resolve().parents[2] / "assets" / "dropdown-chevron.svg").as_posix()
+        station_command_bar_style = (
             "QFrame#stationCommandBar {"
             f"background: {surface}; border: 1px solid {border}; border-bottom: 2px solid {border}; border-radius: 6px;"
             "}"
             "QFrame#stationCommandBar QLabel {"
             f"background: transparent; color: {text};"
             "}"
+            "QFrame#stationCommandRadioTile {"
+            f"background: {tile_surface}; border: 1px solid {tile_border}; border-radius: 6px;"
+            "}"
+            "QFrame#stationCommandRadioTile[selected=\"true\"] {"
+            f"background: {tile_selected_surface}; border: 2px solid {tile_selected_border};"
+            "}"
+            "QLabel#stationCommandRadioTileNow {"
+            f"color: {text}; font-weight: 800;"
+            "}"
+            "QLabel#stationCommandRadioTileState, QLabel#stationCommandRadioTileNext {"
+            f"color: {muted};"
+            "}"
+            "QPushButton#stationCommandRadioTileHealth {"
+            "padding-left: 8px; padding-right: 8px;"
+            "}"
+            "QComboBox#stationCommandRadioTileFrequency {"
+            f"background: {theme.get('surface', '#FFFFFF')}; color: {text};"
+            f"border: 1px solid {tile_border}; border-radius: 5px; padding: 4px 34px 4px 8px; font-weight: 800;"
+            "}"
+            "QComboBox#stationCommandRadioTileFrequency::drop-down {"
+            f"border-left: 1px solid {tile_border}; width: 28px; subcontrol-origin: padding; subcontrol-position: top right;"
+            "}"
+            "QComboBox#stationCommandRadioTileFrequency::down-arrow {"
+            f"image: url({chevron_path}); width: 12px; height: 8px;"
+            "}"
+            "QComboBox#stationCommandRadioTileDuration {"
+            f"background: {theme.get('surface', '#FFFFFF')}; color: {muted};"
+            f"border: 1px solid {tile_border}; border-radius: 5px; padding: 4px 24px 4px 8px;"
+            "}"
+            "QComboBox#stationCommandRadioTileDuration::drop-down {"
+            "border: none; width: 22px;"
+            "}"
+            "QToolButton#stationCommandRadioTileTimedSuspend::menu-button,"
+            "QToolButton#stationCommandRadioTileSchedulerSuspend::menu-button {"
+            f"border-left: 1px solid {tile_border}; width: 20px;"
+            "}"
+            "QToolButton#stationCommandRadioTileTimedSuspend::menu-indicator,"
+            "QToolButton#stationCommandRadioTileSchedulerSuspend::menu-indicator {"
+            f"image: url({chevron_path}); width: 10px; height: 7px; right: 5px;"
+            "}"
         )
+        if station_command_bar_style != getattr(self, "_station_command_bar_style_signature", ""):
+            self.station_command_bar.setStyleSheet(station_command_bar_style)
+            self._station_command_bar_style_signature = station_command_bar_style
         for label in (
             getattr(self, "station_command_radio_label", None),
             getattr(self, "station_command_now_caption", None),
@@ -3614,18 +3727,24 @@ class MainWindow(QMainWindow):
             self.station_command_radio_admin_panel.setStyleSheet("QWidget#stationCommandRadioAdminPanel {background: transparent;}")
         manual_qsy_active = self._station_command_scheduler_manual_qsy_active()
         scheduler_suspended_manual = self._station_command_scheduler_suspended_manually()
+        try:
+            timed_hold_active = bool((getattr(self, "_hold_state_snapshot", None) or {}).get("active"))
+        except Exception:
+            timed_hold_active = False
         button_roles = (
-            (getattr(self, "station_command_qsy_btn", None), "info"),
-            (getattr(self, "station_command_hold_btn", None), "warning"),
-            (getattr(self, "station_command_suspend_btn", None), "muted"),
+            (getattr(self, "station_command_qsy_btn", None), "warning" if manual_qsy_active else "info"),
+            (getattr(self, "station_command_hold_btn", None), "warning" if timed_hold_active else "info"),
+            (getattr(self, "station_command_suspend_btn", None), "warning" if scheduler_suspended_manual else "muted"),
             (
                 getattr(self, "station_command_resume_btn", None),
-                "warning" if manual_qsy_active or scheduler_suspended_manual else "muted",
+                "warning" if manual_qsy_active or scheduler_suspended_manual or timed_hold_active else "muted",
             ),
             (
                 getattr(self, "station_command_radio_admin_btn", None),
                 "info" if bool(getattr(self, "_station_command_radio_admin_expanded", False)) else "muted",
             ),
+            (getattr(self, "station_command_radio_prev_btn", None), "muted"),
+            (getattr(self, "station_command_radio_next_btn", None), "muted"),
         )
         for btn, role in button_roles:
             if btn is not None:
@@ -3671,7 +3790,9 @@ class MainWindow(QMainWindow):
             self.station_command_suspend_btn,
             self.station_command_resume_btn,
             getattr(self, "station_command_radio_summary_label", None),
+            getattr(self, "station_command_radio_prev_btn", None),
             getattr(self, "station_command_radio_summary_scroll", None),
+            getattr(self, "station_command_radio_next_btn", None),
             getattr(self, "station_command_radio_admin_btn", None),
             getattr(self, "station_command_radio_admin_panel", None),
         ):
@@ -3704,9 +3825,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_next_label, 3, 2, 1, 3)
             if hasattr(self, "station_command_radio_summary_label") and hasattr(self, "station_command_radio_summary_scroll"):
                 layout.addWidget(self.station_command_radio_summary_label, 4, 0)
-                layout.addWidget(self.station_command_radio_summary_scroll, 4, 1, 1, 3)
+                layout.addWidget(self.station_command_radio_summary_scroll, 4, 1, 1, 4)
             if hasattr(self, "station_command_radio_admin_btn"):
-                layout.addWidget(self.station_command_radio_admin_btn, 4, 4)
+                layout.addWidget(self.station_command_radio_admin_btn, 4, 5)
             if hasattr(self, "station_command_radio_admin_panel"):
                 layout.addWidget(self.station_command_radio_admin_panel, 5, 0, 1, 5)
             layout.setColumnStretch(4, 1)
@@ -3733,9 +3854,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_next_label, 1, 3, 1, 7)
             if hasattr(self, "station_command_radio_summary_label") and hasattr(self, "station_command_radio_summary_scroll"):
                 layout.addWidget(self.station_command_radio_summary_label, 2, 0)
-                layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 10)
+                layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 11)
             if hasattr(self, "station_command_radio_admin_btn"):
-                layout.addWidget(self.station_command_radio_admin_btn, 2, 11, 1, 2)
+                layout.addWidget(self.station_command_radio_admin_btn, 2, 12)
             if hasattr(self, "station_command_radio_admin_panel"):
                 layout.addWidget(self.station_command_radio_admin_panel, 3, 0, 1, 13)
             layout.setColumnStretch(9, 1)
@@ -4591,21 +4712,40 @@ class MainWindow(QMainWindow):
 
     def _station_command_schedule_group_band(self, snapshot: object | None = None) -> tuple[str, str]:
         try:
+            if snapshot is not None:
+                lane_group, lane_band = self._station_command_lane_current_group_band(
+                    self._station_command_snapshot_id(snapshot)
+                )
+                if lane_group:
+                    return lane_group, lane_band
+                snapshot_group = self._station_command_group_display_name(
+                    self._station_command_value(snapshot, "schedule_group", "")
+                )
+                snapshot_band = str(
+                    self._station_command_value(snapshot, "schedule_band", "")
+                    or ""
+                ).strip().upper()
+                if snapshot_group:
+                    return snapshot_group, snapshot_band
+                snapshot_group = self._station_command_group_display_name(
+                    self._station_command_value(snapshot, "current_group", "")
+                    or self._station_command_value(snapshot, "group", "")
+                    or self._station_command_value(snapshot, "group_name", "")
+                )
+                snapshot_band = str(
+                    self._station_command_value(snapshot, "current_band", "")
+                    or self._station_command_value(snapshot, "band", "")
+                    or ""
+                ).strip().upper()
+                if snapshot_group:
+                    return snapshot_group, snapshot_band
             sched = getattr(self, "scheduler", None)
             entry = getattr(sched, "current_schedule_entry", {}) if sched is not None else {}
             if isinstance(entry, Mapping):
                 source = str(getattr(sched, "current_source", "") or "").strip().upper()
                 selected_radio_id = self._station_command_snapshot_id(snapshot) if snapshot is not None else 0
-                entry_radio_id = 0
-                for key in ("target_device_profile_id", "device_profile_id", "radio_id"):
-                    try:
-                        entry_radio_id = int(entry.get(key) or 0)
-                    except Exception:
-                        entry_radio_id = 0
-                    if entry_radio_id > 0:
-                        break
-                if source != "QSY" and selected_radio_id > 0:
-                    scheduler_radio_id = entry_radio_id
+                if selected_radio_id > 0:
+                    scheduler_radio_id = self._station_command_scheduler_entry_radio_id(entry)
                     if scheduler_radio_id <= 0 and sched is not None:
                         target_getter = getattr(sched, "_primary_manual_control_radio_id", None)
                         if callable(target_getter):
@@ -4613,7 +4753,9 @@ class MainWindow(QMainWindow):
                                 scheduler_radio_id = int(target_getter() or 0)
                             except Exception:
                                 scheduler_radio_id = 0
-                    if scheduler_radio_id > 0 and scheduler_radio_id != selected_radio_id:
+                    if scheduler_radio_id <= 0:
+                        return "", ""
+                    if scheduler_radio_id != selected_radio_id:
                         return "", ""
                 current_raw = self._station_command_value(snapshot, "current_frequency_label", "") if snapshot is not None else ""
                 entry_freq = self._station_command_parse_frequency(entry.get("frequency"))
@@ -4639,64 +4781,410 @@ class MainWindow(QMainWindow):
             pass
         return "", ""
 
-    def _station_command_scheduler_manual_qsy_active(self) -> bool:
-        if self._station_command_manual_qsy_meta_for_selected():
+    @staticmethod
+    def _station_command_parse_json_list(value: object) -> list[dict[str, object]]:
+        if isinstance(value, list):
+            raw = value
+        else:
+            try:
+                raw = json.loads(str(value or "[]"))
+            except Exception:
+                raw = []
+        return [dict(item) for item in raw if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _station_command_parse_json_ref_items(value: object) -> list[object]:
+        if isinstance(value, list):
+            raw = value
+        else:
+            try:
+                raw = json.loads(str(value or "[]"))
+            except Exception:
+                raw = []
+        refs: list[object] = []
+        for item in raw:
+            if isinstance(item, Mapping):
+                refs.append(dict(item))
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    refs.append(text)
+        return refs
+
+    @staticmethod
+    def _station_command_hhmm_to_minutes(value: object) -> int | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            if ":" in text:
+                hour_text, minute_text = text.split(":", 1)
+            elif len(text) in {3, 4} and text.isdigit():
+                hour_text, minute_text = text[:-2], text[-2:]
+            else:
+                return None
+            hour = int(hour_text)
+            minute = int(minute_text)
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                return None
+            return hour * 60 + minute
+        except Exception:
+            return None
+
+    @staticmethod
+    def _station_command_day_name(value: object) -> str:
+        text = str(value or "").strip().upper()
+        aliases = {
+            "SUN": "SUNDAY",
+            "MON": "MONDAY",
+            "TUE": "TUESDAY",
+            "TUES": "TUESDAY",
+            "WED": "WEDNESDAY",
+            "THU": "THURSDAY",
+            "THUR": "THURSDAY",
+            "THURS": "THURSDAY",
+            "FRI": "FRIDAY",
+            "SAT": "SATURDAY",
+        }
+        return aliases.get(text, text)
+
+    @staticmethod
+    def _station_command_next_day_name(day: str) -> str:
+        days = ("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
+        try:
+            return days[(days.index(day) + 1) % len(days)]
+        except ValueError:
+            return "SUNDAY"
+
+    @staticmethod
+    def _station_command_day_index(day: str) -> int | None:
+        days = ("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
+        try:
+            return days.index(day)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _station_command_ref_active_now(cls, ref: Mapping[str, object], now_utc: datetime.datetime) -> bool:
+        start = cls._station_command_hhmm_to_minutes(
+            ref.get("start_utc") or ref.get("start") or ref.get("start_local")
+        )
+        end = cls._station_command_hhmm_to_minutes(
+            ref.get("end_utc") or ref.get("end") or ref.get("end_local")
+        )
+        if start is None or end is None:
+            return False
+        today = now_utc.strftime("%A").upper()
+        row_day = cls._station_command_day_name(ref.get("day_utc") or ref.get("day") or "ALL")
+        minute = now_utc.hour * 60 + now_utc.minute
+        if row_day == "ALL":
+            return start <= minute < end if start <= end else (minute >= start or minute < end)
+        if start <= end:
+            return row_day == today and start <= minute < end
+        return (row_day == today and minute >= start) or (
+            cls._station_command_next_day_name(row_day) == today and minute < end
+        )
+
+    @classmethod
+    def _station_command_ref_start_delta_minutes(
+        cls,
+        ref: Mapping[str, object],
+        now_utc: datetime.datetime,
+    ) -> int | None:
+        start = cls._station_command_hhmm_to_minutes(
+            ref.get("start_utc") or ref.get("start") or ref.get("start_local")
+        )
+        if start is None:
+            return None
+        row_day = cls._station_command_day_name(ref.get("day_utc") or ref.get("day") or "ALL")
+        minute = now_utc.hour * 60 + now_utc.minute
+        if row_day == "ALL":
+            delta = start - minute
+            return delta if delta >= 0 else delta + 1440
+        row_index = cls._station_command_day_index(row_day)
+        if row_index is None:
+            return None
+        today_index = int(now_utc.strftime("%w"))
+        days_until = (row_index - today_index) % 7
+        delta = days_until * 1440 + start - minute
+        return delta if delta >= 0 else delta + (7 * 1440)
+
+    def _station_command_assigned_plan_group_band(self, snapshot: object) -> tuple[str, str]:
+        ident = self._station_command_snapshot_id(snapshot)
+        if ident <= 0:
+            return "", ""
+        lane_group, lane_band = self._station_command_lane_current_group_band(ident)
+        if lane_group:
+            return lane_group, lane_band
+        plan = self._station_command_assigned_plan_for_radio(ident)
+        if not isinstance(plan, Mapping):
+            return "", ""
+        refs = self._station_command_parse_json_list(plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        for ref in refs:
+            if not self._station_command_ref_active_now(ref, now_utc):
+                continue
+            group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
+            band = str(ref.get("band") or "").strip().upper()
+            if group:
+                return group, band
+        return "", ""
+
+    def _station_command_assigned_plan_next_group_band(self, snapshot: object) -> tuple[str, str]:
+        ident = self._station_command_snapshot_id(snapshot)
+        if ident <= 0:
+            return "", ""
+        lane_group, lane_band = self._station_command_lane_next_group_band(ident)
+        if lane_group:
+            return lane_group, lane_band
+        plan = self._station_command_assigned_plan_for_radio(ident)
+        if not isinstance(plan, Mapping):
+            return "", ""
+        refs = self._station_command_parse_json_list(plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        current_group, current_band = self._station_command_assigned_plan_group_band(snapshot)
+        current_key = (current_group.strip().upper(), current_band.strip().upper())
+        best_changed: tuple[int, str, str] | None = None
+        best_any: tuple[int, str, str] | None = None
+        for ref in refs:
+            group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
+            band = str(ref.get("band") or "").strip().upper()
+            if not group:
+                continue
+            delta = self._station_command_ref_start_delta_minutes(ref, now_utc)
+            if delta is None:
+                continue
+            candidate = (delta, group, band)
+            if best_any is None or candidate[0] < best_any[0]:
+                best_any = candidate
+            if (group.strip().upper(), band.strip().upper()) != current_key:
+                if best_changed is None or candidate[0] < best_changed[0]:
+                    best_changed = candidate
+        best = best_changed or best_any
+        if best is None:
+            return "", ""
+        return best[1], best[2]
+
+    def _station_command_plan_cache(self) -> tuple[dict[int, dict[str, object]], dict[int, dict[str, object]]]:
+        now = time.monotonic()
+        cache = getattr(self, "_station_command_plan_cache_data", None)
+        expires = float(getattr(self, "_station_command_plan_cache_expires", 0.0) or 0.0)
+        if isinstance(cache, tuple) and now < expires:
+            return cache
+        assignments_by_radio: dict[int, dict[str, object]] = {}
+        plans_by_id: dict[int, dict[str, object]] = {}
+        store = getattr(self, "multi_radio_store", None)
+        if store is not None:
+            try:
+                for row in store.list_effective_assigned_plans():
+                    data = dict(row)
+                    radio_id = int(data.get("device_profile_id") or 0)
+                    if radio_id > 0:
+                        assignments_by_radio[radio_id] = data
+            except Exception:
+                assignments_by_radio = {}
+            try:
+                for row in store.list_frequency_plans():
+                    data = dict(row)
+                    plan_id = int(data.get("id") or 0)
+                    if plan_id > 0:
+                        plans_by_id[plan_id] = data
+            except Exception:
+                plans_by_id = {}
+        cache = (assignments_by_radio, plans_by_id)
+        self._station_command_plan_cache_data = cache
+        self._station_command_plan_cache_expires = now + 0.75
+        return cache
+
+    def _invalidate_station_command_plan_cache(self) -> None:
+        self._station_command_plan_cache_data = None
+        self._station_command_plan_cache_expires = 0.0
+
+    def _station_command_assigned_plan_for_radio(self, device_profile_id: int) -> dict[str, object] | None:
+        try:
+            assignments_by_radio, plans_by_id = self._station_command_plan_cache()
+            assignment = assignments_by_radio.get(int(device_profile_id or 0))
+            if not assignment:
+                return None
+            plan_id = int(assignment.get("frequency_plan_id") or 0)
+            if plan_id <= 0:
+                return None
+            return plans_by_id.get(plan_id)
+        except Exception:
+            return None
+
+    def _station_command_assigned_plan_name_for_radio(self, device_profile_id: int) -> str:
+        lane = self._station_command_lane_for_radio(device_profile_id)
+        if isinstance(lane, Mapping):
+            name = str(lane.get("frequency_plan_name") or "").strip()
+            if name:
+                return name
+        plan = self._station_command_assigned_plan_for_radio(device_profile_id)
+        if isinstance(plan, Mapping):
+            name = str(plan.get("name") or "").strip()
+            if name:
+                return name
+        try:
+            assignments_by_radio, _plans_by_id = self._station_command_plan_cache()
+            assignment = assignments_by_radio.get(int(device_profile_id or 0), {})
+            for key in ("frequency_plan_name", "plan_name", "name"):
+                name = str(assignment.get(key) or "").strip() if isinstance(assignment, Mapping) else ""
+                if name:
+                    return name
+        except Exception:
+            pass
+        return ""
+
+    def _station_command_active_schedule_lanes(self, *, force: bool = False) -> dict[int, dict[str, object]]:
+        now = time.monotonic()
+        cache = getattr(self, "_station_command_lane_cache_data", None)
+        expires = float(getattr(self, "_station_command_lane_cache_expires", 0.0) or 0.0)
+        if isinstance(cache, dict) and not force and now < expires:
+            return cache
+        scheduler = getattr(self, "scheduler", None)
+        lanes: dict[int, dict[str, object]] = {}
+        if scheduler is not None and hasattr(scheduler, "active_schedule_lanes"):
+            try:
+                for lane in scheduler.active_schedule_lanes(force=force):
+                    if not isinstance(lane, Mapping):
+                        continue
+                    try:
+                        radio_id = int(lane.get("device_profile_id") or 0)
+                    except Exception:
+                        radio_id = 0
+                    if radio_id > 0:
+                        lanes[radio_id] = dict(lane)
+            except Exception as exc:
+                log.debug("MainWindow: failed to load station command schedule lanes: %s", exc)
+                lanes = {}
+        self._station_command_lane_cache_data = lanes
+        self._station_command_lane_cache_expires = now + 0.75
+        return lanes
+
+    def _invalidate_station_command_lane_cache(self) -> None:
+        self._station_command_lane_cache_data = None
+        self._station_command_lane_cache_expires = 0.0
+
+    def _station_command_lane_for_radio(self, device_profile_id: int) -> dict[str, object] | None:
+        try:
+            radio_id = int(device_profile_id or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return None
+        lane = self._station_command_active_schedule_lanes().get(radio_id)
+        return dict(lane) if isinstance(lane, Mapping) else None
+
+    def _station_command_entry_group_band(self, entry: Mapping[str, object] | None) -> tuple[str, str]:
+        if not isinstance(entry, Mapping):
+            return "", ""
+        group = self._station_command_group_display_name(
+            entry.get("group_name") or entry.get("group") or entry.get("net_name") or entry.get("label")
+        )
+        band = str(entry.get("band") or "").strip().upper()
+        return group, band
+
+    def _station_command_lane_current_group_band(self, device_profile_id: int) -> tuple[str, str]:
+        lane = self._station_command_lane_for_radio(device_profile_id)
+        entry = lane.get("current_entry") if isinstance(lane, Mapping) else None
+        return self._station_command_entry_group_band(entry if isinstance(entry, Mapping) else None)
+
+    def _station_command_lane_next_group_band(self, device_profile_id: int) -> tuple[str, str]:
+        lane = self._station_command_lane_for_radio(device_profile_id)
+        entry = lane.get("next_entry") if isinstance(lane, Mapping) else None
+        return self._station_command_entry_group_band(entry if isinstance(entry, Mapping) else None)
+
+    def _station_command_lane_schedule_rows(self, device_profile_id: int) -> list[dict[str, object]]:
+        lane = self._station_command_lane_for_radio(device_profile_id)
+        if not isinstance(lane, Mapping):
+            return []
+        rows: list[dict[str, object]] = []
+        for key in ("hf_rows", "net_rows", "sop_rows"):
+            raw_rows = lane.get(key)
+            if not isinstance(raw_rows, list):
+                continue
+            rows.extend(dict(row) for row in raw_rows if isinstance(row, Mapping))
+        return rows
+
+    @staticmethod
+    def _station_command_scheduler_entry_radio_id(entry: Mapping[str, object]) -> int:
+        return station_command_scheduler_entry_radio_id(entry)
+
+    def _station_command_manual_qsy_meta_for_radio(self, device_profile_id: int) -> dict[str, object] | None:
+        meta = getattr(self, "_station_command_manual_qsy_meta", None)
+        return station_command_manual_qsy_meta_for_radio(
+            meta=meta if isinstance(meta, Mapping) else None,
+            meta_profile_id=getattr(self, "_station_command_manual_qsy_profile_id", 0),
+            device_profile_id=int(device_profile_id or 0),
+        )
+
+    def _station_command_scheduler_manual_qsy_active_for_radio(self, device_profile_id: int) -> bool:
+        try:
+            ident = int(device_profile_id or 0)
+        except Exception:
+            return False
+        if ident <= 0:
+            return False
+        if self._station_command_manual_qsy_meta_for_radio(ident):
             return True
         try:
             sched = getattr(self, "scheduler", None)
-            source = str(getattr(sched, "current_source", "") or "").strip().upper()
-            if source == "QSY":
-                return True
-            return bool(getattr(sched, "_manual_qsy_active", False))
+            entry = getattr(sched, "current_schedule_entry", {}) if sched is not None else {}
+            target_getter = getattr(sched, "_primary_manual_control_radio_id", None)
+            primary_manual_radio_id = target_getter() if callable(target_getter) else 0
+            return scheduler_manual_qsy_active_for_radio(
+                device_profile_id=int(device_profile_id or 0),
+                manual_meta=None,
+                scheduler_source=getattr(sched, "current_source", "") if sched is not None else "",
+                scheduler_manual_active=getattr(sched, "_manual_qsy_active", False) if sched is not None else False,
+                scheduler_entry=entry if isinstance(entry, Mapping) else None,
+                primary_manual_radio_id=primary_manual_radio_id,
+            )
         except Exception:
             return False
 
+    def _station_command_scheduler_manual_qsy_active(self) -> bool:
+        try:
+            active_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
+        except Exception:
+            active_id = 0
+        return self._station_command_scheduler_manual_qsy_active_for_radio(active_id)
+
     @staticmethod
     def _station_command_countdown_text(remaining_sec: object) -> str:
-        try:
-            seconds = max(0, int(float(remaining_sec)))
-        except Exception:
-            return ""
-        if seconds < 10 * 60:
-            minutes = seconds // 60
-            secs = seconds % 60
-            return f"{minutes:02d}:{secs:02d}"
-        minutes = max(1, int((seconds + 59) // 60))
-        return f"{minutes}m"
+        return station_command_countdown_text(remaining_sec)
 
     def _update_station_command_hold_button_labels(self, hold_snapshot: Mapping[str, object]) -> None:
         hold_btn = getattr(self, "station_command_hold_btn", None)
         suspend_btn = getattr(self, "station_command_suspend_btn", None)
+        qsy_btn = getattr(self, "station_command_qsy_btn", None)
         if hold_btn is None or suspend_btn is None:
             return
         base_qsy = str(getattr(self, "_station_command_qsy_suspend_base_text", "QSY Suspend") or "QSY Suspend")
         base_suspend = str(getattr(self, "_station_command_suspend_base_text", "Suspend Scheduler") or "Suspend Scheduler")
+        manual_qsy_active = self._station_command_scheduler_manual_qsy_active()
+        scheduler_suspended_manual = self._station_command_scheduler_suspended_manually()
+        if qsy_btn is not None:
+            qsy_btn.setText("Manual QSY" if manual_qsy_active else "QSY Now")
+        suspend_btn.setText("Scheduler Suspended" if scheduler_suspended_manual else base_suspend)
         if isinstance(hold_snapshot, Mapping) and bool(hold_snapshot.get("active")):
             countdown = self._station_command_countdown_text(hold_snapshot.get("remaining_sec"))
             if countdown:
-                hold_btn.setText(f"{base_qsy} {countdown}")
+                hold_btn.setText(f"Suspended {countdown}")
                 until = hold_snapshot.get("until")
                 if isinstance(until, datetime.datetime):
                     local_dt = until.astimezone()
                     tip = f"Scheduler resumes at {local_dt:%H:%M:%S} local."
                     hold_btn.setToolTip(tip)
-                suspend_btn.setText(base_suspend)
                 return
         hold_btn.setText(base_qsy)
-        suspend_btn.setText(base_suspend)
 
     def _station_command_manual_qsy_meta_for_selected(self) -> dict[str, object] | None:
-        meta = getattr(self, "_station_command_manual_qsy_meta", None)
-        if not isinstance(meta, Mapping):
-            return None
         try:
             active_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
-            meta_id = int(getattr(self, "_station_command_manual_qsy_profile_id", 0) or 0)
         except Exception:
             return None
-        if active_id <= 0 or meta_id != active_id:
-            return None
-        return dict(meta)
+        return self._station_command_manual_qsy_meta_for_radio(active_id)
 
     def _station_command_set_manual_qsy_meta(self, meta: Mapping[str, object] | None) -> None:
         if not isinstance(meta, Mapping):
@@ -4705,7 +5193,11 @@ class MainWindow(QMainWindow):
             return
         self._station_command_manual_qsy_meta = dict(meta)
         try:
-            self._station_command_manual_qsy_profile_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
+            self._station_command_manual_qsy_profile_id = int(
+                meta.get("target_device_profile_id")
+                or getattr(self, "_station_command_selected_profile_id", 0)
+                or 0
+            )
         except Exception:
             self._station_command_manual_qsy_profile_id = None
 
@@ -4713,21 +5205,91 @@ class MainWindow(QMainWindow):
         self._station_command_manual_qsy_meta = None
         self._station_command_manual_qsy_profile_id = None
 
+    def _station_command_scheduler_suspended_manually_for_radio(self, device_profile_id: int) -> bool:
+        try:
+            sched = getattr(self, "scheduler", None)
+            override = getattr(sched, "_runtime_scheduler_enabled_override", None) if sched is not None else None
+            return scheduler_suspended_manually_for_radio(
+                device_profile_id=int(device_profile_id or 0),
+                suspended_manual=getattr(self, "_station_command_scheduler_suspended_manual", False),
+                suspended_profile_id=getattr(self, "_station_command_scheduler_suspended_manual_profile_id", 0),
+                runtime_scheduler_enabled_override=override,
+                selected_profile_id=getattr(self, "_station_command_selected_profile_id", 0),
+            )
+        except Exception:
+            return False
+
     def _station_command_scheduler_suspended_manually(self) -> bool:
         try:
-            if bool(getattr(self, "_station_command_scheduler_suspended_manual", False)):
-                return True
-            sched = getattr(self, "scheduler", None)
-            if sched is not None and hasattr(sched, "_runtime_scheduler_enabled_override"):
-                override = getattr(sched, "_runtime_scheduler_enabled_override", None)
-                return override is False
+            active_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
         except Exception:
-            pass
-        return False
+            active_id = 0
+        return self._station_command_scheduler_suspended_manually_for_radio(active_id)
+
+    def _station_command_timed_suspend_active_for_radio(self, device_profile_id: int) -> bool:
+        hold_snapshot = self._station_command_hold_snapshot_for_radio(device_profile_id)
+        if bool(hold_snapshot.get("active")):
+            return True
+        try:
+            snapshot = suspend_snapshot(self.settings, allow_reload=False)
+        except Exception:
+            snapshot = {}
+        return timed_suspend_active_for_radio(
+            device_profile_id=int(device_profile_id or 0),
+            timed_suspend_profile_id=getattr(self, "_station_command_timed_suspend_profile_id", 0),
+            hold_active=isinstance(snapshot, Mapping) and bool(snapshot.get("active")),
+        )
+
+    def _station_command_hold_snapshot_for_radio(self, device_profile_id: int) -> dict[str, object]:
+        try:
+            radio_id = int(device_profile_id or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return {"active": False, "until": None, "remaining_sec": None}
+        try:
+            service = getattr(getattr(self, "scheduler", None), "_manual_control_service", None)
+            state = service.get_state(radio_id) if service is not None and hasattr(service, "get_state") else None
+        except Exception:
+            state = None
+        if state is not None and getattr(state, "state", "") in {"manual_hold", "manual_qsy"}:
+            text = str(getattr(state, "hold_until_utc", "") or "").strip()
+            if text:
+                try:
+                    until = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    if until.tzinfo is None:
+                        until = until.replace(tzinfo=datetime.timezone.utc)
+                    until = until.astimezone(datetime.timezone.utc)
+                    remaining = (until - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+                    if remaining > 0:
+                        return {"active": True, "until": until, "remaining_sec": remaining}
+                except Exception:
+                    pass
+        try:
+            active_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
+        except Exception:
+            active_id = 0
+        if radio_id == active_id:
+            try:
+                snapshot = suspend_snapshot(self.settings, allow_reload=False)
+            except Exception:
+                snapshot = {}
+            if isinstance(snapshot, Mapping) and bool(snapshot.get("active")):
+                return dict(snapshot)
+        return {"active": False, "until": None, "remaining_sec": None}
 
     def _station_command_set_scheduler_suspended_manual(self, suspended: bool) -> None:
         value = bool(suspended)
         self._station_command_scheduler_suspended_manual = value
+        if value:
+            try:
+                self._station_command_scheduler_suspended_manual_profile_id = int(
+                    getattr(self, "_station_command_selected_profile_id", 0) or 0
+                )
+            except Exception:
+                self._station_command_scheduler_suspended_manual_profile_id = 0
+        else:
+            self._station_command_scheduler_suspended_manual_profile_id = 0
         try:
             scheduler = getattr(self, "scheduler", None)
             if scheduler is not None and hasattr(scheduler, "set_runtime_scheduler_enabled"):
@@ -4776,10 +5338,17 @@ class MainWindow(QMainWindow):
             return "", ""
 
     def _station_command_now_text(self, snapshot: object) -> str:
-        manual_meta = self._station_command_manual_qsy_meta_for_selected()
+        snapshot_id = self._station_command_snapshot_id(snapshot)
+        manual_meta = (
+            self._station_command_manual_qsy_meta_for_radio(snapshot_id)
+            if snapshot_id > 0
+            else self._station_command_manual_qsy_meta_for_selected()
+        )
         if manual_meta:
             return self._station_command_qsy_label(manual_meta)
-        group, band = self._station_command_schedule_group_band(snapshot)
+        group, band = self._station_command_assigned_plan_group_band(snapshot)
+        if not group:
+            group, band = self._station_command_schedule_group_band(snapshot)
         if not group:
             group, band = self._station_command_group_band_for_frequency(snapshot)
         if group:
@@ -4788,7 +5357,12 @@ class MainWindow(QMainWindow):
 
     def _station_command_now_tooltip(self, snapshot: object) -> str:
         exact = self._station_command_frequency_text(snapshot)
-        manual_meta = self._station_command_manual_qsy_meta_for_selected()
+        snapshot_id = self._station_command_snapshot_id(snapshot)
+        manual_meta = (
+            self._station_command_manual_qsy_meta_for_radio(snapshot_id)
+            if snapshot_id > 0
+            else self._station_command_manual_qsy_meta_for_selected()
+        )
         if manual_meta:
             target = self._station_command_qsy_label(manual_meta)
             return f"QSY target: {target}; radio reports: {exact}" if exact else f"QSY target: {target}"
@@ -4843,30 +5417,36 @@ class MainWindow(QMainWindow):
         except Exception:
             return "unknown"
 
-    @staticmethod
-    def _station_command_next_text(snapshot: object) -> str:
+    def _station_command_next_text(self, snapshot: object) -> str:
         try:
-            if str(MainWindow._station_command_value(snapshot, "device_class", "") or "").strip().lower() == "observer":
+            if str(self._station_command_value(snapshot, "device_class", "") or "").strip().lower() == "observer":
                 return (
-                    str(MainWindow._station_command_value(snapshot, "observer_follow_summary", "") or "").strip()
+                    str(self._station_command_value(snapshot, "observer_follow_summary", "") or "").strip()
                     or "Receive-only monitor"
                 )
-            plan = str(
-                MainWindow._station_command_value(
-                    snapshot,
-                    "assigned_operating_profile_name",
-                    MainWindow._station_command_value(snapshot, "operating_profile_name", ""),
-                )
-                or ""
-            ).strip()
-            if not plan:
+            plan = self._station_command_plan_name_for_snapshot(snapshot)
+            if not plan or plan == "Unassigned":
                 return "No assigned plan"
-            if not MainWindow._station_command_bool(
-                MainWindow._station_command_value(snapshot, "scheduler_enabled", True),
+            if not self._station_command_bool(
+                self._station_command_value(snapshot, "scheduler_enabled", True),
                 default=True,
             ):
                 return "Scheduler disabled"
-            return f"Plan: {plan}"
+            next_group = self._station_command_group_display_name(
+                self._station_command_value(snapshot, "next_group", "")
+                or self._station_command_value(snapshot, "next_schedule_group", "")
+            )
+            next_band = str(
+                self._station_command_value(snapshot, "next_band", "")
+                or self._station_command_value(snapshot, "next_schedule_band", "")
+                or ""
+            ).strip().upper()
+            next_label = " ".join(part for part in (next_group, next_band) if part).strip()
+            if next_label:
+                return next_label
+            plan_group, plan_band = self._station_command_assigned_plan_next_group_band(snapshot)
+            plan_label = " ".join(part for part in (plan_group, plan_band) if part).strip()
+            return plan_label or plan
         except Exception:
             return "none"
 
@@ -4894,7 +5474,12 @@ class MainWindow(QMainWindow):
         return f"{label}: {details}" if details else label
 
     def _station_command_preferred_qsy_key(self, selected: object | None) -> str:
-        manual_meta = self._station_command_manual_qsy_meta_for_selected()
+        selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        manual_meta = (
+            self._station_command_manual_qsy_meta_for_radio(selected_id)
+            if selected_id > 0
+            else self._station_command_manual_qsy_meta_for_selected()
+        )
         if manual_meta:
             try:
                 freq = self._station_command_parse_frequency(manual_meta.get("freq"))
@@ -4902,18 +5487,34 @@ class MainWindow(QMainWindow):
                     return f"{freq:.6f}"
             except Exception:
                 pass
+        if selected_id > 0:
+            lane = self._station_command_lane_for_radio(selected_id)
+            entry = lane.get("current_entry") if isinstance(lane, Mapping) else None
+            if isinstance(entry, Mapping):
+                try:
+                    freq = self._station_command_parse_frequency(entry.get("frequency"))
+                    if freq is not None:
+                        return f"{freq:.6f}"
+                except Exception:
+                    pass
         try:
             sched = getattr(self, "scheduler", None)
             entry = getattr(sched, "current_schedule_entry", {}) if sched is not None else {}
             if isinstance(entry, Mapping):
-                freq = parse_frequency_mhz(entry.get("frequency"))
+                if selected_id > 0:
+                    entry_id = self._station_command_scheduler_entry_radio_id(entry)
+                    if entry_id > 0 and entry_id != selected_id:
+                        raise ValueError("scheduler entry belongs to another radio")
+                freq = self._station_command_parse_frequency(entry.get("frequency"))
                 if freq is not None:
                     return f"{freq:.6f}"
         except Exception:
             pass
         if selected is not None:
             try:
-                freq = parse_frequency_mhz(self._station_command_value(selected, "current_frequency_label", ""))
+                freq = self._station_command_parse_frequency(
+                    self._station_command_value(selected, "current_frequency_label", "")
+                )
                 if freq is not None:
                     return f"{freq:.6f}"
             except Exception:
@@ -4947,7 +5548,7 @@ class MainWindow(QMainWindow):
                 key=lambda item: (
                     str(item[1].get("group") or "").upper(),
                     str(item[1].get("band") or "").upper(),
-                    float(item[0]),
+                    float(item[1].get("freq") or 0.0),
                 ),
             ):
                 combo.addItem(self._station_command_qsy_label(meta), meta)
@@ -4997,6 +5598,8 @@ class MainWindow(QMainWindow):
                 detail=str(detail or "").strip(),
                 source_surface="station_command_bar",
             )
+            if str(status or "").strip().lower() in {"blocked", "failed", "error"} and hasattr(self, "statusBar"):
+                self.statusBar().showMessage(str(summary or detail or "Station command needs attention."), 6000)
         except Exception as e:
             log.debug("MainWindow: station command feedback failed: %s", e)
 
@@ -5010,10 +5613,26 @@ class MainWindow(QMainWindow):
         if not isinstance(combo, QComboBox):
             return None
         meta = selected_qsy_meta(combo)
-        return dict(meta) if isinstance(meta, Mapping) else None
+        if not isinstance(meta, Mapping):
+            return None
+        out = dict(meta)
+        try:
+            profile_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0)
+        except Exception:
+            profile_id = 0
+        if profile_id > 0:
+            out["target_device_profile_id"] = profile_id
+        return out
 
-    def _on_station_command_qsy_now_clicked(self) -> None:
-        meta = self._station_command_selected_qsy_meta()
+    @staticmethod
+    def _station_command_display_plan_name(plan_name: object) -> str:
+        text = str(plan_name or "").strip()
+        if len(text) > 5 and text.lower().endswith(" plan"):
+            return text[:-5].strip()
+        return text
+
+    def _on_station_command_qsy_now_clicked(self, meta: Mapping[str, object] | None = None) -> None:
+        meta = dict(meta) if isinstance(meta, Mapping) else self._station_command_selected_qsy_meta()
         if not meta:
             self._publish_station_command_feedback(
                 action_type="qsy",
@@ -5025,6 +5644,12 @@ class MainWindow(QMainWindow):
         ok = perform_qsy(self, meta)
         if ok:
             self._station_command_set_manual_qsy_meta(meta)
+            try:
+                pending = getattr(self, "_station_command_card_qsy_pending_keys", None)
+                if isinstance(pending, dict):
+                    pending.pop(int(meta.get("target_device_profile_id") or 0), None)
+            except Exception:
+                pass
         freq_label = self._station_command_qsy_label(meta)
         self._publish_station_command_feedback(
             action_type="qsy",
@@ -5032,10 +5657,14 @@ class MainWindow(QMainWindow):
             summary=f"QSY sent: {freq_label}" if ok else f"QSY blocked: {freq_label}",
             detail="Scheduler is suspended in manual QSY state until Resume Schedule or the next explicit schedule transition." if ok else "",
         )
-        self._refresh_station_command_bar(force=True)
+        self._refresh_station_command_controls_after_state_change()
 
-    def _on_station_command_qsy_hold_clicked(self) -> None:
-        meta = self._station_command_selected_qsy_meta()
+    def _on_station_command_qsy_hold_clicked(
+        self,
+        meta: Mapping[str, object] | None = None,
+        hold_minutes: int | None = None,
+    ) -> None:
+        meta = dict(meta) if isinstance(meta, Mapping) else self._station_command_selected_qsy_meta()
         if not meta:
             self._publish_station_command_feedback(
                 action_type="qsy",
@@ -5044,9 +5673,20 @@ class MainWindow(QMainWindow):
                 detail="Choose a frequency in the top command bar before using QSY Suspend.",
             )
             return
-        mins = perform_qsy_with_hold(self, self.settings, meta, self._selected_station_command_hold_minutes())
+        mins = perform_qsy_with_hold(
+            self,
+            self.settings,
+            meta,
+            int(hold_minutes or self._selected_station_command_hold_minutes()),
+        )
         if mins > 0:
             self._station_command_set_manual_qsy_meta(meta)
+            try:
+                pending = getattr(self, "_station_command_card_qsy_pending_keys", None)
+                if isinstance(pending, dict):
+                    pending.pop(int(meta.get("target_device_profile_id") or 0), None)
+            except Exception:
+                pass
         freq_label = self._station_command_qsy_label(meta)
         self._publish_station_command_feedback(
             action_type="qsy",
@@ -5054,16 +5694,47 @@ class MainWindow(QMainWindow):
             summary=f"QSY sent: {freq_label}" if mins > 0 else f"QSY Suspend blocked: {freq_label}",
             detail=f"Scheduler suspended for {mins} minutes." if mins > 0 else "",
         )
-        self._refresh_station_command_bar(force=True)
+        self._refresh_station_command_controls_after_state_change()
+
+    def _on_station_command_timed_suspend_clicked(self) -> None:
+        try:
+            mins = suspend_schedule_hold(
+                self,
+                self.settings,
+                minutes=self._selected_station_command_hold_minutes(),
+                warn_rf_conflict=True,
+                target_device_profile_id=int(getattr(self, "_station_command_selected_profile_id", 0) or 0) or None,
+            )
+            try:
+                self._station_command_timed_suspend_profile_id = int(
+                    getattr(self, "_station_command_selected_profile_id", 0) or 0
+                )
+            except Exception:
+                self._station_command_timed_suspend_profile_id = 0
+            self._publish_station_command_feedback(
+                action_type="timed_suspend_schedule",
+                status="succeeded" if mins > 0 else "blocked",
+                summary=f"Scheduler suspended for {mins} minutes." if mins > 0 else "Timed Suspend blocked.",
+                detail="Scheduled frequency changes are paused temporarily. Manual radio changes remain available." if mins > 0 else "",
+            )
+        except Exception as e:
+            self._publish_station_command_feedback(
+                action_type="timed_suspend_schedule",
+                status="failed",
+                summary="Timed Suspend failed.",
+                detail=str(e),
+            )
+        self._refresh_station_command_controls_after_state_change()
 
     def _on_station_command_pause_clicked(self) -> None:
         try:
             self._station_command_set_scheduler_suspended_manual(True)
+            self._station_command_timed_suspend_profile_id = 0
             self._publish_station_command_feedback(
                 action_type="suspend_schedule",
                 status="succeeded",
                 summary="Scheduler suspended.",
-                detail="Scheduled frequency changes are suspended until Resume Schedule.",
+                detail="Scheduled frequency changes are suspended manually until Resume Schedule.",
             )
         except Exception as e:
             self._publish_station_command_feedback(
@@ -5072,20 +5743,43 @@ class MainWindow(QMainWindow):
                 summary="Suspend Scheduler failed.",
                 detail=str(e),
             )
-        self._refresh_station_command_bar(force=True)
+        self._refresh_station_command_controls_after_state_change()
 
     def _on_station_command_resume_clicked(self) -> None:
-        ok = resume_schedule_hold(self, self.settings)
+        target_profile_id = int(getattr(self, "_station_command_selected_profile_id", 0) or 0) or None
+        try:
+            ok = resume_schedule_hold(
+                self,
+                self.settings,
+                target_device_profile_id=target_profile_id,
+            )
+        except TypeError:
+            ok = resume_schedule_hold(self, self.settings)
         if ok:
             self._station_command_clear_manual_qsy_meta()
             self._station_command_set_scheduler_suspended_manual(False)
+            self._station_command_timed_suspend_profile_id = 0
         self._publish_station_command_feedback(
             action_type="resume_schedule",
             status="succeeded" if ok else "blocked",
             summary="Schedule resumed." if ok else "Resume blocked.",
             detail="" if ok else "RF Guard or scheduler state prevented resume.",
         )
-        self._refresh_station_command_bar(force=True)
+        self._refresh_station_command_controls_after_state_change()
+
+    def _refresh_station_command_controls_after_state_change(self) -> None:
+        try:
+            choices = getattr(self, "_station_command_last_choices", []) or []
+        except Exception:
+            choices = []
+        if isinstance(choices, list) and len(choices) >= 2:
+            try:
+                snapshot = suspend_snapshot(self.settings, allow_reload=False)
+            except Exception:
+                snapshot = {}
+            self._update_station_command_radio_tile_hold_controls(snapshot if isinstance(snapshot, Mapping) else {})
+            return
+        self._refresh_station_command_bar(force=False)
 
     def _activate_station_command_radio(self, device_profile_id: int) -> bool:
         ident = int(device_profile_id or 0)
@@ -5143,6 +5837,7 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _station_command_health_profile(self, selected: object | None, selected_id: int) -> dict | None:
@@ -5179,6 +5874,147 @@ class MainWindow(QMainWindow):
             return "error"
         return "warn"
 
+    def _station_command_off_schedule_payload_for_profile(self, profile: dict | None) -> dict[str, object] | None:
+        radio_id = self._station_command_snapshot_id(profile) if profile is not None else 0
+        if radio_id <= 0:
+            return None
+        state = getattr(self, "_station_command_off_schedule_by_radio", {})
+        if not isinstance(state, Mapping):
+            return None
+        payload = state.get(radio_id)
+        return dict(payload) if isinstance(payload, Mapping) else None
+
+    def _station_command_health_summary_for_profile(self, profile: dict | None) -> dict[str, object]:
+        items = self._station_command_health_items(profile)
+        off_schedule_payload = self._station_command_off_schedule_payload_for_profile(profile)
+        off_schedule_items = []
+        if isinstance(off_schedule_payload, Mapping):
+            raw_items = off_schedule_payload.get("items")
+            if isinstance(raw_items, list):
+                off_schedule_items = [str(item).strip() for item in raw_items if str(item).strip()]
+        try:
+            snapshot = self.dependency_status_service.software_status_snapshot()
+        except Exception:
+            snapshot = {}
+        issue_items: list[tuple[str, str, str, str]] = []
+        if off_schedule_items:
+            issue_items.append(
+                (
+                    "__off_schedule__",
+                    "Off Schedule",
+                    "warn",
+                    "Review " + ", ".join(off_schedule_items) + " before trusting scheduler position.",
+                )
+            )
+        healthy_count = 0
+        for key, label_text in items:
+            info = snapshot.get(key, {})
+            state = self._station_command_health_state(info)
+            tooltip = str(info.get("tooltip", "Not running") or "Not running")
+            if state == "ok":
+                healthy_count += 1
+            else:
+                issue_items.append((key, label_text, state, tooltip))
+        issue_states = [state for _key, _label, state, _tooltip in issue_items]
+        summary_state = self._station_command_health_summary_state(issue_states)
+        if off_schedule_items:
+            summary_label = "Off Schedule"
+            summary_tooltip = "Off Schedule: " + ", ".join(off_schedule_items)
+        elif not items:
+            summary_label = "No checks"
+            summary_tooltip = "No configured software health items for this radio."
+        elif not issue_items:
+            summary_label = "Healthy"
+            summary_tooltip = "All configured components for this radio are healthy."
+        else:
+            summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"
+            summary_tooltip = "; ".join(f"{label}: {tooltip}" for _key, label, _state, tooltip in issue_items)
+        return {
+            "items": items,
+            "healthy_count": healthy_count,
+            "issues": issue_items,
+            "state": summary_state,
+            "label": summary_label,
+            "tooltip": summary_tooltip,
+        }
+
+    def _show_station_command_health_menu(
+        self,
+        *,
+        device_profile_id: int = 0,
+        snapshot: object | None = None,
+        anchor: QWidget | None = None,
+    ) -> None:
+        ident = int(device_profile_id or 0)
+        selected = snapshot
+        if selected is None and ident > 0:
+            try:
+                for candidate in getattr(self, "_station_command_last_choices", []) or []:
+                    if self._station_command_snapshot_id(candidate) == ident:
+                        selected = candidate
+                        break
+            except Exception:
+                selected = None
+        if ident <= 0 and selected is not None:
+            ident = self._station_command_snapshot_id(selected)
+        profile = self._station_command_health_profile(selected, ident)
+        summary = self._station_command_health_summary_for_profile(profile)
+        radio_name = self._station_command_snapshot_name(profile or selected or {"id": ident})
+        anchor_widget = anchor or getattr(self, "station_command_health_widget", None) or self
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = {}
+        menu_surface = theme.get("station_control_tile_selected_surface", theme.get("surface", "#FFFFFF"))
+        menu_border = theme.get("station_control_tile_selected_border", theme.get("border", "#D3D7DD"))
+        menu_text = theme.get("station_control_text", theme.get("text", "#222222"))
+        menu_muted = theme.get("station_control_muted", theme.get("text_muted", "#6A737D"))
+        menu = QMenu(anchor_widget)
+        menu.setObjectName("stationCommandHealthMenu")
+        menu.setStyleSheet(
+            "QMenu#stationCommandHealthMenu {"
+            f"background: {menu_surface}; color: {menu_text}; border: 1px solid {menu_border};"
+            "padding: 5px;"
+            "}"
+            "QMenu#stationCommandHealthMenu::item {"
+            "padding: 5px 22px 5px 10px;"
+            "}"
+            "QMenu#stationCommandHealthMenu::item:disabled {"
+            f"color: {menu_muted};"
+            "}"
+            "QMenu#stationCommandHealthMenu::item:selected {"
+            f"background: {theme.get('accent', menu_border)}; color: {theme.get('surface', '#FFFFFF')};"
+            "}"
+        )
+        title = QAction(f"{radio_name} Health: {summary.get('label')}", menu)
+        title.setEnabled(False)
+        menu.addAction(title)
+        issues = [tuple(item) for item in summary.get("issues", []) if isinstance(item, tuple)]
+        if issues:
+            for _key, label, state, tooltip in issues[:6]:
+                prefix = "Block" if state == "error" else "Review"
+                action = QAction(f"{prefix}: {label} - {tooltip}", menu)
+                action.setEnabled(False)
+                menu.addAction(action)
+            if len(issues) > 6:
+                more = QAction(f"+{len(issues) - 6} more item(s)", menu)
+                more.setEnabled(False)
+                menu.addAction(more)
+        else:
+            detail = str(summary.get("tooltip", "") or "No health issues for this radio.")
+            action = QAction(detail, menu)
+            action.setEnabled(False)
+            menu.addAction(action)
+        menu.addSeparator()
+        open_action = QAction("Open Health Details", menu)
+        open_action.triggered.connect(lambda _checked=False, profile_id=ident: self._open_station_health_detail(device_profile_id=profile_id))
+        menu.addAction(open_action)
+        self._station_command_health_menu = menu
+        try:
+            menu.popup(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+        except Exception:
+            self._open_station_health_detail(device_profile_id=ident)
+
     def _add_station_command_health_item(
         self,
         *,
@@ -5191,12 +6027,12 @@ class MainWindow(QMainWindow):
         led = QLabel(self.station_command_health_widget)
         led.setFixedSize(14, 14)
         led.setCursor(Qt.PointingHandCursor)
-        led.mousePressEvent = self._on_station_command_health_clicked
+        led.mousePressEvent = lambda event, widget=led: self._on_station_command_health_clicked(event, anchor=widget)
         led.setStyleSheet(led_style(state, theme))
         led.setToolTip(tooltip)
         text_label = QLabel(label_text, self.station_command_health_widget)
         text_label.setCursor(Qt.PointingHandCursor)
-        text_label.mousePressEvent = self._on_station_command_health_clicked
+        text_label.mousePressEvent = lambda event, widget=text_label: self._on_station_command_health_clicked(event, anchor=widget)
         text_label.setToolTip(tooltip)
         text_label.setStyleSheet(
             f"background: transparent; color: {theme.get('station_control_text', theme.get('text', '#222222'))};"
@@ -5216,42 +6052,23 @@ class MainWindow(QMainWindow):
         profile = self._station_command_health_profile(selected, selected_id)
         items = self._station_command_health_items(profile)
         theme = resolve_theme(self.settings)
-        try:
-            snapshot = self.dependency_status_service.software_status_snapshot()
-        except Exception:
-            snapshot = {}
-
-        issue_items: list[tuple[str, str, str, str]] = []
-        for key, label_text in items:
-            info = snapshot.get(key, {})
-            state = self._station_command_health_state(info)
-            tooltip = str(info.get("tooltip", "Not running"))
-            if state != "ok":
-                issue_items.append((key, label_text, state, tooltip))
+        summary = self._station_command_health_summary_for_profile(profile)
+        issue_items = [tuple(item) for item in summary.get("issues", []) if isinstance(item, tuple)]
 
         if not issue_items and items:
-            healthy_tooltip = "All configured components for this radio are healthy."
             self._add_station_command_health_item(
                 key="__summary__",
                 label_text="Healthy",
                 state="ok",
-                tooltip=healthy_tooltip,
+                tooltip=str(summary.get("tooltip", "") or "All configured components for this radio are healthy."),
                 theme=theme,
             )
         else:
-            issue_states = [state for _key, _label, state, _tooltip in issue_items]
-            summary_state = self._station_command_health_summary_state(issue_states)
-            summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"
-            summary_tooltip = (
-                "; ".join(f"{label}: {tooltip}" for _key, label, _state, tooltip in issue_items)
-                if issue_items
-                else "No configured software health items for this radio."
-            )
             self._add_station_command_health_item(
                 key="__summary__",
-                label_text=summary_label,
-                state=summary_state,
-                tooltip=summary_tooltip,
+                label_text=str(summary.get("label", "Needs Review") or "Needs Review"),
+                state=str(summary.get("state", "warn") or "warn"),
+                tooltip=str(summary.get("tooltip", "") or "No configured software health items for this radio."),
                 theme=theme,
             )
         layout.addStretch(1)
@@ -5306,7 +6123,9 @@ class MainWindow(QMainWindow):
         ident = self._station_command_snapshot_id(snapshot)
         if ident > 0 and ident == int(selected_id or 0):
             return self._station_command_now_text(snapshot)
-        group, band = self._station_command_schedule_group_band(snapshot)
+        group, band = self._station_command_assigned_plan_group_band(snapshot)
+        if not group:
+            group, band = self._station_command_schedule_group_band(snapshot)
         if not group:
             group, band = self._station_command_group_band_for_frequency(snapshot)
         if group:
@@ -5320,6 +6139,8 @@ class MainWindow(QMainWindow):
             return "Ready"
         if text.lower() in {"ok", "ready"}:
             return "Ready"
+        if text.lower().startswith("configured"):
+            return "Inactive"
         return text
 
     def _station_command_radio_summary_text(self, snapshot: object, selected_id: int) -> str:
@@ -5341,6 +6162,63 @@ class MainWindow(QMainWindow):
         next_text = self._station_command_next_text(snapshot)
         return f"{name}\nNow: {now}\nFrequency: {exact}\nState: {state}\nNext: {next_text}"
 
+    def _station_command_active_radio_choices(self, choices: list[object]) -> list[object]:
+        active = [
+            snapshot
+            for snapshot in choices
+            if self._station_command_value(snapshot, "runtime_active", None) is None
+            or self._station_command_bool(self._station_command_value(snapshot, "runtime_active", False), default=False)
+        ]
+        return active if active else choices
+
+    def _station_command_radio_cards_per_page(self, total: int) -> int:
+        if total <= 1:
+            return max(1, int(total or 1))
+        try:
+            width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0) - 80
+        except Exception:
+            width = 700
+        if width <= 0:
+            width = 700
+        width = max(280, width)
+        per_page = max(1, width // 330)
+        if width >= 660:
+            per_page = max(2, per_page)
+        return max(1, min(int(total), int(per_page)))
+
+    def _station_command_radio_card_width(self, count: int) -> int:
+        try:
+            width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0) - 80
+        except Exception:
+            width = 660
+        if width <= 0:
+            width = 660
+        gaps = max(0, int(count or 1) - 1) * 6
+        available = max(220, width - gaps)
+        return max(240, min(430, available // max(1, int(count or 1))))
+
+    def _station_command_radio_page_slice(self, choices: list[object]) -> tuple[list[object], int, int, int]:
+        total = len(choices)
+        per_page = self._station_command_radio_cards_per_page(total)
+        page_count = max(1, (total + per_page - 1) // per_page)
+        try:
+            page = int(getattr(self, "_station_command_radio_page", 0) or 0)
+        except Exception:
+            page = 0
+        page = max(0, min(page, page_count - 1))
+        self._station_command_radio_page = page
+        start = page * per_page
+        return choices[start : start + per_page], page, page_count, per_page
+
+    def _change_station_command_radio_page(self, delta: int) -> None:
+        try:
+            current = int(getattr(self, "_station_command_radio_page", 0) or 0)
+        except Exception:
+            current = 0
+        self._station_command_radio_page = max(0, current + int(delta or 0))
+        self._station_command_radio_summary_signature = None
+        self._refresh_station_command_bar(force=True)
+
     def _style_station_command_radio_summary_button(self, button: QPushButton, *, selected: bool, state_text: str) -> None:
         try:
             theme = resolve_theme(self.settings)
@@ -5361,19 +6239,99 @@ class MainWindow(QMainWindow):
         layout = getattr(self, "station_command_radio_summary_layout", None)
         if layout is None:
             return
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not choices:
+        visible_choices = list(choices)
+        if not visible_choices:
+            self._station_command_radio_tile_controls = {}
+            signature = ("empty",)
+            if signature == getattr(self, "_station_command_radio_summary_signature", None):
+                return
+            self._station_command_radio_summary_signature = signature
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
             empty = QLabel("No configured radios", getattr(self, "station_command_radio_summary_widget", None))
             empty.setObjectName("stationCommandRadioSummaryEmpty")
             empty.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             layout.addWidget(empty)
             layout.addStretch(1)
             return
-        for snapshot in choices:
+        if len(visible_choices) >= 2:
+            if len(visible_choices) <= 2:
+                self._station_command_radio_page = 0
+                page_choices = visible_choices
+            else:
+                page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)
+            signature = (
+                "tiles",
+                int(selected_id or 0),
+                int(getattr(self, "_station_command_radio_page", 0) or 0),
+                len(visible_choices),
+                self._station_command_radio_card_width(len(page_choices)),
+                tuple(
+                    (
+                        self._station_command_snapshot_id(snapshot),
+                        self._station_command_snapshot_name(snapshot),
+                        self._station_command_now_text_for_summary(snapshot, selected_id),
+                        self._station_command_compact_state_text(self._station_command_state_text(snapshot)),
+                        self._station_command_next_text(snapshot),
+                        self._station_command_plan_name_for_snapshot(snapshot),
+                        tuple(
+                            sorted(
+                                (
+                                    str(meta.get("group") or "").strip().upper(),
+                                    str(meta.get("band") or "").strip().upper(),
+                                    f"{float(meta.get('freq') or 0.0):.6f}",
+                                )
+                                for meta in self._station_command_plan_qsy_options(snapshot).values()
+                            )
+                        ),
+                        str(self._station_command_health_summary_for_profile(snapshot).get("state", "")),
+                        self._station_command_scheduler_manual_qsy_active_for_radio(
+                            self._station_command_snapshot_id(snapshot)
+                        ),
+                        self._station_command_scheduler_suspended_manually_for_radio(
+                            self._station_command_snapshot_id(snapshot)
+                        ),
+                        self._station_command_timed_suspend_active_for_radio(
+                            self._station_command_snapshot_id(snapshot)
+                        ),
+                    )
+                    for snapshot in page_choices
+                ),
+            )
+            if signature == getattr(self, "_station_command_radio_summary_signature", None):
+                return
+            self._station_command_radio_summary_signature = signature
+        else:
+            signature = (
+                "chips",
+                int(selected_id or 0),
+                tuple(
+                    (
+                        self._station_command_snapshot_id(snapshot),
+                        self._station_command_radio_summary_text(snapshot, selected_id),
+                        self._station_command_compact_state_text(self._station_command_state_text(snapshot)),
+                    )
+                    for snapshot in visible_choices
+                ),
+            )
+            if signature == getattr(self, "_station_command_radio_summary_signature", None):
+                return
+            self._station_command_radio_summary_signature = signature
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._station_command_radio_tile_controls = {}
+        if len(visible_choices) >= 2:
+            self._refresh_station_command_radio_tiles(page_choices, selected_id)
+            return
+        for snapshot in visible_choices:
             ident = self._station_command_snapshot_id(snapshot)
             button = QPushButton(self._station_command_radio_summary_text(snapshot, selected_id), self.station_command_radio_summary_widget)
             button.setObjectName("stationCommandRadioSummaryChip")
@@ -5392,6 +6350,657 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
         layout.addStretch(1)
 
+    def _station_command_for_radio(self, device_profile_id: int, callback: Callable[[], None]) -> Callable[..., None]:
+        def run(*_args: object) -> None:
+            ident = int(device_profile_id or 0)
+            if ident <= 0:
+                return
+            previous_id = getattr(self, "_station_command_selected_profile_id", None)
+            self._station_command_selected_profile_id = ident
+            try:
+                callback()
+            finally:
+                self._station_command_selected_profile_id = previous_id
+
+        return run
+
+    def _station_command_set_qsy_combo_to_meta(self, meta: Mapping[str, object] | None) -> None:
+        combo = getattr(self, "station_command_freq_combo", None)
+        if not isinstance(combo, QComboBox) or not isinstance(meta, Mapping):
+            return
+        try:
+            target_key = f"{float(meta.get('freq')):.6f}"
+        except Exception:
+            target_key = ""
+        if not target_key:
+            return
+        for index in range(combo.count()):
+            data = combo.itemData(index)
+            try:
+                if isinstance(data, Mapping) and f"{float(data.get('freq')):.6f}" == target_key:
+                    combo.setCurrentIndex(index)
+                    return
+            except Exception:
+                continue
+
+    @staticmethod
+    def _station_command_combo_selected_key(combo: QComboBox) -> str:
+        try:
+            meta = selected_qsy_meta(combo)
+            if isinstance(meta, Mapping):
+                return f"{float(meta.get('freq')):.6f}"
+        except Exception:
+            pass
+        return ""
+
+    def _station_command_for_radio_qsy(
+        self,
+        device_profile_id: int,
+        meta: Mapping[str, object] | QComboBox | None,
+        callback: Callable[..., None],
+        duration_combo: QComboBox | None = None,
+    ) -> Callable[..., None]:
+        def run(*_args: object) -> None:
+            current_meta: Mapping[str, object] | None
+            if isinstance(meta, QComboBox):
+                selected_meta = selected_qsy_meta(meta)
+                current_meta = selected_meta if isinstance(selected_meta, Mapping) else None
+            else:
+                current_meta = meta
+            ident = int(device_profile_id or 0)
+            direct_meta = dict(current_meta) if isinstance(current_meta, Mapping) else None
+            if direct_meta is not None and ident > 0:
+                direct_meta["target_device_profile_id"] = ident
+            duration_minutes = None
+            if isinstance(duration_combo, QComboBox) and isinstance(getattr(self, "station_command_duration_combo", None), QComboBox):
+                try:
+                    value = duration_combo.currentData()
+                    duration_minutes = int(value)
+                    for index in range(self.station_command_duration_combo.count()):
+                        if self.station_command_duration_combo.itemData(index) == value:
+                            self.station_command_duration_combo.setCurrentIndex(index)
+                            break
+                except Exception:
+                    pass
+            if duration_combo is not None:
+                callback(direct_meta, duration_minutes)
+            else:
+                callback(direct_meta)
+
+        return run
+
+    def _station_command_populate_card_frequency_combo(self, combo: QComboBox, snapshot: object | None) -> bool:
+        meta_map = self._station_command_plan_qsy_options(snapshot)
+        preferred_key = self._station_command_preferred_qsy_key(snapshot)
+        has_options = False
+        previous_block = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for key, meta in sorted(
+                meta_map.items(),
+                key=lambda item: (
+                    str(item[1].get("group") or "").upper(),
+                    str(item[1].get("band") or "").upper(),
+                    float(item[1].get("freq") or 0.0),
+                ),
+            ):
+                combo.addItem(self._station_command_qsy_label(meta), meta)
+                combo.setItemData(combo.count() - 1, self._station_command_qsy_tooltip(meta), Qt.ToolTipRole)
+                has_options = True
+            if not has_options:
+                plan_name = ""
+                if snapshot is not None:
+                    plan_name = self._station_command_assigned_plan_name_for_radio(self._station_command_snapshot_id(snapshot))
+                combo.addItem("No plan QSY targets" if plan_name else "No assigned plan", None)
+            elif preferred_key:
+                for index in range(combo.count()):
+                    data = combo.itemData(index)
+                    try:
+                        if isinstance(data, Mapping) and f"{float(data.get('freq')):.6f}" == preferred_key:
+                            combo.setCurrentIndex(index)
+                            break
+                    except Exception:
+                        continue
+        finally:
+            combo.blockSignals(previous_block)
+        return has_options and selected_qsy_meta(combo) is not None
+
+    def _station_command_operating_group_qsy_lookup(self) -> dict[tuple[str, str], dict[str, object]]:
+        lookup: dict[tuple[str, str], dict[str, object]] = {}
+        try:
+            for meta in build_qsy_options(load_operating_groups(self.settings)).values():
+                if not isinstance(meta, Mapping):
+                    continue
+                group = self._station_command_group_display_name(meta.get("group"))
+                band = str(meta.get("band") or "").strip().upper()
+                if group and band:
+                    lookup.setdefault((group.upper(), band), dict(meta))
+        except Exception:
+            pass
+        return lookup
+
+    def _station_command_plan_qsy_options(self, snapshot: object | None) -> dict[str, dict[str, object]]:
+        ident = self._station_command_snapshot_id(snapshot) if snapshot is not None else 0
+        lane_rows = self._station_command_lane_schedule_rows(ident) if ident > 0 else []
+        if lane_rows:
+            lookup = self._station_command_operating_group_qsy_lookup()
+            options: dict[str, dict[str, object]] = {}
+            for item in lane_rows:
+                meta = self._station_command_qsy_meta_from_plan_ref(item, lookup)
+                if not meta:
+                    continue
+                try:
+                    freq_key = f"{float(meta.get('freq')):.6f}"
+                except Exception:
+                    continue
+                option_key = "|".join(
+                    (
+                        str(meta.get("group") or "").strip().upper(),
+                        str(meta.get("band") or "").strip().upper(),
+                        freq_key,
+                    )
+                )
+                options.setdefault(option_key, meta)
+            if options:
+                return options
+        plan = self._station_command_assigned_plan_for_radio(ident) if ident > 0 else None
+        if not isinstance(plan, Mapping):
+            return {}
+        lookup = self._station_command_operating_group_qsy_lookup()
+        options: dict[str, dict[str, object]] = {}
+        for key in ("schedule_refs_json", "frequency_refs_json"):
+            for item in self._station_command_parse_json_ref_items(plan.get(key, "[]")):
+                meta = self._station_command_qsy_meta_from_plan_ref(item, lookup)
+                if not meta:
+                    continue
+                try:
+                    freq_key = f"{float(meta.get('freq')):.6f}"
+                except Exception:
+                    continue
+                option_key = "|".join(
+                    (
+                        str(meta.get("group") or "").strip().upper(),
+                        str(meta.get("band") or "").strip().upper(),
+                        freq_key,
+                    )
+                )
+                options.setdefault(option_key, meta)
+        return options
+
+    def _station_command_qsy_meta_from_plan_ref(
+        self,
+        ref: object,
+        lookup: Mapping[tuple[str, str], Mapping[str, object]],
+    ) -> dict[str, object] | None:
+        if isinstance(ref, Mapping):
+            group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group") or ref.get("label"))
+            band = str(ref.get("band") or ref.get("band_name") or "").strip().upper()
+            freq_value = (
+                ref.get("frequency")
+                or ref.get("freq")
+                or ref.get("frequency_mhz")
+                or ref.get("name")
+            )
+            mode_value = ref.get("mode")
+            vfo_value = ref.get("vfo")
+            fldigi_mode_value = ref.get("fldigi_mode")
+            fldigi_offset_value = ref.get("fldigi_offset")
+        else:
+            text = str(ref or "").strip()
+            group = ""
+            band = ""
+            freq_value = text
+            mode_value = ""
+            vfo_value = "A"
+            fldigi_mode_value = ""
+            fldigi_offset_value = ""
+            band_match = re.search(r"\b(160|80|60|40|30|20|17|15|12|10|6|2)\s*M\b", text, flags=re.IGNORECASE)
+            if band_match:
+                band = f"{band_match.group(1).upper()}M"
+            group_match = re.search(r"\b([A-Z][A-Z0-9_-]{2,})\b", text.upper())
+            if group_match:
+                candidate = group_match.group(1)
+                if candidate != band:
+                    group = self._station_command_group_display_name(candidate)
+        freq = parse_frequency_mhz(freq_value)
+        if not band and freq is not None:
+            band = self._station_command_band_from_frequency(freq)
+        resolved = dict(lookup.get((group.upper(), band), {})) if group and band else {}
+        if freq is None:
+            freq = parse_frequency_mhz(resolved.get("freq"))
+        if not group:
+            group = self._station_command_group_display_name(resolved.get("group"))
+        if not band:
+            band = str(resolved.get("band") or "").strip().upper()
+        if freq is None:
+            return None
+        return {
+            "group": group,
+            "band": band,
+            "freq": float(freq),
+            "mode": str(mode_value or resolved.get("mode") or "").strip(),
+            "vfo": str(vfo_value or resolved.get("vfo") or "A").strip().upper() or "A",
+            "fldigi_mode": str(fldigi_mode_value or resolved.get("fldigi_mode") or "").strip(),
+            "fldigi_offset": str(fldigi_offset_value or resolved.get("fldigi_offset") or "").strip(),
+        }
+
+    @staticmethod
+    def _station_command_band_from_frequency(freq_mhz: object) -> str:
+        try:
+            value = float(freq_mhz)
+        except Exception:
+            return ""
+        bands = (
+            ("160M", 1.8, 2.0),
+            ("80M", 3.5, 4.0),
+            ("60M", 5.0, 5.5),
+            ("40M", 7.0, 7.3),
+            ("30M", 10.1, 10.15),
+            ("20M", 14.0, 14.35),
+            ("17M", 18.068, 18.168),
+            ("15M", 21.0, 21.45),
+            ("12M", 24.89, 24.99),
+            ("10M", 28.0, 29.7),
+            ("6M", 50.0, 54.0),
+            ("2M", 144.0, 148.0),
+        )
+        for band, lo, hi in bands:
+            if lo <= value <= hi:
+                return band
+        return ""
+
+    def _refresh_station_command_radio_tiles(self, choices: list[object], selected_id: int) -> None:
+        layout = getattr(self, "station_command_radio_summary_layout", None)
+        parent = getattr(self, "station_command_radio_summary_widget", None)
+        if layout is None or parent is None:
+            return
+        tile_controls: dict[int, dict[str, object]] = {}
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = {}
+        pending_qsy_keys = getattr(self, "_station_command_card_qsy_pending_keys", None)
+        if not isinstance(pending_qsy_keys, dict):
+            pending_qsy_keys = {}
+            self._station_command_card_qsy_pending_keys = pending_qsy_keys
+        card_width = self._station_command_radio_card_width(len(choices))
+        for snapshot in choices:
+            ident = self._station_command_snapshot_id(snapshot)
+            selected = ident > 0 and ident == int(selected_id or 0)
+            state = self._station_command_compact_state_text(self._station_command_state_text(snapshot))
+            manual_qsy_active = self._station_command_scheduler_manual_qsy_active_for_radio(ident)
+            radio_hold_snapshot = self._station_command_hold_snapshot_for_radio(ident)
+            radio_hold_active = bool(radio_hold_snapshot.get("active"))
+            timed_qsy_active = bool(radio_hold_active and manual_qsy_active)
+            timed_suspend_active = self._station_command_timed_suspend_active_for_radio(ident)
+            scheduler_suspended_manual = self._station_command_scheduler_suspended_manually_for_radio(ident)
+            now = self._station_command_now_text_for_summary(snapshot, selected_id)
+            next_text = self._station_command_next_text(snapshot)
+            plan_text = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
+            health_summary = self._station_command_health_summary_for_profile(snapshot)
+            health_state = str(health_summary.get("state", "warn") or "warn").strip().lower()
+            tile = QFrame(parent)
+            tile.setObjectName("stationCommandRadioTile")
+            tile.setProperty("selected", "true" if selected else "false")
+            tile.setFrameShape(QFrame.StyledPanel)
+            tile.setMinimumWidth(card_width)
+            tile.setMaximumWidth(card_width)
+            tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            tile_layout = QGridLayout(tile)
+            tile_layout.setContentsMargins(8, 7, 8, 7)
+            tile_layout.setHorizontalSpacing(6)
+            tile_layout.setVerticalSpacing(5)
+
+            name_btn = QPushButton(self._station_command_snapshot_name(snapshot), tile)
+            name_btn.setObjectName("stationCommandRadioTileName")
+            name_btn.setCheckable(True)
+            name_btn.setChecked(selected)
+            name_btn.setToolTip(self._station_command_radio_summary_tooltip(snapshot, selected_id))
+            name_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            self._style_station_command_radio_summary_button(name_btn, selected=selected, state_text=state)
+            if ident > 0:
+                name_btn.clicked.connect(lambda _checked=False, profile_id=ident: self._on_station_command_summary_radio_clicked(profile_id))
+
+            freq_combo = QComboBox(tile)
+            freq_combo.setObjectName("stationCommandRadioTileFrequency")
+            freq_combo.setToolTip("Select the operating group and band for this radio.")
+            freq_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            has_card_qsy_target = self._station_command_populate_card_frequency_combo(freq_combo, snapshot)
+            preferred_key_for_card = self._station_command_preferred_qsy_key(snapshot)
+            pending_key = str(pending_qsy_keys.get(ident, "") or "")
+            if pending_key:
+                for index in range(freq_combo.count()):
+                    data = freq_combo.itemData(index)
+                    try:
+                        if isinstance(data, Mapping) and f"{float(data.get('freq')):.6f}" == pending_key:
+                            freq_combo.setCurrentIndex(index)
+                            break
+                    except Exception:
+                        continue
+            freq_combo.setProperty(
+                "stationCommandSelectionDirty",
+                bool(pending_key and pending_key != preferred_key_for_card),
+            )
+            freq_combo.setProperty("stationCommandPreferredKey", preferred_key_for_card)
+            now_font = freq_combo.font()
+            now_font.setBold(True)
+            now_font.setPointSize(max(now_font.pointSize(), 13))
+            freq_combo.setFont(now_font)
+            next_label = ElidedLabel(f"Next: {next_text} | Plan: {plan_text}", tile)
+            next_label.setObjectName("stationCommandRadioTileNext")
+            next_label.setMinimumWidth(0)
+            next_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            next_label.setToolTip(f"Next: {next_text}\nPlan: {plan_text}\nClick Change Plan to manage assignment.")
+
+            qsy_btn = QPushButton("Manual QSY" if manual_qsy_active else "QSY", tile)
+            qsy_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target.")
+            qsy_btn.clicked.connect(
+                self._station_command_for_radio_qsy(
+                    ident,
+                    freq_combo,
+                    self._on_station_command_qsy_now_clicked,
+                )
+            )
+            duration_combo = QComboBox(tile)
+            duration_combo.setObjectName("stationCommandRadioTileDuration")
+            refresh_hold_duration_combo(duration_combo, self.settings, getattr(self, "_active_runtime_profile", None))
+            duration_combo.setVisible(False)
+            timer_btn = QToolButton(tile)
+            timer_btn.setObjectName("stationCommandRadioTileTimedSuspend")
+            timer_btn.setText(timed_qsy_text(timed_qsy_active=timed_qsy_active))
+            timer_btn.setPopupMode(QToolButton.MenuButtonPopup)
+            timer_btn.setMinimumWidth(176)
+            timer_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and QSY with a timed scheduler suspend.")
+            timer_btn.clicked.connect(
+                self._station_command_for_radio_qsy(
+                    ident,
+                    freq_combo,
+                    self._on_station_command_qsy_hold_clicked,
+                    duration_combo,
+                )
+            )
+            duration_menu = QMenu(timer_btn)
+            duration_menu.setObjectName("stationCommandTimedSuspendMenu")
+            manual_qsy_action = QAction("Indefinite", duration_menu)
+            manual_qsy_action.setToolTip("QSY and keep scheduler control suspended until Resume.")
+            manual_qsy_action.triggered.connect(
+                lambda _checked=False,
+                radio_id=ident,
+                combo=freq_combo: self._station_command_for_radio_qsy(
+                    radio_id,
+                    combo,
+                    self._on_station_command_qsy_now_clicked,
+                )()
+            )
+            duration_menu.addAction(manual_qsy_action)
+            duration_menu.addSeparator()
+            for duration_index in range(duration_combo.count()):
+                label = duration_combo.itemText(duration_index)
+                value = duration_combo.itemData(duration_index)
+                action = QAction(label, duration_menu)
+                action.triggered.connect(
+                    lambda _checked=False,
+                    combo=duration_combo,
+                    duration_value=value,
+                    button=timer_btn: (
+                        combo.setCurrentIndex(
+                            next(
+                                (idx for idx in range(combo.count()) if combo.itemData(idx) == duration_value),
+                                combo.currentIndex(),
+                            )
+                        ),
+                        button.click(),
+                    )
+                )
+                duration_menu.addAction(action)
+            timer_btn.setMenu(duration_menu)
+            suspend_btn = QToolButton(tile)
+            suspend_btn.setObjectName("stationCommandRadioTileSchedulerSuspend")
+            scheduler_actions = scheduler_action_state(
+                timed_qsy_active=timed_qsy_active,
+                timed_suspend_active=timed_suspend_active,
+                scheduler_suspended_manual=scheduler_suspended_manual,
+                scheduler_state_text=state,
+            )
+            suspend_btn.setText(scheduler_actions.timed_suspend_text)
+            suspend_btn.setPopupMode(QToolButton.MenuButtonPopup)
+            suspend_btn.setMinimumWidth(150)
+            suspend_btn.setToolTip(f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}.")
+            suspend_btn.setEnabled(ident > 0)
+            suspend_btn.clicked.connect(self._station_command_for_radio(ident, self._on_station_command_timed_suspend_clicked))
+            suspend_menu = QMenu(suspend_btn)
+            suspend_menu.setObjectName("stationCommandSchedulerSuspendMenu")
+            manual_suspend_action = QAction("Indefinite", suspend_menu)
+            manual_suspend_action.setToolTip("Suspend scheduler control until Resume.")
+            manual_suspend_action.triggered.connect(self._station_command_for_radio(ident, self._on_station_command_pause_clicked))
+            suspend_menu.addAction(manual_suspend_action)
+            suspend_menu.addSeparator()
+            for duration_index in range(duration_combo.count()):
+                label = duration_combo.itemText(duration_index)
+                value = duration_combo.itemData(duration_index)
+                action = QAction(label, suspend_menu)
+                action.triggered.connect(
+                    lambda _checked=False,
+                    combo=duration_combo,
+                    duration_value=value,
+                    button=suspend_btn: (
+                        combo.setCurrentIndex(
+                            next(
+                                (idx for idx in range(combo.count()) if combo.itemData(idx) == duration_value),
+                                combo.currentIndex(),
+                            )
+                        ),
+                        button.click(),
+                    )
+                )
+                suspend_menu.addAction(action)
+            suspend_btn.setMenu(suspend_menu)
+            resume_btn = QPushButton("Resume", tile)
+            resume_btn.setToolTip(f"Resume scheduled control for {self._station_command_snapshot_name(snapshot)}.")
+            resume_btn.setEnabled(ident > 0)
+            resume_btn.clicked.connect(self._station_command_for_radio(ident, self._on_station_command_resume_clicked))
+            health_btn = QPushButton("Health", tile)
+            health_btn.setObjectName("stationCommandRadioTileHealth")
+            health_btn.setToolTip(self._station_command_radio_summary_tooltip(snapshot, selected_id))
+            health_btn.setEnabled(ident > 0)
+            health_btn.clicked.connect(
+                lambda _checked=False, profile_id=ident, snap=snapshot, button=health_btn: self._show_station_command_health_menu(
+                    device_profile_id=profile_id,
+                    snapshot=snap,
+                    anchor=button,
+                )
+            )
+            assign_btn = QPushButton("Change Plan", tile)
+            assign_btn.setObjectName("stationCommandRadioTileAssign")
+            assign_btn.setToolTip(f"Assign or change the Frequency Plan for {self._station_command_snapshot_name(snapshot)}.")
+            assign_btn.setEnabled(ident > 0)
+            assign_btn.clicked.connect(lambda _checked=False, profile_id=ident: self._open_schedule_assignment_for_radio(profile_id))
+            def _update_card_qsy_buttons(
+                _index: int = -1,
+                *,
+                radio_id: int = ident,
+                qsy_button: QPushButton = qsy_btn,
+                timer_button: QPushButton = timer_btn,
+                combo: QComboBox = freq_combo,
+                manual_active: bool = manual_qsy_active,
+                timed_qsy: bool = timed_qsy_active,
+                card_snapshot: object = snapshot,
+            ) -> None:
+                preferred_key = self._station_command_preferred_qsy_key(card_snapshot)
+                stable_preferred_key = str(combo.property("stationCommandPreferredKey") or preferred_key or "")
+                selected_key = self._station_command_combo_selected_key(combo)
+                action_state = qsy_action_state(
+                    selected_meta=selected_qsy_meta(combo),
+                    preferred_key=stable_preferred_key,
+                    radio_id=radio_id,
+                    selection_changed=bool(
+                        selected_key
+                        and (
+                            (stable_preferred_key and selected_key != stable_preferred_key)
+                            or (not stable_preferred_key and combo.property("stationCommandSelectionDirty"))
+                        )
+                    ),
+                    manual_qsy_active=manual_active,
+                    timed_qsy_active=timed_qsy,
+                )
+                qsy_button.setText("Manual QSY" if manual_active else "QSY")
+                qsy_button.setEnabled(action_state.qsy_enabled)
+                timer_button.setEnabled(action_state.timed_qsy_enabled)
+                qsy_button.setStyleSheet(button_style(action_state.qsy_role, theme))
+                timer_button.setStyleSheet(button_style(action_state.timed_qsy_role, theme))
+
+            def _on_card_frequency_changed(
+                _index: int = -1,
+                *,
+                combo: QComboBox = freq_combo,
+                radio_id: int = ident,
+                update_buttons: Callable[[int], None] = _update_card_qsy_buttons,
+            ) -> None:
+                selected_key = self._station_command_combo_selected_key(combo)
+                if selected_key:
+                    pending_qsy_keys[radio_id] = selected_key
+                else:
+                    pending_qsy_keys.pop(radio_id, None)
+                combo.setProperty("stationCommandSelectionDirty", True)
+                update_buttons(_index)
+
+            freq_combo.currentIndexChanged.connect(_on_card_frequency_changed)
+            for btn, role in (
+                (qsy_btn, "warning" if manual_qsy_active else "muted"),
+                (timer_btn, "warning" if timed_qsy_active else "muted"),
+                (suspend_btn, scheduler_actions.timed_suspend_role),
+                (resume_btn, scheduler_actions.resume_role),
+                (
+                    health_btn,
+                    "danger"
+                    if health_state == "error"
+                    else "warning"
+                    if health_state in {"warn", "warning", "review"}
+                    else "success",
+                ),
+                (assign_btn, "muted"),
+            ):
+                btn.setStyleSheet(button_style(role, theme))
+                btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            _update_card_qsy_buttons()
+
+            tile_layout.addWidget(name_btn, 0, 0, 1, 3)
+            tile_layout.addWidget(health_btn, 0, 3)
+            tile_layout.addWidget(freq_combo, 1, 0, 1, 4)
+            tile_layout.addWidget(qsy_btn, 2, 0)
+            tile_layout.addWidget(timer_btn, 2, 1, 1, 2)
+            tile_layout.addWidget(suspend_btn, 2, 3)
+            tile_layout.addWidget(next_label, 3, 0, 1, 4)
+            tile_layout.addWidget(resume_btn, 4, 0, 1, 2)
+            tile_layout.addWidget(assign_btn, 4, 2, 1, 2)
+            tile_layout.setColumnStretch(1, 1)
+            tile_layout.setColumnStretch(3, 1)
+            if ident > 0:
+                tile_controls[ident] = {
+                    "qsy_btn": qsy_btn,
+                    "timer_btn": timer_btn,
+                    "suspend_btn": suspend_btn,
+                    "resume_btn": resume_btn,
+                    "freq_combo": freq_combo,
+                }
+            try:
+                tile.style().unpolish(tile)
+                tile.style().polish(tile)
+            except Exception:
+                pass
+            layout.addWidget(tile)
+        layout.addStretch(1)
+        self._station_command_radio_tile_controls = tile_controls
+
+    def _update_station_command_radio_tile_hold_controls(self, hold_snapshot: Mapping[str, object]) -> None:
+        controls_by_radio = getattr(self, "_station_command_radio_tile_controls", {})
+        if not isinstance(controls_by_radio, Mapping):
+            return
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = {}
+        for raw_radio_id, controls in list(controls_by_radio.items()):
+            if not isinstance(controls, Mapping):
+                continue
+            try:
+                radio_id = int(raw_radio_id or 0)
+            except Exception:
+                radio_id = 0
+            radio_hold_snapshot = self._station_command_hold_snapshot_for_radio(radio_id)
+            radio_hold_active = bool(radio_hold_snapshot.get("active"))
+            countdown = self._station_command_countdown_text(radio_hold_snapshot.get("remaining_sec")) if radio_hold_active else ""
+            timed_qsy_active = bool(radio_hold_active and self._station_command_scheduler_manual_qsy_active_for_radio(radio_id))
+            timed_suspend_active = self._station_command_timed_suspend_active_for_radio(radio_id)
+            scheduler_suspended_manual = self._station_command_scheduler_suspended_manually_for_radio(radio_id)
+            manual_qsy_active = self._station_command_scheduler_manual_qsy_active_for_radio(radio_id)
+            qsy_btn = controls.get("qsy_btn")
+            timer_btn = controls.get("timer_btn")
+            suspend_btn = controls.get("suspend_btn")
+            resume_btn = controls.get("resume_btn")
+            combo = controls.get("freq_combo")
+            if isinstance(qsy_btn, QPushButton) and isinstance(combo, QComboBox):
+                preferred_key = str(combo.property("stationCommandPreferredKey") or "")
+                selected_key = self._station_command_combo_selected_key(combo)
+                action_state = qsy_action_state(
+                    selected_meta=selected_qsy_meta(combo),
+                    preferred_key=preferred_key,
+                    radio_id=radio_id,
+                    selection_changed=bool(
+                        selected_key
+                        and (
+                            (preferred_key and selected_key != preferred_key)
+                            or (not preferred_key and combo.property("stationCommandSelectionDirty"))
+                        )
+                    ),
+                    manual_qsy_active=manual_qsy_active,
+                    timed_qsy_active=timed_qsy_active,
+                )
+                qsy_btn.setText("Manual QSY" if manual_qsy_active else "QSY")
+                qsy_btn.setEnabled(action_state.qsy_enabled)
+                qsy_btn.setStyleSheet(button_style(action_state.qsy_role, theme))
+            if isinstance(timer_btn, QToolButton):
+                timer_btn.setText(f"{countdown} | Extend QSY" if timed_qsy_active and countdown else timed_qsy_text(timed_qsy_active=timed_qsy_active))
+                if isinstance(combo, QComboBox):
+                    preferred_key = str(combo.property("stationCommandPreferredKey") or "")
+                    selected_key = self._station_command_combo_selected_key(combo)
+                    action_state = qsy_action_state(
+                        selected_meta=selected_qsy_meta(combo),
+                        preferred_key=preferred_key,
+                        radio_id=radio_id,
+                        selection_changed=bool(
+                            selected_key
+                            and (
+                                (preferred_key and selected_key != preferred_key)
+                                or (not preferred_key and combo.property("stationCommandSelectionDirty"))
+                            )
+                        ),
+                        manual_qsy_active=manual_qsy_active,
+                        timed_qsy_active=timed_qsy_active,
+                    )
+                    timer_btn.setEnabled(action_state.timed_qsy_enabled)
+                    timer_btn.setStyleSheet(button_style(action_state.timed_qsy_role, theme))
+                else:
+                    timer_btn.setStyleSheet(button_style("warning" if timed_qsy_active else "muted", theme))
+            if isinstance(suspend_btn, QToolButton):
+                scheduler_actions = scheduler_action_state(
+                    timed_qsy_active=timed_qsy_active,
+                    timed_suspend_active=timed_suspend_active,
+                    scheduler_suspended_manual=scheduler_suspended_manual,
+                    scheduler_state_text="Scheduler Suspended" if scheduler_suspended_manual else "",
+                )
+                suspend_text = (
+                    f"{countdown} | Extend Suspend"
+                    if timed_suspend_active and countdown
+                    else scheduler_actions.timed_suspend_text
+                )
+                suspend_btn.setText(suspend_text)
+                suspend_btn.setStyleSheet(button_style(scheduler_actions.timed_suspend_role, theme))
+            if isinstance(resume_btn, QPushButton):
+                resume_active = timed_qsy_active or timed_suspend_active or scheduler_suspended_manual
+                resume_btn.setEnabled(radio_id > 0 and resume_active)
+                resume_btn.setStyleSheet(button_style("warning" if resume_active else "muted", theme))
+
     def _clear_station_command_admin_layout(self) -> None:
         layout = getattr(self, "station_command_radio_admin_layout", None)
         if layout is None:
@@ -5400,15 +7009,19 @@ class MainWindow(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _station_command_plan_name_for_snapshot(self, snapshot: object) -> str:
+        ident = self._station_command_snapshot_id(snapshot)
+        if ident > 0:
+            assigned_name = self._station_command_assigned_plan_name_for_radio(ident)
+            if assigned_name:
+                return assigned_name
         for key in (
             "frequency_plan_name",
             "assigned_frequency_plan_name",
             "assigned_schedule_name",
-            "assigned_operating_profile_name",
-            "operating_profile_name",
         ):
             text = str(self._station_command_value(snapshot, key, "") or "").strip()
             if text:
@@ -5436,7 +7049,7 @@ class MainWindow(QMainWindow):
             name = self._station_command_snapshot_name(snapshot)
             now = self._station_command_now_text_for_summary(snapshot, selected_id)
             state = self._station_command_compact_state_text(self._station_command_state_text(snapshot))
-            plan_name = self._station_command_plan_name_for_snapshot(snapshot)
+            plan_name = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
             row = QFrame(panel)
             row.setObjectName("stationCommandRadioAdminRow")
             row.setFrameShape(QFrame.StyledPanel)
@@ -5500,6 +7113,9 @@ class MainWindow(QMainWindow):
     def _refresh_station_command_bar(self, *, force: bool = False) -> None:
         if not hasattr(self, "station_command_radio_combo"):
             return
+        if force:
+            self._invalidate_station_command_plan_cache()
+            self._invalidate_station_command_lane_cache()
         manager = getattr(self, "station_runtime_manager", None)
         snapshots: list[object] = []
         if manager is not None:
@@ -5521,9 +7137,35 @@ class MainWindow(QMainWindow):
             if ident > 0 and ident not in seen_ids and self._station_command_is_controllable_profile(snapshot):
                 choices.append(snapshot)
                 seen_ids.add(ident)
+        self._station_command_last_choices = list(choices)
 
         selected = self._station_command_selected_snapshot(choices)
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        multi_active = len(choices) >= 2
+        if multi_active and not force and bool(getattr(self, "_station_command_multi_mode_active", False)):
+            if selected is not None and selected_id > 0:
+                self._station_command_selected_profile_id = int(selected_id)
+            page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
+            for btn, direction, label in (
+                (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
+                (getattr(self, "station_command_radio_next_btn", None), 1, "Next"),
+            ):
+                if btn is None:
+                    continue
+                show_page_control = len(choices) > 2 and page_count > 1
+                if btn.isVisible() != show_page_control:
+                    btn.setVisible(show_page_control)
+                btn.setEnabled((page > 0) if direction < 0 else (page < page_count - 1))
+                next_text = f"{label} {page + 1}/{page_count}" if page_count > 1 else label
+                if btn.text() != next_text:
+                    btn.setText(next_text)
+            self._refresh_station_command_radio_summary(choices, selected_id)
+            try:
+                snapshot = suspend_snapshot(self.settings, allow_reload=False)
+            except Exception:
+                snapshot = {}
+            self._update_station_command_radio_tile_hold_controls(snapshot if isinstance(snapshot, Mapping) else {})
+            return
         self._station_command_bar_loading = True
         combo = self.station_command_radio_combo
         previous_block = combo.blockSignals(True)
@@ -5568,9 +7210,57 @@ class MainWindow(QMainWindow):
             self.station_command_state_label.setVisible(True)
             self.station_command_next_label.setText("Next: none")
             tooltip = "No configured radio is available for station commands."
+        self._refresh_station_command_health(selected, selected_id)
+        self._station_command_multi_mode_active = multi_active
+        if getattr(self, "station_command_radio_summary_label", None) is not None:
+            self.station_command_radio_summary_label.setText("Active Radios" if multi_active else "Radios")
+            self.station_command_radio_summary_label.setVisible(not multi_active)
+        if getattr(self, "station_command_radio_summary_scroll", None) is not None:
+            self.station_command_radio_summary_scroll.setFixedHeight(188 if multi_active else 42)
+            self.station_command_radio_summary_scroll.setVisible(True)
+        page_choices: list[object] = []
+        page = 0
+        page_count = 1
+        if multi_active:
+            page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
+        for btn, direction, label in (
+            (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
+            (getattr(self, "station_command_radio_next_btn", None), 1, "Next"),
+        ):
+            if btn is None:
+                continue
+            show_page_control = multi_active and len(choices) > 2 and page_count > 1
+            btn.setVisible(show_page_control)
+            btn.setEnabled((page > 0) if direction < 0 else (page < page_count - 1))
+            btn.setText(f"{label} {page + 1}/{page_count}" if page_count > 1 else label)
+        if getattr(self, "station_command_radio_admin_btn", None) is not None:
+            self.station_command_radio_admin_btn.setVisible(not multi_active)
+        if multi_active and getattr(self, "station_command_radio_admin_panel", None) is not None:
+            self._station_command_radio_admin_expanded = False
+            self.station_command_radio_admin_panel.setVisible(False)
+        for widget in (
+            getattr(self, "station_command_radio_label", None),
+            getattr(self, "station_command_radio_combo", None),
+            getattr(self, "station_command_radio_separator", None),
+            getattr(self, "station_command_now_caption", None),
+            getattr(self, "station_command_now_label", None),
+            getattr(self, "station_command_state_label", None),
+            getattr(self, "station_command_now_separator", None),
+            getattr(self, "station_command_action_label", None),
+            getattr(self, "station_command_freq_combo", None),
+            getattr(self, "station_command_qsy_btn", None),
+            getattr(self, "station_command_duration_combo", None),
+            getattr(self, "station_command_hold_btn", None),
+            getattr(self, "station_command_suspend_btn", None),
+            getattr(self, "station_command_resume_btn", None),
+            getattr(self, "station_command_health_label", None),
+            getattr(self, "station_command_health_widget", None),
+            getattr(self, "station_command_next_label", None),
+        ):
+            if widget is not None:
+                widget.setVisible(not multi_active)
         self._refresh_station_command_radio_summary(choices, selected_id)
         self._refresh_station_command_radio_admin(choices, selected_id)
-        self._refresh_station_command_health(selected, selected_id)
         try:
             refresh_hold_duration_combo(
                 self.station_command_duration_combo,
@@ -5613,6 +7303,28 @@ class MainWindow(QMainWindow):
         self.station_command_suspend_btn.setToolTip(f"{tooltip} Suspend scheduled frequency changes until Resume Schedule without changing the radio.")
         self.station_command_resume_btn.setToolTip(f"{tooltip} Resume scheduled frequency changes.")
         self._update_station_command_hold_button_labels(hold_snapshot)
+        if multi_active:
+            for widget in (
+                getattr(self, "station_command_radio_label", None),
+                getattr(self, "station_command_radio_combo", None),
+                getattr(self, "station_command_radio_separator", None),
+                getattr(self, "station_command_now_caption", None),
+                getattr(self, "station_command_now_label", None),
+                getattr(self, "station_command_state_label", None),
+                getattr(self, "station_command_now_separator", None),
+                getattr(self, "station_command_action_label", None),
+                getattr(self, "station_command_freq_combo", None),
+                getattr(self, "station_command_qsy_btn", None),
+                getattr(self, "station_command_duration_combo", None),
+                getattr(self, "station_command_hold_btn", None),
+                getattr(self, "station_command_suspend_btn", None),
+                getattr(self, "station_command_resume_btn", None),
+                getattr(self, "station_command_health_label", None),
+                getattr(self, "station_command_health_widget", None),
+                getattr(self, "station_command_next_label", None),
+            ):
+                if widget is not None:
+                    widget.setVisible(False)
         try:
             self._style_station_command_bar(resolve_theme(self.settings))
         except Exception:

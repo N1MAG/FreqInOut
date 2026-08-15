@@ -32,8 +32,10 @@ def test_settings_source_exposes_radio_first_operating_model_assignment_controls
     assert 'QPushButton("Assign Model")' in source
     assert 'QPushButton("Restore Model")' in source
     assert 'QPushButton("Assign with RF Guard")' in source
+    assert 'QPushButton("Swap Plans with RF Guard")' in source
     assert 'QPushButton("Save with RF Guard")' in source
     assert "RF Guard Blocked Assignment" in source
+    assert "RF Guard Blocked Plan Swap" in source
     assert "Schedule Assignment Saved" in source
     assert "Choose a radio and Frequency Plan, then save with RF Guard before the schedule changes." in source
     assert "self.schedule_assignment_radio_combo = QComboBox()" in source
@@ -46,6 +48,7 @@ def test_settings_source_exposes_radio_first_operating_model_assignment_controls
     assert 'self.schedule_assignment_state_combo.addItem("Inactive", "inactive")' not in source
     assert "No schedule assignments were changed." in source
     assert "self.multi_radio_store.set_assigned_plan(" in source
+    assert "self.multi_radio_store.swap_assigned_frequency_plans(" in source
     assert "Operating Models" in source
     assert "Schedule Assignment" in source
     assert "Restore Default Model" in source
@@ -488,6 +491,53 @@ def test_multi_radio_store_round_trips_durable_schedule_assignment_foundation(mo
     validation = json.loads(str(effective["validation_status_json"]))
     assert validation["rf_guard_validation"] == "enforced"
     assert validation["state"] == "ok"
+
+
+def test_multi_radio_store_swaps_assigned_frequency_plans_atomically(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    first_radio = _create_primary_radio(store, "FIO-A")
+    second_radio = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "enabled": 1,
+            "runtime_active": 1,
+            "runtime_primary": 0,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+        }
+    )
+    first_plan = store.save_frequency_plan(
+        {
+            "name": "MagNet Main Plan",
+            "schedule_refs": [{"day_utc": "ALL", "start_utc": "00:00", "end_utc": "23:59", "group": "MAGNET", "band": "40M"}],
+            "frequency_refs": ["40m:7.115"],
+        }
+    )
+    second_plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Main Plan",
+            "schedule_refs": [{"day_utc": "ALL", "start_utc": "00:00", "end_utc": "23:59", "group": "AMRRON", "band": "20M"}],
+            "frequency_refs": ["20m:14.110"],
+        }
+    )
+    store.set_assigned_plan(int(first_radio["id"]), int(first_plan["id"]))
+    store.set_assigned_plan(int(second_radio["id"]), int(second_plan["id"]))
+
+    swapped = store.swap_assigned_frequency_plans(int(first_radio["id"]), int(second_radio["id"]))
+
+    assert len(swapped) == 2
+    first_effective = store.get_effective_assigned_plan_for_device(int(first_radio["id"]))
+    second_effective = store.get_effective_assigned_plan_for_device(int(second_radio["id"]))
+    assert first_effective is not None
+    assert second_effective is not None
+    assert int(first_effective["frequency_plan_id"]) == int(second_plan["id"])
+    assert int(second_effective["frequency_plan_id"]) == int(first_plan["id"])
+    assert str(first_effective["created_by"]) == "settings_ui_swap"
+    assert str(second_effective["created_by"]) == "settings_ui_swap"
 
 
 def test_multi_radio_store_requires_receive_only_schedule_plan_for_observer_radio(monkeypatch, tmp_path) -> None:

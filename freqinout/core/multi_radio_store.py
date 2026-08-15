@@ -1695,6 +1695,7 @@ def _schedule_assignment_validation_status_conn(
     frequency_plan: Mapping[str, Any],
     *,
     emit_events: bool = True,
+    assignment_plan_overrides: Optional[Mapping[int, int]] = None,
 ) -> Dict[str, Any]:
     plan_bands = _frequency_plan_bands(frequency_plan)
     supported_bands = _device_supported_bands(device)
@@ -1704,6 +1705,15 @@ def _schedule_assignment_validation_status_conn(
     events: List[Dict[str, Any]] = []
     device_id = int(device.get("id", 0) or 0)
     plan_id = int(frequency_plan.get("id", 0) or 0)
+    plan_overrides: Dict[int, int] = {}
+    for key, value in dict(assignment_plan_overrides or {}).items():
+        try:
+            override_device_id = int(key or 0)
+            override_plan_id = int(value or 0)
+        except Exception:
+            continue
+        if override_device_id > 0:
+            plan_overrides[override_device_id] = override_plan_id
 
     antenna_mode = normalize_rf_guard_mode(device.get("antenna_band_guard_mode", "warn"))
     unsupported = [band for band in plan_bands if supported_bands and band not in supported_bands]
@@ -1746,7 +1756,11 @@ def _schedule_assignment_validation_status_conn(
             (device_id, *tuple(EFFECTIVE_ASSIGNMENT_STATES), overlap_group),
         )
         for peer in rows:
-            peer_plan = _record_by_id(conn, "frequency_plans", int(peer.get("assigned_frequency_plan_id", 0) or 0))
+            peer_id = int(peer.get("id", 0) or 0)
+            peer_plan_id = int(plan_overrides.get(peer_id, peer.get("assigned_frequency_plan_id", 0)) or 0)
+            if peer_plan_id <= 0:
+                continue
+            peer_plan = _record_by_id(conn, "frequency_plans", peer_plan_id)
             if not peer_plan:
                 continue
             peer_overlap_mode = normalize_rf_guard_mode(peer.get("band_overlap_guard_mode", "warn"))
@@ -1794,7 +1808,11 @@ def _schedule_assignment_validation_status_conn(
             (device_id, *tuple(EFFECTIVE_ASSIGNMENT_STATES), advanced_group),
         )
         for peer in rows:
-            peer_plan = _record_by_id(conn, "frequency_plans", int(peer.get("assigned_frequency_plan_id", 0) or 0))
+            peer_id = int(peer.get("id", 0) or 0)
+            peer_plan_id = int(plan_overrides.get(peer_id, peer.get("assigned_frequency_plan_id", 0)) or 0)
+            if peer_plan_id <= 0:
+                continue
+            peer_plan = _record_by_id(conn, "frequency_plans", peer_plan_id)
             if not peer_plan:
                 continue
             peer_frequencies = _frequency_plan_frequency_hz_values(peer_plan)
@@ -2995,6 +3013,8 @@ def _set_assigned_plan_conn(
     starts_utc: str = "",
     ends_utc: str = "",
     created_by: str = "settings_ui",
+    assignment_plan_overrides: Optional[Mapping[int, int]] = None,
+    commit: bool = True,
 ) -> Dict[str, Any]:
     device = _record_by_id(conn, "device_profiles", int(device_profile_id))
     if not device:
@@ -3007,9 +3027,15 @@ def _set_assigned_plan_conn(
     if str(frequency_plan.get("category") or "").strip().lower() in SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES:
         raise ValueError("Source schedules must be blended into a Frequency Plan before assignment to a radio.")
     _validate_schedule_assignment_compatibility(device, frequency_plan)
-    validation = _schedule_assignment_validation_status_conn(conn, device, frequency_plan)
+    validation = _schedule_assignment_validation_status_conn(
+        conn,
+        device,
+        frequency_plan,
+        assignment_plan_overrides=assignment_plan_overrides,
+    )
     if validation.get("state") == "blocked":
-        conn.commit()
+        if commit:
+            conn.commit()
         messages = validation.get("blocked") or validation.get("messages") or ["RF Safety Guard blocked this assignment."]
         raise ValueError(str(messages[0]))
     state = _normalize_assignment_state(assignment_state)
@@ -3052,7 +3078,8 @@ def _set_assigned_plan_conn(
             now_iso,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return dict(conn.execute("SELECT * FROM assigned_plans WHERE id=last_insert_rowid()").fetchone())
 
 
@@ -5211,6 +5238,55 @@ class MultiRadioStore:
                 ends_utc=ends_utc,
                 created_by=created_by,
             )
+
+    def swap_assigned_frequency_plans(
+        self,
+        first_device_profile_id: int,
+        second_device_profile_id: int,
+        *,
+        reason: str = "Swapped Frequency Plans in Settings.",
+    ) -> List[Dict[str, Any]]:
+        first_id = int(first_device_profile_id or 0)
+        second_id = int(second_device_profile_id or 0)
+        if first_id <= 0 or second_id <= 0 or first_id == second_id:
+            raise ValueError("Select two different radios with assigned Frequency Plans.")
+        with self._connect() as conn:
+            first_assignment = _effective_assigned_plan_for_device(conn, first_id)
+            second_assignment = _effective_assigned_plan_for_device(conn, second_id)
+            if not first_assignment or not second_assignment:
+                raise ValueError("Both selected radios must already have assigned Frequency Plans before swapping.")
+            first_plan_id = int(first_assignment.get("frequency_plan_id") or 0)
+            second_plan_id = int(second_assignment.get("frequency_plan_id") or 0)
+            if first_plan_id <= 0 or second_plan_id <= 0:
+                raise ValueError("Both selected radios must already have assigned Frequency Plans before swapping.")
+            if first_plan_id == second_plan_id:
+                raise ValueError("The selected radios already use the same Frequency Plan.")
+            overrides = {
+                first_id: second_plan_id,
+                second_id: first_plan_id,
+            }
+            first_row = _set_assigned_plan_conn(
+                conn,
+                first_id,
+                second_plan_id,
+                assignment_state="active",
+                reason=reason,
+                created_by="settings_ui_swap",
+                assignment_plan_overrides=overrides,
+                commit=False,
+            )
+            second_row = _set_assigned_plan_conn(
+                conn,
+                second_id,
+                first_plan_id,
+                assignment_state="active",
+                reason=reason,
+                created_by="settings_ui_swap",
+                assignment_plan_overrides=overrides,
+                commit=False,
+            )
+            conn.commit()
+            return [first_row, second_row]
 
     def validate_frequency_plan_for_device(
         self,

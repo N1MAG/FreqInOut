@@ -31,6 +31,7 @@ from freqinout.core.multi_radio_store import (
     ensure_default_multi_radio_records,
     settings_db_path,
 )
+from freqinout.core.multi_rig_runtime_status import STARTUP_MIGRATED, MultiRigRuntimeStatus
 from freqinout.core.settings_manager import SettingsManager
 
 
@@ -1257,6 +1258,107 @@ def test_settings_autofill_feedback_helper_publishes_configure_event() -> None:
     assert events[0].radio_profile_id == "7"
     assert events[0].target_label == "DX10"
     assert events[0].source_surface == "settings.configure_automatically.js8.result"
+
+
+def test_radio_profile_status_card_uses_selected_radio_not_station_default() -> None:
+    from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    QApplication.instance() or QApplication([])
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.settings = types.SimpleNamespace(get=lambda _key, default=None: default, all=lambda: {})
+    tab.device_profiles = [
+        {
+            "id": 1,
+            "name": "FIO-A",
+            "runtime_primary": 1,
+            "runtime_active": 1,
+            "enabled": 1,
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+        },
+        {
+            "id": 2,
+            "name": "FIO-B",
+            "runtime_primary": 0,
+            "runtime_active": 0,
+            "enabled": 0,
+            "control_backend": "flrig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 22346,
+        },
+    ]
+    tab._settings_radio_focus_id = 2
+    tab.multi_rig_status_card = QFrame()
+    tab.multi_rig_status_title_label = QLabel()
+    tab.multi_rig_status_summary_label = QLabel()
+    tab.multi_rig_status_detail_label = QLabel()
+    tab.multi_rig_autoconfig_preview_label = QLabel()
+    tab.multi_rig_status_actions_widget = QWidget()
+    tab.multi_rig_preview_autoconfig_btn = QPushButton()
+    tab.multi_rig_setup_btn = QPushButton()
+    tab.multi_rig_not_now_btn = QPushButton()
+    tab.multi_rig_copy_summary_btn = QPushButton()
+    tab._multi_rig_runtime_status = MultiRigRuntimeStatus(
+        startup_mode=STARTUP_MIGRATED,
+        migration_version=1,
+        migration_current=True,
+        migration_deferred=False,
+        existing_fio_usage_detected=True,
+        fresh_install_default_created=False,
+        primary_radio_id="radio_1",
+        active_radio_ids=("radio_1",),
+        primary_device_profile_id=1,
+        active_device_profile_ids=(1,),
+        scheduler_scope="all_active_runtime",
+        messages_scope="all_active_runtime",
+        map_scope="all_active_runtime",
+        controlfreq_scope="primary_runtime",
+        main_window_scope="primary_runtime",
+        background_ingest_scope="all_active_runtime",
+        compatibility_projection_allowed=True,
+        legacy_write_mirroring_allowed=True,
+    )
+    tab._effective_assignment_map = lambda: {
+        2: {
+            "operating_profile_name": "Unassigned",
+            "assignment_state": "unassigned",
+        }
+    }
+
+    tab._refresh_multi_rig_status_card()
+
+    assert tab.multi_rig_status_title_label.text() == "FIO-B - Status"
+    assert "FIO-B" not in tab.multi_rig_status_summary_label.text()
+    assert "Not enabled | Inactive" in tab.multi_rig_status_summary_label.text()
+    assert "22346" in tab.multi_rig_status_detail_label.text()
+    assert "FIO-A" not in tab.multi_rig_status_title_label.text()
+    assert "FIO-A" not in tab.multi_rig_status_summary_label.text()
+    assert "FIO-A" not in tab.multi_rig_status_detail_label.text()
+
+
+def test_radio_selector_exposes_visible_runtime_actions() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    configured_radios_block = source[
+        source.index('configured_radios_group = QGroupBox("Configured Radios")')
+        : source.index("sections_row = QHBoxLayout()")
+    ]
+    action_state_block = source[
+        source.index("def _update_device_profile_action_buttons")
+        : source.index("def _refresh_device_profiles_table")
+    ]
+
+    assert 'self.selector_activate_device_profile_btn = QPushButton("Use Radio")' in configured_radios_block
+    assert 'self.selector_deactivate_device_profile_btn = QPushButton("Stop Using")' in configured_radios_block
+    assert 'self.selector_set_default_device_profile_btn = QPushButton("Make Default")' in configured_radios_block
+    assert "self.selector_activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)" in configured_radios_block
+    assert "self.selector_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)" in configured_radios_block
+    assert "self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)" in configured_radios_block
+    assert "self.selector_activate_device_profile_btn.setEnabled(can_activate)" in action_state_block
+    assert "self.selector_deactivate_device_profile_btn.setEnabled(can_deactivate)" in action_state_block
+    assert "self.selector_set_default_device_profile_btn.setEnabled(can_set_active)" in action_state_block
 
 
 def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -> None:

@@ -1266,6 +1266,15 @@ class StationRuntimeManager:
             return None
         return self._runtimes.get(int(self._primary_device_id))
 
+    def get_runtime_for_device(self, device_profile_id: int) -> Optional[DeviceRuntime]:
+        try:
+            ident = int(device_profile_id or 0)
+        except Exception:
+            ident = 0
+        if ident <= 0:
+            return None
+        return self._runtimes.get(ident)
+
     def get_active_profile_swap(self) -> Optional[Dict[str, Any]]:
         return dict(self._active_profile_swap) if isinstance(self._active_profile_swap, dict) else None
 

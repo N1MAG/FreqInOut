@@ -592,6 +592,15 @@ class JS8CallNetControlTab(QWidget):
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
+        hub_valid = False
+        if self._js8_rx_hub is not None:
+            try:
+                hub_valid = bool(self._js8_rx_hub.is_valid())
+            except Exception:
+                hub_valid = False
+        if not hub_valid:
+            self._js8_rx_hub = None
+            self._js8_rx_registered = False
         if self._js8_rx_hub is None or self._js8_rx_hub.endpoint() != (host, port):
             if self._js8_rx_hub is not None and self._js8_rx_registered:
                 try:
@@ -603,7 +612,13 @@ class JS8CallNetControlTab(QWidget):
         if not self._js8_rx_registered:
             self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
             self._js8_rx_registered = True
-        self._js8_rx_hub.start(host, port)
+        try:
+            self._js8_rx_hub.start(host, port)
+        except RuntimeError:
+            self._js8_rx_hub = JS8RxHub.instance(host, port)
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
+            self._js8_rx_hub.start(host, port)
 
     def _js8_live_source_context(self) -> Dict[str, str]:
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"

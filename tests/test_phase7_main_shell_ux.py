@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -1494,8 +1495,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
     assert 'self.station_command_duration_combo.setObjectName("stationCommandDuration")' in source
     assert 'self.station_command_radio_summary_label = QLabel("Radios")' in source
-    assert 'self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)' in source
-    assert 'self.station_command_radio_summary_scroll.setWidgetResizable(True)' in source
+    assert 'self.station_command_radio_summary_scroll = QWidget(self.station_command_bar)' in source
+    assert "self.station_command_radio_summary_widget = self.station_command_radio_summary_scroll" in source
     assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
     assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
     assert "def _refresh_station_command_radio_summary(self, choices: list[object], selected_id: int) -> None:" in source
@@ -1521,8 +1522,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "layout.addWidget(self.station_command_health_widget, 1, 1)" in source
     assert "layout.addWidget(self.station_command_next_label, 1, 3, 1, 7)" in source
     assert "layout.addWidget(self.station_command_radio_summary_label, 2, 0)" in source
-    assert "layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 10)" in source
-    assert "layout.addWidget(self.station_command_radio_admin_btn, 2, 11, 1, 2)" in source
+    assert "layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 11)" in source
+    assert "layout.addWidget(self.station_command_radio_admin_btn, 2, 12)" in source
     assert "layout.addWidget(self.station_command_radio_admin_panel, 3, 0, 1, 13)" in source
     assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
@@ -1546,7 +1547,7 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self._status_timer.timeout.connect(self._refresh_station_overview)" in source
     assert "self._refresh_station_command_bar(force=False)" in source
     assert "self.station_command_qsy_btn.setEnabled(can_qsy)" in source
-    assert '"warning" if manual_qsy_active or scheduler_suspended_manual else "muted"' in source
+    assert '"warning" if manual_qsy_active or scheduler_suspended_manual or timed_hold_active else "muted"' in source
     assert 'self.station_command_state_label.setText("Manual QSY")' in source
     assert "self.station_command_freq_combo = QComboBox" in source
     assert "def _on_station_command_qsy_now_clicked" in source
@@ -1566,7 +1567,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_state_label.setText("Scheduler Suspended")' in source
     assert "def _on_station_command_health_clicked" in source
     assert "self.station_command_health_widget.setCursor(Qt.PointingHandCursor)" in source
-    assert "self.station_command_health_widget.mousePressEvent = self._on_station_command_health_clicked" in source
+    assert "self.station_command_health_widget.mousePressEvent = (" in source
+    assert "self._on_station_command_health_clicked(event, anchor=widget)" in source
 
 
 def test_main_window_compacts_rf_guard_unknown_peer_reason() -> None:
@@ -1620,10 +1622,11 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
     window.station_command_suspend_btn = QPushButton("Suspend Scheduler")
     window.station_command_resume_btn = QPushButton("Resume Schedule")
     window.station_command_radio_summary_label = QLabel("Radios")
-    window.station_command_radio_summary_scroll = QScrollArea()
-    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_scroll = QWidget()
+    window.station_command_radio_summary_widget = window.station_command_radio_summary_scroll
     window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
-    window.station_command_radio_summary_scroll.setWidget(window.station_command_radio_summary_widget)
+    window.station_command_radio_prev_btn = QPushButton("Prev")
+    window.station_command_radio_next_btn = QPushButton("Next")
     window.station_command_radio_admin_btn = QPushButton("All Radios")
     window.station_command_radio_admin_panel = QWidget()
     window.station_command_radio_admin_layout = QVBoxLayout(window.station_command_radio_admin_panel)
@@ -1649,7 +1652,7 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(3, 2).widget() is window.station_command_next_label
         assert window.station_command_layout.itemAtPosition(4, 0).widget() is window.station_command_radio_summary_label
         assert window.station_command_layout.itemAtPosition(4, 1).widget() is window.station_command_radio_summary_scroll
-        assert window.station_command_layout.itemAtPosition(4, 4).widget() is window.station_command_radio_admin_btn
+        assert window.station_command_layout.itemAtPosition(4, 5).widget() is window.station_command_radio_admin_btn
         assert window.station_command_layout.itemAtPosition(5, 0).widget() is window.station_command_radio_admin_panel
 
         window.station_command_bar.resize(1300, 120)
@@ -1674,7 +1677,7 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(1, 3).widget() is window.station_command_next_label
         assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_radio_summary_label
         assert window.station_command_layout.itemAtPosition(2, 1).widget() is window.station_command_radio_summary_scroll
-        assert window.station_command_layout.itemAtPosition(2, 11).widget() is window.station_command_radio_admin_btn
+        assert window.station_command_layout.itemAtPosition(2, 12).widget() is window.station_command_radio_admin_btn
         assert window.station_command_layout.itemAtPosition(3, 0).widget() is window.station_command_radio_admin_panel
     finally:
         window.station_command_bar.deleteLater()
@@ -1764,15 +1767,8 @@ def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypat
         app.processEvents()
 
 
-def test_phase7_station_command_health_summary_opens_health_details() -> None:
+def test_phase7_station_command_health_summary_opens_quick_menu() -> None:
     from freqinout.gui.main_window import MainWindow
-
-    class FakeHealthTab:
-        def __init__(self):
-            self.focused = []
-
-        def focus_scope(self, *, device_profile_id: int = 0, scope_name: str = ""):
-            self.focused.append((device_profile_id, scope_name))
 
     class FakeEvent:
         def __init__(self):
@@ -1783,16 +1779,13 @@ def test_phase7_station_command_health_summary_opens_health_details() -> None:
 
     window = MainWindow.__new__(MainWindow)
     window._station_command_selected_profile_id = 42
-    window.station_health_tab = FakeHealthTab()
-    window._screen_index_by_label = {"Station Health": 7}
-    switched = []
-    window._set_screen = lambda index: switched.append(index)
+    shown = []
+    window._show_station_command_health_menu = lambda **kwargs: shown.append(kwargs)
 
     event = FakeEvent()
     MainWindow._on_station_command_health_clicked(window, event)
 
-    assert window.station_health_tab.focused == [(42, "")]
-    assert switched == [7]
+    assert shown == [{"device_profile_id": 42, "anchor": None}]
     assert event.accepted is True
 
 
@@ -2351,6 +2344,12 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
                 "control_backend": "flrig",
             }
 
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [{"id": 20, "name": "Net Plan", "schedule_refs_json": "[]"}]
+
     window = MainWindow.__new__(MainWindow)
     window.station_runtime_manager = FakeManager()
     window.multi_radio_store = FakeStore()
@@ -2394,14 +2393,12 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert window.station_command_now_label.text() == "MAGNET 20M"
     assert window.station_command_now_label.toolTip() == "MAGNET 20M: 14.115.000 20M"
     assert window.station_command_state_label.text() == "Manual Hold"
-    assert window.station_command_next_label.text() == "Next: Plan: Net Plan"
-    summary_buttons = window.station_command_radio_summary_widget.findChildren(QPushButton)
-    assert [button.text() for button in summary_buttons] == [
-        "DX10 | MAGNET 40M",
-        "icom | MAGNET 20M | Manual Hold",
-        "Spare Rig | unavailable | Configured inactive",
-    ]
-    assert [button.isChecked() for button in summary_buttons] == [False, True, False]
+    assert window.station_command_next_label.text() == "Next: Net Plan"
+    summary_tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
+    assert len(summary_tiles) == 2
+    summary_buttons = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandRadioTileName")
+    assert [button.text() for button in summary_buttons] == ["DX10", "icom"]
+    assert [button.isChecked() for button in summary_buttons] == [False, True]
     assert window.station_command_qsy_btn.isEnabled() is True
     assert window.station_command_freq_combo.currentText() == "MAGNET 20M"
     assert window.station_command_freq_combo.itemData(
@@ -2424,7 +2421,7 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert window.multi_radio_store.activated_ids[-1] == 4
     assert window.station_command_now_label.text() == "unavailable"
     assert window.station_command_state_label.text() == "Configured inactive"
-    assert window.station_command_next_label.text() == "Next: Plan: Backup Plan"
+    assert window.station_command_next_label.text() == "Next: No assigned plan"
 
     for widget in (
         window.station_command_radio_combo,
@@ -2697,6 +2694,7 @@ def test_phase7_station_command_manual_qsy_persists_target_until_runtime_catches
     class FakeScheduler:
         current_source = "QSY"
         current_schedule_entry = {
+            "target_device_profile_id": 1,
             "frequency": "14.115",
             "group": "S2 UNDERGROUND",
             "band": "20M",
@@ -2706,7 +2704,10 @@ def test_phase7_station_command_manual_qsy_persists_target_until_runtime_catches
     window = MainWindow.__new__(MainWindow)
     window.settings = FakeSettings()
     window.scheduler = FakeScheduler()
-    snapshot = SimpleNamespace(current_frequency_label="7.115 MHz", current_band="40M")
+    window._station_command_selected_profile_id = 1
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    snapshot = SimpleNamespace(device_profile_id=1, current_frequency_label="7.115 MHz", current_band="40M")
 
     assert MainWindow._station_command_now_text(window, snapshot) == "S2/GHOSTNET 20M"
     assert (
@@ -2796,6 +2797,682 @@ def test_phase7_station_command_now_ignores_other_radio_scheduler_entry(monkeypa
     app.processEvents()
 
 
+def test_phase7_station_command_selected_radio_uses_its_snapshot_before_global_scheduler(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "AMRRON", "band": "40M", "mode": "Digi", "frequency": "7.110"},
+                    {"group": "MAGNET", "band": "40M", "mode": "Digi", "frequency": "7.115"},
+                ]
+            }
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.scheduler = SimpleNamespace(
+        current_source="HF",
+        current_schedule_entry={
+            "target_device_profile_id": 1,
+            "frequency": "7.115",
+            "group": "MAGNET",
+            "band": "40M",
+            "mode": "Digi",
+        },
+    )
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_selected_profile_id = 2
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        current_frequency_label="7.110 MHz",
+        current_band="40M",
+        current_group="AMRRON",
+    )
+
+    assert MainWindow._station_command_now_text(window, snapshot) == "AMRRON 40M"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_qsy_state_does_not_bleed_across_radios(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace(all=lambda: {"operating_groups": []})
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_selected_profile_id = 2
+    window.scheduler = SimpleNamespace(
+        current_source="QSY",
+        current_schedule_entry={
+            "target_device_profile_id": 1,
+            "frequency": "7.115",
+            "group": "MAGNET",
+            "band": "40M",
+            "mode": "Digi",
+        },
+        _manual_qsy_active=True,
+    )
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        current_frequency_label="7.110 MHz",
+        current_band="40M",
+        current_group="AMRRON",
+    )
+
+    assert MainWindow._station_command_scheduler_manual_qsy_active(window) is False
+    assert MainWindow._station_command_now_text(window, snapshot) == "AMRRON 40M"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_scheduler_suspend_state_does_not_bleed_across_radios(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_scheduler_suspended_manual = True
+    window._station_command_scheduler_suspended_manual_profile_id = 2
+    window._station_command_selected_profile_id = 2
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self._runtime_scheduler_enabled_override = False
+
+        def set_runtime_scheduler_enabled(self, enabled: bool) -> None:
+            self._runtime_scheduler_enabled_override = bool(enabled)
+
+    window.scheduler = FakeScheduler()
+
+    assert MainWindow._station_command_scheduler_suspended_manually_for_radio(window, 2) is True
+    assert MainWindow._station_command_scheduler_suspended_manually_for_radio(window, 1) is False
+
+    MainWindow._station_command_set_scheduler_suspended_manual(window, False)
+
+    assert MainWindow._station_command_scheduler_suspended_manually_for_radio(window, 2) is False
+    assert window._station_command_scheduler_suspended_manual_profile_id == 0
+
+    app.processEvents()
+
+
+def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
+    tile_block = source[
+        source.index("def _refresh_station_command_radio_tiles")
+        : source.index("def _clear_station_command_admin_layout")
+    ]
+    refresh_block = source[
+        source.index("def _refresh_station_command_bar")
+        : source.index("def _on_station_command_radio_changed")
+    ]
+
+    assert 'health_btn = QPushButton("Health", tile)' in tile_block
+    assert 'health_btn.setObjectName("stationCommandRadioTileHealth")' in tile_block
+    assert 'freq_combo = QComboBox(tile)' in tile_block
+    assert 'freq_combo.setObjectName("stationCommandRadioTileFrequency")' in tile_block
+    assert "card_width = self._station_command_radio_card_width(len(choices))" in tile_block
+    assert "tile.setMinimumWidth(card_width)" in tile_block
+    assert "tile.setMaximumWidth(card_width)" in tile_block
+    assert "tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in tile_block
+    assert "timer_btn = QToolButton(tile)" in tile_block
+    assert 'timer_btn.setObjectName("stationCommandRadioTileTimedSuspend")' in tile_block
+    assert "timer_btn.setText(timed_qsy_text(timed_qsy_active=timed_qsy_active))" in tile_block
+    assert "scheduler_actions = scheduler_action_state(" in tile_block
+    assert "action_state = qsy_action_state(" in tile_block
+    assert "card_snapshot: object = snapshot" in tile_block
+    assert "preferred_key = self._station_command_preferred_qsy_key(card_snapshot)" in tile_block
+    assert "not preferred_key and combo.property(\"stationCommandSelectionDirty\")" in tile_block
+    assert "action_state.qsy_enabled" in tile_block
+    assert "def _update_station_command_radio_tile_hold_controls" in source
+    assert "self._station_command_radio_tile_controls = tile_controls" in tile_block
+    summary_block = source[
+        source.index("def _refresh_station_command_radio_summary")
+        : source.index("def _refresh_station_command_radio_tiles")
+    ]
+    assert "hold_countdown" not in summary_block
+    assert 'source_surface", "") or "").strip().lower() == "station_command_bar"' in source
+    wrapper_block = source[
+        source.index("def _station_command_for_radio")
+        : source.index("def _station_command_set_qsy_combo_to_meta")
+    ]
+    assert "_refresh_station_command_bar(force=True)" not in wrapper_block
+    hold_block = source[
+        source.index("def _dispatch_hold_snapshot")
+        : source.index("def on_hold_state_changed")
+    ]
+    assert "if signature_changed:" in hold_block
+    assert "elif was_active:" in hold_block
+    assert "self._update_station_command_radio_tile_hold_controls(snapshot)" in hold_block
+    assert "self._apply_active_hold_status_panel(snapshot)\n                self._refresh_station_command_bar(force=False)" in hold_block
+    assert "statusBar().showMessage" in source[
+        source.index("def _publish_station_command_feedback")
+        : source.index("def _on_station_command_hold_duration_changed")
+    ]
+    assert "timer_btn.setPopupMode(QToolButton.MenuButtonPopup)" in tile_block
+    assert "duration_menu = QMenu(timer_btn)" in tile_block
+    assert 'manual_qsy_action = QAction("Indefinite", duration_menu)' in tile_block
+    assert "suspend_btn = QToolButton(tile)" in tile_block
+    assert 'suspend_btn.setObjectName("stationCommandRadioTileSchedulerSuspend")' in tile_block
+    assert 'manual_suspend_action = QAction("Indefinite", suspend_menu)' in tile_block
+    assert 'assign_btn = QPushButton("Change Plan", tile)' in tile_block
+    assert 'now_font.setBold(True)' in tile_block
+    assert 'now_font.setPointSize(max(now_font.pointSize(), 13))' in tile_block
+    assert 'tile_layout.addWidget(freq_combo, 1, 0, 1, 4)' in tile_block
+    assert 'tile_layout.addWidget(state_label, 0, 2)' not in tile_block
+    assert 'tile_layout.addWidget(name_btn, 0, 0, 1, 3)' in tile_block
+    assert 'tile_layout.addWidget(next_label, 3, 0, 1, 4)' in tile_block
+    assert 'tile_layout.addWidget(resume_btn, 4, 0, 1, 2)' in tile_block
+    assert 'tile_layout.addWidget(assign_btn, 4, 2, 1, 2)' in tile_block
+    assert "scheduler_suspended_manual = self._station_command_scheduler_suspended_manually_for_radio(ident)" in tile_block
+    assert "page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)" in source
+    assert "self._change_station_command_radio_page(1)" in source
+    assert "getattr(self.station_command_bar, \"width\", lambda: 0)() or self.width() or 0" in source
+    assert ".viewport()" not in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
+    assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if multi_active else 42)" in refresh_block
+    assert "widget.setVisible(not multi_active)" in refresh_block
+    assert "widget.setVisible(False)" in refresh_block
+    assert 'tile.setProperty("selected", "true" if selected else "false")' in tile_block
+    assert "QFrame#stationCommandRadioTile[selected=\\\"true\\\"]" in source
+    assert "QComboBox#stationCommandRadioTileFrequency" in source
+    assert "dropdown-chevron.svg" in source
+    assert "QToolButton#stationCommandRadioTileTimedSuspend::menu-indicator" in source
+    assert "station_control_tile_surface" in source
+    assert "station_control_tile_selected_surface" in source
+    assert "station_control_tile_selected_border" in source
+    assert "station_control_tile_surface" in theme_source
+    assert "station_control_tile_selected_surface" in theme_source
+
+
+def test_phase7_station_command_health_uses_non_modal_quick_menu() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    health_block = source[
+        source.index("def _station_command_health_summary_for_profile")
+        : source.index("def _add_station_command_health_item")
+    ]
+    click_block = source[
+        source.index("def _on_station_command_health_clicked")
+        : source.index("def _quick_search_blob")
+    ]
+    tile_block = source[
+        source.index("def _refresh_station_command_radio_tiles")
+        : source.index("def _clear_station_command_admin_layout")
+    ]
+
+    assert "def _show_station_command_health_menu" in health_block
+    assert "menu = QMenu(anchor_widget)" in health_block
+    assert 'menu.setObjectName("stationCommandHealthMenu")' in health_block
+    assert "QMenu#stationCommandHealthMenu" in health_block
+    assert 'open_action = QAction("Open Health Details", menu)' in health_block
+    assert "menu.popup(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))" in health_block
+    assert "self._show_station_command_health_menu(device_profile_id=ident, anchor=anchor)" in click_block
+    assert "self._open_station_health_detail(device_profile_id=ident)" not in click_block
+    assert "self._show_station_command_health_menu(" in tile_block
+
+
+def test_phase7_station_command_selected_radio_uses_assigned_plan_before_other_radio_scheduler(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 20,
+                    "name": "AmRRON Plan",
+                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"AMRRON","band":"40M"}]',
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace(all=lambda: {"operating_groups": []})
+    window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(
+        current_source="HF",
+        current_schedule_entry={
+            "target_device_profile_id": 1,
+            "frequency": "7.115",
+            "group": "MAGNET",
+            "band": "40M",
+            "mode": "Digi",
+        },
+    )
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_selected_profile_id = 2
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        current_frequency_label="",
+        current_band="",
+        current_group="",
+    )
+
+    assert MainWindow._station_command_now_text(window, snapshot) == "AMRRON 40M"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_next_uses_selected_radio_assigned_plan(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    next_minute = (now.hour * 60 + now.minute + 1) % 1440
+    next_start = f"{next_minute // 60:02d}:{next_minute % 60:02d}"
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [
+                {"device_profile_id": 1, "frequency_plan_id": 10},
+                {"device_profile_id": 2, "frequency_plan_id": 20},
+            ]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 10,
+                    "name": "MagNet Plan",
+                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"MAGNET","band":"40M"}]',
+                },
+                {
+                    "id": 20,
+                    "name": "AmRRON Plan",
+                    "schedule_refs_json": (
+                        '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"AMRRON","band":"40M"},'
+                        f'{{"day_utc":"ALL","start_utc":"{next_start}","end_utc":"23:59","group":"AMRRON","band":"20M"}}]'
+                    ),
+                },
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.multi_radio_store = FakeStore()
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        assigned_operating_profile_name="AmRRON Plan",
+        scheduler_enabled=True,
+    )
+
+    assert MainWindow._station_command_next_text(window, snapshot) == "AMRRON 20M"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_next_does_not_use_other_radio_assigned_plan(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 1, "frequency_plan_id": 10}]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 10,
+                    "name": "MagNet Plan",
+                    "schedule_refs_json": '[{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59","group":"MAGNET","band":"40M"}]',
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.multi_radio_store = FakeStore()
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        assigned_operating_profile_name="AmRRON Plan",
+        scheduler_enabled=True,
+    )
+
+    assert MainWindow._station_command_next_text(window, snapshot) == "No assigned plan"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_plan_label_uses_frequency_plan_assignment(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [{"id": 20, "name": "AmRRON Main Plan", "schedule_refs_json": "[]"}]
+
+    window = MainWindow.__new__(MainWindow)
+    window.multi_radio_store = FakeStore()
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    snapshot = SimpleNamespace(
+        device_profile_id=2,
+        assigned_operating_profile_name="Default Operating Profile",
+        operating_profile_name="Default Operating Profile",
+    )
+
+    assert MainWindow._station_command_plan_name_for_snapshot(window, snapshot) == "AmRRON Main Plan"
+    assert MainWindow._station_command_display_plan_name("AmRRON Main Plan") == "AmRRON Main"
+
+    app.processEvents()
+
+
+def test_phase7_station_command_card_qsy_options_are_assigned_plan_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "MAGNET", "band": "40M", "freq": "7.115", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "20M", "freq": "14.110", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "40M", "freq": "7.110", "mode": "Digi"},
+                ]
+            }
+
+        def get(self, _key, default=None):
+            return default
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 20,
+                    "name": "AmRRON Main Plan",
+                    "schedule_refs_json": (
+                        '[{"group":"AMRRON","band":"20M","frequency":"14.110"},'
+                        '{"group":"AMRRON","band":"40M","frequency":"7.110"}]'
+                    ),
+                    "frequency_refs_json": "[]",
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(current_schedule_entry={})
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    snapshot = SimpleNamespace(device_profile_id=2, current_frequency_label="", current_band="", current_group="")
+
+    combo = QComboBox()
+    try:
+        assert MainWindow._station_command_populate_card_frequency_combo(window, combo, snapshot) is True
+        labels = [combo.itemText(index) for index in range(combo.count())]
+        assert labels == ["AMRRON 20M", "AMRRON 40M"]
+        assert all("MAGNET" not in label for label in labels)
+    finally:
+        combo.deleteLater()
+
+    app.processEvents()
+
+
+def test_phase7_station_command_active_lanes_override_stale_global_scheduler_state(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeScheduler:
+        current_source = "HF"
+        current_schedule_entry = {
+            "target_device_profile_id": 1,
+            "frequency": "7.115",
+            "group": "MAGNET",
+            "band": "40M",
+        }
+
+        def active_schedule_lanes(self, *, force: bool = False):
+            return [
+                {
+                    "device_profile_id": 1,
+                    "frequency_plan_name": "Magnet Main Plan",
+                    "current_entry": {"group": "MAGNET", "band": "40M", "frequency": "7.115"},
+                    "next_entry": {"group": "MAGNET", "band": "80M", "frequency": "3.585"},
+                    "hf_rows": [
+                        {"group": "MAGNET", "band": "40M", "frequency": "7.115"},
+                        {"group": "MAGNET", "band": "80M", "frequency": "3.585"},
+                    ],
+                },
+                {
+                    "device_profile_id": 2,
+                    "frequency_plan_name": "AmRRON Plan",
+                    "current_entry": {"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                    "next_entry": {"group": "AMRRON", "band": "80M", "frequency": "3.588"},
+                    "hf_rows": [
+                        {"group": "AMRRON", "band": "20M", "frequency": "14.110"},
+                        {"group": "AMRRON", "band": "80M", "frequency": "3.588"},
+                    ],
+                },
+            ]
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "MAGNET", "band": "40M", "freq": "7.115", "mode": "Digi"},
+                    {"group": "MAGNET", "band": "80M", "freq": "3.585", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "20M", "freq": "14.110", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "80M", "freq": "3.588", "mode": "Digi"},
+                ]
+            }
+
+        def get(self, _key, default=None):
+            return default
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.scheduler = FakeScheduler()
+    window.multi_radio_store = SimpleNamespace(
+        list_effective_assigned_plans=lambda: [],
+        list_frequency_plans=lambda: [],
+    )
+    window._station_command_lane_cache_data = None
+    window._station_command_lane_cache_expires = 0.0
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    snapshot = SimpleNamespace(device_profile_id=2, current_frequency_label="", current_band="", current_group="")
+
+    combo = QComboBox()
+    try:
+        assert MainWindow._station_command_now_text_for_summary(window, snapshot, selected_id=1) == "AMRRON 20M"
+        assert MainWindow._station_command_next_text(window, snapshot) == "AMRRON 80M"
+        assert MainWindow._station_command_plan_name_for_snapshot(window, snapshot) == "AmRRON Plan"
+        assert MainWindow._station_command_populate_card_frequency_combo(window, combo, snapshot) is True
+        assert [combo.itemText(index) for index in range(combo.count())] == ["AMRRON 20M", "AMRRON 80M"]
+    finally:
+        combo.deleteLater()
+
+    app.processEvents()
+
+
+def test_phase7_station_command_health_marks_off_schedule_as_health_category(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_off_schedule_by_radio = {
+        2: {"items": ["Frequency", "VFO"], "entry": {"target_device_profile_id": 2}}
+    }
+    window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
+    window._station_command_health_items = lambda _profile: []
+
+    summary = MainWindow._station_command_health_summary_for_profile(
+        window,
+        {"id": 2, "name": "FIO-B"},
+    )
+
+    assert summary["label"] == "Off Schedule"
+    assert summary["state"] == "warn"
+    assert summary["issues"][0][1] == "Off Schedule"
+    assert "Frequency" in summary["tooltip"]
+
+    app.processEvents()
+
+
+def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    monkeypatch.setattr(main_mod, "suspend_snapshot", lambda *_args, **_kwargs: {"active": False})
+
+    class FakeSettings:
+        def all(self):
+            return {
+                "operating_groups": [
+                    {"group": "MAGNET", "band": "20M", "freq": "14.115", "mode": "Digi"},
+                    {"group": "MAGNET", "band": "40M", "freq": "7.115", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "20M", "freq": "14.110", "mode": "Digi"},
+                    {"group": "AMRRON", "band": "40M", "freq": "7.110", "mode": "Digi"},
+                ]
+            }
+
+        def get(self, _key, default=None):
+            return default
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [
+                {"device_profile_id": 1, "frequency_plan_id": 10},
+                {"device_profile_id": 2, "frequency_plan_id": 20},
+            ]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 10,
+                    "name": "Magnet Main Plan",
+                    "schedule_refs_json": (
+                        '[{"group":"MAGNET","band":"40M","frequency":"7.115"},'
+                        '{"group":"MAGNET","band":"20M","frequency":"14.115"}]'
+                    ),
+                    "frequency_refs_json": "[]",
+                },
+                {
+                    "id": 20,
+                    "name": "AmRRON Plan",
+                    "schedule_refs_json": (
+                        '[{"group":"AMRRON","band":"20M","frequency":"14.110","day":"ALL","start":"00:00","end":"23:59"},'
+                        '{"group":"AMRRON","band":"40M","frequency":"7.110","day":"ALL","start":"23:59","end":"00:00"}]'
+                    ),
+                    "frequency_refs_json": "[]",
+                },
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = FakeSettings()
+    window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(current_source="", current_schedule_entry={})
+    window._station_command_plan_cache_data = None
+    window._station_command_plan_cache_expires = 0.0
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_scheduler_suspended_manual = False
+    window._station_command_scheduler_suspended_manual_profile_id = 0
+    window._station_command_timed_suspend_profile_id = 0
+    window._station_command_selected_profile_id = 1
+    window._station_command_card_qsy_pending_keys = {}
+    window._station_command_health_summary_for_profile = lambda _snapshot: {"state": "ok", "label": "Ready", "tooltip": ""}
+    window._show_station_command_health_menu = lambda **_kwargs: None
+    window._open_schedule_assignment_for_radio = lambda *_args, **_kwargs: None
+    window._on_station_command_summary_radio_clicked = lambda *_args, **_kwargs: None
+    window.station_command_bar = QFrame()
+    window.station_command_bar.resize(1600, 220)
+    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
+
+    snapshots = [
+        SimpleNamespace(
+            device_profile_id=1,
+            name="FIO-A",
+            current_frequency_label="7.115 MHz",
+            current_group="MAGNET",
+            current_band="40M",
+            runtime_active=True,
+        ),
+        SimpleNamespace(
+            device_profile_id=2,
+            name="FIO-B",
+            current_frequency_label="7.115 MHz",
+            current_group="MAGNET",
+            current_band="40M",
+            runtime_active=True,
+        ),
+    ]
+
+    try:
+        MainWindow._refresh_station_command_radio_tiles(window, snapshots, selected_id=1)
+        app.processEvents()
+
+        tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
+        assert len(tiles) == 2
+
+        first_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        second_combo = tiles[1].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        assert first_combo is not None
+        assert second_combo is not None
+
+        first_labels = [first_combo.itemText(index) for index in range(first_combo.count())]
+        second_labels = [second_combo.itemText(index) for index in range(second_combo.count())]
+        assert first_labels == ["MAGNET 20M", "MAGNET 40M"]
+        assert second_labels == ["AMRRON 20M", "AMRRON 40M"]
+        assert MainWindow._station_command_now_text_for_summary(window, snapshots[1], selected_id=1) == "AMRRON 20M"
+
+        first_qsy = next(btn for btn in tiles[0].findChildren(QPushButton) if btn.text() == "QSY")
+        first_timed = tiles[0].findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
+        assert first_timed is not None
+        assert first_qsy.isEnabled() is False
+        assert first_timed.isEnabled() is False
+
+        first_combo.setCurrentIndex(0)
+        app.processEvents()
+
+        assert first_combo.currentText() == "MAGNET 20M"
+        assert first_qsy.isEnabled() is True
+        assert first_timed.isEnabled() is True
+        assert window._station_command_card_qsy_pending_keys[1] == "14.115000"
+    finally:
+        window.station_command_radio_summary_widget.deleteLater()
+        window.station_command_bar.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_station_command_qsy_now_sets_manual_target_until_resume(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
@@ -2825,7 +3502,15 @@ def test_phase7_station_command_qsy_now_sets_manual_target_until_resume(monkeypa
 
     MainWindow._on_station_command_qsy_now_clicked(window)
 
-    assert qsy_calls == [{"freq": 14.115, "group": "S2 UNDERGROUND", "band": "20M", "mode": "Digi"}]
+    assert qsy_calls == [
+        {
+            "freq": 14.115,
+            "group": "S2 UNDERGROUND",
+            "band": "20M",
+            "mode": "Digi",
+            "target_device_profile_id": 1,
+        }
+    ]
     assert MainWindow._station_command_scheduler_manual_qsy_active(window) is True
     assert MainWindow._station_command_now_text(window, snapshot) == "S2/GHOSTNET 20M"
 
@@ -2835,6 +3520,60 @@ def test_phase7_station_command_qsy_now_sets_manual_target_until_resume(monkeypa
 
     window.station_command_freq_combo.deleteLater()
     window.station_command_radio_combo.deleteLater()
+    app.processEvents()
+
+
+def test_phase7_station_command_card_qsy_uses_card_radio_target(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui import main_window as main_mod
+    from freqinout.gui.main_window import MainWindow
+
+    qsy_calls = []
+    monkeypatch.setattr(main_mod, "perform_qsy", lambda _window, meta: qsy_calls.append(dict(meta)) or True)
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_selected_profile_id = 1
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._active_runtime_profile = {"id": 1}
+    window.settings = SimpleNamespace()
+    window.action_feedback_service = None
+    window.station_command_radio_combo = QComboBox()
+    window.station_command_radio_combo.addItem("FIO-A", 1)
+    window.station_command_freq_combo = QComboBox()
+    window.station_command_freq_combo.addItem("MAGNET 40M", {"freq": 7.115, "group": "MAGNET", "band": "40M"})
+    window._activate_station_command_radio = lambda ident: setattr(window, "_active_runtime_profile", {"id": ident}) or True
+    window._refresh_station_command_bar = lambda *args, **kwargs: None
+
+    card_combo = QComboBox()
+    card_combo.addItem("AMRRON 20M", {"freq": 14.110, "group": "AMRRON", "band": "20M", "mode": "Digi"})
+    try:
+        handler = MainWindow._station_command_for_radio_qsy(
+            window,
+            2,
+            card_combo,
+            window._on_station_command_qsy_now_clicked,
+        )
+        handler()
+
+        assert qsy_calls == [
+            {
+                "freq": 14.110,
+                "group": "AMRRON",
+                "band": "20M",
+                "mode": "Digi",
+                "target_device_profile_id": 2,
+            }
+        ]
+        assert window._station_command_selected_profile_id == 1
+        assert window.station_command_freq_combo.currentText() == "MAGNET 40M"
+    finally:
+        card_combo.deleteLater()
+        window.station_command_radio_combo.deleteLater()
+        window.station_command_freq_combo.deleteLater()
+
     app.processEvents()
 
 
@@ -2857,7 +3596,7 @@ def test_phase7_station_command_suspend_buttons_show_countdown(monkeypatch) -> N
             {"active": True, "remaining_sec": 29 * 60 + 10, "until": later},
         )
 
-        assert window.station_command_hold_btn.text() == "QSY Suspend 30m"
+        assert window.station_command_hold_btn.text() == "Suspended 30m"
         assert window.station_command_suspend_btn.text() == "Suspend Scheduler"
         assert "Scheduler resumes at" in window.station_command_hold_btn.toolTip()
 
@@ -2867,7 +3606,7 @@ def test_phase7_station_command_suspend_buttons_show_countdown(monkeypatch) -> N
             {"active": True, "remaining_sec": 9 * 60 + 42, "until": soon},
         )
 
-        assert window.station_command_hold_btn.text() == "QSY Suspend 09:42"
+        assert window.station_command_hold_btn.text() == "Suspended 09:42"
         assert window.station_command_suspend_btn.text() == "Suspend Scheduler"
 
         MainWindow._update_station_command_hold_button_labels(window, {"active": False})

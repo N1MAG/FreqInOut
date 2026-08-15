@@ -205,6 +205,28 @@ def test_rx_hub_can_start_two_native_api_endpoints() -> None:
         server_b.stop()
 
 
+def test_rx_hub_recreates_deleted_qtimer_on_start(monkeypatch) -> None:
+    app = QCoreApplication.instance() or QCoreApplication([])
+    hub = JS8RxHub.instance("127.0.0.1", 29999)
+
+    class _DeletedTimer:
+        def isActive(self) -> bool:
+            raise RuntimeError("libshiboken: Internal C++ object (PySide6.QtCore.QTimer) already deleted.")
+
+    try:
+        hub._timer = _DeletedTimer()  # type: ignore[assignment]
+        monkeypatch.setattr(hub, "_start_native_api", lambda: True)
+
+        assert hub.start("127.0.0.1", 29999) is True
+        assert hub._timer is not None
+        assert hub._timer is not hub  # Smoke check that a replacement timer exists.
+        assert hub.is_active() is True
+    finally:
+        JS8RxHub.shutdown_all()
+        JS8ApiClientRegistry.shutdown_all()
+        app.processEvents()
+
+
 def test_native_client_request_matches_response_by_id() -> None:
     server = _FakeJs8Server(
         {

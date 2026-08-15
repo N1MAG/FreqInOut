@@ -11135,7 +11135,25 @@ Service boundaries:
 - `RadioStatusPollCoordinator` is the shared radio status polling boundary for Scheduler, RF Guard, Control Bar, and UI status. Competing direct polling loops are not allowed.
 - Radio command paths (`QSY Now`, `QSY Timer`, `Suspend Scheduler`, `Resume Schedule`, SOP/scheduler changes) must flow through a command/preflight layer that can consult RF Guard before changing a radio or assigning a schedule.
 - The station control bar is radio-scoped. When the operator toggles radios, `Now`, manual QSY metadata, scheduler state, and action tooltips must be derived from the selected radio snapshot or that radio's assignment context; labels from another radio's scheduler lane must never bleed into the selected radio. Frequency-only fallback labels may be used only when no source-specific group is available.
-- The station control bar should have a compact all-radio summary mode showing each radio's current plan/frequency, guard state, and health at a glance. Summary chips must reuse the existing runtime snapshot refresh, must not start another polling loop, and should be clickable to make a radio the active command target. Expanding it converts the same space into a compact all-radio admin panel with per-radio Select, Assign Plan, and Health actions so operators can correct state without toggling each radio one at a time.
+- The station control bar keeps the single-radio hero controls when only one controllable radio is configured. When two or more controllable radios are configured, the summary strip becomes simultaneous radio command cards, and the redundant global radio/frequency/action controls are hidden. A two-radio station must show both radio cards together without pager chrome. Three-or-more radio stations render as many complete cards as fit and use overflow paging only when complete cards cannot fit. Each card shows the radio name, a hero-style group/band QSY selector with an obvious dropdown affordance, status-colored Health, direct QSY, `Timed QSY` as a menu/split action with selectable duration and `Indefinite`, `Timed Suspend` as a scheduler-suspend menu/split action with selectable duration and `Indefinite`, Resume Schedule, and a combined next/plan row such as `Next: MAGNET 40M | Plan: Magnet Main`. Tile actions select that radio internally before executing, so operators do not have to manually toggle the radio first.
+- Station command cards must use deterministic width and row allocation so displayed controls are not clipped at full width or minimized width. Individual displayed labels/buttons should not be half-visible or overlapped by scrollbars. Routine status/timer refresh must not destroy and rebuild unchanged card widgets; card rendering must be stable enough to avoid flashing.
+- Station command cards derive `Plan` labels only from effective Frequency Plan assignment state (`assigned_plans` + `frequency_plans`) or explicit frequency-plan snapshot fields. Operating Profile names are not Frequency Plan assignments and must not be shown as the card plan fallback. Unassigned radios show `Plan: Unassigned` / `Next: No assigned plan`.
+- Station command card QSY selectors are scoped to the radio's assigned Frequency Plan. They may resolve plan refs through configured Operating Group frequency metadata for mode/VFO/details, but they must not offer global operating-group QSY targets that are not part of the assigned plan. Radios without an assigned plan show no plan QSY targets instead of a global frequency list.
+- Station command card dropdown state is card-local. Selecting a new frequency in the FIO-A card must arm only FIO-A `QSY` and `Timed QSY`; selecting a new frequency in the FIO-B card must arm only FIO-B. Signal handlers must bind each card's update callback at card creation time so Python closure reuse cannot update the wrong radio card.
+- Station command card command handlers must pass an explicit `target_device_profile_id` to QSY actions and must not promote/change the global selected radio merely to execute a card-local QSY. Scheduler suspend/resume card actions may temporarily scope command state to the target radio, but they must not invoke runtime-primary activation or rebuild runtime clients.
+- Forced station-command refreshes and schedule-assignment saves invalidate the short-lived assigned-plan cache before rendering. Routine refreshes may reuse the cache briefly for performance, but plan labels and card QSY choices must converge on assignment changes without app restart or manual navigation.
+- Multi-radio station-command refresh order must settle visibility, card-container sizing, and pager state before creating or reusing card widgets. The render signature includes radio state, assigned plan name, and assigned-plan QSY targets so unchanged timer/status refreshes do not rebuild cards, while actual plan assignment changes do rebuild exactly once.
+- Multi-radio station-command hold, timed-QSY, timed-suspend, resume, health, and dependency-status updates must update existing card controls in place whenever the radio/card set and assigned-plan choices are unchanged. Dependency health snapshots must not force assigned-plan cache invalidation or card teardown. Full rebuilds are reserved for actual radio list, assignment, layout page, or assigned-plan option changes.
+- Multi-radio command tiles are first-class station-control UI, not an admin drawer. They must use station-control theme tokens for light/dark surfaces, selected-radio emphasis, readable muted labels, and compact command buttons; the selected tile must be visibly distinct without requiring the operator to infer selection from the global radio combobox.
+- The old `All Radios` drawer is redundant in multi-radio command mode and should remain hidden there. Radio activation and detailed configuration remain manageable from Settings, but the control bar should still show configured controllable radios so operators understand station-wide status without hunting.
+- Station command action labels are stateful and radio-scoped: `QSY` remains muted until the operator selects a different plan frequency; an active indefinite QSY changes `QSY` to `Manual QSY`; an active timed QSY changes `Timed QSY` to `Extend QSY`; an active timed scheduler suspension changes `Timed Suspend` to `Extend Suspend`; an indefinite scheduler suspension changes `Timed Suspend` to `Indefinite Suspend` only on the affected radio; `Resume Schedule` is visually promoted only when there is a manual QSY, timed QSY, timed scheduler suspend, or indefinite scheduler suspension to clear. Operators must be able to issue another QSY, start/extend a timed QSY, or suspend the scheduler without first using Resume Schedule.
+- Station command card actions must confirm state inside the affected radio card, not by showing a global action-feedback banner or any transient panel above the command bar. Timed-suspend countdowns may be shown only when they update in place; countdown tick text must not be part of any widget rebuild/layout signature because it causes visible control-bar repaint sweeps.
+- Station command presentation logic must stay outside the widget builder when possible. Button labels, enabled states, and visual roles for QSY, Timed QSY, Timed Suspend, indefinite suspend, and Resume are derived by `freqinout.gui.station_command_presenter`; radio-scoped activity decisions such as manual QSY ownership, scheduler-suspend ownership, and timed-suspend ownership are derived by a pure core helper. `main_window.py` remains responsible for Qt layout, signal wiring, and invoking command handlers rather than becoming the command-state brain. Countdown ticks must update existing card controls in place and must not rebuild the station command bar unless the hold signature meaningfully changes.
+- Health in the station control bar should be compact and persistent. Prefer a status-colored `Health` affordance with click/hover details over long inline component lists. Clicking Health opens a non-modal quick menu with a concise per-radio health summary and an `Open Health Details` action; operators should not be forced into the full Health Details tab for every glance.
+- Settings `Radio Profile` is selected-radio scoped. The configured-radio selector, selected-radio hint, setup/readiness chips, profile detail card, and status card must all derive from the same focused radio id. Station-default or primary-radio status may be mentioned only as a labeled relationship, never as the title/status body for a different selected radio.
+- Settings `Radio Profile` must expose selected-radio runtime actions immediately beside the configured-radio selector. Operators must be able to activate the selected radio (`Use Radio`), stop using it (`Stop Using`), and make it the station default without discovering a collapsed advanced/actions panel.
+- Operator-facing multi-rig language uses configured/active/selected/assigned concepts. The legacy `runtime_primary` field remains only as an internal command-focus compatibility shim for single-runtime surfaces until per-active-radio scheduler lanes are complete. It must never be presented as the main product model.
+- Activating a radio through `Use Radio` must persist `runtime_active=1` and refresh the same runtime projection used by the control bar, scheduler, Station Health, and Settings status surfaces. Moving the internal command focus to a radio must also mark that radio active; an inactive command-focus radio is invalid state.
 - Radio schedule assignment UI should make the safety gate visible in the action labels, such as `Assign with RF Guard` and `Save with RF Guard`; compact navigation labels may remain shorter.
 - If RF Guard blocks a radio schedule assignment, the user-facing guidance should name the block as an RF Guard assignment block, not as a generic save or settings failure.
 - Plan Manager may guide users toward assignment, but if the actual radio assignment remains in Settings then its action must say or explain that Settings is the final handoff. A selected unassigned plan should make the safety gate visible with stateful wording such as `Assign with RF Guard`; an assigned plan should settle to a review/change state such as `Assigned in Settings`.
@@ -11144,6 +11162,7 @@ Service boundaries:
 - Plan Manager RF Guard issues are displayed in a structured `RF Guard Review` card with severity, issue, impact, and next-action columns. The card appears automatically when an assigned selected plan has warning/block issues, appears after manual `Review RF Guard`, and stays hidden when there are no actionable issues or no radio context. The primary resolution action opens the editable Schedule Assignment workflow preloaded to the selected plan.
 - Selecting a Plan Manager RF Guard issue row should update the plan action guidance with a concise issue/impact/next-step summary. Double-clicking an issue row should invoke the same `Resolve RF Guard` path as the button and open editable Schedule Assignment for the selected plan/radio context.
 - Plan Manager should include a radio-centric assignment view that mirrors the configured-group selector pattern: selecting a radio shows the plan assigned to that radio, its effective windows, and current RF Guard status; selecting a plan shows the assigned radio lanes that will be affected.
+- Schedule assignment swaps must be modeled as a simultaneous two-radio assignment change, not as two independent saves. RF Guard validation must evaluate the post-swap assignment set so the old plan on the peer radio does not create a false self-conflict. Antenna/band support remains a hard warning/block according to each radio's configured RF Guard mode.
 - Plan Manager is the operator-facing planner surface for the center-of-gravity workflow. It should default to `Effective Windows` for clean "where/when" review, expose `Pattern Summary` for grouped rhythms such as "MAGNET 20M Daily 10:00-15:00" or "MR08 Net Thu 02:00-03:00", and keep the week grid available as a secondary diagnostic view.
 - Plan Manager name edits are explicit. `Rename Plan` changes only the selected plan name and must not regenerate schedule refs or mirror rows. Changing selected Daily/Net/SOP layers makes the visible plan modified until the user chooses `Update Plan` or `New Plan`; this modified state must keep the user's selected layers through table refresh/rebuild, show a `Modified` plan-state cue, and visibly emphasize the save/update action.
 - Plan Manager source layers are explicit: `HF Daily`, `HF Nets`, and `SOP`. Loading a saved Frequency Plan must restore the component Daily and Net schedules used by that plan, plus any saved SOP Schedule Plan dependency (`sop_schedule_plan:<id>`), so the operator can see what comprises the plan before editing or assigning it. If no saved SOP Schedule Plan is selected, the SOP selector defaults to active SOP Builder layers.
@@ -11159,6 +11178,54 @@ Service boundaries:
 - Existing master Frequency Plans saved before SOP layer dependency refs were added may need to be rebuilt/resaved before SOP Builder update preflight can identify the dependency.
 - Station Health runtime observability should surface already-saved assigned schedule RF Guard validation warnings/blocks from assignment metadata. Rendering this status must use existing assigned-plan rows and must not probe radios, apps, or schedule sources.
 - Selecting an assigned schedule RF Guard row in Station Health should offer `Open Related View` and navigate to Settings > Radios > Schedule Assignment so the operator can review or repair the guarded assignment in the owning workflow.
+
+### 1.213 Addendum (2026-08-14): Scheduler Plan Authority, Prompt Preflight, and Manual QSY Hold
+
+Problem:
+- Multi-rig runtime scheduling can lose operator trust if the selected radio, assigned Frequency Plan, and commanded frequency disagree.
+- A radio with an assigned AmRRON plan must not inherit MAGNET rows from the global HF Daily/Net tables simply because those tables are populated.
+- Frequency enforcement set to `Prompt` must ask before FIO commands FLRig/JS8Call/RigCtl. A prompt after the frequency has already been reset is too late.
+- Operator QSY is an intentional manual state. The scheduler must not treat the resulting off-plan frequency as drift and immediately revert it on the next tick.
+
+Scope:
+- The compatibility scheduler remains primary-runtime scoped, but schedule rows are resolved from the primary radio's active assigned Frequency Plan when one exists. The plan's saved Daily/Net refs become the runtime source for that radio; global schedule tables are fallback only when no plan is assigned.
+- Assigned plan rows are normalized to the selected radio context before target filtering so the control bar, scheduler, and RF Guard evaluate the same radio/plan pair.
+- `Prompt` frequency enforcement gates the command path before backend queueing. The prompt/review signal is emitted before any frequency command is queued.
+- Manual QSY state is persisted to the target radio from the QSY entry metadata. Scheduled corrections for that same radio are held until Resume Schedule or timed expiry clears the manual state.
+
+Acceptance criteria:
+- Selecting or starting with FIO-B assigned to an AmRRON plan produces AmRRON schedule targets, not MAGNET targets, provided FIO-B is the active primary runtime radio.
+- In `Prompt` mode, an off-frequency schedule transition opens the operator review prompt and does not queue a frequency command until the operator applies it.
+- `QSY` / `Timed QSY` leaves the selected radio in manual-QSY state and the scheduler does not snap it back on the next tick.
+- Manual QSY state for FIO-B does not contaminate FIO-A, and vice versa.
+
+Rollback:
+- Revert assigned-plan row loading, prompt preflight gating, manual-QSY radio scoping, and the targeted scheduler regression tests together.
+
+### 1.214 Addendum (2026-08-14): Active Radio Scheduler Lane Projection
+
+Problem:
+- Multi-rig operators need every active radio to show the Frequency Plan assigned to that radio. FIO-A must not display FIO-B's plan, and FIO-B must not fall back to MAGNET/global schedule rows when it is assigned an AmRRON plan.
+- The legacy `runtime_primary` concept is an internal command-focus compatibility shim only. Product behavior is active-radio based: a radio is active or inactive, and each active radio has its own assignment, health, manual-control state, and schedule lane.
+- Scheduler/status stability is P1. UI refreshes and control-bar rendering must not create extra FLRig/JS8Call/VarAC/FLDigi polling loops, and assigned-plan monitoring must not cause visible refresh flashing.
+
+Scope:
+- Scheduler core exposes an active-radio schedule lane projection for every active device profile.
+- A lane is a pure DB/config projection: device profile, assigned Frequency Plan, filtered HF Daily rows, filtered HF Net rows, target-filtered SOP rows, current effective row, next effective row, row counts, and policy override metadata.
+- Assigned Frequency Plans are authoritative per lane. Global Daily/Net schedule tables are fallback only for a lane with no assigned plan.
+- Lane projection is cache-backed by config/net DB mtimes, SOP enablement, active radio ids, operating assignment ids, assigned plan ids, and plan update timestamps. A short sub-second read TTL is allowed ahead of the DB identity check so routine UI refreshes do not repeatedly query assignments.
+- Lane projection must not poll radios, query live app APIs, tail log files, scan message folders, or start background jobs. Runtime health and app status remain owned by shared status/source coordinators.
+- The compatibility scheduler may still command only the command-focus lane until per-radio command clients are completed, but all active lanes must be visible to Station Command, Station Health, RF Guard, Plan Manager, and tests.
+
+Acceptance criteria:
+- With FIO-A assigned `Magnet Main Plan` and FIO-B assigned `AmRRON Plan`, active lane projection returns both active radios and each lane's current row comes from that radio's assigned plan.
+- Device-scoped or operating-profile-scoped SOP rows are evaluated only in matching radio lanes. An FIO-A SOP row must never become FIO-B's effective row.
+- Repeated lane projection with unchanged DB/config state does not reload schedule rows or start status polls.
+- The control bar and health surfaces can consume lane projection without recomputing schedule assignments or depending on the selected/command-focus radio.
+- Future per-radio command execution will use the same lane identity and manual-control radio id; no new global schedule authority may be introduced.
+
+Rollback:
+- Revert active-radio lane projection, related scheduler tests, and this addendum together. The previous assigned-plan primary-lane scheduler behavior remains the fallback.
 
 JS8Call:
 - A multi-rig station may run one JS8Call instance per radio.
@@ -11220,6 +11287,32 @@ Performance and stability:
 - CommStat plain JS8 traffic remains a `MESSAGE` artifact unless it matches a known structured SitRep/Spotter form. JS8 relay routes such as `N1MAG: K7RIE>KC7WOK ...` must preserve relay origin/via/destination metadata but must not promote the relay station or destination callsign into operating-group filters.
 - VarAC status rows may be enriched from the latest VarAC sync history. The primary operating view should show last scan/write/error state, not raw DB path details.
 
+## Addendum: Multi-Radio Control Bar Scheduler Authority (2026-08-14)
+
+The global control bar is the operator's always-visible schedule-control surface. When more than one radio is active, each active radio is represented by its own card; the old single selected-radio control strip is informationally subordinate to the cards and must not be the source of truth for another radio.
+
+Source of truth:
+- Each card displays current group/band, next group/band, assigned Frequency Plan, and health from the active schedule lane for that radio.
+- `SchedulerEngine.active_schedule_lanes()` is the preferred projection for card `Now`, `Next`, plan name, and QSY choices. Assigned-plan fallback is allowed while lanes warm up, but a stale global scheduler current entry must not override a radio's assigned lane/plan.
+- QSY options in a card are limited to that radio's assigned plan/lane rows. A card for an AmRRON plan must not show or apply MagNet-only choices unless those rows are part of the assigned plan.
+- Plan names are displayed without a redundant trailing `Plan` where space is constrained.
+
+Health:
+- Off Schedule is an operator-facing health state. If the scheduler detects frequency/VFO/mode/offset drift for a radio, that radio's card health shows `Off Schedule` with warning styling and the health menu lists the off-schedule items.
+- Off Schedule clears from the card when the scheduler emits `off_schedule_cleared`; clearing one stale status must not force a full card rebuild when labels did not change.
+
+Command routing:
+- All card actions carry `target_device_profile_id`.
+- Scheduler command dispatch resolves rig/JS8/VarAC/settings clients from the targeted runtime profile before sending frequency commands. A FIO-A card action must not command FIO-B, and a FIO-B card action must not command FIO-A.
+- Manual QSY, Timed QSY, Timed Suspend, Indefinite Suspend, and Resume UI state are radio-scoped in the control bar. Updating one card must not clear the visual/manual state of another card.
+- Timed QSY and Timed Suspend persist hold state against the target radio's durable manual-control row. Schedule application checks the target radio's hold state before sending commands; a timed suspend on FIO-B must not hold or resume FIO-A.
+- Resume from a radio card clears only that radio's manual/timed state unless invoked through a legacy global control path. RF Guard still runs before a resume can force the assigned schedule back onto the radio.
+- The control bar must not set or depend on a `primary radio` mental model for normal operator control. A radio is active or inactive; active cards are first-class operating lanes.
+
+Performance:
+- Routine status/scheduler ticks compare a stable card signature and update existing controls only when text/state changes. No routine tick may tear down and rebuild the full card area, because visible flicker is a P1 usability defect.
+- UI feedback banners are suppressed for station-command-card actions when the card state itself already confirms the action.
+
 Operator UX:
 - FIO should show simple source health by radio/app in operator language: connected, last heard/checked, degraded, needs setup, or disabled.
 - Technical details such as paths, ports, offsets, and DB names belong in setup/drill-down views, not primary operating views.
@@ -11237,6 +11330,7 @@ Acceptance:
 - Two JS8Call instances with different `DIRECTED.TXT` paths maintain separate offsets and both contribute map/operator link observations.
 - Disabling one app instance stops its background source jobs without removing already-ingested historical projections.
 - A stalled or missing source records degraded health/backoff and does not block other radios, the scheduler, the control bar, or the Messages tab.
+- A Timed Suspend on one active radio does not suppress schedule commands for another active radio. A Resume on one active radio does not clear another radio's manual hold.
 - Messages, Map, and Operator History can refresh without opening JS8 TCP connections, tailing source logs, scanning full FLMsg/FLAmp folders, or syncing VarAC directly from UI code.
 - Source/projection fingerprints prevent unchanged auto-refresh cycles from rebuilding large tables.
 - Tests cover source descriptor construction, checkpoint key uniqueness, JS8 source-scoped log ingestion, and shared radio status polling behavior.

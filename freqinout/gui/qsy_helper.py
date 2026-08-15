@@ -522,6 +522,12 @@ def perform_qsy(window, meta: Dict) -> bool:
         "group": (meta.get("group") or "").strip().upper(),
         "group_name": (meta.get("group") or "").strip().upper(),
     }
+    try:
+        target_device_profile_id = int(meta.get("target_device_profile_id") or 0)
+    except Exception:
+        target_device_profile_id = 0
+    if target_device_profile_id > 0:
+        entry["target_device_profile_id"] = target_device_profile_id
     block_reason = _shared_ptt_block_reason(scheduler)
     if block_reason:
         if not _publish_qsy_blocked_feedback(
@@ -743,6 +749,7 @@ def set_active_hold_duration(
     *,
     notify: bool = True,
     profile: Optional[Dict[str, object]] = None,
+    target_device_profile_id: Optional[int] = None,
 ) -> int:
     active_profile = profile if isinstance(profile, dict) else hold_duration_profile_for_window(window)
     mins = normalize_hold_minutes(
@@ -754,7 +761,10 @@ def set_active_hold_duration(
     except Exception:
         scheduler = None
     if scheduler and hasattr(scheduler, "suspend_schedule"):
-        scheduler.suspend_schedule(mins)
+        try:
+            scheduler.suspend_schedule(mins, target_device_profile_id=target_device_profile_id)
+        except TypeError:
+            scheduler.suspend_schedule(mins)
     else:
         set_suspend_until(settings, until)
     _SUSPEND_CACHE["ts"] = until.timestamp()
@@ -770,6 +780,7 @@ def suspend_schedule_hold(
     minutes: Optional[int] = None,
     *,
     warn_rf_conflict: bool = True,
+    target_device_profile_id: Optional[int] = None,
 ) -> int:
     if warn_rf_conflict:
         try:
@@ -778,12 +789,18 @@ def suspend_schedule_hold(
             scheduler = None
         if scheduler is not None:
             _warn_if_suspend_leaves_rf_conflict(window, scheduler)
-    mins = set_active_hold_duration(window, settings, minutes=minutes, notify=False)
+    mins = set_active_hold_duration(
+        window,
+        settings,
+        minutes=minutes,
+        notify=False,
+        target_device_profile_id=target_device_profile_id,
+    )
     notify_hold_state_changed(window, force_reload=False)
     return mins
 
 
-def resume_schedule_hold(window, settings) -> bool:
+def resume_schedule_hold(window, settings, *, target_device_profile_id: Optional[int] = None) -> bool:
     try:
         scheduler = getattr(window, "scheduler", None)
     except Exception:
@@ -794,7 +811,10 @@ def resume_schedule_hold(window, settings) -> bool:
             notify_hold_state_changed(window, force_reload=False)
             return False
         try:
-            result = scheduler.resume_schedule(ignore_coordination_prompt=acknowledged)
+            result = scheduler.resume_schedule(
+                ignore_coordination_prompt=acknowledged,
+                target_device_profile_id=target_device_profile_id,
+            )
         except TypeError:
             result = scheduler.resume_schedule()
         if result is False:
@@ -812,7 +832,18 @@ def resume_schedule_hold(window, settings) -> bool:
 def perform_qsy_with_hold(window, settings, meta: Dict, minutes: Optional[int] = None) -> int:
     if not perform_qsy(window, meta):
         return 0
-    return suspend_schedule_hold(window, settings, minutes=minutes, warn_rf_conflict=False)
+    target_device_profile_id = None
+    try:
+        target_device_profile_id = int(meta.get("target_device_profile_id") or 0) or None
+    except Exception:
+        target_device_profile_id = None
+    return suspend_schedule_hold(
+        window,
+        settings,
+        minutes=minutes,
+        warn_rf_conflict=False,
+        target_device_profile_id=target_device_profile_id,
+    )
 
 
 # Suspend helpers (shared across tabs)

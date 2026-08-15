@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import datetime
+import json
 import os
 import sqlite3
 import sys
@@ -127,6 +129,371 @@ def test_scheduler_filters_schedule_rows_by_primary_target_scope(monkeypatch, tm
     hf_filtered, net_filtered, _sop, _policies = engine._load_schedules(force=True)
     assert {row["group_name"] for row in hf_filtered} == {"STATION", "ALT", "FIELD_OP"}
     assert {row["group_name"] for row in net_filtered} == {"STATION", "ALT", "FIELD_OP"}
+
+
+def test_scheduler_prefers_assigned_frequency_plan_for_primary_radio(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+        }
+    )
+    store.set_device_profile_runtime_active(int(radio_a["id"]), True)
+    store.set_device_profile_runtime_active(int(radio_b["id"]), True)
+    store.set_runtime_primary_device_profile(int(radio_a["id"]))
+    amrron_plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "AMRRON",
+                        "band": "40M",
+                        "mode": "Digi",
+                        "frequency": "7.110",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    },
+                    {
+                        "source": "NET",
+                        "source_table": "net_schedule_tab",
+                        "day_utc": "Monday",
+                        "group_name": "AMRRON",
+                        "net_name": "AmRRON Net",
+                        "band": "20M",
+                        "mode": "Digi",
+                        "frequency": "14.110",
+                        "start_utc": "07:00",
+                        "end_utc": "08:00",
+                    },
+                ]
+            ),
+        }
+    )
+    store.set_assigned_plan(int(radio_b["id"]), int(amrron_plan["id"]))
+    store.set_runtime_primary_device_profile(int(radio_b["id"]))
+
+    engine = SchedulerEngine()
+    try:
+        monkeypatch.setattr(
+            engine,
+            "_load_daily_schedule_from_db",
+            lambda: [
+                {
+                    "day_utc": "ALL",
+                    "group_name": "MAGNET",
+                    "band": "40M",
+                    "mode": "Digi",
+                    "frequency": "7.115",
+                    "start_utc": "00:00",
+                    "end_utc": "23:59",
+                    "target_scope": "station",
+                }
+            ],
+        )
+        monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
+
+        hf_filtered, net_filtered, _sop, _policies = engine._load_schedules(force=True)
+
+        assert {row["group_name"] for row in hf_filtered} == {"AMRRON"}
+        assert {row["frequency"] for row in hf_filtered} == {"7.110"}
+        assert {row["net_name"] for row in net_filtered} == {"AmRRON Net"}
+        assert all(int(row["target_device_profile_id"]) == int(radio_b["id"]) for row in hf_filtered + net_filtered)
+    finally:
+        engine.stop()
+
+
+def test_scheduler_projects_assigned_schedule_lanes_for_all_active_radios(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+            "runtime_active": 1,
+            "runtime_primary": 1,
+        }
+    )
+    radio_b = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "control_backend": "flrig",
+        }
+    )
+    store.set_device_profile_runtime_active(int(radio_a["id"]), True)
+    store.set_device_profile_runtime_active(int(radio_b["id"]), True)
+    store.set_runtime_primary_device_profile(int(radio_a["id"]))
+    magnet_plan = store.save_frequency_plan(
+        {
+            "name": "Magnet Main Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "MAGNET",
+                        "band": "40M",
+                        "mode": "Digi",
+                        "frequency": "7.115",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    }
+                ]
+            ),
+        }
+    )
+    amrron_plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "AMRRON",
+                        "band": "20M",
+                        "mode": "Digi",
+                        "frequency": "14.110",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    }
+                ]
+            ),
+        }
+    )
+    store.set_assigned_plan(int(radio_a["id"]), int(magnet_plan["id"]))
+    store.set_assigned_plan(int(radio_b["id"]), int(amrron_plan["id"]))
+
+    engine = SchedulerEngine()
+    try:
+        monkeypatch.setattr(
+            engine,
+            "_load_daily_schedule_from_db",
+            lambda: [
+                {
+                    "day_utc": "ALL",
+                    "group_name": "STATION-FALLBACK",
+                    "band": "80M",
+                    "mode": "Digi",
+                    "frequency": "3.585",
+                    "start_utc": "00:00",
+                    "end_utc": "23:59",
+                    "target_scope": "station",
+                }
+            ],
+        )
+        monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
+
+        lanes = engine.active_schedule_lanes(
+            force=True,
+            now_utc=datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc),
+        )
+
+        by_name = {str(lane["device_name"]): lane for lane in lanes}
+        assert set(by_name) == {"FIO-A", "FIO-B"}
+        assert store.get_runtime_primary_device_profile()["name"] == "FIO-A"
+        assert by_name["FIO-A"]["frequency_plan_name"] == "Magnet Main Plan"
+        assert by_name["FIO-B"]["frequency_plan_name"] == "AmRRON Plan"
+        assert by_name["FIO-A"]["current_entry"]["group_name"] == "MAGNET"
+        assert by_name["FIO-B"]["current_entry"]["group_name"] == "AMRRON"
+        assert by_name["FIO-B"]["current_entry"]["band"] == "20M"
+        assert all(lane["current_source"] == "HF" for lane in lanes)
+        assert engine.get_status_poll_metrics()["polls_started"] == 0
+    finally:
+        engine.stop()
+
+
+def test_scheduler_active_schedule_lanes_filter_sop_rows_by_radio(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio_a = store.save_device_profile({"name": "FIO-A", "control_backend": "flrig"})
+    radio_b = store.save_device_profile({"name": "FIO-B", "control_backend": "flrig"})
+    store.set_device_profile_runtime_active(int(radio_a["id"]), True)
+    store.set_device_profile_runtime_active(int(radio_b["id"]), True)
+    store.set_runtime_primary_device_profile(int(radio_a["id"]))
+    magnet_plan = store.save_frequency_plan(
+        {
+            "name": "Magnet Main Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "MAGNET",
+                        "band": "40M",
+                        "mode": "Digi",
+                        "frequency": "7.115",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    }
+                ]
+            ),
+        }
+    )
+    amrron_plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "AMRRON",
+                        "band": "20M",
+                        "mode": "Digi",
+                        "frequency": "14.110",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    }
+                ]
+            ),
+        }
+    )
+    store.set_assigned_plan(int(radio_a["id"]), int(magnet_plan["id"]))
+    store.set_assigned_plan(int(radio_b["id"]), int(amrron_plan["id"]))
+
+    engine = SchedulerEngine()
+    try:
+        monkeypatch.setattr(engine, "_load_daily_schedule_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
+        monkeypatch.setattr(
+            engine,
+            "_load_sop_schedule_layer_from_db",
+            lambda: [
+                {
+                    "day_utc": "ALL",
+                    "recurrence": "Daily",
+                    "group_name": "MAGNET-SOP",
+                    "band": "80M",
+                    "mode": "Digi",
+                    "frequency": "3.585",
+                    "start_utc": "00:00",
+                    "end_utc": "23:59",
+                    "target_scope": "device_profile",
+                    "target_device_profile_id": int(radio_a["id"]),
+                    "sop_priority": 1,
+                }
+            ],
+        )
+        monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
+
+        lanes = engine.active_schedule_lanes(
+            force=True,
+            now_utc=datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc),
+        )
+
+        by_name = {str(lane["device_name"]): lane for lane in lanes}
+        assert by_name["FIO-A"]["current_source"] == "SOP"
+        assert by_name["FIO-A"]["current_entry"]["group_name"] == "MAGNET-SOP"
+        assert by_name["FIO-B"]["current_source"] == "HF"
+        assert by_name["FIO-B"]["current_entry"]["group_name"] == "AMRRON"
+        assert by_name["FIO-B"]["sop_rows"] == []
+        assert engine.get_status_poll_metrics()["polls_started"] == 0
+    finally:
+        engine.stop()
+
+
+def test_scheduler_active_schedule_lanes_cache_rows_without_extra_status_polling(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "control_backend": "flrig",
+        }
+    )
+    store.set_device_profile_runtime_active(int(radio["id"]), True)
+    store.set_runtime_primary_device_profile(int(radio["id"]))
+    plan = store.save_frequency_plan(
+        {
+            "name": "Magnet Main Plan",
+            "category": "normal",
+            "status": "saved",
+            "schedule_refs_json": json.dumps(
+                [
+                    {
+                        "source": "HF",
+                        "source_table": "daily_schedule_tab",
+                        "day_utc": "ALL",
+                        "group_name": "MAGNET",
+                        "band": "40M",
+                        "mode": "Digi",
+                        "frequency": "7.115",
+                        "start_utc": "00:00",
+                        "end_utc": "23:59",
+                    }
+                ]
+            ),
+        }
+    )
+    store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+
+    engine = SchedulerEngine()
+    load_count = {"daily": 0}
+
+    def load_daily():
+        load_count["daily"] += 1
+        return []
+
+    try:
+        monkeypatch.setattr(engine, "_load_daily_schedule_from_db", load_daily)
+        monkeypatch.setattr(engine, "_load_net_schedule_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_schedule_layer_from_db", lambda: [])
+        monkeypatch.setattr(engine, "_load_sop_net_conflict_policies_from_db", lambda: [])
+
+        now = datetime.datetime(2026, 8, 10, 12, 0, tzinfo=datetime.timezone.utc)
+        first = engine.active_schedule_lanes(force=True, now_utc=now)
+        second = engine.active_schedule_lanes(now_utc=now + datetime.timedelta(minutes=1))
+
+        assert first[0]["current_entry"]["group_name"] == "MAGNET"
+        assert second[0]["current_entry"]["group_name"] == "MAGNET"
+        assert load_count["daily"] == 0
+        assert engine.get_status_poll_metrics()["polls_started"] == 0
+    finally:
+        engine.stop()
 
 
 def test_daily_schedule_db_roundtrip_preserves_target_scope(monkeypatch, tmp_path):
