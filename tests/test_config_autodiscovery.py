@@ -824,3 +824,40 @@ def test_duplicate_first_command_alias_does_not_hide_distinct_later_alias(tmp_pa
         str(path_js8_upper).lower(),
         str(path_js8_lower).lower(),
     ]
+
+
+def test_js8call_command_discovery_accepts_improved_and_subspace_aliases(tmp_path, monkeypatch) -> None:
+    improved_bin = tmp_path / "improved-bin"
+    subspace_bin = tmp_path / "subspace-bin"
+    improved = improved_bin / "js8call-improved"
+    subspace = subspace_bin / "js8call-subspace"
+    _make_executable(improved)
+    _make_executable(subspace)
+
+    monkeypatch.setenv("PATH", str(improved_bin))
+
+    candidates = find_app_candidates(
+        apps=("js8call",),
+        platform="Linux",
+        home=tmp_path / "home",
+        app_search_paths={"js8call": ()},
+    )
+
+    assert len(candidates) == 1
+    assert Path(candidates[0].path).name.casefold() == improved.name.casefold()
+    assert candidates[0].source == "path"
+    assert candidates[0].executable is True
+
+    monkeypatch.setenv("PATH", str(subspace_bin))
+
+    candidates = find_app_candidates(
+        apps=("js8call",),
+        platform="Linux",
+        home=tmp_path / "home",
+        app_search_paths={"js8call": ()},
+    )
+
+    assert len(candidates) == 1
+    assert Path(candidates[0].path).name.casefold() == subspace.name.casefold()
+    assert candidates[0].source == "path"
+    assert candidates[0].executable is True
