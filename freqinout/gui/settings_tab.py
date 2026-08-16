@@ -18472,6 +18472,20 @@ class SettingsTab(QWidget):
         varac_incoming_edit = QLineEdit(str((existing or {}).get("varac_incoming_path", "") or ""))
         _add_form_row(connection_form, "VarAC Incoming:", varac_incoming_edit, "Optional VarAC incoming-files path associated with this radio.")
 
+        varac_outbox_edit = QLineEdit(str((existing or {}).get("varac_outbox_dir", "") or ""))
+        _add_form_row(connection_form, "VarAC Outbox:", varac_outbox_edit, "Optional VarAC outbox path associated with this radio.")
+
+        varac_bbs_edit = QLineEdit(str((existing or {}).get("varac_bbs_dir", "") or ""))
+        _add_form_row(connection_form, "VarAC BBS:", varac_bbs_edit, "Optional VarAC BBS folder associated with this radio.")
+
+        varac_bbs_archive_edit = QLineEdit(str((existing or {}).get("varac_bbs_archive_dir", "") or ""))
+        _add_form_row(
+            connection_form,
+            "VarAC BBS Archive:",
+            varac_bbs_archive_edit,
+            "Optional VarAC BBS archive destination associated with this radio.",
+        )
+
         varac_launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
         _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_edit, "Optional VarAC launch override for this radio.")
 
@@ -19177,6 +19191,9 @@ class SettingsTab(QWidget):
                 "varac_db_path": varac_db_edit.text().strip(),
                 "varac_ini_path": varac_ini_edit.text().strip(),
                 "varac_incoming_path": varac_incoming_edit.text().strip(),
+                "varac_outbox_dir": varac_outbox_edit.text().strip(),
+                "varac_bbs_dir": varac_bbs_edit.text().strip(),
+                "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "launch_cmd": varac_launch_cmd_edit.text().strip(),
                 "launch_enabled": bool(launch_enabled_chk.isChecked()),
                 "launch_path": launch_path_edit.text().strip(),
@@ -19300,6 +19317,9 @@ class SettingsTab(QWidget):
                 "varac_ini_path": varac_ini_edit.text().strip(),
                 "varac_db_path": varac_db_edit.text().strip(),
                 "varac_incoming_dir": varac_incoming_edit.text().strip(),
+                "varac_outbox_dir": varac_outbox_edit.text().strip(),
+                "varac_bbs_dir": varac_bbs_edit.text().strip(),
+                "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
             }
             plan = build_app_config_plan_for_blueprint(
@@ -19385,6 +19405,9 @@ class SettingsTab(QWidget):
                 "varac_db_path": (varac_db_edit, "VarAC DB"),
                 "varac_ini_path": (varac_ini_edit, "VarAC INI"),
                 "varac_incoming_path": (varac_incoming_edit, "VarAC incoming"),
+                "varac_outbox_dir": (varac_outbox_edit, "VarAC outbox"),
+                "varac_bbs_dir": (varac_bbs_edit, "VarAC BBS"),
+                "varac_bbs_archive_dir": (varac_bbs_archive_edit, "VarAC BBS archive"),
             }
             for field_key, value in suggestions.items():
                 target = field_targets.get(field_key)
@@ -19687,6 +19710,9 @@ class SettingsTab(QWidget):
             varac_db_edit,
             varac_ini_edit,
             varac_incoming_edit,
+            varac_outbox_edit,
+            varac_bbs_edit,
+            varac_bbs_archive_edit,
             varac_launch_cmd_edit,
             launch_path_edit,
             sdr_host_edit,
@@ -19777,6 +19803,9 @@ class SettingsTab(QWidget):
                     "varac_db_path": varac_db_edit.text().strip(),
                     "varac_ini_path": varac_ini_edit.text().strip(),
                     "varac_incoming_path": varac_incoming_edit.text().strip(),
+                    "varac_outbox_dir": varac_outbox_edit.text().strip(),
+                    "varac_bbs_dir": varac_bbs_edit.text().strip(),
+                    "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                     "launch_cmd": varac_launch_cmd_edit.text().strip(),
                     "launch_enabled": bool(launch_enabled_chk.isChecked()),
                     "launch_path": launch_path_edit.text().strip(),

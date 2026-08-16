@@ -48,7 +48,7 @@ def test_js8_profile_choices_include_port_profile_and_directed(tmp_path: Path) -
 
     assert choices == (
         (
-            f"FIO-C - TCP 2444 - {directed_path.parent}",
+            f"JS8Call | FIO-C | API 2444 - {directed_path.parent}",
             {
                 "port": "2444",
                 "profile_path": str(directed_path.parent),
@@ -345,6 +345,15 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
             exists=True,
             target_type="directory",
         ),
+        "varac_bbs_archive_dir": PathDetectionResult(
+            key="varac_bbs_archive_dir",
+            label="VarAC BBS archive",
+            path="/Applications/VarAC/BBS/Archive",
+            confidence="verified",
+            reason="Found BBS archive",
+            exists=True,
+            target_type="directory",
+        ),
     }
     suggestions, review = guided_radio_autofill_suggestions(
         current={},
@@ -366,6 +375,7 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     assert suggestions["varac_incoming_path"] == "/Applications/VarAC/RX Files"
     assert suggestions["varac_outbox_dir"] == "/Applications/VarAC/Outbox"
     assert suggestions["varac_bbs_dir"] == "/Applications/VarAC/BBS"
+    assert suggestions["varac_bbs_archive_dir"] == "/Applications/VarAC/BBS/Archive"
     assert review == (
         "VarAC database and cluster membership were not changed. "
         "BBS settings were not changed. Review VarAC cluster settings separately.",

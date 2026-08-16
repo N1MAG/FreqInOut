@@ -11,6 +11,7 @@ from freqinout.core.guided_setup import (
     LANE_JS8_ONLY,
     LANE_VARAC_CLUSTER,
     LANE_VARAC,
+    SCHEDULE_NONE,
     SETUP_MODE_MANAGED,
     SETUP_MODE_READ_ONLY,
     answer_guided_setup_step,
@@ -303,6 +304,10 @@ def test_guided_setup_preview_blocks_varac_scheduler_controls(tmp_path) -> None:
             "varac": "/apps/VarAC",
             "varac_ini_path": "/apps/VarAC/VarAC.ini",
             "varac_db_path": "/apps/VarAC/VarAC.db",
+            "varac_incoming_dir": "/apps/VarAC/Incoming",
+            "varac_outbox_dir": "/apps/VarAC/Outbox",
+            "varac_bbs_dir": "/apps/VarAC/BBS",
+            "varac_bbs_archive_dir": "/apps/VarAC/BBS/Archive",
         },
     )
 
@@ -313,7 +318,7 @@ def test_guided_setup_preview_blocks_varac_scheduler_controls(tmp_path) -> None:
     assert preview.backup_required is False
     assert preview.control_summary == "Control: monitor/import only. FIO will not show scheduler/QSY controls for this radio."
     assert preview.lines[0] == "VarAC-only radio: FIO supports BBS and message monitoring, but VarAC handles frequency scheduling."
-    assert "  VarAC references: install, INI, DB." in preview.lines
+    assert "  VarAC references: install, INI, DB, incoming, outbox, BBS, BBS archive." in preview.lines
 
 
 def test_varac_only_payload_normalization_clears_stale_flrig_when_manual() -> None:
@@ -571,6 +576,8 @@ def test_varac_capability_policy_blocks_scheduler_and_qsy_controls() -> None:
     assert policy.external_writes_allowed is False
     assert policy.external_writes_require_backup is False
     assert any("VarAC owns scheduler" in note for note in policy.read_only_notes)
+    assert [choice.choice_id for choice in blueprint.schedule_choices] == [SCHEDULE_NONE]
+    assert blueprint.schedule_choices[0].recommended is True
 
 
 def test_varac_cluster_frequency_control_choices_are_read_only() -> None:
@@ -586,6 +593,7 @@ def test_varac_cluster_frequency_control_choices_are_read_only() -> None:
 
     assert blueprint.control_route == CONTROL_NONE
     assert [choice.choice_id for choice in control_step.choices] == [CONTROL_NONE]
+    assert [choice.choice_id for choice in blueprint.schedule_choices] == [SCHEDULE_NONE]
     assert policy.control_routes == (CONTROL_NONE,)
     assert policy.qsy_controls_visible is False
 

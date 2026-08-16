@@ -500,6 +500,15 @@ def guided_schedule_choices_for_lane(
     receive_only: bool = False,
 ) -> Tuple[GuidedSetupChoice, ...]:
     lane_key = _normalize_lane(lane)
+    if lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+        return (
+            GuidedSetupChoice(
+                SCHEDULE_NONE,
+                "No schedule / monitor only",
+                recommended=True,
+                detail="VarAC has its own scheduler. FIO monitors VarAC messages, BBS, and activity for this radio.",
+            ),
+        )
     choices = [
         GuidedSetupChoice(SCHEDULE_EXISTING_PLAN, "Use an existing Frequency Plan"),
     ]
@@ -847,6 +856,9 @@ def _remembered_varac_labels(details: Mapping[str, str]) -> Tuple[str, ...]:
         ("ini_path", "INI"),
         ("db_path", "DB"),
         ("incoming_dir", "incoming"),
+        ("outgoing_dir", "outbox"),
+        ("bbs_dir", "BBS"),
+        ("bbs_archive_dir", "BBS archive"),
         ("launch_cmd", "launch"),
     )
     return tuple(

@@ -95,7 +95,9 @@ def test_guided_external_app_config_plan_varac_remembers_integration_without_wri
     proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
     varac_dir = tmp_path / "VarAC"
     bbs_dir = varac_dir / "BBS"
+    bbs_archive_dir = bbs_dir / "Archive"
     bbs_dir.mkdir(parents=True)
+    bbs_archive_dir.mkdir(parents=True)
     (varac_dir / "VarAC.ini").write_text(
         "[MY_INFO]\nMycall=N1MAG\nMyLocator=DM79QJ\n[RIG_CONTROL]\nRigFreqControlType=FLRIG\n",
         encoding="utf-8",
@@ -117,6 +119,7 @@ def test_guided_external_app_config_plan_varac_remembers_integration_without_wri
             "varac_db_path": str(varac_dir / "VarAC.db"),
             "varac_incoming_dir": str(varac_dir / "Incoming"),
             "varac_bbs_dir": str(bbs_dir),
+            "varac_bbs_archive_dir": str(bbs_archive_dir),
             "varac_traffic_log": str(varac_dir / "VarAC_traffic.log"),
             "varac_log": str(varac_dir / "VarAC.log"),
         },
@@ -136,6 +139,8 @@ def test_guided_external_app_config_plan_varac_remembers_integration_without_wri
     assert action.details["db_path"] == str(varac_dir / "VarAC.db")
     assert action.details["incoming_dir"] == str(varac_dir / "Incoming")
     assert action.details["bbs_dir"] == str(bbs_dir)
+    assert action.details["bbs_archive_dir"] == str(bbs_archive_dir)
+    assert action.details["bbs_archive_path"] == str(bbs_archive_dir)
     assert action.details["traffic_log_path"] == str(varac_dir / "VarAC_traffic.log")
     assert action.details["app_log_path"] == str(varac_dir / "VarAC.log")
     assert action.details["qso_log_path"] == str(varac_dir / "VarAC_qso_log.adi")

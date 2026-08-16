@@ -110,6 +110,14 @@ class JS8CallFileProfile:
     confidence: str
     reason: str
 
+    @property
+    def family_label(self) -> str:
+        return js8call_ini_family_label(self.ini_path)
+
+    @property
+    def operator_label(self) -> str:
+        return js8call_file_profile_operator_label(self)
+
 
 @dataclass(frozen=True)
 class VarACLocalAsset:
@@ -510,16 +518,27 @@ def default_js8call_ini_paths(
         for env_key in ("LOCALAPPDATA", "APPDATA"):
             raw = str(os.environ.get(env_key, "") or "").strip()
             if raw:
-                env_paths.append(Path(raw) / "JS8Call" / "JS8Call.ini")
-        env_paths.append(user_home / "AppData" / "Local" / "JS8Call" / "JS8Call.ini")
+                env_paths.extend(_js8call_ini_name_candidates(Path(raw) / "JS8Call"))
+        env_paths.extend(_js8call_ini_name_candidates(user_home / "AppData" / "Local" / "JS8Call"))
         return _unique_paths(env_paths)
     return _unique_paths(
         (
-            user_home / ".config" / "JS8Call.ini",
-            user_home / ".config" / "JS8Call" / "JS8Call.ini",
-            user_home / ".local" / "share" / "JS8Call" / "JS8Call.ini",
-            user_home / ".var" / "app" / "org.js8call.JS8Call" / "config" / "JS8Call.ini",
+            *_js8call_ini_name_candidates(user_home / ".config"),
+            *_js8call_ini_name_candidates(user_home / ".config" / "JS8Call"),
+            *_js8call_ini_name_candidates(user_home / ".local" / "share" / "JS8Call"),
+            *_js8call_ini_name_candidates(user_home / ".var" / "app" / "org.js8call.JS8Call" / "config"),
         )
+    )
+
+
+def _js8call_ini_name_candidates(directory: Path) -> Tuple[Path, ...]:
+    return (
+        directory / "JS8Call.ini",
+        directory / "JS8Call-improved.ini",
+        directory / "JS8Call Improved.ini",
+        directory / "JS8Call Subspace.ini",
+        directory / "Subspace.ini",
+        directory / "Subspace-Edition.ini",
     )
 
 
@@ -540,9 +559,40 @@ def _js8call_named_ini_files(directory: Path) -> Tuple[Path, ...]:
         lowered = name.lower()
         if lowered == "js8call.ini":
             continue
-        if lowered.startswith("js8call - ") or lowered.startswith("js8call-improved") or lowered.startswith("subspace"):
+        if (
+            lowered.startswith("js8call - ")
+            or lowered.startswith("js8call-improved")
+            or lowered.startswith("js8call improved")
+            or lowered.startswith("js8call subspace")
+            or lowered.startswith("subspace")
+        ):
             matches.append(child)
     return tuple(sorted(matches, key=lambda path: path.name.casefold()))
+
+
+def js8call_ini_family_label(path: object) -> str:
+    name = Path(str(path or "")).name.strip()
+    lowered = name.casefold()
+    if "subspace" in lowered:
+        return "JS8Call Subspace"
+    if "improved" in lowered:
+        return "JS8Call-improved"
+    if lowered.startswith("js8call - "):
+        instance = name.rsplit(".", 1)[0].split(" - ", 1)[1].strip()
+        return f"JS8Call {instance}" if instance else "JS8Call"
+    return "JS8Call"
+
+
+def js8call_file_profile_operator_label(profile: JS8CallFileProfile) -> str:
+    family = profile.family_label
+    name = str(profile.name or "").strip()
+    port = str(profile.tcp_server_port or "").strip()
+    pieces = [family]
+    if name and name.casefold() != "default":
+        pieces.append(name)
+    if port:
+        pieces.append(f"API {port}")
+    return " | ".join(pieces)
 
 
 def discover_js8call_file_profiles(

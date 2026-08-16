@@ -198,6 +198,7 @@ def _add_varac_integration_action(
         "incoming_dir": str(paths.get("varac_incoming_dir") or paths.get("varac_inbox_dir") or ""),
         "outgoing_dir": str(paths.get("varac_outgoing_dir") or paths.get("varac_outbox_dir") or ""),
         "bbs_dir": str(paths.get("varac_bbs_dir") or ""),
+        "bbs_archive_dir": str(paths.get("varac_bbs_archive_dir") or ""),
         "launch_cmd": str(paths.get("varac_launch_cmd") or paths.get("launch_cmd") or ""),
     }
     varac_assets = discover_varac_local_assets(app_paths=paths)

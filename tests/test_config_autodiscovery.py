@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from freqinout.core.config_autodiscovery import (
+    JS8CallFileProfile,
     build_autoconfig_proposal,
     build_lab_radio_proposals,
     default_app_search_paths,
@@ -14,6 +15,8 @@ from freqinout.core.config_autodiscovery import (
     discover_js8call_file_profiles,
     discover_varac_local_assets,
     find_app_candidates,
+    js8call_file_profile_operator_label,
+    js8call_ini_family_label,
     read_js8call_multisettings,
     select_js8call_file_profile,
 )
@@ -599,9 +602,14 @@ def test_default_js8call_ini_paths_are_os_specific_and_bounded(tmp_path, monkeyp
 
     assert tmp_path / "Library" / "Preferences" / "JS8Call.ini" in mac_paths
     assert tmp_path / ".config" / "JS8Call.ini" in linux_paths
-    assert windows_paths == (tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call.ini",)
+    assert tmp_path / ".config" / "JS8Call-improved.ini" in linux_paths
+    assert tmp_path / ".config" / "JS8Call Subspace.ini" in linux_paths
+    assert tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call.ini" in windows_paths
+    assert tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call-improved.ini" in windows_paths
+    assert tmp_path / "AppData" / "Local" / "JS8Call" / "Subspace.ini" in windows_paths
     assert all(path.is_absolute() for path in mac_paths + linux_paths + windows_paths)
     assert all("*" not in str(path) for path in mac_paths + linux_paths + windows_paths)
+    assert len(windows_paths) < 16
 
 
 def test_default_js8call_ini_paths_include_named_macos_instances(tmp_path) -> None:
@@ -621,6 +629,32 @@ def test_default_js8call_ini_paths_include_named_macos_instances(tmp_path) -> No
     assert improved_ini in paths
     assert unrelated_ini not in paths
     assert all("*" not in str(path) for path in paths)
+
+
+def test_js8call_file_profile_labels_are_operator_readable_for_supported_variants(tmp_path) -> None:
+    named = tmp_path / "JS8Call - fio-b.ini"
+    improved = tmp_path / "JS8Call-improved.ini"
+    subspace = tmp_path / "Subspace.ini"
+    js8_subspace = tmp_path / "JS8Call Subspace.ini"
+    profile = discover_js8call_file_profiles(ini_path=named)
+
+    assert js8call_ini_family_label(named) == "JS8Call fio-b"
+    assert js8call_ini_family_label(improved) == "JS8Call-improved"
+    assert js8call_ini_family_label(subspace) == "JS8Call Subspace"
+    assert js8call_ini_family_label(js8_subspace) == "JS8Call Subspace"
+    assert js8call_file_profile_operator_label(
+        JS8CallFileProfile(
+            name="FIO-B",
+            ini_path=str(named),
+            save_dir="",
+            tcp_server_port="2443",
+            directed_path="",
+            all_path="",
+            confidence="not_found",
+            reason="",
+        )
+    ) == "JS8Call fio-b | FIO-B | API 2443"
+    assert profile == tuple()
 
 
 def test_autoconfig_proposal_includes_default_js8_file_profiles(tmp_path, monkeypatch) -> None:

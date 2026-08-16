@@ -4,7 +4,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
-from freqinout.core.config_autodiscovery import DEFAULT_PORT_PLAN, JS8CALL_COMMAND_NAMES, select_js8call_file_profile
+from freqinout.core.config_autodiscovery import (
+    DEFAULT_PORT_PLAN,
+    JS8CALL_COMMAND_NAMES,
+    js8call_file_profile_operator_label,
+    select_js8call_file_profile,
+)
 from freqinout.core.software_path_detector import PathDetectionResult
 
 
@@ -166,7 +171,7 @@ def guided_js8_profile_choices(profiles: Sequence[Any]) -> Tuple[Tuple[str, Dict
         directed_path = str(getattr(profile, "directed_path", "") or "").strip()
         if not directed_path:
             continue
-        name = str(getattr(profile, "name", "") or "").strip() or "JS8Call profile"
+        name = js8call_file_profile_operator_label(profile)
         port = str(getattr(profile, "tcp_server_port", "") or "").strip()
         save_dir = str(getattr(profile, "save_dir", "") or "").strip()
         key = (port, os.path.normcase(os.path.normpath(save_dir)), os.path.normcase(os.path.normpath(directed_path)))
@@ -174,8 +179,6 @@ def guided_js8_profile_choices(profiles: Sequence[Any]) -> Tuple[Tuple[str, Dict
             continue
         seen.add(key)
         parts = [name]
-        if port:
-            parts.append(f"TCP {port}")
         if save_dir:
             parts.append(save_dir)
         choices.append(
@@ -329,6 +332,7 @@ def guided_radio_autofill_suggestions(
         _suggest("varac_incoming_path", guided_detection_path(varac_results, "message_paths.varac"))
         _suggest("varac_outbox_dir", guided_detection_path(varac_results, "varac_outbox_dir"))
         _suggest("varac_bbs_dir", guided_detection_path(varac_results, "varac_bbs_dir"))
+        _suggest("varac_bbs_archive_dir", guided_detection_path(varac_results, "varac_bbs_archive_dir"))
         review.append(
             "VarAC database and cluster membership were not changed. "
             "BBS settings were not changed. Review VarAC cluster settings separately."

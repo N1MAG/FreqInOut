@@ -1581,6 +1581,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"flmsg_path": (flmsg_path_edit, "FLMsg app")' in dialog_block
     assert '"flamp_path": (flamp_path_edit, "FLAmp app")' in dialog_block
     assert '"varac_db_path": (varac_db_edit, "VarAC DB")' in dialog_block
+    assert '"varac_outbox_dir": (varac_outbox_edit, "VarAC outbox")' in dialog_block
+    assert '"varac_bbs_dir": (varac_bbs_edit, "VarAC BBS")' in dialog_block
+    assert '"varac_bbs_archive_dir": (varac_bbs_archive_edit, "VarAC BBS archive")' in dialog_block
     assert "build_autoconfig_proposal(" in dialog_block
     assert "visible_review = " in dialog_block
     assert "select_js8call_file_profile(" in planner_source
@@ -1594,6 +1597,10 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"flmsg_path": flmsg_path_edit.text().strip()' in dialog_block
     assert '"flamp_path": flamp_path_edit.text().strip()' in dialog_block
     assert '_suggest("varac_db_path", guided_detection_path(varac_results, "varac_db_path"))' in planner_source
+    assert '_suggest("varac_bbs_archive_dir", guided_detection_path(varac_results, "varac_bbs_archive_dir"))' in planner_source
+    assert '"varac_outbox_dir": varac_outbox_edit.text().strip()' in dialog_block
+    assert '"varac_bbs_dir": varac_bbs_edit.text().strip()' in dialog_block
+    assert '"varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip()' in dialog_block
     assert "VarAC database and cluster membership were not changed" in planner_source
     assert 'Path(varac_install_edit.text().strip()) / "VarAC.db"' not in dialog_block
 
