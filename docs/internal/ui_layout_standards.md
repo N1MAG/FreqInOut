@@ -73,6 +73,13 @@ health/routing issue; it must not fall back to a singleton FLRig, RigCtl, or
 JS8Call client. Singleton fallback is only acceptable for an unambiguous
 single-active-radio compatibility path.
 
+Targeted scheduler applies must also read actual state from the target radio's
+own control context before deciding whether a frequency change is needed. A
+cached singleton FLRig/JS8Call frequency is never proof that another radio is on
+schedule. Scheduler de-duplication, pending-command, and latest-intent state is
+radio-scoped so a queued correction for one radio cannot suppress, overwrite, or
+satisfy another radio's correction.
+
 Radio cards and radio-scoped scheduler lanes must not read or write legacy
 global manual-control keys such as `schedule_suspend_until` when a
 `device_profile_id` is known. Timed QSY, Timed Suspend, Indefinite Suspend, and

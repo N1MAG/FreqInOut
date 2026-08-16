@@ -233,6 +233,114 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
     assert all(kwargs["ignore_fldigi_busy"] is True for _entry, _source, kwargs in applied)
 
 
+def test_latest_scheduler_intent_is_retained_per_radio() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.current_source = "HF"
+    scheduler._latest_intent = None
+    scheduler._latest_intents_by_radio = {}
+    scheduler._latest_intent_ts = 0.0
+    applied: list[int] = []
+
+    scheduler._primary_manual_control_radio_id = lambda: None
+    scheduler._apply_schedule_entry = lambda entry, source, **kwargs: applied.append(
+        int(entry["target_device_profile_id"])
+    )
+
+    SchedulerEngine._record_latest_intent(
+        scheduler,
+        {"target_device_profile_id": 8, "frequency": "14.115", "band": "20M"},
+        "HF",
+    )
+    SchedulerEngine._record_latest_intent(
+        scheduler,
+        {"target_device_profile_id": 9, "frequency": "14.110", "band": "20M"},
+        "HF",
+    )
+
+    assert SchedulerEngine._apply_latest_intent_if_any(scheduler) is True
+    assert SchedulerEngine._apply_latest_intent_if_any(scheduler) is True
+    assert SchedulerEngine._apply_latest_intent_if_any(scheduler) is False
+    assert applied == [8, 9]
+
+
+def test_targeted_schedule_apply_reads_target_actual_state_not_singleton(monkeypatch) -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine, StationActualState
+
+    scheduler = SchedulerEngine(rig=SimpleNamespace(name="global-rig"), js8=None, varac=None, fldigi_log=None)
+    try:
+        target_rig = SimpleNamespace(name="fio-b-rig")
+        queued: list[dict[str, object]] = []
+        target_reads: list[int] = []
+        scheduler._entry_with_operating_group_overrides = lambda entry: (dict(entry), {})
+        scheduler._control_context_for_entry = lambda _entry: (
+            target_rig,
+            None,
+            None,
+            SimpleNamespace(get=lambda key, default=None: "FLRig" if key == "control_via" else default),
+            9,
+        )
+        scheduler._flrig_running = lambda: True
+        scheduler._scheduler_enabled = lambda: True
+        scheduler._scheduling_suspended_for_radio = lambda _radio_id, _now: (False, None)
+        scheduler._read_station_actual_state = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("targeted schedule apply must not use singleton actual-state cache")
+        )
+
+        def fake_target_state(entry, *, control_mode=None):
+            target_reads.append(int(entry["target_device_profile_id"]))
+            return StationActualState(
+                flrig_freq_hz=7_115_000,
+                flrig_ptt_active=False,
+                flrig_ptt_known=True,
+                flrig_ptt_stale=False,
+                actual_frequency_hz=7_115_000,
+                actual_frequency_source="Rig",
+            )
+
+        scheduler._read_target_station_actual_state = fake_target_state
+        scheduler._hold_for_frequency_prompt = lambda *args, **kwargs: False
+        scheduler._varac_status = lambda: {"busy": False, "waiting_for_frequency": False, "reason": None}
+        scheduler._should_delay_for_external_busy = lambda **kwargs: (False, None)
+        scheduler._should_delay_for_fldigi = lambda **kwargs: (False, None)
+        scheduler._shared_ptt_lock_status = lambda force=False: {"blocked": False}
+        scheduler._coordination_conflict_status = lambda *args, **kwargs: {}
+        scheduler._coordination_conflict_signature = lambda _conflict: ""
+        scheduler._net_corrections_suppressed = lambda: False
+        scheduler._fldigi_available = lambda: False
+        scheduler._js8_offset_authority_active = lambda *args, **kwargs: False
+        scheduler._update_desired_fldigi_settings = lambda _entry: None
+        scheduler._queue_control_action = lambda **kwargs: queued.append(dict(kwargs)) or True
+        scheduler._record_scheduler_event = lambda *args, **kwargs: None
+        scheduler._record_scheduler_health_issue = lambda *args, **kwargs: None
+        scheduler._clear_scheduler_health_issue = lambda *args, **kwargs: None
+        scheduler._clear_coordination_prompt = lambda: None
+        scheduler._clear_local_ptt_busy_evidence = lambda: None
+        scheduler._clear_shared_ptt_block_evidence = lambda: None
+        scheduler._entry_js8_group_key = lambda _group: ""
+
+        scheduler._apply_schedule_entry(
+            {
+                "target_device_profile_id": 9,
+                "frequency": "14.110",
+                "band": "20M",
+                "mode": "Digi",
+                "vfo": "A",
+            },
+            "HF",
+        )
+
+        assert target_reads == [9]
+        assert len(queued) == 1
+        assert queued[0]["rig_client"] is target_rig
+        assert queued[0]["allow_global_fallback"] is False
+        assert queued[0]["freq_hz"] == 14_110_000
+        assert queued[0]["entry_key"][0] == 9
+    finally:
+        scheduler.stop()
+
+
 def test_off_schedule_frequency_apply_bypasses_busy_gates_for_target_radio() -> None:
     from freqinout.core.scheduler_engine import SchedulerEngine
 

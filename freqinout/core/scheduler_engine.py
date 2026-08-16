@@ -409,6 +409,7 @@ class SchedulerEngine(QObject):
         self._force_retry_after_control: bool = False
         self._forced_retry_attempts_left: int = 0
         self._latest_intent: Optional[Dict[str, object]] = None
+        self._latest_intents_by_radio: Dict[int, Dict[str, object]] = {}
         self._latest_intent_ts: float = 0.0
         self._retry_scheduled: bool = False
         self._manual_qsy_active: bool = False
@@ -1006,6 +1007,7 @@ class SchedulerEngine(QObject):
         self._disconnect_timer()
         self._disconnect_scheduler_thread_call()
         self._latest_intent = None
+        self._latest_intents_by_radio = {}
         self._latest_intent_ts = 0.0
         self._retry_scheduled = False
         self._force_retry_after_control = False
@@ -1368,7 +1370,7 @@ class SchedulerEngine(QObject):
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
     ) -> None:
-        self._latest_intent = {
+        intent = {
             "entry": dict(entry),
             "source": source,
             "now_utc": now_utc,
@@ -1382,10 +1384,32 @@ class SchedulerEngine(QObject):
             "apply_js8_offset": bool(apply_js8_offset),
             "apply_fldigi": bool(apply_fldigi),
         }
+        self._latest_intent = intent
+        radio_id = None
+        try:
+            radio_id = self._entry_manual_control_radio_id(entry)
+        except Exception:
+            radio_id = None
+        if radio_id is not None:
+            try:
+                if not isinstance(getattr(self, "_latest_intents_by_radio", None), dict):
+                    self._latest_intents_by_radio = {}
+                self._latest_intents_by_radio[int(radio_id)] = intent
+            except Exception:
+                pass
         self._latest_intent_ts = time.time()
 
     def _apply_latest_intent_if_any(self) -> bool:
-        intent = self._latest_intent
+        intent = None
+        intents_by_radio = getattr(self, "_latest_intents_by_radio", None)
+        if isinstance(intents_by_radio, dict) and intents_by_radio:
+            try:
+                radio_id = sorted(intents_by_radio.keys())[0]
+            except Exception:
+                radio_id = next(iter(intents_by_radio))
+            intent = intents_by_radio.pop(radio_id, None)
+        if intent is None:
+            intent = self._latest_intent
         if not intent:
             return False
         self._latest_intent = None
@@ -2134,7 +2158,8 @@ class SchedulerEngine(QObject):
                         failures=self._control_fail_count,
                         backoff_s=round(backoff, 1),
                     )
-                if self._latest_intent:
+                intents_by_radio = getattr(self, "_latest_intents_by_radio", None)
+                if self._latest_intent or (isinstance(intents_by_radio, dict) and intents_by_radio):
                     self._force_retry_after_control = False
                     QTimer.singleShot(0, self._apply_latest_intent_if_any)
                 elif self._force_retry_after_control:
@@ -2949,6 +2974,7 @@ class SchedulerEngine(QObject):
         )
         self._fldigi_force_apply_once = True
         self._latest_intent = None
+        self._latest_intents_by_radio = {}
         self._latest_intent_ts = 0.0
         self._retry_scheduled = False
         self._control_backoff_until = 0.0
@@ -6956,11 +6982,17 @@ class SchedulerEngine(QObject):
             return
         if force or scheduler_transition:
             self._maybe_refresh_external_status_snapshot(force=True)
-        actual_state = self._read_station_actual_state(
-            force=False,
-            control_mode=control_mode,
-            allow_poll=False,
-        )
+        if target_radio_id is not None:
+            actual_state = self._read_target_station_actual_state(
+                effective_entry,
+                control_mode=control_mode,
+            )
+        else:
+            actual_state = self._read_station_actual_state(
+                force=False,
+                control_mode=control_mode,
+                allow_poll=False,
+            )
         off_state = self._compute_off_schedule_state(
             effective_entry,
             actual_state,
@@ -7268,6 +7300,7 @@ class SchedulerEngine(QObject):
 
         # Avoid redundant commands
         entry_key = (
+            int(target_radio_id) if target_radio_id is not None else "station",
             band,
             freq_hz,
             fldigi_center,
