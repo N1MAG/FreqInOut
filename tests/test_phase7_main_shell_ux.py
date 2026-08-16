@@ -3069,6 +3069,46 @@ def test_phase7_station_command_selected_radio_uses_assigned_plan_before_other_r
     app.processEvents()
 
 
+def test_phase7_station_command_ignores_legacy_string_plan_refs(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_effective_assigned_plans(self):
+            return [{"device_profile_id": 2, "frequency_plan_id": 20}]
+
+        def list_frequency_plans(self):
+            return [
+                {
+                    "id": 20,
+                    "name": "Mixed Legacy Plan",
+                    "schedule_refs_json": (
+                        '["hf:legacy-string",'
+                        '{"day_utc":"ALL","start_utc":"00:00","end_utc":"23:59",'
+                        '"group":"AMRRON","band":"20M","frequency":"14.110"}]'
+                    ),
+                    "frequency_refs_json": '["20M:14.110"]',
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace(all=lambda: {"operating_groups": []})
+    window.multi_radio_store = FakeStore()
+    window.scheduler = SimpleNamespace(current_source="HF", current_schedule_entry={})
+    window._station_command_manual_qsy_meta = None
+    window._station_command_manual_qsy_profile_id = None
+    window._station_command_selected_profile_id = 2
+    snapshot = SimpleNamespace(device_profile_id=2, current_frequency_label="", current_band="", current_group="")
+
+    assert MainWindow._station_command_ref_active_now("hf:legacy-string", datetime.datetime.now(datetime.timezone.utc)) is False
+    assert MainWindow._station_command_now_text(window, snapshot) == "AMRRON 20M"
+    assert MainWindow._station_command_preferred_qsy_key(window, snapshot) == "14.110000"
+
+    app.processEvents()
+
+
 def test_phase7_station_command_next_uses_selected_radio_assigned_plan(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])

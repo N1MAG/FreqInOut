@@ -4943,8 +4943,15 @@ class MainWindow(QMainWindow):
         except ValueError:
             return None
 
+    @staticmethod
+    def _station_command_ref_mapping(ref: object) -> Mapping[str, object] | None:
+        return ref if isinstance(ref, Mapping) else None
+
     @classmethod
-    def _station_command_ref_active_now(cls, ref: Mapping[str, object], now_utc: datetime.datetime) -> bool:
+    def _station_command_ref_active_now(cls, ref: object, now_utc: datetime.datetime) -> bool:
+        ref = cls._station_command_ref_mapping(ref)
+        if ref is None:
+            return False
         start = cls._station_command_hhmm_to_minutes(
             ref.get("start_utc") or ref.get("start") or ref.get("start_local")
         )
@@ -4995,7 +5002,8 @@ class MainWindow(QMainWindow):
         refs = self._station_command_assigned_plan_refs_for_radio(ident)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         for ref in refs:
-            if not self._station_command_ref_active_now(ref, now_utc):
+            ref = self._station_command_ref_mapping(ref)
+            if ref is None or not self._station_command_ref_active_now(ref, now_utc):
                 continue
             group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
             band = str(ref.get("band") or "").strip().upper()
@@ -5003,6 +5011,9 @@ class MainWindow(QMainWindow):
                 return group, band
         if refs:
             for ref in refs:
+                ref = self._station_command_ref_mapping(ref)
+                if ref is None:
+                    continue
                 group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
                 band = str(ref.get("band") or "").strip().upper()
                 if group:
@@ -5029,6 +5040,9 @@ class MainWindow(QMainWindow):
         best_changed: tuple[int, str, str] | None = None
         best_any: tuple[int, str, str] | None = None
         for ref in refs:
+            ref = self._station_command_ref_mapping(ref)
+            if ref is None:
+                continue
             group = self._station_command_group_display_name(ref.get("group_name") or ref.get("group"))
             band = str(ref.get("band") or "").strip().upper()
             if not group:
@@ -5095,11 +5109,11 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
-    def _station_command_assigned_plan_refs_for_radio(self, device_profile_id: int) -> list[dict[str, object]]:
+    def _station_command_assigned_plan_refs_for_radio(self, device_profile_id: int) -> list[object]:
         plan = self._station_command_assigned_plan_for_radio(device_profile_id)
         if not isinstance(plan, Mapping):
             return []
-        refs: list[dict[str, object]] = []
+        refs: list[object] = []
         for key in ("schedule_refs_json", "frequency_refs_json"):
             refs.extend(self._station_command_parse_json_ref_items(plan.get(key, "[]")))
         return refs
@@ -5661,7 +5675,8 @@ class MainWindow(QMainWindow):
             has_assigned_refs = bool(refs)
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             for ref in refs:
-                if not self._station_command_ref_active_now(ref, now_utc):
+                ref = self._station_command_ref_mapping(ref)
+                if ref is None or not self._station_command_ref_active_now(ref, now_utc):
                     continue
                 try:
                     freq = self._station_command_parse_frequency(
@@ -5672,6 +5687,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             for ref in refs:
+                ref = self._station_command_ref_mapping(ref)
+                if ref is None:
+                    continue
                 try:
                     freq = self._station_command_parse_frequency(
                         ref.get("frequency") or ref.get("freq") or ref.get("frequency_mhz")
