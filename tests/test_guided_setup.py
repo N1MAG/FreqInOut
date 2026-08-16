@@ -21,6 +21,8 @@ from freqinout.core.guided_setup import (
     build_guided_setup_preview,
     generated_radio_label,
     guided_setup_capability_policy,
+    guided_setup_flow_items,
+    guided_setup_flow_summary_lines,
     guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
@@ -469,6 +471,55 @@ def test_js8call_standard_frequencies_are_visible_without_named_plan() -> None:
     )
 
 
+def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_JS8CALL,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"js8call": "/apps/js8call"},
+    )
+
+    items = guided_setup_flow_items(blueprint, plan)
+    lines = guided_setup_flow_summary_lines(blueprint, plan)
+
+    assert [item.title for item in items] == ["Radio", "Software", "Connection", "Schedule", "Review"]
+    assert items[0].detail == "TS-2000"
+    assert items[1].detail == "JS8Call"
+    assert "JS8Call owns the radio/CAT route" in items[2].detail
+    assert "Daily with No Nets" in items[3].detail
+    assert items[4].status == "backup"
+    assert lines[0].startswith("1. Radio: TS-2000")
+    assert "5. Review:" in lines[-1]
+
+
+def test_guided_setup_flow_summary_keeps_varac_monitor_only(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_FLRIG,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"varac": "/apps/VarAC"},
+    )
+
+    items = guided_setup_flow_items(blueprint, plan)
+
+    assert items[1].detail == "VarAC"
+    assert "monitor/import only" in items[2].detail
+    assert "monitor only" in items[3].detail
+    assert items[4].status == "review"
+
+
 def test_varac_cluster_setup_remains_read_only_in_initial_blueprint() -> None:
     blueprint = build_guided_setup_blueprint(
         lane="varac_cluster",
@@ -730,4 +781,5 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
+    assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
     assert "Setup type: {setup_type_label}" in dialog_block

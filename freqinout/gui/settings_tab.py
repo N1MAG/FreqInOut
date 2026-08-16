@@ -149,6 +149,7 @@ from freqinout.core.guided_setup import (
     SETUP_MODE_READ_ONLY,
     build_app_config_plan_for_blueprint,
     build_guided_setup_blueprint,
+    guided_setup_flow_summary_lines,
     build_guided_setup_preview,
     generated_radio_label,
     infer_guided_control_route,
@@ -19370,8 +19371,12 @@ class SettingsTab(QWidget):
                 app_paths=app_paths,
             )
             preview = build_guided_setup_preview(blueprint, plan)
-            app_setup_plan_label.setText("\n".join(preview.lines))
-            app_setup_plan_group.setVisible(bool(preview.lines))
+            flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
+            label_lines = list(flow_lines)
+            if preview.lines:
+                label_lines.extend(("", *preview.lines))
+            app_setup_plan_label.setText("\n".join(label_lines))
+            app_setup_plan_group.setVisible(bool(label_lines))
 
         def _apply_dialog_autoconfigure() -> None:
             filled: List[str] = []

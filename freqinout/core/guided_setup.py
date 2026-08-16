@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
-from freqinout.core.config_autodiscovery import RadioInstanceProposal
+from freqinout.core.config_autodiscovery import APP_DISPLAY_NAMES, RadioInstanceProposal
 from freqinout.core.guided_app_config_plan import GuidedAppConfigPlan, build_guided_external_app_config_plan
 
 
@@ -119,6 +119,14 @@ class GuidedSetupPreview:
     backup_required: bool
     qsy_controls_visible: bool
     scheduler_assignment_allowed: bool
+
+
+@dataclass(frozen=True)
+class GuidedSetupFlowItem:
+    item_id: str
+    title: str
+    detail: str
+    status: str = "ready"
 
 
 @dataclass(frozen=True)
@@ -489,6 +497,78 @@ def guided_setup_schedule_summary(blueprint: GuidedSetupBlueprint) -> str:
     if not labels:
         return ""
     return "Schedule choices: " + ", ".join(labels) + "."
+
+
+def guided_setup_flow_items(
+    blueprint: GuidedSetupBlueprint,
+    plan: GuidedAppConfigPlan,
+) -> Tuple[GuidedSetupFlowItem, ...]:
+    """Return the setup flow as compact, UI-ready steps."""
+
+    policy = guided_setup_capability_policy(blueprint)
+    app_labels = [
+        APP_DISPLAY_NAMES.get(app_id, app_id)
+        for app_id in blueprint.selected_apps
+        if str(app_id or "").strip()
+    ]
+    control_summary = guided_setup_control_summary(policy)
+    schedule_summary = guided_setup_schedule_summary(blueprint)
+    if plan.backup_required:
+        review_detail = "Review detected settings, then back up and apply the app configuration changes."
+        review_status = "backup"
+    elif plan.manual_review_required:
+        review_detail = "Review the detected paths and save the FIO-side integration settings."
+        review_status = "review"
+    else:
+        review_detail = "Save the radio after the required fields look correct."
+        review_status = "ready"
+    return (
+        GuidedSetupFlowItem(
+            item_id="radio",
+            title="Radio",
+            detail=blueprint.radio_label or "Choose the radio or SDR model.",
+            status="ready" if blueprint.radio_label else "needs_input",
+        ),
+        GuidedSetupFlowItem(
+            item_id="software",
+            title="Software",
+            detail=", ".join(app_labels) if app_labels else "Choose the software this radio uses.",
+            status="ready" if app_labels else "needs_input",
+        ),
+        GuidedSetupFlowItem(
+            item_id="connection",
+            title="Connection",
+            detail=control_summary.removeprefix("Control: ").rstrip(".") if control_summary else "Enter the endpoint FIO should use.",
+            status="review" if plan.manual_review_required else "ready",
+        ),
+        GuidedSetupFlowItem(
+            item_id="schedule",
+            title="Schedule",
+            detail=schedule_summary.removeprefix("Schedule choices: ").removeprefix("Schedule: ").rstrip(".")
+            if schedule_summary
+            else "Choose schedule behavior later.",
+            status="ready",
+        ),
+        GuidedSetupFlowItem(
+            item_id="review",
+            title="Review",
+            detail=review_detail,
+            status=review_status,
+        ),
+    )
+
+
+def guided_setup_flow_summary_lines(
+    blueprint: GuidedSetupBlueprint,
+    plan: GuidedAppConfigPlan,
+) -> Tuple[str, ...]:
+    """Return plain stepper lines for existing Qt labels."""
+
+    lines = []
+    for idx, item in enumerate(guided_setup_flow_items(blueprint, plan), start=1):
+        status = str(item.status or "ready").replace("_", " ").title()
+        lines.append(f"{idx}. {item.title}: {item.detail} ({status})")
+    return tuple(lines)
 
 
 def generated_radio_label(
