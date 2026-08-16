@@ -23,6 +23,7 @@ from freqinout.core.guided_setup import (
     guided_setup_capability_policy,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
+    guided_setup_operator_guidance_lines,
     guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
@@ -498,6 +499,31 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     assert "5. Review:" in lines[-1]
 
 
+def test_guided_setup_operator_guidance_is_clear_for_js8_only(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_JS8CALL,
+        include_spotter=True,
+        include_commstat=True,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"js8call": "/apps/js8call"},
+    )
+
+    lines = guided_setup_operator_guidance_lines(blueprint, plan)
+
+    assert any("JS8Call, JS8Spotter, CommStat" in line for line in lines)
+    assert any("hides FLDigi, FLMsg, and FLAmp fields" in line for line in lines)
+    assert any("JS8Call profile, API port, and message files" in line for line in lines)
+    assert any("RF Guard" in line for line in lines)
+    assert any("backup" in line.lower() for line in lines)
+
+
 def test_guided_setup_flow_summary_keeps_varac_monitor_only(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="varac",
@@ -518,6 +544,28 @@ def test_guided_setup_flow_summary_keeps_varac_monitor_only(tmp_path) -> None:
     assert "monitor/import only" in items[2].detail
     assert "monitor only" in items[3].detail
     assert items[4].status == "review"
+
+
+def test_guided_setup_operator_guidance_keeps_varac_frequency_out_of_fio(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_FLRIG,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"varac": "/apps/VarAC"},
+    )
+
+    lines = guided_setup_operator_guidance_lines(blueprint, plan)
+
+    assert any("VarAC" in line for line in lines)
+    assert any("monitor/import only" in line for line in lines)
+    assert any("will not show QSY or scheduler controls" in line for line in lines)
+    assert not any("RF Guard" in line for line in lines)
 
 
 def test_varac_cluster_setup_remains_read_only_in_initial_blueprint() -> None:
@@ -782,4 +830,6 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
     assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
+    assert "guided_setup_operator_guidance_lines(blueprint, plan)" in dialog_block
+    assert 'QGroupBox("Setup Steps")' in dialog_block
     assert "Setup type: {setup_type_label}" in dialog_block

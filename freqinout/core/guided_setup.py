@@ -571,6 +571,50 @@ def guided_setup_flow_summary_lines(
     return tuple(lines)
 
 
+def guided_setup_operator_guidance_lines(
+    blueprint: GuidedSetupBlueprint,
+    plan: GuidedAppConfigPlan,
+) -> Tuple[str, ...]:
+    """Return short, operator-facing guidance for the selected setup path."""
+
+    policy = guided_setup_capability_policy(blueprint)
+    lane_key = _normalize_lane(blueprint.lane)
+    app_names = [
+        APP_DISPLAY_NAMES.get(app_id, app_id)
+        for app_id in blueprint.selected_apps
+        if str(app_id or "").strip()
+    ]
+    lines: list[str] = []
+
+    if app_names:
+        lines.append("FIO will configure only: " + ", ".join(app_names) + ".")
+    else:
+        lines.append("FIO will set up this radio as a receive-only monitor.")
+
+    if lane_key == LANE_JS8_ONLY:
+        lines.append("JS8Call-only setup hides FLDigi, FLMsg, and FLAmp fields.")
+        if policy.default_control_route == CONTROL_JS8CALL:
+            lines.append("Choose the JS8Call profile, API port, and message files if FIO finds more than one.")
+    elif lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+        lines.append("VarAC stays monitor/import only here; VarAC keeps its own frequency scheduler.")
+    elif lane_key in {LANE_FAST_LIGHT, LANE_TRI_MODE}:
+        lines.append("Choose the matching FLRig/FLDigi/Fast Light app set for this radio.")
+
+    if policy.scheduler_assignment_allowed:
+        lines.append("Schedule assignment can be reviewed with RF Guard before the radio follows it.")
+    else:
+        lines.append("FIO will not show QSY or scheduler controls for this setup.")
+
+    if plan.backup_required:
+        lines.append("External app settings require a backup before FIO applies changes.")
+    elif plan.manual_review_required:
+        lines.append("Review the detected paths, then save the FIO integration settings.")
+    else:
+        lines.append("Review the fields, then save the radio profile.")
+
+    return tuple(lines)
+
+
 def generated_radio_label(
     hamlib_short_name: str,
     existing_labels: Sequence[str] = (),

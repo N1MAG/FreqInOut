@@ -150,6 +150,7 @@ from freqinout.core.guided_setup import (
     build_app_config_plan_for_blueprint,
     build_guided_setup_blueprint,
     guided_setup_flow_summary_lines,
+    guided_setup_operator_guidance_lines,
     build_guided_setup_preview,
     generated_radio_label,
     infer_guided_control_route,
@@ -18328,7 +18329,7 @@ class SettingsTab(QWidget):
         configure_auto_row.addWidget(configure_auto_status, 1)
         _add_full_width_row(software_form, configure_auto_wrap)
 
-        app_setup_plan_group = QGroupBox("Planned App Setup")
+        app_setup_plan_group = QGroupBox("Setup Steps")
         app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")
         app_setup_plan_group.setVisible(False)
         app_setup_plan_layout = QVBoxLayout(app_setup_plan_group)
@@ -19372,7 +19373,10 @@ class SettingsTab(QWidget):
             )
             preview = build_guided_setup_preview(blueprint, plan)
             flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
+            guidance_lines = guided_setup_operator_guidance_lines(blueprint, plan)
             label_lines = list(flow_lines)
+            if guidance_lines:
+                label_lines.extend(("", *guidance_lines))
             if preview.lines:
                 label_lines.extend(("", *preview.lines))
             app_setup_plan_label.setText("\n".join(label_lines))

@@ -1524,7 +1524,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "What port does this radio's FLDigi use?" in dialog_block
     assert "What port does this radio's JS8Call use?" in dialog_block
     assert "This is the number the app uses to talk to FIO." in dialog_block
-    assert 'app_setup_plan_group = QGroupBox("Planned App Setup")' in dialog_block
+    assert 'app_setup_plan_group = QGroupBox("Setup Steps")' in dialog_block
     assert 'app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")' in dialog_block
     assert "build_guided_setup_blueprint(" in dialog_block
     assert "build_app_config_plan_for_blueprint(" in dialog_block
