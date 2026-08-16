@@ -3569,9 +3569,9 @@ def test_phase7_off_schedule_prompt_names_and_resolves_target_radio(monkeypatch)
         },
     )
 
-    assert prompt_text["title"] == "Off Schedule"
-    assert prompt_text["text"] == "FIO-B: Frequency Off Schedule"
-    assert prompt_text["apply_label"] == "Resume FIO-B"
+    assert prompt_text["title"] == "FIO-B Off Schedule"
+    assert prompt_text["text"] == "Frequency is off schedule."
+    assert prompt_text["apply_label"] == "Resume Schedule"
     assert calls == [(("apply",), {"items": ["Frequency"], "target_device_profile_id": 2})]
 
     app.processEvents()

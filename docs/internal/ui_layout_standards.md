@@ -102,6 +102,9 @@ Scheduler startup semantics:
   radio's own control context. Cached or singleton status may start a suspicion,
   but FIO must re-check the targeted radio before showing a prompt; if that
   fresh radio-scoped check is on schedule, no prompt is shown.
+- Intentional operator control is not an off-schedule error. Manual QSY, timed
+  QSY, timed suspend, and indefinite suspend suppress off-schedule prompts only
+  for the affected radio until that radio resumes schedule control.
 
 Saving a radio profile must preserve endpoint fields for linked app instances
 when those endpoint fields were not part of the user edit. A profile-name,
@@ -129,6 +132,9 @@ prompt title/text must identify the affected radio, and every action from the
 prompt must pass that same `device_profile_id` back to the scheduler. Prompt
 throttling is keyed by radio and schedule row so one off-schedule radio cannot
 spam repeated prompts or suppress another radio's first actionable prompt.
+`Skip Once` suppresses only the current radio and schedule mismatch until the
+configured prompt interval expires; it must not suppress a different radio or a
+different scheduled target.
 
 When manual QSY is active, `Resume` must be enabled and visually highlighted.
 The `QSY` button text remains stable so it does not resize or clip; button color

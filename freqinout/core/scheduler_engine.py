@@ -343,6 +343,8 @@ class SchedulerEngine(QObject):
         self._prompt_items: List[str] = []
         self._prompt_entry_key: Optional[Tuple] = None
         self._frequency_prompt_last_by_entry: Dict[Tuple, float] = {}
+        self._off_schedule_prompt_suppress_until_by_key: Dict[Tuple[object, ...], float] = {}
+        self._last_off_schedule_prompt_by_radio: Dict[int, Dict[str, object]] = {}
         self._prompt_state = {
             "frequency": {"last_prompt_ts": 0.0},
             "mode": {"last_prompt_ts": 0.0},
@@ -1124,6 +1126,19 @@ class SchedulerEngine(QObject):
     def _radio_manual_suspend_active(self, radio_id: Optional[int]) -> bool:
         state = self._manual_state_for_radio(radio_id)
         return bool(state is not None and state.state == "manual_suspend")
+
+    def _radio_manual_control_blocks_off_schedule_prompt(self, radio_id: Optional[int]) -> bool:
+        state = self._manual_state_for_radio(radio_id)
+        if state is not None and state.state in {"manual_hold", "manual_qsy", "manual_suspend"}:
+            return True
+        if radio_id is not None and self._manual_qsy_active:
+            try:
+                ident = int(radio_id)
+            except Exception:
+                ident = None
+            if self._manual_qsy_radio_id in (None, ident):
+                return True
+        return False
 
     @staticmethod
     def _normalize_hold_minutes(value: object) -> int:
@@ -3192,6 +3207,24 @@ class SchedulerEngine(QObject):
         except Exception as exc:
             log.debug("SchedulerEngine: failed to persist manual resume state: %s", exc)
 
+    def _record_manual_suspend_state(
+        self,
+        *,
+        operator_source: str = "scheduler_prompt",
+        target_device_profile_id: Optional[int] = None,
+    ) -> None:
+        radio_id = target_device_profile_id if target_device_profile_id is not None else self._primary_manual_control_radio_id()
+        if radio_id is None:
+            return
+        try:
+            self._manual_control_service.suspend(
+                radio_id,
+                reason_code="operator_suspend",
+                operator_source=operator_source,
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to persist manual suspend state: %s", exc)
+
     def _shared_ptt_busy_evidence_id(self, radio_id: int) -> str:
         return f"busy_shared_ptt_{int(radio_id)}"
 
@@ -4040,6 +4073,69 @@ class SchedulerEngine(QObject):
             allow_external_reads=False,
         )
 
+    def _off_schedule_prompt_suppression_key(
+        self,
+        entry: Optional[Dict],
+        items: Optional[List[str]],
+        radio_id: Optional[int],
+    ) -> Tuple[object, ...]:
+        try:
+            ident = int(radio_id or 0)
+        except Exception:
+            ident = 0
+        normalized_items = tuple(sorted(str(item or "").strip() for item in (items or []) if str(item or "").strip()))
+        return (ident, normalized_items, self._entry_transition_signature(entry or {}))
+
+    def _off_schedule_prompt_suppressed(
+        self,
+        entry: Optional[Dict],
+        items: Optional[List[str]],
+        radio_id: Optional[int],
+        now_ts: Optional[float] = None,
+    ) -> bool:
+        now = time.time() if now_ts is None else float(now_ts)
+        suppressions = self._off_schedule_prompt_suppress_until_by_key
+        expired = [key for key, until in suppressions.items() if float(until or 0.0) <= now]
+        for key in expired:
+            suppressions.pop(key, None)
+        key = self._off_schedule_prompt_suppression_key(entry, items, radio_id)
+        return float(suppressions.get(key) or 0.0) > now
+
+    def _suppress_off_schedule_prompt_once(
+        self,
+        entry: Optional[Dict],
+        items: Optional[List[str]],
+        radio_id: Optional[int],
+    ) -> None:
+        key = self._off_schedule_prompt_suppression_key(entry, items, radio_id)
+        intervals: List[int] = []
+        item_set = {str(item or "").strip() for item in (items or [])}
+        if "Frequency" in item_set:
+            intervals.append(self._prompt_interval_minutes("freq_prompt_interval"))
+        if item_set.intersection({"Mode", "FLDigi Mode", "FLDigi Offset"}):
+            intervals.append(self._prompt_interval_minutes("fldigi_prompt_interval"))
+        if "Offset" in item_set:
+            intervals.append(self._prompt_interval_minutes("js8_prompt_interval"))
+        minutes = max(intervals or [self._default_hold_minutes()])
+        self._off_schedule_prompt_suppress_until_by_key[key] = time.time() + max(1, minutes) * 60
+
+    def _record_off_schedule_prompt_context(
+        self,
+        entry: Optional[Dict],
+        items: Optional[List[str]],
+        radio_id: Optional[int],
+    ) -> None:
+        try:
+            ident = int(radio_id or 0)
+        except Exception:
+            ident = 0
+        if ident <= 0:
+            return
+        self._last_off_schedule_prompt_by_radio[ident] = {
+            "entry": dict(entry or {}),
+            "items": [str(item) for item in (items or [])],
+        }
+
     def _maybe_prompt_enforcement(self) -> None:
         if not self._scheduler_enabled():
             self._prompt_active = False
@@ -4064,6 +4160,17 @@ class SchedulerEngine(QObject):
             self._last_fldigi_offset_prompt_sig = None
             return
         entry_radio_id = self._entry_manual_control_radio_id(entry)
+        if self._radio_manual_control_blocks_off_schedule_prompt(entry_radio_id):
+            self._prompt_active = False
+            self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
+            self._last_off_schedule_flags = {
+                "frequency": False,
+                "mode": False,
+                "offset": False,
+                "fldigi_offset": False,
+            }
+            return
         entry_key = (
             entry_radio_id,
             entry.get("frequency"),
@@ -4169,6 +4276,9 @@ class SchedulerEngine(QObject):
                 self._last_fldigi_offset_prompt_sig = None
             self._last_off_schedule_flags = dict(flags)
             return
+        if self._off_schedule_prompt_suppressed(entry, items, entry_radio_id, now_ts):
+            self._last_off_schedule_flags = dict(flags)
+            return
         if any(item in {"Mode", "FLDigi Mode", "FLDigi Offset"} for item in items):
             self._fldigi_force_apply_once = False
         self._prompt_active = True
@@ -4182,6 +4292,7 @@ class SchedulerEngine(QObject):
                 self._prompt_state["fldigi_offset"]["last_prompt_ts"] = now_ts
             elif item == "Offset":
                 self._prompt_state["offset"]["last_prompt_ts"] = now_ts
+        self._record_off_schedule_prompt_context(entry, items, entry_radio_id)
         self.off_schedule_detected.emit({"entry": entry, "items": items, "device_profile_id": entry_radio_id})
         self._last_fldigi_offset_prompt_sig = fldigi_offset_prompt_sig if bool(flags.get("fldigi_offset")) else None
         self._last_off_schedule_flags = dict(flags)
@@ -4204,6 +4315,8 @@ class SchedulerEngine(QObject):
             return False
         now_ts = time.time()
         radio_id = self._entry_manual_control_radio_id(entry)
+        if self._radio_manual_control_blocks_off_schedule_prompt(radio_id):
+            return False
         fresh_state = self._fresh_off_schedule_state_for_prompt(
             entry,
             check_frequency=True,
@@ -4226,6 +4339,11 @@ class SchedulerEngine(QObject):
         prompt_due = now_ts - last_prompt_ts >= interval * 60
         same_prompt = self._prompt_active and self._prompt_entry_key == entry_key and "Frequency" in self._prompt_items
         should_emit = (not same_prompt) and prompt_due
+        if self._off_schedule_prompt_suppressed(entry, ["Frequency"], radio_id, now_ts):
+            self._prompt_active = False
+            self._prompt_items = []
+            self._last_off_schedule_flags = dict(off_state.flags)
+            return False
         self._prompt_active = True
         self._prompt_items = ["Frequency"]
         self._prompt_entry_key = entry_key
@@ -4245,6 +4363,7 @@ class SchedulerEngine(QObject):
             throttle_sec=30.0,
         )
         if should_emit:
+            self._record_off_schedule_prompt_context(entry, ["Frequency"], radio_id)
             self.off_schedule_detected.emit(
                 {
                     "entry": entry,
@@ -4275,14 +4394,23 @@ class SchedulerEngine(QObject):
             if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
             self._reset_prompt_timers(items=items)
-            self._suspend_for_minutes(
-                self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()),
-                target_device_profile_id=radio_id,
-            )
+            if minutes is not None and int(minutes or 0) <= 0:
+                self._record_manual_suspend_state(target_device_profile_id=radio_id)
+            else:
+                self._suspend_for_minutes(
+                    self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()),
+                    target_device_profile_id=radio_id,
+                )
             return
         if action == "ignore":
             if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
+            prompt_context = self._last_off_schedule_prompt_by_radio.get(int(radio_id or 0), {})
+            suppress_entry = prompt_context.get("entry") if isinstance(prompt_context, dict) else None
+            suppress_items = items or (prompt_context.get("items") if isinstance(prompt_context, dict) else None)
+            if not isinstance(suppress_entry, dict):
+                suppress_entry = self.current_schedule_entry or {}
+            self._suppress_off_schedule_prompt_once(suppress_entry, suppress_items, radio_id)
             self._reset_prompt_timers(items=items)
             return
         if action != "apply":

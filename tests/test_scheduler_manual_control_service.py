@@ -624,6 +624,99 @@ def test_scheduler_prompt_verifies_target_radio_before_emit(monkeypatch, tmp_pat
         _shutdown_engine(engine)
 
 
+def test_scheduler_manual_qsy_state_suppresses_off_schedule_prompt(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    settings.set("freq_enforcement_mode", "Prompt")
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 7_115_000
+
+        def get_ptt(self):
+            return False
+
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        emitted: list[dict[str, object]] = []
+        engine.off_schedule_detected.connect(lambda payload: emitted.append(dict(payload)))
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_radio_manual_control_blocks_off_schedule_prompt", lambda radio_id: radio_id == 8)
+        monkeypatch.setattr(
+            engine,
+            "_control_context_for_entry",
+            lambda _entry: (_Rig(), None, None, settings, 8),
+        )
+
+        engine.current_schedule_entry = {
+            "frequency": "14.110",
+            "band": "20M",
+            "mode": "Digi",
+            "group_name": "AMRRON",
+            "target_scope": "device_profile",
+            "target_device_profile_id": 8,
+        }
+        engine._maybe_prompt_enforcement()
+
+        assert emitted == []
+        assert engine._prompt_active is False
+    finally:
+        _shutdown_engine(engine)
+
+
+def test_scheduler_skip_once_suppresses_same_radio_mismatch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    settings.set("freq_enforcement_mode", "Prompt")
+
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 7_115_000
+
+        def get_ptt(self):
+            return False
+
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
+    try:
+        emitted: list[dict[str, object]] = []
+        engine.off_schedule_detected.connect(lambda payload: emitted.append(dict(payload)))
+        monkeypatch.setattr(engine, "_control_mode", lambda: "FLRIG")
+        monkeypatch.setattr(engine, "_scheduler_enabled", lambda: True)
+        monkeypatch.setattr(engine, "_fldigi_available", lambda: False)
+        monkeypatch.setattr(engine, "_js8_offset_authority_active", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            engine,
+            "_control_context_for_entry",
+            lambda _entry: (_Rig(), None, None, settings, 8),
+        )
+
+        entry = {
+            "frequency": "14.110",
+            "band": "20M",
+            "mode": "Digi",
+            "group_name": "AMRRON",
+            "target_scope": "device_profile",
+            "target_device_profile_id": 8,
+        }
+        engine.current_schedule_entry = dict(entry)
+        engine._maybe_prompt_enforcement()
+
+        assert emitted
+        assert emitted[-1]["device_profile_id"] == 8
+
+        engine.resolve_off_schedule("ignore", items=["Frequency"], target_device_profile_id=8)
+        emitted.clear()
+        engine._last_off_schedule_flags = {}
+        engine._prompt_state["frequency"]["last_prompt_ts"] = 0.0
+        engine._maybe_prompt_enforcement()
+
+        assert emitted == []
+        assert engine._prompt_active is False
+    finally:
+        _shutdown_engine(engine)
+
+
 def test_scheduler_manual_qsy_waiting_on_rf_conflict_does_not_persist_manual_state(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()

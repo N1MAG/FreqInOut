@@ -2915,9 +2915,21 @@ class MainWindow(QMainWindow):
 
     def _build_prompt_hold_duration_combo(self, parent) -> QComboBox:
         combo = QComboBox(parent)
-        combo.setToolTip("Temporary schedule hold duration.")
+        combo.setToolTip("How long FIO should leave this radio off schedule.")
         refresh_hold_duration_combo(combo, self.settings, getattr(self, "_active_runtime_profile", None))
+        combo.addItem("Indefinite", 0)
         return combo
+
+    def _selected_prompt_hold_duration(self, combo: QComboBox | None) -> int:
+        if combo is None:
+            return selected_hold_duration(combo, self.settings, getattr(self, "_active_runtime_profile", None))
+        try:
+            data = combo.currentData()
+            if data is not None and int(data) <= 0:
+                return 0
+        except Exception:
+            pass
+        return selected_hold_duration(combo, self.settings, getattr(self, "_active_runtime_profile", None))
 
     def _radio_name_for_device_profile_id(self, device_profile_id: int | None) -> str:
         try:
@@ -2949,8 +2961,10 @@ class MainWindow(QMainWindow):
             row = QWidget(msg)
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(6)
-            layout.addWidget(QLabel("Pause for"))
+            layout.setSpacing(10)
+            label = QLabel("Suspend")
+            label.setMinimumWidth(80)
+            layout.addWidget(label)
             layout.addWidget(combo)
             layout.addStretch(1)
             msg.layout().addWidget(row, msg.layout().rowCount(), 0, 1, msg.layout().columnCount())
@@ -2989,19 +3003,28 @@ class MainWindow(QMainWindow):
             return
         self._dismiss_off_schedule_prompt()
         msg = QMessageBox(self)
-        msg.setWindowTitle("Off Schedule")
         radio_name = self._radio_name_for_device_profile_id(target_radio_id)
+        msg.setWindowTitle(f"{radio_name} Off Schedule")
         if len(items) == 1:
-            text = f"{items[0]} Off Schedule"
+            text = f"{items[0]} is off schedule."
         elif len(items) == 2:
-            text = f"{items[0]} and {items[1]} are Off Schedule"
+            text = f"{items[0]} and {items[1]} are off schedule."
         else:
-            text = f"{', '.join(items[:-1])}, and {items[-1]} are Off Schedule"
-        text = f"{radio_name}: {text}"
+            text = f"{', '.join(items[:-1])}, and {items[-1]} are off schedule."
         msg.setText(text)
-        apply_btn = msg.addButton(f"Resume {radio_name}", QMessageBox.AcceptRole)
+        try:
+            entry = payload.get("entry") if isinstance(payload, Mapping) else {}
+            group = str((entry or {}).get("group_name") or (entry or {}).get("group") or "").strip()
+            band = str((entry or {}).get("band") or "").strip()
+            freq = str((entry or {}).get("frequency") or "").strip()
+            scheduled_bits = [part for part in (group, band, freq) if part]
+            if scheduled_bits:
+                msg.setInformativeText(f"Scheduled target for {radio_name}: {' '.join(scheduled_bits)}")
+        except Exception:
+            pass
+        apply_btn = msg.addButton("Resume Schedule", QMessageBox.AcceptRole)
         ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
-        suspend_btn = msg.addButton(f"Pause {radio_name}", QMessageBox.DestructiveRole)
+        suspend_btn = msg.addButton("Suspend", QMessageBox.DestructiveRole)
         hold_combo = self._build_prompt_hold_duration_combo(msg)
         self._attach_prompt_hold_duration_row(msg, hold_combo)
         self._off_schedule_prompt = msg
@@ -3047,9 +3070,10 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                mins = selected_hold_duration(hold_combo, self.settings, getattr(self, "_active_runtime_profile", None))
-                set_hold_duration_default(self.settings, mins)
-                self._sync_hold_duration_combos()
+                mins = self._selected_prompt_hold_duration(hold_combo)
+                if mins > 0:
+                    set_hold_duration_default(self.settings, mins)
+                    self._sync_hold_duration_combos()
                 self.scheduler.resolve_off_schedule(
                     "suspend",
                     items=items,
