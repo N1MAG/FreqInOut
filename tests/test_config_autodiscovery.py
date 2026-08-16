@@ -168,6 +168,33 @@ def test_settings_detector_can_use_varac_production_fixture_folder(tmp_path) -> 
     assert Path(results["varac_ini_path"].path) == varac_fixture / "VarAC.ini"
 
 
+def test_settings_detector_uses_varac_ini_and_production_folder_names(tmp_path) -> None:
+    varac_fixture = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
+    configured_bbs = tmp_path / "configured-bbs"
+    varac_fixture.mkdir(parents=True)
+    configured_bbs.mkdir()
+    (varac_fixture / "VarAC.db").write_bytes(b"")
+    (varac_fixture / "INCOMING").mkdir()
+    (varac_fixture / "OUTGOING").mkdir()
+    (varac_fixture / "VarAC.ini").write_text(
+        "[BBS]\n"
+        f"BBSDirectory={configured_bbs}\n"
+        "[FILES]\n"
+        "IncomingFilesDir=C:\\missing\\Incoming\n",
+        encoding="utf-8",
+    )
+
+    detector = SoftwarePathDetector(settings={})
+    detector.home = tmp_path
+    detector.system = "Darwin"
+
+    results = detector.detect_varac()
+
+    assert Path(results["message_paths.varac"].path) == varac_fixture / "INCOMING"
+    assert Path(results["varac_outbox_dir"].path) == varac_fixture / "OUTGOING"
+    assert Path(results["varac_bbs_dir"].path) == configured_bbs
+
+
 def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) -> None:
     varac_dir = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
     bbs_dir = varac_dir / "BBS"

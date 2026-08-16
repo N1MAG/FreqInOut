@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import os
 import platform
 import shutil
@@ -431,8 +432,13 @@ class SoftwarePathDetector:
     def _detect_varac_incoming_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_incoming = self._varac_ini_existing_path(ini_path, "FILES", "IncomingFilesDir")
+            if ini_incoming is not None:
+                candidates.append(ini_incoming)
             candidates.extend(
                 [
+                    install_dir / "INCOMING",
                     install_dir / "Received Files",
                     install_dir / "ReceivedFiles",
                     install_dir / "Incoming",
@@ -493,6 +499,10 @@ class SoftwarePathDetector:
     def _detect_varac_bbs_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_bbs = self._varac_ini_existing_path(ini_path, "BBS", "BBSDirectory")
+            if ini_bbs is not None:
+                candidates.append(ini_bbs)
             candidates.extend([install_dir / "BBS", install_dir / "bbs", install_dir / "BBS Files"])
         existing = self._existing_paths(candidates)
         if existing:
@@ -511,6 +521,7 @@ class SoftwarePathDetector:
         if install_dir is not None:
             candidates.extend(
                 [
+                    install_dir / "OUTGOING",
                     install_dir / "Outbox",
                     install_dir / "OUTBOX",
                     install_dir / "outbox",
@@ -563,6 +574,27 @@ class SoftwarePathDetector:
             "No conventional VarAC BBS archive directory found",
             "directory",
         )
+
+    def _varac_ini_existing_path(self, ini_path: Path | None, section: str, option: str) -> Path | None:
+        if ini_path is None or not ini_path.is_file():
+            return None
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(ini_path, encoding="utf-8")
+            value = str(parser.get(section, option, fallback="") or "").strip()
+        except Exception:
+            return None
+        if not value:
+            return None
+        path = Path(os.path.expandvars(os.path.expanduser(value)))
+        return path if path.exists() else None
+
+    @staticmethod
+    def _first_existing_path(candidates: Sequence[Path]) -> Path | None:
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
 
     def _js8_data_roots(self) -> List[Path]:
         if self.system == "Windows":
