@@ -203,6 +203,27 @@ def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) 
     assert by_id["bbs"].exists is True
 
 
+def test_varac_local_asset_discovery_uses_latest_timestamped_app_log(tmp_path) -> None:
+    varac_dir = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
+    varac_dir.mkdir(parents=True)
+    older_log = varac_dir / "VarAC_20260101000000.log"
+    newer_log = varac_dir / "VarAC_20260201000000.log"
+    traffic_log = varac_dir / "VarAC_traffic.log"
+    older_log.write_text("older", encoding="utf-8")
+    newer_log.write_text("newer", encoding="utf-8")
+    traffic_log.write_text("traffic", encoding="utf-8")
+    os.utime(older_log, (1000, 1000))
+    os.utime(newer_log, (2000, 2000))
+    os.utime(traffic_log, (3000, 3000))
+
+    assets = discover_varac_local_assets(install_path=varac_dir)
+    by_id = {asset.asset_id: asset for asset in assets}
+
+    assert by_id["app_log"].path == str(newer_log)
+    assert by_id["app_log"].exists is True
+    assert by_id["traffic_log"].path == str(traffic_log)
+
+
 def test_varac_local_asset_discovery_uses_explicit_paths_without_external_writes(tmp_path) -> None:
     db_path = tmp_path / "CustomVarAC.db"
     sqlite3.connect(db_path).close()

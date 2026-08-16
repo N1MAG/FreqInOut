@@ -709,7 +709,10 @@ def discover_varac_local_assets(
     db_path = _first_varac_path(paths.get("varac_db_path"), install_dir / "VarAC.db" if install_dir else None)
     ini_path = _first_varac_path(paths.get("varac_ini_path"), install_dir / "VarAC.ini" if install_dir else None)
     traffic_log = _first_varac_path(paths.get("varac_traffic_log"), install_dir / "VarAC_traffic.log" if install_dir else None)
-    app_log = _first_varac_path(paths.get("varac_log"), install_dir / "VarAC.log" if install_dir else None)
+    app_log = _first_varac_path(paths.get("varac_log"))
+    if app_log is None and install_dir is not None:
+        exact_app_log = install_dir / "VarAC.log"
+        app_log = exact_app_log if exact_app_log.exists() else _latest_varac_app_log(install_dir)
     qso_log = _first_varac_path(paths.get("varac_qso_log"), install_dir / "VarAC_qso_log.adi" if install_dir else None)
     callsign_tags = _first_varac_path(
         paths.get("varac_callsign_tags_path"),
@@ -749,6 +752,20 @@ def _first_varac_path(*values: object) -> Optional[Path]:
         if txt:
             return Path(os.path.expandvars(os.path.expanduser(txt)))
     return None
+
+
+def _latest_varac_app_log(install_dir: Path) -> Optional[Path]:
+    if not install_dir.is_dir():
+        return None
+    candidates = [
+        path
+        for path in install_dir.glob("VarAC_*.log")
+        if path.is_file() and not path.name.lower().startswith("varac_traffic")
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+    return candidates[0]
 
 
 def _varac_path_asset(asset_id: str, label: str, path: Optional[Path], kind: str) -> VarACLocalAsset:
