@@ -38,6 +38,8 @@ from freqinout.core.perf_metrics import emit_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.schedule_source_sets import (
     LIVE_SOURCE_SET_ID,
+    NO_NET_SOURCE_SET_ID,
+    NO_NET_SOURCE_SET_LABEL,
     HF_DAILY_SOURCE_CATEGORY,
     HF_DAILY_SOURCE_SETS_KEY,
     HF_NET_SOURCE_CATEGORY,
@@ -576,6 +578,8 @@ class FreqPlannerTab(QWidget):
         combo.blockSignals(True)
         combo.clear()
         combo.addItem(self._active_source_label(sets_key), LIVE_SOURCE_SET_ID)
+        if sets_key == HF_NET_SOURCE_SETS_KEY:
+            combo.addItem(NO_NET_SOURCE_SET_LABEL, NO_NET_SOURCE_SET_ID)
         for row in self._source_sets(sets_key):
             set_id = str(row.get("id") or "").strip()
             if not set_id:
@@ -753,12 +757,18 @@ class FreqPlannerTab(QWidget):
         net_row = self._source_set_row_by_id(HF_NET_SOURCE_SETS_KEY, net_id)
         sop_row = self._sop_schedule_plan_row_by_id(sop_id)
         hf_label = str((hf_row or {}).get("name") or self._active_source_label(HF_DAILY_SOURCE_SETS_KEY))
-        net_label = str((net_row or {}).get("name") or self._active_source_label(HF_NET_SOURCE_SETS_KEY))
+        net_label = (
+            NO_NET_SOURCE_SET_LABEL
+            if str(net_id or "").strip() == NO_NET_SOURCE_SET_ID
+            else str((net_row or {}).get("name") or self._active_source_label(HF_NET_SOURCE_SETS_KEY))
+        )
         sop_label = str((sop_row or {}).get("name") or "Active SOP Builder layers")
         return f"HF Daily: {hf_label}; HF Nets: {net_label}; SOP: {sop_label}"
 
     def _selected_source_layer_label(self, sets_key: str, selected_key: str) -> str:
         set_id = self._selected_source_set_id(selected_key)
+        if sets_key == HF_NET_SOURCE_SETS_KEY and str(set_id or "").strip() == NO_NET_SOURCE_SET_ID:
+            return NO_NET_SOURCE_SET_LABEL
         row = self._source_set_row_by_id(sets_key, set_id)
         return str((row or {}).get("name") or self._active_source_label(sets_key))
 
@@ -2523,6 +2533,8 @@ class FreqPlannerTab(QWidget):
         net_set = self._source_set_row_by_id(HF_NET_SOURCE_SETS_KEY, selected_net)
         if hf_set is not None:
             hf = [dict(row) for row in hf_set.get("rows", []) if isinstance(row, dict)]
+        if str(selected_net or "").strip() == NO_NET_SOURCE_SET_ID:
+            net = []
         if net_set is not None:
             net = [dict(row) for row in net_set.get("rows", []) if isinstance(row, dict)]
         selected_sop = self._selected_sop_plan_source_id()

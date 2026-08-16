@@ -11,6 +11,8 @@ from freqinout.core.settings_manager import SettingsManager
 
 
 LIVE_SOURCE_SET_ID = "__live__"
+NO_NET_SOURCE_SET_ID = "__no_nets__"
+NO_NET_SOURCE_SET_LABEL = "No Nets"
 HF_DAILY_SOURCE_SETS_KEY = "freqplanner_hf_daily_schedule_sets"
 HF_NET_SOURCE_SETS_KEY = "freqplanner_hf_net_schedule_sets"
 SELECTED_HF_DAILY_SOURCE_SET_KEY = "freqplanner_selected_hf_daily_schedule_set_id"
@@ -41,6 +43,46 @@ def _parse_refs(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [dict(row) for row in raw if isinstance(row, dict)]
+
+
+def _normalized_ref_items(value: Any) -> List[Any]:
+    raw = value
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raw = []
+        else:
+            try:
+                raw = json.loads(text)
+            except Exception:
+                raw = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        raw = list(raw)
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    out: List[Any] = []
+    seen: set[str] = set()
+    for item in raw:
+        if item in (None, ""):
+            continue
+        if isinstance(item, dict):
+            clean_item: Any = {str(k): v for k, v in item.items() if v not in (None, "")}
+        else:
+            clean_item = str(item or "").strip()
+        if clean_item in ({}, ""):
+            continue
+        key = json.dumps(clean_item, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean_item)
+    return out
+
+
+def _refs_equivalent(left: Any, right: Any) -> bool:
+    return _normalized_ref_items(left) == _normalized_ref_items(right)
 
 
 def _parse_ref_values(value: Any) -> List[str]:
@@ -112,6 +154,8 @@ def _dependency_set_id(source_refs: List[str], category: str) -> str:
 
 
 def _rows_for_dependency(settings: Any, category: str, set_id: str) -> List[Dict[str, Any]]:
+    if category == HF_NET_SOURCE_CATEGORY and str(set_id or "").strip() == NO_NET_SOURCE_SET_ID:
+        return []
     sets_key = HF_DAILY_SOURCE_SETS_KEY if category == HF_DAILY_SOURCE_CATEGORY else HF_NET_SOURCE_SETS_KEY
     row = source_set_row_by_id_for_category(settings, sets_key, category, set_id)
     if not row:
@@ -331,6 +375,135 @@ def assigned_plan_rf_guard_impacts_for_source_update(
             }
         )
     return impacts
+
+
+def reproject_frequency_plans_for_source_update(
+    settings: Any,
+    category: str,
+    set_id: str,
+    updated_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Refresh saved Frequency Plans that depend on a named HF Daily/Net schedule.
+
+    Saved Frequency Plans intentionally keep their own concrete schedule windows so
+    scheduler startup does not need to rebuild planner projections. When a named
+    Daily or Net component changes, every dependent plan must be reprojected before
+    the scheduler reads it again; otherwise radios keep following stale windows.
+    """
+
+    dependency_ref = source_schedule_dependency_ref(category, set_id)
+    if not dependency_ref:
+        return []
+    store = MultiRadioStore()
+    updated: List[Dict[str, Any]] = []
+    for plan in store.list_frequency_plans():
+        plan_id = int(plan.get("id", 0) or 0)
+        if plan_id <= 0:
+            continue
+        plan_category = str(plan.get("category") or "").strip().lower()
+        if plan_category in {HF_DAILY_SOURCE_CATEGORY, HF_NET_SOURCE_CATEGORY}:
+            continue
+        source_refs = _parse_ref_values(plan.get("source_refs_json", plan.get("source_refs", "[]")))
+        if dependency_ref not in source_refs:
+            continue
+        daily_set_id = _dependency_set_id(source_refs, HF_DAILY_SOURCE_CATEGORY)
+        net_set_id = _dependency_set_id(source_refs, HF_NET_SOURCE_CATEGORY)
+        daily_rows = _rows_for_dependency(settings, HF_DAILY_SOURCE_CATEGORY, daily_set_id) if daily_set_id else []
+        net_rows = _rows_for_dependency(settings, HF_NET_SOURCE_CATEGORY, net_set_id) if net_set_id else []
+        if category == HF_DAILY_SOURCE_CATEGORY:
+            daily_rows = [dict(row) for row in updated_rows]
+        elif category == HF_NET_SOURCE_CATEGORY:
+            net_rows = [dict(row) for row in updated_rows]
+        sop_rows = [
+            dict(row)
+            for row in _schedule_refs_for_plan(plan)
+            if isinstance(row, dict) and str(row.get("source") or "").strip().upper() == "SOP"
+        ]
+        projection = build_blended_schedule_projection(
+            daily_rows,
+            net_rows,
+            sop_rows,
+            [],
+            week_start_utc=_week_start_sunday_utc(datetime.datetime.now(datetime.timezone.utc)),
+        )
+        refs = _normalized_ref_items(projection.schedule_refs())
+        frequency_refs = projection.frequency_refs()
+        group_refs = projection.group_refs()
+        if (
+            _refs_equivalent(refs, plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
+            and _refs_equivalent(
+                frequency_refs,
+                plan.get("frequency_refs_json", plan.get("frequency_refs", "[]")),
+            )
+            and _refs_equivalent(group_refs, plan.get("group_refs_json", plan.get("group_refs", "[]")))
+        ):
+            continue
+        payload = dict(plan)
+        payload["id"] = plan_id
+        payload["schedule_refs"] = refs
+        payload["frequency_refs"] = frequency_refs
+        payload["group_refs"] = group_refs
+        payload["notes"] = (
+            f"Reprojected after {category} source update "
+            f"{datetime.datetime.now(datetime.timezone.utc).isoformat()}."
+        )
+        updated.append(store.save_frequency_plan(payload))
+    return updated
+
+
+def refresh_source_backed_frequency_plans(settings: Any) -> List[Dict[str, Any]]:
+    """Rebuild stale source-backed Frequency Plans from their current components."""
+
+    store = MultiRadioStore()
+    updated: List[Dict[str, Any]] = []
+    for plan in store.list_frequency_plans():
+        plan_id = int(plan.get("id", 0) or 0)
+        if plan_id <= 0:
+            continue
+        plan_category = str(plan.get("category") or "").strip().lower()
+        if plan_category in {HF_DAILY_SOURCE_CATEGORY, HF_NET_SOURCE_CATEGORY}:
+            continue
+        source_refs = _parse_ref_values(plan.get("source_refs_json", plan.get("source_refs", "[]")))
+        daily_set_id = _dependency_set_id(source_refs, HF_DAILY_SOURCE_CATEGORY)
+        net_set_id = _dependency_set_id(source_refs, HF_NET_SOURCE_CATEGORY)
+        if not daily_set_id and not net_set_id:
+            continue
+        daily_rows = _rows_for_dependency(settings, HF_DAILY_SOURCE_CATEGORY, daily_set_id) if daily_set_id else []
+        net_rows = _rows_for_dependency(settings, HF_NET_SOURCE_CATEGORY, net_set_id) if net_set_id else []
+        sop_rows = [
+            dict(row)
+            for row in _schedule_refs_for_plan(plan)
+            if isinstance(row, dict) and str(row.get("source") or "").strip().upper() == "SOP"
+        ]
+        projection = build_blended_schedule_projection(
+            daily_rows,
+            net_rows,
+            sop_rows,
+            [],
+            week_start_utc=_week_start_sunday_utc(datetime.datetime.now(datetime.timezone.utc)),
+        )
+        refs = _normalized_ref_items(projection.schedule_refs())
+        frequency_refs = projection.frequency_refs()
+        group_refs = projection.group_refs()
+        if (
+            _refs_equivalent(refs, plan.get("schedule_refs_json", plan.get("schedule_refs", "[]")))
+            and _refs_equivalent(
+                frequency_refs,
+                plan.get("frequency_refs_json", plan.get("frequency_refs", "[]")),
+            )
+            and _refs_equivalent(group_refs, plan.get("group_refs_json", plan.get("group_refs", "[]")))
+        ):
+            continue
+        payload = dict(plan)
+        payload["id"] = plan_id
+        payload["schedule_refs"] = refs
+        payload["frequency_refs"] = frequency_refs
+        payload["group_refs"] = group_refs
+        payload["notes"] = (
+            f"Refreshed from source schedules {datetime.datetime.now(datetime.timezone.utc).isoformat()}."
+        )
+        updated.append(store.save_frequency_plan(payload))
+    return updated
 
 
 def source_sets_for_category(settings: Any, legacy_key: str, category: str) -> List[Dict[str, Any]]:

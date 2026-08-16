@@ -24,12 +24,16 @@ from freqinout.core.schedule_source_sets import (
     HF_NET_SOURCE_CATEGORY,
     HF_NET_SOURCE_SETS_KEY,
     LIVE_SOURCE_SET_ID,
+    NO_NET_SOURCE_SET_ID,
+    NO_NET_SOURCE_SET_LABEL,
     SELECTED_HF_DAILY_SOURCE_SET_KEY,
     SELECTED_HF_NET_SOURCE_SET_KEY,
     assigned_plan_rf_guard_impacts_for_sop_update,
     assigned_plan_rf_guard_impacts_for_source_update,
     delete_source_schedule,
+    refresh_source_backed_frequency_plans,
     rename_source_schedule,
+    reproject_frequency_plans_for_source_update,
     save_source_schedule,
     save_source_set,
     source_schedule_dependency_ref,
@@ -603,6 +607,111 @@ def test_freqplanner_selecting_saved_plan_loads_saved_source_layers(monkeypatch,
     projection = tab._build_blended_projection()
     assert [(row.source, row.band) for row in projection.effective_segments] == [("HF", "40M"), ("NET", "80M"), ("SOP", "20M")]
     assert not tab._frequency_plan_layers_dirty
+
+
+def test_freqplanner_no_nets_choice_supplies_empty_net_layer(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    monkeypatch.setattr(
+        tab,
+        "_load_live_schedules",
+        lambda: (
+            [
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "01:00",
+                    "end_utc": "02:00",
+                    "band": "40M",
+                    "frequency": "7.078",
+                    "group_name": "OPS",
+                }
+            ],
+            [
+                {
+                    "day_utc": "Monday",
+                    "start_utc": "01:00",
+                    "end_utc": "02:00",
+                    "band": "80M",
+                    "frequency": "3.590",
+                    "group_name": "OPS",
+                    "net_name": "Unexpected Net",
+                }
+            ],
+            [],
+            [],
+        ),
+    )
+    tab._refresh_source_set_controls()
+    no_nets_idx = tab.hf_net_source_combo.findData(NO_NET_SOURCE_SET_ID)
+    assert no_nets_idx >= 0
+    assert tab.hf_net_source_combo.itemText(no_nets_idx) == NO_NET_SOURCE_SET_LABEL
+
+    tab.hf_net_source_combo.setCurrentIndex(no_nets_idx)
+    app.processEvents()
+
+    projection = tab._build_blended_projection()
+    payload, _count, _kind = tab._current_plan_payload_from_projection()
+    assert [(row.source, row.band) for row in projection.effective_segments] == [("HF", "40M")]
+    assert f"{HF_NET_SOURCE_CATEGORY}:{NO_NET_SOURCE_SET_ID}" in payload["source_refs"]
+    assert "HF Nets: No Nets" in tab._source_selection_summary()
+
+
+def test_freqplanner_saved_no_nets_plan_reloads_no_nets_selection(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    daily = save_source_set(
+        tab.settings,
+        HF_DAILY_SOURCE_SETS_KEY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Saved Daily",
+        [
+            {
+                "day_utc": "Monday",
+                "start_utc": "01:00",
+                "end_utc": "02:00",
+                "band": "40M",
+                "frequency": "7.078",
+                "group_name": "OPS",
+            }
+        ],
+    )
+    saved = tab.plan_context_service.store.save_frequency_plan(
+        {
+            "name": "Daily Only Plan",
+            "status": "saved",
+            "category": "normal",
+            "source_refs": [
+                source_schedule_dependency_ref(HF_DAILY_SOURCE_CATEGORY, daily["id"]),
+                source_schedule_dependency_ref(HF_NET_SOURCE_CATEGORY, NO_NET_SOURCE_SET_ID),
+            ],
+            "schedule_refs": [],
+        }
+    )
+
+    tab._refresh_source_set_controls()
+    tab._refresh_plan_workspace_header()
+    tab.frequency_plan_combo.setCurrentIndex(tab.frequency_plan_combo.findData(int(saved["id"])))
+    app.processEvents()
+
+    assert tab.hf_daily_source_combo.currentData() == daily["id"]
+    assert tab.hf_net_source_combo.currentData() == NO_NET_SOURCE_SET_ID
+    assert tab.settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) == NO_NET_SOURCE_SET_ID
 
 
 def test_freqplanner_layer_change_marks_selected_plan_modified_until_save(monkeypatch, tmp_path) -> None:
@@ -2843,6 +2952,146 @@ def test_saved_source_update_reports_rf_guard_impacts_for_assigned_master_plan(m
     assert impacts[0]["device"]["name"] == "Twenty Meter Only"
     assert impacts[0]["validation"]["state"] == "blocked"
     assert "antenna support does not include 40M" in " ".join(impacts[0]["validation"]["messages"])
+
+
+def test_saved_daily_update_reprojects_dependent_frequency_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    daily = save_source_schedule(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "AmRRON Daily",
+        [
+            {
+                "day_utc": "Sunday",
+                "start_utc": "00:00",
+                "end_utc": "12:00",
+                "band": "40M",
+                "frequency": "7.110",
+                "group_name": "AMRRON",
+            }
+        ],
+    )
+    plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "source_refs": ["hf_daily", source_schedule_dependency_ref(HF_DAILY_SOURCE_CATEGORY, daily["id"])],
+            "schedule_refs": [
+                {
+                    "source": "HF",
+                    "day_utc": "Sunday",
+                    "start_utc": "00:00",
+                    "end_utc": "12:00",
+                    "band": "40M",
+                    "frequency": "7.110",
+                    "group_name": "AMRRON",
+                }
+            ],
+            "frequency_refs": ["40M:7.110"],
+            "group_refs": ["AMRRON"],
+        }
+    )
+
+    updated_rows = [
+        {
+            "day_utc": "Sunday",
+            "start_utc": "00:00",
+            "end_utc": "12:00",
+            "band": "20M",
+            "frequency": "14.110",
+            "group_name": "AMRRON",
+        }
+    ]
+    save_source_schedule(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "AmRRON Daily",
+        updated_rows,
+        existing_plan_id=int(daily["db_id"]),
+    )
+
+    refreshed = reproject_frequency_plans_for_source_update(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        daily["id"],
+        updated_rows,
+    )
+
+    assert [row["name"] for row in refreshed] == ["AmRRON Plan"]
+    saved_plan = store.get_frequency_plan(int(plan["id"]))
+    refs = json.loads(str(saved_plan["schedule_refs_json"]))
+    assert [(row["group_name"], row["band"], row["frequency"]) for row in refs] == [("AMRRON", "20M", "14.110")]
+    assert json.loads(str(saved_plan["frequency_refs_json"])) == ["20M:14.110"]
+    updated_utc = str(saved_plan["updated_utc"])
+    assert (
+        reproject_frequency_plans_for_source_update(
+            settings,
+            HF_DAILY_SOURCE_CATEGORY,
+            daily["id"],
+            updated_rows,
+        )
+        == []
+    )
+    assert str(store.get_frequency_plan(int(plan["id"]))["updated_utc"]) == updated_utc
+
+
+def test_refresh_source_backed_frequency_plans_repairs_stale_saved_plan(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    daily = save_source_schedule(
+        settings,
+        HF_DAILY_SOURCE_CATEGORY,
+        SELECTED_HF_DAILY_SOURCE_SET_KEY,
+        "Current Daily",
+        [
+            {
+                "day_utc": "Sunday",
+                "start_utc": "00:00",
+                "end_utc": "12:00",
+                "band": "20M",
+                "frequency": "14.110",
+                "group_name": "AMRRON",
+            }
+        ],
+    )
+    plan = store.save_frequency_plan(
+        {
+            "name": "Stale Assigned Plan",
+            "source_refs": ["hf_daily", source_schedule_dependency_ref(HF_DAILY_SOURCE_CATEGORY, daily["id"])],
+            "schedule_refs": [
+                {
+                    "source": "HF",
+                    "day_utc": "Sunday",
+                    "start_utc": "00:00",
+                    "end_utc": "12:00",
+                    "band": "40M",
+                    "frequency": "7.110",
+                    "group_name": "AMRRON",
+                }
+            ],
+            "frequency_refs": ["40M:7.110"],
+            "group_refs": ["AMRRON"],
+        }
+    )
+
+    refreshed = refresh_source_backed_frequency_plans(settings)
+
+    assert [row["name"] for row in refreshed] == ["Stale Assigned Plan"]
+    saved_plan = store.get_frequency_plan(int(plan["id"]))
+    refs = json.loads(str(saved_plan["schedule_refs_json"]))
+    assert [(row["band"], row["frequency"]) for row in refs] == [("20M", "14.110")]
+
+    updated_utc = str(saved_plan["updated_utc"])
+    assert refresh_source_backed_frequency_plans(settings) == []
+    assert str(store.get_frequency_plan(int(plan["id"]))["updated_utc"]) == updated_utc
 
 
 def test_saved_net_update_reports_rf_guard_impacts_for_assigned_master_plan(monkeypatch, tmp_path) -> None:

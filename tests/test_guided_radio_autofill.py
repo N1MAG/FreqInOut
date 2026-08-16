@@ -327,6 +327,24 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
             exists=True,
             target_type="file",
         ),
+        "varac_outbox_dir": PathDetectionResult(
+            key="varac_outbox_dir",
+            label="VarAC outbox",
+            path="/Applications/VarAC/Outbox",
+            confidence="verified",
+            reason="Found outbox",
+            exists=True,
+            target_type="directory",
+        ),
+        "varac_bbs_dir": PathDetectionResult(
+            key="varac_bbs_dir",
+            label="VarAC BBS",
+            path="/Applications/VarAC/BBS",
+            confidence="verified",
+            reason="Found BBS",
+            exists=True,
+            target_type="directory",
+        ),
     }
     suggestions, review = guided_radio_autofill_suggestions(
         current={},
@@ -343,7 +361,12 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     )
 
     assert suggestions["varac_install_path"] == "/Applications/VarAC"
+    assert suggestions["varac_db_path"] == "/Applications/VarAC/VarAC.db"
     assert suggestions["varac_ini_path"] == "/Applications/VarAC/VarAC.ini"
     assert suggestions["varac_incoming_path"] == "/Applications/VarAC/RX Files"
-    assert "varac_db_path" not in suggestions
-    assert review == ("VarAC database and cluster membership were not changed. Review VarAC cluster settings separately.",)
+    assert suggestions["varac_outbox_dir"] == "/Applications/VarAC/Outbox"
+    assert suggestions["varac_bbs_dir"] == "/Applications/VarAC/BBS"
+    assert review == (
+        "VarAC database and cluster membership were not changed. "
+        "BBS settings were not changed. Review VarAC cluster settings separately.",
+    )

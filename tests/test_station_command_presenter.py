@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from freqinout.gui.station_command_presenter import (
     countdown_text,
+    frequency_controls_available,
     qsy_action_state,
     scheduler_action_state,
     timed_qsy_text,
@@ -104,3 +105,45 @@ def test_station_command_countdown_and_timed_qsy_text() -> None:
     assert countdown_text(900) == "15m"
     assert timed_qsy_text(timed_qsy_active=False) == "Timed QSY"
     assert timed_qsy_text(timed_qsy_active=True) == "Extend QSY"
+
+
+def test_frequency_controls_are_not_available_for_varac_only_radio() -> None:
+    assert frequency_controls_available(
+        {
+            "control_backend": "manual",
+            "use_varac": 1,
+            "use_flrig": 0,
+            "use_js8call": 0,
+            "use_fldigi": 0,
+        }
+    ) is False
+    assert frequency_controls_available(
+        {
+            "control_backend": "flrig",
+            "uses_varac": True,
+            "uses_flrig": False,
+            "uses_js8call": False,
+            "uses_fldigi": False,
+        }
+    ) is False
+
+
+def test_frequency_controls_remain_available_for_explicit_mixed_control_route() -> None:
+    assert frequency_controls_available(
+        {
+            "control_backend": "flrig",
+            "use_varac": 1,
+            "use_flrig": 1,
+            "use_js8call": 0,
+            "use_fldigi": 0,
+        }
+    ) is True
+    assert frequency_controls_available(
+        {
+            "control_backend": "js8call",
+            "use_varac": 1,
+            "use_flrig": 0,
+            "use_js8call": 1,
+            "use_fldigi": 0,
+        }
+    ) is True

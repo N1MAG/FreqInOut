@@ -23,6 +23,8 @@ class JS8CallManagedProfilePlan:
     tcp_host: str
     tcp_port: int
     udp_port: int
+    control_route: str = "flrig"
+    rig_summary: str = ""
     settings: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -33,8 +35,11 @@ def build_js8call_managed_profile_plans(
     js8call_path: str = "",
     callsign: str = "",
     grid: str = "",
+    control_route: str = "flrig",
+    radio_label: str = "",
 ) -> Tuple[JS8CallManagedProfilePlan, ...]:
     plans = []
+    route_key = str(control_route or "flrig").strip().lower()
     for proposal in proposals:
         if "js8call" not in proposal.enabled_apps:
             continue
@@ -47,8 +52,6 @@ def build_js8call_managed_profile_plans(
         tcp_port = ports.get("js8call", 2442)
         udp_port = ports.get("js8call_udp", 2242)
         settings = {
-            "Rig": "FLRig FLRig",
-            "CATNetworkPort": f"{LOCALHOST}:{flrig_port}",
             "TCPEnabled": "true",
             "TCPServer": LOCALHOST,
             "TCPServerPort": str(tcp_port),
@@ -57,6 +60,19 @@ def build_js8call_managed_profile_plans(
             "UDPServerPort": str(udp_port),
             "SaveDir": str(save_dir),
         }
+        rig_summary = "JS8Call radio/CAT selection requires operator review."
+        if route_key == "flrig":
+            settings["Rig"] = "FLRig FLRig"
+            settings["CATNetworkPort"] = f"{LOCALHOST}:{flrig_port}"
+            rig_summary = f"FLRig {LOCALHOST}:{flrig_port}"
+        elif route_key == "js8call":
+            rig_text = str(radio_label or proposal.name or "").strip()
+            if rig_text:
+                rig_summary = f"JS8Call controls {rig_text}; confirm the radio in JS8Call."
+            else:
+                rig_summary = "JS8Call controls the radio; confirm the radio in JS8Call."
+        elif route_key in {"none", "manual", "later"}:
+            rig_summary = "No FIO-managed JS8Call frequency control."
         if callsign.strip():
             settings["MyCall"] = callsign.strip().upper()
         if grid.strip():
@@ -75,6 +91,8 @@ def build_js8call_managed_profile_plans(
                 tcp_host=LOCALHOST,
                 tcp_port=tcp_port,
                 udp_port=udp_port,
+                control_route=route_key,
+                rig_summary=rig_summary,
                 settings=settings,
             )
         )

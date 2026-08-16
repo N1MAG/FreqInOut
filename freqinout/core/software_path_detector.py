@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
 
-from freqinout.core.config_autodiscovery import discover_js8call_file_profiles, select_js8call_file_profile
+from freqinout.core.config_autodiscovery import (
+    JS8CALL_APP_NAMES,
+    JS8CALL_COMMAND_NAMES,
+    discover_js8call_file_profiles,
+    select_js8call_file_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -87,14 +92,28 @@ class SoftwarePathDetector:
         results["path_js8call"] = self._detect_install_target(
             key="path_js8call",
             label="JS8Call install folder",
-            tokens=("js8call", "JS8Call"),
-            bundle_names=("JS8Call", "js8call"),
+            tokens=JS8CALL_COMMAND_NAMES,
+            bundle_names=JS8CALL_APP_NAMES,
             windows_files=(
                 Path(os.environ.get("ProgramFiles", "")) / "JS8Call" / "js8call.exe",
                 Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call" / "js8call.exe",
                 self.home / "AppData" / "Local" / "JS8Call" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "JS8Call-improved" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call-improved" / "js8call.exe",
+                self.home / "AppData" / "Local" / "JS8Call-improved" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles", "")) / "JS8Call Subspace" / "js8call.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "JS8Call Subspace" / "js8call.exe",
+                self.home / "AppData" / "Local" / "JS8Call Subspace" / "js8call.exe",
             ),
-            linux_files=(Path("/usr/bin/js8call"), Path("/usr/local/bin/js8call"), Path("/opt/js8call/js8call")),
+            linux_files=(
+                Path("/usr/bin/js8call"),
+                Path("/usr/local/bin/js8call"),
+                Path("/opt/js8call/js8call"),
+                Path("/usr/bin/js8call-improved"),
+                Path("/usr/local/bin/js8call-improved"),
+                Path("/opt/js8call-improved/js8call"),
+                Path("/opt/js8call-subspace/js8call"),
+            ),
             prefer_bundle_dir=True,
         )
         results["js8_directed_path"] = self._detect_js8_directed_path()
@@ -140,6 +159,7 @@ class SoftwarePathDetector:
         install = self._detect_varac_install_dir()
         results["varac_path"] = install
         install_dir = Path(install.path) if install.path else None
+        results["varac_db_path"] = self._detect_varac_db_file(install_dir)
         results["varac_ini_path"] = self._detect_varac_ini_file(install_dir)
         results["message_paths.varac"] = self._detect_varac_incoming_dir(install_dir)
         results["varac_outbox_dir"] = self._detect_varac_outbox_dir(install_dir)
@@ -367,6 +387,7 @@ class SoftwarePathDetector:
                     Path(os.environ.get("ProgramFiles", "")) / "VarAC",
                     Path(os.environ.get("ProgramFiles(x86)", "")) / "VarAC",
                     Path(os.environ.get("LOCALAPPDATA", "")) / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / "AppData" / "Local" / "VarAC",
                 ]
             )
@@ -376,6 +397,7 @@ class SoftwarePathDetector:
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / "Applications" / "VarAC.app",
                     Path("/Applications/VarAC.app"),
                 ]
@@ -386,6 +408,7 @@ class SoftwarePathDetector:
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
+                    self.home / "RadioTools" / "Programs" / "VarAC_files",
                     self.home / ".varac",
                 ]
             )
@@ -434,6 +457,22 @@ class SoftwarePathDetector:
             "No conventional VarAC incoming-files directory found",
             "directory",
         )
+
+    def _detect_varac_db_file(self, install_dir: Path | None) -> PathDetectionResult:
+        candidates: List[Path] = []
+        if install_dir is not None:
+            candidates.extend([install_dir / "VarAC.db", install_dir / "varac.db"])
+        existing = self._existing_paths(candidates)
+        if existing:
+            return self._result(
+                "varac_db_path",
+                "VarAC database",
+                existing[0],
+                "verified",
+                "Found conventional VarAC database file",
+                "file",
+            )
+        return self._not_found("varac_db_path", "VarAC database", "No conventional VarAC database found", "file")
 
     def _detect_varac_ini_file(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []

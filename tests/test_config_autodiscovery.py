@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from freqinout.core.config_autodiscovery import (
     build_autoconfig_proposal,
@@ -9,6 +12,7 @@ from freqinout.core.config_autodiscovery import (
     default_app_search_paths,
     default_js8call_ini_paths,
     discover_js8call_file_profiles,
+    discover_varac_local_assets,
     find_app_candidates,
     read_js8call_multisettings,
     select_js8call_file_profile,
@@ -39,12 +43,65 @@ def test_macos_fast_scan_finds_known_app_bundles(tmp_path) -> None:
     assert by_app["js8call"].confidence == "verified"
 
 
+def test_macos_js8_scan_finds_improved_subspace_and_source_tree_binary(tmp_path) -> None:
+    home = tmp_path / "home"
+    improved_exe = (
+        home
+        / "RadioTools"
+        / "Programs"
+        / "JS8Call_Improved_Code"
+        / "JS8Call-improved"
+        / "build-codex-ptt-gate"
+        / "JS8Call.app"
+        / "Contents"
+        / "MacOS"
+        / "JS8Call"
+    )
+    subspace_exe = (
+        home
+        / "RadioTools"
+        / "Programs"
+        / "Subspace-Edition"
+        / "build-trimode-baseline"
+        / "JS8Call.app"
+        / "Contents"
+        / "MacOS"
+        / "JS8Call"
+    )
+    js8_22_binary = home / "RadioTools" / "Programs" / "js8_22" / "js8call"
+    _make_executable(improved_exe)
+    _make_executable(subspace_exe)
+    _make_executable(js8_22_binary)
+
+    candidates = find_app_candidates(apps=("js8call",), platform="Darwin", home=home)
+    paths = {Path(candidate.path) for candidate in candidates}
+
+    assert improved_exe.parents[2] in paths
+    assert subspace_exe.parents[2] in paths
+    assert js8_22_binary in paths
+    by_path = {Path(candidate.path): candidate for candidate in candidates}
+    assert by_path[improved_exe.parents[2]].executable is True
+    assert by_path[subspace_exe.parents[2]].executable is True
+    assert by_path[js8_22_binary].executable is True
+
+
 def test_default_app_search_paths_are_os_specific_and_bounded(tmp_path) -> None:
     mac_paths = default_app_search_paths(platform="Darwin", home=tmp_path)
     linux_paths = default_app_search_paths(platform="Linux", home=tmp_path)
 
     assert tmp_path / "RadioTools" / "Programs" / "JS8Call.app" in mac_paths["js8call"]
+    assert (
+        tmp_path
+        / "RadioTools"
+        / "Programs"
+        / "Subspace-Edition"
+        / "build-trimode-baseline"
+        / "JS8Call.app"
+    ) in mac_paths["js8call"]
+    assert tmp_path / "RadioTools" / "Programs" / "js8_22" / "js8call" in mac_paths["js8call"]
+    assert tmp_path / "RadioTools" / "Programs" / "VarAC_files" in mac_paths["varac"]
     assert Path("/usr/bin/flrig") in linux_paths["flrig"]
+    assert Path("/opt/js8call-improved/js8call") in linux_paths["js8call"]
     assert all("*" not in str(path) for paths in mac_paths.values() for path in paths)
 
 
@@ -57,6 +114,130 @@ def test_settings_detector_searches_macos_radioapps_folder(tmp_path) -> None:
     assert Path("/Applications/RadioApps/fldigi.app") in paths
     assert tmp_path / "Applications" / "RadioApps" / "fldigi.app" in paths
     assert tmp_path / "RadioTools" / "Programs" / "fldigi.app" in paths
+
+
+def test_settings_detector_finds_js8_subspace_nested_bundle(tmp_path) -> None:
+    detector = SoftwarePathDetector(settings={})
+    detector.home = tmp_path
+    detector.system = "Darwin"
+    subspace_exe = (
+        tmp_path
+        / "RadioTools"
+        / "Programs"
+        / "Subspace-Edition"
+        / "build-trimode-baseline"
+        / "JS8Call.app"
+        / "Contents"
+        / "MacOS"
+        / "JS8Call"
+    )
+    _make_executable(subspace_exe)
+
+    result = detector._detect_install_target(
+        key="path_js8call",
+        label="JS8Call install folder",
+        tokens=("JS8Call", "js8call"),
+        bundle_names=("Subspace-Edition/build-trimode-baseline/JS8Call",),
+        windows_files=(),
+        linux_files=(),
+        prefer_bundle_dir=True,
+    )
+
+    assert Path(result.path) == subspace_exe.parents[2]
+    assert result.confidence == "verified"
+    assert result.target_type == "app_bundle"
+
+
+def test_settings_detector_can_use_varac_production_fixture_folder(tmp_path) -> None:
+    varac_fixture = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
+    (varac_fixture / "VarAC.db").parent.mkdir(parents=True)
+    (varac_fixture / "VarAC.db").write_bytes(b"")
+    (varac_fixture / "VarAC.ini").write_text("[VarAC]\n", encoding="utf-8")
+
+    detector = SoftwarePathDetector(settings={})
+    detector.home = tmp_path
+    detector.system = "Darwin"
+
+    results = detector.detect_varac()
+
+    assert Path(results["varac_path"].path) == varac_fixture
+    assert Path(results["varac_db_path"].path) == varac_fixture / "VarAC.db"
+    assert Path(results["varac_ini_path"].path) == varac_fixture / "VarAC.ini"
+
+
+def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) -> None:
+    varac_dir = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
+    bbs_dir = varac_dir / "BBS"
+    bbs_dir.mkdir(parents=True)
+    (varac_dir / "VarAC.ini").write_text("[VARAC]\n", encoding="utf-8")
+    (varac_dir / "VarAC_traffic.log").write_text("CONNECTED TO N1MAG\n", encoding="utf-8")
+    (varac_dir / "VarAC.log").write_text("Database switched to DELETE mode.\n", encoding="utf-8")
+    (varac_dir / "VarAC_qso_log.adi").write_text("<CALL:5>N1MAG\n", encoding="utf-8")
+    (varac_dir / "VarAC_callsign_tags.conf").write_text("N1MAG=MagNet\n", encoding="utf-8")
+    (varac_dir / "VarAC_alert_tags.conf").write_text("FIRE\n", encoding="utf-8")
+    (varac_dir / "VarAC_templates.ini").write_text("[Templates]\n", encoding="utf-8")
+    conn = sqlite3.connect(varac_dir / "VarAC.db")
+    try:
+        for table in ("qso", "vmail", "broadcast", "datastream"):
+            conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assets = discover_varac_local_assets(install_path=varac_dir)
+    by_id = {asset.asset_id: asset for asset in assets}
+
+    assert by_id["install"].confidence == "verified"
+    assert by_id["ini"].path == str(varac_dir / "VarAC.ini")
+    assert by_id["db"].confidence == "verified"
+    assert "qso, vmail, broadcast, datastream" in by_id["db"].detail
+    assert by_id["traffic_log"].exists is True
+    assert by_id["app_log"].exists is True
+    assert by_id["qso_log"].exists is True
+    assert by_id["callsign_tags"].exists is True
+    assert by_id["alert_tags"].exists is True
+    assert by_id["templates"].exists is True
+    assert by_id["bbs"].exists is True
+
+
+def test_varac_local_asset_discovery_uses_explicit_paths_without_external_writes(tmp_path) -> None:
+    db_path = tmp_path / "CustomVarAC.db"
+    sqlite3.connect(db_path).close()
+
+    assets = discover_varac_local_assets(
+        app_paths={
+            "varac_db_path": str(db_path),
+            "varac_ini_path": str(tmp_path / "missing.ini"),
+        }
+    )
+    by_id = {asset.asset_id: asset for asset in assets}
+
+    assert by_id["db"].path == str(db_path)
+    assert by_id["db"].exists is True
+    assert by_id["db"].confidence == "partial"
+    assert by_id["ini"].exists is False
+    assert all(asset.kind != "write" for asset in assets)
+
+
+def test_varac_local_asset_discovery_matches_available_production_fixture() -> None:
+    fixture = Path("/Users/bill/RadioTools/Programs/VarAC_files")
+    if not fixture.exists():
+        pytest.skip("Local VarAC production-style fixture is not available.")
+
+    assets = discover_varac_local_assets(install_path=fixture)
+    by_id = {asset.asset_id: asset for asset in assets}
+
+    assert by_id["install"].exists is True
+    assert by_id["db"].confidence == "verified"
+    assert "qso" in by_id["db"].detail
+    assert by_id["ini"].exists is True
+    assert "station N1MAG DM79QJ" in by_id["ini"].detail
+    assert by_id["qso_log"].exists is True
+    assert by_id["callsign_tags"].exists is True
+    assert by_id["alert_tags"].exists is True
+    assert by_id["templates"].exists is True
+    assert by_id["traffic_log"].exists is True
+    assert by_id["app_log"].exists is True
 
 
 def test_lab_radio_proposal_assigns_expected_ports_and_leaves_varac_off() -> None:
@@ -178,6 +359,31 @@ def test_js8call_multisettings_reader_merges_parseable_qsettings_profiles(tmp_pa
     fio_c = profiles[1].settings
     assert fio_c["TCPServerPort"] == "2444"
     assert fio_c["SaveDir"] == str(save_dir)
+
+
+def test_js8call_multisettings_reader_handles_fully_qualified_qsettings_profile_keys(tmp_path) -> None:
+    ini_path = tmp_path / "JS8Call.ini"
+    save_dir = tmp_path / "fio-b" / "save"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "Configuration\\MyCall=N1MAG",
+                "Configuration\\MyGrid=DM79QJ",
+                f"MultiSettings/fio-b\\Configuration\\SaveDir={save_dir}",
+                "MultiSettings/fio-b\\Configuration\\TCPServerPort=2443",
+                "MultiSettings/fio-b\\Configuration\\CATNetworkPort=127.0.0.1:12346",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = read_js8call_multisettings(ini_path)
+
+    assert [profile.name for profile in profiles] == ["Default", "fio-b"]
+    fio_b = profiles[1].settings
+    assert fio_b["SaveDir"] == str(save_dir)
+    assert fio_b["TCPServerPort"] == "2443"
+    assert fio_b["CATNetworkPort"] == "127.0.0.1:12346"
 
 
 def test_js8call_file_discovery_reads_profile_savedir_logs(tmp_path) -> None:
@@ -396,6 +602,25 @@ def test_default_js8call_ini_paths_are_os_specific_and_bounded(tmp_path, monkeyp
     assert windows_paths == (tmp_path / "AppData" / "Local" / "JS8Call" / "JS8Call.ini",)
     assert all(path.is_absolute() for path in mac_paths + linux_paths + windows_paths)
     assert all("*" not in str(path) for path in mac_paths + linux_paths + windows_paths)
+
+
+def test_default_js8call_ini_paths_include_named_macos_instances(tmp_path) -> None:
+    prefs = tmp_path / "Library" / "Preferences"
+    prefs.mkdir(parents=True)
+    named_ini = prefs / "JS8Call - fio-b.ini"
+    named_ini.write_text("[Configuration]\n", encoding="utf-8")
+    improved_ini = prefs / "JS8Call-improved.ini"
+    improved_ini.write_text("[Configuration]\n", encoding="utf-8")
+    unrelated_ini = prefs / "NotJS8.ini"
+    unrelated_ini.write_text("[Configuration]\n", encoding="utf-8")
+
+    paths = default_js8call_ini_paths(platform="Darwin", home=tmp_path)
+
+    assert prefs / "JS8Call.ini" in paths
+    assert named_ini in paths
+    assert improved_ini in paths
+    assert unrelated_ini not in paths
+    assert all("*" not in str(path) for path in paths)
 
 
 def test_autoconfig_proposal_includes_default_js8_file_profiles(tmp_path, monkeypatch) -> None:

@@ -28,6 +28,16 @@ tables or from those named source snapshots. This lets an operator intentionally
 select combinations such as an exercise daily schedule plus county net schedule
 before review, RF Guard preflight, and save.
 
+Saved Frequency Plans keep concrete schedule windows for fast scheduler startup,
+but plans built from named HF Daily or HF Net schedules also keep dependency refs
+to those source schedules. Editing a named Daily or Net schedule must immediately
+reproject every dependent Frequency Plan, refresh planner/scheduler caches, and
+reload the visible source table if that source is selected. Startup and forced
+scheduler refresh may repair stale source-backed plans, but this repair must be
+idempotent and should not rewrite an already-current plan. The operator-facing
+model is simple: editing a named source schedule updates every assigned plan that
+uses that source before any radio follows it again.
+
 Lane keys:
 
 - `radio:<id>` when a row is explicitly assigned to a radio.

@@ -51,6 +51,24 @@ def test_js8call_managed_profiles_honor_busy_port_assignments(tmp_path) -> None:
     assert plan.settings["TCPServerPort"] == "2453"
 
 
+def test_js8call_managed_profile_can_leave_radio_control_to_js8call(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+
+    plan = build_js8call_managed_profile_plans(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        control_route="js8call",
+        radio_label="TS-2000",
+    )[0]
+
+    assert plan.control_route == "js8call"
+    assert plan.rig_summary == "JS8Call controls TS-2000; confirm the radio in JS8Call."
+    assert "Rig" not in plan.settings
+    assert "CATNetworkPort" not in plan.settings
+    assert plan.settings["TCPServerPort"] == "2442"
+    assert plan.settings["SaveDir"].endswith("managed-instances/fio-a/js8call/save")
+
+
 def test_render_js8call_multisettings_preserves_existing_sections_and_updates_managed_profiles(tmp_path) -> None:
     proposals = build_lab_radio_proposals(radio_count=2, busy_checker=lambda _host, _port: False)
     plans = build_js8call_managed_profile_plans(proposals, config_root=tmp_path / "fio-config")

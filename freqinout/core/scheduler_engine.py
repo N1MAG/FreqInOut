@@ -21,6 +21,7 @@ from freqinout.core.ptt_conflict_service import PttConflictService
 from freqinout.core.radio_status_poll_coordinator import RadioStatusPollCoordinator
 from freqinout.core.scheduler_manual_control_service import SchedulerManualControlService
 from freqinout.core.scheduler_events import record_scheduler_event
+from freqinout.core.schedule_source_sets import refresh_source_backed_frequency_plans
 from freqinout.core.schedule_targeting import (
     normalize_schedule_target_fields,
     schedule_row_matches_target_context,
@@ -1191,6 +1192,8 @@ class SchedulerEngine(QObject):
         Force re-loading schedules from settings and reevaluating
         using the current UTC time.
         """
+        self._schedule_cache = None
+        self._active_schedule_lane_rows_cache = None
         self._evaluate(now_utc=datetime.datetime.now(datetime.timezone.utc), force=True)
 
     def _maybe_resync_js8(self) -> None:
@@ -5568,6 +5571,13 @@ class SchedulerEngine(QObject):
 
         config_db = self._config_dir() / "freqinout.db"
         nets_db = self._config_dir() / "freqinout_nets.db"
+        if force:
+            try:
+                refreshed = refresh_source_backed_frequency_plans(self.settings)
+                if refreshed:
+                    log.info("SchedulerEngine refreshed %d source-backed Frequency Plan(s) before schedule evaluation.", len(refreshed))
+            except Exception as exc:
+                log.warning("SchedulerEngine could not refresh source-backed Frequency Plans: %s", exc)
         try:
             store = MultiRadioStore(settings_db_path())
             active_profiles = list(store.list_runtime_active_device_profiles())

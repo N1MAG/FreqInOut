@@ -4,6 +4,7 @@ import configparser
 import os
 import platform as platform_module
 import shutil
+import sqlite3
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,27 @@ DEFAULT_PORT_PLAN: Mapping[str, Tuple[int, ...]] = {
     "js8call_udp": (2242, 2243, 2244, 2245),
     "wsjtx_udp": (2237, 2238, 2239, 2240),
 }
+
+JS8CALL_APP_NAMES: Tuple[str, ...] = (
+    "JS8Call",
+    "js8call",
+    "JS8Call-improved",
+    "js8call-improved",
+    "Subspace Edition",
+    "Subspace-Edition",
+    "subspace",
+    "JS8Call_Improved_Code/JS8Call-improved/build-codex-ptt-gate/JS8Call",
+    "Subspace-Edition/build-trimode-baseline/JS8Call",
+)
+
+JS8CALL_COMMAND_NAMES: Tuple[str, ...] = (
+    "JS8Call",
+    "js8call",
+    "JS8Call-improved",
+    "js8call-improved",
+    "js8call-subspace",
+    "subspace",
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +112,17 @@ class JS8CallFileProfile:
 
 
 @dataclass(frozen=True)
+class VarACLocalAsset:
+    asset_id: str
+    label: str
+    path: str
+    kind: str
+    exists: bool
+    confidence: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class AutoconfigProposal:
     platform: str
     candidates: Tuple[AppCandidate, ...]
@@ -132,11 +165,15 @@ def default_app_search_paths(
             "fldigi": _mac_app_candidates(base_dirs, ("FLDigi", "fldigi")),
             "flmsg": _mac_app_candidates(base_dirs, ("FLMsg", "flmsg")),
             "flamp": _mac_app_candidates(base_dirs, ("FLAmp", "flamp")),
-            "js8call": _mac_app_candidates(base_dirs, ("JS8Call", "js8call")),
+            "js8call": _mac_app_candidates(base_dirs, JS8CALL_APP_NAMES)
+            + (
+                user_home / "RadioTools" / "Programs" / "js8_22" / "js8call",
+            ),
             "js8spotter": _mac_app_candidates(base_dirs, ("JS8Spotter", "js8spotter")),
             "commstat": _mac_app_candidates(base_dirs, ("CommStat", "commstat")),
             "varac": _mac_app_candidates(base_dirs, ("VarAC", "varac"))
             + (
+                user_home / "RadioTools" / "Programs" / "VarAC_files",
                 user_home / ".wine" / "drive_c" / "VarAC",
                 user_home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                 user_home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
@@ -172,6 +209,12 @@ def default_app_search_paths(
                 program_files / "JS8Call" / "js8call.exe",
                 program_files_x86 / "JS8Call" / "js8call.exe",
                 local_app_data / "JS8Call" / "js8call.exe",
+                program_files / "JS8Call-improved" / "js8call.exe",
+                program_files_x86 / "JS8Call-improved" / "js8call.exe",
+                local_app_data / "JS8Call-improved" / "js8call.exe",
+                program_files / "JS8Call Subspace" / "js8call.exe",
+                program_files_x86 / "JS8Call Subspace" / "js8call.exe",
+                local_app_data / "JS8Call Subspace" / "js8call.exe",
             ),
             "js8spotter": (
                 program_files / "JS8Spotter" / "JS8Spotter.exe",
@@ -187,6 +230,7 @@ def default_app_search_paths(
                 program_files / "VarAC",
                 program_files_x86 / "VarAC",
                 local_app_data / "VarAC",
+                user_home / "RadioTools" / "Programs" / "VarAC_files",
                 user_home / "AppData" / "Local" / "VarAC",
             ),
         }
@@ -196,7 +240,15 @@ def default_app_search_paths(
         "fldigi": (Path("/usr/bin/fldigi"), Path("/usr/local/bin/fldigi"), Path("/opt/fldigi/fldigi")),
         "flmsg": (Path("/usr/bin/flmsg"), Path("/usr/local/bin/flmsg"), Path("/opt/flmsg/flmsg")),
         "flamp": (Path("/usr/bin/flamp"), Path("/usr/local/bin/flamp"), Path("/opt/flamp/flamp")),
-        "js8call": (Path("/usr/bin/js8call"), Path("/usr/local/bin/js8call"), Path("/opt/js8call/js8call")),
+        "js8call": (
+            Path("/usr/bin/js8call"),
+            Path("/usr/local/bin/js8call"),
+            Path("/opt/js8call/js8call"),
+            Path("/usr/bin/js8call-improved"),
+            Path("/usr/local/bin/js8call-improved"),
+            Path("/opt/js8call-improved/js8call"),
+            Path("/opt/js8call-subspace/js8call"),
+        ),
         "js8spotter": (
             Path("/usr/bin/js8spotter"),
             Path("/usr/local/bin/js8spotter"),
@@ -210,6 +262,7 @@ def default_app_search_paths(
             user_home / "bin" / "commstat",
         ),
         "varac": (
+            user_home / "RadioTools" / "Programs" / "VarAC_files",
             user_home / ".wine" / "drive_c" / "VarAC",
             user_home / ".wine" / "drive_c" / "Program Files" / "VarAC",
             user_home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
@@ -401,12 +454,7 @@ def _read_js8call_qsettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ...]:
         group = current_section
         key = raw_key
         if "\\" in raw_key:
-            prefix, key = raw_key.rsplit("\\", 1)
-            if current_section.lower().startswith("multisettings/") and prefix.strip().lower() == "configuration":
-                group = current_section
-            else:
-                group = prefix.strip()
-            key = key.strip()
+            group, key = _split_js8_qsettings_key(current_section, raw_key)
         if not group:
             continue
         grouped.setdefault(group, {})[key] = value.strip()
@@ -426,6 +474,21 @@ def _read_js8call_qsettings(ini_path: Path) -> Tuple[JS8CallConfigProfile, ...]:
     return tuple(profiles)
 
 
+def _split_js8_qsettings_key(current_section: str, raw_key: str) -> tuple[str, str]:
+    prefix, key = raw_key.rsplit("\\", 1)
+    clean_prefix = prefix.strip()
+    clean_key = key.strip()
+    current = str(current_section or "").strip()
+    current_lower = current.lower()
+    prefix_lower = clean_prefix.lower()
+    if current_lower.startswith("multisettings/") and prefix_lower == "configuration":
+        return current, clean_key
+    marker = "\\configuration"
+    if prefix_lower.startswith("multisettings/") and prefix_lower.endswith(marker):
+        return clean_prefix[: -len(marker)], clean_key
+    return clean_prefix, clean_key
+
+
 def default_js8call_ini_paths(
     *,
     platform: Optional[str] = None,
@@ -434,9 +497,11 @@ def default_js8call_ini_paths(
     system = normalize_platform(platform)
     user_home = Path(home) if home is not None else Path.home()
     if system == "Darwin":
+        preferences_dir = user_home / "Library" / "Preferences"
         return _unique_paths(
             (
-                user_home / "Library" / "Preferences" / "JS8Call.ini",
+                preferences_dir / "JS8Call.ini",
+                *_js8call_named_ini_files(preferences_dir),
                 user_home / "Library" / "Application Support" / "JS8Call" / "JS8Call.ini",
             )
         )
@@ -456,6 +521,28 @@ def default_js8call_ini_paths(
             user_home / ".var" / "app" / "org.js8call.JS8Call" / "config" / "JS8Call.ini",
         )
     )
+
+
+def _js8call_named_ini_files(directory: Path) -> Tuple[Path, ...]:
+    if not directory.is_dir():
+        return ()
+    try:
+        children = tuple(directory.iterdir())
+    except OSError:
+        return ()
+    matches = []
+    for child in children:
+        name = child.name
+        if not child.is_file():
+            continue
+        if not name.lower().endswith(".ini"):
+            continue
+        lowered = name.lower()
+        if lowered == "js8call.ini":
+            continue
+        if lowered.startswith("js8call - ") or lowered.startswith("js8call-improved") or lowered.startswith("subspace"):
+            matches.append(child)
+    return tuple(sorted(matches, key=lambda path: path.name.casefold()))
 
 
 def discover_js8call_file_profiles(
@@ -555,6 +642,161 @@ def select_js8call_file_profile(
     if len(usable) == 1:
         return usable[0]
     return None
+
+
+def discover_varac_local_assets(
+    *,
+    install_path: Optional[Path] = None,
+    app_paths: Optional[Mapping[str, str]] = None,
+) -> Tuple[VarACLocalAsset, ...]:
+    paths = dict(app_paths or {})
+    install_dir = _first_varac_path(
+        install_path,
+        paths.get("varac_install_path"),
+        paths.get("varac"),
+        paths.get("varac_path"),
+    )
+    db_path = _first_varac_path(paths.get("varac_db_path"), install_dir / "VarAC.db" if install_dir else None)
+    ini_path = _first_varac_path(paths.get("varac_ini_path"), install_dir / "VarAC.ini" if install_dir else None)
+    traffic_log = _first_varac_path(paths.get("varac_traffic_log"), install_dir / "VarAC_traffic.log" if install_dir else None)
+    app_log = _first_varac_path(paths.get("varac_log"), install_dir / "VarAC.log" if install_dir else None)
+    qso_log = _first_varac_path(paths.get("varac_qso_log"), install_dir / "VarAC_qso_log.adi" if install_dir else None)
+    callsign_tags = _first_varac_path(
+        paths.get("varac_callsign_tags_path"),
+        install_dir / "VarAC_callsign_tags.conf" if install_dir else None,
+    )
+    alert_tags = _first_varac_path(
+        paths.get("varac_alert_tags_path"),
+        install_dir / "VarAC_alert_tags.conf" if install_dir else None,
+    )
+    templates = _first_varac_path(paths.get("varac_templates_path"), install_dir / "VarAC_templates.ini" if install_dir else None)
+    bbs_dir = _first_varac_path(paths.get("varac_bbs_dir"), install_dir / "BBS" if install_dir else None)
+    outbox_dir = _first_varac_path(paths.get("varac_outbox_dir"), install_dir / "Outbox" if install_dir else None)
+    incoming_dir = _first_varac_path(paths.get("varac_incoming_dir"), install_dir / "Incoming" if install_dir else None)
+    archive_dir = _first_varac_path(paths.get("varac_bbs_archive_dir"), bbs_dir / "Archive" if bbs_dir else None)
+
+    assets = [
+        _varac_path_asset("install", "VarAC folder", install_dir, "directory"),
+        _varac_ini_asset(ini_path),
+        _varac_db_asset(db_path),
+        _varac_path_asset("traffic_log", "VarAC traffic log", traffic_log, "file"),
+        _varac_path_asset("app_log", "VarAC app log", app_log, "file"),
+        _varac_path_asset("qso_log", "VarAC QSO ADIF log", qso_log, "file"),
+        _varac_path_asset("callsign_tags", "VarAC callsign tags", callsign_tags, "file"),
+        _varac_path_asset("alert_tags", "VarAC alert tags", alert_tags, "file"),
+        _varac_path_asset("templates", "VarAC templates", templates, "file"),
+        _varac_path_asset("bbs", "VarAC BBS folder", bbs_dir, "directory"),
+        _varac_path_asset("bbs_archive", "VarAC BBS archive folder", archive_dir, "directory"),
+        _varac_path_asset("outbox", "VarAC outbox folder", outbox_dir, "directory"),
+        _varac_path_asset("incoming", "VarAC incoming folder", incoming_dir, "directory"),
+    ]
+    return tuple(asset for asset in assets if asset.path or asset.asset_id in {"install", "db", "ini"})
+
+
+def _first_varac_path(*values: object) -> Optional[Path]:
+    for value in values:
+        txt = str(value or "").strip()
+        if txt:
+            return Path(os.path.expandvars(os.path.expanduser(txt)))
+    return None
+
+
+def _varac_path_asset(asset_id: str, label: str, path: Optional[Path], kind: str) -> VarACLocalAsset:
+    exists = _varac_kind_exists(path, kind)
+    confidence = "verified" if exists else "not_found"
+    detail = f"Found {label}." if exists else f"{label} not found."
+    return VarACLocalAsset(
+        asset_id=asset_id,
+        label=label,
+        path=str(path or ""),
+        kind=kind,
+        exists=exists,
+        confidence=confidence,
+        detail=detail,
+    )
+
+
+def _varac_ini_asset(path: Optional[Path]) -> VarACLocalAsset:
+    exists = bool(path and path.is_file())
+    confidence = "verified" if exists else "not_found"
+    detail = "VarAC.ini not found."
+    if exists and path is not None:
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(path, encoding="utf-8")
+            rig_control = parser["RIG_CONTROL"] if parser.has_section("RIG_CONTROL") else {}
+            flrig_control = parser["RIG_FLRIG_CONFIG"] if parser.has_section("RIG_FLRIG_CONFIG") else {}
+            my_info = parser["MY_INFO"] if parser.has_section("MY_INFO") else {}
+            call = str(my_info.get("Mycall", "") or "").strip()
+            locator = str(my_info.get("MyLocator", "") or "").strip()
+            freq_control = str(rig_control.get("RigFreqControlType", "") or "").strip()
+            ptt_control = str(rig_control.get("RigPTTControlType", "") or "").strip()
+            flrig_port = str(flrig_control.get("FlrigPort", "") or "").strip()
+            parts = ["Found VarAC.ini"]
+            if call or locator:
+                parts.append("station " + " ".join(part for part in (call, locator) if part))
+            if freq_control or ptt_control:
+                control = " / ".join(part for part in (freq_control, ptt_control) if part)
+                parts.append(f"control {control}")
+            if flrig_port:
+                parts.append(f"FLRig port {flrig_port}")
+            detail = "; ".join(parts) + "."
+        except Exception as exc:
+            confidence = "partial"
+            detail = f"Found VarAC.ini, but it could not be summarized: {exc}"
+    return VarACLocalAsset(
+        asset_id="ini",
+        label="VarAC.ini",
+        path=str(path or ""),
+        kind="file",
+        exists=exists,
+        confidence=confidence,
+        detail=detail,
+    )
+
+
+def _varac_db_asset(path: Optional[Path]) -> VarACLocalAsset:
+    exists = bool(path and path.is_file())
+    tables: Tuple[str, ...] = ()
+    confidence = "not_found"
+    detail = "VarAC database not found."
+    if exists and path is not None:
+        try:
+            tables = _sqlite_table_names_readonly(path)
+            core_tables = tuple(table for table in ("qso", "vmail", "broadcast", "datastream") if table in tables)
+            confidence = "verified" if len(core_tables) == 4 else "partial"
+            detail = (
+                "Found VarAC.db with core message/activity tables: " + ", ".join(core_tables)
+                if core_tables
+                else "Found VarAC.db, but core message/activity tables were not detected."
+            )
+        except Exception as exc:
+            confidence = "partial"
+            detail = f"Found VarAC.db, but schema could not be inspected: {exc}"
+    return VarACLocalAsset(
+        asset_id="db",
+        label="VarAC.db",
+        path=str(path or ""),
+        kind="sqlite",
+        exists=exists,
+        confidence=confidence,
+        detail=detail,
+    )
+
+
+def _varac_kind_exists(path: Optional[Path], kind: str) -> bool:
+    if path is None:
+        return False
+    if kind == "directory":
+        return path.is_dir()
+    return path.is_file()
+
+
+def _sqlite_table_names_readonly(path: Path) -> Tuple[str, ...]:
+    uri = f"file:{path.as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+    return tuple(str(row[0]) for row in rows if row and str(row[0] or "").strip())
 
 
 def _profile_name_match_key(value: str) -> str:
@@ -679,7 +921,7 @@ def _macos_bundle_executable(app_id: str, bundle: Path) -> Optional[Path]:
 
 def _command_names(app_id: str) -> Tuple[str, ...]:
     if app_id == "js8call":
-        return ("JS8Call", "js8call")
+        return JS8CALL_COMMAND_NAMES
     if app_id == "js8spotter":
         return ("JS8Spotter", "js8spotter")
     if app_id == "commstat":

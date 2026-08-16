@@ -104,6 +104,7 @@ from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.station_health_tab import StationHealthTab
 from freqinout.gui.station_command_presenter import (
     countdown_text as station_command_countdown_text,
+    frequency_controls_available,
     qsy_action_state,
     scheduler_action_state,
     timed_qsy_text,
@@ -6786,6 +6787,7 @@ class MainWindow(QMainWindow):
             now = self._station_command_now_text_for_summary(snapshot, selected_id)
             next_text = self._station_command_next_text(snapshot)
             plan_text = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
+            frequency_control_available = frequency_controls_available(snapshot if isinstance(snapshot, Mapping) else {})
             health_summary = self._station_command_health_summary_for_profile(snapshot)
             health_state = str(health_summary.get("state", "warn") or "warn").strip().lower()
             tile = QFrame(parent)
@@ -6812,8 +6814,13 @@ class MainWindow(QMainWindow):
 
             freq_combo = QComboBox(tile)
             freq_combo.setObjectName("stationCommandRadioTileFrequency")
-            freq_combo.setToolTip("Select the operating group and band for this radio.")
+            freq_combo.setToolTip(
+                "Select the operating group and band for this radio."
+                if frequency_control_available
+                else "VarAC-only radio: VarAC handles frequency scheduling; FIO monitors messages and BBS."
+            )
             freq_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            freq_combo.setEnabled(frequency_control_available)
             has_card_qsy_target = self._station_command_populate_card_frequency_combo(freq_combo, snapshot)
             preferred_key_for_card = self._station_command_preferred_qsy_key(snapshot)
             pending_key = str(pending_qsy_keys.get(ident, "") or "")
@@ -6844,7 +6851,11 @@ class MainWindow(QMainWindow):
             qsy_btn = QPushButton("QSY", tile)
             qsy_btn.setMinimumWidth(76)
             qsy_btn.setMaximumWidth(96)
-            qsy_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target.")
+            qsy_btn.setToolTip(
+                f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target."
+                if frequency_control_available
+                else "Frequency control is not offered for VarAC-only radios."
+            )
             qsy_btn.clicked.connect(
                 self._station_command_for_radio_qsy(
                     ident,
@@ -6862,7 +6873,11 @@ class MainWindow(QMainWindow):
             timer_btn.setPopupMode(QToolButton.MenuButtonPopup)
             timer_btn.setMinimumWidth(128)
             timer_btn.setMaximumWidth(150)
-            timer_btn.setToolTip(f"Select {self._station_command_snapshot_name(snapshot)} and QSY with a timed scheduler suspend.")
+            timer_btn.setToolTip(
+                f"Select {self._station_command_snapshot_name(snapshot)} and QSY with a timed scheduler suspend."
+                if frequency_control_available
+                else "Timed QSY is not offered for VarAC-only radios."
+            )
             timer_btn.clicked.connect(
                 self._station_command_for_radio_qsy(
                     ident,
@@ -6919,8 +6934,12 @@ class MainWindow(QMainWindow):
             suspend_btn.setPopupMode(QToolButton.MenuButtonPopup)
             suspend_btn.setMinimumWidth(128)
             suspend_btn.setMaximumWidth(150)
-            suspend_btn.setToolTip(f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}.")
-            suspend_btn.setEnabled(ident > 0)
+            suspend_btn.setToolTip(
+                f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}."
+                if frequency_control_available
+                else "FIO scheduler suspend is not offered for VarAC-only radios."
+            )
+            suspend_btn.setEnabled(ident > 0 and frequency_control_available)
             suspend_btn.clicked.connect(
                 lambda _checked=False, radio_id=ident: self._on_station_command_timed_suspend_clicked(radio_id)
             )
@@ -6954,8 +6973,12 @@ class MainWindow(QMainWindow):
                 suspend_menu.addAction(action)
             suspend_btn.setMenu(suspend_menu)
             resume_btn = QPushButton("Resume", tile)
-            resume_btn.setToolTip(f"Resume scheduled control for {self._station_command_snapshot_name(snapshot)}.")
-            resume_btn.setEnabled(ident > 0)
+            resume_btn.setToolTip(
+                f"Resume scheduled control for {self._station_command_snapshot_name(snapshot)}."
+                if frequency_control_available
+                else "VarAC-only radios use VarAC's scheduler; there is no FIO schedule to resume."
+            )
+            resume_btn.setEnabled(ident > 0 and frequency_control_available)
             resume_btn.clicked.connect(
                 lambda _checked=False, radio_id=ident: self._on_station_command_resume_clicked(radio_id)
             )
@@ -6985,7 +7008,15 @@ class MainWindow(QMainWindow):
                 manual_active: bool = manual_qsy_active,
                 timed_qsy: bool = timed_qsy_active,
                 card_snapshot: object = snapshot,
+                controls_available: bool = frequency_control_available,
             ) -> None:
+                if not controls_available:
+                    qsy_button.setText("QSY")
+                    qsy_button.setEnabled(False)
+                    timer_button.setEnabled(False)
+                    qsy_button.setStyleSheet(button_style("muted", theme))
+                    timer_button.setStyleSheet(button_style("muted", theme))
+                    return
                 preferred_key = self._station_command_preferred_qsy_key(card_snapshot)
                 stable_preferred_key = str(combo.property("stationCommandPreferredKey") or preferred_key or "")
                 selected_key = self._station_command_combo_selected_key(combo)
@@ -7067,6 +7098,7 @@ class MainWindow(QMainWindow):
                     "suspend_btn": suspend_btn,
                     "resume_btn": resume_btn,
                     "freq_combo": freq_combo,
+                    "frequency_controls_available": frequency_control_available,
                 }
             try:
                 tile.style().unpolish(tile)
@@ -7104,7 +7136,23 @@ class MainWindow(QMainWindow):
             suspend_btn = controls.get("suspend_btn")
             resume_btn = controls.get("resume_btn")
             combo = controls.get("freq_combo")
+            frequency_control_available = bool(controls.get("frequency_controls_available", True))
             if isinstance(qsy_btn, QPushButton) and isinstance(combo, QComboBox):
+                if not frequency_control_available:
+                    qsy_btn.setText("QSY")
+                    qsy_btn.setEnabled(False)
+                    qsy_btn.setStyleSheet(button_style("muted", theme))
+                    combo.setEnabled(False)
+                    if isinstance(timer_btn, QToolButton):
+                        timer_btn.setEnabled(False)
+                        timer_btn.setStyleSheet(button_style("muted", theme))
+                    if isinstance(suspend_btn, QToolButton):
+                        suspend_btn.setEnabled(False)
+                        suspend_btn.setStyleSheet(button_style("muted", theme))
+                    if isinstance(resume_btn, QPushButton):
+                        resume_btn.setEnabled(False)
+                        resume_btn.setStyleSheet(button_style("muted", theme))
+                    continue
                 preferred_key = str(combo.property("stationCommandPreferredKey") or "")
                 selected_key = self._station_command_combo_selected_key(combo)
                 action_state = qsy_action_state(

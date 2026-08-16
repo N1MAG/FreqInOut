@@ -57,6 +57,7 @@ from freqinout.core.schedule_source_sets import (
     assigned_plan_rf_guard_impacts_for_source_update,
     delete_source_schedule,
     rename_source_schedule,
+    reproject_frequency_plans_for_source_update,
     save_source_schedule,
     selected_source_set_id,
     source_set_row_by_id_for_category,
@@ -817,6 +818,21 @@ class NetScheduleTab(QWidget):
             return
         self._load_source_rows_into_table([dict(item) for item in row.get("rows", []) if isinstance(item, dict)])
 
+    def _sync_selected_freqplanner_source_table(self) -> None:
+        if bool(getattr(self, "_dirty", False)):
+            return
+        row = self._selected_freqplanner_source_row()
+        if row is None:
+            return
+        source_rows = [dict(item) for item in row.get("rows", []) if isinstance(item, dict)]
+        try:
+            current_rows = [self._strip_internal_row(dict(item)) for item in self._collect_rows()]
+        except Exception:
+            current_rows = []
+        if self._rows_signature(source_rows) == self._rows_signature(current_rows):
+            return
+        self._load_source_rows_into_table(source_rows)
+
     def _on_load_freqplanner_source_clicked(self) -> None:
         if not self._confirm_discard_unsaved_source_load():
             return
@@ -909,14 +925,49 @@ class NetScheduleTab(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", f"Could not save HF Net schedule:\n{exc}")
             return
+        updated_plans: List[Dict[str, Any]] = []
+        saved_id = str(saved.get("id") or "").strip()
+        if saved_id:
+            try:
+                updated_plans = reproject_frequency_plans_for_source_update(
+                    self.settings,
+                    HF_NET_SOURCE_CATEGORY,
+                    saved_id,
+                    rows,
+                )
+            except Exception as exc:
+                log.exception("HF Nets: failed refreshing dependent Frequency Plans.")
+                QMessageBox.warning(
+                    self,
+                    "Plan Refresh Warning",
+                    "The HF Net schedule was saved, but FIO could not refresh dependent Frequency Plans.\n\n"
+                    f"{exc}",
+                )
+        try:
+            self.plan_context_service.invalidate()
+        except Exception:
+            pass
         if hasattr(self, "schedule_source_combo"):
             self._refresh_freqplanner_source_combo()
+            if saved_id:
+                idx = self.schedule_source_combo.findData(saved_id)
+                if idx >= 0:
+                    self.schedule_source_combo.blockSignals(True)
+                    self.schedule_source_combo.setCurrentIndex(idx)
+                    self.schedule_source_combo.blockSignals(False)
+                    self._editing_freqplanner_source_id = saved_id
+        if hasattr(self, "table"):
+            try:
+                self._load_source_rows_into_table(rows)
+            except Exception:
+                pass
         self._refresh_freq_planner()
         verb = "Updated" if existing_id else "Saved"
+        plan_note = f" Refreshed {len(updated_plans)} dependent Frequency Plan(s)." if updated_plans else ""
         QMessageBox.information(
             self,
             f"HF Net Schedule {verb}",
-            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s). Select it in Plan Manager.",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s).{plan_note} Select it in Plan Manager.",
         )
 
     def _on_rename_freqplanner_source_clicked(self) -> None:
@@ -1298,6 +1349,7 @@ class NetScheduleTab(QWidget):
         self._apply_theme()
         self._resize_table_columns()
         self._refresh_freqplanner_source_combo()
+        self._sync_selected_freqplanner_source_table()
 
     def _refresh_freq_planner(self) -> None:
         try:
@@ -1319,6 +1371,8 @@ class NetScheduleTab(QWidget):
             meta={"rows": int(self.table.rowCount())},
             min_ms=0.0,
         ):
+            self._refresh_freqplanner_source_combo()
+            self._sync_selected_freqplanner_source_table()
             self._refresh_schedule_target_widgets()
             if self._pending_sop_conflict_refresh:
                 self._pending_sop_conflict_refresh = False

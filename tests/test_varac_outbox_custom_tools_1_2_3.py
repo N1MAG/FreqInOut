@@ -38,6 +38,20 @@ def test_software_path_detector_detects_varac_outbox_dir(tmp_path: Path) -> None
     assert result.path == str(outbox)
 
 
+def test_software_path_detector_detects_varac_db_file(tmp_path: Path) -> None:
+    install_dir = tmp_path / "VarAC"
+    db_path = install_dir / "VarAC.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.write_bytes(b"")
+
+    detector = SoftwarePathDetector(_DummySettings())
+    result = detector._detect_varac_db_file(install_dir)
+
+    assert result.key == "varac_db_path"
+    assert result.path == str(db_path)
+    assert result.target_type == "file"
+
+
 def test_settings_and_compose_source_include_outbox_and_custom_tools() -> None:
     settings_text = _read("freqinout/gui/settings_tab.py")
     messages_text = _read("freqinout/gui/message_viewer_tab.py")
@@ -45,11 +59,13 @@ def test_settings_and_compose_source_include_outbox_and_custom_tools() -> None:
 
     assert 'QLabel("VarAC Outbox Directory")' in settings_text
     assert 'self.varac_outbox_dir_edit = QLineEdit()' in settings_text
-    assert 'self.settings.set("varac_outbox_dir", fn)' in settings_text
+    assert "self.varac_outbox_dir_edit.setText(fn)" in settings_text
+    assert 'data["varac_outbox_dir"] = (' in settings_text
     assert 'custom_tools_group = QGroupBox("Custom Tools")' in settings_text
     assert 'self.custom_tools_table = QTableWidget(0, 2)' in settings_text
     assert 'data["custom_tool_items"] = [dict(item) for item in self._custom_tool_items_cache]' in settings_text
     assert "def normalize_custom_tools(raw_items: Any) -> List[Dict[str, str]]:" in launch_text
     assert 'return self.normalize_custom_tools(self.settings.get("custom_tool_items", []))' in launch_text
     assert 'return self._finalize_launch_command(name, cmd), "configured custom tool"' in launch_text
-    assert 'configured = str(self.settings.get("varac_outbox_dir", "") or "").strip()' in messages_text
+    assert 'configured = self._compose_profile_text(profile, "varac_outbox_dir")' in messages_text
+    assert 'or str(self.settings.get("varac_outbox_dir", "") or "").strip()' in messages_text

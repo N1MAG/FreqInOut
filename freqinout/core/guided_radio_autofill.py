@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
-from freqinout.core.config_autodiscovery import DEFAULT_PORT_PLAN, select_js8call_file_profile
+from freqinout.core.config_autodiscovery import DEFAULT_PORT_PLAN, JS8CALL_COMMAND_NAMES, select_js8call_file_profile
 from freqinout.core.software_path_detector import PathDetectionResult
 
 
@@ -89,7 +89,7 @@ def guided_app_candidate_identity(candidate: Any) -> Tuple[str, str]:
             "fldigi": ("FLDigi", "fldigi"),
             "flmsg": ("FLMsg", "flmsg"),
             "flamp": ("FLAmp", "flamp"),
-            "js8call": ("JS8Call", "js8call"),
+            "js8call": JS8CALL_COMMAND_NAMES,
             "js8spotter": ("JS8Spotter", "js8spotter"),
             "commstat": ("CommStat", "commstat"),
             "varac": ("VarAC", "varac"),
@@ -324,8 +324,14 @@ def guided_radio_autofill_suggestions(
             "varac_install_path",
             guided_single_install_path(install_candidates, "varac", varac_results, "varac_path", "VarAC", review),
         )
+        _suggest("varac_db_path", guided_detection_path(varac_results, "varac_db_path"))
         _suggest("varac_ini_path", guided_detection_path(varac_results, "varac_ini_path"))
         _suggest("varac_incoming_path", guided_detection_path(varac_results, "message_paths.varac"))
-        review.append("VarAC database and cluster membership were not changed. Review VarAC cluster settings separately.")
+        _suggest("varac_outbox_dir", guided_detection_path(varac_results, "varac_outbox_dir"))
+        _suggest("varac_bbs_dir", guided_detection_path(varac_results, "varac_bbs_dir"))
+        review.append(
+            "VarAC database and cluster membership were not changed. "
+            "BBS settings were not changed. Review VarAC cluster settings separately."
+        )
 
     return suggestions, tuple(review)

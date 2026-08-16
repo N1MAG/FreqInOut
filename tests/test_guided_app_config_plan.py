@@ -81,10 +81,68 @@ def test_guided_external_app_config_plan_keeps_varac_cluster_manual(tmp_path) ->
         proposals,
         config_root=tmp_path / "fio-config",
         include_varac=True,
+        allow_external_writes=False,
     )
 
     assert plan.manual_review_required is True
-    assert plan.review_items == (
-        "VarAC app paths may be remembered, but VarAC database, BBS, and cluster membership require separate review.",
-    )
+    assert any("without changing external app configuration" in item for item in plan.review_items)
+    assert "VarAC guided setup is read/import only: FIO remembers paths and monitors VarAC data without rewriting VarAC.ini or VarAC DB." in plan.review_items
+    assert "Use the dedicated VarAC BBS settings workflow for explicit [BBS] section sync; cluster membership remains read-only in this release." in plan.review_items
     assert not any(action.app_id == "varac" and action.writes_external_config for action in plan.actions)
+
+
+def test_guided_external_app_config_plan_varac_remembers_integration_without_writes(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    varac_dir = tmp_path / "VarAC"
+    bbs_dir = varac_dir / "BBS"
+    bbs_dir.mkdir(parents=True)
+    (varac_dir / "VarAC.ini").write_text(
+        "[MY_INFO]\nMycall=N1MAG\nMyLocator=DM79QJ\n[RIG_CONTROL]\nRigFreqControlType=FLRIG\n",
+        encoding="utf-8",
+    )
+    (varac_dir / "VarAC.db").write_bytes(b"")
+    (varac_dir / "VarAC_traffic.log").write_text("", encoding="utf-8")
+    (varac_dir / "VarAC.log").write_text("", encoding="utf-8")
+    (varac_dir / "VarAC_qso_log.adi").write_text("", encoding="utf-8")
+    (varac_dir / "VarAC_callsign_tags.conf").write_text("", encoding="utf-8")
+    (varac_dir / "VarAC_alert_tags.conf").write_text("", encoding="utf-8")
+    (varac_dir / "VarAC_templates.ini").write_text("", encoding="utf-8")
+
+    plan = build_guided_external_app_config_plan(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={
+            "varac": str(varac_dir),
+            "varac_ini_path": str(varac_dir / "VarAC.ini"),
+            "varac_db_path": str(varac_dir / "VarAC.db"),
+            "varac_incoming_dir": str(varac_dir / "Incoming"),
+            "varac_bbs_dir": str(bbs_dir),
+            "varac_traffic_log": str(varac_dir / "VarAC_traffic.log"),
+            "varac_log": str(varac_dir / "VarAC.log"),
+        },
+        include_varac=True,
+        allow_external_writes=False,
+    )
+
+    varac_actions = [action for action in plan.actions if action.app_id == "varac"]
+    assert len(varac_actions) == 1
+    action = varac_actions[0]
+    assert action.action_type == "remember_integration"
+    assert action.requires_backup is False
+    assert action.writes_external_config is False
+    assert action.manual_review_required is True
+    assert action.details["install_path"] == str(varac_dir)
+    assert action.details["ini_path"] == str(varac_dir / "VarAC.ini")
+    assert action.details["db_path"] == str(varac_dir / "VarAC.db")
+    assert action.details["incoming_dir"] == str(varac_dir / "Incoming")
+    assert action.details["bbs_dir"] == str(bbs_dir)
+    assert action.details["traffic_log_path"] == str(varac_dir / "VarAC_traffic.log")
+    assert action.details["app_log_path"] == str(varac_dir / "VarAC.log")
+    assert action.details["qso_log_path"] == str(varac_dir / "VarAC_qso_log.adi")
+    assert action.details["callsign_tags_path"] == str(varac_dir / "VarAC_callsign_tags.conf")
+    assert action.details["alert_tags_path"] == str(varac_dir / "VarAC_alert_tags.conf")
+    assert action.details["templates_path"] == str(varac_dir / "VarAC_templates.ini")
+    assert "VarAC.ini" in action.details["readable_assets"]
+    assert "station N1MAG DM79QJ" in action.details["ini_detail"]
+    assert "does not write VarAC.ini" in " ".join(action.notes)
+    assert plan.backup_required is False

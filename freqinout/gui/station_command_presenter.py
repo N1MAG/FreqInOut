@@ -28,6 +28,20 @@ def qsy_key(meta: Mapping[str, object] | None) -> str:
         return ""
 
 
+def frequency_controls_available(profile: Mapping[str, object] | None) -> bool:
+    if not isinstance(profile, Mapping):
+        return False
+    backend = str(profile.get("control_backend", "") or "").strip().lower()
+    use_varac = _truthy(profile.get("use_varac", profile.get("uses_varac", False)))
+    use_flrig = _truthy(profile.get("use_flrig", profile.get("uses_flrig", False)))
+    use_js8call = _truthy(profile.get("use_js8call", profile.get("uses_js8call", False)))
+    use_fldigi = _truthy(profile.get("use_fldigi", profile.get("uses_fldigi", False)))
+    varac_only = use_varac and not any((use_flrig, use_js8call, use_fldigi))
+    if varac_only:
+        return False
+    return backend in {"flrig", "rigctld", "js8call"}
+
+
 def qsy_action_state(
     *,
     selected_meta: Mapping[str, object] | None,
@@ -97,3 +111,9 @@ def countdown_text(remaining_sec: object) -> str:
         return f"{minutes:02d}:{secs:02d}"
     minutes = max(1, int((seconds + 59) // 60))
     return f"{minutes}m"
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

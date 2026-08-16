@@ -1504,6 +1504,7 @@ def test_settings_setup_ui_does_not_expose_lab_or_test_radio_actions() -> None:
 def test_guided_add_radio_configure_automatically_is_user_facing_and_conservative() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     planner_source = Path("freqinout/core/guided_radio_autofill.py").read_text(encoding="utf-8")
+    guided_setup_source = Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
     dialog_block = source[
         source.index("def _open_device_profile_dialog")
         : source.index("def _apply_runtime_projection_widgets")
@@ -1525,11 +1526,20 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "This is the number the app uses to talk to FIO." in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Planned App Setup")' in dialog_block
     assert 'app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")' in dialog_block
-    assert "build_guided_external_app_config_plan(" in dialog_block
-    assert "Backup required before FIO writes app profiles." in dialog_block
+    assert "build_guided_setup_blueprint(" in dialog_block
+    assert "build_app_config_plan_for_blueprint(" in dialog_block
+    assert 'use_varac_chk = QCheckBox("VarAC")' in dialog_block
+    assert '("VarAC", "varac")' not in source[source.index("def _device_profile_backend_options") : source.index("def _set_combo_current_data")]
+    assert "build_guided_setup_preview(" in dialog_block
+    assert "VarAC-only radio: FIO supports BBS and message monitoring, but VarAC handles frequency scheduling." in guided_setup_source
+    assert "SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED" in dialog_block
+    assert "Backup required before FIO writes app profiles." in guided_setup_source
+    assert 'str(action.action_type or "") == "remember_integration"' in guided_setup_source
+    assert "VarAC references: " in guided_setup_source
+    assert "Guided path: " in guided_setup_source
     assert "_update_guided_app_setup_plan_review()" in dialog_block
     assert "if not enabled_apps and not varac_selected:" in dialog_block
-    assert "include_varac=varac_selected" in dialog_block
+    assert '"varac": varac_install_edit.text().strip()' in dialog_block
     assert "_update_detected_app_choices(install_candidates)" in dialog_block
     assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
     assert "_update_port_prompt_visibility()" in dialog_block
@@ -1570,6 +1580,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "flamp_path_edit = QLineEdit" in dialog_block
     assert '"flmsg_path": (flmsg_path_edit, "FLMsg app")' in dialog_block
     assert '"flamp_path": (flamp_path_edit, "FLAmp app")' in dialog_block
+    assert '"varac_db_path": (varac_db_edit, "VarAC DB")' in dialog_block
     assert "build_autoconfig_proposal(" in dialog_block
     assert "visible_review = " in dialog_block
     assert "select_js8call_file_profile(" in planner_source
@@ -1582,6 +1593,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "guided_js8_profile_review_text(" in planner_source
     assert '"flmsg_path": flmsg_path_edit.text().strip()' in dialog_block
     assert '"flamp_path": flamp_path_edit.text().strip()' in dialog_block
+    assert '_suggest("varac_db_path", guided_detection_path(varac_results, "varac_db_path"))' in planner_source
     assert "VarAC database and cluster membership were not changed" in planner_source
     assert 'Path(varac_install_edit.text().strip()) / "VarAC.db"' not in dialog_block
 

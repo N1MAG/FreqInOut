@@ -136,7 +136,24 @@ from freqinout.core.guided_radio_autofill import (
     guided_single_install_path,
     next_default_instance_port,
 )
-from freqinout.core.guided_app_config_plan import build_guided_external_app_config_plan
+from freqinout.core.guided_setup import (
+    CONTROL_FLRIG,
+    CONTROL_JS8CALL,
+    LANE_FAST_LIGHT,
+    LANE_JS8_ONLY,
+    LANE_SDR_OBSERVER,
+    LANE_TRI_MODE,
+    LANE_VARAC,
+    LANE_VARAC_CLUSTER,
+    SETUP_MODE_MANAGED,
+    SETUP_MODE_READ_ONLY,
+    build_app_config_plan_for_blueprint,
+    build_guided_setup_blueprint,
+    build_guided_setup_preview,
+    infer_guided_control_route,
+    infer_guided_setup_lane,
+    normalize_guided_radio_profile_payload,
+)
 from freqinout.core.secret_store import (
     credential_store_available,
     delete_gpg_signing_passphrase,
@@ -13376,6 +13393,7 @@ class SettingsTab(QWidget):
         return {
             "flrig": "FLRig",
             "js8call": "JS8Call",
+            "varac": "VarAC",
             "manual": "Manual",
             "rigctld": "RIGCTLD",
         }.get(backend, backend.upper() or "Unknown")
@@ -18242,6 +18260,24 @@ class SettingsTab(QWidget):
             "Full is the normal choice. Minimal is for lighter setups where not all integrations will be used.",
         )
 
+        setup_type_combo = QComboBox()
+        setup_type_combo.setObjectName("guidedSetupType")
+        setup_type_combo.addItem("Choose setup type...", "")
+        setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)
+        setup_type_combo.addItem("Fast Light: FLDigi / FLMsg / FLAmp", LANE_FAST_LIGHT)
+        setup_type_combo.addItem("JS8Call + Fast Light", LANE_TRI_MODE)
+        setup_type_combo.addItem("VarAC only", LANE_VARAC)
+        setup_type_combo.addItem("VarAC Cluster / BBS", LANE_VARAC_CLUSTER)
+        setup_type_combo.addItem("Receive-only SDR", LANE_SDR_OBSERVER)
+        setup_type_combo.addItem("Custom software mix", "custom")
+        _configure_combo_width(setup_type_combo, minimum=320)
+        _add_form_row(
+            identity_form,
+            "Setup Type:",
+            setup_type_combo,
+            "Start here. FIO will show only the radio, app, and control fields that fit this setup.",
+        )
+
         software_row = QGridLayout()
         software_row.setContentsMargins(0, 0, 0, 0)
         software_row.setHorizontalSpacing(24)
@@ -18938,6 +18974,109 @@ class SettingsTab(QWidget):
                 ]
             )
         )
+        applying_setup_type_choice = False
+
+        def _set_combo_data(combo: QComboBox, value: str) -> None:
+            idx = combo.findData(value)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+        def _checkbox_set_checked(checkbox: QCheckBox, checked: bool) -> None:
+            if checkbox.isChecked() != bool(checked):
+                checkbox.setChecked(bool(checked))
+
+        def _current_guided_lane() -> str:
+            selected_lane = str(setup_type_combo.currentData() or "").strip()
+            if selected_lane and selected_lane != "custom":
+                return selected_lane
+            return infer_guided_setup_lane(
+                _guided_plan_enabled_apps(),
+                varac_selected=use_varac_chk.isChecked(),
+                receive_only=str(device_class_combo.currentData() or "").strip().lower() == "observer",
+            )
+
+        def _sync_setup_type_from_current_fields() -> None:
+            nonlocal applying_setup_type_choice
+            if applying_setup_type_choice:
+                return
+            selected_apps = _guided_plan_enabled_apps()
+            varac_selected = use_varac_chk.isChecked()
+            observer = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            if not selected_apps and not varac_selected and not observer:
+                _set_combo_data(setup_type_combo, "")
+                return
+            inferred = infer_guided_setup_lane(
+                selected_apps,
+                varac_selected=varac_selected,
+                receive_only=observer,
+            )
+            _set_combo_data(setup_type_combo, inferred)
+
+        def _apply_setup_type_choice() -> None:
+            nonlocal applying_setup_type_choice
+            lane = str(setup_type_combo.currentData() or "").strip()
+            if not lane or lane == "custom":
+                _update_dialog_visibility()
+                return
+            applying_setup_type_choice = True
+            try:
+                if lane == LANE_SDR_OBSERVER:
+                    _set_combo_data(device_class_combo, "observer")
+                else:
+                    _set_combo_data(device_class_combo, "tx_rx")
+                if lane == LANE_JS8_ONLY:
+                    _set_combo_data(backend_combo, CONTROL_JS8CALL)
+                    _checkbox_set_checked(use_flrig_chk, False)
+                    _checkbox_set_checked(use_fldigi_chk, False)
+                    _checkbox_set_checked(use_flmsg_chk, False)
+                    _checkbox_set_checked(use_flamp_chk, False)
+                    _checkbox_set_checked(use_js8call_chk, True)
+                    _checkbox_set_checked(use_varac_chk, False)
+                elif lane == LANE_FAST_LIGHT:
+                    _set_combo_data(backend_combo, CONTROL_FLRIG)
+                    _checkbox_set_checked(use_flrig_chk, True)
+                    _checkbox_set_checked(use_fldigi_chk, True)
+                    _checkbox_set_checked(use_flmsg_chk, True)
+                    _checkbox_set_checked(use_flamp_chk, True)
+                    _checkbox_set_checked(use_js8call_chk, False)
+                    _checkbox_set_checked(use_js8spotter_chk, False)
+                    _checkbox_set_checked(use_commstat_chk, False)
+                    _checkbox_set_checked(use_varac_chk, False)
+                elif lane == LANE_TRI_MODE:
+                    _set_combo_data(backend_combo, CONTROL_FLRIG)
+                    _checkbox_set_checked(use_flrig_chk, True)
+                    _checkbox_set_checked(use_fldigi_chk, True)
+                    _checkbox_set_checked(use_flmsg_chk, True)
+                    _checkbox_set_checked(use_flamp_chk, True)
+                    _checkbox_set_checked(use_js8call_chk, True)
+                    _checkbox_set_checked(use_varac_chk, False)
+                elif lane in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+                    _set_combo_data(backend_combo, "manual")
+                    _checkbox_set_checked(use_flrig_chk, False)
+                    _checkbox_set_checked(use_fldigi_chk, False)
+                    _checkbox_set_checked(use_flmsg_chk, False)
+                    _checkbox_set_checked(use_flamp_chk, False)
+                    _checkbox_set_checked(use_js8call_chk, False)
+                    _checkbox_set_checked(use_js8spotter_chk, False)
+                    _checkbox_set_checked(use_commstat_chk, False)
+                    _checkbox_set_checked(use_varac_chk, True)
+                elif lane == LANE_SDR_OBSERVER:
+                    _set_combo_data(backend_combo, "manual")
+                    for checkbox in (
+                        use_flrig_chk,
+                        use_fldigi_chk,
+                        use_flmsg_chk,
+                        use_flamp_chk,
+                        use_js8call_chk,
+                        use_js8spotter_chk,
+                        use_commstat_chk,
+                        use_varac_chk,
+                    ):
+                        _checkbox_set_checked(checkbox, False)
+            finally:
+                applying_setup_type_choice = False
+            _update_guided_app_setup_plan_review()
+            _update_dialog_visibility()
 
         def _set_row_visible(widget: QWidget, visible: bool) -> None:
             widget.setVisible(bool(visible))
@@ -19116,6 +19255,8 @@ class SettingsTab(QWidget):
                 apps.append("fldigi")
             if use_js8call_chk.isChecked() or backend == "js8call":
                 apps.append("js8call")
+            if use_varac_chk.isChecked():
+                apps.append("varac")
             return tuple(apps)
 
         def _update_guided_app_setup_plan_review() -> None:
@@ -19129,8 +19270,9 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
                 return
+            radio_name = name_edit.text().strip() or "Radio"
             proposal = RadioInstanceProposal(
-                name=name_edit.text().strip() or "Radio",
+                name=radio_name,
                 instance_name=_guided_plan_instance_name(),
                 index=0,
                 enabled_apps=enabled_apps,
@@ -19141,29 +19283,34 @@ class SettingsTab(QWidget):
                 ),
                 varac_enabled=varac_selected,
             )
+            lane = _current_guided_lane()
+            blueprint = build_guided_setup_blueprint(
+                lane=lane,
+                hamlib_short_name=radio_name,
+                setup_mode=SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED,
+                control_route=infer_guided_control_route(str(backend_combo.currentData() or "")),
+                include_varac=varac_selected,
+            )
             app_paths = {
                 "flrig": flrig_path_edit.text().strip(),
                 "fldigi": fldigi_path_edit.text().strip(),
                 "js8call": js8_install_edit.text().strip(),
+                "varac": varac_install_edit.text().strip(),
+                "varac_install_path": varac_install_edit.text().strip(),
+                "varac_ini_path": varac_ini_edit.text().strip(),
+                "varac_db_path": varac_db_edit.text().strip(),
+                "varac_incoming_dir": varac_incoming_edit.text().strip(),
+                "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
             }
-            plan = build_guided_external_app_config_plan(
+            plan = build_app_config_plan_for_blueprint(
+                blueprint,
                 (proposal,),
                 config_root=get_config_dir(),
                 app_paths=app_paths,
-                include_varac=varac_selected,
             )
-            write_actions = [action for action in plan.actions if action.writes_external_config]
-            lines: List[str] = []
-            if plan.backup_required:
-                lines.append("Backup required before FIO writes app profiles.")
-            for action in write_actions[:4]:
-                lines.append("- " + action.summary)
-            if len(write_actions) > 4:
-                lines.append(f"- {len(write_actions) - 4} more app setup action(s).")
-            for item in plan.review_items[:2]:
-                lines.append("- " + item)
-            app_setup_plan_label.setText("\n".join(lines))
-            app_setup_plan_group.setVisible(bool(lines))
+            preview = build_guided_setup_preview(blueprint, plan)
+            app_setup_plan_label.setText("\n".join(preview.lines))
+            app_setup_plan_group.setVisible(bool(preview.lines))
 
         def _apply_dialog_autoconfigure() -> None:
             filled: List[str] = []
@@ -19235,6 +19382,7 @@ class SettingsTab(QWidget):
                 "spotter_launch_path": (js8spotter_launch_edit, "JS8Spotter app"),
                 "commstat_launch_path": (commstat_launch_edit, "CommStat app"),
                 "varac_install_path": (varac_install_edit, "VarAC install"),
+                "varac_db_path": (varac_db_edit, "VarAC DB"),
                 "varac_ini_path": (varac_ini_edit, "VarAC INI"),
                 "varac_incoming_path": (varac_incoming_edit, "VarAC incoming"),
             }
@@ -19413,8 +19561,15 @@ class SettingsTab(QWidget):
                     software_parts.append("CommStat")
                 if use_varac:
                     software_parts.append("VarAC")
+                setup_type_label = setup_type_combo.currentText().strip()
+                setup_prefix = (
+                    f"Setup type: {setup_type_label}. "
+                    if setup_type_label and setup_type_combo.currentData()
+                    else ""
+                )
                 software_hint_label.setText(
-                    "This radio's current software bundle is: "
+                    setup_prefix
+                    + "This radio's current software bundle is: "
                     + ", ".join(software_parts)
                     + ". Hidden sections stay unchanged unless you edit their values."
                 )
@@ -19448,6 +19603,28 @@ class SettingsTab(QWidget):
             _update_port_prompt_visibility()
             _update_dialog_readiness()
 
+        def _on_varac_state_changed(_state: int) -> None:
+            if use_varac_chk.isChecked():
+                fast_or_js8_selected = any(
+                    checkbox.isChecked()
+                    for checkbox in (
+                        use_fldigi_chk,
+                        use_flmsg_chk,
+                        use_flamp_chk,
+                        use_js8call_chk,
+                        use_js8spotter_chk,
+                        use_commstat_chk,
+                    )
+                )
+                backend = str(backend_combo.currentData() or "").strip().lower()
+                if not fast_or_js8_selected and backend == "flrig":
+                    manual_idx = backend_combo.findData("manual")
+                    if manual_idx >= 0:
+                        backend_combo.setCurrentIndex(manual_idx)
+                    use_flrig_chk.setChecked(False)
+            _update_dialog_visibility()
+
+        setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
         backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
         device_class_combo.currentIndexChanged.connect(_update_dialog_visibility)
         use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
@@ -19457,10 +19634,11 @@ class SettingsTab(QWidget):
         use_js8call_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_varac_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
+        use_varac_chk.stateChanged.connect(_on_varac_state_changed)
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_radio_model_hint())
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_dialog_readiness())
         optional_toggle.toggled.connect(lambda _checked: _update_dialog_visibility())
+        _sync_setup_type_from_current_fields()
         _update_radio_model_hint()
         _update_dialog_visibility()
 
@@ -19560,7 +19738,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Validation", "Radio name is required.")
                 return
             out.update(
-                {
+                normalize_guided_radio_profile_payload({
                     "id": (existing or {}).get("id"),
                     "name": name,
                     "radio_catalog_id": str(model_choice.get("catalog_id", "") or ""),
@@ -19613,7 +19791,7 @@ class SettingsTab(QWidget):
                     "frontend_group": frontend_group_edit.text().strip(),
                     "amplifier_group": amplifier_group_edit.text().strip(),
                     "notes": notes_edit.toPlainText().strip(),
-                }
+                })
             )
             dlg.accept()
 
