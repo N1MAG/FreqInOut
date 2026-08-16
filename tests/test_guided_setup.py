@@ -21,6 +21,7 @@ from freqinout.core.guided_setup import (
     build_guided_setup_preview,
     generated_radio_label,
     guided_setup_capability_policy,
+    guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
     infer_guided_control_route,
@@ -285,6 +286,11 @@ def test_guided_setup_preview_keeps_ui_summary_in_core_for_js8(tmp_path) -> None
     assert preview.backup_required is True
     assert preview.control_summary == "Control: JS8Call owns the radio/CAT route for FIO scheduler and QSY actions."
     assert preview.guided_path == "Guided path: Station Use -> Frequency Control -> Schedule."
+    assert preview.schedule_summary == (
+        "Schedule choices: existing Frequency Plan, JS8Call Standard, Daily with No Nets, Daily + Nets, "
+        "SOP condition plan, monitor only."
+    )
+    assert preview.schedule_summary in preview.lines
     assert "Backup required before FIO writes app profiles." in preview.lines
     assert any("Prepare JS8Call profile" in line for line in preview.lines)
 
@@ -317,6 +323,8 @@ def test_guided_setup_preview_blocks_varac_scheduler_controls(tmp_path) -> None:
     assert preview.scheduler_assignment_allowed is False
     assert preview.backup_required is False
     assert preview.control_summary == "Control: monitor/import only. FIO will not show scheduler/QSY controls for this radio."
+    assert preview.schedule_summary == "Schedule: monitor only. VarAC keeps its own scheduler and FIO will not offer QSY controls."
+    assert preview.schedule_summary in preview.lines
     assert preview.lines[0] == "VarAC-only radio: FIO supports BBS and message monitoring, but VarAC handles frequency scheduling."
     assert "  VarAC references: install, INI, DB, incoming, outbox, BBS, BBS archive." in preview.lines
 
@@ -427,6 +435,10 @@ def test_js8call_standard_frequencies_are_visible_without_named_plan() -> None:
     schedule_step = next(step for step in blueprint.steps if step.step_id == "schedule_intent")
     assert any(choice.choice_id == "js8_standard" for choice in schedule_step.choices)
     assert any(item.item_id == "js8_standard_frequencies" for item in blueprint.proposal_items)
+    assert guided_setup_schedule_summary(blueprint) == (
+        "Schedule choices: existing Frequency Plan, JS8Call Standard, Daily with No Nets, Daily + Nets, "
+        "SOP condition plan, monitor only."
+    )
 
 
 def test_varac_cluster_setup_remains_read_only_in_initial_blueprint() -> None:
@@ -679,5 +691,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '_set_combo_data(backend_combo, "manual")' in dialog_block
     assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
     assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
+    assert 'apps.append("flmsg")' in dialog_block
+    assert 'apps.append("flamp")' in dialog_block
+    assert 'apps.append("js8spotter")' in dialog_block
+    assert 'apps.append("commstat")' in dialog_block
+    assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block
+    assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
     assert "Setup type: {setup_type_label}" in dialog_block

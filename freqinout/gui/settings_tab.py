@@ -19279,8 +19279,16 @@ class SettingsTab(QWidget):
                 apps.append("flrig")
             if use_fldigi_chk.isChecked():
                 apps.append("fldigi")
+            if use_flmsg_chk.isChecked():
+                apps.append("flmsg")
+            if use_flamp_chk.isChecked():
+                apps.append("flamp")
             if use_js8call_chk.isChecked() or backend == "js8call":
                 apps.append("js8call")
+            if use_js8spotter_chk.isChecked():
+                apps.append("js8spotter")
+            if use_commstat_chk.isChecked():
+                apps.append("commstat")
             if use_varac_chk.isChecked():
                 apps.append("varac")
             return tuple(apps)
@@ -19315,6 +19323,8 @@ class SettingsTab(QWidget):
                 hamlib_short_name=radio_name,
                 setup_mode=SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED,
                 control_route=infer_guided_control_route(str(backend_combo.currentData() or "")),
+                include_spotter=use_js8spotter_chk.isChecked(),
+                include_commstat=use_commstat_chk.isChecked(),
                 include_varac=varac_selected,
             )
             app_paths = {

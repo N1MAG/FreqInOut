@@ -115,6 +115,7 @@ class GuidedSetupPreview:
     lines: Tuple[str, ...]
     control_summary: str
     guided_path: str
+    schedule_summary: str
     backup_required: bool
     qsy_controls_visible: bool
     scheduler_assignment_allowed: bool
@@ -370,6 +371,10 @@ def build_guided_setup_preview(
     if guided_path:
         lines.append(guided_path)
 
+    schedule_summary = guided_setup_schedule_summary(blueprint)
+    if schedule_summary:
+        lines.append(schedule_summary)
+
     if plan.backup_required:
         lines.append("Backup required before FIO writes app profiles.")
 
@@ -398,6 +403,7 @@ def build_guided_setup_preview(
         lines=tuple(line for line in lines if str(line or "").strip()),
         control_summary=control_summary,
         guided_path=guided_path,
+        schedule_summary=schedule_summary,
         backup_required=plan.backup_required,
         qsy_controls_visible=policy.qsy_controls_visible,
         scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
@@ -457,6 +463,32 @@ def guided_setup_path_summary(blueprint: GuidedSetupBlueprint) -> str:
     if not guided_steps:
         return ""
     return "Guided path: " + " -> ".join(guided_steps[:5]) + "."
+
+
+def guided_setup_schedule_summary(blueprint: GuidedSetupBlueprint) -> str:
+    """Return operator-facing schedule choices for the selected setup lane."""
+
+    lane_key = _normalize_lane(blueprint.lane)
+    choice_ids = {choice.choice_id for choice in blueprint.schedule_choices}
+    if choice_ids == {SCHEDULE_NONE} and lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+        return "Schedule: monitor only. VarAC keeps its own scheduler and FIO will not offer QSY controls."
+
+    labels: list[str] = []
+    if SCHEDULE_EXISTING_PLAN in choice_ids:
+        labels.append("existing Frequency Plan")
+    if SCHEDULE_JS8_STANDARD in choice_ids:
+        labels.append("JS8Call Standard")
+    if SCHEDULE_DAILY_NO_NETS in choice_ids:
+        labels.append("Daily with No Nets")
+    if SCHEDULE_DAILY_PLUS_NETS in choice_ids:
+        labels.append("Daily + Nets")
+    if SCHEDULE_SOP_CONDITION in choice_ids:
+        labels.append("SOP condition plan")
+    if SCHEDULE_NONE in choice_ids:
+        labels.append("monitor only")
+    if not labels:
+        return ""
+    return "Schedule choices: " + ", ".join(labels) + "."
 
 
 def generated_radio_label(
