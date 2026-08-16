@@ -229,6 +229,34 @@ def test_blueprint_bridge_scopes_managed_js8_only_plan_to_js8call(tmp_path) -> N
     assert "Confirm JS8Call's radio/CAT selection" in " ".join(js8_action.notes)
 
 
+def test_blueprint_bridge_keeps_varac_only_plan_read_import_only(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_FLRIG,
+    )
+    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        base_proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={
+            "flrig": "/apps/flrig",
+            "fldigi": "/apps/fldigi",
+            "js8call": "/apps/js8call",
+            "varac": "/apps/VarAC",
+        },
+    )
+
+    assert plan.backup_required is False
+    assert [action.app_id for action in plan.actions] == ["varac"]
+    assert [action.action_type for action in plan.actions] == ["remember_integration"]
+    assert all(not action.writes_external_config for action in plan.actions)
+    assert any("read/import only" in item for item in plan.review_items)
+
+
 def test_blueprint_bridge_keeps_varac_read_import_action_in_mixed_managed_plan(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="tri_mode",
