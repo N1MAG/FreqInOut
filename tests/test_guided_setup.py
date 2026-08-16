@@ -691,6 +691,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '_set_combo_data(backend_combo, "manual")' in dialog_block
     assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
     assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
+    assert "def _existing_radio_labels_for_name_generation()" in dialog_block
+    assert "generated_radio_label(display_name, _existing_radio_labels_for_name_generation())" in dialog_block
     assert 'apps.append("flmsg")' in dialog_block
     assert 'apps.append("flamp")' in dialog_block
     assert 'apps.append("js8spotter")' in dialog_block

@@ -150,6 +150,7 @@ from freqinout.core.guided_setup import (
     build_app_config_plan_for_blueprint,
     build_guided_setup_blueprint,
     build_guided_setup_preview,
+    generated_radio_label,
     infer_guided_control_route,
     infer_guided_setup_lane,
     normalize_guided_radio_profile_payload,
@@ -19107,6 +19108,26 @@ class SettingsTab(QWidget):
             if label_widget is not None:
                 label_widget.setVisible(bool(visible))
 
+        def _existing_radio_labels_for_name_generation() -> Tuple[str, ...]:
+            try:
+                current_id = int((existing or {}).get("id", 0) or 0)
+            except Exception:
+                current_id = 0
+            labels: List[str] = []
+            for row in self.device_profiles or []:
+                if not isinstance(row, Mapping):
+                    continue
+                try:
+                    row_id = int(row.get("id", 0) or 0)
+                except Exception:
+                    row_id = 0
+                if current_id > 0 and row_id == current_id:
+                    continue
+                name = str(row.get("name", "") or "").strip()
+                if name:
+                    labels.append(name)
+            return tuple(labels)
+
         def _update_radio_model_hint() -> None:
             nonlocal display_name_user_edited, last_catalog_display_name
             selected = _current_radio_model_payload()
@@ -19140,8 +19161,9 @@ class SettingsTab(QWidget):
                     or not display_name_user_edited
                 )
                 if can_replace:
-                    name_edit.setText(display_name)
-                    last_catalog_display_name = display_name
+                    generated_name = generated_radio_label(display_name, _existing_radio_labels_for_name_generation())
+                    name_edit.setText(generated_name)
+                    last_catalog_display_name = generated_name
                     display_name_user_edited = False
             else:
                 if catalog_source == "hamlib-rigctl":
