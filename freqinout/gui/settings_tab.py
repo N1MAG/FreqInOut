@@ -18695,7 +18695,16 @@ class SettingsTab(QWidget):
         fldigi_field_widgets = [fldigi_wrap, fldigi_path_edit]
         flmsg_field_widgets = [flmsg_path_edit]
         flamp_field_widgets = [flamp_path_edit]
-        varac_field_widgets = [varac_install_edit, varac_db_edit, varac_ini_edit, varac_incoming_edit, varac_launch_cmd_edit]
+        varac_field_widgets = [
+            varac_install_edit,
+            varac_db_edit,
+            varac_ini_edit,
+            varac_incoming_edit,
+            varac_outbox_edit,
+            varac_bbs_edit,
+            varac_bbs_archive_edit,
+            varac_launch_cmd_edit,
+        ]
         optional_field_widgets = [
             ptt_group_edit,
             antenna_group_edit,

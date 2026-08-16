@@ -1584,6 +1584,13 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"varac_outbox_dir": (varac_outbox_edit, "VarAC outbox")' in dialog_block
     assert '"varac_bbs_dir": (varac_bbs_edit, "VarAC BBS")' in dialog_block
     assert '"varac_bbs_archive_dir": (varac_bbs_archive_edit, "VarAC BBS archive")' in dialog_block
+    varac_field_block = dialog_block[
+        dialog_block.index("varac_field_widgets = [")
+        : dialog_block.index("optional_field_widgets = [")
+    ]
+    assert "varac_outbox_edit" in varac_field_block
+    assert "varac_bbs_edit" in varac_field_block
+    assert "varac_bbs_archive_edit" in varac_field_block
     assert "build_autoconfig_proposal(" in dialog_block
     assert "visible_review = " in dialog_block
     assert "select_js8call_file_profile(" in planner_source
