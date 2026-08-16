@@ -723,10 +723,24 @@ def discover_varac_local_assets(
         install_dir / "VarAC_alert_tags.conf" if install_dir else None,
     )
     templates = _first_varac_path(paths.get("varac_templates_path"), install_dir / "VarAC_templates.ini" if install_dir else None)
-    bbs_dir = _first_varac_path(paths.get("varac_bbs_dir"), install_dir / "BBS" if install_dir else None)
-    outbox_dir = _first_varac_path(paths.get("varac_outbox_dir"), install_dir / "Outbox" if install_dir else None)
-    incoming_dir = _first_varac_path(paths.get("varac_incoming_dir"), install_dir / "Incoming" if install_dir else None)
-    archive_dir = _first_varac_path(paths.get("varac_bbs_archive_dir"), bbs_dir / "Archive" if bbs_dir else None)
+    bbs_dir = _first_varac_path(
+        paths.get("varac_bbs_dir"),
+        _varac_ini_existing_path(ini_path, "BBS", "BBSDirectory"),
+        _varac_child_path(install_dir, "BBS"),
+    )
+    outbox_dir = _first_varac_path(
+        paths.get("varac_outbox_dir"),
+        _varac_child_path(install_dir, "OUTGOING", "Outgoing", "Outbox"),
+    )
+    incoming_dir = _first_varac_path(
+        paths.get("varac_incoming_dir"),
+        _varac_ini_existing_path(ini_path, "FILES", "IncomingFilesDir"),
+        _varac_child_path(install_dir, "INCOMING", "Incoming"),
+    )
+    archive_dir = _first_varac_path(
+        paths.get("varac_bbs_archive_dir"),
+        _varac_child_path(bbs_dir, "Archive", "ARCHIVE") if bbs_dir else None,
+    )
 
     assets = [
         _varac_path_asset("install", "VarAC folder", install_dir, "directory"),
@@ -752,6 +766,38 @@ def _first_varac_path(*values: object) -> Optional[Path]:
         if txt:
             return Path(os.path.expandvars(os.path.expanduser(txt)))
     return None
+
+
+def _varac_child_path(parent: Optional[Path], *names: str) -> Optional[Path]:
+    if parent is None:
+        return None
+    for name in names:
+        candidate = parent / name
+        if candidate.exists():
+            return candidate
+    if parent.is_dir():
+        by_key = {child.name.casefold(): child for child in parent.iterdir()}
+        for name in names:
+            match = by_key.get(str(name or "").casefold())
+            if match is not None:
+                return match
+    return parent / names[0] if names else None
+
+
+def _varac_ini_existing_path(ini_path: Optional[Path], section: str, option: str) -> Optional[Path]:
+    if ini_path is None or not ini_path.is_file():
+        return None
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(ini_path, encoding="utf-8")
+        raw = parser.get(section, option, fallback="")
+    except Exception:
+        return None
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    path = Path(os.path.expandvars(os.path.expanduser(value)))
+    return path if path.exists() else None
 
 
 def _latest_varac_app_log(install_dir: Path) -> Optional[Path]:

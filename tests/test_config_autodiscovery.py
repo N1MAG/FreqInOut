@@ -171,7 +171,11 @@ def test_settings_detector_can_use_varac_production_fixture_folder(tmp_path) -> 
 def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) -> None:
     varac_dir = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
     bbs_dir = varac_dir / "BBS"
+    incoming_dir = varac_dir / "INCOMING"
+    outbox_dir = varac_dir / "OUTGOING"
     bbs_dir.mkdir(parents=True)
+    incoming_dir.mkdir()
+    outbox_dir.mkdir()
     (varac_dir / "VarAC.ini").write_text("[VARAC]\n", encoding="utf-8")
     (varac_dir / "VarAC_traffic.log").write_text("CONNECTED TO N1MAG\n", encoding="utf-8")
     (varac_dir / "VarAC.log").write_text("Database switched to DELETE mode.\n", encoding="utf-8")
@@ -201,6 +205,32 @@ def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) 
     assert by_id["alert_tags"].exists is True
     assert by_id["templates"].exists is True
     assert by_id["bbs"].exists is True
+    assert by_id["incoming"].path == str(incoming_dir)
+    assert by_id["incoming"].exists is True
+    assert by_id["outbox"].path == str(outbox_dir)
+    assert by_id["outbox"].exists is True
+
+
+def test_varac_local_asset_discovery_prefers_existing_ini_bbs_path(tmp_path) -> None:
+    varac_dir = tmp_path / "VarAC"
+    configured_bbs = tmp_path / "Configured BBS"
+    varac_dir.mkdir()
+    configured_bbs.mkdir()
+    (varac_dir / "BBS").mkdir()
+    (varac_dir / "VarAC.ini").write_text(
+        "[BBS]\n"
+        f"BBSDirectory={configured_bbs}\n"
+        "[FILES]\n"
+        "IncomingFilesDir=C:\\missing\\Incoming\n",
+        encoding="utf-8",
+    )
+    (varac_dir / "INCOMING").mkdir()
+
+    assets = discover_varac_local_assets(install_path=varac_dir)
+    by_id = {asset.asset_id: asset for asset in assets}
+
+    assert by_id["bbs"].path == str(configured_bbs)
+    assert by_id["incoming"].path == str(varac_dir / "INCOMING")
 
 
 def test_varac_local_asset_discovery_uses_latest_timestamped_app_log(tmp_path) -> None:
@@ -258,6 +288,10 @@ def test_varac_local_asset_discovery_matches_available_production_fixture() -> N
     assert "station N1MAG DM79QJ" in by_id["ini"].detail
     assert by_id["qso_log"].exists is True
     assert by_id["callsign_tags"].exists is True
+    assert by_id["incoming"].exists is True
+    assert by_id["incoming"].path.endswith("INCOMING")
+    assert by_id["outbox"].exists is True
+    assert by_id["outbox"].path.endswith("OUTGOING")
     assert by_id["alert_tags"].exists is True
     assert by_id["templates"].exists is True
     assert by_id["traffic_log"].exists is True
