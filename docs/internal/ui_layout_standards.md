@@ -85,9 +85,18 @@ older surfaces when the durable manual-control service is not available.
 
 Scheduler startup semantics:
 
+- Multi-rig runtime data review must use the active multi-rig runtime profile
+  DB, normally `/Users/bill/RadioCode/runtime/multi-rig/config/freqinout.db`
+  in Bill's test lab. Do not infer FIO-A/FIO-B state from the legacy/default
+  DB at `/Users/bill/.freqinout/config/freqinout.db`; that DB may contain only
+  a migrated `Default Radio` and can produce false findings during scheduler,
+  endpoint, assignment, or manual-control review.
 - When FIO starts and the scheduler is enabled for active radios, the scheduler
   performs one forced per-radio lane apply so every assigned plan takes control
   of its configured radio immediately.
+- Manual QSY state is runtime-only. A manual QSY target from a previous FIO run
+  must be cleared before startup lane apply, so launch always follows the saved
+  radio-to-plan assignment rather than a stale operator override.
 - That startup apply bypasses the frequency-control wait prompt because launch
   establishes the scheduler's baseline authority. It also bypasses JS8Call,
   VarAC, and FLDigi receive-busy deferrals; hard PTT/transmit protections,
@@ -125,7 +134,10 @@ Action semantics:
   from FLRig, another app, or the radio itself. Include `Indefinite` as an
   option for manual control until the operator resumes.
 - `Resume`: clears manual QSY or timed scheduler suspension and returns control
-  to the active schedule.
+  to the active schedule for only that radio. Resume is operator-authoritative:
+  it bypasses soft JS8Call, VarAC, and FLDigi receive-busy deferrals while still
+  preserving hard PTT/transmit protections, RF Guard blocks, and radio-scoped
+  endpoint routing.
 
 Off-schedule prompts are part of radio health and must be radio-scoped. The
 prompt title/text must identify the affected radio, and every action from the
@@ -135,6 +147,9 @@ spam repeated prompts or suppress another radio's first actionable prompt.
 `Skip Once` suppresses only the current radio and schedule mismatch until the
 configured prompt interval expires; it must not suppress a different radio or a
 different scheduled target.
+`Resume` from this prompt is the same radio-scoped operator recovery action as
+the station card and must not be blocked by FLDigi RX activity when the operator
+explicitly chooses to resume.
 
 When manual QSY is active, `Resume` must be enabled and visually highlighted.
 The `QSY` button text remains stable so it does not resize or clip; button color

@@ -233,6 +233,42 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
     assert all(kwargs["ignore_fldigi_busy"] is True for _entry, _source, kwargs in applied)
 
 
+def test_off_schedule_frequency_apply_bypasses_busy_gates_for_target_radio() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    applied: list[tuple[dict[str, object], str, dict[str, object]]] = []
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler.current_schedule_entry = {}
+    scheduler.current_source = "HF"
+    scheduler._prompt_active = True
+    scheduler._prompt_items = ["Frequency"]
+    scheduler._active_schedule_entry_for_radio = lambda _radio_id, force=False: (
+        "HF",
+        {"group_name": "AMRRON", "band": "20M", "frequency": "14.110"},
+    )
+    scheduler._reset_prompt_timers = lambda **_kwargs: None
+    scheduler._apply_schedule_entry = lambda entry, source, **kwargs: applied.append(
+        (dict(entry), source, dict(kwargs))
+    )
+
+    SchedulerEngine.resolve_off_schedule(
+        scheduler,
+        "apply",
+        items=["Frequency"],
+        target_device_profile_id=9,
+    )
+
+    assert len(applied) == 1
+    entry, source, kwargs = applied[0]
+    assert source == "HF"
+    assert entry["target_device_profile_id"] == 9
+    assert kwargs["force"] is True
+    assert kwargs["ignore_suspend"] is True
+    assert kwargs["ignore_js8_busy"] is True
+    assert kwargs["ignore_varac_busy"] is True
+    assert kwargs["ignore_fldigi_busy"] is True
+
+
 def test_per_radio_flrig_clients_use_configured_ports() -> None:
     from freqinout.core.station_runtime_manager import DeviceSettingsProxy
     from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings

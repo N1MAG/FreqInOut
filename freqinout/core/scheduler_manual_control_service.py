@@ -148,6 +148,30 @@ class SchedulerManualControlService:
             ).fetchall()
             return tuple(self._state_from_row(dict(row)) for row in rows)
 
+    def clear_manual_qsy_states(self) -> int:
+        """Clear runtime-only manual QSY state left from a previous app run."""
+        now = _utc_now_iso()
+        with self.store.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE scheduler_manual_control_states
+                   SET state='on_schedule',
+                       manual_target_json='{}',
+                       hold_until_utc=NULL,
+                       reason_code='startup_clear_manual_qsy',
+                       operator_source='scheduler',
+                       latest_event_id=NULL,
+                       updated_utc=?
+                 WHERE state='manual_qsy'
+                """,
+                (now,),
+            )
+            conn.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+
     def set_manual_qsy(
         self,
         radio_profile_id: str | int,

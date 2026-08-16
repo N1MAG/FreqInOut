@@ -984,6 +984,7 @@ class SchedulerEngine(QObject):
         self._connect_timer()
         self._maybe_refresh_external_status_snapshot(force=True)
         self._apply_js8_offset_startup()
+        self._clear_startup_manual_qsy_states()
         # Perform an immediate evaluation so UI sees something right away.
         # In multi-radio mode, assigned plan lanes are the source of truth;
         # the legacy singleton evaluator is only a fallback when no radio
@@ -1102,6 +1103,19 @@ class SchedulerEngine(QObject):
             return self._manual_control_service.get_state(int(radio_id))
         except Exception:
             return None
+
+    def _clear_startup_manual_qsy_states(self) -> None:
+        """Manual QSY is an in-session override; startup must follow assigned plans."""
+        cleared = 0
+        try:
+            cleared = self._manual_control_service.clear_manual_qsy_states()
+        except Exception as exc:
+            log.debug("SchedulerEngine: failed to clear startup manual QSY states: %s", exc)
+        self._manual_qsy_active = False
+        self._manual_qsy_entry_key = None
+        self._manual_qsy_radio_id = None
+        if cleared:
+            log.info("SchedulerEngine: cleared %s stale manual QSY state(s) at startup.", cleared)
 
     def _radio_suspend_until_dt(self, radio_id: Optional[int]) -> Optional[datetime.datetime]:
         state = self._manual_state_for_radio(radio_id)
@@ -4437,6 +4451,12 @@ class SchedulerEngine(QObject):
                 source,
                 force=True,
                 ignore_wait_prompt=True,
+                ignore_coordination_prompt=True,
+                ignore_suspend=True,
+                ignore_net_suppression=True,
+                ignore_js8_busy=True,
+                ignore_varac_busy=True,
+                ignore_fldigi_busy=True,
                 apply_js8_offset=False,
                 apply_fldigi=False,
             )
@@ -6798,7 +6818,7 @@ class SchedulerEngine(QObject):
         self.current_schedule_entry = effective_entry
         self._scheduled_vfo = vfo
         manual_qsy_key = self._manual_qsy_identity(effective_entry)
-        if source != "QSY" and self._manual_qsy_active:
+        if source != "QSY" and self._manual_qsy_active and not force:
             entry_radio_id = self._entry_manual_control_radio_id(effective_entry)
             if self._manual_qsy_radio_id in (None, entry_radio_id):
                 self._clear_coordination_prompt()

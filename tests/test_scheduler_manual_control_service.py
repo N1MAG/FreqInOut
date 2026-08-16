@@ -116,6 +116,41 @@ def test_scheduler_start_applies_lanes_before_timer_can_prompt(monkeypatch, tmp_
         _shutdown_engine(engine)
 
 
+def test_scheduler_start_clears_stale_manual_qsy_before_lane_apply(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    SettingsManager()
+    QCoreApplication.instance() or QCoreApplication([])
+    store = MultiRadioStore(settings_db_path())
+    radio = _primary_radio(store)
+    service = SchedulerManualControlService(store)
+    service.set_manual_qsy(
+        int(radio["id"]),
+        SchedulerManualTarget(frequency_hz=14_110_000, mode="USB", vfo="A"),
+    )
+    engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=60_000)
+    try:
+        engine.stop()
+        observed: list[str] = []
+
+        monkeypatch.setattr(engine, "_maybe_refresh_external_status_snapshot", lambda *, force=False: None)
+        monkeypatch.setattr(engine, "_apply_js8_offset_startup", lambda: None)
+        monkeypatch.setattr(engine, "_evaluate", lambda **_kwargs: None)
+
+        def fake_apply_lanes(**_kwargs):
+            observed.append(service.get_state(int(radio["id"])).state)
+            return True
+
+        monkeypatch.setattr(engine, "_apply_active_schedule_lanes", fake_apply_lanes)
+
+        engine.start()
+
+        assert observed == ["on_schedule"]
+        assert engine._manual_qsy_active is False
+        assert engine._manual_qsy_radio_id is None
+    finally:
+        _shutdown_engine(engine)
+
+
 def test_scheduler_exposes_status_poll_metrics(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     SettingsManager()
