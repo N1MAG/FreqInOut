@@ -723,6 +723,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "generated_radio_label(display_name, _existing_radio_labels_for_name_generation())" in dialog_block
     assert 'apps.append("flmsg")' in dialog_block
     assert 'apps.append("flamp")' in dialog_block
+    assert "Hidden app sections are not part of this setup type unless you select them." in dialog_block
+    assert "Hidden sections stay unchanged" not in dialog_block
     assert 'apps.append("js8spotter")' in dialog_block
     assert 'apps.append("commstat")' in dialog_block
     assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block

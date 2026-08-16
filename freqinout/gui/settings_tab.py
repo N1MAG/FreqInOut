@@ -19635,7 +19635,7 @@ class SettingsTab(QWidget):
                     setup_prefix
                     + "This radio's current software bundle is: "
                     + ", ".join(software_parts)
-                    + ". Hidden sections stay unchanged unless you edit their values."
+                    + ". Hidden app sections are not part of this setup type unless you select them."
                 )
                 if app_setup_plan_group.isVisible():
                     _update_guided_app_setup_plan_review()
