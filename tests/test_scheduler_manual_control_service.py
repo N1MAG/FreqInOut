@@ -577,13 +577,17 @@ def test_scheduler_prompt_frequency_mode_holds_before_command(monkeypatch, tmp_p
         _shutdown_engine(engine)
 
 
-def test_scheduler_prompt_grace_suppresses_false_prompt_after_apply(monkeypatch, tmp_path) -> None:
+def test_scheduler_prompt_verifies_target_radio_before_emit(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     settings = SettingsManager()
     settings.set("freq_enforcement_mode", "Prompt")
 
-    now = [1_000.0]
-    monkeypatch.setattr(scheduler_engine_module.time, "time", lambda: now[0])
+    class _Rig:
+        def get_vfo_frequency(self):
+            return 14_110_000
+
+        def get_ptt(self):
+            return False
 
     engine = SchedulerEngine(rig=None, js8=None, varac=None, fldigi_log=None)
     try:
@@ -604,21 +608,18 @@ def test_scheduler_prompt_grace_suppresses_false_prompt_after_apply(monkeypatch,
         }
         engine.current_schedule_entry = dict(entry)
         engine._status_flrig_freq_hz = 7_115_000
-        engine._status_flrig_freq_ts = now[0]
-        engine._status_summary_external_ts = now[0]
-        engine._set_off_schedule_prompt_grace(8, seconds=3.0)
+        engine._status_flrig_freq_ts = scheduler_engine_module.time.time()
+        engine._status_summary_external_ts = scheduler_engine_module.time.time()
+        monkeypatch.setattr(
+            engine,
+            "_control_context_for_entry",
+            lambda _entry: (_Rig(), None, None, settings, 8),
+        )
 
         engine._maybe_prompt_enforcement()
 
         assert emitted == []
         assert engine._prompt_active is False
-
-        now[0] += 4.0
-        engine._maybe_prompt_enforcement()
-
-        assert emitted
-        assert emitted[-1]["items"] == ["Frequency"]
-        assert emitted[-1]["device_profile_id"] == 8
     finally:
         _shutdown_engine(engine)
 

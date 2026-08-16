@@ -426,7 +426,6 @@ class SchedulerEngine(QObject):
             "fldigi_offset": False,
             "vfo": False,
         }
-        self._off_schedule_prompt_grace_until_by_radio: Dict[int, float] = {}
         self._fldigi_available_cache: Optional[bool] = None
         self._fldigi_available_ts: float = 0.0
         self._fldigi_busy_entry_key: Optional[Tuple] = None
@@ -3954,29 +3953,92 @@ class SchedulerEngine(QObject):
             if key and key in self._prompt_state:
                 self._prompt_state[key]["last_prompt_ts"] = ts
 
-    def _set_off_schedule_prompt_grace(self, radio_id: Optional[int], *, seconds: float = 3.0) -> None:
-        if not isinstance(radio_id, int) or radio_id <= 0:
-            return
-        grace_map = getattr(self, "_off_schedule_prompt_grace_until_by_radio", None)
-        if not isinstance(grace_map, dict):
-            grace_map = {}
-            self._off_schedule_prompt_grace_until_by_radio = grace_map
-        grace_map[radio_id] = max(float(grace_map.get(radio_id) or 0.0), time.time() + max(float(seconds), 0.0))
-
-    def _off_schedule_prompt_in_grace(self, radio_id: Optional[int]) -> bool:
-        if not isinstance(radio_id, int) or radio_id <= 0:
-            return False
-        grace_map = getattr(self, "_off_schedule_prompt_grace_until_by_radio", None)
-        if not isinstance(grace_map, dict):
-            return False
-        until_ts = float(grace_map.get(radio_id) or 0.0)
-        if until_ts <= 0.0:
-            return False
+    def _read_target_station_actual_state(
+        self,
+        entry: Dict,
+        *,
+        control_mode: Optional[str] = None,
+    ) -> StationActualState:
+        rig_client, js8_client, _varac_client, control_settings, target_radio_id = self._control_context_for_entry(entry)
+        if target_radio_id is None:
+            return self._read_station_actual_state(force=True, control_mode=control_mode, allow_poll=True)
+        mode = self._control_mode_for_context(control_settings, rig=rig_client, js8=js8_client)
+        if control_mode:
+            requested_mode = str(control_mode or "").strip().upper()
+            if requested_mode in {"FLRIG", "RIGCTLD", "JS8CALL"}:
+                mode = requested_mode
         now_ts = time.time()
-        if now_ts >= until_ts:
-            grace_map.pop(radio_id, None)
-            return False
-        return True
+        state = StationActualState(checked_ts=now_ts)
+        if mode in {"FLRIG", "RIGCTLD"} and rig_client is not None:
+            try:
+                if hasattr(rig_client, "get_vfo_frequency"):
+                    freq = rig_client.get_vfo_frequency()
+                    if isinstance(freq, (int, float)) and freq > 0:
+                        state.flrig_freq_hz = int(freq)
+                if hasattr(rig_client, "get_ptt"):
+                    state.flrig_ptt_active = bool(rig_client.get_ptt())
+                    state.flrig_ptt_known = True
+                    state.flrig_ptt_age_s = 0.0
+                    state.flrig_ptt_stale = False
+                if hasattr(rig_client, "get_active_vfo"):
+                    vfo_txt = str(rig_client.get_active_vfo() or "").strip().upper()[:1]
+                    if vfo_txt in {"A", "B"}:
+                        state.flrig_vfo = vfo_txt
+            except Exception as exc:
+                state.errors["rig_frequency"] = str(exc)
+        if js8_client is not None and (mode == "JS8CALL" or state.flrig_freq_hz is None):
+            try:
+                if hasattr(js8_client, "get_frequency"):
+                    freq = js8_client.get_frequency()
+                    if isinstance(freq, (int, float)) and freq > 0:
+                        state.js8_freq_hz = int(freq)
+                if hasattr(js8_client, "get_offset"):
+                    offset = js8_client.get_offset()
+                    if isinstance(offset, (int, float)):
+                        state.js8_offset_hz = int(offset)
+                        state.js8_offset_age_s = 0.0
+                        state.js8_offset_stale = False
+            except Exception as exc:
+                state.errors["js8_frequency"] = str(exc)
+        if state.flrig_freq_hz is not None:
+            state.actual_frequency_hz = state.flrig_freq_hz
+            state.actual_frequency_source = "Rig"
+        elif state.js8_freq_hz is not None:
+            state.actual_frequency_hz = state.js8_freq_hz
+            state.actual_frequency_source = "JS8Call"
+        else:
+            state.actual_frequency_hz = None
+            state.actual_frequency_source = "unknown"
+            state.stale = True
+        return state
+
+    def _fresh_off_schedule_state_for_prompt(
+        self,
+        entry: Dict,
+        *,
+        control_mode: Optional[str] = None,
+        check_frequency: bool,
+        check_mode: bool,
+        check_offset: bool,
+    ) -> OffScheduleState:
+        actual = self._read_target_station_actual_state(entry, control_mode=control_mode)
+        _rig_client, _js8_client, _varac_client, control_settings, _target_radio_id = self._control_context_for_entry(entry)
+        effective_mode = control_mode
+        if not effective_mode:
+            effective_mode = self._control_mode_for_context(
+                control_settings,
+                rig=_rig_client,
+                js8=_js8_client,
+            )
+        return self._compute_off_schedule_state(
+            entry,
+            actual,
+            control_mode=effective_mode,
+            check_frequency=check_frequency,
+            check_mode=check_mode,
+            check_offset=check_offset,
+            allow_external_reads=False,
+        )
 
     def _maybe_prompt_enforcement(self) -> None:
         if not self._scheduler_enabled():
@@ -4022,8 +4084,6 @@ class SchedulerEngine(QObject):
                 pass
             return
         self._prompt_entry_key = entry_key
-        if self._off_schedule_prompt_in_grace(entry_radio_id):
-            return
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         if self._scheduling_suspended(now_utc):
             return
@@ -4042,6 +4102,14 @@ class SchedulerEngine(QObject):
             check_offset=js8_prompt,
             control_mode=control_mode,
         )
+        if any(flags.values()):
+            fresh_state = self._fresh_off_schedule_state_for_prompt(
+                entry,
+                check_frequency=freq_prompt,
+                check_mode=fldigi_prompt,
+                check_offset=js8_prompt,
+            )
+            flags = dict(fresh_state.flags)
         if not any(flags.values()):
             self._prompt_active = False
             self._prompt_items = []
@@ -4136,10 +4204,18 @@ class SchedulerEngine(QObject):
             return False
         now_ts = time.time()
         radio_id = self._entry_manual_control_radio_id(entry)
-        if self._off_schedule_prompt_in_grace(radio_id):
-            self._last_off_schedule_flags = dict(off_state.flags)
-            self.active_entry_changed.emit(entry, source)
-            return True
+        fresh_state = self._fresh_off_schedule_state_for_prompt(
+            entry,
+            check_frequency=True,
+            check_mode=False,
+            check_offset=False,
+        )
+        if not bool(fresh_state.flags.get("frequency")):
+            self._prompt_active = False
+            self._prompt_items = []
+            self._last_off_schedule_flags = dict(fresh_state.flags)
+            return False
+        off_state = fresh_state
         entry_key = (source, radio_id) + self._entry_transition_signature(entry)
         interval = self._prompt_interval_minutes("freq_prompt_interval")
         prompt_times = getattr(self, "_frequency_prompt_last_by_entry", None)
@@ -7185,7 +7261,5 @@ class SchedulerEngine(QObject):
                 if self._control_future is not None and not self._control_future.done():
                     self._force_retry_after_control = True
                 self._schedule_forced_retry()
-        elif want_freq_change and source in ("HF", "NET", "SOP"):
-            self._set_off_schedule_prompt_grace(target_radio_id)
         # Update UI state immediately regardless of control action.
         self.active_entry_changed.emit(effective_entry, source)
