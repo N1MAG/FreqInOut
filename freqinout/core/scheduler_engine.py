@@ -1354,6 +1354,13 @@ class SchedulerEngine(QObject):
         except Exception:
             pass
 
+    def _radio_no_active_schedule_health_key(self, radio_id: int) -> str:
+        try:
+            rid = int(radio_id)
+        except Exception:
+            rid = 0
+        return f"no-active-schedule-radio-{rid}" if rid > 0 else "no-active-schedule-radio"
+
     def _record_latest_intent(
         self,
         entry: Dict,
@@ -5835,7 +5842,61 @@ class SchedulerEngine(QObject):
             source = str(lane.get("current_source") or "NONE")
             entry = lane.get("current_entry")
             if not isinstance(entry, dict) or not entry:
+                radio_name = str(lane.get("device_name") or f"radio {radio_id}").strip()
+                plan_name = str(lane.get("frequency_plan_name") or "").strip()
+                next_source = str(lane.get("next_entry_source") or "NONE").strip()
+                next_start = lane.get("next_entry_start_utc")
+                next_detail = ""
+                if isinstance(next_start, datetime.datetime):
+                    next_entry = lane.get("next_entry")
+                    next_group = ""
+                    next_band = ""
+                    if isinstance(next_entry, dict):
+                        next_group = str(next_entry.get("group_name") or "").strip()
+                        next_band = str(next_entry.get("band") or "").strip()
+                    next_detail = (
+                        f" Next {next_source} row starts {next_start.astimezone(datetime.timezone.utc).strftime('%a %H:%MZ')}"
+                    )
+                    if next_group or next_band:
+                        next_detail += f" ({' '.join(part for part in (next_group, next_band) if part)})."
+                    else:
+                        next_detail += "."
+                detail = (
+                    f"{radio_name} has no active schedule row"
+                    + (f" in {plan_name}" if plan_name else "")
+                    + "."
+                    + next_detail
+                )
+                log.warning("SchedulerEngine: %s", detail)
+                self._record_scheduler_health_issue(
+                    self._radio_no_active_schedule_health_key(radio_id),
+                    detail,
+                    cooldown_sec=30.0,
+                    scope=radio_name,
+                    radio_profile_id=f"radio_{radio_id}",
+                    frequency_plan_name=plan_name,
+                    next_source=next_source,
+                    action="Review the assigned Frequency Plan for a gap at the current time.",
+                )
+                self._record_scheduler_event(
+                    "skip",
+                    "no_active_schedule_lane",
+                    source=source,
+                    action="No active schedule row for assigned radio plan",
+                    detail=detail,
+                    throttle_sec=30.0,
+                    radio_profile_id=f"radio_{radio_id}",
+                    device_profile_id=radio_id,
+                    device_name=radio_name,
+                    frequency_plan_name=plan_name,
+                    next_source=next_source,
+                )
                 continue
+            self._clear_scheduler_health_issue(
+                self._radio_no_active_schedule_health_key(radio_id),
+                scope=str(lane.get("device_name") or f"radio {radio_id}"),
+                radio_profile_id=f"radio_{radio_id}",
+            )
             suspended, _until = self._scheduling_suspended_for_radio(radio_id, now_utc)
             if suspended:
                 continue

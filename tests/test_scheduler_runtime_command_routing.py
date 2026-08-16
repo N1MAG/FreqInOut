@@ -233,6 +233,69 @@ def test_active_schedule_lanes_apply_each_radio_row_without_singleton_fallback()
     assert all(kwargs["ignore_fldigi_busy"] is True for _entry, _source, kwargs in applied)
 
 
+def test_active_schedule_lanes_report_assigned_plan_gap() -> None:
+    from freqinout.core.scheduler_engine import SchedulerEngine
+    from freqinout.core.shared_state import SchedulerManualControlState
+
+    class FakeManualControlService:
+        def get_state(self, radio_id: int):
+            return SchedulerManualControlState(radio_profile_id=f"radio_{radio_id}", state="on_schedule")
+
+    health: list[tuple[str, str, dict[str, object]]] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
+    scheduler = SchedulerEngine.__new__(SchedulerEngine)
+    scheduler._manual_control_service = FakeManualControlService()
+    scheduler.settings = SimpleNamespace(get=lambda _key, default=None: default)
+    scheduler.active_schedule_lanes = lambda force=False, now_utc=None: [
+        {
+            "device_profile_id": 8,
+            "device_name": "FIO-A",
+            "frequency_plan_name": "Magnet Main Plan",
+            "current_source": "HF",
+            "current_entry": {
+                "group_name": "MAGNET",
+                "band": "40M",
+                "frequency": "7.115",
+            },
+        },
+        {
+            "device_profile_id": 9,
+            "device_name": "FIO-B",
+            "frequency_plan_name": "AmRRON Plan",
+            "current_source": "NONE",
+            "current_entry": {},
+            "next_entry_source": "HF",
+            "next_entry_start_utc": datetime.datetime(2026, 8, 16, 16, 0, tzinfo=datetime.timezone.utc),
+            "next_entry": {"group_name": "AMRRON", "band": "20M", "frequency": "14.110"},
+        },
+    ]
+    scheduler._apply_schedule_entry = lambda *args, **kwargs: None
+    scheduler._radio_no_active_schedule_health_key = lambda radio_id: f"gap-{radio_id}"
+    scheduler._record_scheduler_health_issue = lambda name, message, **metadata: health.append(
+        (name, message, dict(metadata))
+    )
+    scheduler._clear_scheduler_health_issue = lambda *args, **kwargs: None
+    scheduler._record_scheduler_event = lambda event_type, code, **metadata: events.append(
+        (event_type, code, dict(metadata))
+    )
+
+    handled = SchedulerEngine._apply_active_schedule_lanes(
+        scheduler,
+        now_utc=datetime.datetime(2026, 8, 16, 12, 48, tzinfo=datetime.timezone.utc),
+        force=True,
+    )
+
+    assert handled is True
+    assert len(health) == 1
+    assert health[0][0] == "gap-9"
+    assert "FIO-B has no active schedule row in AmRRON Plan" in health[0][1]
+    assert health[0][2]["radio_profile_id"] == "radio_9"
+    assert len(events) == 1
+    assert events[0][0] == "skip"
+    assert events[0][1] == "no_active_schedule_lane"
+    assert events[0][2]["radio_profile_id"] == "radio_9"
+
+
 def test_latest_scheduler_intent_is_retained_per_radio() -> None:
     from freqinout.core.scheduler_engine import SchedulerEngine
 
