@@ -1608,7 +1608,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"varac_outbox_dir": varac_outbox_edit.text().strip()' in dialog_block
     assert '"varac_bbs_dir": varac_bbs_edit.text().strip()' in dialog_block
     assert '"varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip()' in dialog_block
-    assert "VarAC database and cluster membership were not changed" in planner_source
+    assert "FIO did not write VarAC.ini, VarAC.db, or VarAC cluster membership" in planner_source
     assert 'Path(varac_install_edit.text().strip()) / "VarAC.db"' not in dialog_block
 
 

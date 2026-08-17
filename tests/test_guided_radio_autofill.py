@@ -3,6 +3,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from freqinout.core.config_autodiscovery import JS8CallFileProfile
 from freqinout.core.guided_radio_autofill import (
     guided_app_candidate_choices,
@@ -13,7 +15,7 @@ from freqinout.core.guided_radio_autofill import (
     guided_single_install_path,
     next_default_instance_port,
 )
-from freqinout.core.software_path_detector import PathDetectionResult
+from freqinout.core.software_path_detector import PathDetectionResult, SoftwarePathDetector
 
 
 def test_js8_profile_choices_include_port_profile_and_directed(tmp_path: Path) -> None:
@@ -440,8 +442,8 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     assert suggestions["varac_bbs_dir"] == "/Applications/VarAC/BBS"
     assert suggestions["varac_bbs_archive_dir"] == "/Applications/VarAC/BBS/Archive"
     assert review == (
-        "VarAC database and cluster membership were not changed. "
-        "BBS settings were not changed. Review VarAC cluster settings separately.",
+        "VarAC references were stored for FIO monitoring and BBS features only. "
+        "FIO did not write VarAC.ini, VarAC.db, or VarAC cluster membership.",
     )
     assert "control_backend" not in suggestions
     assert "use_flrig" not in suggestions
@@ -454,3 +456,37 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     assert "fldigi_port" not in suggestions
     assert "js8_host" not in suggestions
     assert "js8_port" not in suggestions
+
+
+def test_radio_autofill_uses_available_varac_production_fixture_read_only() -> None:
+    fixture = Path("/Users/bill/RadioTools/Programs/VarAC_files")
+    if not fixture.exists():
+        pytest.skip("Local VarAC production-style fixture is not available.")
+
+    detector = SoftwarePathDetector(settings={})
+    detector.home = Path("/Users/bill")
+    detector.system = "Darwin"
+    varac_results = detector.detect_varac()
+
+    suggestions, review = guided_radio_autofill_suggestions(
+        current={},
+        selected={"varac": True},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(),
+        fast_results={},
+        js8_results={},
+        varac_results=varac_results,
+        js8_file_profiles=(),
+        default_ports={},
+        profile_name="VarAC Radio",
+    )
+
+    assert Path(suggestions["varac_install_path"]) == fixture
+    assert Path(suggestions["varac_db_path"]) == fixture / "VarAC.db"
+    assert Path(suggestions["varac_ini_path"]) == fixture / "VarAC.ini"
+    assert Path(suggestions["varac_bbs_dir"]) == fixture / "BBS"
+    assert Path(suggestions["varac_outbox_dir"]) == fixture / "OUTGOING"
+    assert Path(suggestions["varac_incoming_path"]) == fixture / "INCOMING"
+    assert any("FIO did not write VarAC.ini, VarAC.db, or VarAC cluster membership." in line for line in review)
+    assert not any(key.startswith(("flrig_", "fldigi_", "js8_")) for key in suggestions)
