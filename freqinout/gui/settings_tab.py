@@ -18800,6 +18800,11 @@ class SettingsTab(QWidget):
             amplifier_group_edit,
             notes_edit,
         ]
+        technical_identity_widgets = [
+            device_class_combo,
+            backend_combo,
+            deploy_combo,
+        ]
         app_choice_targets: Dict[str, QLineEdit] = {
             "flrig": flrig_path_edit,
             "fldigi": fldigi_path_edit,
@@ -19761,6 +19766,11 @@ class SettingsTab(QWidget):
             for widget in optional_field_widgets:
                 _set_row_visible(widget, optional_toggle.isChecked())
 
+            setup_type_choice = str(setup_type_combo.currentData() or "").strip()
+            show_technical_identity = setup_type_choice == "custom"
+            for widget in technical_identity_widgets:
+                _set_row_visible(widget, show_technical_identity)
+
             if observer_mode:
                 _set_row_visible(software_wrap, False)
                 _set_row_visible(configure_auto_wrap, False)
@@ -19768,7 +19778,6 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                setup_type_choice = str(setup_type_combo.currentData() or "").strip()
                 show_software_checkboxes = setup_type_choice == "custom"
                 _set_row_visible(software_wrap, show_software_checkboxes)
                 _set_row_visible(configure_auto_wrap, bool(setup_type_choice))

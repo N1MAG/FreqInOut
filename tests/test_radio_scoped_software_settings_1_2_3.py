@@ -1529,6 +1529,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "_configure_port_edit(prompt_edit)" in dialog_block
     assert "def _any_row_visible(widgets: Sequence[QWidget]) -> bool:" in dialog_block
     assert "connection_group.setVisible(" in dialog_block
+    assert "technical_identity_widgets = [" in dialog_block
+    assert "show_technical_identity = setup_type_choice == \"custom\"" in dialog_block
+    assert "for widget in technical_identity_widgets:" in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Setup Steps")' in dialog_block
     assert 'app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")' in dialog_block
     assert "build_guided_setup_blueprint(" in dialog_block
