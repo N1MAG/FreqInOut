@@ -1060,6 +1060,35 @@ def test_guided_setup_session_rejects_invalid_choices() -> None:
         raise AssertionError("unknown guided setup step should fail")
 
 
+def test_guided_setup_session_rejects_skipped_steps() -> None:
+    blueprint = build_guided_setup_blueprint(lane="js8_only", hamlib_short_name="IC-7300")
+    session = start_guided_setup_session(blueprint)
+
+    try:
+        answer_guided_setup_step(session, "app_instance", APP_INSTANCE_EXISTING)
+    except ValueError as exc:
+        assert "cannot be answered before current step 'station_use'" in str(exc)
+    else:
+        raise AssertionError("guided setup should not allow future steps before current step")
+
+
+def test_guided_setup_session_revising_earlier_answer_clears_later_answers() -> None:
+    blueprint = build_guided_setup_blueprint(lane="js8_only", hamlib_short_name="IC-7300")
+    session = start_guided_setup_session(blueprint)
+    session = answer_guided_setup_step(session, "station_use", LANE_JS8_ONLY)
+    session = answer_guided_setup_step(session, "frequency_control", CONTROL_JS8CALL)
+    session = answer_guided_setup_step(session, "app_instance", APP_INSTANCE_EXISTING)
+
+    revised = answer_guided_setup_step(session, "frequency_control", CONTROL_NONE)
+
+    assert revised.answer_map == {
+        "station_use": LANE_JS8_ONLY,
+        "frequency_control": CONTROL_NONE,
+    }
+    assert revised.current_step is not None
+    assert revised.current_step.step_id == "app_instance"
+
+
 def test_guided_setup_next_action_comes_from_flow_status() -> None:
     blueprint = build_guided_setup_blueprint(
         lane=LANE_JS8_ONLY,

@@ -223,19 +223,26 @@ def answer_guided_setup_step(
     step_id: str,
     choice_id: str,
 ) -> GuidedSetupSession:
-    step = next((candidate for candidate in session.blueprint.steps if candidate.step_id == step_id), None)
+    steps = tuple(session.blueprint.steps)
+    step = next((candidate for candidate in steps if candidate.step_id == step_id), None)
     if step is None:
         raise ValueError(f"Unknown guided setup step: {step_id}")
     valid_choices = {choice.choice_id for choice in step.choices}
     if choice_id not in valid_choices:
         raise ValueError(f"Invalid choice '{choice_id}' for guided setup step '{step_id}'")
+
+    answer_map = dict(session.answers)
+    current = guided_setup_current_step(session.blueprint, answer_map)
+    if step_id not in answer_map and current is not None and current.step_id != step_id:
+        raise ValueError(
+            f"Guided setup step '{step_id}' cannot be answered before current step '{current.step_id}'"
+        )
+
     answers = dict(session.answers)
     answers[step_id] = choice_id
-    ordered = tuple(
-        (step.step_id, answers[step.step_id])
-        for step in session.blueprint.steps
-        if step.step_id in answers
-    )
+    step_order = [candidate.step_id for candidate in steps]
+    answered_index = step_order.index(step_id)
+    ordered = tuple((candidate.step_id, answers[candidate.step_id]) for candidate in steps[: answered_index + 1])
     return GuidedSetupSession(blueprint=session.blueprint, answers=ordered)
 
 
