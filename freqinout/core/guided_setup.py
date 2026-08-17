@@ -261,6 +261,46 @@ def selected_app_map_for_blueprint(blueprint: GuidedSetupBlueprint) -> Mapping[s
     return selected
 
 
+def guided_setup_selected_apps_from_flags(
+    *,
+    control_backend: str = "",
+    use_flrig: bool = False,
+    use_fldigi: bool = False,
+    use_flmsg: bool = False,
+    use_flamp: bool = False,
+    use_js8call: bool = False,
+    use_js8spotter: bool = False,
+    use_commstat: bool = False,
+    use_varac: bool = False,
+) -> Tuple[str, ...]:
+    """Return normalized app selections from UI flags and the control backend.
+
+    JS8Spotter and CommStat are JS8Call-adjacent workflows in FIO; selecting
+    either keeps JS8Call in the app set so lane inference and preview text stay
+    stable even before the UI checkbox redraw completes.
+    """
+
+    backend = _normalized_control_route(control_backend)
+    apps: list[str] = []
+    if use_flrig or backend == CONTROL_FLRIG:
+        apps.append("flrig")
+    if use_fldigi:
+        apps.append("fldigi")
+    if use_flmsg:
+        apps.append("flmsg")
+    if use_flamp:
+        apps.append("flamp")
+    if use_js8call or use_js8spotter or use_commstat or backend == CONTROL_JS8CALL:
+        apps.append("js8call")
+    if use_js8spotter:
+        apps.append("js8spotter")
+    if use_commstat:
+        apps.append("commstat")
+    if use_varac:
+        apps.append("varac")
+    return tuple(apps)
+
+
 def infer_guided_setup_lane(
     enabled_apps: Sequence[str] = (),
     *,

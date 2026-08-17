@@ -36,6 +36,7 @@ from freqinout.core.guided_setup import (
     guided_setup_lane_preset,
     guided_setup_operator_guidance_lines,
     guided_setup_role_hint,
+    guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
     guided_setup_schedule_summary,
     guided_setup_review_items,
@@ -78,6 +79,13 @@ def test_core_infers_guided_setup_lane_from_selected_apps() -> None:
     assert infer_guided_setup_lane(("flrig", "fldigi", "flmsg", "flamp")) == "fast_light"
     assert infer_guided_setup_lane(("flrig", "fldigi", "js8call")) == "tri_mode"
     assert infer_guided_setup_lane(("varac",), varac_selected=True) == LANE_VARAC
+
+
+def test_core_normalizes_guided_app_flags_from_backend_and_js8_adjacent_tools() -> None:
+    assert guided_setup_selected_apps_from_flags(control_backend=CONTROL_JS8CALL) == ("js8call",)
+    assert guided_setup_selected_apps_from_flags(use_js8spotter=True) == ("js8call", "js8spotter")
+    assert guided_setup_selected_apps_from_flags(use_commstat=True) == ("js8call", "commstat")
+    assert guided_setup_selected_apps_from_flags(use_varac=True) == ("varac",)
     assert infer_guided_setup_lane((), varac_selected=True) == LANE_VARAC
     assert infer_guided_setup_lane((), receive_only=True) == "sdr_observer"
 
@@ -1190,12 +1198,13 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "generated_radio_label(" in dialog_block
     assert "guided_radio_label_base(selected)" in dialog_block
     assert "display_name, _existing_radio_labels_for_name_generation()" not in dialog_block
-    assert 'apps.append("flmsg")' in dialog_block
-    assert 'apps.append("flamp")' in dialog_block
+    assert "guided_setup_selected_apps_from_flags(" in dialog_block
+    assert "use_flmsg=use_flmsg_chk.isChecked()" in dialog_block
+    assert "use_flamp=use_flamp_chk.isChecked()" in dialog_block
     assert "Hidden app sections are not part of this setup type unless you select Custom software mix." not in dialog_block
     assert "Hidden sections stay unchanged" not in dialog_block
-    assert 'apps.append("js8spotter")' in dialog_block
-    assert 'apps.append("commstat")' in dialog_block
+    assert "use_js8spotter=use_js8spotter_chk.isChecked()" in dialog_block
+    assert "use_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block

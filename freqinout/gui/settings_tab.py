@@ -157,6 +157,7 @@ from freqinout.core.guided_setup import (
     guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
     guided_setup_role_hint,
+    guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
     GuidedSetupFieldVisibilityInput,
     build_guided_setup_preview,
@@ -19346,25 +19347,17 @@ class SettingsTab(QWidget):
             )
 
         def _guided_plan_enabled_apps() -> Tuple[str, ...]:
-            backend = str(backend_combo.currentData() or "").strip().lower()
-            apps: List[str] = []
-            if use_flrig_chk.isChecked() or backend == "flrig":
-                apps.append("flrig")
-            if use_fldigi_chk.isChecked():
-                apps.append("fldigi")
-            if use_flmsg_chk.isChecked():
-                apps.append("flmsg")
-            if use_flamp_chk.isChecked():
-                apps.append("flamp")
-            if use_js8call_chk.isChecked() or backend == "js8call":
-                apps.append("js8call")
-            if use_js8spotter_chk.isChecked():
-                apps.append("js8spotter")
-            if use_commstat_chk.isChecked():
-                apps.append("commstat")
-            if use_varac_chk.isChecked():
-                apps.append("varac")
-            return tuple(apps)
+            return guided_setup_selected_apps_from_flags(
+                control_backend=str(backend_combo.currentData() or ""),
+                use_flrig=use_flrig_chk.isChecked(),
+                use_fldigi=use_fldigi_chk.isChecked(),
+                use_flmsg=use_flmsg_chk.isChecked(),
+                use_flamp=use_flamp_chk.isChecked(),
+                use_js8call=use_js8call_chk.isChecked(),
+                use_js8spotter=use_js8spotter_chk.isChecked(),
+                use_commstat=use_commstat_chk.isChecked(),
+                use_varac=use_varac_chk.isChecked(),
+            )
 
         def _current_guided_blueprint() -> GuidedSetupBlueprint:
             lane = _current_guided_lane()
