@@ -912,6 +912,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'setup_type_combo.addItem("Custom software mix", "custom")' in dialog_block
     assert "def _apply_setup_type_choice()" in dialog_block
     assert "def _current_guided_blueprint()" in dialog_block
+    assert "_set_row_visible(configure_auto_wrap, bool(setup_type_choice))" in dialog_block
+    assert "show_software_checkboxes = setup_type_choice == \"custom\"" in dialog_block
     assert "guided_setup_capability_policy(_current_guided_blueprint())" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_JS8CALL)" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_FLRIG)" in dialog_block
@@ -928,7 +930,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "display_name, _existing_radio_labels_for_name_generation()" not in dialog_block
     assert 'apps.append("flmsg")' in dialog_block
     assert 'apps.append("flamp")' in dialog_block
-    assert "Hidden app sections are not part of this setup type unless you select them." in dialog_block
+    assert "Hidden app sections are not part of this setup type unless you select Custom software mix." in dialog_block
     assert "Hidden sections stay unchanged" not in dialog_block
     assert 'apps.append("js8spotter")' in dialog_block
     assert 'apps.append("commstat")' in dialog_block
@@ -936,6 +938,10 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
     assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
+    assert "guided_setup_flow_items(blueprint, plan)" in dialog_block
+    assert 'guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}' in dialog_block
+    assert 'step_frame.setObjectName(f"guidedSetupStep_{step_id}")' in dialog_block
+    assert 'status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")' in dialog_block
     assert "guided_setup_operator_guidance_lines(blueprint, plan)" in dialog_block
     assert 'QGroupBox("Setup Steps")' in dialog_block
     assert "Setup type: {setup_type_label}" in dialog_block

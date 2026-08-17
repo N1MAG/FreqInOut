@@ -151,6 +151,7 @@ from freqinout.core.guided_setup import (
     build_guided_setup_blueprint,
     guided_radio_label_base,
     guided_setup_capability_policy,
+    guided_setup_flow_items,
     guided_setup_flow_summary_lines,
     guided_setup_operator_guidance_lines,
     build_guided_setup_preview,
@@ -18349,6 +18350,38 @@ class SettingsTab(QWidget):
         app_setup_plan_group.setVisible(False)
         app_setup_plan_layout = QVBoxLayout(app_setup_plan_group)
         app_setup_plan_layout.setContentsMargins(10, 8, 10, 8)
+        app_setup_plan_layout.setSpacing(6)
+        guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
+        guided_step_stack = QWidget()
+        guided_step_stack_layout = QVBoxLayout(guided_step_stack)
+        guided_step_stack_layout.setContentsMargins(0, 0, 0, 0)
+        guided_step_stack_layout.setSpacing(4)
+        for step_id in ("radio", "software", "connection", "schedule", "review"):
+            step_frame = QFrame()
+            step_frame.setObjectName(f"guidedSetupStep_{step_id}")
+            step_frame.setFrameShape(QFrame.StyledPanel)
+            step_frame_layout = QGridLayout(step_frame)
+            step_frame_layout.setContentsMargins(8, 6, 8, 6)
+            step_frame_layout.setHorizontalSpacing(8)
+            step_frame_layout.setVerticalSpacing(2)
+            status_label = QLabel()
+            status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")
+            status_label.setAlignment(Qt.AlignCenter)
+            title_label = QLabel()
+            title_label.setObjectName(f"guidedSetupStepTitle_{step_id}")
+            title_font = title_label.font()
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            detail_label = QLabel()
+            detail_label.setObjectName(f"guidedSetupStepDetail_{step_id}")
+            detail_label.setWordWrap(True)
+            step_frame_layout.addWidget(status_label, 0, 0, 2, 1)
+            step_frame_layout.addWidget(title_label, 0, 1)
+            step_frame_layout.addWidget(detail_label, 1, 1)
+            step_frame_layout.setColumnStretch(1, 1)
+            guided_step_stack_layout.addWidget(step_frame)
+            guided_step_widgets[step_id] = (step_frame, status_label, title_label, detail_label)
+        app_setup_plan_layout.addWidget(guided_step_stack)
         app_setup_plan_label = QLabel()
         app_setup_plan_label.setWordWrap(True)
         app_setup_plan_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -19361,6 +19394,58 @@ class SettingsTab(QWidget):
                 include_varac=use_varac_chk.isChecked(),
             )
 
+        def _guided_step_status_label(status: str) -> str:
+            status_key = str(status or "ready").strip().lower()
+            if status_key == "backup":
+                return "Backup"
+            if status_key == "review":
+                return "Review"
+            if status_key == "needs_input":
+                return "Needed"
+            return "Ready"
+
+        def _update_guided_step_widgets(blueprint: GuidedSetupBlueprint, plan: GuidedAppConfigPlan) -> None:
+            theme = resolve_theme(self.settings)
+            text_color = theme.get("text", "#1C1F21")
+            muted_color = theme.get("text_muted", text_color)
+            status_colors = {
+                "ready": theme.get("success", "#2E7D32"),
+                "review": theme.get("warning", "#C99700"),
+                "backup": theme.get("warning", "#C99700"),
+                "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
+            }
+            seen: set[str] = set()
+            for item in guided_setup_flow_items(blueprint, plan):
+                step_id = str(item.item_id or "").strip()
+                widgets = guided_step_widgets.get(step_id)
+                if widgets is None:
+                    continue
+                seen.add(step_id)
+                frame, status_label, title_label, detail_label = widgets
+                status_key = str(item.status or "ready").strip().lower()
+                accent = QColor(status_colors.get(status_key, status_colors["ready"]))
+                bg = QColor(accent)
+                bg.setAlpha(22)
+                border = QColor(accent)
+                border.setAlpha(130)
+                frame.setVisible(True)
+                frame.setToolTip(str(item.detail or ""))
+                frame.setStyleSheet(
+                    "QFrame {"
+                    f" background-color: {bg.name(QColor.HexArgb)};"
+                    f" border: 1px solid {border.name(QColor.HexArgb)};"
+                    " border-radius: 6px;"
+                    "}"
+                    f" QLabel {{ color: {text_color}; border: none; background: transparent; }}"
+                    f" QLabel#{detail_label.objectName()} {{ color: {muted_color}; }}"
+                )
+                status_label.setText(_guided_step_status_label(status_key))
+                title_label.setText(str(item.title or "").strip())
+                detail_label.setText(str(item.detail or "").strip())
+            for step_id, widgets in guided_step_widgets.items():
+                if step_id not in seen:
+                    widgets[0].setVisible(False)
+
         def _update_guided_app_setup_plan_review() -> None:
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 app_setup_plan_group.setVisible(False)
@@ -19407,14 +19492,16 @@ class SettingsTab(QWidget):
                 app_paths=app_paths,
             )
             preview = build_guided_setup_preview(blueprint, plan)
+            _update_guided_step_widgets(blueprint, plan)
             flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
             guidance_lines = guided_setup_operator_guidance_lines(blueprint, plan)
-            label_lines = list(flow_lines)
+            label_lines: List[str] = []
             if guidance_lines:
-                label_lines.extend(("", *guidance_lines))
+                label_lines.extend(guidance_lines)
             if preview.lines:
                 label_lines.extend(("", *preview.lines))
             app_setup_plan_label.setText("\n".join(label_lines))
+            app_setup_plan_label.setToolTip("\n".join(flow_lines))
             app_setup_plan_group.setVisible(bool(label_lines))
 
         def _apply_dialog_autoconfigure() -> None:
@@ -19654,11 +19741,15 @@ class SettingsTab(QWidget):
 
             if observer_mode:
                 _set_row_visible(software_wrap, False)
+                _set_row_visible(configure_auto_wrap, False)
                 _set_row_visible(software_hint_label, False)
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                _set_row_visible(software_wrap, True)
+                setup_type_choice = str(setup_type_combo.currentData() or "").strip()
+                show_software_checkboxes = setup_type_choice == "custom"
+                _set_row_visible(software_wrap, show_software_checkboxes)
+                _set_row_visible(configure_auto_wrap, bool(setup_type_choice))
                 _set_row_visible(software_hint_label, True)
                 software_parts = []
                 if use_flrig:
@@ -19687,12 +19778,22 @@ class SettingsTab(QWidget):
                     if setup_type_label and setup_type_combo.currentData()
                     else ""
                 )
-                software_hint_label.setText(
-                    setup_prefix
-                    + "This radio's current software bundle is: "
-                    + ", ".join(software_parts)
-                    + ". Hidden app sections are not part of this setup type unless you select them."
-                )
+                if not setup_type_choice:
+                    software_hint_label.setText(
+                        "Choose a setup type above. FIO will then show only the fields needed for that radio path."
+                    )
+                elif show_software_checkboxes:
+                    software_hint_label.setText(
+                        setup_prefix
+                        + "Custom software mix is selected. Choose only the applications that belong to this radio."
+                    )
+                else:
+                    software_hint_label.setText(
+                        setup_prefix
+                        + "This setup uses: "
+                        + ", ".join(software_parts)
+                        + ". Hidden app sections are not part of this setup type unless you select Custom software mix."
+                    )
                 if app_setup_plan_group.isVisible():
                     _update_guided_app_setup_plan_review()
 
