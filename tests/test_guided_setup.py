@@ -25,6 +25,7 @@ from freqinout.core.guided_setup import (
     generated_radio_label,
     guided_radio_label_base,
     guided_setup_capability_policy,
+    guided_setup_field_visibility,
     guided_setup_flow_items,
     guided_setup_next_action_text,
     guided_setup_next_flow_item,
@@ -40,6 +41,7 @@ from freqinout.core.guided_setup import (
     radio_proposals_for_blueprint,
     selected_app_map_for_blueprint,
     start_guided_setup_session,
+    GuidedSetupFieldVisibilityInput,
 )
 from freqinout.core.config_autodiscovery import build_lab_radio_proposals
 from freqinout.core.guided_app_config_plan import build_guided_external_app_config_plan
@@ -105,6 +107,64 @@ def test_js8call_only_capability_policy_hides_fast_light_fields_but_allows_js8_c
     assert policy.qsy_controls_visible is True
     assert policy.external_writes_allowed is True
     assert policy.external_writes_require_backup is True
+
+
+def test_guided_setup_field_visibility_blank_state_hides_connection_fields() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8call",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_READ_ONLY,
+        control_route=CONTROL_JS8CALL,
+    )
+
+    visibility = guided_setup_field_visibility(
+        blueprint,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice="",
+            backend=CONTROL_JS8CALL,
+            use_js8call=True,
+        ),
+    )
+
+    assert visibility.setup_started is False
+    assert visibility.connection_group is False
+    assert visibility.configure_automatically is False
+    assert visibility.software_choices is False
+    assert visibility.js8_fields is False
+    assert visibility.flrig_fields is False
+    assert visibility.technical_identity_fields is False
+
+
+def test_guided_setup_field_visibility_js8_only_shows_only_js8_connection_fields() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8call",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_JS8CALL,
+        include_spotter=True,
+        include_commstat=True,
+    )
+
+    visibility = guided_setup_field_visibility(
+        blueprint,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice=LANE_JS8_ONLY,
+            backend=CONTROL_JS8CALL,
+            use_js8call=True,
+            use_fldigi=True,
+            use_flmsg=True,
+            use_flamp=True,
+        ),
+    )
+
+    assert visibility.connection_group is True
+    assert visibility.js8_fields is True
+    assert visibility.flrig_fields is False
+    assert visibility.fldigi_fields is False
+    assert visibility.flmsg_fields is False
+    assert visibility.flamp_fields is False
+    assert visibility.varac_fields is False
+    assert visibility.configure_automatically is True
 
 
 def test_generated_radio_label_uses_hamlib_short_name_and_increments() -> None:
@@ -808,6 +868,33 @@ def test_varac_capability_policy_blocks_scheduler_and_qsy_controls() -> None:
     assert blueprint.schedule_choices[0].recommended is True
 
 
+def test_guided_setup_field_visibility_varac_only_shows_varac_without_frequency_control() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-705",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_FLRIG,
+    )
+
+    visibility = guided_setup_field_visibility(
+        blueprint,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice=LANE_VARAC,
+            backend=CONTROL_FLRIG,
+            use_flrig=True,
+            use_varac=True,
+        ),
+    )
+
+    assert visibility.connection_group is True
+    assert visibility.varac_fields is True
+    assert visibility.flrig_fields is False
+    assert visibility.rigctld_fields is False
+    assert visibility.js8_fields is False
+    assert visibility.configure_automatically is True
+    assert visibility.software_choices is False
+
+
 def test_varac_cluster_frequency_control_choices_are_read_only() -> None:
     blueprint = build_guided_setup_blueprint(
         lane="varac_cluster",
@@ -842,6 +929,34 @@ def test_observer_capability_policy_is_monitor_only() -> None:
     assert policy.scheduler_assignment_allowed is False
     assert policy.qsy_controls_visible is False
     assert any("Receive-only observer" in note for note in policy.read_only_notes)
+
+
+def test_guided_setup_field_visibility_observer_shows_only_observer_fields() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="sdr_observer",
+        hamlib_short_name="Airspy HF",
+        receive_only=True,
+        control_route=CONTROL_NONE,
+    )
+
+    visibility = guided_setup_field_visibility(
+        blueprint,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice="sdr_observer",
+            backend=CONTROL_NONE,
+            device_class="observer",
+            use_js8call=True,
+            use_varac=True,
+        ),
+    )
+
+    assert visibility.observer_mode is True
+    assert visibility.connection_group is True
+    assert visibility.observer_fields is True
+    assert visibility.js8_fields is False
+    assert visibility.varac_fields is False
+    assert visibility.configure_automatically is False
+    assert visibility.setup_steps is False
 
 
 def test_guided_setup_session_advances_to_review_only_after_required_steps() -> None:
@@ -933,18 +1048,19 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'setup_type_combo.addItem("Custom software mix", "custom")' in dialog_block
     assert "def _apply_setup_type_choice()" in dialog_block
     assert "def _current_guided_blueprint()" in dialog_block
-    assert "_set_row_visible(configure_auto_wrap, bool(setup_type_choice))" in dialog_block
-    assert "show_software_checkboxes = setup_type_choice == \"custom\"" in dialog_block
-    assert "guided_setup_capability_policy(_current_guided_blueprint())" in dialog_block
+    assert "guided_setup_field_visibility(" in dialog_block
+    assert "GuidedSetupFieldVisibilityInput(" in dialog_block
+    assert "_set_row_visible(configure_auto_wrap, visibility.configure_automatically)" in dialog_block
+    assert "show_software_checkboxes = visibility.software_choices" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_JS8CALL)" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_FLRIG)" in dialog_block
     assert '_set_combo_data(backend_combo, "manual")' in dialog_block
     assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
     assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
-    assert 'and "fldigi" in visible_apps' in dialog_block
-    assert 'and "flmsg" in visible_apps' in dialog_block
-    assert 'and "flamp" in visible_apps' in dialog_block
-    assert 'and "varac" in visible_apps' in dialog_block
+    assert "_set_row_visible(widget, visibility.fldigi_fields)" in dialog_block
+    assert "_set_row_visible(widget, visibility.flmsg_fields)" in dialog_block
+    assert "_set_row_visible(widget, visibility.flamp_fields)" in dialog_block
+    assert "_set_row_visible(widget, visibility.varac_fields)" in dialog_block
     assert "def _existing_radio_labels_for_name_generation()" in dialog_block
     assert "generated_radio_label(" in dialog_block
     assert "guided_radio_label_base(selected)" in dialog_block

@@ -126,6 +126,42 @@ class GuidedSetupPreview:
 
 
 @dataclass(frozen=True)
+class GuidedSetupFieldVisibilityInput:
+    setup_type_choice: str = ""
+    backend: str = CONTROL_FLRIG
+    device_class: str = "tx_rx"
+    use_flrig: bool = False
+    use_fldigi: bool = False
+    use_flmsg: bool = False
+    use_flamp: bool = False
+    use_js8call: bool = False
+    use_js8spotter: bool = False
+    use_commstat: bool = False
+    use_varac: bool = False
+    optional_open: bool = False
+
+
+@dataclass(frozen=True)
+class GuidedSetupFieldVisibility:
+    setup_started: bool
+    observer_mode: bool
+    flrig_fields: bool
+    rigctld_fields: bool
+    js8_fields: bool
+    observer_fields: bool
+    fldigi_fields: bool
+    flmsg_fields: bool
+    flamp_fields: bool
+    varac_fields: bool
+    optional_fields: bool
+    technical_identity_fields: bool
+    software_choices: bool
+    configure_automatically: bool
+    connection_group: bool
+    setup_steps: bool
+
+
+@dataclass(frozen=True)
 class GuidedSetupFlowItem:
     item_id: str
     title: str
@@ -300,6 +336,77 @@ def guided_setup_capability_policy(blueprint: GuidedSetupBlueprint) -> GuidedSet
         external_writes_allowed=writes_allowed,
         external_writes_require_backup=writes_require_backup,
         read_only_notes=tuple(read_only_notes),
+    )
+
+
+def guided_setup_field_visibility(
+    blueprint: GuidedSetupBlueprint,
+    state: GuidedSetupFieldVisibilityInput,
+) -> GuidedSetupFieldVisibility:
+    """Return Add Radio field visibility from guided setup state.
+
+    The Settings dialog owns widgets; the core owns the product rule that a
+    guided lane should expose only the fields needed for that setup path.
+    """
+
+    policy = guided_setup_capability_policy(blueprint)
+    visible_apps = set(policy.visible_apps)
+    setup_type_choice = str(state.setup_type_choice or "").strip()
+    setup_started = bool(setup_type_choice)
+    backend = _normalized_control_route(str(state.backend or ""))
+    device_class = str(state.device_class or "").strip().lower()
+    observer_mode = device_class == "observer"
+
+    flrig_fields = (
+        setup_started
+        and not observer_mode
+        and policy.fio_frequency_control_allowed
+        and (backend == CONTROL_FLRIG or (bool(state.use_flrig) and "flrig" in visible_apps))
+    )
+    rigctld_fields = (
+        setup_started
+        and not observer_mode
+        and policy.fio_frequency_control_allowed
+        and backend == CONTROL_RIGCTLD
+    )
+    js8_fields = setup_started and not observer_mode and bool(state.use_js8call) and "js8call" in visible_apps
+    observer_fields = setup_started and observer_mode
+    fldigi_fields = setup_started and not observer_mode and bool(state.use_fldigi) and "fldigi" in visible_apps
+    flmsg_fields = setup_started and not observer_mode and bool(state.use_flmsg) and "flmsg" in visible_apps
+    flamp_fields = setup_started and not observer_mode and bool(state.use_flamp) and "flamp" in visible_apps
+    varac_fields = setup_started and not observer_mode and bool(state.use_varac) and "varac" in visible_apps
+    technical_identity_fields = setup_type_choice == "custom"
+    software_choices = setup_type_choice == "custom" and not observer_mode
+    configure_automatically = setup_started and not observer_mode
+    connection_group = any(
+        (
+            flrig_fields,
+            rigctld_fields,
+            js8_fields,
+            observer_fields,
+            fldigi_fields,
+            flmsg_fields,
+            flamp_fields,
+            varac_fields,
+        )
+    )
+    return GuidedSetupFieldVisibility(
+        setup_started=setup_started,
+        observer_mode=observer_mode,
+        flrig_fields=flrig_fields,
+        rigctld_fields=rigctld_fields,
+        js8_fields=js8_fields,
+        observer_fields=observer_fields,
+        fldigi_fields=fldigi_fields,
+        flmsg_fields=flmsg_fields,
+        flamp_fields=flamp_fields,
+        varac_fields=varac_fields,
+        optional_fields=bool(state.optional_open),
+        technical_identity_fields=technical_identity_fields,
+        software_choices=software_choices,
+        configure_automatically=configure_automatically,
+        connection_group=connection_group,
+        setup_steps=not observer_mode,
     )
 
 

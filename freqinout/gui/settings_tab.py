@@ -151,10 +151,12 @@ from freqinout.core.guided_setup import (
     build_guided_setup_blueprint,
     guided_radio_label_base,
     guided_setup_capability_policy,
+    guided_setup_field_visibility,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
     guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
+    GuidedSetupFieldVisibilityInput,
     build_guided_setup_preview,
     generated_radio_label,
     infer_guided_control_route,
@@ -19193,9 +19195,6 @@ class SettingsTab(QWidget):
             if label_widget is not None:
                 label_widget.setVisible(bool(visible))
 
-        def _any_row_visible(widgets: Sequence[QWidget]) -> bool:
-            return any(bool(widget.isVisible()) for widget in widgets)
-
         def _existing_radio_labels_for_name_generation() -> Tuple[str, ...]:
             try:
                 current_id = int((existing or {}).get("id", 0) or 0)
@@ -19737,48 +19736,44 @@ class SettingsTab(QWidget):
                     use_js8call_chk.setChecked(True)
                     use_js8call = True
 
-            policy = guided_setup_capability_policy(_current_guided_blueprint())
-            visible_apps = set(policy.visible_apps)
+            visibility = guided_setup_field_visibility(
+                _current_guided_blueprint(),
+                GuidedSetupFieldVisibilityInput(
+                    setup_type_choice=setup_type_choice,
+                    backend=backend,
+                    device_class=device_class_value,
+                    use_flrig=use_flrig,
+                    use_fldigi=use_fldigi,
+                    use_flmsg=bool(use_flmsg_chk.isChecked()),
+                    use_flamp=bool(use_flamp_chk.isChecked()),
+                    use_js8call=use_js8call,
+                    use_js8spotter=use_js8spotter,
+                    use_commstat=use_commstat,
+                    use_varac=use_varac,
+                    optional_open=optional_toggle.isChecked(),
+                ),
+            )
             for widget in flrig_field_widgets:
-                _set_row_visible(
-                    widget,
-                    setup_started
-                    and not observer_mode
-                    and policy.fio_frequency_control_allowed
-                    and (backend == CONTROL_FLRIG or (use_flrig and "flrig" in visible_apps)),
-                )
+                _set_row_visible(widget, visibility.flrig_fields)
             for widget in rigctld_field_widgets:
-                _set_row_visible(
-                    widget,
-                    setup_started
-                    and not observer_mode
-                    and policy.fio_frequency_control_allowed
-                    and backend == CONTROL_RIGCTLD,
-                )
+                _set_row_visible(widget, visibility.rigctld_fields)
             for widget in js8_field_widgets:
-                _set_row_visible(widget, setup_started and not observer_mode and use_js8call and "js8call" in visible_apps)
+                _set_row_visible(widget, visibility.js8_fields)
             for widget in observer_field_widgets:
-                _set_row_visible(widget, setup_started and observer_mode)
+                _set_row_visible(widget, visibility.observer_fields)
             for widget in fldigi_field_widgets:
-                _set_row_visible(widget, setup_started and not observer_mode and use_fldigi and "fldigi" in visible_apps)
+                _set_row_visible(widget, visibility.fldigi_fields)
             for widget in flmsg_field_widgets:
-                _set_row_visible(
-                    widget,
-                    setup_started and not observer_mode and bool(use_flmsg_chk.isChecked()) and "flmsg" in visible_apps,
-                )
+                _set_row_visible(widget, visibility.flmsg_fields)
             for widget in flamp_field_widgets:
-                _set_row_visible(
-                    widget,
-                    setup_started and not observer_mode and bool(use_flamp_chk.isChecked()) and "flamp" in visible_apps,
-                )
+                _set_row_visible(widget, visibility.flamp_fields)
             for widget in varac_field_widgets:
-                _set_row_visible(widget, setup_started and not observer_mode and use_varac and "varac" in visible_apps)
+                _set_row_visible(widget, visibility.varac_fields)
             for widget in optional_field_widgets:
-                _set_row_visible(widget, optional_toggle.isChecked())
+                _set_row_visible(widget, visibility.optional_fields)
 
-            show_technical_identity = setup_type_choice == "custom"
             for widget in technical_identity_widgets:
-                _set_row_visible(widget, show_technical_identity)
+                _set_row_visible(widget, visibility.technical_identity_fields)
 
             if observer_mode:
                 _set_row_visible(software_wrap, False)
@@ -19787,9 +19782,9 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                show_software_checkboxes = setup_type_choice == "custom"
-                _set_row_visible(software_wrap, show_software_checkboxes)
-                _set_row_visible(configure_auto_wrap, bool(setup_type_choice))
+                show_software_checkboxes = visibility.software_choices
+                _set_row_visible(software_wrap, visibility.software_choices)
+                _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)
                 software_parts = []
                 if use_flrig:
@@ -19860,20 +19855,7 @@ class SettingsTab(QWidget):
                 )
             optional_body.setVisible(bool(optional_toggle.isChecked()))
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
-            connection_group.setVisible(
-                _any_row_visible(
-                    [
-                        *flrig_field_widgets,
-                        *rigctld_field_widgets,
-                        *js8_field_widgets,
-                        *observer_field_widgets,
-                        *fldigi_field_widgets,
-                        *flmsg_field_widgets,
-                        *flamp_field_widgets,
-                        *varac_field_widgets,
-                    ]
-                )
-            )
+            connection_group.setVisible(visibility.connection_group)
             _update_app_choice_visibility()
             _update_port_prompt_visibility()
             _update_dialog_readiness()
