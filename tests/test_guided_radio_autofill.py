@@ -319,7 +319,37 @@ def test_radio_autofill_requires_manual_choice_for_multiple_installs() -> None:
     )
 
     assert "js8_install_path" not in suggestions
-    assert "Multiple JS8Call installs found. Choose the correct app path manually." in review
+    assert "Multiple JS8Call installs found: JS8Call.app, js8call. Choose the correct app path manually." in review
+
+
+def test_radio_autofill_multiple_js8_variants_names_choices_for_review() -> None:
+    suggestions, review = guided_radio_autofill_suggestions(
+        current={},
+        selected={"js8call": True},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(
+            types.SimpleNamespace(app_id="js8call", executable=True, path="/Applications/JS8Call-improved.app"),
+            types.SimpleNamespace(
+                app_id="js8call",
+                executable=True,
+                path="/Users/bill/RadioTools/Programs/Subspace-Edition/build-trimode-baseline/JS8Call.app",
+            ),
+            types.SimpleNamespace(app_id="js8call", executable=True, path="/Users/bill/RadioTools/Programs/js8_22/js8call"),
+        ),
+        fast_results={},
+        js8_results={},
+        varac_results={},
+        js8_file_profiles=(),
+        default_ports={"js8call": "2442"},
+        profile_name="FIO-C",
+    )
+
+    assert "js8_install_path" not in suggestions
+    assert (
+        "Multiple JS8Call installs found: JS8Call-improved, JS8Call Subspace, JS8Call 2.2.0. "
+        "Choose the correct app path manually."
+    ) in review
 
 
 def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:

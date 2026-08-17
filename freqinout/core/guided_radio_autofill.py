@@ -136,11 +136,28 @@ def guided_single_install_path(
         seen.add(key)
         unique_paths.append(path_text)
     if len(unique_paths) > 1:
-        review.append(f"Multiple {label} installs found. Choose the correct app path manually.")
+        labels = _guided_install_review_labels(app_id, unique_paths)
+        detail = f": {', '.join(labels[:4])}" if labels else ""
+        if len(labels) > 4:
+            detail += f", +{len(labels) - 4} more"
+        review.append(f"Multiple {label} installs found{detail}. Choose the correct app path manually.")
         return ""
     if len(unique_paths) == 1:
         return unique_paths[0]
     return guided_detection_path(fallback_results, result_key)
+
+
+def _guided_install_review_labels(app_id: str, paths: Sequence[str]) -> Tuple[str, ...]:
+    labels: List[str] = []
+    seen: set[str] = set()
+    for path_text in paths:
+        variant = guided_app_candidate_variant_label(app_id, path_text)
+        label = variant or Path(str(path_text or "")).name or str(path_text or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return tuple(labels)
 
 
 def guided_app_candidate_choices(candidates: Sequence[Any], app_id: str) -> Tuple[Tuple[str, str], ...]:
