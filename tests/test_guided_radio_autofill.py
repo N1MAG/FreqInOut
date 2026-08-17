@@ -126,6 +126,39 @@ def test_app_candidate_choices_treat_bundle_and_shim_as_one_install(tmp_path: Pa
     assert review == []
 
 
+def test_app_candidate_choices_label_js8call_supported_variants() -> None:
+    choices = guided_app_candidate_choices(
+        (
+            types.SimpleNamespace(
+                app_id="js8call",
+                executable=True,
+                path="/Applications/JS8Call-improved.app",
+                source="known_path",
+            ),
+            types.SimpleNamespace(
+                app_id="js8call",
+                executable=True,
+                path="/Users/bill/RadioTools/Programs/Subspace-Edition/build-trimode-baseline/JS8Call.app",
+                source="known_path",
+            ),
+            types.SimpleNamespace(
+                app_id="js8call",
+                executable=True,
+                path="/Users/bill/RadioTools/Programs/js8_22/js8call",
+                source="known_path",
+            ),
+        ),
+        "js8call",
+    )
+
+    labels = [label for label, _path in choices]
+    assert labels == [
+        "JS8Call-improved - /Applications/JS8Call-improved.app (known_path)",
+        "JS8Call Subspace - /Users/bill/RadioTools/Programs/Subspace-Edition/build-trimode-baseline/JS8Call.app (known_path)",
+        "JS8Call 2.2.0 - /Users/bill/RadioTools/Programs/js8_22/js8call (known_path)",
+    ]
+
+
 def test_default_ports_use_unused_service_defaults() -> None:
     profiles = [
         {"id": 1, "flrig_port": 12345, "fldigi_port": 7362, "js8_port": 2442},

@@ -159,9 +159,26 @@ def guided_app_candidate_choices(candidates: Sequence[Any], app_id: str) -> Tupl
             continue
         seen.add(key)
         source = str(getattr(candidate, "source", "") or "").strip()
-        label = f"{path_text} ({source})" if source else path_text
+        display_prefix = guided_app_candidate_variant_label(app_id, path_text)
+        path_label = f"{display_prefix} - {path_text}" if display_prefix else path_text
+        label = f"{path_label} ({source})" if source else path_label
         choices.append((label, path_text))
     return tuple(choices)
+
+
+def guided_app_candidate_variant_label(app_id: str, path_text: str) -> str:
+    if str(app_id or "").strip().lower() != "js8call":
+        return ""
+    lowered = str(path_text or "").strip().lower()
+    if not lowered:
+        return ""
+    if "subspace" in lowered:
+        return "JS8Call Subspace"
+    if "improved" in lowered:
+        return "JS8Call-improved"
+    if "2.2.0" in lowered or "js8_22" in lowered or "js8-22" in lowered:
+        return "JS8Call 2.2.0"
+    return ""
 
 
 def guided_js8_profile_choices(profiles: Sequence[Any]) -> Tuple[Tuple[str, Dict[str, str]], ...]:
