@@ -899,6 +899,13 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     ]
 
     assert 'setup_type_combo.setObjectName("guidedSetupType")' in dialog_block
+    assert "scroll = QScrollArea(dlg)" in dialog_block
+    assert "scroll.setWidgetResizable(True)" in dialog_block
+    assert "setFixedWidth" not in dialog_block
+    assert "setRowWrapPolicy(QFormLayout.WrapLongRows)" in dialog_block
+    assert "AdjustToMinimumContentsLengthWithIcon" in dialog_block
+    assert "combo.setMinimumWidth" not in dialog_block
+    assert "combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in dialog_block
     assert 'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)' in dialog_block
     assert 'setup_type_combo.addItem("VarAC only", LANE_VARAC)' in dialog_block
     assert 'setup_type_combo.addItem("Receive-only SDR", LANE_SDR_OBSERVER)' in dialog_block

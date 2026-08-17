@@ -1597,7 +1597,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "tcp_port=initial_js8_port" in planner_source
     assert 'guided_single_install_path(install_candidates, "flmsg", fast_results, "path_flmsg", "FLMsg", review)' in planner_source
     assert 'guided_single_install_path(install_candidates, "flamp", fast_results, "path_flamp", "FLAmp", review)' in planner_source
-    assert "Multiple {label} installs found. Choose the correct app path manually." in planner_source
+    assert "Multiple {label} installs found{detail}. Choose the correct app path manually." in planner_source
     assert 'getattr(selected_js8_profile, "tcp_server_port", "")' in planner_source
     assert '_suggest("js8_profile_path", getattr(selected_js8_profile, "save_dir", ""))' in planner_source
     assert "guided_js8_profile_review_text(" in planner_source

@@ -18080,6 +18080,8 @@ class SettingsTab(QWidget):
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(4)
             label = QLabel(text)
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             row.addWidget(label)
             if help_text:
                 help_btn = QPushButton("i", wrap)
@@ -18107,6 +18109,7 @@ class SettingsTab(QWidget):
             return wrap
 
         def _add_form_row(form_layout: QFormLayout, label_text: str, field_widget: QWidget, help_text: str = "") -> None:
+            field_widget.setSizePolicy(QSizePolicy.Expanding, field_widget.sizePolicy().verticalPolicy())
             label_widget = _make_help_label(label_text, help_text) if label_text else QWidget()
             if label_text:
                 row_labels[field_widget] = label_widget
@@ -18119,16 +18122,25 @@ class SettingsTab(QWidget):
             form_layout.addRow(field_widget)
 
         def _configure_combo_width(combo: QComboBox, minimum: int = 220) -> None:
-            combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(max(12, min(28, int(minimum / 10))))
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             fm = combo.fontMetrics()
             widest = minimum
             for idx in range(combo.count()):
                 widest = max(widest, fm.horizontalAdvance(combo.itemText(idx)) + 56)
-            combo.setMinimumWidth(min(widest, 420))
             try:
                 combo.view().setMinimumWidth(min(max(widest + 24, minimum), 520))
             except Exception:
                 pass
+
+        def _configure_guided_form(form_layout: QFormLayout) -> None:
+            form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
+            form_layout.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+            form_layout.setHorizontalSpacing(12)
+            form_layout.setVerticalSpacing(8)
 
         def _make_section(title: str, help_text: str = "") -> tuple[QGroupBox, QFormLayout]:
             group = QGroupBox(title)
@@ -18140,7 +18152,7 @@ class SettingsTab(QWidget):
                 help_label.setWordWrap(True)
                 group_layout.addWidget(help_label)
             form_layout = QFormLayout()
-            form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            _configure_guided_form(form_layout)
             group_layout.addLayout(form_layout)
             body_layout.addWidget(group)
             return group, form_layout
@@ -18179,7 +18191,7 @@ class SettingsTab(QWidget):
         software_group_layout.setSpacing(8)
         body_layout.addWidget(software_group)
         software_form = QFormLayout()
-        software_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        _configure_guided_form(software_form)
         software_group_layout.addLayout(software_form)
         connection_group, connection_form = _make_section(
             "Connection Details",
@@ -18199,6 +18211,7 @@ class SettingsTab(QWidget):
         refresh_catalog_btn.setToolTip("Reload the local rig catalog from Hamlib when available.")
         radio_model_row = QHBoxLayout()
         radio_model_row.setContentsMargins(0, 0, 0, 0)
+        radio_model_row.setSpacing(8)
         radio_model_row.addWidget(radio_model_combo, 1)
         radio_model_row.addWidget(refresh_catalog_btn)
         radio_model_wrap = QWidget()
@@ -18345,7 +18358,7 @@ class SettingsTab(QWidget):
         app_choice_group = QGroupBox("Choose Detected Apps")
         app_choice_group.setVisible(False)
         app_choice_layout = QFormLayout(app_choice_group)
-        app_choice_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        _configure_guided_form(app_choice_layout)
         app_choice_combos: Dict[str, QComboBox] = {}
         app_choice_specs = [
             ("flrig", "Which FLRig controls this radio?"),
@@ -18362,7 +18375,7 @@ class SettingsTab(QWidget):
             combo.setObjectName(f"guidedAutoAppChoice_{app_id}")
             combo.setVisible(False)
             combo.setToolTip("FIO found more than one installed app. Choose the one this radio should use.")
-            combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+            _configure_combo_width(combo, minimum=260)
             app_choice_combos[app_id] = combo
             label_widget = _make_help_label(prompt_text, "Choose the installed app path that belongs to this radio.")
             label_widget.setVisible(False)
@@ -18372,7 +18385,7 @@ class SettingsTab(QWidget):
         js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")
         js8_profile_choice_combo.setVisible(False)
         js8_profile_choice_combo.setToolTip("FIO found more than one JS8Call profile. Choose the profile this radio uses.")
-        js8_profile_choice_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        _configure_combo_width(js8_profile_choice_combo, minimum=260)
         js8_profile_choice_label = _make_help_label(
             "Which JS8Call profile belongs to this radio?",
             "Choose the JS8Call profile/port pair that belongs to this radio. FIO will fill the TCP port, profile folder, and DIRECTED.TXT path.",
@@ -18395,6 +18408,8 @@ class SettingsTab(QWidget):
         rig_port_edit = QLineEdit(str((existing or {}).get("rig_port", "") or ""))
         rig_port_edit.setValidator(QIntValidator(1, 65535, rig_port_edit))
         rig_row = QHBoxLayout()
+        rig_row.setContentsMargins(0, 0, 0, 0)
+        rig_row.setSpacing(8)
         rig_row.addWidget(rig_host_edit, 1)
         rig_row.addWidget(QLabel("Port"))
         rig_row.addWidget(rig_port_edit)
@@ -18406,6 +18421,8 @@ class SettingsTab(QWidget):
         flrig_port_edit = QLineEdit(str((existing or {}).get("flrig_port", "") or ""))
         flrig_port_edit.setValidator(QIntValidator(1, 65535, flrig_port_edit))
         flrig_row = QHBoxLayout()
+        flrig_row.setContentsMargins(0, 0, 0, 0)
+        flrig_row.setSpacing(8)
         flrig_row.addWidget(flrig_host_edit, 1)
         flrig_row.addWidget(QLabel("Port"))
         flrig_row.addWidget(flrig_port_edit)
@@ -18420,6 +18437,8 @@ class SettingsTab(QWidget):
         fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", "") or ""))
         fldigi_port_edit.setValidator(QIntValidator(1, 65535, fldigi_port_edit))
         fldigi_row = QHBoxLayout()
+        fldigi_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_row.setSpacing(8)
         fldigi_row.addWidget(fldigi_host_edit, 1)
         fldigi_row.addWidget(QLabel("Port"))
         fldigi_row.addWidget(fldigi_port_edit)
@@ -18440,6 +18459,8 @@ class SettingsTab(QWidget):
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
         js8_port_edit.setValidator(QIntValidator(1, 65535, js8_port_edit))
         js8_row = QHBoxLayout()
+        js8_row.setContentsMargins(0, 0, 0, 0)
+        js8_row.setSpacing(8)
         js8_row.addWidget(js8_host_edit, 1)
         js8_row.addWidget(QLabel("Port"))
         js8_row.addWidget(js8_port_edit)
@@ -18501,6 +18522,8 @@ class SettingsTab(QWidget):
         launch_path_edit = QLineEdit(str((existing or {}).get("launch_path", "") or ""))
         launch_path_btn = QPushButton("Browse")
         launch_row = QHBoxLayout()
+        launch_row.setContentsMargins(0, 0, 0, 0)
+        launch_row.setSpacing(8)
         launch_row.addWidget(launch_path_edit, 1)
         launch_row.addWidget(launch_path_btn)
         launch_wrap = QWidget()
@@ -18516,6 +18539,8 @@ class SettingsTab(QWidget):
         sdr_port_edit = QLineEdit(str((existing or {}).get("sdr_port", "") or ""))
         sdr_port_edit.setValidator(QIntValidator(1, 65535, sdr_port_edit))
         sdr_row = QHBoxLayout()
+        sdr_row.setContentsMargins(0, 0, 0, 0)
+        sdr_row.setSpacing(8)
         sdr_row.addWidget(sdr_host_edit, 1)
         sdr_row.addWidget(QLabel("Port"))
         sdr_row.addWidget(sdr_port_edit)
@@ -18526,7 +18551,7 @@ class SettingsTab(QWidget):
         port_prompt_group = QGroupBox("Enter App Ports")
         port_prompt_group.setVisible(False)
         port_prompt_layout = QFormLayout(port_prompt_group)
-        port_prompt_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        _configure_guided_form(port_prompt_layout)
         port_prompt_specs = {
             "flrig_port": ("What port does this radio's FLRig use?", flrig_port_edit),
             "fldigi_port": ("What port does this radio's FLDigi use?", fldigi_port_edit),
@@ -18570,7 +18595,7 @@ class SettingsTab(QWidget):
         optional_layout.setContentsMargins(10, 0, 10, 0)
         optional_layout.setSpacing(6)
         optional_form = QFormLayout()
-        optional_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        _configure_guided_form(optional_form)
         optional_layout.addLayout(optional_form)
         body_layout.addWidget(optional_body)
 
