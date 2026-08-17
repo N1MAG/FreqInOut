@@ -1529,6 +1529,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "_configure_port_edit(prompt_edit)" in dialog_block
     assert "guided_setup_field_visibility(" in dialog_block
     assert "GuidedSetupFieldVisibilityInput(" in dialog_block
+    assert "guided_setup_role_hint(blueprint, visibility_state)" in dialog_block
     assert "connection_group.setVisible(visibility.connection_group)" in dialog_block
     assert "technical_identity_widgets = [" in dialog_block
     assert "setup_started = bool(setup_type_choice)" in dialog_block

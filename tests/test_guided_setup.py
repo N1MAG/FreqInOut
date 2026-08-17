@@ -35,6 +35,7 @@ from freqinout.core.guided_setup import (
     guided_setup_flow_summary_lines,
     guided_setup_lane_preset,
     guided_setup_operator_guidance_lines,
+    guided_setup_role_hint,
     guided_setup_software_hint,
     guided_setup_schedule_summary,
     guided_setup_review_items,
@@ -322,6 +323,48 @@ def test_guided_setup_software_hint_is_core_generated_for_setup_surfaces() -> No
         setup_type_label="Custom software mix",
         selected_apps=("js8call", "varac"),
     ) == "Setup type: Custom software mix. Custom software mix is selected. Choose only the applications that belong to this radio."
+
+
+def test_guided_setup_role_hint_is_core_generated_for_setup_surfaces() -> None:
+    js8 = build_guided_setup_blueprint(
+        lane=LANE_JS8_ONLY,
+        hamlib_short_name="IC-7300",
+        control_route=CONTROL_JS8CALL,
+    )
+    varac = build_guided_setup_blueprint(
+        lane=LANE_VARAC,
+        hamlib_short_name="FT-891",
+        control_route=CONTROL_FLRIG,
+    )
+    observer = build_guided_setup_blueprint(
+        lane=LANE_SDR_OBSERVER,
+        hamlib_short_name="SDRplay",
+        control_route=CONTROL_NONE,
+    )
+
+    assert guided_setup_role_hint(
+        js8,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice=LANE_JS8_ONLY,
+            backend=CONTROL_JS8CALL,
+            use_js8call=True,
+        ),
+    ).startswith("JS8Call is the frequency-control route")
+    assert "VarAC owns frequency scheduling" in guided_setup_role_hint(
+        varac,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice=LANE_VARAC,
+            backend="manual",
+            use_varac=True,
+        ),
+    )
+    assert "Observer radios track or monitor RF activity" in guided_setup_role_hint(
+        observer,
+        GuidedSetupFieldVisibilityInput(
+            setup_type_choice=LANE_SDR_OBSERVER,
+            device_class="observer",
+        ),
+    )
 
 
 def test_blueprint_bridge_keeps_read_only_plan_from_writing_external_configs(tmp_path) -> None:

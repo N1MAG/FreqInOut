@@ -911,6 +911,44 @@ def guided_setup_software_hint(
     )
 
 
+def guided_setup_role_hint(
+    blueprint: GuidedSetupBlueprint,
+    state: GuidedSetupFieldVisibilityInput,
+) -> str:
+    """Return the concise role/control hint for guided setup surfaces."""
+
+    policy = guided_setup_capability_policy(blueprint)
+    if str(state.device_class or "").strip().lower() == "observer" or policy.lane == LANE_SDR_OBSERVER:
+        return (
+            "Observer radios track or monitor RF activity without taking over frequency control. "
+            "Set the SDR endpoint if this observer should appear in readiness and runtime summaries."
+        )
+    if policy.lane in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+        return (
+            "VarAC owns frequency scheduling and radio control for this setup. "
+            "FIO stores VarAC paths for message monitoring, BBS, launch, and readiness."
+        )
+    route = policy.default_control_route
+    if route == CONTROL_JS8CALL:
+        return (
+            "JS8Call is the frequency-control route for this radio. "
+            "FIO can still track related Spotter, CommStat, or other message integrations that belong to this radio."
+        )
+    if route == CONTROL_RIGCTLD:
+        return (
+            "RigCtlD is the frequency-control route for this radio. "
+            "Choose only the software integrations that belong to this radio's bundle."
+        )
+    if route == CONTROL_NONE:
+        return (
+            "FIO will track this radio for planning and coordination while frequency changes remain operator-managed."
+        )
+    return (
+        "FLRig is the frequency-control route for this radio. "
+        "Turn on only the other software integrations that belong to this radio's bundle."
+    )
+
+
 def guided_schedule_choices_for_lane(
     lane: str,
     *,

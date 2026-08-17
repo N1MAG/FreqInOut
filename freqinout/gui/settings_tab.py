@@ -156,6 +156,7 @@ from freqinout.core.guided_setup import (
     guided_setup_lane_preset,
     guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
+    guided_setup_role_hint,
     guided_setup_software_hint,
     GuidedSetupFieldVisibilityInput,
     build_guided_setup_preview,
@@ -19696,23 +19697,22 @@ class SettingsTab(QWidget):
                     use_js8call_chk.setChecked(True)
                     use_js8call = True
 
-            visibility = guided_setup_field_visibility(
-                _current_guided_blueprint(),
-                GuidedSetupFieldVisibilityInput(
-                    setup_type_choice=setup_type_choice,
-                    backend=backend,
-                    device_class=device_class_value,
-                    use_flrig=use_flrig,
-                    use_fldigi=use_fldigi,
-                    use_flmsg=bool(use_flmsg_chk.isChecked()),
-                    use_flamp=bool(use_flamp_chk.isChecked()),
-                    use_js8call=use_js8call,
-                    use_js8spotter=use_js8spotter,
-                    use_commstat=use_commstat,
-                    use_varac=use_varac,
-                    optional_open=optional_toggle.isChecked(),
-                ),
+            blueprint = _current_guided_blueprint()
+            visibility_state = GuidedSetupFieldVisibilityInput(
+                setup_type_choice=setup_type_choice,
+                backend=backend,
+                device_class=device_class_value,
+                use_flrig=use_flrig,
+                use_fldigi=use_fldigi,
+                use_flmsg=bool(use_flmsg_chk.isChecked()),
+                use_flamp=bool(use_flamp_chk.isChecked()),
+                use_js8call=use_js8call,
+                use_js8spotter=use_js8spotter,
+                use_commstat=use_commstat,
+                use_varac=use_varac,
+                optional_open=optional_toggle.isChecked(),
             )
+            visibility = guided_setup_field_visibility(blueprint, visibility_state)
             for widget in flrig_field_widgets:
                 _set_row_visible(widget, visibility.flrig_fields)
             for widget in rigctld_field_widgets:
@@ -19755,27 +19755,7 @@ class SettingsTab(QWidget):
                 if app_setup_plan_group.isVisible():
                     _update_guided_app_setup_plan_review()
 
-            if observer_mode:
-                role_hint_label.setText(
-                    "Observer radios track or monitor RF activity without taking over the default control shell. "
-                    "Set the SDR endpoint if this observer should be tracked in readiness and runtime summaries."
-                )
-            elif backend == "js8call":
-                role_hint_label.setText(
-                    "Primary rig control is JS8Call for this radio. The JS8 endpoint drives control, but this radio can still participate in other software options such as VarAC or Fast Light."
-                )
-            elif backend == "rigctld":
-                role_hint_label.setText(
-                    "Primary rig control is RigCtlD for this radio. Use the software stack above to show the other applications that belong to this radio's working bundle."
-                )
-            elif backend == "manual":
-                role_hint_label.setText(
-                    "Use Manual when FreqInOut should track this radio in planning and coordination, while the rest of the radio bundle remains operator-managed."
-                )
-            else:
-                role_hint_label.setText(
-                    "Primary rig control is FLRig for this radio. Turn on the other software that belongs to this radio's single-rig-style operating bundle."
-                )
+            role_hint_label.setText(guided_setup_role_hint(blueprint, visibility_state))
             optional_body.setVisible(bool(optional_toggle.isChecked()))
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
