@@ -18136,6 +18136,10 @@ class SettingsTab(QWidget):
             except Exception:
                 pass
 
+        def _configure_port_edit(edit: QLineEdit) -> None:
+            edit.setMaximumWidth(110)
+            edit.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
         def _configure_guided_form(form_layout: QFormLayout) -> None:
             form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
             form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -18448,6 +18452,7 @@ class SettingsTab(QWidget):
         rig_host_edit = QLineEdit(str((existing or {}).get("rig_host", "") or ""))
         rig_port_edit = QLineEdit(str((existing or {}).get("rig_port", "") or ""))
         rig_port_edit.setValidator(QIntValidator(1, 65535, rig_port_edit))
+        _configure_port_edit(rig_port_edit)
         rig_row = QHBoxLayout()
         rig_row.setContentsMargins(0, 0, 0, 0)
         rig_row.setSpacing(8)
@@ -18461,6 +18466,7 @@ class SettingsTab(QWidget):
         flrig_host_edit = QLineEdit(str((existing or {}).get("flrig_host", "") or ""))
         flrig_port_edit = QLineEdit(str((existing or {}).get("flrig_port", "") or ""))
         flrig_port_edit.setValidator(QIntValidator(1, 65535, flrig_port_edit))
+        _configure_port_edit(flrig_port_edit)
         flrig_row = QHBoxLayout()
         flrig_row.setContentsMargins(0, 0, 0, 0)
         flrig_row.setSpacing(8)
@@ -18477,6 +18483,7 @@ class SettingsTab(QWidget):
         fldigi_host_edit = QLineEdit(str((existing or {}).get("fldigi_host", "") or ""))
         fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", "") or ""))
         fldigi_port_edit.setValidator(QIntValidator(1, 65535, fldigi_port_edit))
+        _configure_port_edit(fldigi_port_edit)
         fldigi_row = QHBoxLayout()
         fldigi_row.setContentsMargins(0, 0, 0, 0)
         fldigi_row.setSpacing(8)
@@ -18499,6 +18506,7 @@ class SettingsTab(QWidget):
         js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or ""))
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
         js8_port_edit.setValidator(QIntValidator(1, 65535, js8_port_edit))
+        _configure_port_edit(js8_port_edit)
         js8_row = QHBoxLayout()
         js8_row.setContentsMargins(0, 0, 0, 0)
         js8_row.setSpacing(8)
@@ -18579,6 +18587,7 @@ class SettingsTab(QWidget):
         sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
         sdr_port_edit = QLineEdit(str((existing or {}).get("sdr_port", "") or ""))
         sdr_port_edit.setValidator(QIntValidator(1, 65535, sdr_port_edit))
+        _configure_port_edit(sdr_port_edit)
         sdr_row = QHBoxLayout()
         sdr_row.setContentsMargins(0, 0, 0, 0)
         sdr_row.setSpacing(8)
@@ -18606,6 +18615,7 @@ class SettingsTab(QWidget):
             prompt_edit.setPlaceholderText("Port number")
             prompt_edit.setVisible(False)
             prompt_edit.setToolTip("This is the number the app uses to talk to FIO.")
+            _configure_port_edit(prompt_edit)
             port_prompt_fields[field_key] = prompt_edit
             label_widget = _make_help_label(prompt_text, "Enter the port number configured in that app for this radio.")
             label_widget.setVisible(False)
@@ -19177,6 +19187,9 @@ class SettingsTab(QWidget):
             label_widget = row_labels.get(widget)
             if label_widget is not None:
                 label_widget.setVisible(bool(visible))
+
+        def _any_row_visible(widgets: Sequence[QWidget]) -> bool:
+            return any(bool(widget.isVisible()) for widget in widgets)
 
         def _existing_radio_labels_for_name_generation() -> Tuple[str, ...]:
             try:
@@ -19829,6 +19842,20 @@ class SettingsTab(QWidget):
                 )
             optional_body.setVisible(bool(optional_toggle.isChecked()))
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
+            connection_group.setVisible(
+                _any_row_visible(
+                    [
+                        *flrig_field_widgets,
+                        *rigctld_field_widgets,
+                        *js8_field_widgets,
+                        *observer_field_widgets,
+                        *fldigi_field_widgets,
+                        *flmsg_field_widgets,
+                        *flamp_field_widgets,
+                        *varac_field_widgets,
+                    ]
+                )
+            )
             _update_app_choice_visibility()
             _update_port_prompt_visibility()
             _update_dialog_readiness()
