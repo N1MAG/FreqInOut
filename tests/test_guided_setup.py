@@ -261,6 +261,35 @@ def test_blueprint_bridge_scopes_managed_js8_only_plan_to_js8call(tmp_path) -> N
     assert "Confirm JS8Call's radio/CAT selection" in " ".join(js8_action.notes)
 
 
+def test_blueprint_bridge_js8_only_flrig_route_does_not_enable_fast_light(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_JS8CALL,
+        js8call_uses_flrig=True,
+    )
+    base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        base_proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={
+            "flrig": "/apps/flrig",
+            "fldigi": "/apps/fldigi",
+            "js8call": "/apps/js8call",
+        },
+    )
+
+    write_actions = [action for action in plan.actions if action.writes_external_config]
+    assert [action.app_id for action in write_actions] == ["js8call"]
+    assert all(action.app_id not in {"flrig", "fldigi", "flmsg", "flamp"} for action in plan.actions)
+    js8_action = write_actions[0]
+    assert js8_action.details["control_route"] == CONTROL_FLRIG
+    assert "with FLRig" in js8_action.summary
+
+
 def test_blueprint_bridge_keeps_varac_only_plan_read_import_only(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="varac",
