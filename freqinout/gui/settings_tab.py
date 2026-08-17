@@ -150,6 +150,7 @@ from freqinout.core.guided_setup import (
     build_app_config_plan_for_blueprint,
     build_guided_setup_blueprint,
     guided_radio_label_base,
+    guided_setup_capability_policy,
     guided_setup_flow_summary_lines,
     guided_setup_operator_guidance_lines,
     build_guided_setup_preview,
@@ -19321,6 +19322,20 @@ class SettingsTab(QWidget):
                 apps.append("varac")
             return tuple(apps)
 
+        def _current_guided_blueprint() -> GuidedSetupBlueprint:
+            lane = _current_guided_lane()
+            radio_name = name_edit.text().strip() or "Radio"
+            return build_guided_setup_blueprint(
+                lane=lane,
+                hamlib_short_name=radio_name,
+                setup_mode=SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED,
+                control_route=infer_guided_control_route(str(backend_combo.currentData() or "")),
+                js8call_uses_flrig=str(backend_combo.currentData() or "").strip().lower() == CONTROL_FLRIG,
+                include_spotter=use_js8spotter_chk.isChecked(),
+                include_commstat=use_commstat_chk.isChecked(),
+                include_varac=use_varac_chk.isChecked(),
+            )
+
         def _update_guided_app_setup_plan_review() -> None:
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 app_setup_plan_group.setVisible(False)
@@ -19345,16 +19360,7 @@ class SettingsTab(QWidget):
                 ),
                 varac_enabled=varac_selected,
             )
-            lane = _current_guided_lane()
-            blueprint = build_guided_setup_blueprint(
-                lane=lane,
-                hamlib_short_name=radio_name,
-                setup_mode=SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED,
-                control_route=infer_guided_control_route(str(backend_combo.currentData() or "")),
-                include_spotter=use_js8spotter_chk.isChecked(),
-                include_commstat=use_commstat_chk.isChecked(),
-                include_varac=varac_selected,
-            )
+            blueprint = _current_guided_blueprint()
             app_paths = {
                 "flrig": flrig_path_edit.text().strip(),
                 "fldigi": fldigi_path_edit.text().strip(),
@@ -19590,22 +19596,34 @@ class SettingsTab(QWidget):
                     use_js8call_chk.setChecked(True)
                     use_js8call = True
 
+            policy = guided_setup_capability_policy(_current_guided_blueprint())
+            visible_apps = set(policy.visible_apps)
             for widget in flrig_field_widgets:
-                _set_row_visible(widget, use_flrig and not observer_mode)
+                _set_row_visible(
+                    widget,
+                    not observer_mode
+                    and policy.fio_frequency_control_allowed
+                    and (backend == CONTROL_FLRIG or (use_flrig and "flrig" in visible_apps)),
+                )
             for widget in rigctld_field_widgets:
-                _set_row_visible(widget, (backend == "rigctld") and not observer_mode)
+                _set_row_visible(
+                    widget,
+                    not observer_mode
+                    and policy.fio_frequency_control_allowed
+                    and backend == CONTROL_RIGCTLD,
+                )
             for widget in js8_field_widgets:
-                _set_row_visible(widget, use_js8call and not observer_mode)
+                _set_row_visible(widget, not observer_mode and use_js8call and "js8call" in visible_apps)
             for widget in observer_field_widgets:
                 _set_row_visible(widget, observer_mode)
             for widget in fldigi_field_widgets:
-                _set_row_visible(widget, not observer_mode and use_fldigi)
+                _set_row_visible(widget, not observer_mode and use_fldigi and "fldigi" in visible_apps)
             for widget in flmsg_field_widgets:
-                _set_row_visible(widget, not observer_mode and bool(use_flmsg_chk.isChecked()))
+                _set_row_visible(widget, not observer_mode and bool(use_flmsg_chk.isChecked()) and "flmsg" in visible_apps)
             for widget in flamp_field_widgets:
-                _set_row_visible(widget, not observer_mode and bool(use_flamp_chk.isChecked()))
+                _set_row_visible(widget, not observer_mode and bool(use_flamp_chk.isChecked()) and "flamp" in visible_apps)
             for widget in varac_field_widgets:
-                _set_row_visible(widget, not observer_mode and use_varac)
+                _set_row_visible(widget, not observer_mode and use_varac and "varac" in visible_apps)
             for widget in optional_field_widgets:
                 _set_row_visible(widget, optional_toggle.isChecked())
 

@@ -839,11 +839,17 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'setup_type_combo.addItem("Receive-only SDR", LANE_SDR_OBSERVER)' in dialog_block
     assert 'setup_type_combo.addItem("Custom software mix", "custom")' in dialog_block
     assert "def _apply_setup_type_choice()" in dialog_block
+    assert "def _current_guided_blueprint()" in dialog_block
+    assert "guided_setup_capability_policy(_current_guided_blueprint())" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_JS8CALL)" in dialog_block
     assert "_set_combo_data(backend_combo, CONTROL_FLRIG)" in dialog_block
     assert '_set_combo_data(backend_combo, "manual")' in dialog_block
     assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
     assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
+    assert 'and "fldigi" in visible_apps' in dialog_block
+    assert 'and "flmsg" in visible_apps' in dialog_block
+    assert 'and "flamp" in visible_apps' in dialog_block
+    assert 'and "varac" in visible_apps' in dialog_block
     assert "def _existing_radio_labels_for_name_generation()" in dialog_block
     assert "generated_radio_label(" in dialog_block
     assert "guided_radio_label_base(selected)" in dialog_block
