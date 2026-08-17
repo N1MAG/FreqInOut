@@ -562,6 +562,38 @@ def guided_setup_flow_items(
     )
 
 
+def guided_setup_next_flow_item(
+    blueprint: GuidedSetupBlueprint,
+    plan: GuidedAppConfigPlan,
+) -> GuidedSetupFlowItem:
+    """Return the next operator-visible setup item that needs attention."""
+
+    items = guided_setup_flow_items(blueprint, plan)
+    for item in items:
+        if str(item.status or "ready").strip().lower() != "ready":
+            return item
+    return items[-1] if items else GuidedSetupFlowItem(
+        item_id="review",
+        title="Review",
+        detail="Review the setup before saving.",
+        status="ready",
+    )
+
+
+def guided_setup_next_action_text(
+    blueprint: GuidedSetupBlueprint,
+    plan: GuidedAppConfigPlan,
+) -> str:
+    """Return one concise instruction for the next guided setup action."""
+
+    item = guided_setup_next_flow_item(blueprint, plan)
+    title = str(item.title or "Review").strip()
+    detail = str(item.detail or "").strip()
+    if detail:
+        return f"Next: {title} - {detail}"
+    return f"Next: {title}"
+
+
 def guided_setup_flow_summary_lines(
     blueprint: GuidedSetupBlueprint,
     plan: GuidedAppConfigPlan,

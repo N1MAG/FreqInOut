@@ -153,6 +153,7 @@ from freqinout.core.guided_setup import (
     guided_setup_capability_policy,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
+    guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
     build_guided_setup_preview,
     generated_radio_label,
@@ -18351,6 +18352,13 @@ class SettingsTab(QWidget):
         app_setup_plan_layout = QVBoxLayout(app_setup_plan_group)
         app_setup_plan_layout.setContentsMargins(10, 8, 10, 8)
         app_setup_plan_layout.setSpacing(6)
+        guided_next_action_label = QLabel()
+        guided_next_action_label.setObjectName("guidedSetupNextAction")
+        guided_next_action_label.setWordWrap(True)
+        guided_next_action_font = guided_next_action_label.font()
+        guided_next_action_font.setBold(True)
+        guided_next_action_label.setFont(guided_next_action_font)
+        app_setup_plan_layout.addWidget(guided_next_action_label)
         guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
         guided_step_stack = QWidget()
         guided_step_stack_layout = QVBoxLayout(guided_step_stack)
@@ -19492,6 +19500,7 @@ class SettingsTab(QWidget):
                 app_paths=app_paths,
             )
             preview = build_guided_setup_preview(blueprint, plan)
+            guided_next_action_label.setText(guided_setup_next_action_text(blueprint, plan))
             _update_guided_step_widgets(blueprint, plan)
             flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
             guidance_lines = guided_setup_operator_guidance_lines(blueprint, plan)

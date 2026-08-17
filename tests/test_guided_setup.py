@@ -26,6 +26,8 @@ from freqinout.core.guided_setup import (
     guided_radio_label_base,
     guided_setup_capability_policy,
     guided_setup_flow_items,
+    guided_setup_next_action_text,
+    guided_setup_next_flow_item,
     guided_setup_flow_summary_lines,
     guided_setup_operator_guidance_lines,
     guided_setup_schedule_summary,
@@ -891,6 +893,25 @@ def test_guided_setup_session_rejects_invalid_choices() -> None:
         raise AssertionError("unknown guided setup step should fail")
 
 
+def test_guided_setup_next_action_comes_from_flow_status() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane=LANE_JS8_ONLY,
+        hamlib_short_name="IC-7300",
+        control_route=CONTROL_JS8CALL,
+        setup_mode=SETUP_MODE_MANAGED,
+    )
+    plan = build_guided_external_app_config_plan(
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=Path("/tmp/fio-test"),
+        allow_external_writes=True,
+    )
+
+    next_item = guided_setup_next_flow_item(blueprint, plan)
+
+    assert next_item.item_id in {"connection", "review"}
+    assert guided_setup_next_action_text(blueprint, plan).startswith(f"Next: {next_item.title} - ")
+
+
 def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     dialog_block = source[
@@ -939,6 +960,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "lane = _current_guided_lane()" in dialog_block
     assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
     assert "guided_setup_flow_items(blueprint, plan)" in dialog_block
+    assert "guided_setup_next_action_text(blueprint, plan)" in dialog_block
+    assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
     assert 'guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}' in dialog_block
     assert 'step_frame.setObjectName(f"guidedSetupStep_{step_id}")' in dialog_block
     assert 'status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")' in dialog_block
