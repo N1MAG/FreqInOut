@@ -635,6 +635,28 @@ def generated_radio_label(
         index += 1
 
 
+def guided_radio_label_base(
+    radio_payload: Mapping[str, object] | None,
+    *,
+    fallback_prefix: str = "Radio",
+) -> str:
+    """Return the short radio model label to feed into generated_radio_label."""
+
+    payload = radio_payload or {}
+    model_name = _clean_radio_label(payload.get("model_name", ""))
+    if model_name:
+        return model_name
+    display_name = _clean_radio_label(payload.get("display_name", ""))
+    manufacturer = _clean_radio_label(payload.get("manufacturer", ""))
+    if display_name and manufacturer:
+        prefix = f"{manufacturer} "
+        if display_name.lower().startswith(prefix.lower()):
+            short_display = _clean_radio_label(display_name[len(prefix) :])
+            if short_display:
+                return short_display
+    return display_name or _clean_radio_label(fallback_prefix) or "Radio"
+
+
 def guided_setup_apps_for_lane(lane: str) -> Tuple[str, ...]:
     lane_key = _normalize_lane(lane)
     if lane_key == LANE_JS8_ONLY:

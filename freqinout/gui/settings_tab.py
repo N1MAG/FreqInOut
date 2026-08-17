@@ -149,6 +149,7 @@ from freqinout.core.guided_setup import (
     SETUP_MODE_READ_ONLY,
     build_app_config_plan_for_blueprint,
     build_guided_setup_blueprint,
+    guided_radio_label_base,
     guided_setup_flow_summary_lines,
     guided_setup_operator_guidance_lines,
     build_guided_setup_preview,
@@ -19163,7 +19164,10 @@ class SettingsTab(QWidget):
                     or not display_name_user_edited
                 )
                 if can_replace:
-                    generated_name = generated_radio_label(display_name, _existing_radio_labels_for_name_generation())
+                    generated_name = generated_radio_label(
+                        guided_radio_label_base(selected),
+                        _existing_radio_labels_for_name_generation(),
+                    )
                     name_edit.setText(generated_name)
                     last_catalog_display_name = generated_name
                     display_name_user_edited = False

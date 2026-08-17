@@ -20,6 +20,7 @@ from freqinout.core.guided_setup import (
     build_app_config_plan_for_blueprint,
     build_guided_setup_preview,
     generated_radio_label,
+    guided_radio_label_base,
     guided_setup_capability_policy,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
@@ -106,6 +107,31 @@ def test_generated_radio_label_uses_hamlib_short_name_and_increments() -> None:
     assert generated_radio_label("TS-2000", ["TS-2000"]) == "TS-2000 1"
     assert generated_radio_label("TS-2000", ["TS-2000", "TS-2000 1"]) == "TS-2000 2"
     assert generated_radio_label("", ["Radio"]) == "Radio 1"
+
+
+def test_guided_radio_label_base_prefers_model_short_name() -> None:
+    assert (
+        guided_radio_label_base(
+            {
+                "manufacturer": "Kenwood",
+                "model_name": "TS-2000",
+                "display_name": "Kenwood TS-2000",
+            }
+        )
+        == "TS-2000"
+    )
+    assert (
+        guided_radio_label_base(
+            {
+                "manufacturer": "Icom",
+                "model_name": "",
+                "display_name": "Icom IC-7300",
+            }
+        )
+        == "IC-7300"
+    )
+    assert guided_radio_label_base({"display_name": "Airspy HF+"}) == "Airspy HF+"
+    assert guided_radio_label_base({}) == "Radio"
 
 
 def test_read_only_setup_does_not_plan_external_app_writes() -> None:
@@ -819,7 +845,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
     assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
     assert "def _existing_radio_labels_for_name_generation()" in dialog_block
-    assert "generated_radio_label(display_name, _existing_radio_labels_for_name_generation())" in dialog_block
+    assert "generated_radio_label(" in dialog_block
+    assert "guided_radio_label_base(selected)" in dialog_block
+    assert "display_name, _existing_radio_labels_for_name_generation()" not in dialog_block
     assert 'apps.append("flmsg")' in dialog_block
     assert 'apps.append("flamp")' in dialog_block
     assert "Hidden app sections are not part of this setup type unless you select them." in dialog_block
