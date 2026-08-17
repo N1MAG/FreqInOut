@@ -19679,14 +19679,12 @@ class SettingsTab(QWidget):
             use_js8spotter_chk.setEnabled(not observer_mode)
             use_commstat_chk.setEnabled(not observer_mode)
             use_varac_chk.setEnabled(not observer_mode)
-            if setup_started and backend == "flrig" and not use_flrig_chk.isChecked():
-                use_flrig_chk.setChecked(True)
-                use_flrig = True
-            if setup_started and backend == "js8call" and not use_js8call_chk.isChecked():
-                use_js8call_chk.setChecked(True)
-                use_js8call = True
-            if setup_started and (use_js8spotter or use_commstat):
-                if not use_js8call_chk.isChecked():
+            if setup_started:
+                normalized_apps = set(_guided_plan_enabled_apps())
+                if "flrig" in normalized_apps and not use_flrig_chk.isChecked():
+                    use_flrig_chk.setChecked(True)
+                    use_flrig = True
+                if "js8call" in normalized_apps and not use_js8call_chk.isChecked():
                     use_js8call_chk.setChecked(True)
                     use_js8call = True
 

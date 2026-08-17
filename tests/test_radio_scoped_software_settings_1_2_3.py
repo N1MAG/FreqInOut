@@ -1533,7 +1533,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "connection_group.setVisible(visibility.connection_group)" in dialog_block
     assert "technical_identity_widgets = [" in dialog_block
     assert "setup_started = bool(setup_type_choice)" in dialog_block
-    assert "if setup_started and backend == \"flrig\"" in dialog_block
+    assert "normalized_apps = set(_guided_plan_enabled_apps())" in dialog_block
+    assert '"flrig" in normalized_apps' in dialog_block
+    assert '"js8call" in normalized_apps' in dialog_block
     assert "_set_row_visible(widget, visibility.technical_identity_fields)" in dialog_block
     assert "for widget in technical_identity_widgets:" in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Setup Steps")' in dialog_block
