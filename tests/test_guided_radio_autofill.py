@@ -380,3 +380,14 @@ def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
         "VarAC database and cluster membership were not changed. "
         "BBS settings were not changed. Review VarAC cluster settings separately.",
     )
+    assert "control_backend" not in suggestions
+    assert "use_flrig" not in suggestions
+    assert "use_js8call" not in suggestions
+    assert "frequency_plan" not in suggestions
+    assert "schedule_assignment_id" not in suggestions
+    assert "flrig_host" not in suggestions
+    assert "flrig_port" not in suggestions
+    assert "fldigi_host" not in suggestions
+    assert "fldigi_port" not in suggestions
+    assert "js8_host" not in suggestions
+    assert "js8_port" not in suggestions
