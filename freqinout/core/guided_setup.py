@@ -162,6 +162,22 @@ class GuidedSetupFieldVisibility:
 
 
 @dataclass(frozen=True)
+class GuidedSetupLanePreset:
+    lane: str
+    device_class: str
+    backend: str
+    selected_apps: Tuple[str, ...]
+
+    @property
+    def app_map(self) -> Mapping[str, bool]:
+        selected = set(self.selected_apps)
+        return {
+            app_id: app_id in selected
+            for app_id in ("flrig", "fldigi", "flmsg", "flamp", "js8call", "js8spotter", "commstat", "varac")
+        }
+
+
+@dataclass(frozen=True)
 class GuidedSetupFlowItem:
     item_id: str
     title: str
@@ -813,6 +829,46 @@ def guided_setup_apps_for_lane(lane: str) -> Tuple[str, ...]:
     if lane_key == LANE_SDR_OBSERVER:
         return tuple()
     return tuple()
+
+
+def guided_setup_lane_preset(lane: str) -> GuidedSetupLanePreset:
+    """Return the UI-safe defaults for selecting a guided setup lane."""
+
+    lane_key = _normalize_lane(lane)
+    if lane_key == LANE_SDR_OBSERVER:
+        return GuidedSetupLanePreset(
+            lane=lane_key,
+            device_class="observer",
+            backend="manual",
+            selected_apps=tuple(),
+        )
+    if lane_key == LANE_JS8_ONLY:
+        return GuidedSetupLanePreset(
+            lane=lane_key,
+            device_class="tx_rx",
+            backend=CONTROL_JS8CALL,
+            selected_apps=guided_setup_apps_for_lane(lane_key),
+        )
+    if lane_key in {LANE_FAST_LIGHT, LANE_TRI_MODE}:
+        return GuidedSetupLanePreset(
+            lane=lane_key,
+            device_class="tx_rx",
+            backend=CONTROL_FLRIG,
+            selected_apps=guided_setup_apps_for_lane(lane_key),
+        )
+    if lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
+        return GuidedSetupLanePreset(
+            lane=lane_key,
+            device_class="tx_rx",
+            backend="manual",
+            selected_apps=guided_setup_apps_for_lane(lane_key),
+        )
+    return GuidedSetupLanePreset(
+        lane=lane_key,
+        device_class="tx_rx",
+        backend="manual",
+        selected_apps=tuple(),
+    )
 
 
 def guided_schedule_choices_for_lane(

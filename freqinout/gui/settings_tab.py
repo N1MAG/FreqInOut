@@ -138,7 +138,6 @@ from freqinout.core.guided_radio_autofill import (
 )
 from freqinout.core.guided_setup import (
     CONTROL_FLRIG,
-    CONTROL_JS8CALL,
     LANE_FAST_LIGHT,
     LANE_JS8_ONLY,
     LANE_SDR_OBSERVER,
@@ -154,6 +153,7 @@ from freqinout.core.guided_setup import (
     guided_setup_field_visibility,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
+    guided_setup_lane_preset,
     guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
     GuidedSetupFieldVisibilityInput,
@@ -19131,59 +19131,18 @@ class SettingsTab(QWidget):
                 return
             applying_setup_type_choice = True
             try:
-                if lane == LANE_SDR_OBSERVER:
-                    _set_combo_data(device_class_combo, "observer")
-                else:
-                    _set_combo_data(device_class_combo, "tx_rx")
-                if lane == LANE_JS8_ONLY:
-                    _set_combo_data(backend_combo, CONTROL_JS8CALL)
-                    _checkbox_set_checked(use_flrig_chk, False)
-                    _checkbox_set_checked(use_fldigi_chk, False)
-                    _checkbox_set_checked(use_flmsg_chk, False)
-                    _checkbox_set_checked(use_flamp_chk, False)
-                    _checkbox_set_checked(use_js8call_chk, True)
-                    _checkbox_set_checked(use_varac_chk, False)
-                elif lane == LANE_FAST_LIGHT:
-                    _set_combo_data(backend_combo, CONTROL_FLRIG)
-                    _checkbox_set_checked(use_flrig_chk, True)
-                    _checkbox_set_checked(use_fldigi_chk, True)
-                    _checkbox_set_checked(use_flmsg_chk, True)
-                    _checkbox_set_checked(use_flamp_chk, True)
-                    _checkbox_set_checked(use_js8call_chk, False)
-                    _checkbox_set_checked(use_js8spotter_chk, False)
-                    _checkbox_set_checked(use_commstat_chk, False)
-                    _checkbox_set_checked(use_varac_chk, False)
-                elif lane == LANE_TRI_MODE:
-                    _set_combo_data(backend_combo, CONTROL_FLRIG)
-                    _checkbox_set_checked(use_flrig_chk, True)
-                    _checkbox_set_checked(use_fldigi_chk, True)
-                    _checkbox_set_checked(use_flmsg_chk, True)
-                    _checkbox_set_checked(use_flamp_chk, True)
-                    _checkbox_set_checked(use_js8call_chk, True)
-                    _checkbox_set_checked(use_varac_chk, False)
-                elif lane in {LANE_VARAC, LANE_VARAC_CLUSTER}:
-                    _set_combo_data(backend_combo, "manual")
-                    _checkbox_set_checked(use_flrig_chk, False)
-                    _checkbox_set_checked(use_fldigi_chk, False)
-                    _checkbox_set_checked(use_flmsg_chk, False)
-                    _checkbox_set_checked(use_flamp_chk, False)
-                    _checkbox_set_checked(use_js8call_chk, False)
-                    _checkbox_set_checked(use_js8spotter_chk, False)
-                    _checkbox_set_checked(use_commstat_chk, False)
-                    _checkbox_set_checked(use_varac_chk, True)
-                elif lane == LANE_SDR_OBSERVER:
-                    _set_combo_data(backend_combo, "manual")
-                    for checkbox in (
-                        use_flrig_chk,
-                        use_fldigi_chk,
-                        use_flmsg_chk,
-                        use_flamp_chk,
-                        use_js8call_chk,
-                        use_js8spotter_chk,
-                        use_commstat_chk,
-                        use_varac_chk,
-                    ):
-                        _checkbox_set_checked(checkbox, False)
+                preset = guided_setup_lane_preset(lane)
+                _set_combo_data(device_class_combo, preset.device_class)
+                _set_combo_data(backend_combo, preset.backend)
+                selected_apps = preset.app_map
+                _checkbox_set_checked(use_flrig_chk, selected_apps.get("flrig", False))
+                _checkbox_set_checked(use_fldigi_chk, selected_apps.get("fldigi", False))
+                _checkbox_set_checked(use_flmsg_chk, selected_apps.get("flmsg", False))
+                _checkbox_set_checked(use_flamp_chk, selected_apps.get("flamp", False))
+                _checkbox_set_checked(use_js8call_chk, selected_apps.get("js8call", False))
+                _checkbox_set_checked(use_js8spotter_chk, selected_apps.get("js8spotter", False))
+                _checkbox_set_checked(use_commstat_chk, selected_apps.get("commstat", False))
+                _checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))
             finally:
                 applying_setup_type_choice = False
             _update_guided_app_setup_plan_review()

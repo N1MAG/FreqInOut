@@ -11,7 +11,10 @@ from freqinout.core.guided_setup import (
     APP_INSTANCE_EXISTING,
     APP_INSTANCE_MANAGED,
     APP_INSTANCE_MANUAL,
+    LANE_FAST_LIGHT,
     LANE_JS8_ONLY,
+    LANE_SDR_OBSERVER,
+    LANE_TRI_MODE,
     LANE_VARAC_CLUSTER,
     LANE_VARAC,
     SCHEDULE_NONE,
@@ -30,6 +33,7 @@ from freqinout.core.guided_setup import (
     guided_setup_next_action_text,
     guided_setup_next_flow_item,
     guided_setup_flow_summary_lines,
+    guided_setup_lane_preset,
     guided_setup_operator_guidance_lines,
     guided_setup_schedule_summary,
     guided_setup_review_items,
@@ -270,6 +274,32 @@ def test_js8call_only_blueprint_scopes_autofill_and_planner_apps() -> None:
     assert selected["flmsg"] is False
     assert selected["flamp"] is False
     assert proposal.enabled_apps == ("js8call",)
+
+
+def test_guided_setup_lane_preset_maps_setup_type_to_ui_defaults() -> None:
+    js8 = guided_setup_lane_preset(LANE_JS8_ONLY)
+    fast_light = guided_setup_lane_preset(LANE_FAST_LIGHT)
+    tri_mode = guided_setup_lane_preset(LANE_TRI_MODE)
+    varac = guided_setup_lane_preset(LANE_VARAC)
+    observer = guided_setup_lane_preset(LANE_SDR_OBSERVER)
+
+    assert js8.device_class == "tx_rx"
+    assert js8.backend == CONTROL_JS8CALL
+    assert js8.app_map["js8call"] is True
+    assert js8.app_map["fldigi"] is False
+
+    assert fast_light.backend == CONTROL_FLRIG
+    assert fast_light.selected_apps == ("flrig", "fldigi", "flmsg", "flamp")
+
+    assert tri_mode.backend == CONTROL_FLRIG
+    assert tri_mode.selected_apps == ("flrig", "fldigi", "flmsg", "flamp", "js8call")
+
+    assert varac.backend == "manual"
+    assert varac.selected_apps == ("varac",)
+
+    assert observer.device_class == "observer"
+    assert observer.backend == "manual"
+    assert observer.selected_apps == tuple()
 
 
 def test_blueprint_bridge_keeps_read_only_plan_from_writing_external_configs(tmp_path) -> None:
@@ -1052,11 +1082,12 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "GuidedSetupFieldVisibilityInput(" in dialog_block
     assert "_set_row_visible(configure_auto_wrap, visibility.configure_automatically)" in dialog_block
     assert "show_software_checkboxes = visibility.software_choices" in dialog_block
-    assert "_set_combo_data(backend_combo, CONTROL_JS8CALL)" in dialog_block
-    assert "_set_combo_data(backend_combo, CONTROL_FLRIG)" in dialog_block
-    assert '_set_combo_data(backend_combo, "manual")' in dialog_block
-    assert "_checkbox_set_checked(use_fldigi_chk, False)" in dialog_block
-    assert "_checkbox_set_checked(use_varac_chk, True)" in dialog_block
+    assert "preset = guided_setup_lane_preset(lane)" in dialog_block
+    assert "_set_combo_data(device_class_combo, preset.device_class)" in dialog_block
+    assert "_set_combo_data(backend_combo, preset.backend)" in dialog_block
+    assert "selected_apps = preset.app_map" in dialog_block
+    assert '_checkbox_set_checked(use_fldigi_chk, selected_apps.get("fldigi", False))' in dialog_block
+    assert '_checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))' in dialog_block
     assert "_set_row_visible(widget, visibility.fldigi_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flmsg_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flamp_fields)" in dialog_block
