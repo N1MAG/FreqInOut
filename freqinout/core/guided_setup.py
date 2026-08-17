@@ -34,6 +34,10 @@ SCHEDULE_NONE = "no_schedule"
 
 NET_COMPONENT_NO_NETS = "no_nets"
 
+APP_INSTANCE_EXISTING = "existing_app_instance"
+APP_INSTANCE_MANAGED = "managed_app_instance"
+APP_INSTANCE_MANUAL = "manual_app_instance"
+
 
 @dataclass(frozen=True)
 class GuidedSetupChoice:
@@ -840,6 +844,7 @@ def _build_steps(
             hint="If FIO cannot control frequency, the scheduler can advise but cannot tune this radio.",
             advanced_available=True,
         ),
+        _guided_app_instance_step(lane_key=lane_key, radio_label=radio_label),
         GuidedSetupStep(
             step_id="schedule_intent",
             title="Schedule",
@@ -847,6 +852,81 @@ def _build_steps(
             choices=schedule_choices,
             status="needs_input",
         ),
+    )
+
+
+def _guided_app_instance_step(*, lane_key: str, radio_label: str) -> GuidedSetupStep:
+    lane = _normalize_lane(lane_key)
+    if lane == LANE_VARAC:
+        return GuidedSetupStep(
+            step_id="app_instance",
+            title="VarAC Setup",
+            prompt=f"Which VarAC setup belongs to {radio_label}?",
+            choices=(
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected VarAC config", recommended=True),
+                GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose VarAC files manually"),
+            ),
+            status="needs_input",
+            hint="FIO stores VarAC paths for monitoring and BBS support; VarAC keeps frequency scheduling.",
+        )
+    if lane == LANE_VARAC_CLUSTER:
+        return GuidedSetupStep(
+            step_id="app_instance",
+            title="VarAC Cluster / BBS",
+            prompt=f"Which VarAC cluster or BBS assets should FIO monitor for {radio_label}?",
+            choices=(
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected VarAC cluster/BBS assets", recommended=True),
+                GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose VarAC cluster/BBS files manually"),
+            ),
+            status="needs_input",
+            hint="Cluster setup remains read/import only in this guided release.",
+        )
+    if lane == LANE_FAST_LIGHT:
+        return GuidedSetupStep(
+            step_id="app_instance",
+            title="Fast Light Apps",
+            prompt=f"Which FLRig, FLDigi, FLMsg, and FLAmp setup belongs to {radio_label}?",
+            choices=(
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected Fast Light apps", recommended=True),
+                GuidedSetupChoice(APP_INSTANCE_MANAGED, "Create FIO-managed Fast Light setup"),
+                GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose Fast Light apps manually"),
+            ),
+            status="needs_input",
+        )
+    if lane == LANE_TRI_MODE:
+        return GuidedSetupStep(
+            step_id="app_instance",
+            title="Mixed App Stack",
+            prompt=f"Which FLRig, FLDigi, and JS8Call setup belongs to {radio_label}?",
+            choices=(
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected paired app stack", recommended=True),
+                GuidedSetupChoice(APP_INSTANCE_MANAGED, "Create FIO-managed app stack"),
+                GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose app paths and profiles manually"),
+            ),
+            status="needs_input",
+        )
+    if lane == LANE_SDR_OBSERVER:
+        return GuidedSetupStep(
+            step_id="app_instance",
+            title="Receive Source",
+            prompt=f"Which receive-only source should FIO monitor for {radio_label}?",
+            choices=(
+                GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected receiver or log source", recommended=True),
+                GuidedSetupChoice(APP_INSTANCE_MANUAL, "Enter receive/log paths manually"),
+            ),
+            status="needs_input",
+            hint="Receive-only sources can feed messages and map awareness but cannot be tuned by FIO.",
+        )
+    return GuidedSetupStep(
+        step_id="app_instance",
+        title="JS8Call Instance",
+        prompt=f"Which JS8Call belongs to {radio_label}?",
+        choices=(
+            GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected JS8Call instance/profile", recommended=True),
+            GuidedSetupChoice(APP_INSTANCE_MANAGED, "Create a FIO-managed JS8Call instance"),
+            GuidedSetupChoice(APP_INSTANCE_MANUAL, "Choose JS8Call app/profile manually"),
+        ),
+        status="needs_input",
     )
 
 

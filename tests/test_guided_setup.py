@@ -8,6 +8,9 @@ from freqinout.core.guided_setup import (
     CONTROL_JS8CALL,
     CONTROL_NONE,
     CONTROL_RIGCTLD,
+    APP_INSTANCE_EXISTING,
+    APP_INSTANCE_MANAGED,
+    APP_INSTANCE_MANUAL,
     LANE_JS8_ONLY,
     LANE_VARAC_CLUSTER,
     LANE_VARAC,
@@ -342,7 +345,7 @@ def test_guided_setup_preview_keeps_ui_summary_in_core_for_js8(tmp_path) -> None
     assert preview.scheduler_assignment_allowed is True
     assert preview.backup_required is True
     assert preview.control_summary == "Control: JS8Call owns the radio/CAT route for FIO scheduler and QSY actions."
-    assert preview.guided_path == "Guided path: Station Use -> Frequency Control -> Schedule."
+    assert preview.guided_path == "Guided path: Station Use -> Frequency Control -> JS8Call Instance -> Schedule."
     assert preview.schedule_summary == (
         "Schedule choices: existing Frequency Plan, JS8Call Standard, Daily with No Nets, Daily + Nets, "
         "SOP condition plan, monitor only."
@@ -480,6 +483,35 @@ def test_js8call_only_inherits_flrig_route_when_js8_config_uses_flrig() -> None:
     recommended = [choice.choice_id for choice in control_step.choices if choice.recommended]
     assert recommended == [CONTROL_FLRIG]
     assert any(choice.label == "FLRig controls the TS-2000" for choice in control_step.choices)
+
+
+def test_guided_setup_includes_app_instance_step_for_js8call() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="IC-7300",
+    )
+    app_step = next(step for step in blueprint.steps if step.step_id == "app_instance")
+
+    assert app_step.title == "JS8Call Instance"
+    assert app_step.prompt == "Which JS8Call belongs to IC-7300?"
+    assert [choice.choice_id for choice in app_step.choices] == [
+        APP_INSTANCE_EXISTING,
+        APP_INSTANCE_MANAGED,
+        APP_INSTANCE_MANUAL,
+    ]
+
+
+def test_guided_setup_includes_read_only_varac_app_instance_step() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-705",
+    )
+    app_step = next(step for step in blueprint.steps if step.step_id == "app_instance")
+
+    assert app_step.title == "VarAC Setup"
+    assert app_step.prompt == "Which VarAC setup belongs to IC-705?"
+    assert [choice.choice_id for choice in app_step.choices] == [APP_INSTANCE_EXISTING, APP_INSTANCE_MANUAL]
+    assert "VarAC keeps frequency scheduling" in app_step.hint
 
 
 def test_js8call_standard_frequencies_are_visible_without_named_plan() -> None:
@@ -798,6 +830,10 @@ def test_guided_setup_session_advances_to_review_only_after_required_steps() -> 
     assert session.current_step.step_id == "frequency_control"
 
     session = answer_guided_setup_step(session, "frequency_control", CONTROL_JS8CALL)
+    assert session.current_step is not None
+    assert session.current_step.step_id == "app_instance"
+
+    session = answer_guided_setup_step(session, "app_instance", APP_INSTANCE_EXISTING)
     assert session.current_step is not None
     assert session.current_step.step_id == "schedule_intent"
 
