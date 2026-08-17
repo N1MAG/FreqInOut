@@ -2865,10 +2865,17 @@ class SettingsTab(QWidget):
         self.selector_set_default_device_profile_btn.setToolTip("Make the selected radio the station default command radio.")
         self.selector_set_default_device_profile_btn.setAccessibleName("Make selected radio default")
         self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
+        self.selector_remove_device_profile_btn = QPushButton("Remove Radio")
+        self.selector_remove_device_profile_btn.setToolTip(
+            "Remove the selected inactive radio profile from FIO. External app profiles and files are not deleted."
+        )
+        self.selector_remove_device_profile_btn.setAccessibleName("Remove selected radio")
+        self.selector_remove_device_profile_btn.clicked.connect(self._delete_device_profiles)
         radio_selector_actions.addWidget(QLabel("Selected Radio:"))
         radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_set_default_device_profile_btn)
+        radio_selector_actions.addWidget(self.selector_remove_device_profile_btn)
         radio_selector_actions.addStretch(1)
         configured_radios_layout.addLayout(radio_selector_actions)
         self.status_group.setVisible(False)
@@ -3687,7 +3694,10 @@ class SettingsTab(QWidget):
         self.restore_radio_schedule_btn.clicked.connect(self._restore_schedule_for_selected_radios)
         self.set_active_device_profile_btn = QPushButton("Make Default")
         self.set_active_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
-        self.delete_device_profile_btn = QPushButton("Delete Selected")
+        self.delete_device_profile_btn = QPushButton("Remove Selected")
+        self.delete_device_profile_btn.setToolTip(
+            "Remove selected inactive radio profiles from FIO. External app profiles and files are not deleted."
+        )
         self.delete_device_profile_btn.clicked.connect(self._delete_device_profiles)
         device_actions.addWidget(QLabel("Selected Radio:"), 0, 0)
         device_actions.addWidget(self.edit_device_profile_btn, 0, 1)
@@ -15914,6 +15924,9 @@ class SettingsTab(QWidget):
             self.selector_set_default_device_profile_btn.setStyleSheet(button_style("info" if can_set_active else "muted", theme))
         self.delete_device_profile_btn.setEnabled(can_delete)
         self.delete_device_profile_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
+        if hasattr(self, "selector_remove_device_profile_btn"):
+            self.selector_remove_device_profile_btn.setEnabled(can_delete)
+            self.selector_remove_device_profile_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
 
     def _refresh_device_profiles_table(self, *, refresh_section_titles: bool = True) -> None:
         if not hasattr(self, "device_profiles_table"):
@@ -20256,19 +20269,32 @@ class SettingsTab(QWidget):
     def _delete_device_profiles(self) -> None:
         selected = self._selected_device_profiles()
         if not selected:
-            QMessageBox.information(self, "Delete Radio Profiles", "Select one or more radio profiles to delete.")
+            QMessageBox.information(self, "Remove Radio", "Select one or more inactive radios to remove.")
             return
         if any(int(row.get("runtime_active", 0) or 0) == 1 for row in selected):
             QMessageBox.warning(
                 self,
-                "Delete Radio Profiles",
-                "Active radios cannot be deleted. Use Stop Using Now first.",
+                "Remove Radio",
+                "Active radios cannot be removed. Use Stop Using first, then remove the radio.",
             )
             return
+        names = [str(row.get("name") or f"Radio {row.get('id')}") for row in selected]
+        if len(names) == 1:
+            prompt = (
+                f"Remove {names[0]} from FIO?\n\n"
+                "This removes the radio profile and radio-scoped settings saved in FIO. "
+                "It does not delete FLRig, JS8Call, FLDigi, VarAC, or other external app files."
+            )
+        else:
+            prompt = (
+                f"Remove {len(names)} radios from FIO?\n\n"
+                + "\n".join(f"- {name}" for name in names)
+                + "\n\nExternal app files and profiles are not deleted."
+            )
         confirm = QMessageBox.question(
             self,
-            "Delete Radio Profiles",
-            f"Delete {len(selected)} selected radio profile(s)?",
+            "Remove Radio",
+            prompt,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -20278,22 +20304,17 @@ class SettingsTab(QWidget):
             for row in selected:
                 self.multi_radio_store.delete_device_profile(int(row.get("id", 0) or 0))
         except ValueError as exc:
-            QMessageBox.warning(self, "Delete Radio Profiles", str(exc))
+            QMessageBox.warning(self, "Remove Radio", str(exc))
             self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed deleting device profiles.")
-            QMessageBox.warning(self, "Delete Radio Profiles", "Unable to delete the selected radio profiles.")
+            QMessageBox.warning(self, "Remove Radio", "Unable to remove the selected radio profiles.")
             self._refresh_multi_radio_tables()
             return
         self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
-        QMessageBox.information(
-            self,
-            "Delete Radio Profiles",
-            f"Deleted {len(selected)} radio profile{'s' if len(selected) != 1 else ''}.",
-        )
 
     def _varac_cluster_by_id(self, cluster_id: int) -> Optional[Dict[str, Any]]:
         return next(

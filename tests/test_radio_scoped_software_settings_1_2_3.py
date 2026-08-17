@@ -409,6 +409,8 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "new radio or SDR" in configured_radios_block
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in configured_radios_block
     assert "configured_title_row.addWidget(self.add_device_profile_btn)" in configured_radios_block
+    assert 'self.selector_remove_device_profile_btn = QPushButton("Remove Radio")' in configured_radios_block
+    assert 'self.selector_remove_device_profile_btn.setAccessibleName("Remove selected radio")' in configured_radios_block
     assert "settings_header_layout.addWidget(self.add_device_profile_btn" not in nav_build_block
     assert 'btn.setAccessibleName(f"Settings navigation: {title}")' in add_section_block
     assert "item.setData(self.SECTION_HEALTH_KEY_ROLE" in add_section_block
@@ -1462,12 +1464,15 @@ def test_radio_selector_exposes_visible_runtime_actions() -> None:
     assert 'self.selector_activate_device_profile_btn = QPushButton("Use Radio")' in configured_radios_block
     assert 'self.selector_deactivate_device_profile_btn = QPushButton("Stop Using")' in configured_radios_block
     assert 'self.selector_set_default_device_profile_btn = QPushButton("Make Default")' in configured_radios_block
+    assert 'self.selector_remove_device_profile_btn = QPushButton("Remove Radio")' in configured_radios_block
     assert "self.selector_activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)" in configured_radios_block
     assert "self.selector_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)" in configured_radios_block
     assert "self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)" in configured_radios_block
+    assert "self.selector_remove_device_profile_btn.clicked.connect(self._delete_device_profiles)" in configured_radios_block
     assert "self.selector_activate_device_profile_btn.setEnabled(can_activate)" in action_state_block
     assert "self.selector_deactivate_device_profile_btn.setEnabled(can_deactivate)" in action_state_block
     assert "self.selector_set_default_device_profile_btn.setEnabled(can_set_active)" in action_state_block
+    assert "self.selector_remove_device_profile_btn.setEnabled(can_delete)" in action_state_block
 
 
 def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -> None:
