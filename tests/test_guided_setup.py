@@ -302,7 +302,7 @@ def test_guided_setup_lane_preset_maps_setup_type_to_ui_defaults() -> None:
     assert fast_light.selected_apps == ("flrig", "fldigi", "flmsg", "flamp")
 
     assert tri_mode.backend == CONTROL_FLRIG
-    assert tri_mode.selected_apps == ("flrig", "fldigi", "flmsg", "flamp", "js8call")
+    assert tri_mode.selected_apps == ("flrig", "fldigi", "flmsg", "flamp", "js8call", "varac")
 
     assert varac.backend == "manual"
     assert varac.selected_apps == ("varac",)
@@ -319,10 +319,10 @@ def test_guided_setup_software_hint_is_core_generated_for_setup_surfaces() -> No
 
     assert guided_setup_software_hint(
         setup_type_choice=LANE_TRI_MODE,
-        setup_type_label="JS8Call + Fast Light",
-        selected_apps=("flrig", "fldigi", "flmsg", "flamp", "js8call"),
+        setup_type_label="TriMode - FastLight/JS8Call/VarAC",
+        selected_apps=("flrig", "fldigi", "flmsg", "flamp", "js8call", "varac"),
     ) == (
-        "Setup type: JS8Call + Fast Light. This setup uses: FLRig, FLDigi, FLMsg, FLAmp, JS8Call. "
+        "Setup type: TriMode - FastLight/JS8Call/VarAC. This setup uses: FLRig, FLDigi, FLMsg, FLAmp, JS8Call, VarAC. "
         "Hidden app sections are not part of this setup type unless you select Custom software mix."
     )
 
@@ -483,16 +483,14 @@ def test_blueprint_bridge_keeps_varac_only_plan_read_import_only(tmp_path) -> No
     assert any("read/import only" in item for item in plan.review_items)
 
 
-def test_blueprint_bridge_keeps_varac_read_import_action_in_mixed_managed_plan(tmp_path) -> None:
+def test_blueprint_bridge_keeps_varac_read_import_action_in_trimode_managed_plan(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="tri_mode",
         hamlib_short_name="IC-7300",
         setup_mode=SETUP_MODE_MANAGED,
         control_route=CONTROL_FLRIG,
-        include_varac=True,
     )
     base_proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
-    base_proposals = (replace(base_proposals[0], varac_enabled=True),)
 
     plan = build_app_config_plan_for_blueprint(
         blueprint,
@@ -1174,6 +1172,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "AdjustToMinimumContentsLengthWithIcon" in dialog_block
     assert "combo.setMinimumWidth" not in dialog_block
     assert "combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in dialog_block
+    assert dialog_block.index('setup_type_combo.addItem("TriMode - FastLight/JS8Call/VarAC", LANE_TRI_MODE)') < dialog_block.index(
+        'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)'
+    )
     assert 'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)' in dialog_block
     assert 'setup_type_combo.addItem("VarAC only", LANE_VARAC)' in dialog_block
     assert 'setup_type_combo.addItem("Receive-only SDR", LANE_SDR_OBSERVER)' in dialog_block

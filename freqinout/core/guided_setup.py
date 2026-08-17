@@ -486,7 +486,7 @@ def radio_proposal_for_blueprint(
         index=base_proposal.index,
         enabled_apps=selected,
         ports=base_proposal.ports,
-        varac_enabled=base_proposal.varac_enabled or blueprint.lane in {LANE_VARAC, LANE_VARAC_CLUSTER},
+        varac_enabled=base_proposal.varac_enabled or "varac" in set(blueprint.selected_apps),
         notes=base_proposal.notes,
     )
 
@@ -516,7 +516,7 @@ def build_app_config_plan_for_blueprint(
     """Build the external-app plan through the guided setup policy boundary."""
 
     scoped_proposals = radio_proposals_for_blueprint(blueprint, base_proposals)
-    include_varac = blueprint.lane in {LANE_VARAC, LANE_VARAC_CLUSTER} or any(
+    include_varac = "varac" in set(blueprint.selected_apps) or any(
         proposal.varac_enabled for proposal in base_proposals
     )
     return build_guided_external_app_config_plan(
@@ -803,7 +803,9 @@ def guided_setup_operator_guidance_lines(
             lines.append("Choose the JS8Call profile, API port, and message files if FIO finds more than one.")
     elif lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
         lines.append("VarAC stays monitor/import only here; VarAC keeps its own frequency scheduler.")
-    elif lane_key in {LANE_FAST_LIGHT, LANE_TRI_MODE}:
+    elif lane_key == LANE_TRI_MODE:
+        lines.append("Choose the matching FastLight, JS8Call, and VarAC app set for this radio.")
+    elif lane_key == LANE_FAST_LIGHT:
         lines.append("Choose the matching FLRig/FLDigi/Fast Light app set for this radio.")
 
     if policy.scheduler_assignment_allowed:
@@ -870,7 +872,7 @@ def guided_setup_apps_for_lane(lane: str) -> Tuple[str, ...]:
     if lane_key == LANE_FAST_LIGHT:
         return ("flrig", "fldigi", "flmsg", "flamp")
     if lane_key == LANE_TRI_MODE:
-        return ("flrig", "fldigi", "flmsg", "flamp", "js8call")
+        return ("flrig", "fldigi", "flmsg", "flamp", "js8call", "varac")
     if lane_key in {LANE_VARAC, LANE_VARAC_CLUSTER}:
         return ("varac",)
     if lane_key == LANE_SDR_OBSERVER:
@@ -1095,7 +1097,7 @@ def build_guided_setup_blueprint(
         notes.append("VarAC setup uses the radio name directly and does not imply FLRig.")
         notes.append("VarAC-only radios use VarAC's scheduler; FIO does not show scheduler/QSY frequency controls.")
         notes.append("VarAC guided setup stores integration settings in FIO and does not write VarAC.ini or VarAC DB.")
-    elif include_varac:
+    elif include_varac or "varac" in apps:
         notes.append("VarAC is included as a read/import integration; other selected app lanes keep their normal control rules.")
     if mode_key == SETUP_MODE_READ_ONLY:
         notes.append("Read-only setup stores references in FIO but does not change external app configuration.")
@@ -1130,7 +1132,7 @@ def _build_steps(
     station_choices = (
         GuidedSetupChoice(LANE_JS8_ONLY, "JS8Call", recommended=lane_key == LANE_JS8_ONLY),
         GuidedSetupChoice(LANE_FAST_LIGHT, "Fast Light: FLDigi / FLMsg / FLAmp", recommended=lane_key == LANE_FAST_LIGHT),
-        GuidedSetupChoice(LANE_TRI_MODE, "JS8Call + Fast Light", recommended=lane_key == LANE_TRI_MODE),
+        GuidedSetupChoice(LANE_TRI_MODE, "TriMode - FastLight/JS8Call/VarAC", recommended=lane_key == LANE_TRI_MODE),
         GuidedSetupChoice(LANE_VARAC, "VarAC", recommended=lane_key == LANE_VARAC),
         GuidedSetupChoice(LANE_VARAC_CLUSTER, "VarAC Cluster / BBS", recommended=lane_key == LANE_VARAC_CLUSTER),
         GuidedSetupChoice(LANE_SDR_OBSERVER, "Receive-only monitoring", recommended=receive_only or lane_key == LANE_SDR_OBSERVER),
@@ -1210,7 +1212,7 @@ def _guided_app_instance_step(*, lane_key: str, radio_label: str) -> GuidedSetup
         return GuidedSetupStep(
             step_id="app_instance",
             title="Mixed App Stack",
-            prompt=f"Which FLRig, FLDigi, and JS8Call setup belongs to {radio_label}?",
+            prompt=f"Which FastLight, JS8Call, and VarAC setup belongs to {radio_label}?",
             choices=(
                 GuidedSetupChoice(APP_INSTANCE_EXISTING, "Use detected paired app stack", recommended=True),
                 GuidedSetupChoice(APP_INSTANCE_MANAGED, "Create FIO-managed app stack"),
