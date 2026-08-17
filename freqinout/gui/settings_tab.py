@@ -156,6 +156,7 @@ from freqinout.core.guided_setup import (
     guided_setup_lane_preset,
     guided_setup_next_action_text,
     guided_setup_operator_guidance_lines,
+    guided_setup_software_hint,
     GuidedSetupFieldVisibilityInput,
     build_guided_setup_preview,
     generated_radio_label,
@@ -19741,53 +19742,16 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                show_software_checkboxes = visibility.software_choices
                 _set_row_visible(software_wrap, visibility.software_choices)
                 _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)
-                software_parts = []
-                if use_flrig:
-                    software_parts.append("FLRig")
-                elif backend == "rigctld":
-                    software_parts.append("RigCtlD")
-                elif backend == "manual":
-                    software_parts.append("Manual")
-                if use_fldigi:
-                    software_parts.append("FLDigi")
-                if bool(use_flmsg_chk.isChecked()):
-                    software_parts.append("FLMsg")
-                if bool(use_flamp_chk.isChecked()):
-                    software_parts.append("FLAmp")
-                if use_js8call:
-                    software_parts.append("JS8Call")
-                if use_js8spotter:
-                    software_parts.append("JS8Spotter")
-                if use_commstat:
-                    software_parts.append("CommStat")
-                if use_varac:
-                    software_parts.append("VarAC")
-                setup_type_label = setup_type_combo.currentText().strip()
-                setup_prefix = (
-                    f"Setup type: {setup_type_label}. "
-                    if setup_type_label and setup_type_combo.currentData()
-                    else ""
+                software_hint_label.setText(
+                    guided_setup_software_hint(
+                        setup_type_choice=setup_type_choice,
+                        setup_type_label=setup_type_combo.currentText().strip(),
+                        selected_apps=_guided_plan_enabled_apps(),
+                    )
                 )
-                if not setup_type_choice:
-                    software_hint_label.setText(
-                        "Choose a setup type above. FIO will then show only the fields needed for that radio path."
-                    )
-                elif show_software_checkboxes:
-                    software_hint_label.setText(
-                        setup_prefix
-                        + "Custom software mix is selected. Choose only the applications that belong to this radio."
-                    )
-                else:
-                    software_hint_label.setText(
-                        setup_prefix
-                        + "This setup uses: "
-                        + ", ".join(software_parts)
-                        + ". Hidden app sections are not part of this setup type unless you select Custom software mix."
-                    )
                 if app_setup_plan_group.isVisible():
                     _update_guided_app_setup_plan_review()
 

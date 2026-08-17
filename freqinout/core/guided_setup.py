@@ -871,6 +871,39 @@ def guided_setup_lane_preset(lane: str) -> GuidedSetupLanePreset:
     )
 
 
+def guided_setup_software_hint(
+    *,
+    setup_type_choice: str = "",
+    setup_type_label: str = "",
+    selected_apps: Sequence[str] = (),
+) -> str:
+    """Return the concise setup-type guidance shown above app connection fields."""
+
+    choice = str(setup_type_choice or "").strip()
+    label = str(setup_type_label or "").strip()
+    prefix = f"Setup type: {label}. " if choice and label else ""
+    if not choice:
+        return "Choose a setup type above. FIO will then show only the fields needed for that radio path."
+    if choice == "custom":
+        return prefix + "Custom software mix is selected. Choose only the applications that belong to this radio."
+
+    app_labels: list[str] = []
+    seen: set[str] = set()
+    for app_id in selected_apps:
+        key = str(app_id or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        app_labels.append(APP_DISPLAY_NAMES.get(key, key.upper()))
+    app_summary = ", ".join(app_labels) if app_labels else "monitor/import only"
+    return (
+        prefix
+        + "This setup uses: "
+        + app_summary
+        + ". Hidden app sections are not part of this setup type unless you select Custom software mix."
+    )
+
+
 def guided_schedule_choices_for_lane(
     lane: str,
     *,

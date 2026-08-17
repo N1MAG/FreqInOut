@@ -35,6 +35,7 @@ from freqinout.core.guided_setup import (
     guided_setup_flow_summary_lines,
     guided_setup_lane_preset,
     guided_setup_operator_guidance_lines,
+    guided_setup_software_hint,
     guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
@@ -300,6 +301,27 @@ def test_guided_setup_lane_preset_maps_setup_type_to_ui_defaults() -> None:
     assert observer.device_class == "observer"
     assert observer.backend == "manual"
     assert observer.selected_apps == tuple()
+
+
+def test_guided_setup_software_hint_is_core_generated_for_setup_surfaces() -> None:
+    assert guided_setup_software_hint() == (
+        "Choose a setup type above. FIO will then show only the fields needed for that radio path."
+    )
+
+    assert guided_setup_software_hint(
+        setup_type_choice=LANE_TRI_MODE,
+        setup_type_label="JS8Call + Fast Light",
+        selected_apps=("flrig", "fldigi", "flmsg", "flamp", "js8call"),
+    ) == (
+        "Setup type: JS8Call + Fast Light. This setup uses: FLRig, FLDigi, FLMsg, FLAmp, JS8Call. "
+        "Hidden app sections are not part of this setup type unless you select Custom software mix."
+    )
+
+    assert guided_setup_software_hint(
+        setup_type_choice="custom",
+        setup_type_label="Custom software mix",
+        selected_apps=("js8call", "varac"),
+    ) == "Setup type: Custom software mix. Custom software mix is selected. Choose only the applications that belong to this radio."
 
 
 def test_blueprint_bridge_keeps_read_only_plan_from_writing_external_configs(tmp_path) -> None:
@@ -1081,7 +1103,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "guided_setup_field_visibility(" in dialog_block
     assert "GuidedSetupFieldVisibilityInput(" in dialog_block
     assert "_set_row_visible(configure_auto_wrap, visibility.configure_automatically)" in dialog_block
-    assert "show_software_checkboxes = visibility.software_choices" in dialog_block
+    assert "guided_setup_software_hint(" in dialog_block
     assert "preset = guided_setup_lane_preset(lane)" in dialog_block
     assert "_set_combo_data(device_class_combo, preset.device_class)" in dialog_block
     assert "_set_combo_data(backend_combo, preset.backend)" in dialog_block
@@ -1098,7 +1120,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "display_name, _existing_radio_labels_for_name_generation()" not in dialog_block
     assert 'apps.append("flmsg")' in dialog_block
     assert 'apps.append("flamp")' in dialog_block
-    assert "Hidden app sections are not part of this setup type unless you select Custom software mix." in dialog_block
+    assert "Hidden app sections are not part of this setup type unless you select Custom software mix." not in dialog_block
     assert "Hidden sections stay unchanged" not in dialog_block
     assert 'apps.append("js8spotter")' in dialog_block
     assert 'apps.append("commstat")' in dialog_block
@@ -1114,4 +1136,3 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")' in dialog_block
     assert "guided_setup_operator_guidance_lines(blueprint, plan)" in dialog_block
     assert 'QGroupBox("Setup Steps")' in dialog_block
-    assert "Setup type: {setup_type_label}" in dialog_block
