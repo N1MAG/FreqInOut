@@ -1530,6 +1530,8 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "def _any_row_visible(widgets: Sequence[QWidget]) -> bool:" in dialog_block
     assert "connection_group.setVisible(" in dialog_block
     assert "technical_identity_widgets = [" in dialog_block
+    assert "setup_started = bool(setup_type_choice)" in dialog_block
+    assert "if setup_started and backend == \"flrig\"" in dialog_block
     assert "show_technical_identity = setup_type_choice == \"custom\"" in dialog_block
     assert "for widget in technical_identity_widgets:" in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Setup Steps")' in dialog_block

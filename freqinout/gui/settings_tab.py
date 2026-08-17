@@ -19708,6 +19708,8 @@ class SettingsTab(QWidget):
         def _update_dialog_visibility() -> None:
             backend = str(backend_combo.currentData() or "flrig").strip().lower()
             device_class_value = str(device_class_combo.currentData() or "tx_rx").strip().lower()
+            setup_type_choice = str(setup_type_combo.currentData() or "").strip()
+            setup_started = bool(setup_type_choice)
             observer_mode = device_class_value == "observer"
             use_flrig = bool(use_flrig_chk.isChecked())
             use_fldigi = bool(use_fldigi_chk.isChecked())
@@ -19724,13 +19726,13 @@ class SettingsTab(QWidget):
             use_js8spotter_chk.setEnabled(not observer_mode)
             use_commstat_chk.setEnabled(not observer_mode)
             use_varac_chk.setEnabled(not observer_mode)
-            if backend == "flrig" and not use_flrig_chk.isChecked():
+            if setup_started and backend == "flrig" and not use_flrig_chk.isChecked():
                 use_flrig_chk.setChecked(True)
                 use_flrig = True
-            if backend == "js8call" and not use_js8call_chk.isChecked():
+            if setup_started and backend == "js8call" and not use_js8call_chk.isChecked():
                 use_js8call_chk.setChecked(True)
                 use_js8call = True
-            if use_js8spotter or use_commstat:
+            if setup_started and (use_js8spotter or use_commstat):
                 if not use_js8call_chk.isChecked():
                     use_js8call_chk.setChecked(True)
                     use_js8call = True
@@ -19740,33 +19742,40 @@ class SettingsTab(QWidget):
             for widget in flrig_field_widgets:
                 _set_row_visible(
                     widget,
-                    not observer_mode
+                    setup_started
+                    and not observer_mode
                     and policy.fio_frequency_control_allowed
                     and (backend == CONTROL_FLRIG or (use_flrig and "flrig" in visible_apps)),
                 )
             for widget in rigctld_field_widgets:
                 _set_row_visible(
                     widget,
-                    not observer_mode
+                    setup_started
+                    and not observer_mode
                     and policy.fio_frequency_control_allowed
                     and backend == CONTROL_RIGCTLD,
                 )
             for widget in js8_field_widgets:
-                _set_row_visible(widget, not observer_mode and use_js8call and "js8call" in visible_apps)
+                _set_row_visible(widget, setup_started and not observer_mode and use_js8call and "js8call" in visible_apps)
             for widget in observer_field_widgets:
-                _set_row_visible(widget, observer_mode)
+                _set_row_visible(widget, setup_started and observer_mode)
             for widget in fldigi_field_widgets:
-                _set_row_visible(widget, not observer_mode and use_fldigi and "fldigi" in visible_apps)
+                _set_row_visible(widget, setup_started and not observer_mode and use_fldigi and "fldigi" in visible_apps)
             for widget in flmsg_field_widgets:
-                _set_row_visible(widget, not observer_mode and bool(use_flmsg_chk.isChecked()) and "flmsg" in visible_apps)
+                _set_row_visible(
+                    widget,
+                    setup_started and not observer_mode and bool(use_flmsg_chk.isChecked()) and "flmsg" in visible_apps,
+                )
             for widget in flamp_field_widgets:
-                _set_row_visible(widget, not observer_mode and bool(use_flamp_chk.isChecked()) and "flamp" in visible_apps)
+                _set_row_visible(
+                    widget,
+                    setup_started and not observer_mode and bool(use_flamp_chk.isChecked()) and "flamp" in visible_apps,
+                )
             for widget in varac_field_widgets:
-                _set_row_visible(widget, not observer_mode and use_varac and "varac" in visible_apps)
+                _set_row_visible(widget, setup_started and not observer_mode and use_varac and "varac" in visible_apps)
             for widget in optional_field_widgets:
                 _set_row_visible(widget, optional_toggle.isChecked())
 
-            setup_type_choice = str(setup_type_combo.currentData() or "").strip()
             show_technical_identity = setup_type_choice == "custom"
             for widget in technical_identity_widgets:
                 _set_row_visible(widget, show_technical_identity)
