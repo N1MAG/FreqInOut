@@ -1489,6 +1489,19 @@ def test_radio_selector_selection_is_not_color_only() -> None:
     assert "btn.setMinimumWidth(190 if selected else 170)" in selector_block
 
 
+def test_radio_selector_ignores_launch_only_external_manual_badge() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    selector_block = source[
+        source.index("def _radio_selector_button_role")
+        : source.index("def _rebuild_device_profile_selector")
+    ]
+
+    assert "self._radio_selector_readiness_summary(profile, readiness_report)" in selector_block
+    assert "def _radio_selector_readiness_summary" in selector_block
+    assert '== "external_manual"' in selector_block
+    assert 'return readiness_state_label("ready")' in selector_block
+
+
 def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     build_block = source[

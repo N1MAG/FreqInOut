@@ -11878,7 +11878,7 @@ class SettingsTab(QWidget):
             return "muted"
         if self._profile_needs_operator_name(profile):
             return "warning"
-        status = self._device_readiness_summary(profile, readiness_report).strip().lower()
+        status = self._radio_selector_readiness_summary(profile, readiness_report).strip().lower()
         if any(token in status for token in ("offline", "unreachable", "not responding", "failed")):
             return "danger"
         if any(token in status for token in ("needs", "warning", "degraded", "issue", "missing")):
@@ -11921,7 +11921,7 @@ class SettingsTab(QWidget):
     ) -> str:
         name = self._profile_display_name(profile)
         status_bits: List[str] = []
-        readiness = self._device_readiness_summary(profile, readiness_report).strip()
+        readiness = self._radio_selector_readiness_summary(profile, readiness_report).strip()
         if readiness:
             status_bits.append(readiness)
         if int(profile.get("runtime_active", 0) or 0) == 1:
@@ -11937,6 +11937,28 @@ class SettingsTab(QWidget):
             status_bits.append(device_class)
         title = f"SELECTED: {name}" if selected else name
         return f"{title}\n{' | '.join(dict.fromkeys(status_bits))}"
+
+    def _radio_selector_readiness_summary(
+        self,
+        profile: Dict[str, Any],
+        readiness_report: Any | None = None,
+    ) -> str:
+        if not int(profile.get("enabled", 1) or 0):
+            return readiness_state_label("not_enabled")
+        if readiness_report is not None:
+            try:
+                summary = readiness_report.summary_for_radio(int(profile.get("id", 0) or 0))
+            except Exception:
+                summary = None
+            if summary is not None:
+                if (
+                    str(getattr(summary, "overall_state", "") or "").strip().lower() == "external_manual"
+                    and int(getattr(summary, "required_count", 0) or 0) == 0
+                    and int(getattr(summary, "recommended_count", 0) or 0) == 0
+                ):
+                    return readiness_state_label("ready")
+                return readiness_summary_badge_text(summary)
+        return self._device_readiness_summary(profile, None)
 
     def _rebuild_device_profile_selector(self) -> None:
         if not hasattr(self, "device_profile_selector_layout"):
