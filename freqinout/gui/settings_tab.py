@@ -11873,7 +11873,7 @@ class SettingsTab(QWidget):
         readiness_report: Any | None = None,
     ) -> str:
         if selected:
-            return "primary"
+            return "selected"
         if not int(profile.get("enabled", 1) or 0):
             return "muted"
         if self._profile_needs_operator_name(profile):
@@ -11887,7 +11887,38 @@ class SettingsTab(QWidget):
             return "success_muted"
         return "info"
 
-    def _radio_selector_button_text(self, profile: Dict[str, Any], readiness_report: Any | None = None) -> str:
+    def _radio_selector_button_style(
+        self,
+        profile: Dict[str, Any],
+        *,
+        selected: bool,
+        readiness_report: Any | None = None,
+        theme: Dict[str, str],
+    ) -> str:
+        role = self._radio_selector_button_role(profile, selected=selected, readiness_report=readiness_report)
+        if not selected:
+            return button_style(role, theme)
+        bg = theme.get("station_control_tile_selected_surface") or theme.get("surface", "#F0F2F4")
+        fg = theme.get("text", "#1C1F21")
+        border = theme.get("accent_active") or theme.get("accent", "#2E6F9E")
+        focus = theme.get("focus", border)
+        return (
+            "QPushButton {"
+            f" background-color: {bg}; color: {fg}; border: 3px solid {border};"
+            " border-radius: 8px; padding: 3px 10px; font-weight: 800;"
+            " }"
+            f" QPushButton:hover {{ border-color: {focus}; }}"
+            f" QPushButton:checked {{ background-color: {bg}; color: {fg}; border: 3px solid {border}; }}"
+            f" QPushButton:focus {{ border: 4px solid {focus}; }}"
+        )
+
+    def _radio_selector_button_text(
+        self,
+        profile: Dict[str, Any],
+        readiness_report: Any | None = None,
+        *,
+        selected: bool = False,
+    ) -> str:
         name = self._profile_display_name(profile)
         status_bits: List[str] = []
         readiness = self._device_readiness_summary(profile, readiness_report).strip()
@@ -11904,7 +11935,8 @@ class SettingsTab(QWidget):
         device_class = self._device_class_label(str(profile.get("device_class", "") or ""))
         if device_class and device_class.lower() != "transceiver":
             status_bits.append(device_class)
-        return f"{name}\n{' | '.join(dict.fromkeys(status_bits))}"
+        title = f"SELECTED: {name}" if selected else name
+        return f"{title}\n{' | '.join(dict.fromkeys(status_bits))}"
 
     def _rebuild_device_profile_selector(self) -> None:
         if not hasattr(self, "device_profile_selector_layout"):
@@ -11933,19 +11965,31 @@ class SettingsTab(QWidget):
             if radio_id <= 0:
                 continue
             selected = radio_id == focused_id
-            btn = QPushButton(self._radio_selector_button_text(profile, readiness_report))
+            btn = QPushButton(self._radio_selector_button_text(profile, readiness_report, selected=selected))
             btn.setCheckable(True)
             btn.setChecked(selected)
-            btn.setMinimumWidth(170)
+            btn.setMinimumWidth(190 if selected else 170)
             btn.setMinimumHeight(52)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setAccessibleName(
+                f"Selected radio: {self._profile_display_name(profile)}"
+                if selected
+                else f"Radio: {self._profile_display_name(profile)}"
+            )
             btn.setToolTip(
                 f"Edit {self._profile_display_name(profile)}. "
                 f"Software: {self._device_software_summary(profile)}. "
                 f"Endpoint: {self._device_endpoint_summary(profile)}."
             )
             btn.clicked.connect(lambda _checked=False, ident=radio_id: self._set_settings_radio_focus(ident))
-            btn.setStyleSheet(button_style(self._radio_selector_button_role(profile, selected=selected, readiness_report=readiness_report), theme))
+            btn.setStyleSheet(
+                self._radio_selector_button_style(
+                    profile,
+                    selected=selected,
+                    readiness_report=readiness_report,
+                    theme=theme,
+                )
+            )
             self._settings_radio_selector_buttons[radio_id] = btn
             layout.addWidget(btn)
         layout.addStretch()

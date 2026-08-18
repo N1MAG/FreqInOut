@@ -1475,6 +1475,20 @@ def test_radio_selector_exposes_visible_runtime_actions() -> None:
     assert "self.selector_remove_device_profile_btn.setEnabled(can_delete)" in action_state_block
 
 
+def test_radio_selector_selection_is_not_color_only() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    selector_block = source[
+        source.index("def _radio_selector_button_style")
+        : source.index("def _selected_radio_detail_text")
+    ]
+
+    assert '"SELECTED: {name}"' in selector_block
+    assert "Selected radio:" in selector_block
+    assert "border: 3px solid" in selector_block
+    assert "border: 4px solid" in selector_block
+    assert "btn.setMinimumWidth(190 if selected else 170)" in selector_block
+
+
 def test_settings_multirig_autoconfig_preview_is_in_card_and_non_destructive() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     build_block = source[
