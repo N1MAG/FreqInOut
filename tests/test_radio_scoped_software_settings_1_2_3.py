@@ -1605,9 +1605,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert 'configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")' in dialog_block
     assert 'configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")' in dialog_block
     assert 'configure_auto_btn.setStyleSheet(button_style("primary", theme))' in dialog_block
-    assert "Recommended: let FIO fill what it can." in dialog_block
-    assert "Choose the highlighted detected app/profile, then continue." in dialog_block
-    assert "Detected settings are ready to review. Continue to Connection." in dialog_block
+    assert "Recommended next step: let FIO fill blank paths, ports, and message locations." in dialog_block
+    assert "Choose the highlighted app or profile, then continue." in dialog_block
+    assert "Settings found. Continue to Connection." in dialog_block
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
@@ -1623,6 +1623,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert 'app_choice_group.setObjectName("guidedDetectedAppsReview")' in dialog_block
     assert "Choose the detected app that belongs to this radio before continuing." in dialog_block
     assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
+    assert 'browse_btn.setObjectName(f"guidedAutoAppBrowse_{app_id}")' in dialog_block
+    assert "def _browse_guided_app_choice(app_id: str) -> None:" in dialog_block
+    assert "Select {app_label} app or folder" in dialog_block
     assert 'js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")' in dialog_block
     assert "Which JS8Call profile belongs to this radio?" in dialog_block
     assert 'port_prompt_group = QGroupBox("Enter App Ports")' in dialog_block

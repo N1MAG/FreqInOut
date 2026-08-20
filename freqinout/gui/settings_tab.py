@@ -18705,7 +18705,7 @@ class SettingsTab(QWidget):
         configure_auto_btn.setToolTip(
             "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
         )
-        configure_auto_status = QLabel("Recommended: let FIO fill what it can.")
+        configure_auto_status = QLabel("Recommended next step: let FIO fill blank paths, ports, and message locations.")
         configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
         configure_auto_status.setWordWrap(True)
         configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -18769,6 +18769,8 @@ class SettingsTab(QWidget):
         app_choice_layout = QFormLayout(app_choice_group)
         _configure_guided_form(app_choice_layout)
         app_choice_combos: Dict[str, QComboBox] = {}
+        app_choice_rows: Dict[str, QWidget] = {}
+        app_choice_browse_buttons: Dict[str, QPushButton] = {}
         app_choice_specs = [
             ("flrig", "Which FLRig controls this radio?"),
             ("fldigi", "Which FLDigi belongs to this radio?"),
@@ -18786,10 +18788,24 @@ class SettingsTab(QWidget):
             combo.setToolTip("FIO found more than one installed app. Choose the one this radio should use.")
             _configure_combo_width(combo, minimum=260)
             app_choice_combos[app_id] = combo
+            browse_btn = QPushButton("Browse")
+            browse_btn.setObjectName(f"guidedAutoAppBrowse_{app_id}")
+            browse_btn.setToolTip("Choose a different app or folder if FIO did not find it.")
+            app_choice_browse_buttons[app_id] = browse_btn
+            choice_row = QHBoxLayout()
+            choice_row.setContentsMargins(0, 0, 0, 0)
+            choice_row.setSpacing(8)
+            choice_row.addWidget(combo, 1)
+            choice_row.addWidget(browse_btn)
+            choice_wrap = QWidget()
+            choice_wrap.setObjectName(f"guidedAutoAppChoiceRow_{app_id}")
+            choice_wrap.setLayout(choice_row)
+            choice_wrap.setVisible(False)
+            app_choice_rows[app_id] = choice_wrap
             label_widget = _make_help_label(prompt_text, "Choose the installed app path that belongs to this radio.")
             label_widget.setVisible(False)
-            row_labels[combo] = label_widget
-            app_choice_layout.addRow(label_widget, combo)
+            row_labels[choice_wrap] = label_widget
+            app_choice_layout.addRow(label_widget, choice_wrap)
         js8_profile_choice_combo = QComboBox()
         js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")
         js8_profile_choice_combo.setVisible(False)
@@ -19222,6 +19238,32 @@ class SettingsTab(QWidget):
             "varac": varac_install_edit,
         }
 
+        def _browse_guided_app_choice(app_id: str) -> None:
+            target = app_choice_targets.get(app_id)
+            if target is None:
+                return
+            app_label = {
+                "flrig": "FLRig",
+                "fldigi": "FLDigi",
+                "flmsg": "FLMsg",
+                "flamp": "FLAmp",
+                "js8call": "JS8Call",
+                "js8spotter": "External JS8Spotter",
+                "commstat": "CommStat",
+                "varac": "VarAC",
+            }.get(str(app_id or "").strip().lower(), "app")
+            start = target.text().strip() or radio_apps_base_edit.text().strip() or str(Path.home())
+            chosen = QFileDialog.getExistingDirectory(self, f"Select {app_label} app or folder", start)
+            if not chosen:
+                return
+            target.setText(chosen)
+            configure_auto_status.setText(f"Using selected {app_label} location. Continue to Connection.")
+            _update_app_choice_visibility()
+            _update_dialog_readiness()
+
+        for app_id, browse_btn in app_choice_browse_buttons.items():
+            browse_btn.clicked.connect(lambda _checked=False, key=app_id: _browse_guided_app_choice(key))
+
         def _app_choice_app_selected(app_id: str) -> bool:
             key = str(app_id or "").strip().lower()
             backend = str(backend_combo.currentData() or "").strip().lower()
@@ -19318,20 +19360,28 @@ class SettingsTab(QWidget):
             attention_style = (
                 f"QComboBox {{ background-color: {selection_bg}; border: 2px solid {warning}; }}"
             )
+            attention_row_style = (
+                f"QWidget {{ background-color: {selection_bg}; border: 1px solid {warning}; border-radius: 4px; }}"
+            )
             for app_id, combo in app_choice_combos.items():
+                row_widget = app_choice_rows.get(app_id, combo)
                 visible = (
                     not observer_mode
                     and _app_choice_app_selected(app_id)
                     and combo.count() > 1
                 )
-                _set_row_visible(combo, visible)
+                _set_row_visible(row_widget, visible)
                 needs_choice = visible and combo.count() > 2 and combo.currentIndex() <= 0
                 combo.setStyleSheet(attention_style if needs_choice else "")
+                row_widget.setStyleSheet(attention_row_style if needs_choice else "")
                 combo.setToolTip(
                     "Choose the detected app that belongs to this radio before continuing."
                     if needs_choice
                     else "Review the detected app path for this radio."
                 )
+                browse_btn = app_choice_browse_buttons.get(app_id)
+                if browse_btn is not None:
+                    browse_btn.setVisible(visible)
                 any_visible = any_visible or visible
             js8_profile_visible = (
                 not observer_mode
@@ -19382,11 +19432,21 @@ class SettingsTab(QWidget):
             combo.blockSignals(was_blocked)
 
         def _update_detected_app_choices(candidates: Sequence[Any]) -> None:
+            placeholder_labels = {
+                "flrig": "Choose detected FLRig...",
+                "fldigi": "Choose detected FLDigi...",
+                "flmsg": "Choose detected FLMsg...",
+                "flamp": "Choose detected FLAmp...",
+                "js8call": "Choose detected JS8Call...",
+                "js8spotter": "Choose detected external JS8Spotter...",
+                "commstat": "Choose detected CommStat...",
+                "varac": "Choose detected VarAC...",
+            }
             for app_id, combo in app_choice_combos.items():
                 choices = self._guided_app_candidate_choices(candidates, app_id)
                 combo.blockSignals(True)
                 combo.clear()
-                combo.addItem("Choose detected app...", "")
+                combo.addItem(placeholder_labels.get(app_id, "Choose detected app..."), "")
                 for label_text, path_text in choices:
                     combo.addItem(label_text, path_text)
                 combo.blockSignals(False)
@@ -20551,9 +20611,9 @@ class SettingsTab(QWidget):
                 radio_apps_base_used=bool(radio_apps_base_edit.text().strip()),
             )
             if _detected_app_choice_needs_operator_selection():
-                configure_auto_status.setText("Choose the highlighted detected app/profile, then continue.")
+                configure_auto_status.setText("Choose the highlighted app or profile, then continue.")
             else:
-                configure_auto_status.setText("Detected settings are ready to review. Continue to Connection.")
+                configure_auto_status.setText("Settings found. Continue to Connection.")
             configure_auto_status.setToolTip("\n".join(review.detail_lines))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
