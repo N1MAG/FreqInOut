@@ -1421,8 +1421,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "return tuple()" in dialog_block
     assert 'control_backend = "" if setup_type_choice == "custom" else str(backend_combo.currentData() or "")' in dialog_block
     assert "_set_row_visible(software_wrap, setup_started and not observer_mode)" in dialog_block
-    assert 'preset_software = setup_started and setup_type_choice != "custom"' in dialog_block
-    assert "checkbox.setEnabled(not preset_software)" in dialog_block
+    assert "checkbox.setEnabled(True)" in dialog_block
+    assert "def _mark_custom_mix_from_software_edit() -> None:" in dialog_block
+    assert '_set_combo_data(setup_type_combo, "custom")' in dialog_block
+    assert "def _guided_save_allowed() -> bool:" in dialog_block
+    assert "save_button.setEnabled(allowed)" in dialog_block
     assert "_set_row_visible(widget, visibility.fldigi_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flmsg_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flamp_fields)" in dialog_block

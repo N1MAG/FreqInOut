@@ -18315,6 +18315,7 @@ class SettingsTab(QWidget):
 
         guided_wizard_step_id = "radio"
         guided_wizard_steps: Tuple[Tuple[str, str], ...] = guided_setup_wizard_view("radio").steps
+        guided_wizard_max_index_seen = len(guided_wizard_steps) - 1 if existing else 0
         guided_wizard_group = QGroupBox("Guided Setup")
         guided_wizard_group.setObjectName("guidedSetupWizard")
         guided_wizard_layout = QVBoxLayout(guided_wizard_group)
@@ -18444,6 +18445,7 @@ class SettingsTab(QWidget):
                 guided_initial_frequency_plan_id = 0
         guided_schedule_plan_combo_loaded = False
         guided_schedule_plan_count = 0
+        save_button: QPushButton | None = None
         save_review_group, save_review_form = _make_section(
             "Save Review",
             "Review exactly what FIO will save for this radio profile before applying changes.",
@@ -18628,9 +18630,7 @@ class SettingsTab(QWidget):
         configure_auto_btn.setToolTip(
             "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
         )
-        configure_auto_status = QLabel(
-            "Recommended next step: let FIO fill blank app paths, ports, and message locations."
-        )
+        configure_auto_status = QLabel("Recommended: let FIO fill what it can.")
         configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
         configure_auto_status.setWordWrap(True)
         configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -18689,6 +18689,7 @@ class SettingsTab(QWidget):
         guided_wizard_layout.addWidget(app_setup_plan_group)
 
         app_choice_group = QGroupBox("Review Detected Apps")
+        app_choice_group.setObjectName("guidedDetectedAppsReview")
         app_choice_group.setVisible(False)
         app_choice_layout = QFormLayout(app_choice_group)
         _configure_guided_form(app_choice_layout)
@@ -19194,6 +19195,12 @@ class SettingsTab(QWidget):
         def _update_app_choice_visibility() -> None:
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             any_visible = False
+            theme = resolve_theme(self.settings)
+            warning = theme.get("warning", "#C99700")
+            selection_bg = theme.get("selection_bg", theme.get("surface_alt", "#E8F3FA"))
+            attention_style = (
+                f"QComboBox {{ background-color: {selection_bg}; border: 2px solid {warning}; }}"
+            )
             for app_id, combo in app_choice_combos.items():
                 visible = (
                     not observer_mode
@@ -19201,6 +19208,13 @@ class SettingsTab(QWidget):
                     and combo.count() > 1
                 )
                 _set_row_visible(combo, visible)
+                needs_choice = visible and combo.count() > 2 and combo.currentIndex() <= 0
+                combo.setStyleSheet(attention_style if needs_choice else "")
+                combo.setToolTip(
+                    "Choose the detected app that belongs to this radio before continuing."
+                    if needs_choice
+                    else "Review the detected app path for this radio."
+                )
                 any_visible = any_visible or visible
             js8_profile_visible = (
                 not observer_mode
@@ -19208,8 +19222,27 @@ class SettingsTab(QWidget):
                 and js8_profile_choice_combo.count() > 1
             )
             _set_row_visible(js8_profile_choice_combo, js8_profile_visible)
+            js8_profile_needs_choice = (
+                js8_profile_visible
+                and js8_profile_choice_combo.count() > 2
+                and js8_profile_choice_combo.currentIndex() <= 0
+            )
+            js8_profile_choice_combo.setStyleSheet(attention_style if js8_profile_needs_choice else "")
+            js8_profile_choice_combo.setToolTip(
+                "Choose the JS8Call profile that belongs to this radio before continuing."
+                if js8_profile_needs_choice
+                else "Review the detected JS8Call profile for this radio."
+            )
             any_visible = any_visible or js8_profile_visible
             app_choice_group.setVisible(any_visible)
+            if any_visible:
+                group_style = (
+                    f"QGroupBox#guidedDetectedAppsReview {{ border: 2px solid {warning}; border-radius: 6px; margin-top: 8px; }}"
+                    f"QGroupBox#guidedDetectedAppsReview::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}"
+                    if _detected_app_choice_needs_operator_selection()
+                    else ""
+                )
+                app_choice_group.setStyleSheet(group_style)
 
         def _detected_app_choice_needs_operator_selection() -> bool:
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
@@ -19453,6 +19486,15 @@ class SettingsTab(QWidget):
             finally:
                 applying_setup_type_choice = False
             _update_guided_app_setup_plan_review()
+            _update_dialog_visibility()
+
+        def _mark_custom_mix_from_software_edit() -> None:
+            if applying_setup_type_choice:
+                return
+            lane = str(setup_type_combo.currentData() or "").strip()
+            if lane and lane != "custom":
+                _set_combo_data(setup_type_combo, "custom")
+                return
             _update_dialog_visibility()
 
         def _set_row_visible(widget: QWidget, visible: bool) -> None:
@@ -20003,16 +20045,47 @@ class SettingsTab(QWidget):
                 return ""
 
         def _set_guided_wizard_step(step_id: str) -> None:
-            nonlocal guided_wizard_step_id
+            nonlocal guided_wizard_step_id, guided_wizard_max_index_seen
             candidate = str(step_id or "").strip()
-            valid_steps = {item[0] for item in _guided_visible_wizard_steps()}
+            visible_steps = _guided_visible_wizard_steps()
+            valid_steps = {item[0] for item in visible_steps}
             if candidate in valid_steps:
-                guided_wizard_step_id = candidate
+                requested_idx = next(
+                    (idx for idx, (item_step_id, _label) in enumerate(visible_steps) if item_step_id == candidate),
+                    0,
+                )
+                allowed_idx = min(requested_idx, guided_wizard_max_index_seen + 1)
+                guided_wizard_step_id = visible_steps[allowed_idx][0]
+                guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, allowed_idx)
             elif candidate == "connection" and "schedule" in valid_steps:
                 guided_wizard_step_id = "schedule"
+                guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, _guided_wizard_index("schedule"))
             else:
                 guided_wizard_step_id = "radio"
             _update_dialog_visibility()
+
+        def _guided_save_allowed() -> bool:
+            if guided_wizard_step_id != "review":
+                return False
+            if not str(setup_type_combo.currentData() or "").strip():
+                return False
+            if _detected_app_choice_needs_operator_selection():
+                return False
+            return True
+
+        def _update_guided_save_button() -> None:
+            if save_button is None:
+                return
+            allowed = _guided_save_allowed()
+            save_button.setEnabled(allowed)
+            if allowed:
+                save_button.setToolTip("Save this reviewed radio setup.")
+            elif guided_wizard_step_id != "review":
+                save_button.setToolTip("Walk through the guided setup and review before saving.")
+            elif _detected_app_choice_needs_operator_selection():
+                save_button.setToolTip("Choose the highlighted detected app/profile before saving.")
+            else:
+                save_button.setToolTip("Complete the guided setup before saving.")
 
         def _move_guided_wizard(delta: int) -> None:
             visible_steps = _guided_visible_wizard_steps()
@@ -20159,6 +20232,11 @@ class SettingsTab(QWidget):
             for step_id, btn in guided_wizard_buttons.items():
                 btn.setVisible(step_id in visible_step_ids)
                 checked = step_id == guided_wizard_step_id
+                step_idx = next(
+                    (idx for idx, (item_step_id, _label) in enumerate(wizard_view.steps) if item_step_id == step_id),
+                    0,
+                )
+                btn.setEnabled(step_idx <= guided_wizard_max_index_seen + 1)
                 btn.setChecked(checked)
                 btn.setStyleSheet(button_style("primary" if checked else "secondary", theme))
             guided_wizard_back_btn.setEnabled(wizard_view.can_go_back)
@@ -20191,6 +20269,7 @@ class SettingsTab(QWidget):
 
             guided_wizard_detail_label.setText(wizard_view.detail)
             _update_guided_save_review()
+            _update_guided_save_button()
 
         def _apply_dialog_autoconfigure() -> None:
             filled: List[str] = []
@@ -20286,18 +20365,14 @@ class SettingsTab(QWidget):
                 detection_notes=review_items,
                 radio_apps_base_used=bool(radio_apps_base_edit.text().strip()),
             )
-            visible_review = "\n".join(review.visible_lines)
-            configure_auto_status.setText(
-                f"{review.status_text}\n{visible_review}" if visible_review else review.status_text
-            )
+            if _detected_app_choice_needs_operator_selection():
+                configure_auto_status.setText("Choose the highlighted detected app/profile, then continue.")
+            else:
+                configure_auto_status.setText("Detected settings are ready to review. Continue to Connection.")
             configure_auto_status.setToolTip("\n".join(review.detail_lines))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
             if _detected_app_choice_needs_operator_selection():
-                configure_auto_status.setText(
-                    configure_auto_status.text().strip()
-                    + "\nChoose the detected app/profile that belongs to this radio before moving to Connection."
-                )
                 _set_guided_wizard_step("software")
             else:
                 _set_guided_wizard_step("connection")
@@ -20453,7 +20528,6 @@ class SettingsTab(QWidget):
                 app_setup_plan_label.setText("")
             else:
                 _set_row_visible(software_wrap, setup_started and not observer_mode)
-                preset_software = setup_started and setup_type_choice != "custom"
                 for checkbox in (
                     use_flrig_chk,
                     use_fldigi_chk,
@@ -20464,7 +20538,7 @@ class SettingsTab(QWidget):
                     use_commstat_chk,
                     use_varac_chk,
                 ):
-                    checkbox.setEnabled(not preset_software)
+                    checkbox.setEnabled(True)
                 _set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)
                 _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)
@@ -20501,6 +20575,11 @@ class SettingsTab(QWidget):
             _apply_guided_wizard_visibility(visibility.connection_group)
 
         def _on_varac_state_changed(_state: int) -> None:
+            if not applying_setup_type_choice:
+                lane = str(setup_type_combo.currentData() or "").strip()
+                if lane and lane != "custom":
+                    _set_combo_data(setup_type_combo, "custom")
+                    return
             if use_varac_chk.isChecked():
                 fast_or_js8_selected = any(
                     checkbox.isChecked()
@@ -20528,13 +20607,13 @@ class SettingsTab(QWidget):
         guided_wizard_next_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(1))
         backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
         device_class_combo.currentIndexChanged.connect(_update_dialog_visibility)
-        use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_fldigi_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_flmsg_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_flamp_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_js8call_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
-        use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
+        use_flrig_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_fldigi_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_flmsg_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_flamp_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_js8call_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
         schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
         schedule_plan_combo.currentIndexChanged.connect(lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
@@ -20644,11 +20723,29 @@ class SettingsTab(QWidget):
         if save_button is not None:
             save_button.setText(self._device_profile_dialog_save_text(existing))
             save_button.setAccessibleName(self._device_profile_dialog_save_text(existing))
+            save_button.setEnabled(False)
+            save_button.setToolTip("Walk through the guided setup and review before saving.")
         layout.addWidget(buttons)
 
         out: Dict[str, Any] = {}
 
         def _save() -> None:
+            if not _guided_save_allowed():
+                if _detected_app_choice_needs_operator_selection():
+                    _set_guided_wizard_step("software")
+                    QMessageBox.warning(
+                        self,
+                        "Review Required",
+                        "Choose the highlighted detected app/profile before saving this radio.",
+                    )
+                else:
+                    _set_guided_wizard_step("review")
+                    QMessageBox.warning(
+                        self,
+                        "Review Required",
+                        "Review the guided setup before saving this radio.",
+                    )
+                return
             model_choice = _current_radio_model_payload()
             name = name_edit.text().strip() or str(model_choice.get("display_name", "") or "").strip()
             if name and not name_edit.text().strip():
@@ -20680,6 +20777,7 @@ class SettingsTab(QWidget):
 
         buttons.accepted.connect(_save)
         buttons.rejected.connect(dlg.reject)
+        _update_guided_save_button()
         if dlg.exec() != QDialog.Accepted:
             return None
         return out

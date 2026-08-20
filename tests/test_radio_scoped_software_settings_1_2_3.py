@@ -1605,7 +1605,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert 'configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")' in dialog_block
     assert 'configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")' in dialog_block
     assert 'configure_auto_btn.setStyleSheet(button_style("primary", theme))' in dialog_block
-    assert "Recommended next step: let FIO fill blank app paths, ports, and message locations." in dialog_block
+    assert "Recommended: let FIO fill what it can." in dialog_block
+    assert "Choose the highlighted detected app/profile, then continue." in dialog_block
+    assert "Detected settings are ready to review. Continue to Connection." in dialog_block
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
@@ -1614,6 +1616,8 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "External JS8Spotter app {external_spotter}" in source
     assert "Spotter {spotter}" not in source
     assert 'app_choice_group = QGroupBox("Review Detected Apps")' in dialog_block
+    assert 'app_choice_group.setObjectName("guidedDetectedAppsReview")' in dialog_block
+    assert "Choose the detected app that belongs to this radio before continuing." in dialog_block
     assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
     assert 'js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")' in dialog_block
     assert "Which JS8Call profile belongs to this radio?" in dialog_block
@@ -1721,7 +1725,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "varac_bbs_edit" in varac_field_block
     assert "varac_bbs_archive_edit" in varac_field_block
     assert "build_autoconfig_proposal(" in dialog_block
-    assert "visible_review = " in dialog_block
+    assert 'configure_auto_status.setToolTip("\\n".join(review.detail_lines))' in dialog_block
     assert "select_js8call_file_profile(" in planner_source
     assert "tcp_port=initial_js8_port" in planner_source
     assert 'guided_single_install_path(install_candidates, "flmsg", fast_results, "path_flmsg", "FLMsg", review)' in planner_source
