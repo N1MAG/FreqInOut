@@ -181,11 +181,25 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
 
     SettingsManager()
     store = MultiRadioStore(settings_db_path())
+    fast = store.save_fast_light_config(
+        {
+            "name": "Remote Fast Light",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12365,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7383,
+        }
+    )
+    js8 = store.save_js8_instance({"name": "Remote JS8", "host": "127.0.0.1", "port": 2462})
+    varac = store.save_varac_node({"name": "Remote VarAC", "install_path": "/tmp/VarAC"})
     remote = store.save_device_profile(
         {
             "name": "Remote Manual",
             "control_backend": "manual",
             "deployment_mode": "minimal",
+            "fast_light_config_id": int(fast["id"]),
+            "js8_instance_id": int(js8["id"]),
+            "varac_node_id": int(varac["id"]),
         }
     )
     plan = store.save_frequency_plan({"name": "Remove Radio Test Plan", "category": "normal"})
@@ -212,6 +226,9 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
             int(row.get("device_profile_id", 0) or 0) != int(remote["id"])
             for row in store.list_assigned_plans()
         )
+        assert store.get_fast_light_config(int(fast["id"])) is None
+        assert store.get_js8_instance(int(js8["id"])) is None
+        assert store.get_varac_node(int(varac["id"])) is None
         assert tab.device_profiles_table.rowCount() == 0
     finally:
         tab.deleteLater()

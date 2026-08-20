@@ -5984,6 +5984,21 @@ class MultiRadioStore:
                 (int(device_profile_id), int(device_profile_id)),
             )
             conn.execute("DELETE FROM device_profiles WHERE id=?", (int(device_profile_id),))
+            orphan_links = (
+                ("js8_instances", "js8_instance_id"),
+                ("fast_light_configs", "fast_light_config_id"),
+                ("varac_nodes", "varac_node_id"),
+            )
+            for table_name, device_column in orphan_links:
+                linked_id = int(device.get(device_column, 0) or 0)
+                if linked_id <= 0:
+                    continue
+                count = conn.execute(
+                    f"SELECT COUNT(*) FROM device_profiles WHERE {device_column}=?",
+                    (linked_id,),
+                ).fetchone()[0]
+                if int(count or 0) == 0:
+                    conn.execute(f"DELETE FROM {table_name} WHERE id=?", (linked_id,))
             conn.commit()
             _sync_derived_coordination_policies_conn(conn)
             _normalize_runtime_primary_device(conn)
