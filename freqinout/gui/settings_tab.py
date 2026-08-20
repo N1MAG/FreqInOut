@@ -19066,9 +19066,9 @@ class SettingsTab(QWidget):
             band_grid.addWidget(checkbox, index // 6, index % 6)
         _add_form_row(
             optional_form,
-            "Antenna Supports These Bands:",
+            "Supported Bands:",
             band_grid_widget,
-            "Choose the bands this radio and its antenna path can safely use. RF Guard checks these before assigning or applying a schedule.",
+            "Choose the bands this radio and antenna can safely use. FIO checks this before assigning or applying a schedule.",
         )
 
         antenna_band_mode_combo = QComboBox()
@@ -19080,34 +19080,41 @@ class SettingsTab(QWidget):
         )
         _add_form_row(
             optional_form,
-            "Unsupported Band Action:",
+            "Unsupported Band:",
             antenna_band_mode_combo,
-            "Choose what FIO should do if a plan tries to use a band that is not checked above.",
+            "Choose whether FIO should warn or block if a plan tries to use a band that is not checked above.",
         )
+
+        shared_guard_heading = QLabel("Shared Hardware")
+        shared_guard_heading.setObjectName("guidedSharedHardwareHeading")
+        shared_guard_heading_font = shared_guard_heading.font()
+        shared_guard_heading_font.setBold(True)
+        shared_guard_heading.setFont(shared_guard_heading_font)
+        _add_full_width_row(optional_form, shared_guard_heading)
 
         antenna_group_edit = QLineEdit(str((existing or {}).get("antenna_group", "") or ""))
         antenna_group_edit.setPlaceholderText("Optional shared antenna path, e.g. ANT-1")
         _add_form_row(
             optional_form,
-            "Antenna Guard Group:",
+            "Shared Antenna:",
             antenna_group_edit,
-            "Use the same name on radios that share one antenna path, antenna switch position, tuner, or feed line. FIO treats those radios as competing for that antenna.",
+            "Use the same name on radios that share one antenna, switch position, tuner, or feed line. FIO treats those radios as competing for that path.",
         )
 
         ptt_group_edit = QLineEdit(str((existing or {}).get("ptt_group", "") or ""))
         ptt_group_edit.setPlaceholderText("Optional shared transmit/PTT path, e.g. AMP-A")
         _add_form_row(
             optional_form,
-            "PTT Guard Group:",
+            "Shared Transmit Path:",
             ptt_group_edit,
-            "Use the same name on radios that must not transmit at the same time, such as radios sharing an amplifier, tuner, or PTT control path.",
+            "Use the same name on radios that must not transmit at the same time, such as radios sharing an amplifier, tuner, or PTT line.",
         )
 
         band_overlap_edit = QLineEdit(str((existing or {}).get("band_overlap_guard_group", "") or ""))
         band_overlap_edit.setPlaceholderText("Optional shared receive/front-end group, e.g. NORTH-MAST")
         _add_form_row(
             optional_form,
-            "Prevent Band Overlap Group:",
+            "Same-Band Guard:",
             band_overlap_edit,
             "Use the same name on radios that should not occupy the same band at the same time, even when their exact frequencies differ.",
         )
@@ -19121,7 +19128,7 @@ class SettingsTab(QWidget):
         )
         _add_form_row(
             optional_form,
-            "Band Overlap Action:",
+            "Same-Band Action:",
             band_overlap_mode_combo,
             "Choose what FIO should do when another radio in this guard group is scheduled on the same band.",
         )
@@ -19130,7 +19137,7 @@ class SettingsTab(QWidget):
         advanced_frequency_group_edit.setPlaceholderText("Optional close-frequency guard group, e.g. SDR-FRONTEND")
         _add_form_row(
             optional_form,
-            "Advanced Guard Group:",
+            "Close-Frequency Guard:",
             advanced_frequency_group_edit,
             "Use the same name on radios that need close-frequency spacing protection because they share filters, front-end hardware, or antenna systems.",
         )
