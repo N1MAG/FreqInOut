@@ -1601,6 +1601,11 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     ]
 
     assert 'configure_auto_btn = QPushButton("Configure Automatically")' in dialog_block
+    assert 'configure_auto_wrap = QFrame()' in dialog_block
+    assert 'configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")' in dialog_block
+    assert 'configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")' in dialog_block
+    assert 'configure_auto_btn.setStyleSheet(button_style("primary", theme))' in dialog_block
+    assert "Recommended next step: let FIO fill blank app paths, ports, and message locations." in dialog_block
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source

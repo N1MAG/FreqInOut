@@ -18215,6 +18215,7 @@ class SettingsTab(QWidget):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(10)
+        theme = resolve_theme(self.settings)
 
         catalog_payload = load_radio_catalog()
         catalog_entries = list(catalog_payload.get("entries", []) or [])
@@ -18608,15 +18609,29 @@ class SettingsTab(QWidget):
             "Optional. Point FIO at the common folder where tools like external JS8Spotter, CommStat, or VarAC are installed.",
         )
 
-        configure_auto_wrap = QWidget()
+        configure_auto_wrap = QFrame()
+        configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")
+        configure_auto_wrap.setFrameShape(QFrame.StyledPanel)
+        configure_auto_wrap.setStyleSheet(
+            "QFrame#guidedConfigureAutomaticallyCard {"
+            f" background-color: {theme.get('selection_bg', theme.get('surface_alt', '#E8F3FA'))};"
+            f" border: 1px solid {theme.get('accent', '#0076A8')};"
+            " border-radius: 6px;"
+            "}"
+        )
         configure_auto_row = QHBoxLayout(configure_auto_wrap)
-        configure_auto_row.setContentsMargins(0, 0, 0, 0)
+        configure_auto_row.setContentsMargins(10, 8, 10, 8)
         configure_auto_row.setSpacing(8)
         configure_auto_btn = QPushButton("Configure Automatically")
+        configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")
+        configure_auto_btn.setStyleSheet(button_style("primary", theme))
         configure_auto_btn.setToolTip(
             "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
         )
-        configure_auto_status = QLabel("Choose the software this radio uses, then let FIO fill what it can.")
+        configure_auto_status = QLabel(
+            "Recommended next step: let FIO fill blank app paths, ports, and message locations."
+        )
+        configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
         configure_auto_status.setWordWrap(True)
         configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         configure_auto_row.addWidget(configure_auto_btn)
