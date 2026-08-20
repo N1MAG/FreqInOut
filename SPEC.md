@@ -9974,7 +9974,7 @@ Wave 1, Slice B:
   - adding and editing a device profile persists through `MultiRadioStore`
   - `Set Active` refreshes the visible legacy control/backend widgets to match the selected device
   - attempting to activate a `rigctld` profile shows a clear warning and leaves the existing active device unchanged
-  - deleting a non-active device profile removes it from both the store and the Settings table
+  - deleting a non-active device profile removes it from both the store and the Settings table, clears FIO-owned schedule/profile/runtime policy assignments for that radio, and never deletes external app files or profiles
   - no regression in `1.2.2` startup or Settings responsiveness when radio software is absent
 - Rollback:
   - revert the Device Profiles Settings section, dialog/actions, targeted tests, and this spec addendum together, leaving Slice A storage/projection intact

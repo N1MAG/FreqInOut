@@ -188,6 +188,9 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
             "deployment_mode": "minimal",
         }
     )
+    plan = store.save_frequency_plan({"name": "Remove Radio Test Plan", "category": "normal"})
+    store.set_assigned_plan(int(remote["id"]), int(plan["id"]))
+    assert store.get_effective_assigned_plan_for_device(int(remote["id"])) is not None
 
     from freqinout.gui.settings_tab import SettingsTab
 
@@ -204,6 +207,11 @@ def test_settings_tab_delete_device_profile_persists(monkeypatch, tmp_path):
         devices = store.list_device_profiles()
         assert len(devices) == 0
         assert all(int(row.get("id", 0) or 0) != int(remote["id"]) for row in devices)
+        assert store.get_effective_assigned_plan_for_device(int(remote["id"])) is None
+        assert all(
+            int(row.get("device_profile_id", 0) or 0) != int(remote["id"])
+            for row in store.list_assigned_plans()
+        )
         assert tab.device_profiles_table.rowCount() == 0
     finally:
         tab.deleteLater()

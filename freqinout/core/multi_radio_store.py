@@ -5976,6 +5976,7 @@ class MultiRadioStore:
                 (int(device_profile_id),),
             )
             conn.execute("DELETE FROM operating_profile_assignments WHERE device_profile_id=?", (int(device_profile_id),))
+            conn.execute("DELETE FROM assigned_plans WHERE device_profile_id=?", (int(device_profile_id),))
             conn.execute("DELETE FROM varac_cluster_members WHERE device_profile_id=?", (int(device_profile_id),))
             conn.execute("DELETE FROM runtime_policies WHERE radio_profile_id=?", (int(device_profile_id),))
             conn.execute(
