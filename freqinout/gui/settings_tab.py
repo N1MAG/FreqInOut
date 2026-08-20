@@ -19211,6 +19211,19 @@ class SettingsTab(QWidget):
             any_visible = any_visible or js8_profile_visible
             app_choice_group.setVisible(any_visible)
 
+        def _detected_app_choice_needs_operator_selection() -> bool:
+            observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            if observer_mode:
+                return False
+            for app_id, combo in app_choice_combos.items():
+                if _app_choice_app_selected(app_id) and combo.count() > 2 and combo.currentIndex() <= 0:
+                    return True
+            return bool(
+                _js8_app_selected()
+                and js8_profile_choice_combo.count() > 2
+                and js8_profile_choice_combo.currentIndex() <= 0
+            )
+
         def _select_single_detected_choice(combo: QComboBox) -> None:
             if combo.count() != 2 or combo.currentIndex() > 0:
                 return
@@ -19638,8 +19651,12 @@ class SettingsTab(QWidget):
             )
 
         def _guided_plan_enabled_apps() -> Tuple[str, ...]:
+            setup_type_choice = str(setup_type_combo.currentData() or "").strip()
+            if not setup_type_choice:
+                return tuple()
+            control_backend = "" if setup_type_choice == "custom" else str(backend_combo.currentData() or "")
             return guided_setup_selected_apps_from_flags(
-                control_backend=str(backend_combo.currentData() or ""),
+                control_backend=control_backend,
                 use_flrig=use_flrig_chk.isChecked(),
                 use_fldigi=use_fldigi_chk.isChecked(),
                 use_flmsg=use_flmsg_chk.isChecked(),
@@ -20276,7 +20293,14 @@ class SettingsTab(QWidget):
             configure_auto_status.setToolTip("\n".join(review.detail_lines))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
-            _set_guided_wizard_step("connection")
+            if _detected_app_choice_needs_operator_selection():
+                configure_auto_status.setText(
+                    configure_auto_status.text().strip()
+                    + "\nChoose the detected app/profile that belongs to this radio before moving to Connection."
+                )
+                _set_guided_wizard_step("software")
+            else:
+                _set_guided_wizard_step("connection")
 
         configure_auto_btn.clicked.connect(_apply_dialog_autoconfigure)
 
@@ -20428,7 +20452,19 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                _set_row_visible(software_wrap, visibility.software_choices and setup_type_choice == "custom")
+                _set_row_visible(software_wrap, setup_started and not observer_mode)
+                preset_software = setup_started and setup_type_choice != "custom"
+                for checkbox in (
+                    use_flrig_chk,
+                    use_fldigi_chk,
+                    use_flmsg_chk,
+                    use_flamp_chk,
+                    use_js8call_chk,
+                    use_js8spotter_chk,
+                    use_commstat_chk,
+                    use_varac_chk,
+                ):
+                    checkbox.setEnabled(not preset_software)
                 _set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)
                 _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)

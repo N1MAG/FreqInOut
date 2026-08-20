@@ -1417,7 +1417,12 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "selected_apps = preset.app_map" in dialog_block
     assert '_checkbox_set_checked(use_fldigi_chk, selected_apps.get("fldigi", False))' in dialog_block
     assert '_checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))' in dialog_block
-    assert '_set_row_visible(software_wrap, visibility.software_choices and setup_type_choice == "custom")' in dialog_block
+    assert 'if not setup_type_choice:' in dialog_block
+    assert "return tuple()" in dialog_block
+    assert 'control_backend = "" if setup_type_choice == "custom" else str(backend_combo.currentData() or "")' in dialog_block
+    assert "_set_row_visible(software_wrap, setup_started and not observer_mode)" in dialog_block
+    assert 'preset_software = setup_started and setup_type_choice != "custom"' in dialog_block
+    assert "checkbox.setEnabled(not preset_software)" in dialog_block
     assert "_set_row_visible(widget, visibility.fldigi_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flmsg_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flamp_fields)" in dialog_block

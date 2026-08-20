@@ -1658,6 +1658,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "_update_detected_app_choices(install_candidates)" in dialog_block
     assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
     assert "def _select_single_detected_choice(combo: QComboBox) -> None:" in dialog_block
+    assert "def _detected_app_choice_needs_operator_selection() -> bool:" in dialog_block
+    assert "_detected_app_choice_needs_operator_selection()" in dialog_block
+    assert '_set_guided_wizard_step("software")' in dialog_block
     assert "if _app_choice_app_selected(app_id):" in dialog_block
     assert "_select_single_detected_choice(combo)" in dialog_block
     assert "if _js8_app_selected():" in dialog_block
