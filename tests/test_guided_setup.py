@@ -606,6 +606,7 @@ def test_varac_only_payload_normalization_clears_stale_flrig_when_manual() -> No
     assert normalized["control_backend"] == "manual"
     assert normalized["use_varac"] is True
     assert normalized["use_scheduler"] is False
+    assert normalized["scheduler_enabled"] is False
     assert "guided_frequency_plan_id" not in normalized
     assert "guided_open_plan_manager_after_save" not in normalized
     assert normalized["use_flrig"] is False
@@ -992,6 +993,7 @@ def test_varac_only_profile_payload_normalizes_to_manual_monitoring() -> None:
 
     assert payload["control_backend"] == "manual"
     assert payload["use_varac"] is True
+    assert payload["scheduler_enabled"] is False
     assert payload["use_flrig"] is False
     assert payload["use_js8call"] is False
 
@@ -1361,6 +1363,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "selected_apps = preset.app_map" in dialog_block
     assert '_checkbox_set_checked(use_fldigi_chk, selected_apps.get("fldigi", False))' in dialog_block
     assert '_checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))' in dialog_block
+    assert '_set_row_visible(software_wrap, visibility.software_choices and setup_type_choice == "custom")' in dialog_block
     assert "_set_row_visible(widget, visibility.fldigi_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flmsg_fields)" in dialog_block
     assert "_set_row_visible(widget, visibility.flamp_fields)" in dialog_block

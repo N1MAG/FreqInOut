@@ -20316,7 +20316,7 @@ class SettingsTab(QWidget):
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
-                _set_row_visible(software_wrap, visibility.software_choices)
+                _set_row_visible(software_wrap, visibility.software_choices and setup_type_choice == "custom")
                 _set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)
                 _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)

@@ -706,6 +706,7 @@ def normalize_guided_radio_profile_payload(
     if varac_only_without_explicit_flrig:
         values["control_backend"] = "manual"
         values["use_scheduler"] = False
+        values["scheduler_enabled"] = False
         values.pop("guided_frequency_plan_id", None)
         values.pop("guided_open_plan_manager_after_save", None)
         values["use_flrig"] = False

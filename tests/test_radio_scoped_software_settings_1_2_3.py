@@ -31,6 +31,7 @@ from freqinout.core.multi_radio_store import (
     ensure_default_multi_radio_records,
     settings_db_path,
 )
+from freqinout.core.guided_setup import normalize_guided_radio_profile_payload
 from freqinout.core.multi_rig_runtime_status import STARTUP_MIGRATED, MultiRigRuntimeStatus
 from freqinout.core.settings_manager import SettingsManager
 
@@ -249,6 +250,61 @@ def test_radio_profile_save_preserves_linked_endpoints_when_fields_omitted(monke
     assert int(updated.get("fldigi_port", 0) or 0) == 7363
     assert int(updated.get("js8_port", 0) or 0) == 2443
     assert updated.get("js8_directed_path") == "/tmp/js8/fio-b/save/DIRECTED.TXT"
+
+
+def test_guided_varac_only_profile_persists_monitor_only_capabilities(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    store = MultiRadioStore(settings_db_path())
+    varac_node = store.save_varac_node(
+        {
+            "name": "VarAC Portable VarAC",
+            "install_path": "/apps/VarAC",
+            "db_path": "/apps/VarAC/VarAC.db",
+            "ini_path": "/apps/VarAC/VarAC.ini",
+            "incoming_path": "/apps/VarAC/Incoming",
+        }
+    )
+    payload = normalize_guided_radio_profile_payload(
+        {
+            "name": "VarAC Portable",
+            "control_backend": "manual",
+            "use_varac": True,
+            "use_flrig": True,
+            "use_fldigi": False,
+            "use_flmsg": False,
+            "use_flamp": False,
+            "use_js8call": False,
+            "use_js8spotter": False,
+            "use_commstat": False,
+            "scheduler_enabled": True,
+            "guided_frequency_plan_id": 12,
+            "guided_open_plan_manager_after_save": True,
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12346,
+            "varac_node_id": int(varac_node["id"]),
+            "varac_install_path": "/apps/VarAC",
+            "varac_db_path": "/apps/VarAC/VarAC.db",
+            "varac_ini_path": "/apps/VarAC/VarAC.ini",
+            "varac_incoming_path": "/apps/VarAC/Incoming",
+            "varac_outbox_dir": "/apps/VarAC/Outbox",
+            "varac_bbs_dir": "/apps/VarAC/BBS",
+            "varac_bbs_archive_dir": "/apps/VarAC/BBS/Archive",
+        }
+    )
+
+    saved = store.save_device_profile(payload)
+
+    assert saved["name"] == "VarAC Portable"
+    assert saved["control_backend"] == "manual"
+    assert int(saved["scheduler_enabled"]) == 0
+    assert int(saved["use_varac"]) == 1
+    assert int(saved["use_flrig"]) == 0
+    assert int(saved["use_fldigi"]) == 0
+    assert int(saved["use_js8call"]) == 0
+    assert saved["varac_ini_path"] == "/apps/VarAC/VarAC.ini"
+    assert saved["varac_outbox_dir"] == "/apps/VarAC/Outbox"
 
 
 def test_coerce_json_mapping_accepts_stored_json_text() -> None:
