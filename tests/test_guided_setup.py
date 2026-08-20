@@ -1575,19 +1575,29 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "def _open_plan_manager_after_guided_profile_save(" in source
     assert 'screen_map.get("FreqPlanner", -1)' in source
     assert "begin_guided_radio_plan_handoff" in source
-    assert "handoff(device_profile or {})" in source
+    assert "handoff(device_profile or {}, schedule_choice=schedule_choice)" in source
     assert "def begin_guided_radio_plan_handoff(" in planner_source
+    assert "schedule_choice: str = \"\"" in planner_source
+    assert "SCHEDULE_DAILY_NO_NETS" in planner_source
+    assert "SCHEDULE_DAILY_PLUS_NETS" in planner_source
+    assert "SCHEDULE_JS8_STANDARD" in planner_source
+    assert "SCHEDULE_SOP_CONDITION" in planner_source
     assert "self._guided_plan_handoff_device_profile_id" in planner_source
     assert "device_profile_id=int(getattr(self, \"_guided_plan_handoff_device_profile_id\"" in planner_source
     assert "radio_name = str((device_profile or {}).get(\"name\")" in planner_source
     assert "Name the Frequency Plan for {radio_name}" in planner_source
     assert "saved without a Frequency Plan" in planner_source
     assert "Build its first Frequency Plan here" in planner_source
+    assert "Build a Daily with No Nets plan" in planner_source
+    assert "Build a Daily + Nets plan" in planner_source
+    assert "Build an SOP condition plan" in planner_source
     assert "self.multi_radio_store.set_assigned_plan(" in source
     assert 'reason="Initial Frequency Plan selected during guided radio setup."' in source
     assert "guided_plan_id = int(created.pop(\"guided_frequency_plan_id\", 0) or 0)" in source
     assert "guided_plan_id = int(updated.pop(\"guided_frequency_plan_id\", 0) or 0)" in source
     assert "created.pop(\"guided_open_plan_manager_after_save\", False)" in source
     assert "updated.pop(\"guided_open_plan_manager_after_save\", False)" in source
+    assert "created.pop(\"guided_schedule_choice\", \"\")" in source
+    assert "updated.pop(\"guided_schedule_choice\", \"\")" in source
     assert "self._last_persisted_device_profile = dict(saved)" in source
     assert '"RF Guard Blocked Schedule Assignment"' in source

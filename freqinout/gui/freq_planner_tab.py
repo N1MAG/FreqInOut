@@ -36,6 +36,12 @@ from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.guided_setup import (
+    SCHEDULE_DAILY_NO_NETS,
+    SCHEDULE_DAILY_PLUS_NETS,
+    SCHEDULE_JS8_STANDARD,
+    SCHEDULE_SOP_CONDITION,
+)
 from freqinout.core.schedule_source_sets import (
     LIVE_SOURCE_SET_ID,
     NO_NET_SOURCE_SET_ID,
@@ -1077,7 +1083,12 @@ class FreqPlannerTab(QWidget):
         self.rebuild_table()
         self._set_plan_manager_new_plan_state()
 
-    def begin_guided_radio_plan_handoff(self, device_profile: Optional[Mapping[str, Any]] = None) -> None:
+    def begin_guided_radio_plan_handoff(
+        self,
+        device_profile: Optional[Mapping[str, Any]] = None,
+        *,
+        schedule_choice: str = "",
+    ) -> None:
         """
         Prime Plan Manager after guided radio setup saves a radio without a plan.
 
@@ -1105,7 +1116,37 @@ class FreqPlannerTab(QWidget):
             self._guided_plan_handoff_device_profile_id = 0
         if hasattr(self, "frequency_plan_combo") and self.frequency_plan_combo.lineEdit() is not None:
             self.frequency_plan_combo.lineEdit().setPlaceholderText(f"Name the Frequency Plan for {radio_name}")
-        if built_plans:
+        schedule_choice = str(schedule_choice or "").strip()
+        path_message = ""
+        path_detail = "Select the schedule layers this radio should follow."
+        if schedule_choice == SCHEDULE_JS8_STANDARD:
+            path_message = (
+                "Start with a JS8Call-standard daily plan. Choose the JS8Call frequency set, name the plan, "
+                "then Save Plan and Assign with RF Guard."
+            )
+            path_detail = "Build a no-net JS8Call operating plan for this radio, then assign it after RF Guard review."
+        elif schedule_choice == SCHEDULE_DAILY_NO_NETS:
+            path_message = (
+                "Build a Daily with No Nets plan. Choose or create the HF Daily schedule, keep Nets set to No Nets, "
+                "name the plan, then Save Plan and Assign with RF Guard."
+            )
+            path_detail = "Use this when the radio follows a daily frequency pattern without net overlays."
+        elif schedule_choice == SCHEDULE_DAILY_PLUS_NETS:
+            path_message = (
+                "Build a Daily + Nets plan. Choose the HF Daily baseline and the HF Net schedule to layer over it, "
+                "review the effective windows, then Save Plan and Assign with RF Guard."
+            )
+            path_detail = "Layer net windows over the daily baseline so the user can see where to be and when."
+        elif schedule_choice == SCHEDULE_SOP_CONDITION:
+            path_message = (
+                "Build an SOP condition plan. Choose Daily and Net layers, add the SOP condition layer, "
+                "review RF Guard, then Save Plan and Assign with RF Guard."
+            )
+            path_detail = "Use this when the plan also defines what to do when condition levels are active."
+
+        if path_message:
+            message = f"{radio_name} was saved. {path_message}"
+        elif built_plans:
             message = (
                 f"{radio_name} was saved without a Frequency Plan. Choose an existing plan above, "
                 "or keep New Plan selected, choose Daily/Nets/SOP layers, name the plan, then Save Plan and Assign with RF Guard."
@@ -1121,7 +1162,7 @@ class FreqPlannerTab(QWidget):
             self.selected_window_title_label.setText(f"Build Plan for {radio_name}")
         if hasattr(self, "selected_window_detail_label"):
             self.selected_window_detail_label.setText(
-                "Select the schedule layers this radio should follow. No radio changes happen until the saved plan is assigned with RF Guard."
+                f"{path_detail} No radio changes happen until the saved plan is assigned with RF Guard."
             )
         try:
             self.planner_view_combo.setCurrentIndex(max(0, self.planner_view_combo.findData("effective")))

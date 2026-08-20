@@ -20593,6 +20593,7 @@ class SettingsTab(QWidget):
                 and schedule_choice != SCHEDULE_NONE
             ):
                 out["guided_open_plan_manager_after_save"] = True
+                out["guided_schedule_choice"] = schedule_choice
             dlg.accept()
 
         buttons.accepted.connect(_save)
@@ -20837,6 +20838,8 @@ class SettingsTab(QWidget):
     def _open_plan_manager_after_guided_profile_save(
         self,
         device_profile: Optional[Mapping[str, Any]] = None,
+        *,
+        schedule_choice: str = "",
     ) -> bool:
         try:
             win = self.window()
@@ -20859,7 +20862,7 @@ class SettingsTab(QWidget):
             planner = getattr(win, "freq_planner_tab", None)
             handoff = getattr(planner, "begin_guided_radio_plan_handoff", None)
             if callable(handoff):
-                handoff(device_profile or {})
+                handoff(device_profile or {}, schedule_choice=schedule_choice)
             return True
         except Exception:
             log.debug("Failed opening Plan Manager after guided radio setup.", exc_info=True)
@@ -20871,13 +20874,14 @@ class SettingsTab(QWidget):
             return
         guided_plan_id = int(created.pop("guided_frequency_plan_id", 0) or 0)
         open_plan_manager = bool(created.pop("guided_open_plan_manager_after_save", False))
+        schedule_choice = str(created.pop("guided_schedule_choice", "") or "").strip()
         if not self._persist_device_profile(created):
             return
         saved = getattr(self, "_last_persisted_device_profile", None) or {}
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
         elif open_plan_manager:
-            self._open_plan_manager_after_guided_profile_save(saved)
+            self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
 
     def _edit_device_profile(self) -> None:
         selected = self._selected_device_profiles()
@@ -20893,13 +20897,14 @@ class SettingsTab(QWidget):
             return
         guided_plan_id = int(updated.pop("guided_frequency_plan_id", 0) or 0)
         open_plan_manager = bool(updated.pop("guided_open_plan_manager_after_save", False))
+        schedule_choice = str(updated.pop("guided_schedule_choice", "") or "").strip()
         if not self._persist_device_profile(updated, existing=existing):
             return
         saved = getattr(self, "_last_persisted_device_profile", None) or {}
         if guided_plan_id > 0:
             self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
         elif open_plan_manager:
-            self._open_plan_manager_after_guided_profile_save(saved)
+            self._open_plan_manager_after_guided_profile_save(saved, schedule_choice=schedule_choice)
 
     def _set_active_selected_device_profile(self) -> None:
         selected = self._selected_device_profiles()
