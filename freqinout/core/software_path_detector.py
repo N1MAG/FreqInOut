@@ -384,6 +384,17 @@ class SoftwarePathDetector:
                 continue
             p = Path(raw)
             candidates.extend([p / "CUSTOM", *[parent / "CUSTOM" for parent in p.parents]])
+        for root in self._radio_apps_base_roots():
+            candidates.extend(
+                [
+                    root / "JS8Spotter" / "forms",
+                    root / "JS8Spotter" / "Forms",
+                    root / "JS8Spotter" / "MCForms",
+                    root / "MCForms",
+                    root / "forms",
+                    root / "Forms",
+                ]
+            )
         for root in self._nbems_roots():
             candidates.append(root / "CUSTOM")
         for candidate in self._unique_paths(candidates):

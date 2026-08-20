@@ -147,6 +147,7 @@ class FreqPlannerTab(QWidget):
         self._pending_rebuild: bool = False
         self._creating_new_frequency_plan: bool = False
         self._frequency_plan_layers_dirty: bool = False
+        self._guided_plan_handoff_device_profile_id: int = 0
         self._build_ui()
         self._apply_theme()
         self.rebuild_table()
@@ -1098,6 +1099,10 @@ class FreqPlannerTab(QWidget):
         self._refresh_source_set_controls()
         self._refresh_plan_workspace_header()
         self._set_plan_manager_new_plan_state()
+        try:
+            self._guided_plan_handoff_device_profile_id = int((device_profile or {}).get("id", 0) or 0)
+        except Exception:
+            self._guided_plan_handoff_device_profile_id = 0
         if hasattr(self, "frequency_plan_combo") and self.frequency_plan_combo.lineEdit() is not None:
             self.frequency_plan_combo.lineEdit().setPlaceholderText(f"Name the Frequency Plan for {radio_name}")
         if built_plans:
@@ -1312,6 +1317,7 @@ class FreqPlannerTab(QWidget):
             plan_name=str(plan.get("name") or "Frequency Plan"),
             purpose="assign",
             plan_id=plan_id,
+            device_profile_id=int(getattr(self, "_guided_plan_handoff_device_profile_id", 0) or 0),
         ):
             return
         self.frequency_plan_action_hint_label.setText(
@@ -1904,6 +1910,7 @@ class FreqPlannerTab(QWidget):
         plan_name: str = "",
         purpose: str = "resolve",
         plan_id: int = 0,
+        device_profile_id: int = 0,
     ) -> bool:
         win = self.window()
         if hasattr(win, "open_settings_section"):
@@ -1913,7 +1920,12 @@ class FreqPlannerTab(QWidget):
                 assigned_ids: List[int] = []
                 if plan_id > 0:
                     assigned_ids = self._assigned_radio_ids_for_plan({"id": int(plan_id)})
-                target_radio_id = int(assigned_ids[0]) if assigned_ids else 0
+                try:
+                    target_radio_id = int(device_profile_id or 0)
+                except Exception:
+                    target_radio_id = 0
+                if target_radio_id <= 0:
+                    target_radio_id = int(assigned_ids[0]) if assigned_ids else 0
                 settings_tab = getattr(win, "settings_tab", None)
                 opener = getattr(settings_tab, "open_schedule_assignment_editor", None)
                 if callable(opener):

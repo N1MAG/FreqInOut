@@ -200,6 +200,14 @@ class GuidedSetupFlowItem:
 
 
 @dataclass(frozen=True)
+class GuidedScheduleDecision:
+    status: str
+    step_detail: str
+    status_text: str
+    review_text: str
+
+
+@dataclass(frozen=True)
 class GuidedSetupSession:
     blueprint: GuidedSetupBlueprint
     answers: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
@@ -750,6 +758,59 @@ def guided_setup_schedule_summary(blueprint: GuidedSetupBlueprint) -> str:
     if not labels:
         return ""
     return "Schedule choices: " + ", ".join(labels) + "."
+
+
+def guided_setup_schedule_decision(
+    *,
+    scheduler_assignment_allowed: bool,
+    selected_plan_name: str = "",
+    plan_count: int = 0,
+    open_plan_manager: bool = False,
+) -> GuidedScheduleDecision:
+    """Return one consistent schedule decision for guided setup UI surfaces."""
+
+    selected = str(selected_plan_name or "").strip()
+    try:
+        count = int(plan_count or 0)
+    except Exception:
+        count = 0
+    if not scheduler_assignment_allowed:
+        text = "FIO will monitor/import this radio; the external app keeps its own frequency schedule."
+        return GuidedScheduleDecision(
+            status="ready",
+            step_detail=text,
+            status_text=text,
+            review_text="No FIO-controlled schedule or QSY controls will be saved for this radio.",
+        )
+    if selected:
+        return GuidedScheduleDecision(
+            status="ready",
+            step_detail=f"Selected plan: {selected}. FIO assigns it after save with RF Guard.",
+            status_text=f"After saving, FIO will assign '{selected}' to this radio with RF Guard.",
+            review_text=f"Assign '{selected}' after save with RF Guard.",
+        )
+    if bool(open_plan_manager) or count <= 0:
+        text = (
+            "Plan Manager will open after save so you can build or choose this radio's Frequency Plan."
+        )
+        if count <= 0:
+            text = (
+                "No Frequency Plans exist yet. Save this radio, then Plan Manager will open so you can build "
+                "a Daily with No Nets, Net, or SOP-based plan."
+            )
+        return GuidedScheduleDecision(
+            status="needs_input",
+            step_detail=text,
+            status_text=text,
+            review_text="Open Plan Manager after save so a Frequency Plan can be built and assigned.",
+        )
+    text = "No Frequency Plan selected. You can save this radio now and assign a plan later."
+    return GuidedScheduleDecision(
+        status="needs_input",
+        step_detail="Choose the Frequency Plan this radio should follow, or assign one later.",
+        status_text=text,
+        review_text="No Frequency Plan selected; assign one later in Radio Settings or Plan Manager.",
+    )
 
 
 def guided_setup_flow_items(

@@ -38,6 +38,7 @@ from freqinout.core.guided_setup import (
     guided_setup_role_hint,
     guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
+    guided_setup_schedule_decision,
     guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
@@ -1259,6 +1260,39 @@ def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
     assert [step_id for step_id, _label in software.steps] == ["radio", "software", "schedule", "review"]
 
 
+def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> None:
+    selected = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=True,
+        selected_plan_name="Magnet Main",
+        plan_count=3,
+        open_plan_manager=False,
+    )
+    assert selected.status == "ready"
+    assert selected.step_detail == "Selected plan: Magnet Main. FIO assigns it after save with RF Guard."
+    assert selected.status_text == "After saving, FIO will assign 'Magnet Main' to this radio with RF Guard."
+    assert selected.review_text == "Assign 'Magnet Main' after save with RF Guard."
+
+    handoff = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=True,
+        selected_plan_name="",
+        plan_count=0,
+        open_plan_manager=True,
+    )
+    assert handoff.status == "needs_input"
+    assert "Plan Manager will open" in handoff.step_detail
+    assert handoff.review_text == "Open Plan Manager after save so a Frequency Plan can be built and assigned."
+
+    monitor_only = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=False,
+        selected_plan_name="Ignored",
+        plan_count=2,
+        open_plan_manager=True,
+    )
+    assert monitor_only.status == "ready"
+    assert "monitor/import" in monitor_only.status_text
+    assert monitor_only.review_text == "No FIO-controlled schedule or QSY controls will be saved for this radio."
+
+
 def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     dialog_block = source[
@@ -1337,7 +1371,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'schedule_plan_combo.setObjectName("guidedSchedulePlanCombo")' in dialog_block
     assert 'schedule_plan_combo.addItem("Assign later", 0)' in dialog_block
     assert 'schedule_open_plan_manager_chk.setObjectName("guidedScheduleOpenPlanManager")' in dialog_block
-    assert "Plan Manager can open so you can build a Daily with No Nets" in dialog_block
+    assert "guided_setup_schedule_decision(" in dialog_block
+    assert "Plan Manager will open after save" in Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
     assert "guided_initial_frequency_plan_id" in dialog_block
     assert "get_effective_assigned_plan_for_device" in dialog_block
     assert "self.multi_radio_store.list_frequency_plans()" in dialog_block
@@ -1366,7 +1401,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "payload = _draft_radio_profile()" in dialog_block
     assert 'payload["name"] = name' in dialog_block
     assert "out.update(normalize_guided_radio_profile_payload(payload))" in dialog_block
-    assert "Assign '{selected_plan}' after save with RF Guard." in dialog_block
+    assert "Assign '{selected}' after save with RF Guard." in Path("freqinout/core/guided_setup.py").read_text(
+        encoding="utf-8"
+    )
     assert "out[\"guided_frequency_plan_id\"] = guided_plan_id" in dialog_block
     assert "out[\"guided_open_plan_manager_after_save\"] = True" in dialog_block
     assert "def _apply_guided_wizard_visibility(connection_visible: bool) -> None:" in dialog_block
@@ -1455,6 +1492,8 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "begin_guided_radio_plan_handoff" in source
     assert "handoff(device_profile or {})" in source
     assert "def begin_guided_radio_plan_handoff(" in planner_source
+    assert "self._guided_plan_handoff_device_profile_id" in planner_source
+    assert "device_profile_id=int(getattr(self, \"_guided_plan_handoff_device_profile_id\"" in planner_source
     assert "radio_name = str((device_profile or {}).get(\"name\")" in planner_source
     assert "Name the Frequency Plan for {radio_name}" in planner_source
     assert "saved without a Frequency Plan" in planner_source

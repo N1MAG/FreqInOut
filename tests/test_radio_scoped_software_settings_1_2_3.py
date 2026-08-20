@@ -1546,6 +1546,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
     assert "Kept existing:" in dialog_block
     assert "Review before Save" in dialog_block
+    assert "FIO Spotter forms {fio_spotter_forms}" in source
+    assert "External JS8Spotter app {external_spotter}" in source
+    assert "Spotter {spotter}" not in source
     assert 'app_choice_group = QGroupBox("Choose Detected Apps")' in dialog_block
     assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
     assert 'js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")' in dialog_block
@@ -4048,7 +4051,7 @@ def test_radio_profile_software_flag_helpers_define_inline_stack_choices() -> No
         ("flmsg", "FLMsg"),
         ("flamp", "FLAmp"),
         ("js8call", "JS8Call"),
-        ("js8spotter", "JS8Spotter"),
+        ("js8spotter", "FIO Spotter"),
         ("commstat", "CommStat"),
         ("varac", "VarAC"),
     )

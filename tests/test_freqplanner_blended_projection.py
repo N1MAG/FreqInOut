@@ -1840,6 +1840,53 @@ def test_freqplanner_assign_plan_opens_settings_with_assignment_language(monkeyp
     assert "resolve RF Guard issues" not in tab.frequency_plan_action_hint_label.text()
 
 
+def test_freqplanner_guided_radio_handoff_assigns_target_radio(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+    SettingsManager()
+
+    import freqinout.gui.freq_planner_tab as planner_mod
+
+    planner_mod = importlib.reload(planner_mod)
+    tab = planner_mod.FreqPlannerTab()
+    saved = tab.plan_context_service.store.save_frequency_plan(
+        {
+            "name": "Portable JS8 Plan",
+            "status": "saved",
+            "category": "normal",
+            "schedule_refs": [],
+        }
+    )
+    tab.begin_guided_radio_plan_handoff({"id": 42, "name": "Portable SDR"})
+    tab._refresh_plan_workspace_header()
+    tab.frequency_plan_combo.setCurrentIndex(tab.frequency_plan_combo.findData(int(saved["id"])))
+
+    class WindowStub:
+        def __init__(self) -> None:
+            self.calls = []
+            self.editor_calls = []
+            self.settings_tab = self
+
+        def open_settings_section(self, section, **kwargs):
+            self.calls.append((section, kwargs))
+
+        def open_schedule_assignment_editor(self, **kwargs):
+            self.editor_calls.append(kwargs)
+            return True
+
+    window = WindowStub()
+    monkeypatch.setattr(tab, "window", lambda: window)
+
+    tab._on_assign_plan_clicked()
+    app.processEvents()
+
+    assert window.calls == [("schedule_assignments", {"settings_nav_context": "radios"})]
+    assert window.editor_calls == [{"plan_id": int(saved["id"]), "device_profile_id": 42}]
+    assert "Portable JS8 Plan" in tab.frequency_plan_action_hint_label.text()
+
+
 def test_freqplanner_selecting_assigned_plan_switches_command_radio(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

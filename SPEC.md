@@ -11383,6 +11383,7 @@ Schedule readiness:
 - A FIO-controlled radio is not `Schedule Ready` merely because schedule options exist. The Schedule step remains `Needed` until the user explicitly chooses or assigns the Frequency Plan the radio should follow.
 - The Add Radio Schedule step offers `Assign later` plus enabled built Frequency Plans. When the user chooses a plan and saves the radio, FIO assigns that plan to the newly saved radio through the existing RF Guard-backed `assigned_plans` path; the wizard must not create a second schedule-assignment persistence path.
 - When no built Frequency Plans exist, the Schedule step defaults to opening Plan Manager after save. Plan creation stays in Plan Manager so Daily, No Nets, Net, SOP, and RF Guard workflows remain in one place.
+- Add Radio schedule-state text must come from one core decision helper and be reused by the step card, Schedule status text, and final Review summary. The three operator states are explicit: selected plan assignment, Plan Manager handoff after save, or monitor/import-only with no FIO-controlled schedule.
 - When guided setup opens Plan Manager after save, it passes the saved radio context into Plan Manager so the next-step guidance names that radio and explains whether to choose an existing plan or build a new Daily/No Nets/Net/SOP plan before RF Guard assignment.
 - VarAC-only and VarAC Cluster/BBS lanes remain monitor/import-only for FIO frequency control. They may show their schedule step as ready only because VarAC keeps its own scheduler and FIO will not offer QSY/scheduler controls.
 - VarAC-only save normalization must clear stale FIO scheduler assignment hints and disable `use_scheduler`; a VarAC-only radio must not inherit QSY/schedule control from default UI state or a prior mixed profile.
@@ -11407,7 +11408,7 @@ Acceptance:
 - Selecting VarAC-only does not present FIO scheduler/QSY control as available.
 - Saving VarAC-only cannot persist stale FIO scheduler assignment hints or leave `use_scheduler` enabled.
 - `Configure Automatically` does not overwrite non-empty user-entered paths, ports, profile names, or VarAC locations.
-- If `Radio Apps Base Folder` is set, automatic discovery checks that folder before generic app locations and uses it to locate external JS8Spotter, CommStat, VarAC, and compatible app folders where present.
+- If `Radio Apps Base Folder` is set, automatic discovery checks that folder before generic app locations and uses it to locate external JS8Spotter, CommStat, VarAC, compatible app folders, and built-in FIO Spotter MCF forms folders such as `JS8Spotter/forms` where present.
 - Updating `Radio Apps Base Folder` from Preferences or the Add Radio wizard persists the same setting and affects the next automatic discovery pass.
 - The setup-step footer contains no long software notes in normal use; the cards contain the guidance.
 - The final Review step uses operator-readable save language and explicitly says when FIO will control scheduler/QSY, when the radio is monitor/import-only, and which JS8/FIO Spotter/CommStat/VarAC files or folders will be saved, including VarAC incoming, outbox, BBS, and BBS archive paths when VarAC is selected.

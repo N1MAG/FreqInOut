@@ -83,6 +83,19 @@ def test_software_path_detector_uses_radio_apps_base_folder_for_external_tools(t
     assert results["path_commstat"].path == str(commstat)
 
 
+def test_software_path_detector_uses_radio_apps_base_folder_for_spotter_forms(tmp_path: Path) -> None:
+    base = tmp_path / "RadioTools" / "Programs"
+    forms_dir = base / "JS8Spotter" / "forms"
+    forms_dir.mkdir(parents=True)
+    (forms_dir / "MCF307.txt").write_text("Wildfire", encoding="utf-8")
+
+    detector = SoftwarePathDetector(_DummySettings({"radio_apps_base_folder": str(base)}))
+    result = detector.detect_js8()["js8_forms_path"]
+
+    assert result.path == str(forms_dir)
+    assert result.reason == "Found forms directory containing MCF*.txt files"
+
+
 def test_software_path_detector_uses_radio_apps_base_folder_for_js8call_variants(tmp_path: Path) -> None:
     base = tmp_path / "RadioTools" / "Programs"
     subspace_bundle = base / "Subspace-Edition" / "build-trimode-baseline" / "JS8Call.app"

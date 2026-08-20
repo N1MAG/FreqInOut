@@ -150,6 +150,7 @@ from freqinout.core.guided_setup import (
     build_guided_setup_blueprint,
     guided_radio_label_base,
     guided_setup_capability_policy,
+    guided_setup_schedule_decision,
     guided_setup_field_visibility,
     guided_setup_flow_items,
     guided_setup_flow_summary_lines,
@@ -8560,11 +8561,14 @@ class SettingsTab(QWidget):
 
     def _summary_js8_settings(self) -> str:
         directed = "set" if self.js8_directed_edit.text().strip() else "missing"
-        forms = "set" if self.js8_forms_edit.text().strip() else "missing"
+        fio_spotter_forms = "set" if self.js8_forms_edit.text().strip() else "missing"
         js8call = "set" if hasattr(self, "js8call_path_edit") and self.js8call_path_edit.text().strip() else "missing"
-        spotter = "set" if hasattr(self, "js8spotter_path_edit") and self.js8spotter_path_edit.text().strip() else "missing"
+        external_spotter = "set" if hasattr(self, "js8spotter_path_edit") and self.js8spotter_path_edit.text().strip() else "not used"
         commstat = "set" if hasattr(self, "commstat_path_edit") and self.commstat_path_edit.text().strip() else "missing"
-        return f"JS8Call {js8call}, Spotter {spotter}, CommStat {commstat}, DIRECTED {directed}, Forms {forms}"
+        return (
+            f"JS8Call {js8call}, FIO Spotter forms {fio_spotter_forms}, "
+            f"External JS8Spotter app {external_spotter}, CommStat {commstat}, DIRECTED {directed}"
+        )
 
     def _summary_fast_light_settings(self) -> str:
         total = len(self.PROGRAMS)
@@ -19687,36 +19691,17 @@ class SettingsTab(QWidget):
 
         def _refresh_guided_schedule_step_card() -> None:
             policy = guided_setup_capability_policy(_current_guided_blueprint())
-            if not policy.scheduler_assignment_allowed:
-                _set_guided_step_override(
-                    "schedule",
-                    status="ready",
-                    title="Schedule",
-                    detail="FIO will monitor/import this radio; VarAC or the external app keeps its own frequency schedule.",
-                )
-                return
-            selected_plan = _selected_guided_schedule_plan_name()
-            if selected_plan:
-                _set_guided_step_override(
-                    "schedule",
-                    status="ready",
-                    title="Schedule",
-                    detail=f"Selected plan: {selected_plan}. FIO assigns it after save with RF Guard.",
-                )
-                return
-            if guided_schedule_plan_count <= 0 or schedule_open_plan_manager_chk.isChecked():
-                _set_guided_step_override(
-                    "schedule",
-                    status="needs_input",
-                    title="Schedule",
-                    detail="Plan Manager will open after save so this radio can get its first Frequency Plan.",
-                )
-                return
+            decision = guided_setup_schedule_decision(
+                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
+                selected_plan_name=_selected_guided_schedule_plan_name(),
+                plan_count=guided_schedule_plan_count,
+                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+            )
             _set_guided_step_override(
                 "schedule",
-                status="needs_input",
+                status=decision.status,
                 title="Schedule",
-                detail="Choose the Frequency Plan this radio should follow, or assign one later.",
+                detail=decision.step_detail,
             )
 
         def _update_guided_app_setup_plan_review() -> None:
@@ -19840,22 +19825,13 @@ class SettingsTab(QWidget):
 
         def _update_guided_schedule_assignment_status() -> None:
             policy = guided_setup_capability_policy(_current_guided_blueprint())
-            if not policy.scheduler_assignment_allowed:
-                schedule_status_label.setText("This setup does not use FIO-controlled schedule or QSY controls.")
-                return
-            selected_plan = _selected_guided_schedule_plan_name()
-            if selected_plan:
-                schedule_status_label.setText(
-                    f"After saving, FIO will assign '{selected_plan}' to this radio with RF Guard."
-                )
-            elif guided_schedule_plan_count <= 0:
-                schedule_status_label.setText(
-                    "No Frequency Plans exist yet. Save this radio, then Plan Manager can open so you can build a Daily with No Nets, Net, or SOP-based plan."
-                )
-            else:
-                schedule_status_label.setText(
-                    "No Frequency Plan selected. Save the radio now, then assign a plan later from Radio Settings."
-                )
+            decision = guided_setup_schedule_decision(
+                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
+                selected_plan_name=_selected_guided_schedule_plan_name(),
+                plan_count=guided_schedule_plan_count,
+                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+            )
+            schedule_status_label.setText(decision.status_text)
             if app_setup_plan_group.isVisible():
                 _refresh_guided_schedule_step_card()
 
@@ -20012,16 +19988,12 @@ class SettingsTab(QWidget):
                 file_lines.append("No message/forms paths selected")
 
             policy = guided_setup_capability_policy(_current_guided_blueprint())
-            if policy.scheduler_assignment_allowed:
-                selected_plan = _selected_guided_schedule_plan_name()
-                if selected_plan:
-                    schedule_line = f"Assign '{selected_plan}' after save with RF Guard."
-                elif schedule_open_plan_manager_chk.isChecked():
-                    schedule_line = "Open Plan Manager after save so a Frequency Plan can be built and assigned."
-                else:
-                    schedule_line = "No Frequency Plan selected; assign one later in Radio Settings."
-            else:
-                schedule_line = "No FIO-controlled schedule/QSY controls will be saved for this radio."
+            schedule_line = guided_setup_schedule_decision(
+                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
+                selected_plan_name=_selected_guided_schedule_plan_name(),
+                plan_count=guided_schedule_plan_count,
+                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+            ).review_text
 
             if not policy.fio_frequency_control_allowed:
                 frequency_line = "Monitor/import only. FIO will not offer scheduler or QSY controls."
