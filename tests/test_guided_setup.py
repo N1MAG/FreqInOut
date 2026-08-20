@@ -1592,6 +1592,26 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "build_guided_setup_preview(blueprint, plan)" not in dialog_block
 
 
+def test_guided_add_radio_save_path_is_inline_and_review_gated() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    dialog_block = source[
+        source.index("def _open_device_profile_dialog")
+        : source.index("def _apply_runtime_projection_widgets")
+    ]
+    save_block = dialog_block.split("def _save() -> None:", 1)[1].split("model_choice =", 1)[0]
+
+    assert "if not _guided_save_allowed():" in save_block
+    assert "_detected_app_choice_needs_operator_selection()" in save_block
+    assert '_set_guided_wizard_step("software")' in save_block
+    assert '_set_guided_wizard_step("review")' in save_block
+    assert "guided_wizard_detail_label.setText(" in save_block
+    assert "_update_guided_save_button()" in save_block
+    assert "return" in save_block
+    assert "QMessageBox.warning" not in save_block
+    assert "out.update(" not in save_block
+    assert "dlg.accept()" not in save_block
+
+
 def test_settings_preferences_expose_radio_apps_base_folder() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 

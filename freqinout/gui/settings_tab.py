@@ -20997,18 +20997,13 @@ class SettingsTab(QWidget):
             if not _guided_save_allowed():
                 if _detected_app_choice_needs_operator_selection():
                     _set_guided_wizard_step("software")
-                    QMessageBox.warning(
-                        self,
-                        "Review Required",
-                        "Choose the highlighted detected app/profile before saving this radio.",
+                    guided_wizard_detail_label.setText(
+                        "Choose the highlighted detected app or profile, then continue to Review before saving."
                     )
                 else:
                     _set_guided_wizard_step("review")
-                    QMessageBox.warning(
-                        self,
-                        "Review Required",
-                        "Review the guided setup before saving this radio.",
-                    )
+                    guided_wizard_detail_label.setText("Review the guided setup before saving this radio.")
+                _update_guided_save_button()
                 return
             model_choice = _current_radio_model_payload()
             name = name_edit.text().strip() or str(model_choice.get("display_name", "") or "").strip()
