@@ -1615,6 +1615,10 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "FIO Spotter forms {fio_spotter_forms}" in source
     assert "External JS8Spotter app {external_spotter}" in source
     assert "Spotter {spotter}" not in source
+    assert 'use_external_js8spotter_chk = QCheckBox("External JS8Spotter")' in dialog_block
+    assert "Built-in FIO Spotter does not require this" in dialog_block
+    assert "_make_browse_row(" in dialog_block
+    assert "_make_browse_row(js8spotter_launch_edit" in dialog_block
     assert 'app_choice_group = QGroupBox("Review Detected Apps")' in dialog_block
     assert 'app_choice_group.setObjectName("guidedDetectedAppsReview")' in dialog_block
     assert "Choose the detected app that belongs to this radio before continuing." in dialog_block
@@ -1721,9 +1725,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
         dialog_block.index("varac_field_widgets = [")
         : dialog_block.index("optional_field_widgets = [")
     ]
-    assert "varac_outbox_edit" in varac_field_block
-    assert "varac_bbs_edit" in varac_field_block
-    assert "varac_bbs_archive_edit" in varac_field_block
+    assert "varac_outbox_wrap" in varac_field_block
+    assert "varac_bbs_wrap" in varac_field_block
+    assert "varac_bbs_archive_wrap" in varac_field_block
     assert "build_autoconfig_proposal(" in dialog_block
     assert 'configure_auto_status.setToolTip("\\n".join(review.detail_lines))' in dialog_block
     assert "select_js8call_file_profile(" in planner_source

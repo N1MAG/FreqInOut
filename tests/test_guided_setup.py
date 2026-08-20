@@ -1478,10 +1478,13 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'save_review_label.setObjectName("guidedSaveReview")' in dialog_block
     assert "def _update_guided_save_review() -> None:" in dialog_block
     assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
-    assert "FIO Spotter + external JS8Spotter" in dialog_block
+    assert 'use_external_js8spotter_chk = QCheckBox("External JS8Spotter")' in dialog_block
+    assert "Built-in FIO Spotter does not require this" in dialog_block
     assert "app_labels.append(\"FIO Spotter\")" in dialog_block
+    assert "app_labels.append(\"External JS8Spotter\")" in dialog_block
     assert '"External JS8Spotter app"' in dialog_block
     assert '"js8spotter": "External JS8Spotter"' in dialog_block
+    assert "_make_browse_row(js8spotter_launch_edit" in dialog_block
     launch_allowed_block = source[
         source.index("def _launch_item_allowed_for_profile")
         : source.index("def _is_launch_item_configured")

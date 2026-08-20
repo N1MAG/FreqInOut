@@ -18290,6 +18290,36 @@ class SettingsTab(QWidget):
             edit.setMaximumWidth(110)
             edit.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
 
+        def _make_browse_row(
+            edit: QLineEdit,
+            *,
+            title: str,
+            mode: str = "file",
+            file_filter: str = "All Files (*)",
+        ) -> QWidget:
+            browse_btn = QPushButton("Browse")
+            browse_btn.setToolTip(f"Choose {title.lower()} if FIO did not detect the right location.")
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            row.addWidget(edit, 1)
+            row.addWidget(browse_btn)
+            wrap = QWidget()
+            wrap.setLayout(row)
+
+            def _browse() -> None:
+                start = edit.text().strip() or str(Path.home())
+                if mode == "folder":
+                    chosen = QFileDialog.getExistingDirectory(self, title, start)
+                else:
+                    chosen, _selected_filter = QFileDialog.getOpenFileName(self, title, start, file_filter)
+                if chosen:
+                    edit.setText(chosen)
+                    _update_dialog_readiness()
+
+            browse_btn.clicked.connect(_browse)
+            return wrap
+
         def _configure_guided_form(form_layout: QFormLayout) -> None:
             form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
             form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -18565,7 +18595,11 @@ class SettingsTab(QWidget):
         use_js8call_chk = QCheckBox("JS8Call")
         use_js8spotter_chk = QCheckBox("FIO Spotter")
         use_js8spotter_chk.setToolTip(
-            "Use built-in FIO Spotter compose/decode workflows. External JS8Spotter app launch is optional."
+            "Use FIO's built-in Spotter compose, decode, Expect, and message-viewer workflows."
+        )
+        use_external_js8spotter_chk = QCheckBox("External JS8Spotter")
+        use_external_js8spotter_chk.setToolTip(
+            "Track or launch the separate JS8Spotter app. Built-in FIO Spotter does not require this."
         )
         use_commstat_chk = QCheckBox("CommStat")
         use_varac_chk = QCheckBox("VarAC")
@@ -18575,7 +18609,8 @@ class SettingsTab(QWidget):
         software_row.addWidget(use_flamp_chk, 0, 3)
         software_row.addWidget(use_js8call_chk, 1, 0)
         software_row.addWidget(use_js8spotter_chk, 1, 1)
-        software_row.addWidget(use_commstat_chk, 1, 2)
+        software_row.addWidget(use_external_js8spotter_chk, 1, 2)
+        software_row.addWidget(use_commstat_chk, 1, 3)
         software_row.addWidget(use_varac_chk, 2, 0)
         software_wrap = QWidget()
         software_wrap.setLayout(software_row)
@@ -18767,7 +18802,8 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "FLRig XML RPC:", flrig_wrap, "Host and port for FLRig XML RPC control of this radio.")
 
         flrig_path_edit = QLineEdit(str((existing or {}).get("flrig_path", "") or ""))
-        _add_form_row(connection_form, "FLRig App:", flrig_path_edit, "Optional FLRig executable or app path associated with this radio.")
+        flrig_path_wrap = _make_browse_row(flrig_path_edit, title="Select FLRig app", mode="folder")
+        _add_form_row(connection_form, "FLRig App:", flrig_path_wrap, "Optional FLRig executable or app path associated with this radio.")
 
         fldigi_host_edit = QLineEdit(str((existing or {}).get("fldigi_host", "") or ""))
         fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", "") or ""))
@@ -18784,13 +18820,16 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "FLDigi XML RPC:", fldigi_wrap, "Host and port for FLDigi XML RPC when this radio uses Fast Light workflows.")
 
         fldigi_path_edit = QLineEdit(str((existing or {}).get("fldigi_path", "") or ""))
-        _add_form_row(connection_form, "FLDigi App:", fldigi_path_edit, "Optional FLDigi executable or app path associated with this radio.")
+        fldigi_path_wrap = _make_browse_row(fldigi_path_edit, title="Select FLDigi app", mode="folder")
+        _add_form_row(connection_form, "FLDigi App:", fldigi_path_wrap, "Optional FLDigi executable or app path associated with this radio.")
 
         flmsg_path_edit = QLineEdit(str((existing or {}).get("flmsg_path", "") or ""))
-        _add_form_row(connection_form, "FLMsg App:", flmsg_path_edit, "Optional FLMsg executable or app path associated with this radio.")
+        flmsg_path_wrap = _make_browse_row(flmsg_path_edit, title="Select FLMsg app", mode="folder")
+        _add_form_row(connection_form, "FLMsg App:", flmsg_path_wrap, "Optional FLMsg executable or app path associated with this radio.")
 
         flamp_path_edit = QLineEdit(str((existing or {}).get("flamp_path", "") or ""))
-        _add_form_row(connection_form, "FLAmp App:", flamp_path_edit, "Optional FLAmp executable or app path associated with this radio.")
+        flamp_path_wrap = _make_browse_row(flamp_path_edit, title="Select FLAmp app", mode="folder")
+        _add_form_row(connection_form, "FLAmp App:", flamp_path_wrap, "Optional FLAmp executable or app path associated with this radio.")
 
         js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or ""))
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
@@ -18807,51 +18846,69 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "JS8Call TCP:", js8_wrap, "Host and port for the JS8Call TCP API for this radio.")
 
         js8_install_edit = QLineEdit(str((existing or {}).get("js8_install_path", "") or ""))
-        _add_form_row(connection_form, "JS8Call App:", js8_install_edit, "Optional JS8Call executable or app path associated with this radio.")
+        js8_install_wrap = _make_browse_row(js8_install_edit, title="Select JS8Call app", mode="folder")
+        _add_form_row(connection_form, "JS8Call App:", js8_install_wrap, "Optional JS8Call executable or app path associated with this radio.")
 
         js8_profile_edit = QLineEdit(str((existing or {}).get("js8_profile_path", "") or ""))
-        _add_form_row(connection_form, "JS8 Profile:", js8_profile_edit, "Optional JS8Call profile folder for this radio.")
+        js8_profile_wrap = _make_browse_row(js8_profile_edit, title="Select JS8Call profile folder", mode="folder")
+        _add_form_row(connection_form, "JS8 Profile:", js8_profile_wrap, "Optional JS8Call profile folder for this radio.")
 
         js8_directed_edit = QLineEdit(str((existing or {}).get("js8_directed_path", "") or ""))
-        _add_form_row(connection_form, "DIRECTED.TXT:", js8_directed_edit, "Optional DIRECTED.TXT path associated with this radio's JS8 setup.")
+        js8_directed_wrap = _make_browse_row(
+            js8_directed_edit,
+            title="Select DIRECTED.TXT",
+            file_filter="Text Files (*.txt);;All Files (*)",
+        )
+        _add_form_row(connection_form, "DIRECTED.TXT:", js8_directed_wrap, "Optional DIRECTED.TXT path associated with this radio's JS8 setup.")
 
         js8_forms_edit = QLineEdit(str((existing or {}).get("js8_forms_path", "") or ""))
-        _add_form_row(connection_form, "MCF Forms Folder:", js8_forms_edit, "MCF form definitions used by built-in FIO Spotter compose and decode workflows.")
+        js8_forms_wrap = _make_browse_row(js8_forms_edit, title="Select MCF forms folder", mode="folder")
+        _add_form_row(connection_form, "MCF Forms Folder:", js8_forms_wrap, "MCF form definitions used by built-in FIO Spotter compose and decode workflows.")
 
         js8spotter_launch_edit = QLineEdit(str((existing or {}).get("spotter_launch_path", "") or ""))
-        _add_form_row(connection_form, "External JS8Spotter App:", js8spotter_launch_edit, "Optional. Built-in FIO Spotter does not require the separate JS8Spotter application.")
+        js8spotter_launch_wrap = _make_browse_row(js8spotter_launch_edit, title="Select external JS8Spotter app", mode="folder")
+        _add_form_row(connection_form, "External JS8Spotter App:", js8spotter_launch_wrap, "Optional. Built-in FIO Spotter does not require the separate JS8Spotter application.")
 
         commstat_launch_edit = QLineEdit(str((existing or {}).get("commstat_launch_path", "") or ""))
-        _add_form_row(connection_form, "CommStat App:", commstat_launch_edit, "Optional CommStat launch path for this radio.")
+        commstat_launch_wrap = _make_browse_row(commstat_launch_edit, title="Select CommStat app", mode="folder")
+        _add_form_row(connection_form, "CommStat App:", commstat_launch_wrap, "Optional CommStat launch path for this radio.")
 
         varac_install_edit = QLineEdit(str((existing or {}).get("varac_install_path", "") or ""))
-        _add_form_row(connection_form, "VarAC Install:", varac_install_edit, "VarAC install folder used for this radio.")
+        varac_install_wrap = _make_browse_row(varac_install_edit, title="Select VarAC install folder", mode="folder")
+        _add_form_row(connection_form, "VarAC Install:", varac_install_wrap, "VarAC install folder used for this radio.")
 
         varac_db_edit = QLineEdit(str((existing or {}).get("varac_db_path", "") or ""))
-        _add_form_row(connection_form, "VarAC DB:", varac_db_edit, "VarAC database path for this radio.")
+        varac_db_wrap = _make_browse_row(varac_db_edit, title="Select VarAC database", file_filter="Database Files (*.db);;All Files (*)")
+        _add_form_row(connection_form, "VarAC DB:", varac_db_wrap, "VarAC database path for this radio.")
 
         varac_ini_edit = QLineEdit(str((existing or {}).get("varac_ini_path", "") or ""))
-        _add_form_row(connection_form, "VarAC INI:", varac_ini_edit, "VarAC INI/config path for this radio.")
+        varac_ini_wrap = _make_browse_row(varac_ini_edit, title="Select VarAC INI", file_filter="INI Files (*.ini);;All Files (*)")
+        _add_form_row(connection_form, "VarAC INI:", varac_ini_wrap, "VarAC INI/config path for this radio.")
 
         varac_incoming_edit = QLineEdit(str((existing or {}).get("varac_incoming_path", "") or ""))
-        _add_form_row(connection_form, "VarAC Incoming:", varac_incoming_edit, "Optional VarAC incoming-files path associated with this radio.")
+        varac_incoming_wrap = _make_browse_row(varac_incoming_edit, title="Select VarAC incoming folder", mode="folder")
+        _add_form_row(connection_form, "VarAC Incoming:", varac_incoming_wrap, "Optional VarAC incoming-files path associated with this radio.")
 
         varac_outbox_edit = QLineEdit(str((existing or {}).get("varac_outbox_dir", "") or ""))
-        _add_form_row(connection_form, "VarAC Outbox:", varac_outbox_edit, "Optional VarAC outbox path associated with this radio.")
+        varac_outbox_wrap = _make_browse_row(varac_outbox_edit, title="Select VarAC outbox folder", mode="folder")
+        _add_form_row(connection_form, "VarAC Outbox:", varac_outbox_wrap, "Optional VarAC outbox path associated with this radio.")
 
         varac_bbs_edit = QLineEdit(str((existing or {}).get("varac_bbs_dir", "") or ""))
-        _add_form_row(connection_form, "VarAC BBS:", varac_bbs_edit, "Optional VarAC BBS folder associated with this radio.")
+        varac_bbs_wrap = _make_browse_row(varac_bbs_edit, title="Select VarAC BBS folder", mode="folder")
+        _add_form_row(connection_form, "VarAC BBS:", varac_bbs_wrap, "Optional VarAC BBS folder associated with this radio.")
 
         varac_bbs_archive_edit = QLineEdit(str((existing or {}).get("varac_bbs_archive_dir", "") or ""))
+        varac_bbs_archive_wrap = _make_browse_row(varac_bbs_archive_edit, title="Select VarAC BBS archive folder", mode="folder")
         _add_form_row(
             connection_form,
             "VarAC BBS Archive:",
-            varac_bbs_archive_edit,
+            varac_bbs_archive_wrap,
             "Optional VarAC BBS archive destination associated with this radio.",
         )
 
         varac_launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
-        _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_edit, "Optional VarAC launch override for this radio.")
+        varac_launch_cmd_wrap = _make_browse_row(varac_launch_cmd_edit, title="Select VarAC launch command", mode="folder")
+        _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_wrap, "Optional VarAC launch override for this radio.")
 
         launch_enabled_chk = QCheckBox("Use Launch Control for this radio")
         launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))
@@ -18939,14 +18996,6 @@ class SettingsTab(QWidget):
         optional_layout.addLayout(optional_form)
         body_layout.addWidget(optional_body)
 
-        ptt_group_edit = QLineEdit(str((existing or {}).get("ptt_group", "") or ""))
-        ptt_group_edit.setPlaceholderText("Optional shared transmit/PTT domain, e.g. AMP-A")
-        _add_form_row(optional_form, "PTT Guard Group:", ptt_group_edit, "Optional shared transmit/PTT domain for conflict protection.")
-
-        antenna_group_edit = QLineEdit(str((existing or {}).get("antenna_group", "") or ""))
-        antenna_group_edit.setPlaceholderText("Optional shared antenna path, e.g. ANT-1")
-        _add_form_row(optional_form, "Antenna Guard Group:", antenna_group_edit, "Optional shared antenna path used for RF conflict warnings.")
-
         band_grid_widget = QWidget()
         band_grid = QGridLayout(band_grid_widget)
         band_grid.setContentsMargins(0, 0, 0, 0)
@@ -18963,7 +19012,7 @@ class SettingsTab(QWidget):
             optional_form,
             "Antenna Supports These Bands:",
             band_grid_widget,
-            "FIO warns or blocks schedule assignments when this radio's antenna cannot safely use a plan band.",
+            "Choose the bands this radio and its antenna path can safely use. RF Guard checks these before assigning or applying a schedule.",
         )
 
         antenna_band_mode_combo = QComboBox()
@@ -18977,7 +19026,25 @@ class SettingsTab(QWidget):
             optional_form,
             "Unsupported Band Action:",
             antenna_band_mode_combo,
-            "Choose how strongly FIO should protect this radio from schedules outside the supported antenna bands.",
+            "Choose what FIO should do if a plan tries to use a band that is not checked above.",
+        )
+
+        antenna_group_edit = QLineEdit(str((existing or {}).get("antenna_group", "") or ""))
+        antenna_group_edit.setPlaceholderText("Optional shared antenna path, e.g. ANT-1")
+        _add_form_row(
+            optional_form,
+            "Antenna Guard Group:",
+            antenna_group_edit,
+            "Use the same name on radios that share one antenna path, antenna switch position, tuner, or feed line. FIO treats those radios as competing for that antenna.",
+        )
+
+        ptt_group_edit = QLineEdit(str((existing or {}).get("ptt_group", "") or ""))
+        ptt_group_edit.setPlaceholderText("Optional shared transmit/PTT path, e.g. AMP-A")
+        _add_form_row(
+            optional_form,
+            "PTT Guard Group:",
+            ptt_group_edit,
+            "Use the same name on radios that must not transmit at the same time, such as radios sharing an amplifier, tuner, or PTT control path.",
         )
 
         band_overlap_edit = QLineEdit(str((existing or {}).get("band_overlap_guard_group", "") or ""))
@@ -18986,7 +19053,7 @@ class SettingsTab(QWidget):
             optional_form,
             "Prevent Band Overlap Group:",
             band_overlap_edit,
-            "Use the same group name on radios that should not be on the same amateur band at the same time.",
+            "Use the same name on radios that should not occupy the same band at the same time, even when their exact frequencies differ.",
         )
 
         band_overlap_mode_combo = QComboBox()
@@ -19009,7 +19076,7 @@ class SettingsTab(QWidget):
             optional_form,
             "Advanced Guard Group:",
             advanced_frequency_group_edit,
-            "Use the same group name on radios that need exact-frequency/passband spacing protection.",
+            "Use the same name on radios that need close-frequency spacing protection because they share filters, front-end hardware, or antenna systems.",
         )
 
         advanced_frequency_mode_combo = QComboBox()
@@ -19039,47 +19106,57 @@ class SettingsTab(QWidget):
         )
 
         frontend_group_edit = QLineEdit(str((existing or {}).get("frontend_group", "") or ""))
-        frontend_group_edit.setPlaceholderText("Optional shared front-end chain, e.g. FRONT-A")
-        _add_form_row(optional_form, "Front-End Guard Group:", frontend_group_edit, "Optional shared front-end chain for RF conflict warnings.")
+        frontend_group_edit.setPlaceholderText("Optional shared receive chain, e.g. FRONT-A")
+        _add_form_row(
+            optional_form,
+            "Front-End Guard Group:",
+            frontend_group_edit,
+            "Use the same name on receivers that share a sensitive receive chain, preselector, or SDR front end.",
+        )
 
         amplifier_group_edit = QLineEdit(str((existing or {}).get("amplifier_group", "") or ""))
         amplifier_group_edit.setPlaceholderText("Optional shared amplifier chain, e.g. AMP-MAIN")
-        _add_form_row(optional_form, "Amplifier Guard Group:", amplifier_group_edit, "Optional shared amplifier chain for RF conflict warnings.")
+        _add_form_row(
+            optional_form,
+            "Amplifier Guard Group:",
+            amplifier_group_edit,
+            "Use the same name on radios that share one amplifier or high-power transmit chain.",
+        )
 
         notes_edit = QPlainTextEdit(str((existing or {}).get("notes", "") or ""))
         notes_edit.setMaximumHeight(96)
         _add_form_row(optional_form, "Notes:", notes_edit, "Optional operator notes about this radio profile.")
 
-        flrig_field_widgets = [flrig_wrap, flrig_path_edit]
+        flrig_field_widgets = [flrig_wrap, flrig_path_wrap]
         rigctld_field_widgets = [rig_wrap]
         js8_field_widgets = [
             js8_wrap,
-            js8_install_edit,
-            js8_profile_edit,
-            js8_directed_edit,
-            js8_forms_edit,
-            js8spotter_launch_edit,
-            commstat_launch_edit,
+            js8_install_wrap,
+            js8_profile_wrap,
+            js8_directed_wrap,
         ]
         observer_field_widgets = [sdr_wrap]
-        fldigi_field_widgets = [fldigi_wrap, fldigi_path_edit]
-        flmsg_field_widgets = [flmsg_path_edit]
-        flamp_field_widgets = [flamp_path_edit]
+        js8_forms_field_widgets = [js8_forms_wrap]
+        external_spotter_field_widgets = [js8spotter_launch_wrap]
+        commstat_field_widgets = [commstat_launch_wrap]
+        fldigi_field_widgets = [fldigi_wrap, fldigi_path_wrap]
+        flmsg_field_widgets = [flmsg_path_wrap]
+        flamp_field_widgets = [flamp_path_wrap]
         varac_field_widgets = [
-            varac_install_edit,
-            varac_db_edit,
-            varac_ini_edit,
-            varac_incoming_edit,
-            varac_outbox_edit,
-            varac_bbs_edit,
-            varac_bbs_archive_edit,
-            varac_launch_cmd_edit,
+            varac_install_wrap,
+            varac_db_wrap,
+            varac_ini_wrap,
+            varac_incoming_wrap,
+            varac_outbox_wrap,
+            varac_bbs_wrap,
+            varac_bbs_archive_wrap,
+            varac_launch_cmd_wrap,
         ]
         optional_field_widgets = [
-            ptt_group_edit,
-            antenna_group_edit,
             band_grid_widget,
             antenna_band_mode_combo,
+            antenna_group_edit,
+            ptt_group_edit,
             band_overlap_edit,
             band_overlap_mode_combo,
             advanced_frequency_group_edit,
@@ -19114,7 +19191,7 @@ class SettingsTab(QWidget):
                 "flmsg": use_flmsg_chk.isChecked(),
                 "flamp": use_flamp_chk.isChecked(),
                 "js8call": use_js8call_chk.isChecked() or backend == "js8call",
-                "js8spotter": use_js8spotter_chk.isChecked(),
+                "js8spotter": use_external_js8spotter_chk.isChecked(),
                 "commstat": use_commstat_chk.isChecked(),
                 "varac": use_varac_chk.isChecked(),
             }
@@ -19404,7 +19481,8 @@ class SettingsTab(QWidget):
         use_flmsg_chk.setChecked(self._radio_software_enabled(existing or {}, "flmsg"))
         use_flamp_chk.setChecked(self._radio_software_enabled(existing or {}, "flamp"))
         use_js8call_chk.setChecked(self._radio_software_enabled(existing or {}, "js8call"))
-        use_js8spotter_chk.setChecked(self._radio_software_enabled(existing or {}, "js8spotter"))
+        use_js8spotter_chk.setChecked(bool((existing or {}).get("use_js8spotter", 0)))
+        use_external_js8spotter_chk.setChecked(bool(str((existing or {}).get("spotter_launch_path", "") or "").strip()))
         use_commstat_chk.setChecked(self._radio_software_enabled(existing or {}, "commstat"))
         use_varac_chk.setChecked(self._radio_software_enabled(existing or {}, "varac"))
         optional_toggle.setChecked(
@@ -19481,6 +19559,7 @@ class SettingsTab(QWidget):
                 _checkbox_set_checked(use_flamp_chk, selected_apps.get("flamp", False))
                 _checkbox_set_checked(use_js8call_chk, selected_apps.get("js8call", False))
                 _checkbox_set_checked(use_js8spotter_chk, selected_apps.get("js8spotter", False))
+                _checkbox_set_checked(use_external_js8spotter_chk, False)
                 _checkbox_set_checked(use_commstat_chk, selected_apps.get("commstat", False))
                 _checkbox_set_checked(use_varac_chk, selected_apps.get("varac", False))
             finally:
@@ -19614,7 +19693,9 @@ class SettingsTab(QWidget):
                 "js8_profile_path": js8_profile_edit.text().strip(),
                 "js8_directed_path": js8_directed_edit.text().strip(),
                 "js8_forms_path": js8_forms_edit.text().strip(),
-                "spotter_launch_path": js8spotter_launch_edit.text().strip(),
+                "spotter_launch_path": js8spotter_launch_edit.text().strip()
+                if use_external_js8spotter_chk.isChecked()
+                else "",
                 "commstat_launch_path": commstat_launch_edit.text().strip(),
                 "varac_install_path": varac_install_edit.text().strip(),
                 "varac_db_path": varac_db_edit.text().strip(),
@@ -19704,7 +19785,7 @@ class SettingsTab(QWidget):
                 use_flmsg=use_flmsg_chk.isChecked(),
                 use_flamp=use_flamp_chk.isChecked(),
                 use_js8call=use_js8call_chk.isChecked(),
-                use_js8spotter=use_js8spotter_chk.isChecked(),
+                use_js8spotter=use_js8spotter_chk.isChecked() or use_external_js8spotter_chk.isChecked(),
                 use_commstat=use_commstat_chk.isChecked(),
                 use_varac=use_varac_chk.isChecked(),
             )
@@ -20014,7 +20095,7 @@ class SettingsTab(QWidget):
                 use_flmsg=bool(use_flmsg_chk.isChecked()),
                 use_flamp=bool(use_flamp_chk.isChecked()),
                 use_js8call=bool(use_js8call_chk.isChecked()),
-                use_js8spotter=bool(use_js8spotter_chk.isChecked()),
+                use_js8spotter=bool(use_js8spotter_chk.isChecked() or use_external_js8spotter_chk.isChecked()),
                 use_commstat=bool(use_commstat_chk.isChecked()),
                 use_varac=bool(use_varac_chk.isChecked()),
                 optional_open=bool(optional_toggle.isChecked()),
@@ -20138,10 +20219,9 @@ class SettingsTab(QWidget):
             if use_js8call_chk.isChecked():
                 app_labels.append("JS8Call")
             if use_js8spotter_chk.isChecked():
-                if js8spotter_launch_edit.text().strip():
-                    app_labels.append("FIO Spotter + external JS8Spotter")
-                else:
-                    app_labels.append("FIO Spotter")
+                app_labels.append("FIO Spotter")
+            if use_external_js8spotter_chk.isChecked():
+                app_labels.append("External JS8Spotter")
             if use_commstat_chk.isChecked():
                 app_labels.append("CommStat")
             if use_varac_chk.isChecked():
@@ -20169,8 +20249,8 @@ class SettingsTab(QWidget):
                 file_lines.append(_path_summary("DIRECTED.TXT", js8_directed_edit.text()))
             if use_js8spotter_chk.isChecked():
                 file_lines.append(_path_summary("MCF forms", js8_forms_edit.text()))
-                if js8spotter_launch_edit.text().strip():
-                    file_lines.append(_path_summary("External JS8Spotter", js8spotter_launch_edit.text()))
+            if use_external_js8spotter_chk.isChecked():
+                file_lines.append(_path_summary("External JS8Spotter", js8spotter_launch_edit.text()))
             if use_commstat_chk.isChecked():
                 file_lines.append(_path_summary("CommStat app", commstat_launch_edit.text()))
             if use_varac_chk.isChecked():
@@ -20310,7 +20390,7 @@ class SettingsTab(QWidget):
                     "flmsg": use_flmsg_chk.isChecked(),
                     "flamp": use_flamp_chk.isChecked(),
                     "js8call": use_js8call_chk.isChecked(),
-                    "js8spotter": use_js8spotter_chk.isChecked(),
+                    "js8spotter": use_external_js8spotter_chk.isChecked(),
                     "commstat": use_commstat_chk.isChecked(),
                     "varac": use_varac_chk.isChecked(),
                 },
@@ -20461,6 +20541,7 @@ class SettingsTab(QWidget):
             use_fldigi = bool(use_fldigi_chk.isChecked())
             use_js8call = bool(use_js8call_chk.isChecked())
             use_js8spotter = bool(use_js8spotter_chk.isChecked())
+            use_external_js8spotter = bool(use_external_js8spotter_chk.isChecked())
             use_commstat = bool(use_commstat_chk.isChecked())
             use_varac = bool(use_varac_chk.isChecked())
 
@@ -20470,6 +20551,7 @@ class SettingsTab(QWidget):
             use_flamp_chk.setEnabled(not observer_mode)
             use_js8call_chk.setEnabled(not observer_mode)
             use_js8spotter_chk.setEnabled(not observer_mode)
+            use_external_js8spotter_chk.setEnabled(not observer_mode)
             use_commstat_chk.setEnabled(not observer_mode)
             use_varac_chk.setEnabled(not observer_mode)
             if setup_started:
@@ -20491,7 +20573,7 @@ class SettingsTab(QWidget):
                 use_flmsg=bool(use_flmsg_chk.isChecked()),
                 use_flamp=bool(use_flamp_chk.isChecked()),
                 use_js8call=use_js8call,
-                use_js8spotter=use_js8spotter,
+                use_js8spotter=use_js8spotter or use_external_js8spotter,
                 use_commstat=use_commstat,
                 use_varac=use_varac,
                 optional_open=optional_toggle.isChecked(),
@@ -20503,6 +20585,12 @@ class SettingsTab(QWidget):
                 _set_row_visible(widget, visibility.rigctld_fields)
             for widget in js8_field_widgets:
                 _set_row_visible(widget, visibility.js8_fields)
+            for widget in js8_forms_field_widgets:
+                _set_row_visible(widget, visibility.js8_fields and use_js8spotter)
+            for widget in external_spotter_field_widgets:
+                _set_row_visible(widget, visibility.js8_fields and use_external_js8spotter)
+            for widget in commstat_field_widgets:
+                _set_row_visible(widget, visibility.js8_fields and use_commstat)
             for widget in observer_field_widgets:
                 _set_row_visible(widget, visibility.observer_fields)
             for widget in fldigi_field_widgets:
@@ -20535,6 +20623,7 @@ class SettingsTab(QWidget):
                     use_flamp_chk,
                     use_js8call_chk,
                     use_js8spotter_chk,
+                    use_external_js8spotter_chk,
                     use_commstat_chk,
                     use_varac_chk,
                 ):
@@ -20582,16 +20671,17 @@ class SettingsTab(QWidget):
                     return
             if use_varac_chk.isChecked():
                 fast_or_js8_selected = any(
-                    checkbox.isChecked()
-                    for checkbox in (
-                        use_fldigi_chk,
-                        use_flmsg_chk,
-                        use_flamp_chk,
-                        use_js8call_chk,
-                        use_js8spotter_chk,
-                        use_commstat_chk,
-                    )
+                checkbox.isChecked()
+                for checkbox in (
+                    use_fldigi_chk,
+                    use_flmsg_chk,
+                    use_flamp_chk,
+                    use_js8call_chk,
+                    use_js8spotter_chk,
+                    use_external_js8spotter_chk,
+                    use_commstat_chk,
                 )
+            )
                 backend = str(backend_combo.currentData() or "").strip().lower()
                 if not fast_or_js8_selected and backend == "flrig":
                     manual_idx = backend_combo.findData("manual")
@@ -20613,6 +20703,7 @@ class SettingsTab(QWidget):
         use_flamp_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_js8call_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
+        use_external_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
         schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
@@ -20710,6 +20801,7 @@ class SettingsTab(QWidget):
         use_flamp_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_js8call_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
+        use_external_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_varac_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         backend_combo.currentIndexChanged.connect(lambda _idx: _update_dialog_readiness())
