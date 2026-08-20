@@ -332,7 +332,10 @@ def guided_radio_autofill_suggestions(
                     profile_name=profile_name,
                 )
             )
-    if bool(selected.get("js8spotter")):
+    if bool(selected.get("fio_spotter")):
+        _suggest("js8_forms_path", guided_detection_path(js8_results, "js8_forms_path"))
+    external_js8spotter_selected = bool(selected.get("external_js8spotter")) or bool(selected.get("js8spotter"))
+    if external_js8spotter_selected:
         _suggest(
             "spotter_launch_path",
             guided_single_install_path(

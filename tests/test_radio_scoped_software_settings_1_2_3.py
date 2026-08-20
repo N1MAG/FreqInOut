@@ -1624,7 +1624,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "browse_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in dialog_block
     assert 'app_choice_group = QGroupBox("Review Detected Apps")' in dialog_block
     assert 'app_choice_group.setObjectName("guidedDetectedAppsReview")' in dialog_block
-    assert "Choose the detected app that belongs to this radio before continuing." in dialog_block
+    assert "Choose or browse to the app that belongs to this radio before continuing." in dialog_block
     assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
     assert 'browse_btn.setObjectName(f"guidedAutoAppBrowse_{app_id}")' in dialog_block
     assert "def _browse_guided_app_choice(app_id: str) -> None:" in dialog_block

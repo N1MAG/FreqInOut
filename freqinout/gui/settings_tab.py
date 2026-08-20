@@ -19040,7 +19040,7 @@ class SettingsTab(QWidget):
         _add_full_width_row(software_form, port_prompt_group)
 
         optional_toggle = QToolButton(dlg)
-        optional_toggle.setText("Advanced RF Guards")
+        optional_toggle.setText("Radio Safety / RF Guard")
         optional_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         optional_toggle.setArrowType(Qt.RightArrow)
         optional_toggle.setCheckable(True)
@@ -19376,17 +19376,20 @@ class SettingsTab(QWidget):
             )
             for app_id, combo in app_choice_combos.items():
                 row_widget = app_choice_rows.get(app_id, combo)
+                target_edit = app_choice_targets.get(app_id)
+                target_missing = target_edit is not None and not target_edit.text().strip()
+                selected_for_radio = _app_choice_app_selected(app_id)
                 visible = (
                     not observer_mode
-                    and _app_choice_app_selected(app_id)
-                    and combo.count() > 1
+                    and selected_for_radio
+                    and (combo.count() > 1 or target_missing)
                 )
                 _set_row_visible(row_widget, visible)
-                needs_choice = visible and combo.count() > 2 and combo.currentIndex() <= 0
+                needs_choice = visible and ((combo.count() > 2 and combo.currentIndex() <= 0) or (combo.count() <= 1 and target_missing))
                 combo.setStyleSheet(attention_style if needs_choice else "")
                 row_widget.setStyleSheet(attention_row_style if needs_choice else "")
                 combo.setToolTip(
-                    "Choose the detected app that belongs to this radio before continuing."
+                    "Choose or browse to the app that belongs to this radio before continuing."
                     if needs_choice
                     else "Review the detected app path for this radio."
                 )
@@ -19427,7 +19430,13 @@ class SettingsTab(QWidget):
             if observer_mode:
                 return False
             for app_id, combo in app_choice_combos.items():
-                if _app_choice_app_selected(app_id) and combo.count() > 2 and combo.currentIndex() <= 0:
+                target_edit = app_choice_targets.get(app_id)
+                target_missing = target_edit is not None and not target_edit.text().strip()
+                if not _app_choice_app_selected(app_id):
+                    continue
+                if combo.count() > 2 and combo.currentIndex() <= 0:
+                    return True
+                if combo.count() <= 1 and target_missing:
                     return True
             return bool(
                 _js8_app_selected()
@@ -20595,6 +20604,8 @@ class SettingsTab(QWidget):
                     "flmsg": use_flmsg_chk.isChecked(),
                     "flamp": use_flamp_chk.isChecked(),
                     "js8call": use_js8call_chk.isChecked(),
+                    "fio_spotter": use_js8spotter_chk.isChecked(),
+                    "external_js8spotter": use_external_js8spotter_chk.isChecked(),
                     "js8spotter": use_external_js8spotter_chk.isChecked(),
                     "commstat": use_commstat_chk.isChecked(),
                     "varac": use_varac_chk.isChecked(),
@@ -20628,6 +20639,7 @@ class SettingsTab(QWidget):
                 "js8_install_path": (js8_install_edit, "JS8Call app"),
                 "js8_directed_path": (js8_directed_edit, "JS8Call DIRECTED.TXT"),
                 "js8_profile_path": (js8_profile_edit, "JS8 profile folder"),
+                "js8_forms_path": (js8_forms_edit, "MCF forms folder"),
                 "spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app"),
                 "commstat_launch_path": (commstat_launch_edit, "CommStat app"),
                 "varac_install_path": (varac_install_edit, "VarAC install"),

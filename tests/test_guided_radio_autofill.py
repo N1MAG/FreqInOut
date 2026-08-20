@@ -354,6 +354,79 @@ def test_radio_autofill_multiple_js8_variants_names_choices_for_review() -> None
     ) in review
 
 
+def test_radio_autofill_fio_spotter_fills_mcf_forms_without_external_launcher() -> None:
+    suggestions, review = guided_radio_autofill_suggestions(
+        current={},
+        selected={"fio_spotter": True, "external_js8spotter": False, "js8spotter": False},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(
+            types.SimpleNamespace(app_id="js8spotter", executable=True, path="/Applications/JS8Spotter.app"),
+        ),
+        fast_results={},
+        js8_results={
+            "js8_forms_path": PathDetectionResult(
+                key="js8_forms_path",
+                label="MCF forms folder",
+                path="/Users/bill/RadioTools/Programs/JS8Spotter/forms",
+                confidence="verified",
+                reason="Found forms",
+                exists=True,
+                target_type="directory",
+            ),
+            "path_js8spotter": PathDetectionResult(
+                key="path_js8spotter",
+                label="JS8Spotter",
+                path="/Applications/JS8Spotter.app",
+                confidence="verified",
+                reason="Found app",
+                exists=True,
+                target_type="file",
+            ),
+        },
+        varac_results={},
+        js8_file_profiles=(),
+        default_ports={},
+        profile_name="FIO-C",
+    )
+
+    assert suggestions["js8_forms_path"] == "/Users/bill/RadioTools/Programs/JS8Spotter/forms"
+    assert "spotter_launch_path" not in suggestions
+    assert review == ()
+
+
+def test_radio_autofill_external_js8spotter_fills_launcher_without_mcf_forms() -> None:
+    suggestions, review = guided_radio_autofill_suggestions(
+        current={},
+        selected={"fio_spotter": False, "external_js8spotter": True},
+        backend="manual",
+        observer_mode=False,
+        install_candidates=(
+            types.SimpleNamespace(app_id="js8spotter", executable=True, path="/Applications/JS8Spotter.app"),
+        ),
+        fast_results={},
+        js8_results={
+            "js8_forms_path": PathDetectionResult(
+                key="js8_forms_path",
+                label="MCF forms folder",
+                path="/Users/bill/RadioTools/Programs/JS8Spotter/forms",
+                confidence="verified",
+                reason="Found forms",
+                exists=True,
+                target_type="directory",
+            ),
+        },
+        varac_results={},
+        js8_file_profiles=(),
+        default_ports={},
+        profile_name="FIO-C",
+    )
+
+    assert suggestions["spotter_launch_path"] == "/Applications/JS8Spotter.app"
+    assert "js8_forms_path" not in suggestions
+    assert review == ()
+
+
 def test_radio_autofill_leaves_varac_db_and_cluster_manual() -> None:
     varac_results = {
         "varac_path": PathDetectionResult(
