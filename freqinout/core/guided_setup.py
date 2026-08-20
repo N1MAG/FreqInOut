@@ -683,6 +683,58 @@ def build_guided_setup_preview(
     )
 
 
+def guided_app_config_review_lines(plan: GuidedAppConfigPlan) -> Tuple[str, ...]:
+    """Return a compact operator review of FIO-side vs external app setup."""
+
+    write_actions = [action for action in plan.actions if action.writes_external_config]
+    remember_actions = [action for action in plan.actions if not action.writes_external_config]
+    lines: list[str] = []
+    if write_actions:
+        apps = []
+        seen: set[str] = set()
+        for action in write_actions:
+            label = guided_setup_app_label(action.app_id)
+            if label and label not in seen:
+                apps.append(label)
+                seen.add(label)
+        app_text = ", ".join(apps[:4]) if apps else "external apps"
+        if len(apps) > 4:
+            app_text = f"{app_text}, +{len(apps) - 4} more"
+        lines.append(
+            f"App Configuration: backup required before FIO prepares {len(write_actions)} profile change(s)"
+            f" for {app_text}."
+        )
+    elif remember_actions:
+        apps = []
+        seen = set()
+        for action in remember_actions:
+            label = guided_setup_app_label(action.app_id)
+            if label and label not in seen:
+                apps.append(label)
+                seen.add(label)
+        app_text = ", ".join(apps) if apps else "selected apps"
+        lines.append(f"App Configuration: FIO will remember {app_text} paths; no external app files will be changed.")
+    else:
+        lines.append("App Configuration: no external app setup changes.")
+
+    if any(str(action.app_id or "").strip().lower() == "varac" for action in plan.actions) or any(
+        "VarAC" in str(item or "") for item in plan.review_items
+    ):
+        lines.append("VarAC: read/import only; FIO will not change VarAC.ini or VarAC.db.")
+
+    for item in plan.review_items:
+        text = str(item or "").strip()
+        if text and text not in lines:
+            lines.append(text)
+    for action in write_actions[:5]:
+        summary = str(action.summary or "").strip()
+        if summary:
+            lines.append(summary)
+    if len(write_actions) > 5:
+        lines.append(f"{len(write_actions) - 5} more app configuration action(s).")
+    return tuple(lines)
+
+
 def normalize_guided_radio_profile_payload(
     payload: Mapping[str, object],
 ) -> Mapping[str, object]:

@@ -26,6 +26,7 @@ from freqinout.core.guided_setup import (
     build_app_config_plan_for_blueprint,
     build_guided_setup_preview,
     generated_radio_label,
+    guided_app_config_review_lines,
     guided_radio_label_base,
     guided_setup_autofill_review,
     guided_setup_capability_policy,
@@ -801,6 +802,48 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     assert "5. Review:" in lines[-1]
 
 
+def test_guided_app_config_review_summarizes_managed_external_writes(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="tri_mode",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_FLRIG,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"flrig": "/apps/flrig", "fldigi": "/apps/fldigi", "js8call": "/apps/js8call"},
+    )
+
+    lines = guided_app_config_review_lines(plan)
+
+    assert lines[0].startswith("App Configuration: backup required before FIO prepares")
+    assert "FLRig" in lines[0]
+    assert "FLDigi" in lines[0]
+    assert "JS8Call" in lines[0]
+    assert any("VarAC: read/import only" in line for line in lines)
+
+
+def test_guided_app_config_review_summarizes_read_only_references(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="varac",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_READ_ONLY,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+        app_paths={"varac": "/apps/VarAC"},
+    )
+
+    lines = guided_app_config_review_lines(plan)
+
+    assert lines[0] == "App Configuration: FIO will remember VarAC paths; no external app files will be changed."
+    assert "VarAC: read/import only; FIO will not change VarAC.ini or VarAC.db." in lines
+
+
 def test_guided_station_use_choices_prioritize_trimode_then_custom() -> None:
     blueprint = build_guided_setup_blueprint(
         lane="tri_mode",
@@ -1448,6 +1491,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "guided_setup_flow_summary_lines(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
     assert "guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
     assert "guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
+    assert "def _current_guided_app_config_plan() -> GuidedAppConfigPlan:" in dialog_block
+    assert "plan = _current_guided_app_config_plan()" in dialog_block
     assert 'guided_wizard_group = QGroupBox("Guided Setup")' in dialog_block
     assert 'guided_wizard_group.setObjectName("guidedSetupWizard")' in dialog_block
     assert 'btn.setObjectName(f"guidedWizardStep_{step_id}")' in dialog_block
@@ -1496,6 +1541,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
     assert "Message/Forms Files: " in dialog_block
+    assert "app_config_lines = guided_app_config_review_lines(_current_guided_app_config_plan())" in dialog_block
+    assert "app_config_summary" in dialog_block
     assert "Monitor/import only. FIO will not offer scheduler or QSY controls." in dialog_block
     assert "Manual/external control. FIO will not tune this radio until a control endpoint is selected." in dialog_block
     assert "controls scheduler and QSY actions." in dialog_block

@@ -154,6 +154,7 @@ from freqinout.core.guided_setup import (
     guided_radio_label_base,
     guided_setup_capability_policy,
     guided_setup_autofill_review,
+    guided_app_config_review_lines,
     guided_setup_schedule_decision,
     guided_setup_field_visibility,
     guided_setup_flow_items,
@@ -164,6 +165,7 @@ from freqinout.core.guided_setup import (
     guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
     guided_setup_wizard_view,
+    GuidedAppConfigPlan,
     GuidedScheduleDecision,
     GuidedSetupFieldVisibilityInput,
     generated_radio_label,
@@ -19917,6 +19919,45 @@ class SettingsTab(QWidget):
                 detail=decision.step_detail,
             )
 
+        def _current_guided_app_config_plan() -> GuidedAppConfigPlan:
+            enabled_apps = _guided_plan_enabled_apps()
+            varac_selected = use_varac_chk.isChecked()
+            if not enabled_apps and not varac_selected:
+                return GuidedAppConfigPlan(actions=(), review_items=())
+            radio_name = name_edit.text().strip() or "Radio"
+            proposal = RadioInstanceProposal(
+                name=radio_name,
+                instance_name=_guided_plan_instance_name(),
+                index=0,
+                enabled_apps=enabled_apps,
+                ports=(
+                    _guided_plan_port_assignment("flrig", flrig_port_edit.text()),
+                    _guided_plan_port_assignment("fldigi", fldigi_port_edit.text()),
+                    _guided_plan_port_assignment("js8call", js8_port_edit.text()),
+                ),
+                varac_enabled=varac_selected,
+            )
+            app_paths = {
+                "flrig": flrig_path_edit.text().strip(),
+                "fldigi": fldigi_path_edit.text().strip(),
+                "js8call": js8_install_edit.text().strip(),
+                "varac": varac_install_edit.text().strip(),
+                "varac_install_path": varac_install_edit.text().strip(),
+                "varac_ini_path": varac_ini_edit.text().strip(),
+                "varac_db_path": varac_db_edit.text().strip(),
+                "varac_incoming_dir": varac_incoming_edit.text().strip(),
+                "varac_outbox_dir": varac_outbox_edit.text().strip(),
+                "varac_bbs_dir": varac_bbs_edit.text().strip(),
+                "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
+                "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
+            }
+            return build_app_config_plan_for_blueprint(
+                _current_guided_blueprint(),
+                (proposal,),
+                config_root=get_config_dir(),
+                app_paths=app_paths,
+            )
+
         def _update_guided_app_setup_plan_review() -> None:
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 app_setup_plan_group.setVisible(False)
@@ -19932,40 +19973,8 @@ class SettingsTab(QWidget):
                 app_setup_plan_label.setText("")
                 schedule_status_label.setText("Choose the setup type and software before assigning a Frequency Plan.")
                 return
-            radio_name = name_edit.text().strip() or "Radio"
-            proposal = RadioInstanceProposal(
-                name=radio_name,
-                instance_name=_guided_plan_instance_name(),
-                index=0,
-                enabled_apps=enabled_apps,
-                ports=(
-                    _guided_plan_port_assignment("flrig", flrig_port_edit.text()),
-                    _guided_plan_port_assignment("fldigi", fldigi_port_edit.text()),
-                    _guided_plan_port_assignment("js8call", js8_port_edit.text()),
-                ),
-                varac_enabled=varac_selected,
-            )
             blueprint = _current_guided_blueprint()
-            app_paths = {
-                "flrig": flrig_path_edit.text().strip(),
-                "fldigi": fldigi_path_edit.text().strip(),
-                "js8call": js8_install_edit.text().strip(),
-                "varac": varac_install_edit.text().strip(),
-                "varac_install_path": varac_install_edit.text().strip(),
-                "varac_ini_path": varac_ini_edit.text().strip(),
-                "varac_db_path": varac_db_edit.text().strip(),
-                "varac_incoming_dir": varac_incoming_edit.text().strip(),
-                "varac_outbox_dir": varac_outbox_edit.text().strip(),
-                "varac_bbs_dir": varac_bbs_edit.text().strip(),
-                "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
-                "varac_launch_cmd": varac_launch_cmd_edit.text().strip(),
-            }
-            plan = build_app_config_plan_for_blueprint(
-                blueprint,
-                (proposal,),
-                config_root=get_config_dir(),
-                app_paths=app_paths,
-            )
+            plan = _current_guided_app_config_plan()
             schedule_decision = _current_guided_schedule_decision()
             guided_next_action_label.setText(
                 guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)
@@ -20287,6 +20296,8 @@ class SettingsTab(QWidget):
             launch_path = str(launch_path_edit.text().strip() or varac_launch_cmd_edit.text().strip() or "")
             if launch_path:
                 launch_line = f"{launch_line}; {_compact_value(launch_path)}"
+            app_config_lines = guided_app_config_review_lines(_current_guided_app_config_plan())
+            app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
 
             review_lines = [
                 "What FIO will save:",
@@ -20297,10 +20308,12 @@ class SettingsTab(QWidget):
                 f"Frequency Control: {frequency_line}",
                 "Endpoints: " + "; ".join(endpoint_lines),
                 "Message/Forms Files: " + "; ".join(file_lines),
+                app_config_summary,
                 "Schedule: " + schedule_line,
                 "Launch: " + launch_line,
             ]
             save_review_label.setText("\n".join(review_lines))
+            save_review_label.setToolTip("\n".join(app_config_lines))
 
         def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
             nonlocal guided_wizard_step_id
