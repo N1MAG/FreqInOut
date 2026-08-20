@@ -558,6 +558,10 @@ class SoftwarePathDetector:
     def _detect_varac_outbox_dir(self, install_dir: Path | None) -> PathDetectionResult:
         candidates: List[Path] = []
         if install_dir is not None:
+            ini_path = self._first_existing_path([install_dir / "VarAC.ini", install_dir / "varac.ini"])
+            ini_outbox = self._varac_ini_existing_path(ini_path, "FILE_TRANSFER", "OutgoingFilesDir")
+            if ini_outbox is not None:
+                candidates.append(ini_outbox)
             candidates.extend(
                 [
                     install_dir / "OUTGOING",

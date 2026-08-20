@@ -38,6 +38,24 @@ def test_software_path_detector_detects_varac_outbox_dir(tmp_path: Path) -> None
     assert result.path == str(outbox)
 
 
+def test_software_path_detector_detects_varac_outbox_from_ini(tmp_path: Path) -> None:
+    install_dir = tmp_path / "VarAC"
+    outbox = tmp_path / "VaraFiles" / "Outgoing"
+    install_dir.mkdir(parents=True)
+    outbox.mkdir(parents=True)
+    (install_dir / "VarAC.ini").write_text(
+        "[FILE_TRANSFER]\n"
+        f"OutgoingFilesDir={outbox}\n",
+        encoding="utf-8",
+    )
+
+    detector = SoftwarePathDetector(_DummySettings())
+    result = detector._detect_varac_outbox_dir(install_dir)
+
+    assert result.key == "varac_outbox_dir"
+    assert result.path == str(outbox)
+
+
 def test_software_path_detector_detects_varac_db_file(tmp_path: Path) -> None:
     install_dir = tmp_path / "VarAC"
     db_path = install_dir / "VarAC.db"

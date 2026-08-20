@@ -11387,6 +11387,7 @@ Schedule readiness:
 - Add Radio schedule-state text must come from one core decision helper and be reused by the step card, Schedule status text, and final Review summary. The three operator states are explicit: selected plan assignment, Plan Manager handoff after save, or monitor/import-only with no FIO-controlled schedule.
 - When guided setup opens Plan Manager after save, it passes the saved radio context into Plan Manager so the next-step guidance names that radio and explains whether to choose an existing plan or build a new Daily/No Nets/Net/SOP plan before RF Guard assignment.
 - VarAC-only and VarAC Cluster/BBS lanes remain monitor/import-only for FIO frequency control. They may show their schedule step as ready only because VarAC keeps its own scheduler and FIO will not offer QSY/scheduler controls.
+- VarAC autodetection may read local VarAC files such as `VarAC.ini`, `VarAC.db`, incoming/outgoing file directories, BBS directory, and BBS archive location to support message/BBS monitoring and guided review. Reading these files must not imply FIO owns VarAC frequency control.
 - VarAC-only save normalization must clear stale FIO scheduler assignment hints and disable `use_scheduler`; a VarAC-only radio must not inherit QSY/schedule control from default UI state or a prior mixed profile.
 - `Daily with No Nets` and `No Nets` must be available schedule concepts so JS8Call-only or simple HF schedules can be created without inventing a net layer.
 
