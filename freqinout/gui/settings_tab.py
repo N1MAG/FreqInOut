@@ -2894,6 +2894,10 @@ class SettingsTab(QWidget):
         self.selector_remove_device_profile_btn.setAccessibleName("Remove selected radio")
         self.selector_remove_device_profile_btn.clicked.connect(self._delete_device_profiles)
         radio_selector_actions.addWidget(QLabel("Selected Radio:"))
+        self.selector_selected_device_profile_label = QLabel("--")
+        self.selector_selected_device_profile_label.setAccessibleName("Selected radio name")
+        self.selector_selected_device_profile_label.setMinimumWidth(120)
+        radio_selector_actions.addWidget(self.selector_selected_device_profile_label)
         radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_set_default_device_profile_btn)
@@ -15992,6 +15996,15 @@ class SettingsTab(QWidget):
             or str(row.get("operating_system_key", "") or "").strip() != "default_operating"
             for row in selected_assignment_rows
         )
+        if hasattr(self, "selector_selected_device_profile_label"):
+            if count == 1:
+                selected_radio_text = self._profile_display_name(selected[0])
+            elif count > 1:
+                selected_radio_text = f"{count} radios"
+            else:
+                selected_radio_text = "--"
+            self.selector_selected_device_profile_label.setText(selected_radio_text)
+            self.selector_selected_device_profile_label.setAccessibleName(f"Selected radio: {selected_radio_text}")
 
         self.add_device_profile_btn.setStyleSheet(button_style("primary", theme))
         if hasattr(self, "copy_readiness_summary_btn"):

@@ -1521,6 +1521,7 @@ def test_radio_selector_exposes_visible_runtime_actions() -> None:
     assert 'self.selector_deactivate_device_profile_btn = QPushButton("Stop Using")' in configured_radios_block
     assert 'self.selector_set_default_device_profile_btn = QPushButton("Make Default")' in configured_radios_block
     assert 'self.selector_remove_device_profile_btn = QPushButton("Remove Radio")' in configured_radios_block
+    assert 'self.selector_selected_device_profile_label = QLabel("--")' in configured_radios_block
     assert "self.selector_activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)" in configured_radios_block
     assert "self.selector_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)" in configured_radios_block
     assert "self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)" in configured_radios_block
@@ -1529,6 +1530,7 @@ def test_radio_selector_exposes_visible_runtime_actions() -> None:
     assert "self.selector_deactivate_device_profile_btn.setEnabled(can_deactivate)" in action_state_block
     assert "self.selector_set_default_device_profile_btn.setEnabled(can_set_active)" in action_state_block
     assert "self.selector_remove_device_profile_btn.setEnabled(can_delete)" in action_state_block
+    assert 'self.selector_selected_device_profile_label.setAccessibleName(f"Selected radio: {selected_radio_text}")' in action_state_block
 
 
 def test_radio_selector_selection_is_not_color_only() -> None:
