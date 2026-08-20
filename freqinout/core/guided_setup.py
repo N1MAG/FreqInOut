@@ -796,7 +796,7 @@ def guided_setup_schedule_decision(
     if schedule_choice == SCHEDULE_NONE:
         text = "No Frequency Plan will be assigned now. This radio can be assigned later."
         return GuidedScheduleDecision(
-            status="ready",
+            status="review",
             step_detail=text,
             status_text=text,
             review_text="No Frequency Plan assigned during setup.",
@@ -818,7 +818,7 @@ def guided_setup_schedule_decision(
         )
     if selected:
         return GuidedScheduleDecision(
-            status="ready",
+            status="review",
             step_detail=f"Selected plan: {selected}. RF Guard runs after save.",
             status_text=f"After saving, FIO will assign '{selected}' to this radio with RF Guard.",
             review_text=f"Assign '{selected}' after save with RF Guard.",

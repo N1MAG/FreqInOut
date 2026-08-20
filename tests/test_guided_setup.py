@@ -1248,9 +1248,9 @@ def test_guided_setup_next_action_uses_selected_schedule_decision() -> None:
     items = guided_setup_flow_items(blueprint, plan, schedule_decision=decision)
     schedule_item = next(item for item in items if item.item_id == "schedule")
 
-    assert schedule_item.status == "ready"
+    assert schedule_item.status == "review"
     assert schedule_item.detail == "Selected plan: JS8 Standard. RF Guard runs after save."
-    assert guided_setup_next_action_text(blueprint, plan, schedule_decision=decision).startswith("Next: Review - ")
+    assert guided_setup_next_action_text(blueprint, plan, schedule_decision=decision).startswith("Next: Schedule - ")
 
 
 def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
@@ -1297,7 +1297,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         plan_count=3,
         open_plan_manager=False,
     )
-    assert selected.status == "ready"
+    assert selected.status == "review"
     assert selected.step_detail == "Selected plan: Magnet Main. RF Guard runs after save."
     assert selected.status_text == "After saving, FIO will assign 'Magnet Main' to this radio with RF Guard."
     assert selected.review_text == "Assign 'Magnet Main' after save with RF Guard."
@@ -1330,7 +1330,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=False,
         selected_schedule_choice=SCHEDULE_NONE,
     )
-    assert no_schedule.status == "ready"
+    assert no_schedule.status == "review"
     assert no_schedule.review_text == "No Frequency Plan assigned during setup."
 
     monitor_only = guided_setup_schedule_decision(
