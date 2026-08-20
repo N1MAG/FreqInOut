@@ -19264,7 +19264,15 @@ class SettingsTab(QWidget):
                 "varac": "VarAC",
             }.get(str(app_id or "").strip().lower(), "app")
             start = target.text().strip() or radio_apps_base_edit.text().strip() or str(Path.home())
-            chosen = QFileDialog.getExistingDirectory(self, f"Select {app_label} app or folder", start)
+            if platform.system() == "Darwin" or app_id == "varac":
+                chosen = QFileDialog.getExistingDirectory(self, f"Select {app_label} app or folder", start)
+            else:
+                chosen, _filter = QFileDialog.getOpenFileName(
+                    self,
+                    f"Select {app_label} executable",
+                    start,
+                    "Executables (*.exe *.bat *.cmd *.sh);;All Files (*)",
+                )
             if not chosen:
                 return
             target.setText(chosen)
