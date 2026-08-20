@@ -1471,6 +1471,13 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "app_labels.append(\"FIO Spotter\")" in dialog_block
     assert '"External JS8Spotter app"' in dialog_block
     assert '"js8spotter": "External JS8Spotter"' in dialog_block
+    launch_allowed_block = source[
+        source.index("def _launch_item_allowed_for_profile")
+        : source.index("def _is_launch_item_configured")
+    ]
+    assert 'if app_name == "JS8Spotter":' in launch_allowed_block
+    assert 'profile.get("spotter_launch_path", "")' in launch_allowed_block
+    assert 'self._radio_software_enabled(profile, software_key)' in launch_allowed_block
     assert '"What FIO will save:"' in dialog_block
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block

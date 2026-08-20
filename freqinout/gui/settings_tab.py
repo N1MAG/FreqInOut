@@ -21608,6 +21608,8 @@ class SettingsTab(QWidget):
         software_key = mapping.get(app_name)
         if not software_key:
             return True
+        if app_name == "JS8Spotter":
+            return bool(str(profile.get("spotter_launch_path", "") or "").strip())
         return bool(self._radio_software_enabled(profile, software_key))
 
     def _is_launch_item_configured(self, name: str) -> bool:
