@@ -1541,8 +1541,16 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
     assert "Message/Forms Files: " in dialog_block
-    assert "app_config_lines = guided_app_config_review_lines(_current_guided_app_config_plan())" in dialog_block
+    assert 'app_config_review_card.setObjectName("guidedAppConfigReviewCard")' in dialog_block
+    assert 'app_config_review_title = QLabel("App Configuration")' in dialog_block
+    assert 'app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")' in dialog_block
+    assert "def _toggle_guided_app_config_review_details() -> None:" in dialog_block
+    assert "def _set_app_config_review_card(" in dialog_block
+    assert "app_config_plan = _current_guided_app_config_plan()" in dialog_block
+    assert "app_config_lines = guided_app_config_review_lines(app_config_plan)" in dialog_block
     assert "app_config_summary" in dialog_block
+    assert "Save Radio will not change external app files." in dialog_block
+    assert "Save Radio will only update the FIO radio profile." in dialog_block
     assert "Monitor/import only. FIO will not offer scheduler or QSY controls." in dialog_block
     assert "Manual/external control. FIO will not tune this radio until a control endpoint is selected." in dialog_block
     assert "controls scheduler and QSY actions." in dialog_block

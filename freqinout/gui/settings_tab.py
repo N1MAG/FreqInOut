@@ -18487,6 +18487,44 @@ class SettingsTab(QWidget):
         save_review_label.setWordWrap(True)
         save_review_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         _add_full_width_row(save_review_form, save_review_label)
+        app_config_review_card = QFrame()
+        app_config_review_card.setObjectName("guidedAppConfigReviewCard")
+        app_config_review_card.setFrameShape(QFrame.StyledPanel)
+        app_config_review_layout = QGridLayout(app_config_review_card)
+        app_config_review_layout.setContentsMargins(10, 8, 10, 8)
+        app_config_review_layout.setHorizontalSpacing(10)
+        app_config_review_layout.setVerticalSpacing(4)
+        app_config_review_title = QLabel("App Configuration")
+        app_config_review_title.setObjectName("guidedAppConfigReviewTitle")
+        app_config_review_title_font = app_config_review_title.font()
+        app_config_review_title_font.setBold(True)
+        app_config_review_title.setFont(app_config_review_title_font)
+        app_config_review_status = QLabel()
+        app_config_review_status.setObjectName("guidedAppConfigReviewStatus")
+        app_config_review_status.setWordWrap(True)
+        app_config_review_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        app_config_review_details = QLabel()
+        app_config_review_details.setObjectName("guidedAppConfigReviewDetails")
+        app_config_review_details.setWordWrap(True)
+        app_config_review_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        app_config_review_details.setVisible(False)
+        app_config_review_toggle_btn = QPushButton("Show Details")
+        app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")
+        app_config_review_toggle_btn.setStyleSheet(button_style("secondary", theme))
+        app_config_review_toggle_btn.setToolTip("Show the app configuration details FIO reviewed for this radio.")
+        app_config_review_layout.addWidget(app_config_review_title, 0, 0)
+        app_config_review_layout.addWidget(app_config_review_status, 1, 0)
+        app_config_review_layout.addWidget(app_config_review_toggle_btn, 0, 1, 2, 1)
+        app_config_review_layout.addWidget(app_config_review_details, 2, 0, 1, 2)
+        app_config_review_layout.setColumnStretch(0, 1)
+        _add_full_width_row(save_review_form, app_config_review_card)
+
+        def _toggle_guided_app_config_review_details() -> None:
+            visible = not app_config_review_details.isVisible()
+            app_config_review_details.setVisible(visible)
+            app_config_review_toggle_btn.setText("Hide Details" if visible else "Show Details")
+
+        app_config_review_toggle_btn.clicked.connect(_toggle_guided_app_config_review_details)
         launch_group, launch_form = _make_section(
             "Launch and Support",
             "Launch settings are optional, but they help FreqInOut guide startup behavior and readiness more accurately.",
@@ -20184,6 +20222,54 @@ class SettingsTab(QWidget):
             _set_guided_wizard_step(visible_steps[next_idx][0])
 
         def _update_guided_save_review() -> None:
+            def _set_app_config_review_card(
+                lines: Sequence[str],
+                *,
+                backup_required: bool,
+                manual_review_required: bool,
+            ) -> None:
+                theme = resolve_theme(self.settings)
+                text_color = theme.get("text", "#1C1F21")
+                muted_color = theme.get("text_muted", text_color)
+                if backup_required:
+                    accent = QColor(theme.get("warning", "#C99700"))
+                    detail_intro = (
+                        "Save Radio will not change external app files. Managed app setup must be reviewed and backed up first."
+                    )
+                elif manual_review_required:
+                    accent = QColor(theme.get("info", theme.get("accent", "#1565C0")))
+                    detail_intro = "Save Radio records these selections in FIO. Review any app choices before saving."
+                else:
+                    accent = QColor(theme.get("success", "#2E7D32"))
+                    detail_intro = "Save Radio will only update the FIO radio profile."
+                bg = QColor(accent)
+                bg.setAlpha(22)
+                border = QColor(accent)
+                border.setAlpha(130)
+                app_config_review_card.setStyleSheet(
+                    "QFrame#guidedAppConfigReviewCard {"
+                    f" background-color: {bg.name(QColor.HexArgb)};"
+                    f" border: 1px solid {border.name(QColor.HexArgb)};"
+                    " border-radius: 6px;"
+                    "}"
+                    f" QLabel {{ color: {text_color}; border: none; background: transparent; }}"
+                    f" QLabel#{app_config_review_details.objectName()} {{ color: {muted_color}; }}"
+                )
+                app_config_review_toggle_btn.setStyleSheet(button_style("secondary", theme))
+                summary = str(lines[0] if lines else "App Configuration: no external app setup changes.").strip()
+                if summary.startswith("App Configuration:"):
+                    summary = summary.split(":", 1)[1].strip()
+                app_config_review_status.setText(summary)
+                detail_lines = [detail_intro]
+                detail_lines.extend(str(line).strip() for line in lines[1:] if str(line).strip())
+                details = "\n".join(detail_lines)
+                app_config_review_details.setText(details)
+                app_config_review_card.setToolTip("\n".join(lines))
+                app_config_review_toggle_btn.setVisible(bool(lines[1:]))
+                if not lines[1:]:
+                    app_config_review_details.setVisible(False)
+                    app_config_review_toggle_btn.setText("Show Details")
+
             def _compact_value(value: str, *, missing: str = "not set") -> str:
                 text = str(value or "").strip()
                 return text if text else missing
@@ -20296,8 +20382,14 @@ class SettingsTab(QWidget):
             launch_path = str(launch_path_edit.text().strip() or varac_launch_cmd_edit.text().strip() or "")
             if launch_path:
                 launch_line = f"{launch_line}; {_compact_value(launch_path)}"
-            app_config_lines = guided_app_config_review_lines(_current_guided_app_config_plan())
+            app_config_plan = _current_guided_app_config_plan()
+            app_config_lines = guided_app_config_review_lines(app_config_plan)
             app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
+            _set_app_config_review_card(
+                app_config_lines,
+                backup_required=bool(app_config_plan.backup_required),
+                manual_review_required=bool(app_config_plan.manual_review_required),
+            )
 
             review_lines = [
                 "What FIO will save:",
