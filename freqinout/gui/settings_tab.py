@@ -18688,7 +18688,7 @@ class SettingsTab(QWidget):
         app_setup_plan_layout.addWidget(app_setup_plan_label)
         guided_wizard_layout.addWidget(app_setup_plan_group)
 
-        app_choice_group = QGroupBox("Choose Detected Apps")
+        app_choice_group = QGroupBox("Review Detected Apps")
         app_choice_group.setVisible(False)
         app_choice_layout = QFormLayout(app_choice_group)
         _configure_guided_form(app_choice_layout)
@@ -19198,29 +19198,25 @@ class SettingsTab(QWidget):
                 visible = (
                     not observer_mode
                     and _app_choice_app_selected(app_id)
-                    and combo.count() > 2
+                    and combo.count() > 1
                 )
                 _set_row_visible(combo, visible)
                 any_visible = any_visible or visible
-            js8_port_text = js8_port_edit.text().strip()
-            js8_port_has_one_match = False
-            if js8_port_text:
-                js8_port_matches = 0
-                for idx in range(1, js8_profile_choice_combo.count()):
-                    payload = js8_profile_choice_combo.itemData(idx)
-                    if isinstance(payload, Mapping) and str(payload.get("port", "") or "").strip() == js8_port_text:
-                        js8_port_matches += 1
-                js8_port_has_one_match = js8_port_matches == 1
-            js8_profile_details_present = bool(js8_profile_edit.text().strip() and js8_directed_edit.text().strip())
             js8_profile_visible = (
                 not observer_mode
                 and _js8_app_selected()
-                and js8_profile_choice_combo.count() > 2
-                and not (js8_port_has_one_match and js8_profile_details_present)
+                and js8_profile_choice_combo.count() > 1
             )
             _set_row_visible(js8_profile_choice_combo, js8_profile_visible)
             any_visible = any_visible or js8_profile_visible
             app_choice_group.setVisible(any_visible)
+
+        def _select_single_detected_choice(combo: QComboBox) -> None:
+            if combo.count() != 2 or combo.currentIndex() > 0:
+                return
+            was_blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(1)
+            combo.blockSignals(was_blocked)
 
         def _update_detected_app_choices(candidates: Sequence[Any]) -> None:
             for app_id, combo in app_choice_combos.items():
@@ -19231,6 +19227,8 @@ class SettingsTab(QWidget):
                 for label_text, path_text in choices:
                     combo.addItem(label_text, path_text)
                 combo.blockSignals(False)
+                if _app_choice_app_selected(app_id):
+                    _select_single_detected_choice(combo)
                 _configure_combo_width(combo, minimum=360)
             _update_app_choice_visibility()
 
@@ -19242,6 +19240,8 @@ class SettingsTab(QWidget):
             for label_text, payload in choices:
                 js8_profile_choice_combo.addItem(label_text, payload)
             js8_profile_choice_combo.blockSignals(False)
+            if _js8_app_selected():
+                _select_single_detected_choice(js8_profile_choice_combo)
             _configure_combo_width(js8_profile_choice_combo, minimum=420)
             _update_app_choice_visibility()
 

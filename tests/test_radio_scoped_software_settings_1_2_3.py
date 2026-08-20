@@ -1613,7 +1613,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "FIO Spotter forms {fio_spotter_forms}" in source
     assert "External JS8Spotter app {external_spotter}" in source
     assert "Spotter {spotter}" not in source
-    assert 'app_choice_group = QGroupBox("Choose Detected Apps")' in dialog_block
+    assert 'app_choice_group = QGroupBox("Review Detected Apps")' in dialog_block
     assert 'combo.setObjectName(f"guidedAutoAppChoice_{app_id}")' in dialog_block
     assert 'js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")' in dialog_block
     assert "Which JS8Call profile belongs to this radio?" in dialog_block
@@ -1657,6 +1657,11 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"varac": varac_install_edit.text().strip()' in dialog_block
     assert "_update_detected_app_choices(install_candidates)" in dialog_block
     assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
+    assert "def _select_single_detected_choice(combo: QComboBox) -> None:" in dialog_block
+    assert "if _app_choice_app_selected(app_id):" in dialog_block
+    assert "_select_single_detected_choice(combo)" in dialog_block
+    assert "if _js8_app_selected():" in dialog_block
+    assert "_select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
     assert "_update_port_prompt_visibility()" in dialog_block
     assert "for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:" in dialog_block
     assert "widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())" in dialog_block
@@ -1678,8 +1683,14 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "if directed_path and not js8_directed_edit.text().strip():" in js8_choice_apply_block
     assert "Kept existing JS8Call profile fields" in js8_choice_apply_block
     assert "_update_app_choice_visibility()" in js8_choice_apply_block
-    assert "js8_profile_details_present" in dialog_block
-    assert "not (js8_port_has_one_match and js8_profile_details_present)" in dialog_block
+    app_choice_visibility_block = dialog_block[
+        dialog_block.index("def _update_app_choice_visibility")
+        : dialog_block.index("def _select_single_detected_choice")
+    ]
+    assert "combo.count() > 1" in app_choice_visibility_block
+    assert "js8_profile_choice_combo.count() > 1" in app_choice_visibility_block
+    assert "js8_profile_details_present" not in app_choice_visibility_block
+    assert "js8_port_has_one_match" not in app_choice_visibility_block
     assert "for widget in [js8_port_edit, js8_profile_edit, js8_directed_edit]:" in dialog_block
     helper_block = source[
         source.index("def _guided_radio_autofill_suggestions")
