@@ -47,7 +47,7 @@ python -m freqinout.main
 - Watch the Settings left-nav for warning highlights. In `1.2.2`, these indicate sections where a companion field is still missing.
 - Typical examples:
   - `JS8Call Settings`: if `JS8Call Install Folder` is set, also set host, TCP port, and `DIRECTED.TXT`.
-  - `JS8Call Settings`: if `JS8Spotter Launch Path` is set, also set `JS8Spotter forms`.
+  - `JS8Call Settings`: set the FIO Spotter forms folder for built-in Spotter compose/decode. Set the external JS8Spotter app path only when FIO should track or launch the separate JS8Spotter application.
   - `Fast Light Settings`: if `FLRig` or `FLDigi` executable paths are set, also set their endpoint fields; if `FLMsg` or `FLAmp` executable paths are set, also set their message folders.
   - `VarAC Settings`: if `VarAC Install Folder` is set, also set `Incoming Files`.
 

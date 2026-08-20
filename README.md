@@ -211,7 +211,7 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 
 - Set radio software paths and JS8Call DIRECTED.TXT in the Settings tab.
 - Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
-- When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. If `JS8Spotter Launch Path` is set, also configure `JS8Spotter forms`.
+- When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. Configure the FIO Spotter forms folder when using built-in Spotter compose/decode workflows. The external JS8Spotter app path is optional and is only needed when FIO should track or launch the separate JS8Spotter application.
 - When `VarAC Install Folder` is set, also configure `Incoming Files`.
 - When `Managed BBS Vault` is enabled under `Settings -> VarAC Settings`, also configure a live `BBS Directory`, initialize the vault, and keep at least one valid `Default Location` in the selected Station Default radio bundle. Access codes are operational controls, not strong secrets.
 - In the current release, the vault root is automatic: if your live VarAC BBS is `/path/to/VarAC_files/BBS`, FreqInOut creates the managed vault next to it as `/path/to/VarAC_files/FIO_BBS_Vault`.
