@@ -1619,6 +1619,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "Built-in FIO Spotter does not require this" in dialog_block
     assert "_make_browse_row(" in dialog_block
     assert "_make_browse_row(js8spotter_launch_edit" in dialog_block
+    assert "edit.setMinimumWidth(0)" in dialog_block
+    assert "browse_btn.setMinimumWidth(86)" in dialog_block
+    assert "browse_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in dialog_block
     assert 'app_choice_group = QGroupBox("Review Detected Apps")' in dialog_block
     assert 'app_choice_group.setObjectName("guidedDetectedAppsReview")' in dialog_block
     assert "Choose the detected app that belongs to this radio before continuing." in dialog_block

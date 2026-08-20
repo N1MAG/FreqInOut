@@ -18299,7 +18299,11 @@ class SettingsTab(QWidget):
             mode: str = "file",
             file_filter: str = "All Files (*)",
         ) -> QWidget:
+            edit.setMinimumWidth(0)
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             browse_btn = QPushButton("Browse")
+            browse_btn.setMinimumWidth(86)
+            browse_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             browse_btn.setToolTip(f"Choose {title.lower()} if FIO did not detect the right location.")
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
