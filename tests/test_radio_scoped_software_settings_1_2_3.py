@@ -1538,7 +1538,7 @@ def test_radio_selector_selection_is_not_color_only() -> None:
         : source.index("def _selected_radio_detail_text")
     ]
 
-    assert '"SELECTED: {name}"' in selector_block
+    assert 'status_bits.insert(0, "SELECTED")' in selector_block
     assert "Selected radio:" in selector_block
     assert "border: 3px solid" in selector_block
     assert "border: 4px solid" in selector_block

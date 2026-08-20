@@ -11963,8 +11963,9 @@ class SettingsTab(QWidget):
         device_class = self._device_class_label(str(profile.get("device_class", "") or ""))
         if device_class and device_class.lower() != "transceiver":
             status_bits.append(device_class)
-        title = f"SELECTED: {name}" if selected else name
-        return f"{title}\n{' | '.join(dict.fromkeys(status_bits))}"
+        if selected:
+            status_bits.insert(0, "SELECTED")
+        return f"{name}\n{' | '.join(dict.fromkeys(status_bits))}"
 
     def _radio_selector_readiness_summary(
         self,
@@ -12027,9 +12028,13 @@ class SettingsTab(QWidget):
                 else f"Radio: {self._profile_display_name(profile)}"
             )
             btn.setToolTip(
-                f"Edit {self._profile_display_name(profile)}. "
-                f"Software: {self._device_software_summary(profile)}. "
-                f"Endpoint: {self._device_endpoint_summary(profile)}."
+                (
+                    f"Selected radio: {self._profile_display_name(profile)}. "
+                    if selected
+                    else f"Edit {self._profile_display_name(profile)}. "
+                )
+                + f"Software: {self._device_software_summary(profile)}. "
+                + f"Endpoint: {self._device_endpoint_summary(profile)}."
             )
             btn.clicked.connect(lambda _checked=False, ident=radio_id: self._set_settings_radio_focus(ident))
             btn.setStyleSheet(
