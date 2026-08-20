@@ -88,11 +88,16 @@ def test_core_infers_guided_setup_lane_from_selected_apps() -> None:
 def test_core_normalizes_guided_app_flags_from_backend_and_js8_adjacent_tools() -> None:
     assert guided_setup_selected_apps_from_flags(control_backend=CONTROL_JS8CALL) == ("js8call",)
     assert guided_setup_selected_apps_from_flags(use_js8spotter=True) == ("js8call", "js8spotter")
+    assert guided_setup_selected_apps_from_flags(use_external_js8spotter=True) == (
+        "js8call",
+        "external_js8spotter",
+    )
     assert guided_setup_selected_apps_from_flags(use_commstat=True) == ("js8call", "commstat")
     assert guided_setup_selected_apps_from_flags(use_varac=True) == ("varac",)
     assert infer_guided_setup_lane((), varac_selected=True) == LANE_VARAC
     assert infer_guided_setup_lane((), receive_only=True) == "sdr_observer"
     assert guided_setup_app_label("js8spotter") == "FIO Spotter"
+    assert guided_setup_app_label("external_js8spotter") == "External JS8Spotter"
 
 
 def test_core_normalizes_guided_control_routes_from_ui_backend_values() -> None:
@@ -283,12 +288,42 @@ def test_js8call_only_blueprint_scopes_autofill_and_planner_apps() -> None:
 
     assert selected["js8call"] is True
     assert selected["js8spotter"] is True
+    assert selected["external_js8spotter"] is False
     assert selected["commstat"] is True
     assert selected["flrig"] is False
     assert selected["fldigi"] is False
     assert selected["flmsg"] is False
     assert selected["flamp"] is False
     assert proposal.enabled_apps == ("js8call",)
+
+
+def test_external_js8spotter_is_distinct_from_built_in_fio_spotter() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+        include_external_spotter=True,
+    )
+    selected = selected_app_map_for_blueprint(blueprint)
+    policy = guided_setup_capability_policy(blueprint)
+
+    assert selected["js8call"] is True
+    assert selected["external_js8spotter"] is True
+    assert selected["js8spotter"] is False
+    assert guided_setup_app_label("external_js8spotter") == "External JS8Spotter"
+    assert policy.visible_apps == ("js8call", "external_js8spotter")
+    assert allow_external_app_writes(blueprint) is True
+
+
+def test_external_js8spotter_alone_does_not_create_managed_write_permission() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="IC-7300",
+        setup_mode=SETUP_MODE_MANAGED,
+    )
+    external_only_blueprint = replace(blueprint, selected_apps=("external_js8spotter",))
+
+    assert allow_external_app_writes(external_only_blueprint) is False
 
 
 def test_guided_setup_lane_preset_maps_setup_type_to_ui_defaults() -> None:
@@ -1506,8 +1541,10 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "Hidden app sections are not part of this setup type unless you select Custom software mix." not in dialog_block
     assert "Hidden sections stay unchanged" not in dialog_block
     assert "use_js8spotter=use_js8spotter_chk.isChecked()" in dialog_block
+    assert "use_external_js8spotter=use_external_js8spotter_chk.isChecked()" in dialog_block
     assert "use_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block
+    assert "include_external_spotter=use_external_js8spotter_chk.isChecked()" in dialog_block
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
     assert "schedule_decision = _current_guided_schedule_decision()" in dialog_block

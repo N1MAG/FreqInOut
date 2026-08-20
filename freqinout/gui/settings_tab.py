@@ -19896,7 +19896,8 @@ class SettingsTab(QWidget):
                 use_flmsg=use_flmsg_chk.isChecked(),
                 use_flamp=use_flamp_chk.isChecked(),
                 use_js8call=use_js8call_chk.isChecked(),
-                use_js8spotter=use_js8spotter_chk.isChecked() or use_external_js8spotter_chk.isChecked(),
+                use_js8spotter=use_js8spotter_chk.isChecked(),
+                use_external_js8spotter=use_external_js8spotter_chk.isChecked(),
                 use_commstat=use_commstat_chk.isChecked(),
                 use_varac=use_varac_chk.isChecked(),
             )
@@ -19911,6 +19912,7 @@ class SettingsTab(QWidget):
                 control_route=infer_guided_control_route(str(backend_combo.currentData() or "")),
                 js8call_uses_flrig=str(backend_combo.currentData() or "").strip().lower() == CONTROL_FLRIG,
                 include_spotter=use_js8spotter_chk.isChecked(),
+                include_external_spotter=use_external_js8spotter_chk.isChecked(),
                 include_commstat=use_commstat_chk.isChecked(),
                 include_varac=use_varac_chk.isChecked(),
             )

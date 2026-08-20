@@ -20,6 +20,7 @@ APP_DISPLAY_NAMES: Mapping[str, str] = {
     "flamp": "FLAmp",
     "js8call": "JS8Call",
     "js8spotter": "JS8Spotter",
+    "external_js8spotter": "External JS8Spotter",
     "commstat": "CommStat",
     "varac": "VarAC",
 }

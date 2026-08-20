@@ -8,6 +8,19 @@ from typing import Mapping, Sequence, Tuple
 from freqinout.core.config_autodiscovery import APP_DISPLAY_NAMES, RadioInstanceProposal
 from freqinout.core.guided_app_config_plan import GuidedAppConfigPlan, build_guided_external_app_config_plan
 
+GUIDED_SETUP_APP_IDS: Tuple[str, ...] = (
+    "flrig",
+    "fldigi",
+    "flmsg",
+    "flamp",
+    "js8call",
+    "js8spotter",
+    "external_js8spotter",
+    "commstat",
+    "varac",
+)
+GUIDED_SETUP_MANAGED_APP_IDS = {"flrig", "fldigi", "flmsg", "flamp", "js8call"}
+
 
 SETUP_MODE_READ_ONLY = "read_only"
 SETUP_MODE_MANAGED = "managed"
@@ -185,10 +198,7 @@ class GuidedSetupLanePreset:
     @property
     def app_map(self) -> Mapping[str, bool]:
         selected = set(self.selected_apps)
-        return {
-            app_id: app_id in selected
-            for app_id in ("flrig", "fldigi", "flmsg", "flamp", "js8call", "js8spotter", "commstat", "varac")
-        }
+        return {app_id: app_id in selected for app_id in GUIDED_SETUP_APP_IDS}
 
 
 @dataclass(frozen=True)
@@ -284,7 +294,7 @@ def guided_setup_review_items(
 
 
 def selected_app_map_for_blueprint(blueprint: GuidedSetupBlueprint) -> Mapping[str, bool]:
-    selected = {app_id: False for app_id in ("flrig", "fldigi", "flmsg", "flamp", "js8call", "js8spotter", "commstat", "varac")}
+    selected = {app_id: False for app_id in GUIDED_SETUP_APP_IDS}
     for app_id in blueprint.selected_apps:
         selected[str(app_id)] = True
     return selected
@@ -299,14 +309,15 @@ def guided_setup_selected_apps_from_flags(
     use_flamp: bool = False,
     use_js8call: bool = False,
     use_js8spotter: bool = False,
+    use_external_js8spotter: bool = False,
     use_commstat: bool = False,
     use_varac: bool = False,
 ) -> Tuple[str, ...]:
     """Return normalized app selections from UI flags and the control backend.
 
-    FIO Spotter and CommStat are JS8Call-adjacent workflows in FIO; selecting
-    either keeps JS8Call in the app set so lane inference and preview text stay
-    stable even before the UI checkbox redraw completes.
+    FIO Spotter, external JS8Spotter, and CommStat are JS8Call-adjacent
+    workflows in FIO; selecting any of them keeps JS8Call in the app set so
+    lane inference and preview text stay stable before the UI redraw completes.
     """
 
     backend = _normalized_control_route(control_backend)
@@ -319,10 +330,12 @@ def guided_setup_selected_apps_from_flags(
         apps.append("flmsg")
     if use_flamp:
         apps.append("flamp")
-    if use_js8call or use_js8spotter or use_commstat or backend == CONTROL_JS8CALL:
+    if use_js8call or use_js8spotter or use_external_js8spotter or use_commstat or backend == CONTROL_JS8CALL:
         apps.append("js8call")
     if use_js8spotter:
         apps.append("js8spotter")
+    if use_external_js8spotter:
+        apps.append("external_js8spotter")
     if use_commstat:
         apps.append("commstat")
     if use_varac:
@@ -336,6 +349,8 @@ def guided_setup_app_label(app_id: str) -> str:
     key = str(app_id or "").strip().lower()
     if key == "js8spotter":
         return "FIO Spotter"
+    if key == "external_js8spotter":
+        return "External JS8Spotter"
     return APP_DISPLAY_NAMES.get(key, key.upper())
 
 
@@ -358,6 +373,7 @@ def infer_guided_setup_lane(
         for app in enabled_apps
         if str(app or "").strip()
     }
+    app_set.discard("external_js8spotter")
     if varac_selected and app_set <= {"varac"}:
         return LANE_VARAC
     if "varac" in app_set and app_set <= {"varac"}:
@@ -387,9 +403,8 @@ def guided_setup_capability_policy(blueprint: GuidedSetupBlueprint) -> GuidedSet
     valid for a lane.
     """
 
-    all_apps = ("flrig", "fldigi", "flmsg", "flamp", "js8call", "js8spotter", "commstat", "varac")
-    visible_apps = tuple(app for app in all_apps if app in set(blueprint.selected_apps))
-    hidden_apps = tuple(app for app in all_apps if app not in set(visible_apps))
+    visible_apps = tuple(app for app in GUIDED_SETUP_APP_IDS if app in set(blueprint.selected_apps))
+    hidden_apps = tuple(app for app in GUIDED_SETUP_APP_IDS if app not in set(visible_apps))
     lane_key = _normalize_lane(blueprint.lane)
     route_key = _normalized_control_route(blueprint.control_route)
     read_only_notes: list[str] = []
@@ -591,7 +606,7 @@ def radio_proposals_for_blueprint(
 
 def allow_external_app_writes(blueprint: GuidedSetupBlueprint) -> bool:
     return blueprint.setup_mode == SETUP_MODE_MANAGED and any(
-        app not in {"varac"} for app in blueprint.selected_apps
+        app in GUIDED_SETUP_MANAGED_APP_IDS for app in blueprint.selected_apps
     )
 
 
@@ -1409,6 +1424,7 @@ def build_guided_setup_blueprint(
     js8call_uses_flrig: bool = False,
     receive_only: bool = False,
     include_spotter: bool = False,
+    include_external_spotter: bool = False,
     include_commstat: bool = False,
     include_varac: bool = False,
 ) -> GuidedSetupBlueprint:
@@ -1425,6 +1441,8 @@ def build_guided_setup_blueprint(
     apps = list(guided_setup_apps_for_lane(lane_key))
     if include_spotter and "js8call" in apps:
         apps.append("js8spotter")
+    if include_external_spotter and "js8call" in apps:
+        apps.append("external_js8spotter")
     if include_commstat and "js8call" in apps:
         apps.append("commstat")
     if include_varac and "varac" not in apps:
