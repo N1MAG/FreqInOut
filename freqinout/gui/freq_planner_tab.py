@@ -1110,13 +1110,19 @@ class FreqPlannerTab(QWidget):
         self._refresh_source_set_controls()
         self._refresh_plan_workspace_header()
         self._set_plan_manager_new_plan_state()
+        schedule_choice = str(schedule_choice or "").strip()
+        if schedule_choice in {SCHEDULE_JS8_STANDARD, SCHEDULE_DAILY_NO_NETS} and hasattr(self, "hf_net_source_combo"):
+            self._set_source_combo_to_id(
+                self.hf_net_source_combo,
+                SELECTED_HF_NET_SOURCE_SET_KEY,
+                NO_NET_SOURCE_SET_ID,
+            )
         try:
             self._guided_plan_handoff_device_profile_id = int((device_profile or {}).get("id", 0) or 0)
         except Exception:
             self._guided_plan_handoff_device_profile_id = 0
         if hasattr(self, "frequency_plan_combo") and self.frequency_plan_combo.lineEdit() is not None:
             self.frequency_plan_combo.lineEdit().setPlaceholderText(f"Name the Frequency Plan for {radio_name}")
-        schedule_choice = str(schedule_choice or "").strip()
         path_message = ""
         path_detail = "Select the schedule layers this radio should follow."
         if schedule_choice == SCHEDULE_JS8_STANDARD:

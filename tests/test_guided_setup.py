@@ -1582,6 +1582,9 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "SCHEDULE_DAILY_PLUS_NETS" in planner_source
     assert "SCHEDULE_JS8_STANDARD" in planner_source
     assert "SCHEDULE_SOP_CONDITION" in planner_source
+    assert "schedule_choice in {SCHEDULE_JS8_STANDARD, SCHEDULE_DAILY_NO_NETS}" in planner_source
+    assert "NO_NET_SOURCE_SET_ID" in planner_source
+    assert "SELECTED_HF_NET_SOURCE_SET_KEY" in planner_source
     assert "self._guided_plan_handoff_device_profile_id" in planner_source
     assert "device_profile_id=int(getattr(self, \"_guided_plan_handoff_device_profile_id\"" in planner_source
     assert "radio_name = str((device_profile or {}).get(\"name\")" in planner_source
