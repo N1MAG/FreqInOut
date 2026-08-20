@@ -74,7 +74,7 @@ def test_settings_section_health_warns_for_partial_js8_spotter_setup(monkeypatch
         app.processEvents()
 
     assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
-    assert "JS8Spotter forms path missing" in str(js8_item.toolTip())
+    assert "Spotter MCF forms folder missing" in str(js8_item.toolTip())
 
 
 def test_settings_section_health_warns_when_directed_txt_missing_after_js8_setup(monkeypatch, tmp_path):
@@ -209,7 +209,7 @@ def test_settings_section_health_allows_js8spotter_with_forms_without_directed(m
 
     assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "warn"
     assert "JS8Call DIRECTED.TXT path missing" not in str(js8_item.toolTip())
-    assert "JS8Spotter forms path missing" not in str(js8_item.toolTip())
+    assert "Spotter MCF forms folder missing" not in str(js8_item.toolTip())
 
 
 def test_settings_section_health_allows_commstat_without_forms(monkeypatch, tmp_path):
@@ -236,7 +236,7 @@ def test_settings_section_health_allows_commstat_without_forms(monkeypatch, tmp_
         app.processEvents()
 
     assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "warn"
-    assert "JS8Spotter forms path missing for CommStat" not in str(js8_item.toolTip())
+    assert "Spotter MCF forms folder missing for CommStat" not in str(js8_item.toolTip())
     assert "JS8Call DIRECTED.TXT path missing" not in str(js8_item.toolTip())
 
 

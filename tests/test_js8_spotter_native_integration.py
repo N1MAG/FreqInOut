@@ -43,7 +43,9 @@ def test_message_compose_exposes_spotter_as_guarded_form_family() -> None:
     assert "Save to Expect" in source
     assert "send_js8_message_guarded" in source
     assert "save_expect_entry" in source
-    assert "Joseph D. Lyman, KF7MIX" in source
+    assert "Joseph D. Lyman, KF7MIX" not in source
+    credits = (ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    assert "Joseph D. Lyman, KF7MIX" in credits
     assert "_spotter_msg_auth_state_map" in source
     assert "list_msg_auth_key_rows(enabled_only=True)" in source
     assert "MsgAuth: Valid" in source
@@ -101,7 +103,9 @@ def test_message_auth_settings_explain_msgauth_scope_and_credit() -> None:
     assert "My Signing Key" in settings_source
     assert "Any Sender in Group" in settings_source
     assert "Specific Sender Callsign" in settings_source
-    assert "https://kf7mix.com/" in settings_source
+    assert "https://kf7mix.com/" not in settings_source
+    credits = (ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    assert "https://kf7mix.com/" in credits
     assert "Save Key" in settings_source
     assert "Delete Selected" in settings_source
     assert "My Signing Keys" in settings_source

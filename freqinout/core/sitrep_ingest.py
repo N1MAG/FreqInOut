@@ -293,7 +293,7 @@ def _resolve_js8spotter_db_path(settings) -> Optional[Path]:
     if forms_path:
         try:
             fp = Path(forms_path)
-            # JS8Spotter forms path is usually <install>/forms.
+            # MCF forms folder is usually <install>/forms for external JS8Spotter.
             candidates.extend(_candidate_db_paths(str(fp.parent), "js8spotter.db"))
         except Exception:
             pass
@@ -1214,7 +1214,7 @@ def _ingest_js8spotter(local_conn: sqlite3.Connection, source_db: Path, *, setti
         except Exception as e:
             out["errors"] += 1
             _set_last_id(local_conn, source, table, source_db_path, _get_last_id(local_conn, source, table, source_db_path), error_text=str(e))
-            log.debug("SitrepIngest: JS8Spotter forms ingest failed: %s", e)
+            log.debug("SitrepIngest: MCF forms ingest failed: %s", e)
 
         # csstatrep table: CommStat 12-digit status seen by JS8Spotter.
         table = "csstatrep"

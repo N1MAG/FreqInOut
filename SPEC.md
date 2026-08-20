@@ -9439,9 +9439,12 @@ Settings section warning scope:
       - TCP host
       - TCP port
       - `DIRECTED.TXT`
-    - `JS8Spotter` launch path without `JS8Spotter forms`
-  - `CommStat` launch-path configuration is standalone in this phase and must not require `JS8Spotter forms`
-  - `JS8Spotter` launch-path configuration alone must not require `DIRECTED.TXT` in this phase
+    - external `JS8Spotter App` path being configured without `MCF Forms Folder`
+    - built-in FIO Spotter being enabled without `MCF Forms Folder`
+  - Built-in FIO Spotter uses JS8Spotter-compatible MCForms directly inside FIO and must not require an external JS8Spotter launch path.
+  - `CommStat` launch-path configuration is standalone in this phase and must not require `MCF Forms Folder`
+  - external `JS8Spotter App` configuration alone must not require `DIRECTED.TXT` in this phase
+  - JS8Spotter / MCForms / Message Authenticator attribution belongs in repo credits or third-party notices, not in operational compose/inbox UI.
 - `Fast Light Settings`
   - stay neutral when untouched
   - warn only for clear partial setup, such as:
@@ -9476,11 +9479,12 @@ Performance:
 ### Acceptance Criteria
 
 - On a fresh profile, `FreqInOut Settings` and `HF Operating Groups` show a warning-state section navigation chip, while untouched optional `JS8Call`, `Fast Light`, and `VarAC` sections remain neutral.
-- If the user sets `JS8Spotter Launch Path` without `JS8Spotter forms`, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains the missing forms path.
+- If the user sets `External JS8Spotter App` without `MCF Forms Folder`, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains the missing forms folder.
+- If the user enables built-in FIO Spotter without `MCF Forms Folder`, station readiness explains that the MCF forms folder is required while leaving the external JS8Spotter app path optional.
 - If the user removes `DIRECTED.TXT` after configuring other JS8 paths, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains that `DIRECTED.TXT` is missing.
 - If the user sets `JS8Call Install Folder` and clears host, clears TCP port, or removes `DIRECTED.TXT`, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains the missing JS8Call requirement.
-- If the user configures only `CommStat Launch Path`, the `JS8Call Settings` navigation chip does not warn for missing `JS8Spotter forms` or `DIRECTED.TXT`.
-- If the user configures `JS8Spotter Launch Path` with forms present but no `JS8Call Install Folder`, the `JS8Call Settings` navigation chip does not warn for missing `DIRECTED.TXT`.
+- If the user configures only `CommStat Launch Path`, the `JS8Call Settings` navigation chip does not warn for missing `MCF Forms Folder` or `DIRECTED.TXT`.
+- If the user configures `External JS8Spotter App` with forms present but no `JS8Call Install Folder`, the `JS8Call Settings` navigation chip does not warn for missing `DIRECTED.TXT`.
 - If the user sets `FLMsg` executable path without `ICS/Messages`, `Fast Light Settings` warns and explains that the message path is missing.
 - If the user sets `FLAmp` executable path without `FLAMP/rx`, `Fast Light Settings` warns and explains that the receive path is missing.
 - If the user sets `FLRig` executable path without XML-RPC port, `Fast Light Settings` warns and explains that the port is missing.
@@ -11347,3 +11351,67 @@ Acceptance:
 
 Rollback:
 - Revert `ingest_source_model`, JS8 source-scoped indexer/background-ingest wiring, and this addendum together. Legacy single-source JS8 offset behavior remains available through `JS8LogLinkIndexer.update()`.
+
+## Addendum: Guided Add Radio Auto-Configuration (2026-08-18)
+
+The Add Radio flow is the entry point for new operators and must feel like FIO is walking the user through station setup, not exposing every integration field at once. The current dialog remains a bridge toward a fuller step-by-step wizard, but it must already follow the wizard mental model.
+
+Setup type ordering:
+- `TriMode - FastLight/JS8Call/VarAC` is first because MagNet and AmRRON are primary early audiences.
+- `Custom software mix` follows TriMode for operators whose station does not match a preset bundle.
+- JS8Call-only, Fast Light-only, VarAC-only, VarAC Cluster/BBS, and Receive-only SDR follow.
+
+Guidance model:
+- The `Setup Steps` cards are the primary explanation surface. Radio, Software, Connection, Schedule, and Review each show one compact status and one useful detail.
+- The `Setup Steps` cards live in the wizard shell above the step content so they remain visible as the user moves through Radio, Software, Connection, Schedule, and Review. They must not be nested inside the Software form.
+- The old bottom prose summary must not repeat app notes, schedule choices, and software caveats under the cards. Verbose review text may remain available to tests, logs, tooltips, or a future explicit review panel, but it should not clutter the normal Add Radio walkthrough.
+- `Configure Automatically` fills only blank fields, preserves user-entered values, and reports filled/preserved values in review text without making the user read a technical plan to understand the next step.
+- After `Configure Automatically` runs, the wizard advances to Connection so the operator can review the exact endpoints, paths, profiles, and message folders FIO found.
+- The Software step may prompt for one optional `Radio Apps Base Folder`. This is a station-level discovery hint for common operator installs such as `RadioTools/Programs`; it helps FIO find external JS8Spotter, CommStat, VarAC, and other radio apps before falling back to generic system locations.
+- `Radio Apps Base Folder` is also editable in Main Settings > Preferences so operators can set the common app install folder before or after adding radios.
+- The base folder is not a required setup field and must not cause autofill to overwrite any user-entered path, port, profile, or message folder.
+
+Wizard shell:
+- The Add Radio dialog exposes the setup as five steps: Radio, Software, Connection, Schedule, and Review.
+- The wizard shell uses the existing section/group-box visual language, step buttons, and Back/Next buttons rather than introducing a new component style.
+- The wizard shell controls only which high-level section is shown. Existing core helpers still decide which fields are relevant and existing save code still persists the profile.
+- Wizard navigation state, Back/Next labels, step details, and section visibility are supplied by a core helper so Settings renders the wizard instead of owning setup flow rules.
+- The Review step shows a compact `What FIO will save` checklist covering radio identity, enabled/active state, software stack, frequency-control authority, endpoints, message/forms files, schedule assignment, and launch behavior. Routine setup steps should not show readiness cards unless the step needs action.
+- The Review checklist and Save action use the same normalized radio-profile draft. A field shown in Review, including RF Guard groups, advanced guard settings, launch fields, SDR endpoints, VarAC folders, JS8 paths, Fast Light paths, and app flags, must either persist from that draft or be removed from Review.
+
+Schedule readiness:
+- A FIO-controlled radio is not `Schedule Ready` merely because schedule options exist. The Schedule step remains `Needed` until the user explicitly chooses or assigns the Frequency Plan the radio should follow.
+- The Add Radio Schedule step offers `Assign later` plus enabled built Frequency Plans. When the user chooses a plan and saves the radio, FIO assigns that plan to the newly saved radio through the existing RF Guard-backed `assigned_plans` path; the wizard must not create a second schedule-assignment persistence path.
+- When no built Frequency Plans exist, the Schedule step defaults to opening Plan Manager after save. Plan creation stays in Plan Manager so Daily, No Nets, Net, SOP, and RF Guard workflows remain in one place.
+- When guided setup opens Plan Manager after save, it passes the saved radio context into Plan Manager so the next-step guidance names that radio and explains whether to choose an existing plan or build a new Daily/No Nets/Net/SOP plan before RF Guard assignment.
+- VarAC-only and VarAC Cluster/BBS lanes remain monitor/import-only for FIO frequency control. They may show their schedule step as ready only because VarAC keeps its own scheduler and FIO will not offer QSY/scheduler controls.
+- `Daily with No Nets` and `No Nets` must be available schedule concepts so JS8Call-only or simple HF schedules can be created without inventing a net layer.
+
+Spotter wording:
+- Built-in FIO Spotter and external JS8Spotter are distinct choices.
+- Fields and autofill review text that reference the legacy separate app use `External JS8Spotter App`.
+- Built-in FIO Spotter requires an `MCF Forms Folder`; it does not require an external JS8Spotter launch path.
+- KF7MIX/JS8Spotter/MCForms attribution belongs in project credits or acknowledgments, not in routine UI panels.
+
+Implementation boundaries:
+- Guided setup policy, capability, preview, and schedule-readiness logic belongs in `freqinout/core/guided_setup.py`.
+- Settings-tab UI consumes those helpers and should not duplicate preset or readiness rules.
+- New wizard UI must use existing FIO theme, group boxes, buttons, combo boxes, and status-card styling. Avoid adding a second visual language.
+- The Add Radio wizard dialog must be explicitly resizable with a scrollable, wrapping body so minimized-screen review does not clip fields, dropdowns, or action buttons.
+- Heavy discovery, config parsing, app probing, and save-plan logic remains in core/helper layers; the UI only renders current state and submits explicit user choices.
+
+Acceptance:
+- Selecting TriMode shows the TriMode app stack and relevant fields. Selecting Custom Mix is immediately discoverable below TriMode.
+- Selecting JS8Call-only or a JS8Call-only SDR hides FLDigi, FLMsg, and FLAmp fields.
+- Selecting VarAC-only does not present FIO scheduler/QSY control as available.
+- `Configure Automatically` does not overwrite non-empty user-entered paths, ports, profile names, or VarAC locations.
+- If `Radio Apps Base Folder` is set, automatic discovery checks that folder before generic app locations and uses it to locate external JS8Spotter, CommStat, VarAC, and compatible app folders where present.
+- Updating `Radio Apps Base Folder` from Preferences or the Add Radio wizard persists the same setting and affects the next automatic discovery pass.
+- The setup-step footer contains no long software notes in normal use; the cards contain the guidance.
+- The final Review step uses operator-readable save language and explicitly says when FIO will control scheduler/QSY, when the radio is monitor/import-only, and which JS8/FIO Spotter/CommStat/VarAC files or folders will be saved, including VarAC incoming, outbox, BBS, and BBS archive paths when VarAC is selected.
+- The final Review step and saved radio profile cannot drift: tests must verify that Save submits the same normalized draft used by Review rather than rebuilding a separate partial payload.
+- The Schedule card for a FIO-controlled radio does not say `Ready` before a plan assignment/confirmation exists.
+- Choosing a Frequency Plan during Add Radio saves the radio first, then assigns the selected plan with RF Guard. RF Guard blocks or warnings must use the same messages and validation rules as Settings > Schedule Assignment.
+- If no Frequency Plan exists, the user can save the radio and land in Plan Manager with radio-specific plan-building guidance, without seeing FLDigi/FLMsg/FLAmp fields for JS8Call-only setups or VarAC frequency controls for VarAC-only setups.
+- Add Radio can be walked with Back/Next through Radio, Software, Connection, Schedule, and Review without revealing unrelated integration fields for the selected setup type.
+- Tests cover the core wizard-state helper so Back/Next labels and visible step sections do not drift from the Add Radio setup model.

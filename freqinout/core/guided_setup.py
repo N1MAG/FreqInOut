@@ -15,6 +15,7 @@ SETUP_MODE_MANAGED = "managed"
 LANE_JS8_ONLY = "js8_only"
 LANE_FAST_LIGHT = "fast_light"
 LANE_TRI_MODE = "tri_mode"
+LANE_CUSTOM_MIX = "custom"
 LANE_VARAC = "varac"
 LANE_VARAC_CLUSTER = "varac_cluster"
 LANE_SDR_OBSERVER = "sdr_observer"
@@ -162,6 +163,19 @@ class GuidedSetupFieldVisibility:
 
 
 @dataclass(frozen=True)
+class GuidedSetupWizardView:
+    current_step_id: str
+    current_index: int
+    steps: Tuple[Tuple[str, str], ...]
+    previous_label: str
+    next_label: str
+    detail: str
+    visible_sections: Tuple[str, ...]
+    can_go_back: bool
+    can_go_next: bool
+
+
+@dataclass(frozen=True)
 class GuidedSetupLanePreset:
     lane: str
     device_class: str
@@ -275,7 +289,7 @@ def guided_setup_selected_apps_from_flags(
 ) -> Tuple[str, ...]:
     """Return normalized app selections from UI flags and the control backend.
 
-    JS8Spotter and CommStat are JS8Call-adjacent workflows in FIO; selecting
+    FIO Spotter and CommStat are JS8Call-adjacent workflows in FIO; selecting
     either keeps JS8Call in the app set so lane inference and preview text stay
     stable even before the UI checkbox redraw completes.
     """
@@ -299,6 +313,15 @@ def guided_setup_selected_apps_from_flags(
     if use_varac:
         apps.append("varac")
     return tuple(apps)
+
+
+def guided_setup_app_label(app_id: str) -> str:
+    """Return the operator-facing app label used by guided setup surfaces."""
+
+    key = str(app_id or "").strip().lower()
+    if key == "js8spotter":
+        return "FIO Spotter"
+    return APP_DISPLAY_NAMES.get(key, key.upper())
 
 
 def infer_guided_setup_lane(
@@ -470,6 +493,54 @@ def guided_setup_field_visibility(
         configure_automatically=configure_automatically,
         connection_group=connection_group,
         setup_steps=not observer_mode,
+    )
+
+
+ADD_RADIO_WIZARD_STEPS: Tuple[Tuple[str, str], ...] = (
+    ("radio", "Radio"),
+    ("software", "Software"),
+    ("connection", "Connection"),
+    ("schedule", "Schedule"),
+    ("review", "Review"),
+)
+
+
+def guided_setup_wizard_view(
+    current_step_id: str,
+    *,
+    connection_visible: bool = True,
+) -> GuidedSetupWizardView:
+    """Return UI-ready state for the Add Radio guided setup wizard."""
+
+    requested = str(current_step_id or "").strip().lower()
+    step_ids = [step_id for step_id, _label in ADD_RADIO_WIZARD_STEPS]
+    if requested not in step_ids:
+        requested = "radio"
+    current_index = step_ids.index(requested)
+    previous_label = ADD_RADIO_WIZARD_STEPS[current_index - 1][1] if current_index > 0 else ""
+    next_label = ADD_RADIO_WIZARD_STEPS[current_index + 1][1] if current_index < len(ADD_RADIO_WIZARD_STEPS) - 1 else ""
+    detail_by_step = {
+        "radio": "Choose the radio model, name, role, and setup type.",
+        "software": "Choose the software stack and let FIO fill blank paths and ports where it can.",
+        "connection": "Review only the connection fields that apply to this radio.",
+        "schedule": "Assign the Frequency Plan after saving the radio profile; RF Guard checks before it is used.",
+        "review": "Review readiness, launch behavior, and advanced guard notes before saving.",
+    }
+    visible_sections = (requested,)
+    if requested == "review":
+        visible_sections = ("review", "launch", "optional")
+    elif requested == "connection" and not bool(connection_visible):
+        visible_sections = tuple()
+    return GuidedSetupWizardView(
+        current_step_id=requested,
+        current_index=current_index,
+        steps=ADD_RADIO_WIZARD_STEPS,
+        previous_label=previous_label,
+        next_label=next_label,
+        detail=detail_by_step.get(requested, "Review this setup step."),
+        visible_sections=visible_sections,
+        can_go_back=current_index > 0,
+        can_go_next=current_index < len(ADD_RADIO_WIZARD_STEPS) - 1,
     )
 
 
@@ -681,12 +752,22 @@ def guided_setup_flow_items(
 
     policy = guided_setup_capability_policy(blueprint)
     app_labels = [
-        APP_DISPLAY_NAMES.get(app_id, app_id)
+        guided_setup_app_label(app_id)
         for app_id in blueprint.selected_apps
         if str(app_id or "").strip()
     ]
     control_summary = guided_setup_control_summary(policy)
     schedule_summary = guided_setup_schedule_summary(blueprint)
+    if policy.scheduler_assignment_allowed:
+        schedule_detail = "Choose or assign a Frequency Plan after saving this radio."
+        schedule_status = "needs_input"
+    else:
+        schedule_detail = (
+            schedule_summary.removeprefix("Schedule choices: ").removeprefix("Schedule: ").rstrip(".")
+            if schedule_summary
+            else "Monitor/import only. FIO will not control frequency for this radio."
+        )
+        schedule_status = "ready"
     if plan.backup_required:
         review_detail = "Review detected settings, then back up and apply the app configuration changes."
         review_status = "backup"
@@ -718,10 +799,8 @@ def guided_setup_flow_items(
         GuidedSetupFlowItem(
             item_id="schedule",
             title="Schedule",
-            detail=schedule_summary.removeprefix("Schedule choices: ").removeprefix("Schedule: ").rstrip(".")
-            if schedule_summary
-            else "Choose schedule behavior later.",
-            status="ready",
+            detail=schedule_detail,
+            status=schedule_status,
         ),
         GuidedSetupFlowItem(
             item_id="review",
@@ -786,7 +865,7 @@ def guided_setup_operator_guidance_lines(
     policy = guided_setup_capability_policy(blueprint)
     lane_key = _normalize_lane(blueprint.lane)
     app_names = [
-        APP_DISPLAY_NAMES.get(app_id, app_id)
+        guided_setup_app_label(app_id)
         for app_id in blueprint.selected_apps
         if str(app_id or "").strip()
     ]
@@ -943,14 +1022,9 @@ def guided_setup_software_hint(
         if not key or key in seen:
             continue
         seen.add(key)
-        app_labels.append(APP_DISPLAY_NAMES.get(key, key.upper()))
+        app_labels.append(guided_setup_app_label(key))
     app_summary = ", ".join(app_labels) if app_labels else "monitor/import only"
-    return (
-        prefix
-        + "This setup uses: "
-        + app_summary
-        + ". Hidden app sections are not part of this setup type unless you select Custom software mix."
-    )
+    return prefix + "This setup uses: " + app_summary + "."
 
 
 def guided_setup_role_hint(
@@ -1130,9 +1204,10 @@ def _build_steps(
     schedule_choices: Tuple[GuidedSetupChoice, ...],
 ) -> Tuple[GuidedSetupStep, ...]:
     station_choices = (
+        GuidedSetupChoice(LANE_TRI_MODE, "TriMode - FastLight/JS8Call/VarAC", recommended=lane_key == LANE_TRI_MODE),
+        GuidedSetupChoice(LANE_CUSTOM_MIX, "Custom software mix", recommended=lane_key == LANE_CUSTOM_MIX),
         GuidedSetupChoice(LANE_JS8_ONLY, "JS8Call", recommended=lane_key == LANE_JS8_ONLY),
         GuidedSetupChoice(LANE_FAST_LIGHT, "Fast Light: FLDigi / FLMsg / FLAmp", recommended=lane_key == LANE_FAST_LIGHT),
-        GuidedSetupChoice(LANE_TRI_MODE, "TriMode - FastLight/JS8Call/VarAC", recommended=lane_key == LANE_TRI_MODE),
         GuidedSetupChoice(LANE_VARAC, "VarAC", recommended=lane_key == LANE_VARAC),
         GuidedSetupChoice(LANE_VARAC_CLUSTER, "VarAC Cluster / BBS", recommended=lane_key == LANE_VARAC_CLUSTER),
         GuidedSetupChoice(LANE_SDR_OBSERVER, "Receive-only monitoring", recommended=receive_only or lane_key == LANE_SDR_OBSERVER),

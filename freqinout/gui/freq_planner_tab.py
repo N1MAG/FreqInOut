@@ -1076,6 +1076,56 @@ class FreqPlannerTab(QWidget):
         self.rebuild_table()
         self._set_plan_manager_new_plan_state()
 
+    def begin_guided_radio_plan_handoff(self, device_profile: Optional[Mapping[str, Any]] = None) -> None:
+        """
+        Prime Plan Manager after guided radio setup saves a radio without a plan.
+
+        The Add Radio wizard owns radio/app configuration only. Plan creation and
+        RF Guard assignment stay here, so this method gives the user a clear next
+        step without creating a second schedule-assignment path.
+        """
+        radio_name = str((device_profile or {}).get("name") or "this radio").strip() or "this radio"
+        try:
+            plans = list(self.plan_context_service.store.list_frequency_plans())
+        except Exception:
+            plans = []
+        built_plans = [
+            plan
+            for plan in plans
+            if str(plan.get("category") or "").strip().lower()
+            not in {HF_DAILY_SOURCE_CATEGORY, HF_NET_SOURCE_CATEGORY}
+        ]
+        self._refresh_source_set_controls()
+        self._refresh_plan_workspace_header()
+        self._set_plan_manager_new_plan_state()
+        if hasattr(self, "frequency_plan_combo") and self.frequency_plan_combo.lineEdit() is not None:
+            self.frequency_plan_combo.lineEdit().setPlaceholderText(f"Name the Frequency Plan for {radio_name}")
+        if built_plans:
+            message = (
+                f"{radio_name} was saved without a Frequency Plan. Choose an existing plan above, "
+                "or keep New Plan selected, choose Daily/Nets/SOP layers, name the plan, then Save Plan and Assign with RF Guard."
+            )
+        else:
+            message = (
+                f"{radio_name} was saved. Build its first Frequency Plan here: choose an HF Daily schedule, "
+                "choose No Nets or a Net schedule, add an SOP layer if needed, name the plan, then Save Plan and Assign with RF Guard."
+            )
+        if hasattr(self, "frequency_plan_action_hint_label"):
+            self.frequency_plan_action_hint_label.setText(message)
+        if hasattr(self, "selected_window_title_label"):
+            self.selected_window_title_label.setText(f"Build Plan for {radio_name}")
+        if hasattr(self, "selected_window_detail_label"):
+            self.selected_window_detail_label.setText(
+                "Select the schedule layers this radio should follow. No radio changes happen until the saved plan is assigned with RF Guard."
+            )
+        try:
+            self.planner_view_combo.setCurrentIndex(max(0, self.planner_view_combo.findData("effective")))
+        except Exception:
+            pass
+        self.rebuild_table()
+        if hasattr(self, "frequency_plan_action_hint_label"):
+            self.frequency_plan_action_hint_label.setText(message)
+
     def _has_sop_schedule_rows(self) -> bool:
         try:
             _hf_sched, _net_sched, sop_sched, _policy_rows = self._load_schedules()

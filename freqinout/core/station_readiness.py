@@ -15,7 +15,7 @@ STATUS_DISPLAY_ITEMS: Sequence[Tuple[str, str]] = (
     ("FLAmp", "FLAmp"),
     ("JS8Call_API", "JS8"),
     ("VarAC", "VarAC"),
-    ("JS8Spotter", "JS8Spotter"),
+    ("JS8Spotter", "FIO Spotter"),
     ("CommStat", "CommStat"),
 )
 
@@ -687,20 +687,6 @@ def build_station_readiness_report(
                         state_key="needs_setup",
                     )
                 )
-        if spotter_enabled and not _text(profile, "spotter_launch_path"):
-            issues.append(
-                ReadinessIssue(
-                    severity="recommended",
-                    section_key="radio_profiles",
-                    scope=scope,
-                    radio_id=radio_id,
-                    integration_key="js8spotter",
-                    message=f"{name}: JS8Spotter launch path missing",
-                    resolution_hint="Set the JS8Spotter launch path if this radio should launch or track JS8Spotter with its JS8 stack.",
-                    deep_link_target=_issue_deep_link("radio_profiles", radio_id),
-                    state_key="degraded",
-                )
-            )
         if commstat_enabled and not _text(profile, "commstat_launch_path"):
             issues.append(
                 ReadinessIssue(
@@ -860,8 +846,8 @@ def build_station_readiness_report(
                 section_key="js8call",
                 scope="global",
                 integration_key="js8spotter",
-                message="JS8Spotter forms path missing",
-                resolution_hint="Set the JS8Spotter forms path in Settings.",
+                message="Spotter MCF forms folder missing",
+                resolution_hint="Set the MCF forms folder in JS8Call / Spotter settings.",
                 deep_link_target=_issue_deep_link("js8call", None),
                 state_key="needs_setup",
             )

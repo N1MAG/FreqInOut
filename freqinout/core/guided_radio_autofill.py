@@ -340,7 +340,7 @@ def guided_radio_autofill_suggestions(
                 "js8spotter",
                 js8_results,
                 "path_js8spotter",
-                "JS8Spotter",
+                "External JS8Spotter",
                 review,
             ),
         )

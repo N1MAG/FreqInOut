@@ -335,7 +335,7 @@ class JS8CallNetControlTab(QWidget):
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
         self.checkin_table.horizontalHeader().setStretchLastSection(True)
         self.checkin_empty_label = QLabel(
-            "No JS8 check-ins yet. Start the net and accept mapped JS8Spotter forms as stations check in."
+            "No JS8 check-ins yet. Start the net and accept mapped MCF forms as stations check in."
         )
         self.checkin_empty_label.setObjectName("js8NcsCheckinEmptyState")
         self.checkin_empty_label.setWordWrap(True)
@@ -1607,7 +1607,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _set_spotter_form(self):
         if not self.spotter_combo.isEnabled():
-            QMessageBox.warning(self, "Spotter", "No JS8Spotter forms found.")
+            QMessageBox.warning(self, "Spotter", "No MCF forms found.")
             return
         self._spotter_form = self._current_spotter_code()
         self._expected_form = self._spotter_form

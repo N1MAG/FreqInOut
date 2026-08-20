@@ -121,7 +121,7 @@ class SoftwarePathDetector:
         results["js8_forms_path"] = self._detect_js8_forms_path()
         results["path_js8spotter"] = self._detect_program_path(
             key="path_js8spotter",
-            label="JS8Spotter launch path",
+            label="External JS8Spotter app",
             tokens=("js8spotter", "JS8Spotter"),
             bundle_names=("JS8Spotter", "js8spotter"),
             windows_files=(
@@ -179,6 +179,9 @@ class SoftwarePathDetector:
         linux_files: Sequence[Path],
     ) -> PathDetectionResult:
         if self.system == "Darwin":
+            base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+            if base_match is not None:
+                return self._result(key, label, base_match, "high", "Found from Radio Apps Base Folder", "file")
             for bundle_name in bundle_names:
                 bundle = self._existing_paths(self._macos_bundle_candidates(bundle_name))
                 if bundle:
@@ -190,6 +193,10 @@ class SoftwarePathDetector:
                 if resolved:
                     return self._result(key, label, Path(resolved), "verified", "Found on PATH", "file")
             return self._not_found(key, label, "No installed app bundle or PATH command found", "file")
+
+        base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+        if base_match is not None:
+            return self._result(key, label, base_match, "high", "Found from Radio Apps Base Folder", "file")
 
         for token in tokens:
             resolved = shutil.which(token)
@@ -214,6 +221,17 @@ class SoftwarePathDetector:
         prefer_bundle_dir: bool,
     ) -> PathDetectionResult:
         if self.system == "Darwin":
+            base_candidates = self._base_program_candidates(tokens, bundle_names)
+            base_preferred = [
+                path
+                for path in base_candidates
+                if path.exists() and (path.suffix.lower() == ".app" or path.is_file())
+            ]
+            base_match = base_preferred[0] if base_preferred else self._first_existing_path(base_candidates)
+            if base_match is not None:
+                target = base_match if base_match.suffix.lower() == ".app" else base_match.parent
+                target_type = "app_bundle" if target.suffix.lower() == ".app" else "directory"
+                return self._result(key, label, target, "high", "Found from Radio Apps Base Folder", target_type)
             for bundle_name in bundle_names:
                 bundle = self._existing_paths(self._macos_bundle_candidates(bundle_name))
                 if bundle:
@@ -226,6 +244,11 @@ class SoftwarePathDetector:
                 if resolved:
                     return self._result(key, label, Path(resolved).parent, "high", "Derived install folder from PATH command", "directory")
             return self._not_found(key, label, "No installed app bundle or PATH command found", "directory")
+
+        base_match = self._first_existing_path(self._base_program_candidates(tokens, bundle_names))
+        if base_match is not None:
+            target = base_match if base_match.is_dir() else base_match.parent
+            return self._result(key, label, target, "high", "Found from Radio Apps Base Folder", "directory")
 
         for token in tokens:
             resolved = shutil.which(token)
@@ -367,7 +390,7 @@ class SoftwarePathDetector:
             if candidate.is_dir() and list(candidate.glob("MCF*.txt")):
                 return self._result(
                     "js8_forms_path",
-                    "JS8Spotter forms path",
+                    "MCF forms folder",
                     candidate,
                     "verified",
                     "Found forms directory containing MCF*.txt files",
@@ -375,7 +398,7 @@ class SoftwarePathDetector:
                 )
         return self._not_found(
             "js8_forms_path",
-            "JS8Spotter forms path",
+            "MCF forms folder",
             "No forms directory containing MCF*.txt files found",
             "directory",
         )
@@ -395,6 +418,9 @@ class SoftwarePathDetector:
         elif self.system == "Darwin":
             candidates.extend(
                 [
+                    *[root / "VarAC_files" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC.app" for root in self._radio_apps_base_roots()],
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
@@ -406,6 +432,8 @@ class SoftwarePathDetector:
         else:
             candidates.extend(
                 [
+                    *[root / "VarAC_files" for root in self._radio_apps_base_roots()],
+                    *[root / "VarAC" for root in self._radio_apps_base_roots()],
                     self.home / ".wine" / "drive_c" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files" / "VarAC",
                     self.home / ".wine" / "drive_c" / "Program Files (x86)" / "VarAC",
@@ -635,11 +663,11 @@ class SoftwarePathDetector:
     def _macos_bundle_candidates(self, app_name: str) -> List[Path]:
         normalized = app_name if app_name.lower().endswith(".app") else f"{app_name}.app"
         roots = [
+            *self._radio_apps_base_roots(),
             Path("/Applications"),
             Path("/Applications") / "RadioApps",
             self.home / "Applications",
             self.home / "Applications" / "RadioApps",
-            self.home / "RadioTools" / "Programs",
         ]
         candidates: List[Path] = [root / normalized for root in roots]
         stem = Path(normalized).stem
@@ -649,6 +677,36 @@ class SoftwarePathDetector:
             candidates.extend(sorted(root.glob(f"{stem}-*.app")))
             candidates.extend(sorted(root.glob(f"{stem.upper()}-*.app")))
             candidates.extend(sorted(root.glob(f"{stem.lower()}-*.app")))
+        return self._unique_paths(candidates)
+
+    def _radio_apps_base_roots(self) -> List[Path]:
+        try:
+            raw = str(self.settings.get("radio_apps_base_folder", "") or "").strip()
+        except Exception:
+            raw = ""
+        roots: List[Path] = []
+        if raw:
+            roots.append(Path(raw))
+        roots.append(self.home / "RadioTools" / "Programs")
+        return self._unique_paths(roots)
+
+    def _base_program_candidates(self, tokens: Sequence[str], bundle_names: Sequence[str]) -> List[Path]:
+        candidates: List[Path] = []
+        for root in self._radio_apps_base_roots():
+            for name in bundle_names:
+                normalized = name if str(name).lower().endswith(".app") else f"{name}.app"
+                candidates.append(root / normalized)
+                candidates.append(root / str(name) / str(name))
+                candidates.append(root / str(name) / f"{Path(str(name)).stem}.exe")
+                candidates.append(root / str(name))
+            for token in tokens:
+                token_name = Path(str(token)).name
+                token_stem = Path(token_name).stem
+                candidates.append(root / token_name)
+                candidates.append(root / token_stem / token_name)
+                candidates.append(root / token_stem / f"{token_stem}.exe")
+                candidates.append(root / token_stem / f"{token_stem}.py")
+                candidates.append(root / token_stem)
         return self._unique_paths(candidates)
 
     def _macos_bundle_executable(self, bundle: Path, names: Sequence[str]) -> Path | None:

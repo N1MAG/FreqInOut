@@ -256,7 +256,8 @@ def test_build_station_readiness_report_tracks_js8_bundle_even_when_backend_is_f
     messages = {issue.message for issue in report.issues}
     assert "TriMode Desk: JS8Call host missing" in messages
     assert "TriMode Desk: JS8Call port missing" in messages
-    assert "TriMode Desk: JS8Spotter launch path missing" in messages
+    assert "Spotter MCF forms folder missing" in messages
+    assert "TriMode Desk: JS8Spotter launch path missing" not in messages
     assert "TriMode Desk: CommStat launch path missing" in messages
 
 
@@ -415,7 +416,8 @@ def test_settings_source_promotes_radio_readiness_cards() -> None:
     assert "Only apps configured for the current Station Default radio bundle are shown here" in source
     assert "Primary Rig Control:" in source
     assert 'QCheckBox("JS8Call")' in source
-    assert 'QCheckBox("JS8Spotter")' in source
+    assert 'QCheckBox("FIO Spotter")' in source
+    assert "Which external JS8Spotter app belongs to this radio?" in source
     assert 'QCheckBox("CommStat")' in source
     assert "Assigned Plan" in source
     assert "Assign Plan..." in source

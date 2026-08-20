@@ -5233,7 +5233,7 @@ class MessageViewerTab(QWidget):
                         },
                     )
             else:
-                self.compose_form_combo.addItem("No JS8Spotter forms in this category", None)
+                self.compose_form_combo.addItem("No MCF forms in this category", None)
         finally:
             self.compose_form_combo.blockSignals(False)
         self._on_compose_form_changed()
@@ -6907,7 +6907,6 @@ class MessageViewerTab(QWidget):
                     f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
                     f"<div><b>JS8 Payload:</b> {html.escape(spotter_command or 'Enter a JS8 target to build the payload.')}</div>",
                     f"<div><b>MsgAuth:</b> {html.escape(auth_label)}</div>",
-                    "<div><b>Attribution:</b> Compatible with JS8Spotter / MCForms by Joseph D. Lyman, KF7MIX.</div>",
                 ]
             )
         if bbs_selected:

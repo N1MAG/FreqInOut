@@ -376,8 +376,8 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
 
     assert "self.global_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in nav_build_block
     assert "self.radio_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in nav_build_block
-    assert 'self.global_settings_toggle_btn.setAccessibleName("Settings navigation group: Global Settings")' in nav_build_block
-    assert 'self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Selected Radio")' in nav_build_block
+    assert 'self.global_settings_toggle_btn.setAccessibleName("Settings navigation group: Main Settings")' in nav_build_block
+    assert 'self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Radio Settings")' in nav_build_block
     assert "self.global_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert "self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)" in nav_build_block
     assert 'nav_panel.setObjectName("settingsSectionNavPanel")' in nav_build_block
@@ -399,7 +399,7 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in nav_build_block
     assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in nav_build_block
     assert "self.settings_section_nav_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)" in nav_build_block
-    assert "self.settings_section_nav_scroll.hide()" in nav_build_block
+    assert "self.settings_section_nav_scroll.setVisible(True)" in nav_build_block
     assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" not in nav_build_block
     assert "self.sections_stack.setMinimumWidth(0)" in sections_scroll_block
     assert "self.sections_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)" in sections_scroll_block
@@ -470,13 +470,13 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         assert tab.settings_section_nav_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.settings_section_nav_scroll.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
         assert tab.settings_section_nav_scroll.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
-        assert tab.settings_section_nav_scroll.maximumWidth() <= 250
+        assert tab.settings_section_nav_scroll.maximumWidth() <= 300
         assert tab.sections_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
 
         tab.resize(720, 420)
         app.processEvents()
 
-        assert tab.settings_section_nav_scroll.isVisible() is False
+        assert tab.settings_section_nav_scroll.isVisible() is True
         assert tab.settings_compact_header.isVisible() is True
         assert tab.settings_global_tasks_widget.width() > 0
         assert tab.settings_radio_tasks_widget.width() > 0
@@ -805,10 +805,10 @@ def test_settings_group_tables_visual_geometry_caps_to_internal_scroll(monkeypat
     try:
         tab.operating_groups = [
             {
-                "group": f"G{idx}",
+                "group": "G0",
                 "mode": "Digi",
-                "band": "40M",
-                "frequency": "7.078",
+                "band": f"{idx + 1}M",
+                "frequency": f"7.{idx:03d}",
                 "vfo": "A",
                 "fldigi_mode": "Olivia",
                 "fldigi_offset": "1500",
@@ -819,10 +819,10 @@ def test_settings_group_tables_visual_geometry_caps_to_internal_scroll(monkeypat
         ]
         tab.local_net_profiles = [
             {
-                "group": f"L{idx}",
+                "group": "L0",
                 "resource": "Voice",
                 "mode": "Phone",
-                "target": "Local",
+                "target": f"Local {idx}",
                 "notes": "Check-in",
             }
             for idx in range(10)
@@ -942,10 +942,10 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
 
         tab.operating_groups = [
             {
-                "group": f"G{idx}",
+                "group": "G0",
                 "mode": "Digi",
-                "band": "40M",
-                "frequency": "7.078",
+                "band": f"{idx + 1}M",
+                "frequency": f"7.{idx:03d}",
                 "vfo": "A",
                 "fldigi_mode": "Olivia",
                 "fldigi_offset": "1500",
@@ -956,10 +956,10 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
         ]
         tab.local_net_profiles = [
             {
-                "group": f"L{idx}",
+                "group": "L0",
                 "resource": "Voice",
                 "mode": "Phone",
-                "target": "Local",
+                "target": f"Local {idx}",
                 "notes": "Check-in",
             }
             for idx in range(12)
@@ -1576,7 +1576,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert "build_app_config_plan_for_blueprint(" in dialog_block
     assert 'use_varac_chk = QCheckBox("VarAC")' in dialog_block
     assert '("VarAC", "varac")' not in source[source.index("def _device_profile_backend_options") : source.index("def _set_combo_current_data")]
-    assert "build_guided_setup_preview(" in dialog_block
+    assert "build_guided_setup_preview(" not in dialog_block
+    assert "app_setup_plan_label.setVisible(False)" in dialog_block
+    assert '"spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app")' in dialog_block
     assert "VarAC-only radio: FIO supports BBS and message monitoring, but VarAC handles frequency scheduling." in guided_setup_source
     assert "SETUP_MODE_READ_ONLY if lane in {LANE_VARAC, LANE_VARAC_CLUSTER} else SETUP_MODE_MANAGED" in dialog_block
     assert "Backup required before FIO writes app profiles." in guided_setup_source
@@ -1654,6 +1656,8 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"varac_outbox_dir": varac_outbox_edit.text().strip()' in dialog_block
     assert '"varac_bbs_dir": varac_bbs_edit.text().strip()' in dialog_block
     assert '"varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip()' in dialog_block
+    assert "payload = _draft_radio_profile()" in dialog_block
+    assert "out.update(normalize_guided_radio_profile_payload(payload))" in dialog_block
     assert "FIO did not write VarAC.ini, VarAC.db, or VarAC cluster membership" in planner_source
     assert 'Path(varac_install_edit.text().strip()) / "VarAC.db"' not in dialog_block
 
@@ -3581,7 +3585,7 @@ def test_radio_profile_stack_guidance_items_map_issues_to_action_rows() -> None:
                 scope="radio",
                 radio_id=7,
                 integration_key="js8spotter",
-                message="DX10: JS8Spotter launch path missing",
+                message="DX10: Spotter MCF forms folder missing",
                 state_key="needs_setup",
             ),
             ReadinessIssue(
@@ -3634,7 +3638,7 @@ def test_radio_profile_stack_guidance_items_map_issues_to_action_rows() -> None:
         radio_name="DX10",
         max_items=5,
     ) == [
-        ("JS8Spotter launch path missing", "Open JS8Call Settings", "js8_section_group", "danger"),
+        ("Spotter MCF forms folder missing", "Open JS8Call Settings", "js8_section_group", "danger"),
         ("FLDigi endpoint setup is incomplete", "Open Fast Light Settings", "fast_light_section_group", "warning"),
         ("VarAC radio setup is incomplete", "Open VarAC Settings", "varac_section_group", "warning"),
         ("FLRig is not enabled for this radio", "Open Fast Light Settings", "fast_light_section_group", "muted"),

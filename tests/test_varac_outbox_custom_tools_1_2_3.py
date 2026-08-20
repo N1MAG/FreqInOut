@@ -52,6 +52,53 @@ def test_software_path_detector_detects_varac_db_file(tmp_path: Path) -> None:
     assert result.target_type == "file"
 
 
+def test_software_path_detector_uses_radio_apps_base_folder_for_varac(tmp_path: Path) -> None:
+    base = tmp_path / "RadioTools" / "Programs"
+    install_dir = base / "VarAC_files"
+    db_path = install_dir / "VarAC.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.write_bytes(b"")
+
+    detector = SoftwarePathDetector(_DummySettings({"radio_apps_base_folder": str(base)}))
+    result = detector.detect_varac()["varac_path"]
+
+    assert result.path == str(install_dir)
+    assert result.confidence == "verified"
+
+
+def test_software_path_detector_uses_radio_apps_base_folder_for_external_tools(tmp_path: Path) -> None:
+    base = tmp_path / "RadioTools" / "Programs"
+    spotter = base / "JS8Spotter" / "JS8Spotter"
+    commstat = base / "CommStat" / "CommStat"
+    spotter.parent.mkdir(parents=True)
+    commstat.parent.mkdir(parents=True)
+    spotter.write_text("#!/bin/sh\n", encoding="utf-8")
+    commstat.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    detector = SoftwarePathDetector(_DummySettings({"radio_apps_base_folder": str(base)}))
+    results = detector.detect_js8()
+
+    assert results["path_js8spotter"].path == str(spotter)
+    assert results["path_js8spotter"].reason == "Found from Radio Apps Base Folder"
+    assert results["path_commstat"].path == str(commstat)
+
+
+def test_software_path_detector_uses_radio_apps_base_folder_for_js8call_variants(tmp_path: Path) -> None:
+    base = tmp_path / "RadioTools" / "Programs"
+    subspace_bundle = base / "Subspace-Edition" / "build-trimode-baseline" / "JS8Call.app"
+    executable = subspace_bundle / "Contents" / "MacOS" / "JS8Call"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    detector = SoftwarePathDetector(_DummySettings({"radio_apps_base_folder": str(base)}))
+    detector.system = "Darwin"
+    result = detector.detect_js8()["path_js8call"]
+
+    assert result.path == str(subspace_bundle)
+    assert result.target_type == "app_bundle"
+    assert result.reason == "Found from Radio Apps Base Folder"
+
+
 def test_settings_and_compose_source_include_outbox_and_custom_tools() -> None:
     settings_text = _read("freqinout/gui/settings_tab.py")
     messages_text = _read("freqinout/gui/message_viewer_tab.py")

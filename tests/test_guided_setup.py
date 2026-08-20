@@ -41,6 +41,7 @@ from freqinout.core.guided_setup import (
     guided_setup_schedule_summary,
     guided_setup_review_items,
     guided_setup_apps_for_lane,
+    guided_setup_app_label,
     infer_guided_control_route,
     infer_guided_setup_lane,
     normalize_guided_radio_profile_payload,
@@ -88,6 +89,7 @@ def test_core_normalizes_guided_app_flags_from_backend_and_js8_adjacent_tools() 
     assert guided_setup_selected_apps_from_flags(use_varac=True) == ("varac",)
     assert infer_guided_setup_lane((), varac_selected=True) == LANE_VARAC
     assert infer_guided_setup_lane((), receive_only=True) == "sdr_observer"
+    assert guided_setup_app_label("js8spotter") == "FIO Spotter"
 
 
 def test_core_normalizes_guided_control_routes_from_ui_backend_values() -> None:
@@ -322,8 +324,7 @@ def test_guided_setup_software_hint_is_core_generated_for_setup_surfaces() -> No
         setup_type_label="TriMode - FastLight/JS8Call/VarAC",
         selected_apps=("flrig", "fldigi", "flmsg", "flamp", "js8call", "varac"),
     ) == (
-        "Setup type: TriMode - FastLight/JS8Call/VarAC. This setup uses: FLRig, FLDigi, FLMsg, FLAmp, JS8Call, VarAC. "
-        "Hidden app sections are not part of this setup type unless you select Custom software mix."
+        "Setup type: TriMode - FastLight/JS8Call/VarAC. This setup uses: FLRig, FLDigi, FLMsg, FLAmp, JS8Call, VarAC."
     )
 
     assert guided_setup_software_hint(
@@ -625,6 +626,45 @@ def test_varac_payload_normalization_keeps_explicit_flrig_mixed_route() -> None:
     assert normalized["use_flrig"] is True
 
 
+def test_guided_payload_normalization_preserves_reviewed_save_fields() -> None:
+    reviewed_values = {
+        "name": "TriMode Radio",
+        "control_backend": "flrig",
+        "use_flrig": True,
+        "use_fldigi": True,
+        "use_flmsg": True,
+        "use_flamp": True,
+        "use_js8call": True,
+        "use_js8spotter": True,
+        "use_commstat": True,
+        "use_varac": True,
+        "launch_enabled": True,
+        "launch_path": "/apps/start-station.sh",
+        "sdr_host": "127.0.0.1",
+        "sdr_port": "7355",
+        "ptt_group": "hf-a",
+        "antenna_group": "wire-1",
+        "antenna_supported_bands": ["20M", "40M"],
+        "antenna_band_guard_mode": "block",
+        "band_overlap_guard_group": "shared-wire",
+        "band_overlap_guard_mode": "warn",
+        "advanced_frequency_guard_group": "front-end",
+        "advanced_frequency_guard_mode": "block",
+        "advanced_frequency_guard_window_hz": 2500,
+        "frontend_group": "sdr-front-end",
+        "amplifier_group": "amp-1",
+        "varac_outbox_dir": "/VarAC/Outbox",
+        "varac_bbs_dir": "/VarAC/BBS",
+        "varac_bbs_archive_dir": "/VarAC/BBS/Archive",
+        "notes": "Operator verified.",
+    }
+
+    normalized = normalize_guided_radio_profile_payload(reviewed_values)
+
+    for key, value in reviewed_values.items():
+        assert normalized[key] == value
+
+
 def test_guided_setup_preview_describes_rigctld_control_route(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="js8_only",
@@ -743,10 +783,29 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     assert items[0].detail == "TS-2000"
     assert items[1].detail == "JS8Call"
     assert "JS8Call owns the radio/CAT route" in items[2].detail
-    assert "Daily with No Nets" in items[3].detail
+    assert items[3].status == "needs_input"
+    assert "Frequency Plan" in items[3].detail
     assert items[4].status == "backup"
     assert lines[0].startswith("1. Radio: TS-2000")
+    assert "4. Schedule:" in lines[3]
+    assert "(Needs Input)" in lines[3]
     assert "5. Review:" in lines[-1]
+
+
+def test_guided_station_use_choices_prioritize_trimode_then_custom() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="tri_mode",
+        hamlib_short_name="TS-2000",
+        setup_mode=SETUP_MODE_MANAGED,
+    )
+
+    station_step = next(step for step in blueprint.steps if step.step_id == "station_use")
+
+    assert [choice.label for choice in station_step.choices[:3]] == [
+        "TriMode - FastLight/JS8Call/VarAC",
+        "Custom software mix",
+        "JS8Call",
+    ]
 
 
 def test_guided_setup_operator_guidance_is_clear_for_js8_only(tmp_path) -> None:
@@ -767,7 +826,7 @@ def test_guided_setup_operator_guidance_is_clear_for_js8_only(tmp_path) -> None:
 
     lines = guided_setup_operator_guidance_lines(blueprint, plan)
 
-    assert any("JS8Call, JS8Spotter, CommStat" in line for line in lines)
+    assert any("JS8Call, FIO Spotter, CommStat" in line for line in lines)
     assert any("hides FLDigi, FLMsg, and FLAmp fields" in line for line in lines)
     assert any("JS8Call profile, API port, and message files" in line for line in lines)
     assert any("RF Guard" in line for line in lines)
@@ -1153,8 +1212,41 @@ def test_guided_setup_next_action_comes_from_flow_status() -> None:
 
     next_item = guided_setup_next_flow_item(blueprint, plan)
 
-    assert next_item.item_id in {"connection", "review"}
+    assert next_item.item_id in {"connection", "schedule", "review"}
     assert guided_setup_next_action_text(blueprint, plan).startswith(f"Next: {next_item.title} - ")
+
+
+def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
+    from freqinout.core.guided_setup import guided_setup_wizard_view
+
+    radio = guided_setup_wizard_view("radio")
+    assert radio.current_index == 0
+    assert radio.previous_label == ""
+    assert radio.next_label == "Software"
+    assert radio.can_go_back is False
+    assert radio.can_go_next is True
+    assert radio.visible_sections == ("radio",)
+
+    schedule = guided_setup_wizard_view("schedule")
+    assert schedule.previous_label == "Connection"
+    assert schedule.next_label == "Review"
+    assert schedule.visible_sections == ("schedule",)
+    assert "RF Guard" in schedule.detail
+
+    review = guided_setup_wizard_view("review")
+    assert review.can_go_next is False
+    assert review.visible_sections == ("review", "launch", "optional")
+
+
+def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
+    from freqinout.core.guided_setup import guided_setup_wizard_view
+
+    view = guided_setup_wizard_view("connection", connection_visible=False)
+
+    assert view.current_step_id == "connection"
+    assert view.visible_sections == tuple()
+    assert view.previous_label == "Software"
+    assert view.next_label == "Schedule"
 
 
 def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> None:
@@ -1165,6 +1257,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     ]
 
     assert 'setup_type_combo.setObjectName("guidedSetupType")' in dialog_block
+    assert "dlg.setSizeGripEnabled(True)" in dialog_block
+    assert "dlg.setMinimumSize(640, 520)" in dialog_block
     assert "scroll = QScrollArea(dlg)" in dialog_block
     assert "scroll.setWidgetResizable(True)" in dialog_block
     assert "setFixedWidth" not in dialog_block
@@ -1173,6 +1267,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "combo.setMinimumWidth" not in dialog_block
     assert "combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in dialog_block
     assert dialog_block.index('setup_type_combo.addItem("TriMode - FastLight/JS8Call/VarAC", LANE_TRI_MODE)') < dialog_block.index(
+        'setup_type_combo.addItem("Custom software mix", "custom")'
+    )
+    assert dialog_block.index('setup_type_combo.addItem("Custom software mix", "custom")') < dialog_block.index(
         'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)'
     )
     assert 'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)' in dialog_block
@@ -1184,6 +1281,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "guided_setup_field_visibility(" in dialog_block
     assert "GuidedSetupFieldVisibilityInput(" in dialog_block
     assert "_set_row_visible(configure_auto_wrap, visibility.configure_automatically)" in dialog_block
+    assert 'radio_apps_base_edit.setObjectName("guidedRadioAppsBaseFolder")' in dialog_block
+    assert '"Radio Apps Base Folder:"' in dialog_block
+    assert "_set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)" in dialog_block
+    assert "def _persist_radio_apps_base_folder() -> None:" in dialog_block
+    assert "Radio Apps Base Folder used for app detection." in dialog_block
     assert "guided_setup_software_hint(" in dialog_block
     assert "preset = guided_setup_lane_preset(lane)" in dialog_block
     assert "_set_combo_data(device_class_combo, preset.device_class)" in dialog_block
@@ -1212,9 +1314,142 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
     assert "guided_setup_flow_items(blueprint, plan)" in dialog_block
     assert "guided_setup_next_action_text(blueprint, plan)" in dialog_block
+    assert 'guided_wizard_group = QGroupBox("Guided Setup")' in dialog_block
+    assert 'guided_wizard_group.setObjectName("guidedSetupWizard")' in dialog_block
+    assert 'btn.setObjectName(f"guidedWizardStep_{step_id}")' in dialog_block
+    assert 'guided_wizard_back_btn.setObjectName("guidedWizardBack")' in dialog_block
+    assert 'guided_wizard_next_btn.setObjectName("guidedWizardNext")' in dialog_block
+    assert 'schedule_group, schedule_form = _make_section(' in dialog_block
+    assert 'connection_status_label.setObjectName("guidedConnectionStatus")' in dialog_block
+    assert "No FIO frequency-control endpoint is required for this setup type." in dialog_block
+    assert '"Schedule Assignment"' in dialog_block
+    assert 'schedule_status_label.setObjectName("guidedScheduleAssignmentStatus")' in dialog_block
+    assert 'schedule_plan_combo.setObjectName("guidedSchedulePlanCombo")' in dialog_block
+    assert 'schedule_plan_combo.addItem("Assign later", 0)' in dialog_block
+    assert 'schedule_open_plan_manager_chk.setObjectName("guidedScheduleOpenPlanManager")' in dialog_block
+    assert "Plan Manager can open so you can build a Daily with No Nets" in dialog_block
+    assert "guided_initial_frequency_plan_id" in dialog_block
+    assert "get_effective_assigned_plan_for_device" in dialog_block
+    assert "self.multi_radio_store.list_frequency_plans()" in dialog_block
+    assert "SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES" in dialog_block
+    assert 'save_review_group, save_review_form = _make_section(' in dialog_block
+    assert '"Save Review"' in dialog_block
+    assert 'save_review_label.setObjectName("guidedSaveReview")' in dialog_block
+    assert "def _update_guided_save_review() -> None:" in dialog_block
+    assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
+    assert "FIO Spotter + external JS8Spotter" in dialog_block
+    assert "app_labels.append(\"FIO Spotter\")" in dialog_block
+    assert '"External JS8Spotter app"' in dialog_block
+    assert '"What FIO will save:"' in dialog_block
+    assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
+    assert "Frequency Control: {frequency_line}" in dialog_block
+    assert "Message/Forms Files: " in dialog_block
+    assert "Monitor/import only. FIO will not offer scheduler or QSY controls." in dialog_block
+    assert "Manual/external control. FIO will not tune this radio until a control endpoint is selected." in dialog_block
+    assert "controls scheduler and QSY actions." in dialog_block
+    assert "VarAC monitor/import: FIO will not control VarAC frequency" in dialog_block
+    assert "Radio Apps Base Folder" in dialog_block
+    assert '_path_summary("VarAC outbox", varac_outbox_edit.text())' in dialog_block
+    assert '_path_summary("VarAC BBS", varac_bbs_edit.text())' in dialog_block
+    assert '_path_summary("VarAC BBS archive", varac_bbs_archive_edit.text())' in dialog_block
+    assert "payload = _draft_radio_profile()" in dialog_block
+    assert 'payload["name"] = name' in dialog_block
+    assert "out.update(normalize_guided_radio_profile_payload(payload))" in dialog_block
+    assert "Assign '{selected_plan}' after save with RF Guard." in dialog_block
+    assert "out[\"guided_frequency_plan_id\"] = guided_plan_id" in dialog_block
+    assert "out[\"guided_open_plan_manager_after_save\"] = True" in dialog_block
+    assert "def _apply_guided_wizard_visibility(connection_visible: bool) -> None:" in dialog_block
+    assert "def _guided_wizard_step_label(index: int) -> str:" in dialog_block
+    assert 'guided_wizard_next_btn.setText(f"Next: {next_label}" if next_label else "Next")' in dialog_block
+    assert 'guided_wizard_back_btn.setText(f"Back: {previous_label}" if previous_label else "Back")' in dialog_block
+    assert 'identity_group.setVisible(guided_wizard_step_id == "radio")' in dialog_block
+    assert 'software_group.setVisible(guided_wizard_step_id == "software")' in dialog_block
+    assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
+    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule")' in dialog_block
+    assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
+    assert 'launch_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
     assert 'guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}' in dialog_block
     assert 'step_frame.setObjectName(f"guidedSetupStep_{step_id}")' in dialog_block
     assert 'status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")' in dialog_block
-    assert "guided_setup_operator_guidance_lines(blueprint, plan)" in dialog_block
+    assert "guided_wizard_layout.addWidget(app_setup_plan_group)" in dialog_block
+    assert "_add_full_width_row(software_form, app_setup_plan_group)" not in dialog_block
+    assert 'if guided_wizard_step_id != "review":' in dialog_block
+    assert '_set_guided_wizard_step("connection")' in dialog_block
+    assert "guided_setup_operator_guidance_lines(blueprint, plan)" not in dialog_block
+    assert "build_guided_setup_preview(blueprint, plan)" not in dialog_block
+
+
+def test_settings_preferences_expose_radio_apps_base_folder() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.radio_apps_base_folder_edit.setObjectName("radioAppsBaseFolder")' in source
+    assert '"Radio Apps Base Folder:"' in source
+    assert "self.radio_apps_base_folder_browse_btn.clicked.connect(self._choose_radio_apps_base_folder)" in source
+    assert 'data["radio_apps_base_folder"] = (' in source
+    assert 'self.radio_apps_base_folder_edit.setText(str(data.get("radio_apps_base_folder", "") or "").strip())' in source
+    assert 'QFileDialog.getExistingDirectory(self, "Select Radio Apps Base Folder", start)' in source
+
+
+def test_guided_add_radio_reviewed_fields_are_in_single_draft_save_payload() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    dialog_block = source.split("    def _open_device_profile_dialog", 1)[1].split(
+        "    def _apply_runtime_projection_widgets", 1
+    )[0]
+    draft_block = dialog_block.split("def _draft_radio_profile() -> Dict[str, Any]:", 1)[1].split(
+        "def _default_instance_port", 1
+    )[0]
+    save_block = dialog_block.split("def _save() -> None:", 1)[1].split("buttons.accepted.connect", 1)[0]
+
+    reviewed_keys = (
+        "advanced_frequency_guard_group",
+        "advanced_frequency_guard_mode",
+        "advanced_frequency_guard_window_hz",
+        "antenna_supported_bands",
+        "launch_enabled",
+        "launch_path",
+        "sdr_host",
+        "sdr_port",
+        "varac_outbox_dir",
+        "varac_bbs_dir",
+        "varac_bbs_archive_dir",
+    )
+    for key in reviewed_keys:
+        assert f'"{key}"' in draft_block
+
+    assert "payload = _draft_radio_profile()" in save_block
+    assert "out.update(normalize_guided_radio_profile_payload(payload))" in save_block
+    for key in reviewed_keys:
+        assert f'"{key}"' not in save_block
+    assert "app_setup_plan_label.setVisible(False)" in dialog_block
+    assert '"spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app")' in dialog_block
     assert 'QGroupBox("Setup Steps")' in dialog_block
+    assert dialog_block.index('setup_type_combo.addItem("TriMode - FastLight/JS8Call/VarAC", LANE_TRI_MODE)') < dialog_block.index(
+        'setup_type_combo.addItem("Custom software mix", "custom")'
+    )
+    assert dialog_block.index('setup_type_combo.addItem("Custom software mix", "custom")') < dialog_block.index(
+        'setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)'
+    )
+
+
+def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    planner_source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
+    assert "def _assign_guided_frequency_plan_after_profile_save(" in source
+    assert "def _open_plan_manager_after_guided_profile_save(" in source
+    assert 'screen_map.get("FreqPlanner", -1)' in source
+    assert "begin_guided_radio_plan_handoff" in source
+    assert "handoff(device_profile or {})" in source
+    assert "def begin_guided_radio_plan_handoff(" in planner_source
+    assert "radio_name = str((device_profile or {}).get(\"name\")" in planner_source
+    assert "Name the Frequency Plan for {radio_name}" in planner_source
+    assert "saved without a Frequency Plan" in planner_source
+    assert "Build its first Frequency Plan here" in planner_source
+    assert "self.multi_radio_store.set_assigned_plan(" in source
+    assert 'reason="Initial Frequency Plan selected during guided radio setup."' in source
+    assert "guided_plan_id = int(created.pop(\"guided_frequency_plan_id\", 0) or 0)" in source
+    assert "guided_plan_id = int(updated.pop(\"guided_frequency_plan_id\", 0) or 0)" in source
+    assert "created.pop(\"guided_open_plan_manager_after_save\", False)" in source
+    assert "updated.pop(\"guided_open_plan_manager_after_save\", False)" in source
+    assert "self._last_persisted_device_profile = dict(saved)" in source
+    assert '"RF Guard Blocked Schedule Assignment"' in source

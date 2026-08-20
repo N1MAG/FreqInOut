@@ -155,12 +155,11 @@ from freqinout.core.guided_setup import (
     guided_setup_flow_summary_lines,
     guided_setup_lane_preset,
     guided_setup_next_action_text,
-    guided_setup_operator_guidance_lines,
     guided_setup_role_hint,
     guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
+    guided_setup_wizard_view,
     GuidedSetupFieldVisibilityInput,
-    build_guided_setup_preview,
     generated_radio_label,
     infer_guided_control_route,
     infer_guided_setup_lane,
@@ -2640,6 +2639,23 @@ class SettingsTab(QWidget):
         self.use_scheduler_chk = QCheckBox("Use FreqInOut Scheduler")
         self.use_scheduler_chk.setToolTip("Enable automatic schedule-driven frequency changes.")
         top_preferences_grid.addWidget(self.use_scheduler_chk, 1, 2, 1, 2)
+        top_preferences_grid.addWidget(QLabel("Radio Apps Base Folder:"), 2, 0)
+        self.radio_apps_base_folder_edit = QLineEdit()
+        self.radio_apps_base_folder_edit.setObjectName("radioAppsBaseFolder")
+        self.radio_apps_base_folder_edit.setPlaceholderText("Optional folder for external radio apps")
+        self.radio_apps_base_folder_edit.setToolTip(
+            "Optional. Point FIO at a common folder such as RadioTools/Programs to improve app autodetection."
+        )
+        self.radio_apps_base_folder_browse_btn = QPushButton("Browse")
+        self.radio_apps_base_folder_browse_btn.setToolTip("Choose the common folder where external radio apps are installed.")
+        self.radio_apps_base_folder_browse_btn.clicked.connect(self._choose_radio_apps_base_folder)
+        radio_apps_base_folder_row = QWidget()
+        radio_apps_base_folder_layout = QHBoxLayout(radio_apps_base_folder_row)
+        radio_apps_base_folder_layout.setContentsMargins(0, 0, 0, 0)
+        radio_apps_base_folder_layout.setSpacing(8)
+        radio_apps_base_folder_layout.addWidget(self.radio_apps_base_folder_edit, 1)
+        radio_apps_base_folder_layout.addWidget(self.radio_apps_base_folder_browse_btn)
+        top_preferences_grid.addWidget(radio_apps_base_folder_row, 2, 1, 1, 3)
         top_preferences_grid.setColumnStretch(5, 1)
 
         enforcement_choices = ["On Schedule Change", "Prompt"]
@@ -3747,7 +3763,7 @@ class SettingsTab(QWidget):
         self._add_radio_profile_guided_task_button(
             "plans",
             "Schedule Control",
-            "Assigned frequency plan, scheduler automation, and hold/timer defaults.",
+            "Focused Frequency Plan Guidance: assigned frequency plan, scheduler automation, and hold/timer defaults.",
             ("radio_profile_frequency_section",),
         )
         self._add_radio_profile_guided_task_button(
@@ -4074,12 +4090,12 @@ class SettingsTab(QWidget):
         schedule_assignments_layout = QVBoxLayout(schedule_assignments_container)
         schedule_assignments_layout.setSpacing(8)
         schedule_assignments_hint = QLabel(
-            "Assign one built Frequency Plan to the radio that should follow it. RF Guard checks run before the assignment is saved."
+            "Assign one built Frequency Plan to the radio that should follow it. RF Guard checks run before the assignment is saved. Restore Plan returns a temporary assignment to its prior plan; Restore Default Plan returns a radio to its default assigned plan."
         )
         schedule_assignments_hint.setWordWrap(True)
         schedule_assignments_layout.addWidget(schedule_assignments_hint)
         self.schedule_assignments_guidance_card, self.schedule_assignments_guidance_title_label, self.schedule_assignments_guidance_status_label = _make_support_card(
-            "Focused Schedule Assignment Guidance",
+            "Focused Assigned Plan Guidance",
             "scheduleAssignmentsGuidanceStatus",
         )
         self._set_guidance_card_state(
@@ -4977,26 +4993,25 @@ class SettingsTab(QWidget):
         )
 
         self.js8spotter_path_edit = QLineEdit()
-        self.js8spotter_path_edit.setPlaceholderText("Select your JS8Spotter launcher/script/shortcut")
+        self.js8spotter_path_edit.setPlaceholderText("Optional external JS8Spotter launcher/script/shortcut")
         self.js8spotter_path_edit.setToolTip(
-            "JS8Spotter launchers are often stored in custom locations. Use Browse to select the launcher, "
-            "script, or shortcut used for the selected radio."
+            "Optional. Built-in FIO Spotter does not require this path. Set it only when FIO should track or launch "
+            "the separate JS8Spotter application for the selected radio."
         )
         js8_v.addWidget(
             build_js8_path_row(
-                "JS8Spotter Launch Path:",
+                "External JS8Spotter App:",
                 self.js8spotter_path_edit,
                 self._choose_js8spotter_launch_path,
             )
         )
 
         self.js8_forms_edit = QLineEdit()
-        self.js8_forms_edit.setPlaceholderText("Select your JS8Spotter forms folder")
+        self.js8_forms_edit.setPlaceholderText("Select the MCF forms folder")
         self.js8_forms_edit.setToolTip(
-            "JS8Spotter is commonly installed in custom locations. Use Browse to select the forms folder "
-            "used for the selected radio."
+            "Folder containing MCF form definitions. Built-in FIO Spotter uses these files to compose and decode Spotter forms."
         )
-        js8_v.addWidget(build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path))
+        js8_v.addWidget(build_js8_path_row("MCF Forms Folder:", self.js8_forms_edit, self._choose_js8_forms_path))
 
         mapper_header = QHBoxLayout()
         mapper_header.setContentsMargins(0, 0, 0, 0)
@@ -5667,11 +5682,6 @@ class SettingsTab(QWidget):
         )
         js8_auth_note.setWordWrap(True)
         js8_auth_v.addWidget(js8_auth_note)
-        js8_auth_credit = QLabel("Compatible with JS8Spotter / Message Authenticator by Joseph D. Lyman, KF7MIX.")
-        js8_auth_credit.setToolTip("https://kf7mix.com/")
-        js8_auth_credit.setWordWrap(True)
-        js8_auth_v.addWidget(js8_auth_credit)
-
         js8_key_editor = QWidget()
         js8_key_form = QGridLayout(js8_key_editor)
         js8_key_form.setContentsMargins(8, 8, 8, 8)
@@ -7756,6 +7766,8 @@ class SettingsTab(QWidget):
     def _refresh_settings_mode_visibility(self) -> None:
         scope = self._current_settings_section_scope()
         radio_mode = scope != "global"
+        if hasattr(self, "settings_compact_header"):
+            self.settings_compact_header.setVisible(True)
         if hasattr(self, "configured_radios_group"):
             self.configured_radios_group.setVisible(radio_mode)
         if hasattr(self, "settings_global_tasks_label"):
@@ -8271,7 +8283,7 @@ class SettingsTab(QWidget):
         if js8call_path and not js8_directed:
             js8_issues.append("JS8Call DIRECTED.TXT path missing")
         if js8spotter_path and not js8_forms:
-            js8_issues.append("JS8Spotter forms path missing")
+            js8_issues.append("Spotter MCF forms folder missing")
         snapshot["js8call"] = self._build_section_health_entry(engaged=js8_engaged, issues=js8_issues)
 
         default_fldigi_checkin_dir = str(get_fldigi_checkin_dir())
@@ -9589,6 +9601,8 @@ class SettingsTab(QWidget):
         self.text_size_combo.setCurrentText(
             "Normal" if ui_text_size == "normal" else ("Medium" if ui_text_size == "medium" else "Large")
         )
+        if hasattr(self, "radio_apps_base_folder_edit"):
+            self.radio_apps_base_folder_edit.setText(str(data.get("radio_apps_base_folder", "") or "").strip())
 
         js8_host_txt = str(data.get("js8_host", "") or "").strip() or "127.0.0.1"
         self.js8_host_edit.setText(js8_host_txt)
@@ -10004,6 +10018,11 @@ class SettingsTab(QWidget):
         data["js8_prompt_interval"] = js8_prompt
         data["ui_theme"] = self.theme_combo.currentText().strip().lower()
         data["ui_text_size"] = normalize_ui_text_size(self.text_size_combo.currentText())
+        data["radio_apps_base_folder"] = (
+            self.radio_apps_base_folder_edit.text().strip()
+            if hasattr(self, "radio_apps_base_folder_edit")
+            else str(data.get("radio_apps_base_folder", "") or "").strip()
+        )
 
         host_val = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
         if not host_val:
@@ -12963,7 +12982,7 @@ class SettingsTab(QWidget):
             ("flmsg", "FLMsg"),
             ("flamp", "FLAmp"),
             ("js8call", "JS8Call"),
-            ("js8spotter", "JS8Spotter"),
+            ("js8spotter", "FIO Spotter"),
             ("commstat", "CommStat"),
             ("varac", "VarAC"),
         )
@@ -13545,7 +13564,7 @@ class SettingsTab(QWidget):
         if self._radio_software_enabled(profile, "js8call"):
             software.append("JS8Call")
         if self._radio_software_enabled(profile, "js8spotter"):
-            software.append("JS8Spotter")
+            software.append("FIO Spotter")
         if self._radio_software_enabled(profile, "commstat"):
             software.append("CommStat")
         if self._radio_software_enabled(profile, "varac"):
@@ -15115,7 +15134,7 @@ class SettingsTab(QWidget):
         role_labels = [
             ("fast_light", "FLRig / FLDigi (Fast Light)"),
             ("js8call", "JS8Call"),
-            ("js8spotter", "JS8Spotter"),
+            ("js8spotter", "FIO Spotter"),
             ("varac", "VarAC"),
             ("flamp", "FLAMP"),
             ("flmsg", "FLMsg"),
@@ -18133,6 +18152,8 @@ class SettingsTab(QWidget):
         dlg_title = self._device_profile_dialog_title(existing)
         dlg.setWindowTitle(dlg_title)
         dlg.setAccessibleName(dlg_title)
+        dlg.setSizeGripEnabled(True)
+        dlg.setMinimumSize(640, 520)
         dlg.resize(760, 720)
         layout = QVBoxLayout(dlg)
         intro = QLabel(self._device_profile_dialog_intro(existing))
@@ -18247,6 +18268,47 @@ class SettingsTab(QWidget):
             body_layout.addWidget(group)
             return group, form_layout
 
+        guided_wizard_step_id = "radio"
+        guided_wizard_steps: Tuple[Tuple[str, str], ...] = guided_setup_wizard_view("radio").steps
+        guided_wizard_group = QGroupBox("Guided Setup")
+        guided_wizard_group.setObjectName("guidedSetupWizard")
+        guided_wizard_layout = QVBoxLayout(guided_wizard_group)
+        guided_wizard_layout.setContentsMargins(10, 8, 10, 8)
+        guided_wizard_layout.setSpacing(8)
+        guided_wizard_buttons_row = QGridLayout()
+        guided_wizard_buttons_row.setContentsMargins(0, 0, 0, 0)
+        guided_wizard_buttons_row.setHorizontalSpacing(6)
+        guided_wizard_buttons_row.setVerticalSpacing(6)
+        guided_wizard_buttons: Dict[str, QPushButton] = {}
+        for idx, (step_id, label) in enumerate(guided_wizard_steps, start=1):
+            btn = QPushButton(f"{idx}. {label}")
+            btn.setObjectName(f"guidedWizardStep_{step_id}")
+            btn.setCheckable(True)
+            btn.setToolTip(f"Show the {label} setup step.")
+            btn.setMinimumWidth(120)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            guided_wizard_buttons[step_id] = btn
+            guided_wizard_buttons_row.addWidget(btn, (idx - 1) // 3, (idx - 1) % 3)
+        for col in range(3):
+            guided_wizard_buttons_row.setColumnStretch(col, 1)
+        guided_wizard_layout.addLayout(guided_wizard_buttons_row)
+        guided_wizard_detail_label = QLabel("Start with the radio model and setup type.")
+        guided_wizard_detail_label.setObjectName("guidedWizardDetail")
+        guided_wizard_detail_label.setWordWrap(True)
+        guided_wizard_layout.addWidget(guided_wizard_detail_label)
+        guided_wizard_nav_row = QHBoxLayout()
+        guided_wizard_nav_row.setContentsMargins(0, 0, 0, 0)
+        guided_wizard_nav_row.setSpacing(8)
+        guided_wizard_back_btn = QPushButton("Back")
+        guided_wizard_back_btn.setObjectName("guidedWizardBack")
+        guided_wizard_next_btn = QPushButton("Next")
+        guided_wizard_next_btn.setObjectName("guidedWizardNext")
+        guided_wizard_nav_row.addStretch(1)
+        guided_wizard_nav_row.addWidget(guided_wizard_back_btn)
+        guided_wizard_nav_row.addWidget(guided_wizard_next_btn)
+        guided_wizard_layout.addLayout(guided_wizard_nav_row)
+        body_layout.addWidget(guided_wizard_group)
+
         readiness_card = QFrame()
         readiness_card.setFrameShape(QFrame.StyledPanel)
         readiness_card_layout = QVBoxLayout(readiness_card)
@@ -18287,6 +18349,56 @@ class SettingsTab(QWidget):
             "Connection Details",
             "Only the fields that matter for the selected role, backend, and software are shown.",
         )
+        connection_status_label = QLabel()
+        connection_status_label.setObjectName("guidedConnectionStatus")
+        connection_status_label.setWordWrap(True)
+        _add_full_width_row(connection_form, connection_status_label)
+        schedule_group, schedule_form = _make_section(
+            "Schedule Assignment",
+            "Choose the plan this radio should follow after the radio profile has been saved.",
+        )
+        schedule_status_label = QLabel()
+        schedule_status_label.setObjectName("guidedScheduleAssignmentStatus")
+        schedule_status_label.setWordWrap(True)
+        schedule_status_label.setText(
+            "Schedule assignment is the next step after saving this radio. Assigning a plan runs RF Guard before the radio follows it."
+        )
+        _add_full_width_row(schedule_form, schedule_status_label)
+        schedule_plan_combo = QComboBox()
+        schedule_plan_combo.setObjectName("guidedSchedulePlanCombo")
+        _configure_combo_width(schedule_plan_combo, minimum=320)
+        _add_form_row(
+            schedule_form,
+            "Frequency Plan:",
+            schedule_plan_combo,
+            "Optional. Choose the plan this radio should follow after save, or assign it later in Radio Settings.",
+        )
+        schedule_open_plan_manager_chk = QCheckBox("Open Plan Manager after saving")
+        schedule_open_plan_manager_chk.setObjectName("guidedScheduleOpenPlanManager")
+        schedule_open_plan_manager_chk.setToolTip(
+            "Assign Plan... Use this when you still need to build a Daily, No Nets, Net, or SOP-based Frequency Plan for this radio."
+        )
+        _add_full_width_row(schedule_form, schedule_open_plan_manager_chk)
+        guided_initial_frequency_plan_id = 0
+        if existing:
+            try:
+                assignment = self.multi_radio_store.get_effective_assigned_plan_for_device(
+                    int(existing.get("id", 0) or 0)
+                )
+                guided_initial_frequency_plan_id = int((assignment or {}).get("frequency_plan_id", 0) or 0)
+            except Exception:
+                guided_initial_frequency_plan_id = 0
+        guided_schedule_plan_combo_loaded = False
+        guided_schedule_plan_count = 0
+        save_review_group, save_review_form = _make_section(
+            "Save Review",
+            "Review exactly what FIO will save for this radio profile before applying changes.",
+        )
+        save_review_label = QLabel()
+        save_review_label.setObjectName("guidedSaveReview")
+        save_review_label.setWordWrap(True)
+        save_review_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        _add_full_width_row(save_review_form, save_review_label)
         launch_group, launch_form = _make_section(
             "Launch and Support",
             "Launch settings are optional, but they help FreqInOut guide startup behavior and readiness more accurately.",
@@ -18372,12 +18484,12 @@ class SettingsTab(QWidget):
         setup_type_combo.setObjectName("guidedSetupType")
         setup_type_combo.addItem("Choose setup type...", "")
         setup_type_combo.addItem("TriMode - FastLight/JS8Call/VarAC", LANE_TRI_MODE)
+        setup_type_combo.addItem("Custom software mix", "custom")
         setup_type_combo.addItem("JS8Call only", LANE_JS8_ONLY)
         setup_type_combo.addItem("Fast Light: FLDigi / FLMsg / FLAmp", LANE_FAST_LIGHT)
         setup_type_combo.addItem("VarAC only", LANE_VARAC)
         setup_type_combo.addItem("VarAC Cluster / BBS", LANE_VARAC_CLUSTER)
         setup_type_combo.addItem("Receive-only SDR", LANE_SDR_OBSERVER)
-        setup_type_combo.addItem("Custom software mix", "custom")
         _configure_combo_width(setup_type_combo, minimum=320)
         _add_form_row(
             identity_form,
@@ -18395,7 +18507,10 @@ class SettingsTab(QWidget):
         use_flmsg_chk = QCheckBox("FLMsg")
         use_flamp_chk = QCheckBox("FLAmp")
         use_js8call_chk = QCheckBox("JS8Call")
-        use_js8spotter_chk = QCheckBox("JS8Spotter")
+        use_js8spotter_chk = QCheckBox("FIO Spotter")
+        use_js8spotter_chk.setToolTip(
+            "Use built-in FIO Spotter compose/decode workflows. External JS8Spotter app launch is optional."
+        )
         use_commstat_chk = QCheckBox("CommStat")
         use_varac_chk = QCheckBox("VarAC")
         software_row.addWidget(use_flrig_chk, 0, 0)
@@ -18418,6 +18533,27 @@ class SettingsTab(QWidget):
         software_hint_label = QLabel()
         software_hint_label.setWordWrap(True)
         _add_full_width_row(software_form, software_hint_label)
+
+        radio_apps_base_edit = QLineEdit(str(self.settings.get("radio_apps_base_folder", "") or ""))
+        radio_apps_base_edit.setObjectName("guidedRadioAppsBaseFolder")
+        radio_apps_base_edit.setPlaceholderText("Optional folder where radio apps are installed")
+        radio_apps_base_browse_btn = QPushButton("Browse")
+        radio_apps_base_browse_btn.setToolTip(
+            "Choose a common folder such as RadioTools/Programs that contains external radio apps."
+        )
+        radio_apps_base_row = QHBoxLayout()
+        radio_apps_base_row.setContentsMargins(0, 0, 0, 0)
+        radio_apps_base_row.setSpacing(8)
+        radio_apps_base_row.addWidget(radio_apps_base_edit, 1)
+        radio_apps_base_row.addWidget(radio_apps_base_browse_btn)
+        radio_apps_base_wrap = QWidget()
+        radio_apps_base_wrap.setLayout(radio_apps_base_row)
+        _add_form_row(
+            software_form,
+            "Radio Apps Base Folder:",
+            radio_apps_base_wrap,
+            "Optional. Point FIO at the common folder where tools like external JS8Spotter, CommStat, or VarAC are installed.",
+        )
 
         configure_auto_wrap = QWidget()
         configure_auto_row = QHBoxLayout(configure_auto_wrap)
@@ -18482,7 +18618,7 @@ class SettingsTab(QWidget):
         app_setup_plan_label.setWordWrap(True)
         app_setup_plan_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         app_setup_plan_layout.addWidget(app_setup_plan_label)
-        _add_full_width_row(software_form, app_setup_plan_group)
+        guided_wizard_layout.addWidget(app_setup_plan_group)
 
         app_choice_group = QGroupBox("Choose Detected Apps")
         app_choice_group.setVisible(False)
@@ -18495,7 +18631,7 @@ class SettingsTab(QWidget):
             ("flmsg", "Which FLMsg belongs to this radio?"),
             ("flamp", "Which FLAmp belongs to this radio?"),
             ("js8call", "Which JS8Call belongs to this radio?"),
-            ("js8spotter", "Which JS8Spotter belongs to this radio?"),
+            ("js8spotter", "Which external JS8Spotter app belongs to this radio?"),
             ("commstat", "Which CommStat belongs to this radio?"),
             ("varac", "Which VarAC belongs to this radio?"),
         ]
@@ -18611,10 +18747,10 @@ class SettingsTab(QWidget):
         _add_form_row(connection_form, "DIRECTED.TXT:", js8_directed_edit, "Optional DIRECTED.TXT path associated with this radio's JS8 setup.")
 
         js8_forms_edit = QLineEdit(str((existing or {}).get("js8_forms_path", "") or ""))
-        _add_form_row(connection_form, "JS8 Forms Path:", js8_forms_edit, "Optional JS8 forms / inbox path associated with this radio.")
+        _add_form_row(connection_form, "MCF Forms Folder:", js8_forms_edit, "MCF form definitions used by built-in FIO Spotter compose and decode workflows.")
 
         js8spotter_launch_edit = QLineEdit(str((existing or {}).get("spotter_launch_path", "") or ""))
-        _add_form_row(connection_form, "JS8Spotter App:", js8spotter_launch_edit, "Optional JS8Spotter launch path for this radio.")
+        _add_form_row(connection_form, "External JS8Spotter App:", js8spotter_launch_edit, "Optional. Built-in FIO Spotter does not require the separate JS8Spotter application.")
 
         commstat_launch_edit = QLineEdit(str((existing or {}).get("commstat_launch_path", "") or ""))
         _add_form_row(connection_form, "CommStat App:", commstat_launch_edit, "Optional CommStat launch path for this radio.")
@@ -18978,6 +19114,14 @@ class SettingsTab(QWidget):
                 )
             _update_app_choice_visibility()
             _update_dialog_readiness()
+
+        def _persist_radio_apps_base_folder() -> None:
+            value = radio_apps_base_edit.text().strip()
+            try:
+                if str(self.settings.get("radio_apps_base_folder", "") or "").strip() != value:
+                    self.settings.set("radio_apps_base_folder", value)
+            except Exception:
+                log.debug("Unable to save Radio Apps Base Folder during guided setup.", exc_info=True)
 
         def _update_app_choice_visibility() -> None:
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
@@ -19504,16 +19648,91 @@ class SettingsTab(QWidget):
                 if step_id not in seen:
                     widgets[0].setVisible(False)
 
+        def _set_guided_step_override(step_id: str, *, status: str, title: str = "", detail: str = "") -> None:
+            widgets = guided_step_widgets.get(step_id)
+            if widgets is None:
+                return
+            theme = resolve_theme(self.settings)
+            text_color = theme.get("text", "#1C1F21")
+            muted_color = theme.get("text_muted", text_color)
+            status_colors = {
+                "ready": theme.get("success", "#2E7D32"),
+                "review": theme.get("warning", "#C99700"),
+                "backup": theme.get("warning", "#C99700"),
+                "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
+            }
+            status_key = str(status or "ready").strip().lower()
+            accent = QColor(status_colors.get(status_key, status_colors["ready"]))
+            bg = QColor(accent)
+            bg.setAlpha(22)
+            border = QColor(accent)
+            border.setAlpha(130)
+            frame, status_label, title_label, detail_label = widgets
+            frame.setVisible(True)
+            frame.setToolTip(detail)
+            frame.setStyleSheet(
+                "QFrame {"
+                f" background-color: {bg.name(QColor.HexArgb)};"
+                f" border: 1px solid {border.name(QColor.HexArgb)};"
+                " border-radius: 6px;"
+                "}"
+                f" QLabel {{ color: {text_color}; border: none; background: transparent; }}"
+                f" QLabel#{detail_label.objectName()} {{ color: {muted_color}; }}"
+            )
+            status_label.setText(_guided_step_status_label(status_key))
+            if title:
+                title_label.setText(title)
+            if detail:
+                detail_label.setText(detail)
+
+        def _refresh_guided_schedule_step_card() -> None:
+            policy = guided_setup_capability_policy(_current_guided_blueprint())
+            if not policy.scheduler_assignment_allowed:
+                _set_guided_step_override(
+                    "schedule",
+                    status="ready",
+                    title="Schedule",
+                    detail="FIO will monitor/import this radio; VarAC or the external app keeps its own frequency schedule.",
+                )
+                return
+            selected_plan = _selected_guided_schedule_plan_name()
+            if selected_plan:
+                _set_guided_step_override(
+                    "schedule",
+                    status="ready",
+                    title="Schedule",
+                    detail=f"Selected plan: {selected_plan}. FIO assigns it after save with RF Guard.",
+                )
+                return
+            if guided_schedule_plan_count <= 0 or schedule_open_plan_manager_chk.isChecked():
+                _set_guided_step_override(
+                    "schedule",
+                    status="needs_input",
+                    title="Schedule",
+                    detail="Plan Manager will open after save so this radio can get its first Frequency Plan.",
+                )
+                return
+            _set_guided_step_override(
+                "schedule",
+                status="needs_input",
+                title="Schedule",
+                detail="Choose the Frequency Plan this radio should follow, or assign one later.",
+            )
+
         def _update_guided_app_setup_plan_review() -> None:
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
+                schedule_status_label.setText(
+                    "Observer and receive-only profiles do not need a FIO-controlled Frequency Plan."
+                )
                 return
             enabled_apps = _guided_plan_enabled_apps()
             varac_selected = use_varac_chk.isChecked()
             if not enabled_apps and not varac_selected:
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
+                schedule_status_label.setText("Choose the setup type and software before assigning a Frequency Plan.")
                 return
             radio_name = name_edit.text().strip() or "Radio"
             proposal = RadioInstanceProposal(
@@ -19549,24 +19768,297 @@ class SettingsTab(QWidget):
                 config_root=get_config_dir(),
                 app_paths=app_paths,
             )
-            preview = build_guided_setup_preview(blueprint, plan)
             guided_next_action_label.setText(guided_setup_next_action_text(blueprint, plan))
             _update_guided_step_widgets(blueprint, plan)
             flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
-            guidance_lines = guided_setup_operator_guidance_lines(blueprint, plan)
-            label_lines: List[str] = []
-            if guidance_lines:
-                label_lines.extend(guidance_lines)
-            if preview.lines:
-                label_lines.extend(("", *preview.lines))
-            app_setup_plan_label.setText("\n".join(label_lines))
+            schedule_item = next(
+                (item for item in guided_setup_flow_items(blueprint, plan) if str(item.item_id or "") == "schedule"),
+                None,
+            )
+            if schedule_item is not None:
+                schedule_status_label.setText(str(schedule_item.detail or "").strip())
+            app_setup_plan_label.setText("")
             app_setup_plan_label.setToolTip("\n".join(flow_lines))
-            app_setup_plan_group.setVisible(bool(label_lines))
+            app_setup_plan_label.setVisible(False)
+            app_setup_plan_group.setToolTip("\n".join(flow_lines))
+            app_setup_plan_group.setVisible(True)
+            _refresh_guided_schedule_step_card()
+
+        def _selected_guided_schedule_plan_name() -> str:
+            if not hasattr(schedule_plan_combo, "currentData"):
+                return ""
+            try:
+                plan_id = int(schedule_plan_combo.currentData() or 0)
+            except Exception:
+                plan_id = 0
+            if plan_id <= 0:
+                return ""
+            return str(schedule_plan_combo.currentText() or "").strip()
+
+        def _refresh_guided_schedule_plan_combo() -> None:
+            nonlocal guided_schedule_plan_combo_loaded, guided_schedule_plan_count
+            current_data = schedule_plan_combo.currentData()
+            try:
+                current_plan_id = int(current_data or 0)
+            except Exception:
+                current_plan_id = 0
+            if not guided_schedule_plan_combo_loaded and current_plan_id <= 0:
+                current_plan_id = int(guided_initial_frequency_plan_id or 0)
+            schedule_plan_combo.blockSignals(True)
+            schedule_plan_combo.clear()
+            schedule_plan_combo.addItem("Assign later", 0)
+            try:
+                plans = list(self.multi_radio_store.list_frequency_plans())
+            except Exception:
+                log.debug("Failed loading Frequency Plans for guided radio setup.", exc_info=True)
+                plans = []
+            loaded_count = 0
+            for row in plans:
+                if not isinstance(row, dict):
+                    continue
+                if int(row.get("enabled", 1) or 0) != 1:
+                    continue
+                if str(row.get("category") or "").strip().lower() in SOURCE_ONLY_FREQUENCY_PLAN_CATEGORIES:
+                    continue
+                label = str(row.get("name", "") or "Frequency Plan").strip()
+                if not label:
+                    continue
+                if int(row.get("receive_only", 0) or 0) == 1:
+                    label = f"{label} (receive-only)"
+                schedule_plan_combo.addItem(label, int(row.get("id", 0) or 0))
+                loaded_count += 1
+            if current_plan_id > 0:
+                idx = schedule_plan_combo.findData(current_plan_id)
+                if idx >= 0:
+                    schedule_plan_combo.setCurrentIndex(idx)
+            schedule_plan_combo.blockSignals(False)
+            guided_schedule_plan_combo_loaded = True
+            guided_schedule_plan_count = loaded_count
+            _configure_combo_width(schedule_plan_combo, minimum=320)
+            if loaded_count <= 0 and not schedule_open_plan_manager_chk.isChecked():
+                schedule_open_plan_manager_chk.setChecked(True)
+
+        def _update_guided_schedule_assignment_status() -> None:
+            policy = guided_setup_capability_policy(_current_guided_blueprint())
+            if not policy.scheduler_assignment_allowed:
+                schedule_status_label.setText("This setup does not use FIO-controlled schedule or QSY controls.")
+                return
+            selected_plan = _selected_guided_schedule_plan_name()
+            if selected_plan:
+                schedule_status_label.setText(
+                    f"After saving, FIO will assign '{selected_plan}' to this radio with RF Guard."
+                )
+            elif guided_schedule_plan_count <= 0:
+                schedule_status_label.setText(
+                    "No Frequency Plans exist yet. Save this radio, then Plan Manager can open so you can build a Daily with No Nets, Net, or SOP-based plan."
+                )
+            else:
+                schedule_status_label.setText(
+                    "No Frequency Plan selected. Save the radio now, then assign a plan later from Radio Settings."
+                )
+            if app_setup_plan_group.isVisible():
+                _refresh_guided_schedule_step_card()
+
+        def _guided_wizard_index(step_id: str) -> int:
+            for idx, (candidate, _label) in enumerate(guided_wizard_steps):
+                if candidate == step_id:
+                    return idx
+            return 0
+
+        def _guided_wizard_step_label(index: int) -> str:
+            try:
+                return str(guided_setup_wizard_view(guided_wizard_step_id).steps[int(index)][1] or "").strip()
+            except Exception:
+                return ""
+
+        def _set_guided_wizard_step(step_id: str) -> None:
+            nonlocal guided_wizard_step_id
+            candidate = str(step_id or "").strip()
+            valid_steps = {item[0] for item in guided_wizard_steps}
+            guided_wizard_step_id = candidate if candidate in valid_steps else "radio"
+            _update_dialog_visibility()
+
+        def _move_guided_wizard(delta: int) -> None:
+            idx = _guided_wizard_index(guided_wizard_step_id)
+            next_idx = max(0, min(len(guided_wizard_steps) - 1, idx + int(delta)))
+            _set_guided_wizard_step(guided_wizard_steps[next_idx][0])
+
+        def _update_guided_save_review() -> None:
+            def _compact_value(value: str, *, missing: str = "not set") -> str:
+                text = str(value or "").strip()
+                return text if text else missing
+
+            def _path_summary(label: str, value: str) -> str:
+                text = str(value or "").strip()
+                if not text:
+                    return f"{label}: not set"
+                path = Path(text).expanduser()
+                try:
+                    home = Path.home()
+                    if path.is_absolute():
+                        text = str(path).replace(str(home), "~", 1) if str(path).startswith(str(home)) else str(path)
+                except Exception:
+                    pass
+                return f"{label}: {text}"
+
+            def _endpoint_summary(label: str, host: str, port: str) -> str:
+                host_text = str(host or "").strip() or "127.0.0.1"
+                port_text = str(port or "").strip()
+                return f"{label}: {host_text}:{port_text}" if port_text else f"{label}: port not set"
+
+            model_payload = _current_radio_model_payload()
+            radio_label = (
+                name_edit.text().strip()
+                or str(model_payload.get("display_name", "") or "").strip()
+                or str(model_payload.get("model_name", "") or "").strip()
+                or "Unnamed radio"
+            )
+            setup_label = setup_type_combo.currentText().strip()
+            if not str(setup_type_combo.currentData() or "").strip():
+                setup_label = "Setup type not selected"
+            app_labels = []
+            if use_flrig_chk.isChecked():
+                app_labels.append("FLRig")
+            if use_fldigi_chk.isChecked():
+                app_labels.append("FLDigi")
+            if use_flmsg_chk.isChecked():
+                app_labels.append("FLMsg")
+            if use_flamp_chk.isChecked():
+                app_labels.append("FLAmp")
+            if use_js8call_chk.isChecked():
+                app_labels.append("JS8Call")
+            if use_js8spotter_chk.isChecked():
+                if js8spotter_launch_edit.text().strip():
+                    app_labels.append("FIO Spotter + external JS8Spotter")
+                else:
+                    app_labels.append("FIO Spotter")
+            if use_commstat_chk.isChecked():
+                app_labels.append("CommStat")
+            if use_varac_chk.isChecked():
+                app_labels.append("VarAC")
+            backend_value = str(backend_combo.currentData() or "manual").strip().lower()
+            backend_label = self._device_backend_label(backend_value)
+            endpoint_lines: List[str] = []
+            if backend_value == "flrig" or use_flrig_chk.isChecked():
+                endpoint_lines.append(_endpoint_summary("FLRig", flrig_host_edit.text(), flrig_port_edit.text()))
+            if backend_value == "rigctld":
+                endpoint_lines.append(_endpoint_summary("RigCtlD", rig_host_edit.text(), rig_port_edit.text()))
+            if use_fldigi_chk.isChecked():
+                endpoint_lines.append(_endpoint_summary("FLDigi", fldigi_host_edit.text(), fldigi_port_edit.text()))
+            if backend_value == "js8call" or use_js8call_chk.isChecked():
+                endpoint_lines.append(_endpoint_summary("JS8Call", js8_host_edit.text(), js8_port_edit.text()))
+            if str(device_class_combo.currentData() or "").strip().lower() == "observer":
+                endpoint_lines.append(_endpoint_summary("Observer SDR", sdr_host_edit.text(), sdr_port_edit.text()))
+            if use_varac_chk.isChecked():
+                endpoint_lines.append("VarAC monitor/import: FIO will not control VarAC frequency")
+            if not endpoint_lines:
+                endpoint_lines.append("No app endpoint selected")
+            file_lines: List[str] = []
+            if use_js8call_chk.isChecked():
+                file_lines.append(_path_summary("JS8 profile", js8_profile_edit.text()))
+                file_lines.append(_path_summary("DIRECTED.TXT", js8_directed_edit.text()))
+            if use_js8spotter_chk.isChecked():
+                file_lines.append(_path_summary("MCF forms", js8_forms_edit.text()))
+                if js8spotter_launch_edit.text().strip():
+                    file_lines.append(_path_summary("External JS8Spotter", js8spotter_launch_edit.text()))
+            if use_commstat_chk.isChecked():
+                file_lines.append(_path_summary("CommStat app", commstat_launch_edit.text()))
+            if use_varac_chk.isChecked():
+                file_lines.append(_path_summary("VarAC install", varac_install_edit.text()))
+                file_lines.append(_path_summary("VarAC DB", varac_db_edit.text()))
+                file_lines.append(_path_summary("VarAC incoming", varac_incoming_edit.text()))
+                file_lines.append(_path_summary("VarAC outbox", varac_outbox_edit.text()))
+                file_lines.append(_path_summary("VarAC BBS", varac_bbs_edit.text()))
+                file_lines.append(_path_summary("VarAC BBS archive", varac_bbs_archive_edit.text()))
+            if radio_apps_base_edit.text().strip():
+                file_lines.append(_path_summary("Radio Apps Base Folder", radio_apps_base_edit.text()))
+            if not file_lines:
+                file_lines.append("No message/forms paths selected")
+
+            policy = guided_setup_capability_policy(_current_guided_blueprint())
+            if policy.scheduler_assignment_allowed:
+                selected_plan = _selected_guided_schedule_plan_name()
+                if selected_plan:
+                    schedule_line = f"Assign '{selected_plan}' after save with RF Guard."
+                elif schedule_open_plan_manager_chk.isChecked():
+                    schedule_line = "Open Plan Manager after save so a Frequency Plan can be built and assigned."
+                else:
+                    schedule_line = "No Frequency Plan selected; assign one later in Radio Settings."
+            else:
+                schedule_line = "No FIO-controlled schedule/QSY controls will be saved for this radio."
+
+            if not policy.fio_frequency_control_allowed:
+                frequency_line = "Monitor/import only. FIO will not offer scheduler or QSY controls."
+            elif backend_value in {"manual", "none"}:
+                frequency_line = "Manual/external control. FIO will not tune this radio until a control endpoint is selected."
+            else:
+                frequency_line = f"{backend_label} controls scheduler and QSY actions."
+
+            enabled_text = "Enabled" if int((existing or {}).get("enabled", 1) or 1) == 1 else "Not enabled"
+            active_text = "Active now" if int((existing or {}).get("runtime_active", 0) or 0) == 1 else "Inactive until you choose Use Radio"
+            launch_line = "Launch Control enabled" if launch_enabled_chk.isChecked() else "Launch Control off"
+            launch_path = str(launch_path_edit.text().strip() or varac_launch_cmd_edit.text().strip() or "")
+            if launch_path:
+                launch_line = f"{launch_line}; {_compact_value(launch_path)}"
+
+            review_lines = [
+                "What FIO will save:",
+                f"Radio: {radio_label}",
+                f"Setup: {setup_label}",
+                f"Use in FIO: {enabled_text}; {active_text}",
+                "Software: " + (", ".join(app_labels) if app_labels else "Monitor only"),
+                f"Frequency Control: {frequency_line}",
+                "Endpoints: " + "; ".join(endpoint_lines),
+                "Message/Forms Files: " + "; ".join(file_lines),
+                "Schedule: " + schedule_line,
+                "Launch: " + launch_line,
+            ]
+            save_review_label.setText("\n".join(review_lines))
+
+        def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
+            theme = resolve_theme(self.settings)
+            wizard_view = guided_setup_wizard_view(guided_wizard_step_id, connection_visible=connection_visible)
+            current_idx = wizard_view.current_index
+            for step_id, btn in guided_wizard_buttons.items():
+                checked = step_id == guided_wizard_step_id
+                btn.setChecked(checked)
+                btn.setStyleSheet(button_style("primary" if checked else "secondary", theme))
+            guided_wizard_back_btn.setEnabled(wizard_view.can_go_back)
+            guided_wizard_next_btn.setEnabled(wizard_view.can_go_next)
+            guided_wizard_back_btn.setStyleSheet(button_style("secondary", theme))
+            guided_wizard_next_btn.setStyleSheet(button_style("primary", theme))
+            previous_label = wizard_view.previous_label
+            next_label = wizard_view.next_label
+            guided_wizard_back_btn.setText(f"Back: {previous_label}" if previous_label else "Back")
+            guided_wizard_next_btn.setText(f"Next: {next_label}" if next_label else "Next")
+            guided_wizard_next_btn.setToolTip(
+                f"Continue to {next_label} setup." if next_label else "This is the final guided setup step."
+            )
+            guided_wizard_back_btn.setToolTip(
+                f"Return to {previous_label} setup." if previous_label else "This is the first guided setup step."
+            )
+
+            identity_group.setVisible(guided_wizard_step_id == "radio")
+            software_group.setVisible(guided_wizard_step_id == "software")
+            connection_group.setVisible(guided_wizard_step_id == "connection")
+            schedule_group.setVisible(guided_wizard_step_id == "schedule")
+            save_review_group.setVisible(guided_wizard_step_id == "review")
+            launch_group.setVisible(guided_wizard_step_id == "review")
+            optional_toggle.setVisible(guided_wizard_step_id == "review")
+            optional_body.setVisible(guided_wizard_step_id == "review" and bool(optional_toggle.isChecked()))
+            if guided_wizard_step_id != "review":
+                readiness_card.setVisible(False)
+            else:
+                _update_dialog_readiness()
+
+            guided_wizard_detail_label.setText(wizard_view.detail)
+            _update_guided_save_review()
 
         def _apply_dialog_autoconfigure() -> None:
             filled: List[str] = []
             preserved: List[str] = []
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
+            _persist_radio_apps_base_folder()
             install_candidates: Sequence[Any] = ()
             fast_results: Dict[str, PathDetectionResult] = {}
             js8_results: Dict[str, PathDetectionResult] = {}
@@ -19630,7 +20122,7 @@ class SettingsTab(QWidget):
                 "js8_install_path": (js8_install_edit, "JS8Call app"),
                 "js8_directed_path": (js8_directed_edit, "JS8Call DIRECTED.TXT"),
                 "js8_profile_path": (js8_profile_edit, "JS8 profile folder"),
-                "spotter_launch_path": (js8spotter_launch_edit, "JS8Spotter app"),
+                "spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app"),
                 "commstat_launch_path": (commstat_launch_edit, "CommStat app"),
                 "varac_install_path": (varac_install_edit, "VarAC install"),
                 "varac_db_path": (varac_db_edit, "VarAC DB"),
@@ -19653,6 +20145,8 @@ class SettingsTab(QWidget):
                 review.append("Kept existing: " + ", ".join(preserved[:6]) + ("..." if len(preserved) > 6 else ""))
             if not review:
                 review.append("No blank fields could be filled from the current scan.")
+            if radio_apps_base_edit.text().strip():
+                review.append("Radio Apps Base Folder used for app detection.")
             status = (
                 f"Configure Automatically filled {len(filled)} field(s). Review before Save."
                 if filled
@@ -19665,11 +20159,15 @@ class SettingsTab(QWidget):
             configure_auto_status.setToolTip("\n".join(review))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
-            _update_dialog_visibility()
+            _set_guided_wizard_step("connection")
 
         configure_auto_btn.clicked.connect(_apply_dialog_autoconfigure)
 
         def _update_dialog_readiness() -> None:
+            if guided_wizard_step_id != "review":
+                readiness_card.setVisible(False)
+                return
+
             def _set_readiness_card_style(level: str) -> None:
                 theme = resolve_theme(self.settings)
                 level_key = (level or "info").strip().lower()
@@ -19807,12 +20305,14 @@ class SettingsTab(QWidget):
 
             if observer_mode:
                 _set_row_visible(software_wrap, False)
+                _set_row_visible(radio_apps_base_wrap, False)
                 _set_row_visible(configure_auto_wrap, False)
                 _set_row_visible(software_hint_label, False)
                 app_setup_plan_group.setVisible(False)
                 app_setup_plan_label.setText("")
             else:
                 _set_row_visible(software_wrap, visibility.software_choices)
+                _set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)
                 _set_row_visible(configure_auto_wrap, visibility.configure_automatically)
                 _set_row_visible(software_hint_label, True)
                 software_hint_label.setText(
@@ -19826,12 +20326,23 @@ class SettingsTab(QWidget):
                     _update_guided_app_setup_plan_review()
 
             role_hint_label.setText(guided_setup_role_hint(blueprint, visibility_state))
+            if visibility.connection_group:
+                connection_status_label.setText("Review the endpoint fields below for the selected software stack.")
+            else:
+                connection_status_label.setText("No FIO frequency-control endpoint is required for this setup type.")
             optional_body.setVisible(bool(optional_toggle.isChecked()))
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
+            assignment_allowed = guided_setup_capability_policy(blueprint).scheduler_assignment_allowed
+            _set_row_visible(schedule_plan_combo, assignment_allowed)
+            _set_row_visible(schedule_open_plan_manager_chk, assignment_allowed)
+            if assignment_allowed:
+                _refresh_guided_schedule_plan_combo()
+            _update_guided_schedule_assignment_status()
             _update_app_choice_visibility()
             _update_port_prompt_visibility()
             _update_dialog_readiness()
+            _apply_guided_wizard_visibility(visibility.connection_group)
 
         def _on_varac_state_changed(_state: int) -> None:
             if use_varac_chk.isChecked():
@@ -19855,6 +20366,10 @@ class SettingsTab(QWidget):
             _update_dialog_visibility()
 
         setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
+        for step_id, btn in guided_wizard_buttons.items():
+            btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
+        guided_wizard_back_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(-1))
+        guided_wizard_next_btn.clicked.connect(lambda _checked=False: _move_guided_wizard(1))
         backend_combo.currentIndexChanged.connect(_update_dialog_visibility)
         device_class_combo.currentIndexChanged.connect(_update_dialog_visibility)
         use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
@@ -19865,6 +20380,10 @@ class SettingsTab(QWidget):
         use_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
+        schedule_plan_combo.currentIndexChanged.connect(lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
+        schedule_open_plan_manager_chk.stateChanged.connect(
+            lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
+        )
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_radio_model_hint())
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_dialog_readiness())
         optional_toggle.toggled.connect(lambda _checked: _update_dialog_visibility())
@@ -19883,6 +20402,15 @@ class SettingsTab(QWidget):
             _update_dialog_readiness()
 
         refresh_catalog_btn.clicked.connect(_refresh_radio_catalog)
+
+        def _browse_radio_apps_base_folder() -> None:
+            start = radio_apps_base_edit.text().strip() or str(Path.home() / "RadioTools" / "Programs")
+            folder = QFileDialog.getExistingDirectory(self, "Select Radio Apps Base Folder", start)
+            if folder:
+                radio_apps_base_edit.setText(folder)
+                _update_dialog_readiness()
+
+        radio_apps_base_browse_btn.clicked.connect(_browse_radio_apps_base_folder)
 
         def _browse_launch_path() -> None:
             start = launch_path_edit.text().strip()
@@ -19913,6 +20441,7 @@ class SettingsTab(QWidget):
             js8_forms_edit,
             js8spotter_launch_edit,
             commstat_launch_edit,
+            radio_apps_base_edit,
             varac_install_edit,
             varac_db_edit,
             varac_ini_edit,
@@ -19970,65 +20499,22 @@ class SettingsTab(QWidget):
             if not name:
                 QMessageBox.warning(self, "Validation", "Radio name is required.")
                 return
-            out.update(
-                normalize_guided_radio_profile_payload({
-                    "id": (existing or {}).get("id"),
-                    "name": name,
-                    "radio_catalog_id": str(model_choice.get("catalog_id", "") or ""),
-                    "radio_manufacturer": str(model_choice.get("manufacturer", "") or ""),
-                    "radio_model": str(model_choice.get("model_name", "") or ""),
-                    "device_class": str(device_class_combo.currentData() or "tx_rx"),
-                    "control_backend": str(backend_combo.currentData() or "flrig"),
-                    "deployment_mode": str(deploy_combo.currentData() or "full"),
-                    "use_flrig": bool(use_flrig_chk.isChecked()),
-                    "use_fldigi": bool(use_fldigi_chk.isChecked()),
-                    "use_flmsg": bool(use_flmsg_chk.isChecked()),
-                    "use_flamp": bool(use_flamp_chk.isChecked()),
-                    "use_js8call": bool(use_js8call_chk.isChecked()),
-                    "use_js8spotter": bool(use_js8spotter_chk.isChecked()),
-                    "use_commstat": bool(use_commstat_chk.isChecked()),
-                    "use_varac": bool(use_varac_chk.isChecked()),
-                    "rig_host": rig_host_edit.text().strip(),
-                    "rig_port": rig_port_edit.text().strip(),
-                    "flrig_host": flrig_host_edit.text().strip(),
-                    "flrig_port": flrig_port_edit.text().strip(),
-                    "flrig_path": flrig_path_edit.text().strip(),
-                    "fldigi_host": fldigi_host_edit.text().strip(),
-                    "fldigi_port": fldigi_port_edit.text().strip(),
-                    "fldigi_path": fldigi_path_edit.text().strip(),
-                    "flmsg_path": flmsg_path_edit.text().strip(),
-                    "flamp_path": flamp_path_edit.text().strip(),
-                    "js8_host": js8_host_edit.text().strip(),
-                    "js8_port": js8_port_edit.text().strip(),
-                    "js8_install_path": js8_install_edit.text().strip(),
-                    "js8_profile_path": js8_profile_edit.text().strip(),
-                    "js8_directed_path": js8_directed_edit.text().strip(),
-                    "js8_forms_path": js8_forms_edit.text().strip(),
-                    "spotter_launch_path": js8spotter_launch_edit.text().strip(),
-                    "commstat_launch_path": commstat_launch_edit.text().strip(),
-                    "varac_install_path": varac_install_edit.text().strip(),
-                    "varac_db_path": varac_db_edit.text().strip(),
-                    "varac_ini_path": varac_ini_edit.text().strip(),
-                    "varac_incoming_path": varac_incoming_edit.text().strip(),
-                    "varac_outbox_dir": varac_outbox_edit.text().strip(),
-                    "varac_bbs_dir": varac_bbs_edit.text().strip(),
-                    "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
-                    "launch_cmd": varac_launch_cmd_edit.text().strip(),
-                    "launch_enabled": bool(launch_enabled_chk.isChecked()),
-                    "launch_path": launch_path_edit.text().strip(),
-                    "sdr_host": sdr_host_edit.text().strip(),
-                    "sdr_port": sdr_port_edit.text().strip(),
-                    "ptt_group": ptt_group_edit.text().strip(),
-                    "antenna_group": antenna_group_edit.text().strip(),
-                    "antenna_supported_bands": self._band_check_values(band_checks),
-                    "antenna_band_guard_mode": str(antenna_band_mode_combo.currentData() or "warn"),
-                    "band_overlap_guard_group": band_overlap_edit.text().strip(),
-                    "band_overlap_guard_mode": str(band_overlap_mode_combo.currentData() or "warn"),
-                    "frontend_group": frontend_group_edit.text().strip(),
-                    "amplifier_group": amplifier_group_edit.text().strip(),
-                    "notes": notes_edit.toPlainText().strip(),
-                })
-            )
+            _persist_radio_apps_base_folder()
+            payload = _draft_radio_profile()
+            payload["id"] = (existing or {}).get("id")
+            payload["name"] = name
+            out.update(normalize_guided_radio_profile_payload(payload))
+            try:
+                guided_plan_id = int(schedule_plan_combo.currentData() or 0)
+            except Exception:
+                guided_plan_id = 0
+            if guided_plan_id > 0 and guided_setup_capability_policy(_current_guided_blueprint()).scheduler_assignment_allowed:
+                out["guided_frequency_plan_id"] = guided_plan_id
+            elif (
+                schedule_open_plan_manager_chk.isChecked()
+                and guided_setup_capability_policy(_current_guided_blueprint()).scheduler_assignment_allowed
+            ):
+                out["guided_open_plan_manager_after_save"] = True
             dlg.accept()
 
         buttons.accepted.connect(_save)
@@ -20077,6 +20563,7 @@ class SettingsTab(QWidget):
                 pass
 
     def _persist_device_profile(self, values: Dict[str, Any], *, existing: Optional[Dict[str, Any]] = None) -> bool:
+        self._last_persisted_device_profile = None
         is_active_edit = bool(existing and int(existing.get("runtime_active", 0) or 0) == 1)
         is_primary_edit = bool(existing and int(existing.get("runtime_primary", 0) or 0) == 1)
         payload = dict(values)
@@ -20223,15 +20710,96 @@ class SettingsTab(QWidget):
             self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=True)
         else:
             self._refresh_multi_radio_tables()
+        self._last_persisted_device_profile = dict(saved)
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
         return True
+
+    def _assign_guided_frequency_plan_after_profile_save(self, device_profile_id: int, plan_id: int) -> bool:
+        try:
+            target_device_id = int(device_profile_id or 0)
+            target_plan_id = int(plan_id or 0)
+        except Exception:
+            return False
+        if target_device_id <= 0 or target_plan_id <= 0:
+            return False
+        try:
+            self.multi_radio_store.set_assigned_plan(
+                target_device_id,
+                target_plan_id,
+                assignment_state="active",
+                reason="Initial Frequency Plan selected during guided radio setup.",
+                ends_utc="",
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "RF Guard Blocked Schedule Assignment", str(exc))
+            return False
+        except Exception:
+            log.exception("Failed assigning guided Frequency Plan after radio save.")
+            QMessageBox.warning(
+                self,
+                "Schedule Assignment",
+                "The radio profile was saved, but FIO could not assign the selected Frequency Plan.",
+            )
+            return False
+        self._refresh_multi_radio_tables()
+        self._refresh_schedule_assignments_table(refresh_section_titles=False)
+        self._emit_device_profiles_changed()
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary="Assigned the selected Frequency Plan after guided radio setup.",
+            action_type="schedule_assignment",
+        )
+        return True
+
+    def _open_plan_manager_after_guided_profile_save(
+        self,
+        device_profile: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        try:
+            win = self.window()
+            screen_map = getattr(win, "_screen_index_by_label", {})
+            index = int(screen_map.get("FreqPlanner", -1))
+            if index < 0:
+                return False
+            set_screen = getattr(win, "_set_screen", None)
+            if callable(set_screen):
+                set_screen(index)
+                opened = True
+            else:
+                opened = False
+            stack = getattr(win, "stack", None)
+            if not opened and stack is not None:
+                stack.setCurrentIndex(index)
+                opened = True
+            if not opened:
+                return False
+            planner = getattr(win, "freq_planner_tab", None)
+            handoff = getattr(planner, "begin_guided_radio_plan_handoff", None)
+            if callable(handoff):
+                handoff(device_profile or {})
+            return True
+        except Exception:
+            log.debug("Failed opening Plan Manager after guided radio setup.", exc_info=True)
+        return False
 
     def _add_device_profile(self) -> None:
         created = self._open_device_profile_dialog(existing=None)
         if not created:
             return
-        self._persist_device_profile(created)
+        guided_plan_id = int(created.pop("guided_frequency_plan_id", 0) or 0)
+        open_plan_manager = bool(created.pop("guided_open_plan_manager_after_save", False))
+        if not self._persist_device_profile(created):
+            return
+        saved = getattr(self, "_last_persisted_device_profile", None) or {}
+        if guided_plan_id > 0:
+            self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
+        elif open_plan_manager:
+            self._open_plan_manager_after_guided_profile_save(saved)
 
     def _edit_device_profile(self) -> None:
         selected = self._selected_device_profiles()
@@ -20245,7 +20813,15 @@ class SettingsTab(QWidget):
         updated = self._open_device_profile_dialog(existing=existing)
         if not updated:
             return
-        self._persist_device_profile(updated, existing=existing)
+        guided_plan_id = int(updated.pop("guided_frequency_plan_id", 0) or 0)
+        open_plan_manager = bool(updated.pop("guided_open_plan_manager_after_save", False))
+        if not self._persist_device_profile(updated, existing=existing):
+            return
+        saved = getattr(self, "_last_persisted_device_profile", None) or {}
+        if guided_plan_id > 0:
+            self._assign_guided_frequency_plan_after_profile_save(int(saved.get("id", 0) or 0), guided_plan_id)
+        elif open_plan_manager:
+            self._open_plan_manager_after_guided_profile_save(saved)
 
     def _set_active_selected_device_profile(self) -> None:
         selected = self._selected_device_profiles()
@@ -21409,6 +21985,16 @@ class SettingsTab(QWidget):
             pass
 
     # ---------- RADIO PROGRAMS ---------- #
+
+    def _choose_radio_apps_base_folder(self) -> None:
+        start = ""
+        if hasattr(self, "radio_apps_base_folder_edit"):
+            start = self.radio_apps_base_folder_edit.text().strip()
+        if not start:
+            start = str(Path.home() / "RadioTools" / "Programs")
+        folder = QFileDialog.getExistingDirectory(self, "Select Radio Apps Base Folder", start)
+        if folder and hasattr(self, "radio_apps_base_folder_edit"):
+            self.radio_apps_base_folder_edit.setText(folder)
 
     def _choose_program_path(self, program_name: str):
         fn, _ = QFileDialog.getOpenFileName(self, f"Select {program_name} Executable")
@@ -25376,17 +25962,17 @@ class SettingsTab(QWidget):
 
     def _choose_js8_forms_path(self):
         """
-        Prompt for JS8Spotter forms folder (MCF###.txt files).
+        Prompt for MCF forms folder (MCF###.txt files).
         """
         fn = QFileDialog.getExistingDirectory(
             self,
-            "Select JS8Spotter forms folder",
+            "Select MCF forms folder",
             "",
         )
         if not fn:
             return
         self.js8_forms_edit.setText(fn)
-        log.info("JS8Spotter forms path staged for selected radio: %s", fn)
+        log.info("Spotter MCF forms folder staged for selected radio: %s", fn)
         self._refresh_spotter_form_mapper()
         self._mark_settings_dirty()
         self._refresh_section_titles()
