@@ -4071,17 +4071,17 @@ def test_launch_control_defaults_are_explicit_opt_in() -> None:
 def test_radio_profile_advanced_edit_wording_keeps_software_settings_inline() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 
-    assert 'self.edit_device_profile_btn = QPushButton("Edit Full Radio Form...")' in source
-    assert "Backstop editor for radio details while the guided in-page settings are being completed." in source
+    assert 'self.edit_device_profile_btn = QPushButton("Edit Radio Details...")' in source
+    assert "Detailed editor for radio details while the guided in-page settings are being completed." in source
     assert 'self.add_device_profile_btn.setAccessibleName("Guided Add Radio")' in source
     assert "Start guided setup for a new radio or SDR" in source
-    assert 'self.edit_device_profile_btn.setAccessibleName("Edit Full Radio Form")' in source
+    assert 'self.edit_device_profile_btn.setAccessibleName("Edit Radio Details")' in source
     assert "def _device_profile_dialog_title" in source
     assert "def _device_profile_dialog_intro" in source
     assert "def _device_profile_dialog_save_text" in source
     assert "dlg.setWindowTitle(dlg_title)" in source
-    assert 'QMessageBox.information(self, "Full Radio Form", "Select one radio to edit.")' in source
-    assert 'QMessageBox.warning(self, "Full Radio Form", "Please select only one radio to edit.")' in source
+    assert 'QMessageBox.information(self, "Radio Details", "Select one radio to edit.")' in source
+    assert 'QMessageBox.warning(self, "Radio Details", "Please select only one radio to edit.")' in source
     assert "Enable at least one software option above" in source
     assert "Use Edit Radio Details to choose the software" not in source
 
@@ -4090,13 +4090,14 @@ def test_radio_profile_guided_add_dialog_copy_is_distinct_from_advanced_edit() -
     from freqinout.gui.settings_tab import SettingsTab
 
     assert SettingsTab._device_profile_dialog_title(None) == "Guided Add Radio"
-    assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Full Radio Form"
+    assert SettingsTab._device_profile_dialog_title({"id": 7}) == "Radio Details"
     assert SettingsTab._device_profile_dialog_save_text(None) == "Save Radio"
     assert SettingsTab._device_profile_dialog_save_text({"id": 7}) == "Save Changes"
     assert "one step at a time" in SettingsTab._device_profile_dialog_intro(None)
     assert "software used by that radio" in SettingsTab._device_profile_dialog_intro(None)
     assert "readiness before saving" in SettingsTab._device_profile_dialog_intro(None)
     assert "guided in-page settings" in SettingsTab._device_profile_dialog_intro({"id": 7})
+    assert "Detailed editor" in SettingsTab._device_profile_dialog_intro({"id": 7})
 
 
 def test_radio_profile_software_flag_helpers_define_inline_stack_choices() -> None:

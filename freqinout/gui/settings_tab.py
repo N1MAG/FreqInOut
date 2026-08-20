@@ -3700,11 +3700,11 @@ class SettingsTab(QWidget):
         device_actions = QGridLayout()
         device_actions.setHorizontalSpacing(8)
         device_actions.setVerticalSpacing(6)
-        self.edit_device_profile_btn = QPushButton("Edit Full Radio Form...")
+        self.edit_device_profile_btn = QPushButton("Edit Radio Details...")
         self.edit_device_profile_btn.setToolTip(
-            "Backstop editor for radio details while the guided in-page settings are being completed."
+            "Detailed editor for radio details while the guided in-page settings are being completed."
         )
-        self.edit_device_profile_btn.setAccessibleName("Edit Full Radio Form")
+        self.edit_device_profile_btn.setAccessibleName("Edit Radio Details")
         self.edit_device_profile_btn.clicked.connect(self._edit_device_profile)
         self.activate_device_profile_btn = QPushButton("Use Now")
         self.activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
@@ -18142,13 +18142,13 @@ class SettingsTab(QWidget):
 
     @staticmethod
     def _device_profile_dialog_title(existing: Optional[Dict[str, Any]] = None) -> str:
-        return "Full Radio Form" if existing else "Guided Add Radio"
+        return "Radio Details" if existing else "Guided Add Radio"
 
     @staticmethod
     def _device_profile_dialog_intro(existing: Optional[Dict[str, Any]] = None) -> str:
         if existing:
             return (
-                "Backstop editor for the selected radio while the guided in-page settings are being completed. "
+                "Detailed editor for the selected radio while the guided in-page settings are being completed. "
                 "Use the Radio Settings tasks first when possible."
             )
         return (
@@ -20899,10 +20899,10 @@ class SettingsTab(QWidget):
     def _edit_device_profile(self) -> None:
         selected = self._selected_device_profiles()
         if not selected:
-            QMessageBox.information(self, "Full Radio Form", "Select one radio to edit.")
+            QMessageBox.information(self, "Radio Details", "Select one radio to edit.")
             return
         if len(selected) > 1:
-            QMessageBox.warning(self, "Full Radio Form", "Please select only one radio to edit.")
+            QMessageBox.warning(self, "Radio Details", "Please select only one radio to edit.")
             return
         existing = selected[0]
         updated = self._open_device_profile_dialog(existing=existing)
