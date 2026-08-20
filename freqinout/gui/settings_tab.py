@@ -18167,7 +18167,20 @@ class SettingsTab(QWidget):
         dlg.setAccessibleName(dlg_title)
         dlg.setSizeGripEnabled(True)
         dlg.setMinimumSize(640, 520)
-        dlg.resize(760, 720)
+
+        def _guided_dialog_initial_size() -> QSize:
+            preferred = QSize(760, 720)
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+            if screen is None:
+                return preferred
+            available = screen.availableGeometry().size()
+            return QSize(
+                max(640, min(preferred.width(), available.width() - 80)),
+                max(520, min(preferred.height(), available.height() - 80)),
+            )
+
+        dlg.resize(_guided_dialog_initial_size())
         layout = QVBoxLayout(dlg)
         intro = QLabel(self._device_profile_dialog_intro(existing))
         intro.setAccessibleName(f"{dlg_title} guidance")
