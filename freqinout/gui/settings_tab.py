@@ -19068,7 +19068,7 @@ class SettingsTab(QWidget):
                 "flmsg": "FLMsg",
                 "flamp": "FLAmp",
                 "js8call": "JS8Call",
-                "js8spotter": "JS8Spotter",
+                "js8spotter": "External JS8Spotter",
                 "commstat": "CommStat",
                 "varac": "VarAC",
             }
@@ -19859,29 +19859,65 @@ class SettingsTab(QWidget):
             if app_setup_plan_group.isVisible():
                 _refresh_guided_schedule_step_card()
 
+        def _guided_connection_step_visible() -> bool:
+            setup_type_choice = str(setup_type_combo.currentData() or "").strip()
+            device_class_value = str(device_class_combo.currentData() or "tx_rx").strip().lower()
+            visibility_state = GuidedSetupFieldVisibilityInput(
+                setup_type_choice=setup_type_choice,
+                backend=str(backend_combo.currentData() or "manual").strip().lower(),
+                device_class=device_class_value,
+                use_flrig=bool(use_flrig_chk.isChecked()),
+                use_fldigi=bool(use_fldigi_chk.isChecked()),
+                use_flmsg=bool(use_flmsg_chk.isChecked()),
+                use_flamp=bool(use_flamp_chk.isChecked()),
+                use_js8call=bool(use_js8call_chk.isChecked()),
+                use_js8spotter=bool(use_js8spotter_chk.isChecked()),
+                use_commstat=bool(use_commstat_chk.isChecked()),
+                use_varac=bool(use_varac_chk.isChecked()),
+                optional_open=bool(optional_toggle.isChecked()),
+            )
+            return bool(
+                guided_setup_field_visibility(
+                    _current_guided_blueprint(),
+                    visibility_state,
+                ).connection_group
+            )
+
+        def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:
+            return guided_setup_wizard_view(
+                guided_wizard_step_id,
+                connection_visible=_guided_connection_step_visible(),
+            ).steps
+
         def _guided_wizard_index(step_id: str) -> int:
-            for idx, (candidate, _label) in enumerate(guided_wizard_steps):
+            for idx, (candidate, _label) in enumerate(_guided_visible_wizard_steps()):
                 if candidate == step_id:
                     return idx
             return 0
 
         def _guided_wizard_step_label(index: int) -> str:
             try:
-                return str(guided_setup_wizard_view(guided_wizard_step_id).steps[int(index)][1] or "").strip()
+                return str(_guided_visible_wizard_steps()[int(index)][1] or "").strip()
             except Exception:
                 return ""
 
         def _set_guided_wizard_step(step_id: str) -> None:
             nonlocal guided_wizard_step_id
             candidate = str(step_id or "").strip()
-            valid_steps = {item[0] for item in guided_wizard_steps}
-            guided_wizard_step_id = candidate if candidate in valid_steps else "radio"
+            valid_steps = {item[0] for item in _guided_visible_wizard_steps()}
+            if candidate in valid_steps:
+                guided_wizard_step_id = candidate
+            elif candidate == "connection" and "schedule" in valid_steps:
+                guided_wizard_step_id = "schedule"
+            else:
+                guided_wizard_step_id = "radio"
             _update_dialog_visibility()
 
         def _move_guided_wizard(delta: int) -> None:
+            visible_steps = _guided_visible_wizard_steps()
             idx = _guided_wizard_index(guided_wizard_step_id)
-            next_idx = max(0, min(len(guided_wizard_steps) - 1, idx + int(delta)))
-            _set_guided_wizard_step(guided_wizard_steps[next_idx][0])
+            next_idx = max(0, min(len(visible_steps) - 1, idx + int(delta)))
+            _set_guided_wizard_step(visible_steps[next_idx][0])
 
         def _update_guided_save_review() -> None:
             def _compact_value(value: str, *, missing: str = "not set") -> str:
@@ -20016,10 +20052,14 @@ class SettingsTab(QWidget):
             save_review_label.setText("\n".join(review_lines))
 
         def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
+            nonlocal guided_wizard_step_id
             theme = resolve_theme(self.settings)
             wizard_view = guided_setup_wizard_view(guided_wizard_step_id, connection_visible=connection_visible)
+            guided_wizard_step_id = wizard_view.current_step_id
             current_idx = wizard_view.current_index
+            visible_step_ids = {step_id for step_id, _label in wizard_view.steps}
             for step_id, btn in guided_wizard_buttons.items():
+                btn.setVisible(step_id in visible_step_ids)
                 checked = step_id == guided_wizard_step_id
                 btn.setChecked(checked)
                 btn.setStyleSheet(button_style("primary" if checked else "secondary", theme))

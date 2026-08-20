@@ -588,6 +588,9 @@ def test_varac_only_payload_normalization_clears_stale_flrig_when_manual() -> No
             "name": "VarAC Radio",
             "control_backend": "manual",
             "use_varac": True,
+            "use_scheduler": True,
+            "guided_frequency_plan_id": 12,
+            "guided_open_plan_manager_after_save": True,
             "use_flrig": True,
             "use_fldigi": False,
             "use_flmsg": False,
@@ -600,6 +603,9 @@ def test_varac_only_payload_normalization_clears_stale_flrig_when_manual() -> No
 
     assert normalized["control_backend"] == "manual"
     assert normalized["use_varac"] is True
+    assert normalized["use_scheduler"] is False
+    assert "guided_frequency_plan_id" not in normalized
+    assert "guided_open_plan_manager_after_save" not in normalized
     assert normalized["use_flrig"] is False
     assert normalized["use_fldigi"] is False
     assert normalized["use_js8call"] is False
@@ -1243,10 +1249,14 @@ def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
 
     view = guided_setup_wizard_view("connection", connection_visible=False)
 
-    assert view.current_step_id == "connection"
-    assert view.visible_sections == tuple()
+    assert view.current_step_id == "schedule"
+    assert view.visible_sections == ("schedule",)
     assert view.previous_label == "Software"
-    assert view.next_label == "Schedule"
+    assert view.next_label == "Review"
+
+    software = guided_setup_wizard_view("software", connection_visible=False)
+    assert software.next_label == "Schedule"
+    assert [step_id for step_id, _label in software.steps] == ["radio", "software", "schedule", "review"]
 
 
 def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> None:
@@ -1340,6 +1350,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "FIO Spotter + external JS8Spotter" in dialog_block
     assert "app_labels.append(\"FIO Spotter\")" in dialog_block
     assert '"External JS8Spotter app"' in dialog_block
+    assert '"js8spotter": "External JS8Spotter"' in dialog_block
     assert '"What FIO will save:"' in dialog_block
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
@@ -1360,8 +1371,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "out[\"guided_open_plan_manager_after_save\"] = True" in dialog_block
     assert "def _apply_guided_wizard_visibility(connection_visible: bool) -> None:" in dialog_block
     assert "def _guided_wizard_step_label(index: int) -> str:" in dialog_block
+    assert "def _guided_connection_step_visible() -> bool:" in dialog_block
+    assert "def _guided_visible_wizard_steps() -> Tuple[Tuple[str, str], ...]:" in dialog_block
     assert 'guided_wizard_next_btn.setText(f"Next: {next_label}" if next_label else "Next")' in dialog_block
     assert 'guided_wizard_back_btn.setText(f"Back: {previous_label}" if previous_label else "Back")' in dialog_block
+    assert "btn.setVisible(step_id in visible_step_ids)" in dialog_block
     assert 'identity_group.setVisible(guided_wizard_step_id == "radio")' in dialog_block
     assert 'software_group.setVisible(guided_wizard_step_id == "software")' in dialog_block
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block

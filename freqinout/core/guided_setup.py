@@ -513,12 +513,17 @@ def guided_setup_wizard_view(
     """Return UI-ready state for the Add Radio guided setup wizard."""
 
     requested = str(current_step_id or "").strip().lower()
-    step_ids = [step_id for step_id, _label in ADD_RADIO_WIZARD_STEPS]
+    visible_steps = tuple(
+        item
+        for item in ADD_RADIO_WIZARD_STEPS
+        if bool(connection_visible) or item[0] != "connection"
+    )
+    step_ids = [step_id for step_id, _label in visible_steps]
     if requested not in step_ids:
-        requested = "radio"
+        requested = "schedule" if requested == "connection" and "schedule" in step_ids else "radio"
     current_index = step_ids.index(requested)
-    previous_label = ADD_RADIO_WIZARD_STEPS[current_index - 1][1] if current_index > 0 else ""
-    next_label = ADD_RADIO_WIZARD_STEPS[current_index + 1][1] if current_index < len(ADD_RADIO_WIZARD_STEPS) - 1 else ""
+    previous_label = visible_steps[current_index - 1][1] if current_index > 0 else ""
+    next_label = visible_steps[current_index + 1][1] if current_index < len(visible_steps) - 1 else ""
     detail_by_step = {
         "radio": "Choose the radio model, name, role, and setup type.",
         "software": "Choose the software stack and let FIO fill blank paths and ports where it can.",
@@ -534,13 +539,13 @@ def guided_setup_wizard_view(
     return GuidedSetupWizardView(
         current_step_id=requested,
         current_index=current_index,
-        steps=ADD_RADIO_WIZARD_STEPS,
+        steps=visible_steps,
         previous_label=previous_label,
         next_label=next_label,
         detail=detail_by_step.get(requested, "Review this setup step."),
         visible_sections=visible_sections,
         can_go_back=current_index > 0,
-        can_go_next=current_index < len(ADD_RADIO_WIZARD_STEPS) - 1,
+        can_go_next=current_index < len(visible_steps) - 1,
     )
 
 
@@ -685,6 +690,9 @@ def normalize_guided_radio_profile_payload(
     )
     if varac_only_without_explicit_flrig:
         values["control_backend"] = "manual"
+        values["use_scheduler"] = False
+        values.pop("guided_frequency_plan_id", None)
+        values.pop("guided_open_plan_manager_after_save", None)
         values["use_flrig"] = False
         values["use_fldigi"] = False
         values["use_flmsg"] = False

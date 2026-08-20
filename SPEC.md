@@ -11366,7 +11366,7 @@ Guidance model:
 - The `Setup Steps` cards live in the wizard shell above the step content so they remain visible as the user moves through Radio, Software, Connection, Schedule, and Review. They must not be nested inside the Software form.
 - The old bottom prose summary must not repeat app notes, schedule choices, and software caveats under the cards. Verbose review text may remain available to tests, logs, tooltips, or a future explicit review panel, but it should not clutter the normal Add Radio walkthrough.
 - `Configure Automatically` fills only blank fields, preserves user-entered values, and reports filled/preserved values in review text without making the user read a technical plan to understand the next step.
-- After `Configure Automatically` runs, the wizard advances to Connection so the operator can review the exact endpoints, paths, profiles, and message folders FIO found.
+- After `Configure Automatically` runs, the wizard advances to Connection only when endpoint/path fields apply. If the selected setup type has no FIO-controlled connection fields, the wizard skips Connection and advances to Schedule.
 - The Software step may prompt for one optional `Radio Apps Base Folder`. This is a station-level discovery hint for common operator installs such as `RadioTools/Programs`; it helps FIO find external JS8Spotter, CommStat, VarAC, and other radio apps before falling back to generic system locations.
 - `Radio Apps Base Folder` is also editable in Main Settings > Preferences so operators can set the common app install folder before or after adding radios.
 - The base folder is not a required setup field and must not cause autofill to overwrite any user-entered path, port, profile, or message folder.
@@ -11375,7 +11375,7 @@ Wizard shell:
 - The Add Radio dialog exposes the setup as five steps: Radio, Software, Connection, Schedule, and Review.
 - The wizard shell uses the existing section/group-box visual language, step buttons, and Back/Next buttons rather than introducing a new component style.
 - The wizard shell controls only which high-level section is shown. Existing core helpers still decide which fields are relevant and existing save code still persists the profile.
-- Wizard navigation state, Back/Next labels, step details, and section visibility are supplied by a core helper so Settings renders the wizard instead of owning setup flow rules.
+- Wizard navigation state, Back/Next labels, step details, and section visibility are supplied by a core helper so Settings renders the wizard instead of owning setup flow rules. Hidden steps are removed from the navigation path rather than displayed as empty pages.
 - The Review step shows a compact `What FIO will save` checklist covering radio identity, enabled/active state, software stack, frequency-control authority, endpoints, message/forms files, schedule assignment, and launch behavior. Routine setup steps should not show readiness cards unless the step needs action.
 - The Review checklist and Save action use the same normalized radio-profile draft. A field shown in Review, including RF Guard groups, advanced guard settings, launch fields, SDR endpoints, VarAC folders, JS8 paths, Fast Light paths, and app flags, must either persist from that draft or be removed from Review.
 
@@ -11385,6 +11385,7 @@ Schedule readiness:
 - When no built Frequency Plans exist, the Schedule step defaults to opening Plan Manager after save. Plan creation stays in Plan Manager so Daily, No Nets, Net, SOP, and RF Guard workflows remain in one place.
 - When guided setup opens Plan Manager after save, it passes the saved radio context into Plan Manager so the next-step guidance names that radio and explains whether to choose an existing plan or build a new Daily/No Nets/Net/SOP plan before RF Guard assignment.
 - VarAC-only and VarAC Cluster/BBS lanes remain monitor/import-only for FIO frequency control. They may show their schedule step as ready only because VarAC keeps its own scheduler and FIO will not offer QSY/scheduler controls.
+- VarAC-only save normalization must clear stale FIO scheduler assignment hints and disable `use_scheduler`; a VarAC-only radio must not inherit QSY/schedule control from default UI state or a prior mixed profile.
 - `Daily with No Nets` and `No Nets` must be available schedule concepts so JS8Call-only or simple HF schedules can be created without inventing a net layer.
 
 Spotter wording:
@@ -11404,6 +11405,7 @@ Acceptance:
 - Selecting TriMode shows the TriMode app stack and relevant fields. Selecting Custom Mix is immediately discoverable below TriMode.
 - Selecting JS8Call-only or a JS8Call-only SDR hides FLDigi, FLMsg, and FLAmp fields.
 - Selecting VarAC-only does not present FIO scheduler/QSY control as available.
+- Saving VarAC-only cannot persist stale FIO scheduler assignment hints or leave `use_scheduler` enabled.
 - `Configure Automatically` does not overwrite non-empty user-entered paths, ports, profile names, or VarAC locations.
 - If `Radio Apps Base Folder` is set, automatic discovery checks that folder before generic app locations and uses it to locate external JS8Spotter, CommStat, VarAC, and compatible app folders where present.
 - Updating `Radio Apps Base Folder` from Preferences or the Add Radio wizard persists the same setting and affects the next automatic discovery pass.
@@ -11413,5 +11415,5 @@ Acceptance:
 - The Schedule card for a FIO-controlled radio does not say `Ready` before a plan assignment/confirmation exists.
 - Choosing a Frequency Plan during Add Radio saves the radio first, then assigns the selected plan with RF Guard. RF Guard blocks or warnings must use the same messages and validation rules as Settings > Schedule Assignment.
 - If no Frequency Plan exists, the user can save the radio and land in Plan Manager with radio-specific plan-building guidance, without seeing FLDigi/FLMsg/FLAmp fields for JS8Call-only setups or VarAC frequency controls for VarAC-only setups.
-- Add Radio can be walked with Back/Next through Radio, Software, Connection, Schedule, and Review without revealing unrelated integration fields for the selected setup type.
+- Add Radio can be walked with Back/Next through Radio, Software, Connection, Schedule, and Review without revealing unrelated integration fields for the selected setup type; setup types without FIO-controlled connection fields skip Connection cleanly.
 - Tests cover the core wizard-state helper so Back/Next labels and visible step sections do not drift from the Add Radio setup model.
