@@ -27,6 +27,7 @@ from freqinout.core.guided_setup import (
     build_guided_setup_preview,
     generated_radio_label,
     guided_radio_label_base,
+    guided_setup_autofill_review,
     guided_setup_capability_policy,
     guided_setup_field_visibility,
     guided_setup_flow_items,
@@ -1293,6 +1294,26 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
     assert monitor_only.review_text == "No FIO-controlled schedule or QSY controls will be saved for this radio."
 
 
+def test_guided_setup_autofill_review_is_bounded_and_operator_readable() -> None:
+    review = guided_setup_autofill_review(
+        filled=("FLRig port", "JS8Call port", "MCF forms", "VarAC DB", "VarAC outbox"),
+        preserved=("JS8Call host", "Radio name"),
+        detection_notes=("Detected JS8Call profile FIO-A.", "External JS8Spotter not required for FIO Spotter."),
+        radio_apps_base_used=True,
+        visible_limit=4,
+    )
+
+    assert review.status_text == "Configure Automatically filled 5 field(s). Review before Save."
+    assert review.visible_lines == (
+        "Filled: FLRig port, JS8Call port, MCF forms, VarAC DB, VarAC outbox",
+        "Kept existing: JS8Call host, Radio name",
+        "Used Radio Apps Base Folder for app detection.",
+        "Detected JS8Call profile FIO-A.",
+        "1 more detail item(s) available.",
+    )
+    assert "External JS8Spotter not required for FIO Spotter." in review.detail_lines
+
+
 def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     dialog_block = source[
@@ -1329,7 +1350,10 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Radio Apps Base Folder:"' in dialog_block
     assert "_set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)" in dialog_block
     assert "def _persist_radio_apps_base_folder() -> None:" in dialog_block
-    assert "Radio Apps Base Folder used for app detection." in dialog_block
+    assert "guided_setup_autofill_review(" in dialog_block
+    assert "Used Radio Apps Base Folder for app detection." in Path("freqinout/core/guided_setup.py").read_text(
+        encoding="utf-8"
+    )
     assert "guided_setup_software_hint(" in dialog_block
     assert "preset = guided_setup_lane_preset(lane)" in dialog_block
     assert "_set_combo_data(device_class_combo, preset.device_class)" in dialog_block

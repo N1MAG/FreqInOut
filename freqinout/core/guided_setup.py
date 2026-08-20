@@ -208,6 +208,13 @@ class GuidedScheduleDecision:
 
 
 @dataclass(frozen=True)
+class GuidedAutofillReview:
+    status_text: str
+    visible_lines: Tuple[str, ...]
+    detail_lines: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class GuidedSetupSession:
     blueprint: GuidedSetupBlueprint
     answers: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
@@ -810,6 +817,49 @@ def guided_setup_schedule_decision(
         step_detail="Choose the Frequency Plan this radio should follow, or assign one later.",
         status_text=text,
         review_text="No Frequency Plan selected; assign one later in Radio Settings or Plan Manager.",
+    )
+
+
+def guided_setup_autofill_review(
+    *,
+    filled: Sequence[str] = (),
+    preserved: Sequence[str] = (),
+    detection_notes: Sequence[str] = (),
+    radio_apps_base_used: bool = False,
+    visible_limit: int = 4,
+) -> GuidedAutofillReview:
+    """Return bounded, operator-readable Configure Automatically review copy."""
+
+    filled_items = tuple(str(item or "").strip() for item in filled if str(item or "").strip())
+    preserved_items = tuple(str(item or "").strip() for item in preserved if str(item or "").strip())
+    notes = tuple(str(item or "").strip() for item in detection_notes if str(item or "").strip())
+    limit = max(1, int(visible_limit or 4))
+
+    if filled_items:
+        status = f"Configure Automatically filled {len(filled_items)} field(s). Review before Save."
+    else:
+        status = "Configure Automatically did not find new blank fields to fill."
+
+    detail: list[str] = []
+    if filled_items:
+        detail.append("Filled: " + ", ".join(filled_items))
+    if preserved_items:
+        detail.append("Kept existing: " + ", ".join(preserved_items))
+    if radio_apps_base_used:
+        detail.append("Used Radio Apps Base Folder for app detection.")
+    detail.extend(notes)
+    if not detail:
+        detail.append("No blank fields could be filled from the current scan.")
+
+    visible = list(detail[:limit])
+    remaining = len(detail) - len(visible)
+    if remaining > 0:
+        visible.append(f"{remaining} more detail item(s) available.")
+
+    return GuidedAutofillReview(
+        status_text=status,
+        visible_lines=tuple(visible),
+        detail_lines=tuple(detail),
     )
 
 

@@ -150,6 +150,7 @@ from freqinout.core.guided_setup import (
     build_guided_setup_blueprint,
     guided_radio_label_base,
     guided_setup_capability_policy,
+    guided_setup_autofill_review,
     guided_setup_schedule_decision,
     guided_setup_field_visibility,
     guided_setup_flow_items,
@@ -20150,25 +20151,17 @@ class SettingsTab(QWidget):
                     continue
                 edit, label = target
                 _fill_blank(edit, value, label, filled, preserved)
-            review = list(review_items)
-            if filled:
-                review.insert(0, "Filled: " + ", ".join(filled[:8]) + ("..." if len(filled) > 8 else ""))
-            if preserved:
-                review.append("Kept existing: " + ", ".join(preserved[:6]) + ("..." if len(preserved) > 6 else ""))
-            if not review:
-                review.append("No blank fields could be filled from the current scan.")
-            if radio_apps_base_edit.text().strip():
-                review.append("Radio Apps Base Folder used for app detection.")
-            status = (
-                f"Configure Automatically filled {len(filled)} field(s). Review before Save."
-                if filled
-                else "Configure Automatically did not find new blank fields to fill."
+            review = guided_setup_autofill_review(
+                filled=filled,
+                preserved=preserved,
+                detection_notes=review_items,
+                radio_apps_base_used=bool(radio_apps_base_edit.text().strip()),
             )
-            visible_review = "\n".join(review[:4])
-            if len(review) > 4:
-                visible_review += f"\n{len(review) - 4} more review item(s)."
-            configure_auto_status.setText(f"{status}\n{visible_review}" if visible_review else status)
-            configure_auto_status.setToolTip("\n".join(review))
+            visible_review = "\n".join(review.visible_lines)
+            configure_auto_status.setText(
+                f"{review.status_text}\n{visible_review}" if visible_review else review.status_text
+            )
+            configure_auto_status.setToolTip("\n".join(review.detail_lines))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
             _set_guided_wizard_step("connection")

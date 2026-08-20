@@ -1544,8 +1544,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
 
     assert 'configure_auto_btn = QPushButton("Configure Automatically")' in dialog_block
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
-    assert "Kept existing:" in dialog_block
-    assert "Review before Save" in dialog_block
+    assert "guided_setup_autofill_review(" in dialog_block
+    assert "Kept existing:" in guided_setup_source
+    assert "Review before Save" in guided_setup_source
     assert "FIO Spotter forms {fio_spotter_forms}" in source
     assert "External JS8Spotter app {external_spotter}" in source
     assert "Spotter {spotter}" not in source
