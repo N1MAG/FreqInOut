@@ -161,6 +161,7 @@ from freqinout.core.guided_setup import (
     guided_setup_selected_apps_from_flags,
     guided_setup_software_hint,
     guided_setup_wizard_view,
+    GuidedScheduleDecision,
     GuidedSetupFieldVisibilityInput,
     generated_radio_label,
     infer_guided_control_route,
@@ -19611,7 +19612,21 @@ class SettingsTab(QWidget):
                 return "Needed"
             return "Ready"
 
-        def _update_guided_step_widgets(blueprint: GuidedSetupBlueprint, plan: GuidedAppConfigPlan) -> None:
+        def _current_guided_schedule_decision() -> GuidedScheduleDecision:
+            policy = guided_setup_capability_policy(_current_guided_blueprint())
+            return guided_setup_schedule_decision(
+                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
+                selected_plan_name=_selected_guided_schedule_plan_name(),
+                plan_count=guided_schedule_plan_count,
+                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+            )
+
+        def _update_guided_step_widgets(
+            blueprint: GuidedSetupBlueprint,
+            plan: GuidedAppConfigPlan,
+            *,
+            schedule_decision: GuidedScheduleDecision | None = None,
+        ) -> None:
             theme = resolve_theme(self.settings)
             text_color = theme.get("text", "#1C1F21")
             muted_color = theme.get("text_muted", text_color)
@@ -19622,7 +19637,7 @@ class SettingsTab(QWidget):
                 "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
             }
             seen: set[str] = set()
-            for item in guided_setup_flow_items(blueprint, plan):
+            for item in guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision):
                 step_id = str(item.item_id or "").strip()
                 widgets = guided_step_widgets.get(step_id)
                 if widgets is None:
@@ -19691,13 +19706,7 @@ class SettingsTab(QWidget):
                 detail_label.setText(detail)
 
         def _refresh_guided_schedule_step_card() -> None:
-            policy = guided_setup_capability_policy(_current_guided_blueprint())
-            decision = guided_setup_schedule_decision(
-                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
-                selected_plan_name=_selected_guided_schedule_plan_name(),
-                plan_count=guided_schedule_plan_count,
-                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
-            )
+            decision = _current_guided_schedule_decision()
             _set_guided_step_override(
                 "schedule",
                 status=decision.status,
@@ -19754,11 +19763,18 @@ class SettingsTab(QWidget):
                 config_root=get_config_dir(),
                 app_paths=app_paths,
             )
-            guided_next_action_label.setText(guided_setup_next_action_text(blueprint, plan))
-            _update_guided_step_widgets(blueprint, plan)
-            flow_lines = guided_setup_flow_summary_lines(blueprint, plan)
+            schedule_decision = _current_guided_schedule_decision()
+            guided_next_action_label.setText(
+                guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)
+            )
+            _update_guided_step_widgets(blueprint, plan, schedule_decision=schedule_decision)
+            flow_lines = guided_setup_flow_summary_lines(blueprint, plan, schedule_decision=schedule_decision)
             schedule_item = next(
-                (item for item in guided_setup_flow_items(blueprint, plan) if str(item.item_id or "") == "schedule"),
+                (
+                    item
+                    for item in guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)
+                    if str(item.item_id or "") == "schedule"
+                ),
                 None,
             )
             if schedule_item is not None:
@@ -19825,13 +19841,7 @@ class SettingsTab(QWidget):
                 schedule_open_plan_manager_chk.setChecked(True)
 
         def _update_guided_schedule_assignment_status() -> None:
-            policy = guided_setup_capability_policy(_current_guided_blueprint())
-            decision = guided_setup_schedule_decision(
-                scheduler_assignment_allowed=policy.scheduler_assignment_allowed,
-                selected_plan_name=_selected_guided_schedule_plan_name(),
-                plan_count=guided_schedule_plan_count,
-                open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
-            )
+            decision = _current_guided_schedule_decision()
             schedule_status_label.setText(decision.status_text)
             if app_setup_plan_group.isVisible():
                 _refresh_guided_schedule_step_card()

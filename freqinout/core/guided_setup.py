@@ -867,6 +867,8 @@ def guided_setup_autofill_review(
 def guided_setup_flow_items(
     blueprint: GuidedSetupBlueprint,
     plan: GuidedAppConfigPlan,
+    *,
+    schedule_decision: GuidedScheduleDecision | None = None,
 ) -> Tuple[GuidedSetupFlowItem, ...]:
     """Return the setup flow as compact, UI-ready steps."""
 
@@ -878,7 +880,10 @@ def guided_setup_flow_items(
     ]
     control_summary = guided_setup_control_summary(policy)
     schedule_summary = guided_setup_schedule_summary(blueprint)
-    if policy.scheduler_assignment_allowed:
+    if schedule_decision is not None:
+        schedule_detail = str(schedule_decision.step_detail or schedule_decision.status_text or "").strip()
+        schedule_status = str(schedule_decision.status or "needs_input").strip().lower()
+    elif policy.scheduler_assignment_allowed:
         schedule_detail = "Choose or assign a Frequency Plan after saving this radio."
         schedule_status = "needs_input"
     else:
@@ -934,10 +939,12 @@ def guided_setup_flow_items(
 def guided_setup_next_flow_item(
     blueprint: GuidedSetupBlueprint,
     plan: GuidedAppConfigPlan,
+    *,
+    schedule_decision: GuidedScheduleDecision | None = None,
 ) -> GuidedSetupFlowItem:
     """Return the next operator-visible setup item that needs attention."""
 
-    items = guided_setup_flow_items(blueprint, plan)
+    items = guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)
     for item in items:
         if str(item.status or "ready").strip().lower() != "ready":
             return item
@@ -952,10 +959,12 @@ def guided_setup_next_flow_item(
 def guided_setup_next_action_text(
     blueprint: GuidedSetupBlueprint,
     plan: GuidedAppConfigPlan,
+    *,
+    schedule_decision: GuidedScheduleDecision | None = None,
 ) -> str:
     """Return one concise instruction for the next guided setup action."""
 
-    item = guided_setup_next_flow_item(blueprint, plan)
+    item = guided_setup_next_flow_item(blueprint, plan, schedule_decision=schedule_decision)
     title = str(item.title or "Review").strip()
     detail = str(item.detail or "").strip()
     if detail:
@@ -966,11 +975,13 @@ def guided_setup_next_action_text(
 def guided_setup_flow_summary_lines(
     blueprint: GuidedSetupBlueprint,
     plan: GuidedAppConfigPlan,
+    *,
+    schedule_decision: GuidedScheduleDecision | None = None,
 ) -> Tuple[str, ...]:
     """Return plain stepper lines for existing Qt labels."""
 
     lines = []
-    for idx, item in enumerate(guided_setup_flow_items(blueprint, plan), start=1):
+    for idx, item in enumerate(guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision), start=1):
         status = str(item.status or "ready").replace("_", " ").title()
         lines.append(f"{idx}. {item.title}: {item.detail} ({status})")
     return tuple(lines)

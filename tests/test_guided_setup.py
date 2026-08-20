@@ -1226,6 +1226,33 @@ def test_guided_setup_next_action_comes_from_flow_status() -> None:
     assert guided_setup_next_action_text(blueprint, plan).startswith(f"Next: {next_item.title} - ")
 
 
+def test_guided_setup_next_action_uses_selected_schedule_decision() -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane=LANE_JS8_ONLY,
+        hamlib_short_name="IC-7300",
+        control_route=CONTROL_JS8CALL,
+        setup_mode=SETUP_MODE_MANAGED,
+    )
+    plan = build_guided_external_app_config_plan(
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=Path("/tmp/fio-test"),
+        allow_external_writes=True,
+    )
+    decision = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=True,
+        selected_plan_name="JS8 Standard",
+        plan_count=1,
+        open_plan_manager=False,
+    )
+
+    items = guided_setup_flow_items(blueprint, plan, schedule_decision=decision)
+    schedule_item = next(item for item in items if item.item_id == "schedule")
+
+    assert schedule_item.status == "ready"
+    assert schedule_item.detail == "Selected plan: JS8 Standard. FIO assigns it after save with RF Guard."
+    assert guided_setup_next_action_text(blueprint, plan, schedule_decision=decision).startswith("Next: Review - ")
+
+
 def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
     from freqinout.core.guided_setup import guided_setup_wizard_view
 
@@ -1382,9 +1409,10 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "include_spotter=use_js8spotter_chk.isChecked()" in dialog_block
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
-    assert "guided_setup_flow_summary_lines(blueprint, plan)" in dialog_block
-    assert "guided_setup_flow_items(blueprint, plan)" in dialog_block
-    assert "guided_setup_next_action_text(blueprint, plan)" in dialog_block
+    assert "schedule_decision = _current_guided_schedule_decision()" in dialog_block
+    assert "guided_setup_flow_summary_lines(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
+    assert "guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
+    assert "guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
     assert 'guided_wizard_group = QGroupBox("Guided Setup")' in dialog_block
     assert 'guided_wizard_group.setObjectName("guidedSetupWizard")' in dialog_block
     assert 'btn.setObjectName(f"guidedWizardStep_{step_id}")' in dialog_block
