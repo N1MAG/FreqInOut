@@ -229,6 +229,22 @@ def test_settings_detector_uses_varac_ini_and_production_folder_names(tmp_path) 
     assert Path(results["varac_bbs_dir"].path) == configured_bbs
 
 
+def test_settings_detector_finds_mcf_forms_from_radio_apps_base_folder(tmp_path) -> None:
+    base = tmp_path / "RadioApps"
+    forms = base / "MCForms"
+    forms.mkdir(parents=True)
+    (forms / "MCF304.txt").write_text("F!304\n", encoding="utf-8")
+
+    detector = SoftwarePathDetector(settings={"radio_apps_base_folder": str(base)})
+    detector.home = tmp_path / "home"
+
+    result = detector._detect_js8_forms_path()
+
+    assert Path(result.path) == forms
+    assert result.confidence == "verified"
+    assert result.target_type == "directory"
+
+
 def test_varac_local_asset_discovery_inspects_known_db_and_log_assets(tmp_path) -> None:
     varac_dir = tmp_path / "RadioTools" / "Programs" / "VarAC_files"
     bbs_dir = varac_dir / "BBS"
