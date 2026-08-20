@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from freqinout.core.config_autodiscovery import build_lab_radio_proposals
-from freqinout.core.guided_app_config_plan import build_guided_external_app_config_plan
+from freqinout.core.guided_app_config_plan import (
+    apply_guided_external_app_config_plan,
+    build_guided_external_app_config_plan,
+)
 
 
 def test_guided_external_app_config_plan_is_review_only_and_backup_gated(tmp_path) -> None:
@@ -28,6 +31,62 @@ def test_guided_external_app_config_plan_is_review_only_and_backup_gated(tmp_pat
     assert all(not action.requires_backup for action in directory_actions)
     assert all(action.requires_backup for action in write_actions)
     assert {action.app_id for action in write_actions} == {"flrig", "fldigi", "js8call"}
+
+
+def test_guided_external_app_config_apply_defaults_to_no_external_writes(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    js8_ini = tmp_path / "JS8Call.ini"
+    js8_ini.write_text("[Configuration]\nMyCall=OLD\n", encoding="utf-8")
+    plan = build_guided_external_app_config_plan(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={
+            "flrig": "/Applications/RadioApps/FLRig.app",
+            "fldigi": "/Applications/RadioApps/FLDigi.app",
+            "js8call": "/Applications/JS8Call.app",
+            "js8call_ini_path": str(js8_ini),
+        },
+        callsign="n1mag",
+        grid="dm79",
+    )
+
+    result = apply_guided_external_app_config_plan(plan)
+
+    assert result.ok is True
+    assert result.backup is None
+    assert any(item.action_type == "create_directory" and item.status == "applied" for item in result.items)
+    assert any(item.action_type == "update_js8_multisettings" and item.status == "skipped" for item in result.items)
+    assert "[MultiSettings/fio-a]" not in js8_ini.read_text(encoding="utf-8")
+
+
+def test_guided_external_app_config_apply_writes_js8_only_with_explicit_backup(tmp_path) -> None:
+    proposals = build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False)
+    js8_ini = tmp_path / "JS8Call.ini"
+    js8_ini.write_text("[Configuration]\nMyCall=OLD\n", encoding="utf-8")
+    plan = build_guided_external_app_config_plan(
+        proposals,
+        config_root=tmp_path / "fio-config",
+        app_paths={
+            "js8call": "/Applications/JS8Call.app",
+            "js8call_ini_path": str(js8_ini),
+        },
+        callsign="n1mag",
+        grid="dm79",
+    )
+
+    result = apply_guided_external_app_config_plan(
+        plan,
+        allow_external_writes=True,
+        backup_root=tmp_path / "backups",
+    )
+
+    rendered = js8_ini.read_text(encoding="utf-8")
+    assert result.ok is True
+    assert result.backup is not None
+    assert any(item.original_path == str(js8_ini) and item.status == "backed_up" for item in result.backup.items)
+    assert "[MultiSettings/fio-a]" in rendered
+    assert "TCPServerPort = 2442" in rendered
+    assert "MyCall = OLD" in rendered
 
 
 def test_guided_external_app_config_plan_describes_fast_light_instances(tmp_path) -> None:

@@ -132,5 +132,20 @@ def render_js8call_multisettings_ini(
     return output.getvalue()
 
 
+def apply_js8call_multisettings_plan(
+    plan: JS8CallManagedProfilePlan,
+    *,
+    ini_path: Path,
+) -> Path:
+    """Apply one managed JS8Call profile to an explicit JS8Call.ini path."""
+
+    target = Path(ini_path).expanduser()
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    rendered = render_js8call_multisettings_ini(existing, (plan,))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(rendered, encoding="utf-8")
+    return target
+
+
 def _ports_by_service(proposal: RadioInstanceProposal) -> Mapping[str, int]:
     return {assignment.service: int(assignment.assigned_port) for assignment in proposal.ports}
