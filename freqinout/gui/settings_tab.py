@@ -145,6 +145,8 @@ from freqinout.core.guided_setup import (
     LANE_TRI_MODE,
     LANE_VARAC,
     LANE_VARAC_CLUSTER,
+    SCHEDULE_EXISTING_PLAN,
+    SCHEDULE_NONE,
     SETUP_MODE_MANAGED,
     SETUP_MODE_READ_ONLY,
     build_app_config_plan_for_blueprint,
@@ -18375,6 +18377,15 @@ class SettingsTab(QWidget):
             "Schedule assignment is the next step after saving this radio. Assigning a plan runs RF Guard before the radio follows it."
         )
         _add_full_width_row(schedule_form, schedule_status_label)
+        schedule_path_combo = QComboBox()
+        schedule_path_combo.setObjectName("guidedSchedulePathCombo")
+        _configure_combo_width(schedule_path_combo, minimum=320)
+        _add_form_row(
+            schedule_form,
+            "Schedule Path:",
+            schedule_path_combo,
+            "Choose whether this radio uses an existing plan, a Daily with No Nets, Daily + Nets, SOP, or no schedule.",
+        )
         schedule_plan_combo = QComboBox()
         schedule_plan_combo.setObjectName("guidedSchedulePlanCombo")
         _configure_combo_width(schedule_plan_combo, minimum=320)
@@ -19624,6 +19635,7 @@ class SettingsTab(QWidget):
                 selected_plan_name=_selected_guided_schedule_plan_name(),
                 plan_count=guided_schedule_plan_count,
                 open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+                selected_schedule_choice=_selected_guided_schedule_path(),
             )
 
         def _update_guided_step_widgets(
@@ -19792,6 +19804,8 @@ class SettingsTab(QWidget):
             _refresh_guided_schedule_step_card()
 
         def _selected_guided_schedule_plan_name() -> str:
+            if _selected_guided_schedule_path() != SCHEDULE_EXISTING_PLAN:
+                return ""
             if not hasattr(schedule_plan_combo, "currentData"):
                 return ""
             try:
@@ -19801,6 +19815,35 @@ class SettingsTab(QWidget):
             if plan_id <= 0:
                 return ""
             return str(schedule_plan_combo.currentText() or "").strip()
+
+        def _selected_guided_schedule_path() -> str:
+            if not hasattr(schedule_path_combo, "currentData"):
+                return ""
+            return str(schedule_path_combo.currentData() or "").strip()
+
+        def _refresh_guided_schedule_path_combo() -> None:
+            current_choice = _selected_guided_schedule_path()
+            blueprint = _current_guided_blueprint()
+            choices = tuple(getattr(blueprint, "schedule_choices", ()) or ())
+            schedule_path_combo.blockSignals(True)
+            schedule_path_combo.clear()
+            preferred = current_choice
+            if not preferred:
+                recommended = next((choice.choice_id for choice in choices if bool(choice.recommended)), "")
+                preferred = recommended or (choices[0].choice_id if choices else "")
+            for choice in choices:
+                label = str(choice.label or "").strip() or str(choice.choice_id or "").strip()
+                schedule_path_combo.addItem(label, str(choice.choice_id or ""))
+                detail = str(choice.detail or "").strip()
+                if detail:
+                    schedule_path_combo.setItemData(schedule_path_combo.count() - 1, detail, Qt.ToolTipRole)
+            idx = schedule_path_combo.findData(preferred)
+            if idx < 0 and schedule_path_combo.count() > 0:
+                idx = 0
+            if idx >= 0:
+                schedule_path_combo.setCurrentIndex(idx)
+            schedule_path_combo.blockSignals(False)
+            _configure_combo_width(schedule_path_combo, minimum=320)
 
         def _refresh_guided_schedule_plan_combo() -> None:
             nonlocal guided_schedule_plan_combo_loaded, guided_schedule_plan_count
@@ -19846,6 +19889,9 @@ class SettingsTab(QWidget):
                 schedule_open_plan_manager_chk.setChecked(True)
 
         def _update_guided_schedule_assignment_status() -> None:
+            schedule_choice = _selected_guided_schedule_path()
+            if schedule_choice and schedule_choice not in {SCHEDULE_EXISTING_PLAN, SCHEDULE_NONE}:
+                schedule_open_plan_manager_chk.setChecked(True)
             decision = _current_guided_schedule_decision()
             schedule_status_label.setText(decision.status_text)
             if app_setup_plan_group.isVisible():
@@ -20009,6 +20055,7 @@ class SettingsTab(QWidget):
                 selected_plan_name=_selected_guided_schedule_plan_name(),
                 plan_count=guided_schedule_plan_count,
                 open_plan_manager=schedule_open_plan_manager_chk.isChecked(),
+                selected_schedule_choice=_selected_guided_schedule_path(),
             ).review_text
 
             if not policy.fio_frequency_control_allowed:
@@ -20358,10 +20405,13 @@ class SettingsTab(QWidget):
             optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
             assignment_allowed = guided_setup_capability_policy(blueprint).scheduler_assignment_allowed
-            _set_row_visible(schedule_plan_combo, assignment_allowed)
-            _set_row_visible(schedule_open_plan_manager_chk, assignment_allowed)
+            _set_row_visible(schedule_path_combo, assignment_allowed)
             if assignment_allowed:
+                _refresh_guided_schedule_path_combo()
                 _refresh_guided_schedule_plan_combo()
+            schedule_choice = _selected_guided_schedule_path()
+            _set_row_visible(schedule_plan_combo, assignment_allowed and schedule_choice == SCHEDULE_EXISTING_PLAN)
+            _set_row_visible(schedule_open_plan_manager_chk, assignment_allowed and schedule_choice != SCHEDULE_NONE)
             _update_guided_schedule_assignment_status()
             _update_app_choice_visibility()
             _update_port_prompt_visibility()
@@ -20404,6 +20454,7 @@ class SettingsTab(QWidget):
         use_js8spotter_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_commstat_chk.stateChanged.connect(lambda _state: _update_dialog_visibility())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
+        schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
         schedule_plan_combo.currentIndexChanged.connect(lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
         schedule_open_plan_manager_chk.stateChanged.connect(
             lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
@@ -20532,11 +20583,14 @@ class SettingsTab(QWidget):
                 guided_plan_id = int(schedule_plan_combo.currentData() or 0)
             except Exception:
                 guided_plan_id = 0
-            if guided_plan_id > 0 and guided_setup_capability_policy(_current_guided_blueprint()).scheduler_assignment_allowed:
+            schedule_choice = _selected_guided_schedule_path()
+            assignment_allowed = guided_setup_capability_policy(_current_guided_blueprint()).scheduler_assignment_allowed
+            if guided_plan_id > 0 and assignment_allowed and schedule_choice == SCHEDULE_EXISTING_PLAN:
                 out["guided_frequency_plan_id"] = guided_plan_id
             elif (
                 schedule_open_plan_manager_chk.isChecked()
-                and guided_setup_capability_policy(_current_guided_blueprint()).scheduler_assignment_allowed
+                and assignment_allowed
+                and schedule_choice != SCHEDULE_NONE
             ):
                 out["guided_open_plan_manager_after_save"] = True
             dlg.accept()

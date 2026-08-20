@@ -1312,6 +1312,27 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
     assert "Plan Manager will open" in handoff.step_detail
     assert handoff.review_text == "Open Plan Manager after save so a Frequency Plan can be built and assigned."
 
+    no_nets = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=True,
+        selected_plan_name="Ignored hidden combo",
+        plan_count=3,
+        open_plan_manager=False,
+        selected_schedule_choice="daily_no_nets",
+    )
+    assert no_nets.status == "needs_input"
+    assert no_nets.step_detail == "Plan Manager will open after save to build or choose a Daily with No Nets plan."
+    assert no_nets.review_text == "Open Plan Manager after save for Daily with No Nets."
+
+    no_schedule = guided_setup_schedule_decision(
+        scheduler_assignment_allowed=True,
+        selected_plan_name="Ignored hidden combo",
+        plan_count=3,
+        open_plan_manager=False,
+        selected_schedule_choice=SCHEDULE_NONE,
+    )
+    assert no_schedule.status == "ready"
+    assert no_schedule.review_text == "No Frequency Plan assigned during setup."
+
     monitor_only = guided_setup_schedule_decision(
         scheduler_assignment_allowed=False,
         selected_plan_name="Ignored",
@@ -1426,9 +1447,15 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "No FIO frequency-control endpoint is required for this setup type." in dialog_block
     assert '"Schedule Assignment"' in dialog_block
     assert 'schedule_status_label.setObjectName("guidedScheduleAssignmentStatus")' in dialog_block
+    assert 'schedule_path_combo.setObjectName("guidedSchedulePathCombo")' in dialog_block
+    assert '"Schedule Path:"' in dialog_block
     assert 'schedule_plan_combo.setObjectName("guidedSchedulePlanCombo")' in dialog_block
     assert 'schedule_plan_combo.addItem("Assign later", 0)' in dialog_block
     assert 'schedule_open_plan_manager_chk.setObjectName("guidedScheduleOpenPlanManager")' in dialog_block
+    assert "def _selected_guided_schedule_path() -> str:" in dialog_block
+    assert "def _refresh_guided_schedule_path_combo() -> None:" in dialog_block
+    assert "selected_schedule_choice=_selected_guided_schedule_path()" in dialog_block
+    assert "schedule_choice == SCHEDULE_EXISTING_PLAN" in dialog_block
     assert "guided_setup_schedule_decision(" in dialog_block
     assert "Plan Manager will open after save" in Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
     assert "guided_initial_frequency_plan_id" in dialog_block

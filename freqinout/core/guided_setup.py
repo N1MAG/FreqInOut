@@ -774,10 +774,12 @@ def guided_setup_schedule_decision(
     selected_plan_name: str = "",
     plan_count: int = 0,
     open_plan_manager: bool = False,
+    selected_schedule_choice: str = "",
 ) -> GuidedScheduleDecision:
     """Return one consistent schedule decision for guided setup UI surfaces."""
 
     selected = str(selected_plan_name or "").strip()
+    schedule_choice = str(selected_schedule_choice or "").strip()
     try:
         count = int(plan_count or 0)
     except Exception:
@@ -789,6 +791,29 @@ def guided_setup_schedule_decision(
             step_detail=text,
             status_text=text,
             review_text="No FIO-controlled schedule or QSY controls will be saved for this radio.",
+        )
+    if schedule_choice == SCHEDULE_NONE:
+        text = "No Frequency Plan will be assigned now. This radio can be assigned later."
+        return GuidedScheduleDecision(
+            status="ready",
+            step_detail=text,
+            status_text=text,
+            review_text="No Frequency Plan assigned during setup.",
+        )
+    if schedule_choice and schedule_choice != SCHEDULE_EXISTING_PLAN:
+        path_labels = {
+            SCHEDULE_JS8_STANDARD: "JS8Call Standard",
+            SCHEDULE_DAILY_NO_NETS: "Daily with No Nets",
+            SCHEDULE_DAILY_PLUS_NETS: "Daily + Nets",
+            SCHEDULE_SOP_CONDITION: "SOP condition plan",
+        }
+        path_label = path_labels.get(schedule_choice, "Frequency Plan")
+        text = f"Plan Manager will open after save to build or choose a {path_label} plan."
+        return GuidedScheduleDecision(
+            status="needs_input",
+            step_detail=text,
+            status_text=text,
+            review_text=f"Open Plan Manager after save for {path_label}.",
         )
     if selected:
         return GuidedScheduleDecision(
