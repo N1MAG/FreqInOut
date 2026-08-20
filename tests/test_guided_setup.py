@@ -1379,6 +1379,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Radio Apps Base Folder:"' in dialog_block
     assert "_set_row_visible(radio_apps_base_wrap, visibility.configure_automatically)" in dialog_block
     assert "def _persist_radio_apps_base_folder() -> None:" in dialog_block
+    assert "app_search_paths_with_radio_apps_base(" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Used Radio Apps Base Folder for app detection." in Path("freqinout/core/guided_setup.py").read_text(
         encoding="utf-8"

@@ -8,6 +8,7 @@ import pytest
 
 from freqinout.core.config_autodiscovery import (
     JS8CallFileProfile,
+    app_search_paths_with_radio_apps_base,
     build_autoconfig_proposal,
     build_lab_radio_proposals,
     default_app_search_paths,
@@ -108,6 +109,39 @@ def test_default_app_search_paths_are_os_specific_and_bounded(tmp_path) -> None:
     assert all("*" not in str(path) for paths in mac_paths.values() for path in paths)
 
 
+def test_app_search_paths_with_radio_apps_base_prioritizes_operator_folder(tmp_path) -> None:
+    home = tmp_path / "home"
+    base = tmp_path / "RadioApps"
+
+    paths = app_search_paths_with_radio_apps_base(base, platform="Darwin", home=home)
+
+    assert paths["commstat"][0] == base / "CommStat.app"
+    assert base / "JS8Call-improved.app" in paths["js8call"]
+    assert base / "Subspace-Edition" / "build-trimode-baseline" / "JS8Call.app" in paths["js8call"]
+    assert paths["varac"][0] == base / "VarAC.app"
+    assert base / "VarAC_files" in paths["varac"]
+    assert home / "RadioTools" / "Programs" / "CommStat.app" in paths["commstat"]
+    assert home / "RadioTools" / "Programs" / "VarAC_files" in paths["varac"]
+
+
+def test_find_app_candidates_uses_radio_apps_base_search_paths(tmp_path) -> None:
+    base = tmp_path / "RadioApps"
+    commstat_exe = base / "CommStat.app" / "Contents" / "MacOS" / "CommStat"
+    _make_executable(commstat_exe)
+
+    paths = app_search_paths_with_radio_apps_base(base, platform="Darwin", home=tmp_path / "home")
+    candidates = find_app_candidates(
+        apps=("commstat",),
+        platform="Darwin",
+        home=tmp_path / "home",
+        app_search_paths=paths,
+    )
+
+    assert candidates
+    assert Path(candidates[0].path) == commstat_exe.parents[2]
+    assert candidates[0].executable is True
+
+
 def test_settings_detector_searches_macos_radioapps_folder(tmp_path) -> None:
     detector = SoftwarePathDetector(settings={})
     detector.home = tmp_path
@@ -147,7 +181,7 @@ def test_settings_detector_finds_js8_subspace_nested_bundle(tmp_path) -> None:
     )
 
     assert Path(result.path) == subspace_exe.parents[2]
-    assert result.confidence == "verified"
+    assert result.confidence == "high"
     assert result.target_type == "app_bundle"
 
 

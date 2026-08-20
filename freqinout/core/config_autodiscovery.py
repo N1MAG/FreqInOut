@@ -279,6 +279,71 @@ def default_app_search_paths(
     }
 
 
+def app_search_paths_with_radio_apps_base(
+    base_folder: str | Path | None = None,
+    *,
+    platform: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> Mapping[str, Tuple[Path, ...]]:
+    """Return app search paths with an optional operator-selected app folder first."""
+
+    defaults = {
+        app_id: tuple(paths)
+        for app_id, paths in default_app_search_paths(platform=platform, home=home).items()
+    }
+    raw = str(base_folder or "").strip()
+    if not raw:
+        return defaults
+    root = Path(os.path.expandvars(os.path.expanduser(raw)))
+    system = normalize_platform(platform)
+    if system == "Darwin":
+        additions = {
+            "flrig": _mac_app_candidates((root,), ("FLRig", "flrig")),
+            "fldigi": _mac_app_candidates((root,), ("FLDigi", "fldigi")),
+            "flmsg": _mac_app_candidates((root,), ("FLMsg", "flmsg")),
+            "flamp": _mac_app_candidates((root,), ("FLAmp", "flamp")),
+            "js8call": _mac_app_candidates((root,), JS8CALL_APP_NAMES) + (root / "js8_22" / "js8call",),
+            "js8spotter": _mac_app_candidates((root,), ("JS8Spotter", "js8spotter")),
+            "commstat": _mac_app_candidates((root,), ("CommStat", "commstat")),
+            "varac": _mac_app_candidates((root,), ("VarAC", "varac")) + (root / "VarAC_files", root / "VarAC"),
+        }
+    elif system == "Windows":
+        additions = {
+            "flrig": (root / "flrig" / "flrig.exe", root / "FLRig" / "flrig.exe"),
+            "fldigi": (root / "fldigi" / "fldigi.exe", root / "FLDigi" / "fldigi.exe"),
+            "flmsg": (root / "flmsg" / "flmsg.exe", root / "FLMsg" / "flmsg.exe"),
+            "flamp": (root / "flamp" / "flamp.exe", root / "FLAmp" / "flamp.exe"),
+            "js8call": (
+                root / "JS8Call" / "js8call.exe",
+                root / "JS8Call-improved" / "js8call.exe",
+                root / "JS8Call Subspace" / "js8call.exe",
+            ),
+            "js8spotter": (root / "JS8Spotter" / "JS8Spotter.exe",),
+            "commstat": (root / "CommStat" / "CommStat.exe",),
+            "varac": (root / "VarAC_files", root / "VarAC", root / "VarAC" / "VarAC.exe"),
+        }
+    else:
+        additions = {
+            "flrig": (root / "flrig", root / "FLRig" / "flrig"),
+            "fldigi": (root / "fldigi", root / "FLDigi" / "fldigi"),
+            "flmsg": (root / "flmsg", root / "FLMsg" / "flmsg"),
+            "flamp": (root / "flamp", root / "FLAmp" / "flamp"),
+            "js8call": (
+                root / "js8call",
+                root / "JS8Call" / "js8call",
+                root / "JS8Call-improved" / "js8call",
+                root / "JS8Call Subspace" / "js8call",
+            ),
+            "js8spotter": (root / "js8spotter", root / "JS8Spotter" / "js8spotter"),
+            "commstat": (root / "commstat", root / "CommStat" / "commstat"),
+            "varac": (root / "VarAC_files", root / "VarAC"),
+        }
+    merged: Dict[str, Tuple[Path, ...]] = {}
+    for app_id, paths in defaults.items():
+        merged[app_id] = tuple(_unique_paths(tuple(additions.get(app_id, ())) + tuple(paths)))
+    return merged
+
+
 def find_app_candidates(
     *,
     apps: Sequence[str] = ("flrig", "fldigi", "flmsg", "flamp", "js8call", "js8spotter", "commstat", "varac"),

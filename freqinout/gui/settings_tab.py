@@ -65,6 +65,7 @@ from freqinout.core.config_autodiscovery import (
     DEFAULT_PORT_PLAN,
     PortAssignment,
     RadioInstanceProposal,
+    app_search_paths_with_radio_apps_base,
     build_autoconfig_proposal,
     discover_js8call_file_profiles,
     select_js8call_file_profile,
@@ -14882,6 +14883,10 @@ class SettingsTab(QWidget):
                 radio_count=1,
                 home=Path.home(),
                 extra_app_paths=self._multi_rig_autoconfig_extra_app_paths(settings_values),
+                app_search_paths=app_search_paths_with_radio_apps_base(
+                    settings_values.get("radio_apps_base_folder", ""),
+                    home=Path.home(),
+                ),
             )
             summary, detail = self._multi_rig_autoconfig_preview_text(upgrade_preview, discovery_proposal)
             if hasattr(self, "multi_rig_autoconfig_preview_label"):
@@ -20092,6 +20097,10 @@ class SettingsTab(QWidget):
                     install_candidates = build_autoconfig_proposal(
                         radio_count=1,
                         home=Path.home(),
+                        app_search_paths=app_search_paths_with_radio_apps_base(
+                            radio_apps_base_edit.text().strip(),
+                            home=Path.home(),
+                        ),
                         busy_checker=lambda _host, _port: False,
                     ).candidates
                 except Exception:
