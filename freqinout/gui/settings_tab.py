@@ -19940,6 +19940,7 @@ class SettingsTab(QWidget):
             plan: GuidedAppConfigPlan,
             *,
             schedule_decision: GuidedScheduleDecision | None = None,
+            setup_started: bool = True,
         ) -> None:
             theme = resolve_theme(self.settings)
             text_color = theme.get("text", "#1C1F21")
@@ -19951,7 +19952,12 @@ class SettingsTab(QWidget):
                 "needs_input": theme.get("info", theme.get("accent", "#1565C0")),
             }
             seen: set[str] = set()
-            for item in guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision):
+            for item in guided_setup_flow_items(
+                blueprint,
+                plan,
+                schedule_decision=schedule_decision,
+                setup_started=setup_started,
+            ):
                 step_id = str(item.item_id or "").strip()
                 widgets = guided_step_widgets.get(step_id)
                 if widgets is None:
@@ -20085,15 +20091,36 @@ class SettingsTab(QWidget):
             blueprint = _current_guided_blueprint()
             plan = _current_guided_app_config_plan()
             schedule_decision = _current_guided_schedule_decision()
+            setup_started = bool(str(setup_type_combo.currentData() or "").strip())
             guided_next_action_label.setText(
-                guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)
+                guided_setup_next_action_text(
+                    blueprint,
+                    plan,
+                    schedule_decision=schedule_decision,
+                    setup_started=setup_started,
+                )
             )
-            _update_guided_step_widgets(blueprint, plan, schedule_decision=schedule_decision)
-            flow_lines = guided_setup_flow_summary_lines(blueprint, plan, schedule_decision=schedule_decision)
+            _update_guided_step_widgets(
+                blueprint,
+                plan,
+                schedule_decision=schedule_decision,
+                setup_started=setup_started,
+            )
+            flow_lines = guided_setup_flow_summary_lines(
+                blueprint,
+                plan,
+                schedule_decision=schedule_decision,
+                setup_started=setup_started,
+            )
             schedule_item = next(
                 (
                     item
-                    for item in guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)
+                    for item in guided_setup_flow_items(
+                        blueprint,
+                        plan,
+                        schedule_decision=schedule_decision,
+                        setup_started=setup_started,
+                    )
                     if str(item.item_id or "") == "schedule"
                 ),
                 None,

@@ -802,6 +802,29 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     assert "5. Review:" in lines[-1]
 
 
+def test_guided_setup_flow_does_not_show_ready_before_setup_type_selected(tmp_path) -> None:
+    blueprint = build_guided_setup_blueprint(
+        lane="js8_only",
+        hamlib_short_name="Radio",
+        setup_mode=SETUP_MODE_MANAGED,
+        control_route=CONTROL_JS8CALL,
+    )
+    plan = build_app_config_plan_for_blueprint(
+        blueprint,
+        build_lab_radio_proposals(radio_count=1, busy_checker=lambda _host, _port: False),
+        config_root=tmp_path / "fio-config",
+    )
+
+    items = guided_setup_flow_items(blueprint, plan, setup_started=False)
+    lines = guided_setup_flow_summary_lines(blueprint, plan, setup_started=False)
+
+    assert [item.status for item in items] == ["needs_input"] * 5
+    assert items[0].detail == "Choose the radio or SDR model and setup type."
+    assert items[1].detail == "Choose the software this radio uses."
+    assert guided_setup_next_action_text(blueprint, plan, setup_started=False).startswith("Next: Radio - ")
+    assert all("(Needs Input)" in line for line in lines)
+
+
 def test_guided_app_config_review_summarizes_managed_external_writes(tmp_path) -> None:
     blueprint = build_guided_setup_blueprint(
         lane="tri_mode",
@@ -1488,9 +1511,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "include_commstat=use_commstat_chk.isChecked()" in dialog_block
     assert "lane = _current_guided_lane()" in dialog_block
     assert "schedule_decision = _current_guided_schedule_decision()" in dialog_block
-    assert "guided_setup_flow_summary_lines(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
-    assert "guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
-    assert "guided_setup_next_action_text(blueprint, plan, schedule_decision=schedule_decision)" in dialog_block
+    assert "setup_started = bool(str(setup_type_combo.currentData() or \"\").strip())" in dialog_block
+    assert "guided_setup_flow_summary_lines(" in dialog_block
+    assert "setup_started=setup_started" in dialog_block
+    assert "guided_setup_flow_items(" in dialog_block
+    assert "guided_setup_next_action_text(" in dialog_block
     assert "def _current_guided_app_config_plan() -> GuidedAppConfigPlan:" in dialog_block
     assert "plan = _current_guided_app_config_plan()" in dialog_block
     assert 'guided_wizard_group = QGroupBox("Guided Setup")' in dialog_block

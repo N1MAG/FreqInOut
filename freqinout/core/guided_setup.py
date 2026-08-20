@@ -966,8 +966,43 @@ def guided_setup_flow_items(
     plan: GuidedAppConfigPlan,
     *,
     schedule_decision: GuidedScheduleDecision | None = None,
+    setup_started: bool = True,
 ) -> Tuple[GuidedSetupFlowItem, ...]:
     """Return the setup flow as compact, UI-ready steps."""
+
+    if not bool(setup_started):
+        return (
+            GuidedSetupFlowItem(
+                item_id="radio",
+                title="Radio",
+                detail="Choose the radio or SDR model and setup type.",
+                status="needs_input",
+            ),
+            GuidedSetupFlowItem(
+                item_id="software",
+                title="Software",
+                detail="Choose the software this radio uses.",
+                status="needs_input",
+            ),
+            GuidedSetupFlowItem(
+                item_id="connection",
+                title="Connection",
+                detail="FIO will show only the endpoint fields that apply after setup type is selected.",
+                status="needs_input",
+            ),
+            GuidedSetupFlowItem(
+                item_id="schedule",
+                title="Schedule",
+                detail="Choose or assign a Frequency Plan after software and connection details are reviewed.",
+                status="needs_input",
+            ),
+            GuidedSetupFlowItem(
+                item_id="review",
+                title="Review",
+                detail="Review the completed setup before saving.",
+                status="needs_input",
+            ),
+        )
 
     policy = guided_setup_capability_policy(blueprint)
     app_labels = [
@@ -1038,10 +1073,16 @@ def guided_setup_next_flow_item(
     plan: GuidedAppConfigPlan,
     *,
     schedule_decision: GuidedScheduleDecision | None = None,
+    setup_started: bool = True,
 ) -> GuidedSetupFlowItem:
     """Return the next operator-visible setup item that needs attention."""
 
-    items = guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision)
+    items = guided_setup_flow_items(
+        blueprint,
+        plan,
+        schedule_decision=schedule_decision,
+        setup_started=setup_started,
+    )
     for item in items:
         if str(item.status or "ready").strip().lower() != "ready":
             return item
@@ -1058,10 +1099,16 @@ def guided_setup_next_action_text(
     plan: GuidedAppConfigPlan,
     *,
     schedule_decision: GuidedScheduleDecision | None = None,
+    setup_started: bool = True,
 ) -> str:
     """Return one concise instruction for the next guided setup action."""
 
-    item = guided_setup_next_flow_item(blueprint, plan, schedule_decision=schedule_decision)
+    item = guided_setup_next_flow_item(
+        blueprint,
+        plan,
+        schedule_decision=schedule_decision,
+        setup_started=setup_started,
+    )
     title = str(item.title or "Review").strip()
     detail = str(item.detail or "").strip()
     if detail:
@@ -1074,11 +1121,20 @@ def guided_setup_flow_summary_lines(
     plan: GuidedAppConfigPlan,
     *,
     schedule_decision: GuidedScheduleDecision | None = None,
+    setup_started: bool = True,
 ) -> Tuple[str, ...]:
     """Return plain stepper lines for existing Qt labels."""
 
     lines = []
-    for idx, item in enumerate(guided_setup_flow_items(blueprint, plan, schedule_decision=schedule_decision), start=1):
+    for idx, item in enumerate(
+        guided_setup_flow_items(
+            blueprint,
+            plan,
+            schedule_decision=schedule_decision,
+            setup_started=setup_started,
+        ),
+        start=1,
+    ):
         status = str(item.status or "ready").replace("_", " ").title()
         lines.append(f"{idx}. {item.title}: {item.detail} ({status})")
     return tuple(lines)
