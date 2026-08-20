@@ -1332,14 +1332,16 @@ def test_guided_setup_autofill_review_is_bounded_and_operator_readable() -> None
         visible_limit=4,
     )
 
-    assert review.status_text == "Configure Automatically filled 5 field(s). Review before Save."
+    assert review.status_text == "Configure Automatically found settings. Review before Save."
     assert review.visible_lines == (
-        "Filled: FLRig port, JS8Call port, MCF forms, VarAC DB, VarAC outbox",
-        "Kept existing: JS8Call host, Radio name",
-        "Used Radio Apps Base Folder for app detection.",
+        "Filled 5: FLRig port, JS8Call port, MCF forms, +2 more",
+        "Kept existing: 2 field(s) unchanged.",
+        "Used Radio Apps Base Folder.",
         "Detected JS8Call profile FIO-A.",
         "1 more detail item(s) available.",
     )
+    assert "Filled: FLRig port, JS8Call port, MCF forms, VarAC DB, VarAC outbox" in review.detail_lines
+    assert "Kept existing: JS8Call host, Radio name" in review.detail_lines
     assert "External JS8Spotter not required for FIO Spotter." in review.detail_lines
 
 

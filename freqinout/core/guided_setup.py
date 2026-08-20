@@ -836,8 +836,14 @@ def guided_setup_autofill_review(
     notes = tuple(str(item or "").strip() for item in detection_notes if str(item or "").strip())
     limit = max(1, int(visible_limit or 4))
 
+    def _summary_line(label: str, items: Sequence[str], *, max_names: int = 3) -> str:
+        shown = tuple(items[:max_names])
+        suffix = f", +{len(items) - len(shown)} more" if len(items) > len(shown) else ""
+        names = ", ".join(shown)
+        return f"{label} {len(items)}: {names}{suffix}" if names else f"{label} {len(items)}"
+
     if filled_items:
-        status = f"Configure Automatically filled {len(filled_items)} field(s). Review before Save."
+        status = "Configure Automatically found settings. Review before Save."
     else:
         status = "Configure Automatically did not find new blank fields to fill."
 
@@ -852,7 +858,20 @@ def guided_setup_autofill_review(
     if not detail:
         detail.append("No blank fields could be filled from the current scan.")
 
-    visible = list(detail[:limit])
+    visible: list[str] = []
+    if filled_items:
+        visible.append(_summary_line("Filled", filled_items))
+    if preserved_items and len(visible) < limit:
+        visible.append(f"Kept existing: {len(preserved_items)} field(s) unchanged.")
+    if radio_apps_base_used and len(visible) < limit:
+        visible.append("Used Radio Apps Base Folder.")
+    for note in notes:
+        if len(visible) >= limit:
+            break
+        visible.append(note)
+    if not visible:
+        visible.append("No blank fields could be filled from the current scan.")
+
     remaining = len(detail) - len(visible)
     if remaining > 0:
         visible.append(f"{remaining} more detail item(s) available.")
