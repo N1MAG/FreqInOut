@@ -1249,7 +1249,7 @@ def test_guided_setup_next_action_uses_selected_schedule_decision() -> None:
     schedule_item = next(item for item in items if item.item_id == "schedule")
 
     assert schedule_item.status == "ready"
-    assert schedule_item.detail == "Selected plan: JS8 Standard. FIO assigns it after save with RF Guard."
+    assert schedule_item.detail == "Selected plan: JS8 Standard. RF Guard runs after save."
     assert guided_setup_next_action_text(blueprint, plan, schedule_decision=decision).startswith("Next: Review - ")
 
 
@@ -1298,7 +1298,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=False,
     )
     assert selected.status == "ready"
-    assert selected.step_detail == "Selected plan: Magnet Main. FIO assigns it after save with RF Guard."
+    assert selected.step_detail == "Selected plan: Magnet Main. RF Guard runs after save."
     assert selected.status_text == "After saving, FIO will assign 'Magnet Main' to this radio with RF Guard."
     assert selected.review_text == "Assign 'Magnet Main' after save with RF Guard."
 
@@ -1309,7 +1309,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=True,
     )
     assert handoff.status == "needs_input"
-    assert "Plan Manager will open" in handoff.step_detail
+    assert handoff.step_detail == "Save this radio, then build its Frequency Plan in Plan Manager."
     assert handoff.review_text == "Open Plan Manager after save so a Frequency Plan can be built and assigned."
 
     no_nets = guided_setup_schedule_decision(
@@ -1320,7 +1320,7 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         selected_schedule_choice="daily_no_nets",
     )
     assert no_nets.status == "needs_input"
-    assert no_nets.step_detail == "Plan Manager will open after save to build or choose a Daily with No Nets plan."
+    assert no_nets.step_detail == "Build or choose a Daily with No Nets plan in Plan Manager after save."
     assert no_nets.review_text == "Open Plan Manager after save for Daily with No Nets."
 
     no_schedule = guided_setup_schedule_decision(

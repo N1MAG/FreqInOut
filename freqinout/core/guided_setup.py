@@ -785,10 +785,11 @@ def guided_setup_schedule_decision(
     except Exception:
         count = 0
     if not scheduler_assignment_allowed:
+        step_text = "Monitor/import only; the external app keeps its schedule."
         text = "FIO will monitor/import this radio; the external app keeps its own frequency schedule."
         return GuidedScheduleDecision(
             status="ready",
-            step_detail=text,
+            step_detail=step_text,
             status_text=text,
             review_text="No FIO-controlled schedule or QSY controls will be saved for this radio.",
         )
@@ -811,14 +812,14 @@ def guided_setup_schedule_decision(
         text = f"Plan Manager will open after save to build or choose a {path_label} plan."
         return GuidedScheduleDecision(
             status="needs_input",
-            step_detail=text,
+            step_detail=f"Build or choose a {path_label} plan in Plan Manager after save.",
             status_text=text,
             review_text=f"Open Plan Manager after save for {path_label}.",
         )
     if selected:
         return GuidedScheduleDecision(
             status="ready",
-            step_detail=f"Selected plan: {selected}. FIO assigns it after save with RF Guard.",
+            step_detail=f"Selected plan: {selected}. RF Guard runs after save.",
             status_text=f"After saving, FIO will assign '{selected}' to this radio with RF Guard.",
             review_text=f"Assign '{selected}' after save with RF Guard.",
         )
@@ -833,7 +834,7 @@ def guided_setup_schedule_decision(
             )
         return GuidedScheduleDecision(
             status="needs_input",
-            step_detail=text,
+            step_detail="Save this radio, then build its Frequency Plan in Plan Manager.",
             status_text=text,
             review_text="Open Plan Manager after save so a Frequency Plan can be built and assigned.",
         )
