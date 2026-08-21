@@ -1706,6 +1706,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
         : dialog_block.index("def _select_single_detected_choice")
     ]
     assert "combo.count() > 1" in app_choice_visibility_block
+    assert "combo.setVisible(visible)" in app_choice_visibility_block
     assert "js8_profile_choice_combo.count() > 1" in app_choice_visibility_block
     assert "js8_profile_details_present" not in app_choice_visibility_block
     assert "js8_port_has_one_match" not in app_choice_visibility_block

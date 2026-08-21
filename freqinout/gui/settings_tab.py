@@ -19396,6 +19396,7 @@ class SettingsTab(QWidget):
                     and (combo.count() > 1 or (app_autoconfigure_attempted and target_missing))
                 )
                 _set_row_visible(row_widget, visible)
+                combo.setVisible(visible)
                 needs_choice = visible and (
                     (combo.count() > 2 and combo.currentIndex() <= 0)
                     or (app_autoconfigure_attempted and combo.count() <= 1 and target_missing)
