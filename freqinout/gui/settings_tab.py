@@ -6993,7 +6993,7 @@ class SettingsTab(QWidget):
             self.launch_guidance_card,
             self.launch_guidance_title_label,
             self.launch_guidance_status_label,
-        ) = _make_support_card("Projected Launch Bundle", "launchControlGuidanceStatus")
+        ) = _make_support_card("Selected Radio Launch Bundle", "launchControlGuidanceStatus")
         launch_v.addWidget(self.launch_guidance_card)
 
         self.launch_hint_label = QLabel()
@@ -7003,7 +7003,7 @@ class SettingsTab(QWidget):
         launch_global_row.setContentsMargins(0, 0, 0, 0)
         launch_global_row.setSpacing(8)
         launch_global_row.addWidget(self.launch_hint_label, 1)
-        self.launch_all_with_startup_chk = QCheckBox("Launch All with FreqInOut")
+        self.launch_all_with_startup_chk = QCheckBox("Launch this radio with FreqInOut")
         launch_global_row.addWidget(self.launch_all_with_startup_chk)
         launch_v.addLayout(launch_global_row)
 
@@ -7028,7 +7028,7 @@ class SettingsTab(QWidget):
         self.launch_order_up_btn = QPushButton("Up")
         self.launch_order_down_btn = QPushButton("Down")
         self.launch_reset_order_btn = QPushButton("Reset Default Order")
-        self.launch_configured_now_btn = QPushButton("Launch Configured Now")
+        self.launch_configured_now_btn = QPushButton("Launch This Radio")
         self.launch_stop_btn = QPushButton("Stop Launch Sequence")
         self.launch_stop_btn.setEnabled(False)
         launch_actions_grid.addWidget(QLabel("Order:"), 0, 0)
@@ -13064,11 +13064,32 @@ class SettingsTab(QWidget):
     def _radio_profile_operating_launch_allowed(profile: Optional[Dict[str, Any]]) -> bool:
         return bool(isinstance(profile, dict) and int(profile.get("use_launch_control", 0) or 0) == 1)
 
+    @staticmethod
+    def _radio_profile_has_launch_path(profile: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        for key in (
+            "flrig_path",
+            "fldigi_path",
+            "flmsg_path",
+            "flamp_path",
+            "js8_install_path",
+            "spotter_launch_path",
+            "commstat_launch_path",
+            "varac_install_path",
+            "launch_cmd",
+        ):
+            if str(profile.get(key, "") or "").strip():
+                return True
+        return False
+
     @classmethod
     def _radio_profile_launch_control_enabled(cls, profile: Optional[Dict[str, Any]]) -> bool:
-        # Transitional Settings visibility: show Launch Control when either the radio opt-in
-        # or the projected operating-plan policy references launch control.
-        return cls._radio_profile_launch_opt_in_enabled(profile) or cls._radio_profile_operating_launch_allowed(profile)
+        return (
+            cls._radio_profile_launch_opt_in_enabled(profile)
+            or cls._radio_profile_operating_launch_allowed(profile)
+            or cls._radio_profile_has_launch_path(profile)
+        )
 
     @classmethod
     def _radio_profile_launch_control_summary(cls, profile: Optional[Dict[str, Any]]) -> str:
@@ -13490,7 +13511,13 @@ class SettingsTab(QWidget):
         js8_visible = enabled("js8call") or enabled("js8spotter") or enabled("commstat")
         fast_light_visible = enabled("flrig") or enabled("fldigi") or enabled("flmsg") or enabled("flamp") or enabled("rigctld")
         varac_visible = enabled("varac")
-        launch_visible = self._radio_profile_launch_control_enabled(profile)
+        launch_visible = bool(
+            has_profile
+            and (
+                self._radio_profile_launch_control_enabled(profile)
+                or self._radio_profile_has_software_option(profile)
+            )
+        )
 
         self._set_settings_section_visible(getattr(self, "radio_software_scope_section_group", None), False)
         self._set_settings_section_visible(getattr(self, "js8_section_group", None), js8_visible)
@@ -13960,7 +13987,7 @@ class SettingsTab(QWidget):
                 self.software_scope_status_label.setText(
                     f"Selected radio: {radio_name}. These JS8Call, Fast Light, and VarAC pages now edit this radio's software bundle. "
                     f"Current software summary: {summary}. Endpoint summary: {endpoint}. "
-                    "Launch Control and operating status still follow the Station Default compatibility projection."
+                    "Launch Control also follows this selected radio bundle."
                 )
             else:
                 self.software_scope_status_label.setText(
@@ -13974,11 +14001,11 @@ class SettingsTab(QWidget):
             self.varac_scope_label.setText(scope_text)
         if hasattr(self, "custom_tools_scope_label"):
             self.custom_tools_scope_label.setText(
-                f"{scope_text} Custom tools are still shared until the radio-scoped custom-tools binding audit is complete."
+                f"{scope_text} Custom tools remain shared station tools."
             )
         if hasattr(self, "launch_control_scope_label"):
             self.launch_control_scope_label.setText(
-                f"{scope_text} Launch Control currently follows the Station Default projection while selected-radio launch binding is reviewed."
+                f"{scope_text} Launch Control reviews and starts this selected radio's configured software."
             )
 
     def _refresh_radio_context_labels(self) -> None:
@@ -17194,6 +17221,25 @@ class SettingsTab(QWidget):
         else:
             bits.append("Active assignments become the current schedule plan for the selected radio immediately.")
         bits.append("Save with RF Guard runs the assignment check before the radio schedule changes.")
+        if len(rows) == 1 and plan is not None:
+            try:
+                device_id = int(rows[0].get("device_profile_id", 0) or 0)
+            except Exception:
+                device_id = 0
+            if device_id > 0:
+                try:
+                    validation = self.multi_radio_store.validate_frequency_plan_for_device(device_id, plan)
+                except ValueError as exc:
+                    bits.append(f"RF Guard blocked: {exc}")
+                except Exception:
+                    log.exception("Failed validating selected schedule assignment.")
+                else:
+                    blocked = [str(item).strip() for item in validation.get("blocked", []) if str(item).strip()]
+                    warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+                    if blocked:
+                        bits.append(f"RF Guard blocked: {blocked[0]}")
+                    elif warnings:
+                        bits.append(f"RF Guard warning: {warnings[0]}")
         self.schedule_assignment_editor_hint_label.setText(" ".join(bits))
 
     def _show_schedule_assignment_editor(
@@ -17343,15 +17389,18 @@ class SettingsTab(QWidget):
         if state == "temporary_override" and not reason_value:
             reason_value = "Temporary schedule override from Settings."
         ends_value = self.schedule_assignment_ends_edit.text().strip()
+        saved_assignments: List[Dict[str, Any]] = []
         try:
             for row in selected:
-                self.multi_radio_store.set_assigned_plan(
+                saved = self.multi_radio_store.set_assigned_plan(
                     int(row.get("device_profile_id", 0) or 0),
                     plan_id,
                     assignment_state=state,
                     reason=reason_value,
                     ends_utc=ends_value,
                 )
+                if isinstance(saved, dict):
+                    saved_assignments.append(saved)
         except ValueError as exc:
             self._set_schedule_assignment_guidance("RF Guard Blocked Assignment", str(exc), "warning")
             return
@@ -17378,11 +17427,28 @@ class SettingsTab(QWidget):
         )
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
-        self._set_schedule_assignment_guidance(
-            "Schedule Assignment Saved",
-            f"Saved with RF Guard for {len(selected)} radio{'s' if len(selected) != 1 else ''}.",
-            "success",
-        )
+        warning_text = ""
+        for assignment in saved_assignments:
+            try:
+                validation = json.loads(str(assignment.get("validation_status_json", "") or "{}"))
+            except Exception:
+                validation = {}
+            warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+            if warnings:
+                warning_text = warnings[0]
+                break
+        if warning_text:
+            self._set_schedule_assignment_guidance(
+                "RF Guard Needs Review",
+                warning_text,
+                "warning",
+            )
+        else:
+            self._set_schedule_assignment_guidance(
+                "Schedule Assignment Saved",
+                f"Saved with RF Guard for {len(selected)} radio{'s' if len(selected) != 1 else ''}.",
+                "success",
+            )
         self._publish_settings_action_feedback(
             status="succeeded",
             summary=f"Updated schedule assignment for {len(selected)} radio{'s' if len(selected) != 1 else ''}.",
@@ -18447,6 +18513,23 @@ class SettingsTab(QWidget):
             "Schedule assignment is the next step after saving this radio. Assigning a plan runs RF Guard before the radio follows it."
         )
         _add_full_width_row(schedule_form, schedule_status_label)
+        schedule_guard_warning_card = QFrame()
+        schedule_guard_warning_card.setObjectName("guidedScheduleRfGuardWarning")
+        schedule_guard_warning_layout = QVBoxLayout(schedule_guard_warning_card)
+        schedule_guard_warning_layout.setContentsMargins(10, 8, 10, 8)
+        schedule_guard_warning_layout.setSpacing(4)
+        schedule_guard_warning_title = QLabel("RF Guard Needs Review")
+        schedule_guard_warning_title.setObjectName("guidedScheduleRfGuardWarningTitle")
+        schedule_guard_warning_title_font = schedule_guard_warning_title.font()
+        schedule_guard_warning_title_font.setBold(True)
+        schedule_guard_warning_title.setFont(schedule_guard_warning_title_font)
+        schedule_guard_warning_detail = QLabel()
+        schedule_guard_warning_detail.setObjectName("guidedScheduleRfGuardWarningDetail")
+        schedule_guard_warning_detail.setWordWrap(True)
+        schedule_guard_warning_layout.addWidget(schedule_guard_warning_title)
+        schedule_guard_warning_layout.addWidget(schedule_guard_warning_detail)
+        schedule_guard_warning_card.setVisible(False)
+        _add_full_width_row(schedule_form, schedule_guard_warning_card)
         schedule_path_combo = QComboBox()
         schedule_path_combo.setObjectName("guidedSchedulePathCombo")
         _configure_combo_width(schedule_path_combo, minimum=320)
@@ -18533,7 +18616,7 @@ class SettingsTab(QWidget):
         app_config_review_toggle_btn.clicked.connect(_toggle_guided_app_config_review_details)
         launch_group, launch_form = _make_section(
             "Launch Control",
-            "Use this only when FIO should launch an external app or script for this radio.",
+            "Optional. Let FIO start the selected software bundle for this radio from Radio Settings.",
         )
 
         radio_model_combo = QComboBox()
@@ -18756,9 +18839,10 @@ class SettingsTab(QWidget):
             detail_label = QLabel()
             detail_label.setObjectName(f"guidedSetupStepDetail_{step_id}")
             detail_label.setWordWrap(True)
-            step_frame_layout.addWidget(status_label, 0, 0, 2, 1)
+            step_frame_layout.addWidget(status_label, 0, 0)
             step_frame_layout.addWidget(title_label, 0, 1)
-            step_frame_layout.addWidget(detail_label, 1, 1)
+            step_frame_layout.addWidget(detail_label, 1, 0, 1, 2)
+            detail_label.setVisible(False)
             step_frame_layout.setColumnStretch(1, 1)
             guided_step_stack_layout.addWidget(step_frame)
             guided_step_widgets[step_id] = (step_frame, status_label, title_label, detail_label)
@@ -18777,17 +18861,20 @@ class SettingsTab(QWidget):
         app_choice_combos: Dict[str, QComboBox] = {}
         app_choice_rows: Dict[str, QWidget] = {}
         app_choice_browse_buttons: Dict[str, QPushButton] = {}
-        app_choice_specs = [
+        app_choice_specs_primary = [
             ("flrig", "Which FLRig controls this radio?"),
             ("fldigi", "Which FLDigi belongs to this radio?"),
             ("flmsg", "Which FLMsg belongs to this radio?"),
             ("flamp", "Which FLAmp belongs to this radio?"),
             ("js8call", "Which JS8Call belongs to this radio?"),
+        ]
+        app_choice_specs_secondary = [
             ("js8spotter", "Which external JS8Spotter app belongs to this radio?"),
             ("commstat", "Which CommStat belongs to this radio?"),
             ("varac", "Which VarAC belongs to this radio?"),
         ]
-        for app_id, prompt_text in app_choice_specs:
+
+        def _add_app_choice_row(app_id: str, prompt_text: str) -> None:
             combo = QComboBox()
             combo.setObjectName(f"guidedAutoAppChoice_{app_id}")
             combo.setVisible(False)
@@ -18812,6 +18899,9 @@ class SettingsTab(QWidget):
             label_widget.setVisible(False)
             row_labels[choice_wrap] = label_widget
             app_choice_layout.addRow(label_widget, choice_wrap)
+
+        for app_id, prompt_text in app_choice_specs_primary:
+            _add_app_choice_row(app_id, prompt_text)
         js8_profile_choice_combo = QComboBox()
         js8_profile_choice_combo.setObjectName("guidedAutoJs8ProfileChoice")
         js8_profile_choice_combo.setVisible(False)
@@ -18824,6 +18914,8 @@ class SettingsTab(QWidget):
         js8_profile_choice_label.setVisible(False)
         row_labels[js8_profile_choice_combo] = js8_profile_choice_label
         app_choice_layout.addRow(js8_profile_choice_label, js8_profile_choice_combo)
+        for app_id, prompt_text in app_choice_specs_secondary:
+            _add_app_choice_row(app_id, prompt_text)
         _add_full_width_row(software_form, app_choice_group)
 
         role_hint_label = QLabel()
@@ -18972,7 +19064,7 @@ class SettingsTab(QWidget):
         varac_launch_cmd_wrap = _make_browse_row(varac_launch_cmd_edit, title="Select VarAC launch command", mode="folder")
         _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_wrap, "Optional VarAC launch override for this radio.")
 
-        launch_enabled_chk = QCheckBox("Use Launch Control for this radio")
+        launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")
         launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))
         launch_form.addRow("", launch_enabled_chk)
 
@@ -18987,9 +19079,9 @@ class SettingsTab(QWidget):
         launch_wrap.setLayout(launch_row)
         _add_form_row(
             launch_form,
-            "Launch Path:",
+            "Extra Launch Path:",
             launch_wrap,
-            "Optional executable or script path used when FreqInOut launches this radio's software.",
+            "Optional app or script to start with this radio's software bundle.",
         )
 
         sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
@@ -20011,8 +20103,9 @@ class SettingsTab(QWidget):
                     f" QLabel#{detail_label.objectName()} {{ color: {muted_color}; }}"
                 )
                 status_label.setText(_guided_step_status_label(status_key))
-                title_label.setText(str(item.title or "").strip())
+                title_label.setText(f"{str(item.title or '').strip()}: {_guided_step_status_label(status_key)}")
                 detail_label.setText(str(item.detail or "").strip())
+                detail_label.setVisible(False)
             for step_id, widgets in guided_step_widgets.items():
                 if step_id not in seen:
                     widgets[0].setVisible(False)
@@ -20050,9 +20143,10 @@ class SettingsTab(QWidget):
             )
             status_label.setText(_guided_step_status_label(status_key))
             if title:
-                title_label.setText(title)
+                title_label.setText(f"{title}: {_guided_step_status_label(status_key)}")
             if detail:
                 detail_label.setText(detail)
+            detail_label.setVisible(False)
 
         def _refresh_guided_schedule_step_card() -> None:
             decision = _current_guided_schedule_decision()
@@ -20176,6 +20270,104 @@ class SettingsTab(QWidget):
                 return ""
             return str(schedule_plan_combo.currentText() or "").strip()
 
+        def _selected_guided_schedule_plan() -> Optional[Dict[str, Any]]:
+            if _selected_guided_schedule_path() != SCHEDULE_EXISTING_PLAN:
+                return None
+            try:
+                plan_id = int(schedule_plan_combo.currentData() or 0)
+            except Exception:
+                plan_id = 0
+            if plan_id <= 0:
+                return None
+            try:
+                plans = list(self.multi_radio_store.list_frequency_plans())
+            except Exception:
+                log.debug("Failed loading Frequency Plans for guided RF Guard preview.", exc_info=True)
+                plans = []
+            return next(
+                (
+                    dict(row)
+                    for row in plans
+                    if isinstance(row, dict) and int(row.get("id", 0) or 0) == plan_id
+                ),
+                None,
+            )
+
+        def _guided_schedule_assignment_validation() -> Dict[str, Any]:
+            plan = _selected_guided_schedule_plan()
+            if plan is None:
+                return {}
+            try:
+                return self.multi_radio_store.validate_frequency_plan_for_device_payload(
+                    _draft_radio_profile(),
+                    plan,
+                )
+            except ValueError as exc:
+                return {
+                    "state": "blocked",
+                    "blocked": [str(exc)],
+                    "warnings": [],
+                    "messages": [str(exc)],
+                }
+            except Exception:
+                log.exception("Failed validating guided schedule assignment preview.")
+                return {}
+
+        def _guided_schedule_assignment_warning_lines() -> List[str]:
+            validation = _guided_schedule_assignment_validation()
+            blocked = [str(item).strip() for item in validation.get("blocked", []) if str(item).strip()]
+            warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+            return [f"RF Guard blocked: {blocked[0]}"] if blocked else [f"RF Guard warning: {warnings[0]}"] if warnings else []
+
+        def _guided_schedule_assignment_warning_summary() -> Tuple[str, str, str]:
+            validation = _guided_schedule_assignment_validation()
+            blocked = [str(item).strip() for item in validation.get("blocked", []) if str(item).strip()]
+            warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+            if not blocked and not warnings:
+                return "", "", ""
+            supported = [str(item).strip() for item in validation.get("supported_bands", []) if str(item).strip()]
+            plan_bands = [str(item).strip() for item in validation.get("plan_bands", []) if str(item).strip()]
+            unsupported = [band for band in plan_bands if supported and band not in supported]
+            plan_name = _selected_guided_schedule_plan_name() or "selected Frequency Plan"
+            radio_name = name_edit.text().strip() or "this radio"
+            if unsupported and supported:
+                detail = (
+                    f"Antenna and schedule mismatch: {radio_name} is configured for "
+                    f"{self._human_join(supported)}, but {plan_name} uses {self._human_join(unsupported)}. "
+                    "Choose a different plan, update the supported antenna bands, or do not transmit until the antenna path is confirmed."
+                )
+            else:
+                detail = blocked[0] if blocked else warnings[0]
+            if blocked:
+                return "blocked", "RF Guard Blocked Schedule Assignment", detail
+            return "warning", "RF Guard Warning: Antenna / Schedule Mismatch", detail
+
+        def _apply_guided_schedule_assignment_warning_ui() -> None:
+            tone, title, detail = _guided_schedule_assignment_warning_summary()
+            if not tone:
+                schedule_guard_warning_card.setVisible(False)
+                schedule_guard_warning_title.setText("")
+                schedule_guard_warning_detail.setText("")
+                schedule_guard_warning_card.setToolTip("")
+                return
+            theme = resolve_theme(self.settings)
+            border = theme.get("danger", "#B3261E") if tone == "blocked" else theme.get("warning", "#C99700")
+            bg = QColor(border)
+            bg.setAlpha(28)
+            fg = theme.get("text", "#1C1F21")
+            schedule_guard_warning_title.setText(title)
+            schedule_guard_warning_detail.setText(detail)
+            schedule_guard_warning_card.setToolTip(detail)
+            schedule_guard_warning_card.setStyleSheet(
+                "QFrame#guidedScheduleRfGuardWarning {"
+                f" background-color: {bg.name(QColor.HexArgb)};"
+                f" border: 2px solid {border};"
+                " border-radius: 6px;"
+                "}"
+                f" QLabel {{ color: {fg}; border: none; background: transparent; }}"
+            )
+            schedule_guard_warning_card.setVisible(True)
+
         def _selected_guided_schedule_path() -> str:
             if not hasattr(schedule_path_combo, "currentData"):
                 return ""
@@ -20253,8 +20445,20 @@ class SettingsTab(QWidget):
             if schedule_choice and schedule_choice not in {SCHEDULE_EXISTING_PLAN, SCHEDULE_NONE}:
                 schedule_open_plan_manager_chk.setChecked(True)
             decision = _current_guided_schedule_decision()
-            schedule_status_label.setText(decision.status_text)
-            if app_setup_plan_group.isVisible():
+            tone, title, detail = _guided_schedule_assignment_warning_summary()
+            status_text = decision.status_text
+            if detail:
+                status_text = f"{status_text}\n{detail}"
+            schedule_status_label.setText(status_text)
+            _apply_guided_schedule_assignment_warning_ui()
+            if tone:
+                _set_guided_step_override(
+                    "schedule",
+                    status="review",
+                    title="Schedule",
+                    detail=detail,
+                )
+            elif app_setup_plan_group.isVisible():
                 _refresh_guided_schedule_step_card()
 
         def _guided_connection_step_visible() -> bool:
@@ -20575,10 +20779,6 @@ class SettingsTab(QWidget):
 
             enabled_text = "Enabled" if int((existing or {}).get("enabled", 1) or 1) == 1 else "Not enabled"
             active_text = "Active now" if int((existing or {}).get("runtime_active", 0) or 0) == 1 else "Inactive until you choose Use Radio"
-            launch_line = "Launch Control enabled" if launch_enabled_chk.isChecked() else "Launch Control off"
-            launch_path = str(launch_path_edit.text().strip() or varac_launch_cmd_edit.text().strip() or "")
-            if launch_path:
-                launch_line = f"{launch_line}; {_compact_value(launch_path)}"
             app_config_plan = _current_guided_app_config_plan()
             app_config_lines = guided_app_config_review_lines(app_config_plan)
             app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
@@ -20593,8 +20793,12 @@ class SettingsTab(QWidget):
                 "Supported bands are checked before assignment.",
                 "Shared antenna/transmit/front-end groups are used by RF Guard when configured.",
             ]
+            _guard_tone, _guard_title, guard_detail = _guided_schedule_assignment_warning_summary()
+            if guard_detail:
+                guard_lines.append(guard_detail)
             if conflict_lines:
                 guard_lines.extend(conflict_lines)
+            guard_tone = "warning" if conflict_lines or guard_detail else "success"
             review_html = [
                 _review_card_html(
                     "Radio Profile",
@@ -20621,11 +20825,11 @@ class SettingsTab(QWidget):
                 _review_card_html(
                     "RF Guard and Schedule",
                     guard_lines + ["Schedule: " + schedule_line],
-                    tone="warning" if conflict_lines else "success",
+                    tone=guard_tone,
                 ),
                 _review_card_html(
-                    "Files and Launch",
-                    file_lines + [app_config_summary, "Launch: " + launch_line],
+                    "Files",
+                    file_lines + [app_config_summary],
                     tone="neutral",
                 ),
             ]
@@ -20674,7 +20878,7 @@ class SettingsTab(QWidget):
             optional_body.setVisible(guided_wizard_step_id == "guard")
             schedule_group.setVisible(guided_wizard_step_id == "schedule")
             save_review_group.setVisible(guided_wizard_step_id == "review")
-            launch_group.setVisible(guided_wizard_step_id == "review")
+            launch_group.setVisible(False)
             if guided_wizard_step_id != "review":
                 readiness_card.setVisible(False)
             else:
@@ -20939,8 +21143,11 @@ class SettingsTab(QWidget):
                 _set_row_visible(widget, visibility.flamp_fields)
             for widget in varac_field_widgets:
                 _set_row_visible(widget, visibility.varac_fields)
+            rf_guard_step_active = guided_wizard_step_id == "guard"
+            guard_fields_visible = bool(visibility.optional_fields or rf_guard_step_active)
+            shared_guard_heading.setVisible(guard_fields_visible)
             for widget in optional_field_widgets:
-                _set_row_visible(widget, visibility.optional_fields)
+                _set_row_visible(widget, guard_fields_visible)
 
             for widget in technical_identity_widgets:
                 _set_row_visible(widget, visibility.technical_identity_fields)
@@ -20984,9 +21191,8 @@ class SettingsTab(QWidget):
                 connection_status_label.setText("Review the endpoint fields below for the selected software stack.")
             else:
                 connection_status_label.setText("No FIO frequency-control endpoint is required for this setup type.")
-            rf_guard_step_active = guided_wizard_step_id == "guard"
-            optional_body.setVisible(bool(optional_toggle.isChecked()) or rf_guard_step_active)
-            optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() or rf_guard_step_active else Qt.RightArrow)
+            optional_body.setVisible(guard_fields_visible)
+            optional_toggle.setArrowType(Qt.DownArrow if guard_fields_visible else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
             assignment_allowed = guided_setup_capability_policy(blueprint).scheduler_assignment_allowed
             _set_row_visible(schedule_path_combo, assignment_allowed)
@@ -21047,6 +21253,11 @@ class SettingsTab(QWidget):
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
         schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
         schedule_plan_combo.currentIndexChanged.connect(lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
+        for checkbox in band_checks.values():
+            checkbox.stateChanged.connect(lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
+        antenna_band_mode_combo.currentIndexChanged.connect(
+            lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
+        )
         schedule_open_plan_manager_chk.stateChanged.connect(
             lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
         )
@@ -21408,8 +21619,9 @@ class SettingsTab(QWidget):
             return False
         if target_device_id <= 0 or target_plan_id <= 0:
             return False
+        saved_assignment: Optional[Dict[str, Any]] = None
         try:
-            self.multi_radio_store.set_assigned_plan(
+            saved_assignment = self.multi_radio_store.set_assigned_plan(
                 target_device_id,
                 target_plan_id,
                 assignment_state="active",
@@ -21434,6 +21646,25 @@ class SettingsTab(QWidget):
             self.settings_saved.emit()
         except Exception:
             pass
+        validation: Dict[str, Any] = {}
+        try:
+            validation = json.loads(str((saved_assignment or {}).get("validation_status_json", "") or "{}"))
+        except Exception:
+            validation = {}
+        warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+        if warnings:
+            self._set_schedule_assignment_guidance(
+                "RF Guard Needs Review",
+                warnings[0],
+                "warning",
+            )
+            self._publish_settings_action_feedback(
+                status="succeeded",
+                summary="Assigned the selected Frequency Plan; RF Guard warning needs review.",
+                detail=warnings[0],
+                action_type="schedule_assignment",
+            )
+            return True
         self._publish_settings_action_feedback(
             status="succeeded",
             summary="Assigned the selected Frequency Plan after guided radio setup.",
@@ -22163,25 +22394,8 @@ class SettingsTab(QWidget):
         self._mark_settings_dirty()
 
     def _launch_bundle_source_profile(self) -> Optional[Dict[str, Any]]:
-        primary = next(
-            (
-                dict(row)
-                for row in self.device_profiles
-                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
-            ),
-            None,
-        )
-        if primary is not None:
-            return primary
-        active = next(
-            (
-                dict(row)
-                for row in self.device_profiles
-                if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
-            ),
-            None,
-        )
-        return active
+        profile = self._selected_settings_radio_profile()
+        return dict(profile) if isinstance(profile, dict) else None
 
     @staticmethod
     def _profile_display_name(profile: Dict[str, Any]) -> str:
@@ -22259,6 +22473,43 @@ class SettingsTab(QWidget):
         meta = self.PROGRAMS.get(name)
         path_key = str((meta or {}).get("setting_key", "") or "").strip()
         return bool(str(settings_data.get(path_key, "") or "").strip()) if path_key else False
+
+    @staticmethod
+    def _radio_launch_overrides_for_name(name: str, profile: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        if not isinstance(profile, dict):
+            return {}
+        app_name = str(name or "").strip()
+        path_map = {
+            "FLRig": "flrig_path",
+            "FLDigi": "fldigi_path",
+            "FLMsg": "flmsg_path",
+            "FLAmp": "flamp_path",
+            "JS8Call": "js8_install_path",
+            "JS8Spotter": "spotter_launch_path",
+            "CommStat": "commstat_launch_path",
+            "VarAC": "varac_install_path",
+        }
+        if app_name == "VarAC":
+            launch_cmd = str(profile.get("launch_cmd", "") or "").strip()
+            if launch_cmd:
+                return {"launch_command_override": launch_cmd}
+        path_key = path_map.get(app_name, "")
+        path = str(profile.get(path_key, "") or "").strip() if path_key else ""
+        return {"launch_path_override": path} if path else {}
+
+    def _radio_scoped_launch_items(self) -> List[Dict[str, object]]:
+        profile = self._launch_bundle_source_profile()
+        items: List[Dict[str, object]] = []
+        for item in self._launch_items_cache:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if not name or not self._is_launch_item_configured(name):
+                continue
+            scoped = dict(item)
+            scoped.update(self._radio_launch_overrides_for_name(name, profile))
+            items.append(scoped)
+        return items
 
     def _sync_launch_cache_from_table(self) -> None:
         if not hasattr(self, "launch_control_table"):
@@ -22385,13 +22636,13 @@ class SettingsTab(QWidget):
                 self.launch_guidance_card,
                 self.launch_guidance_title_label,
                 self.launch_guidance_status_label,
-                title="Projected Launch Bundle",
-                text="Launch Control follows the current Station Default compatibility shell. Select a default radio in Radio Profiles so launch behavior clearly follows one radio bundle.",
+                title="Selected Radio Launch Bundle",
+                text="Select a radio profile to review or start that radio's configured software.",
                 level="warning",
             )
             if hasattr(self, "launch_hint_label"):
                 self.launch_hint_label.setText(
-                    "Only configured apps are shown. Custom tools remain global. Without a default radio, Launch Control falls back to whatever is currently projected into the compatibility shell."
+                    "Only configured apps for the selected radio are shown. Custom tools remain shared station tools."
                 )
             return
         radio_name = self._profile_display_name(profile)
@@ -22401,9 +22652,9 @@ class SettingsTab(QWidget):
         launch_enabled = self._radio_profile_launch_opt_in_enabled(profile)
         level = "success" if self._radio_profile_effective_launch_control_enabled(profile) else "warning"
         text = (
-            f"Station Default radio: {radio_name}. Primary rig control: {backend_label}. "
-            f"Software bundle: {bundle}. Endpoint summary: {endpoint}. "
-            f"Radio launch opt-in: {'enabled' if launch_enabled else 'off for this radio'}."
+            f"Selected radio: {radio_name}. Frequency control: {backend_label}. "
+            f"Software: {bundle}. Endpoints: {endpoint}. "
+            f"Launch with FIO: {'enabled' if launch_enabled else 'off'}."
         )
         self._set_guidance_card_state(
             self.launch_guidance_card,
@@ -22421,8 +22672,8 @@ class SettingsTab(QWidget):
             ]
             active_text = f" Active radios: {', '.join(active_names)}." if active_names else ""
             self.launch_hint_label.setText(
-                "Only apps configured for the current Station Default radio bundle are shown here, along with any global custom tools. "
-                "Launch order controls startup sequencing for that projected radio bundle."
+                "Only apps configured for this selected radio are shown here, along with shared custom tools. "
+                "Launch order controls this radio's startup sequence."
                 + active_text
             )
 
@@ -22492,12 +22743,12 @@ class SettingsTab(QWidget):
                     self._publish_launch_control_feedback(
                         status="blocked",
                         summary="Launch blocked: Launch Control is disabled.",
-                        detail=reason or "Launch Control is disabled by the primary operating model.",
+                        detail=reason or "Launch Control is disabled for the selected radio.",
                     )
                     return
             except Exception:
                 pass
-        started = self.launch_orchestrator.start_manual_sequence(self._launch_items_cache)
+        started = self.launch_orchestrator.start_manual_sequence(self._radio_scoped_launch_items())
         if not started:
             self._publish_launch_control_feedback(
                 status="blocked",
@@ -22508,7 +22759,7 @@ class SettingsTab(QWidget):
         self._publish_launch_control_feedback(
             status="in_progress",
             summary="Launch sequence started.",
-            detail="FreqInOut is starting the selected configured applications.",
+            detail="FreqInOut is starting the configured applications for the selected radio.",
         )
         self._update_launch_control_buttons()
 

@@ -1357,13 +1357,41 @@ def _validate_schedule_assignment_compatibility(device: Mapping[str, Any], frequ
         raise ValueError("Observer / SDR radios can only be assigned receive-only schedule plans.")
 
 
+def _band_tokens_from_plan_ref_item(item: Any) -> List[str]:
+    bands: List[str] = []
+    if isinstance(item, Mapping):
+        for field in ("band", "band_name", "band_label", "target_band"):
+            bands.extend(_extract_band_tokens_from_text(item.get(field, "")))
+        for field in (
+            "frequency",
+            "freq",
+            "freq_mhz",
+            "frequency_mhz",
+            "freq_hz",
+            "frequency_hz",
+        ):
+            freq_hz = _parse_frequency_hz_value(item.get(field, ""))
+            inferred = _band_from_frequency_hz(freq_hz)
+            if inferred:
+                bands.append(inferred)
+        # Keep a text fallback so older plans with ad-hoc refs remain covered.
+        bands.extend(_extract_band_tokens_from_text(" ".join(_coerce_text(v, "") for v in item.values())))
+        return bands
+    bands.extend(_extract_band_tokens_from_text(item))
+    freq_hz = _parse_frequency_hz_value(item)
+    inferred = _band_from_frequency_hz(freq_hz)
+    if inferred:
+        bands.append(inferred)
+    return bands
+
+
 def _frequency_plan_bands(frequency_plan: Mapping[str, Any]) -> List[str]:
     bands: List[str] = []
     for key in ("frequency_refs_json", "schedule_refs_json", "group_refs_json", "source_refs_json", "notes", "description", "name"):
         value = frequency_plan.get(key, "") if isinstance(frequency_plan, Mapping) else ""
         if str(key).endswith("_json"):
-            for item in _parse_ref_list(value):
-                bands.extend(_extract_band_tokens_from_text(item))
+            for item in _parse_ref_items(value):
+                bands.extend(_band_tokens_from_plan_ref_item(item))
         else:
             bands.extend(_extract_band_tokens_from_text(value))
     for freq_hz in _frequency_plan_frequency_hz_values(frequency_plan):
@@ -1719,8 +1747,9 @@ def _schedule_assignment_validation_status_conn(
     unsupported = [band for band in plan_bands if supported_bands and band not in supported_bands]
     for band in unsupported:
         message = (
-            f"{str(device.get('name', '') or 'Radio')} antenna support does not include {band} "
-            f"for {str(frequency_plan.get('name', '') or 'Frequency Plan')}."
+            f"Antenna and schedule mismatch: {str(device.get('name', '') or 'Radio')} antenna support "
+            f"does not include {band} for {str(frequency_plan.get('name', '') or 'Frequency Plan')}. "
+            "Confirm the antenna path before transmitting."
         )
         target = blocked if antenna_mode == "block" else warnings
         target.append(message)
@@ -5368,6 +5397,30 @@ class MultiRadioStore:
             device = _record_by_id(conn, "device_profiles", int(device_profile_id))
             if not device:
                 raise KeyError(f"Unknown device profile id: {device_profile_id}")
+            _validate_schedule_assignment_compatibility(device, frequency_plan)
+            return _schedule_assignment_validation_status_conn(conn, device, frequency_plan, emit_events=False)
+
+    def validate_frequency_plan_for_device_payload(
+        self,
+        device_profile: Mapping[str, Any],
+        frequency_plan: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate a not-yet-saved radio profile draft against a Frequency Plan."""
+        device = dict(device_profile or {})
+        if "antenna_supported_bands_json" not in device:
+            device["antenna_supported_bands_json"] = _coerce_json_array_text(
+                device.get("antenna_supported_bands", [])
+            )
+        device["antenna_band_guard_mode"] = normalize_rf_guard_mode(
+            device.get("antenna_band_guard_mode", "warn")
+        )
+        device["band_overlap_guard_mode"] = normalize_rf_guard_mode(
+            device.get("band_overlap_guard_mode", "warn")
+        )
+        device["advanced_frequency_guard_mode"] = normalize_rf_guard_mode(
+            device.get("advanced_frequency_guard_mode", "warn")
+        )
+        with self._connect() as conn:
             _validate_schedule_assignment_compatibility(device, frequency_plan)
             return _schedule_assignment_validation_status_conn(conn, device, frequency_plan, emit_events=False)
 

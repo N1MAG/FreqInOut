@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -104,7 +104,7 @@ class LaunchOrchestrator(QObject):
         self._active = False
         self._cancel_requested = False
         self._trigger = ""
-        self._queue: List[str] = []
+        self._queue: List[Any] = []
         self._index = 0
         self._results: List[Dict[str, Any]] = []
         self._current_name: Optional[str] = None
@@ -211,13 +211,16 @@ class LaunchOrchestrator(QObject):
             legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
             if legacy_key:
                 default_startup = self.is_truthy(self.settings.get(str(legacy_key), False))
-            out.append(
-                {
-                    "name": name,
-                    "enabled": bool(prev.get("enabled", True)),
-                    "startup": bool(prev.get("startup", default_startup)),
-                }
-            )
+            normalized_item = {
+                "name": name,
+                "enabled": bool(prev.get("enabled", True)),
+                "startup": bool(prev.get("startup", default_startup)),
+            }
+            for key in ("launch_path_override", "launch_command_override"):
+                value = str(prev.get(key, "") or "").strip()
+                if value:
+                    normalized_item[key] = value
+            out.append(normalized_item)
         return out
 
     def get_launch_items(self) -> List[Dict[str, Any]]:
@@ -335,8 +338,8 @@ class LaunchOrchestrator(QObject):
             for key, val in batch.items():
                 self.settings.set(key, val)
 
-    def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[str]:
-        queue: List[str] = []
+    def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[Any]:
+        queue: List[Any] = []
         catalog = set(self.launch_catalog_order())
         for item in items:
             if not isinstance(item, dict):
@@ -348,10 +351,20 @@ class LaunchOrchestrator(QObject):
                 continue
             if startup_only and not bool(item.get("startup", False)):
                 continue
-            if not self.is_configured(name):
+            has_override = bool(
+                str(item.get("launch_path_override", "") or "").strip()
+                or str(item.get("launch_command_override", "") or "").strip()
+            )
+            if not has_override and not self.is_configured(name):
                 continue
-            queue.append(name)
+            queue.append(dict(item) if has_override else name)
         return queue
+
+    @staticmethod
+    def _queue_item_name(item: Any) -> str:
+        if isinstance(item, Mapping):
+            return str(item.get("name", "") or "").strip()
+        return str(item or "").strip()
 
     def _schedule_advance_queue(self, delay_ms: int = 0) -> None:
         QTimer.singleShot(max(0, int(delay_ms)), self._advance_queue)
@@ -383,7 +396,8 @@ class LaunchOrchestrator(QObject):
             return False
         if self._index >= len(self._queue):
             return False
-        for name in self._queue[self._index :]:
+        for item in self._queue[self._index :]:
+            name = self._queue_item_name(item)
             if name in names:
                 return True
         return False
@@ -399,7 +413,7 @@ class LaunchOrchestrator(QObject):
             return self._coerce_delay_seconds(raw, DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC)
         return 0.0
 
-    def _start_sequence(self, trigger: str, queue: List[str]) -> bool:
+    def _start_sequence(self, trigger: str, queue: List[Any]) -> bool:
         self._active = True
         self._cancel_requested = False
         self._trigger = trigger
@@ -416,7 +430,7 @@ class LaunchOrchestrator(QObject):
             )
         except Exception:
             self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-        self.sequence_started.emit({"trigger": trigger, "queue": list(queue)})
+        self.sequence_started.emit({"trigger": trigger, "queue": [self._queue_item_name(item) for item in queue]})
         self._schedule_advance_queue(0)
         return True
 
@@ -429,8 +443,12 @@ class LaunchOrchestrator(QObject):
         if self._index >= len(self._queue):
             self._finish_sequence(cancelled=False)
             return
-        name = self._queue[self._index]
+        queue_item = self._queue[self._index]
+        name = self._queue_item_name(queue_item)
         self._index += 1
+        if not name:
+            self._schedule_advance_queue(0)
+            return
         if self._program_running(name):
             if self._program_ready_for_sequence(name):
                 result = {"name": name, "status": "already_running", "detail": "already running"}
@@ -444,7 +462,7 @@ class LaunchOrchestrator(QObject):
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
             return
-        cmd, cmd_desc = self._resolve_launch_command(name)
+        cmd, cmd_desc = self._resolve_launch_command(queue_item)
         if not cmd:
             result = {"name": name, "status": "failed", "detail": "no launch command"}
             self._results.append(result)
@@ -529,7 +547,22 @@ class LaunchOrchestrator(QObject):
         except Exception:
             return False
 
-    def _resolve_launch_command(self, name: str) -> Tuple[Optional[List[str]], str]:
+    def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
+        name = self._queue_item_name(item_or_name)
+        item = item_or_name if isinstance(item_or_name, Mapping) else {}
+        override_cmd = str(item.get("launch_command_override", "") or "").strip()
+        if override_cmd:
+            cmd = self._command_from_freeform(override_cmd)
+            if cmd:
+                return self._finalize_launch_command(name, cmd), "radio launch command"
+        override_path = str(item.get("launch_path_override", "") or "").strip()
+        if override_path:
+            cmd = self._command_from_config_path(name, override_path)
+            if cmd:
+                return self._finalize_launch_command(name, cmd), "radio configured path"
+            cmd = self._command_from_freeform(override_path)
+            if cmd:
+                return self._finalize_launch_command(name, cmd), "radio configured command"
         custom_cmd = self._custom_tool_command(name)
         if custom_cmd:
             cmd = self._command_from_freeform(custom_cmd)

@@ -4728,6 +4728,45 @@ class MainWindow(QMainWindow):
         return bool(value)
 
     @staticmethod
+    def _station_command_frequency_controls_available(snapshot: object | None) -> bool:
+        if snapshot is None:
+            return False
+        profile = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+        for key in (
+            "control_backend",
+            "use_varac",
+            "uses_varac",
+            "use_flrig",
+            "uses_flrig",
+            "use_js8call",
+            "uses_js8call",
+            "use_fldigi",
+            "uses_fldigi",
+        ):
+            value = MainWindow._station_command_value(snapshot, key, None)
+            if value is not None:
+                profile[key] = value
+        if not profile:
+            return True
+        has_explicit_control_shape = any(
+            str(profile.get(key, "") or "").strip()
+            for key in (
+                "control_backend",
+                "use_varac",
+                "uses_varac",
+                "use_flrig",
+                "uses_flrig",
+                "use_js8call",
+                "uses_js8call",
+                "use_fldigi",
+                "uses_fldigi",
+            )
+        )
+        if not has_explicit_control_shape:
+            return True
+        return frequency_controls_available(profile)
+
+    @staticmethod
     def _station_command_snapshot_name(snapshot: object) -> str:
         try:
             name = str(MainWindow._station_command_value(snapshot, "name", "") or "").strip()
@@ -6089,9 +6128,40 @@ class MainWindow(QMainWindow):
         payload = state.get(radio_id)
         return dict(payload) if isinstance(payload, Mapping) else None
 
+    def _station_command_assignment_rf_guard_issues(self, profile: dict | None) -> list[tuple[str, str]]:
+        radio_id = self._station_command_snapshot_id(profile) if profile is not None else 0
+        if radio_id <= 0:
+            return []
+        try:
+            assignment = self.multi_radio_store.get_effective_assigned_plan_for_device(radio_id)
+        except Exception:
+            assignment = None
+        if not isinstance(assignment, Mapping):
+            return []
+        try:
+            validation = json.loads(str(assignment.get("validation_status_json", "") or "{}"))
+        except Exception:
+            validation = {}
+        if not isinstance(validation, Mapping):
+            return []
+        state = str(validation.get("state", "") or "").strip().lower()
+        if state not in {"blocked", "warning"}:
+            return []
+        messages = [
+            str(item).strip()
+            for key in ("blocked", "warnings", "messages")
+            for item in (validation.get(key) or [])
+            if str(item or "").strip()
+        ]
+        if not messages:
+            messages = ["RF Guard detected an assigned schedule issue."]
+        severity = "error" if state == "blocked" else "warn"
+        return [(severity, message) for message in messages]
+
     def _station_command_health_summary_for_profile(self, profile: dict | None) -> dict[str, object]:
         items = self._station_command_health_items(profile)
         off_schedule_payload = self._station_command_off_schedule_payload_for_profile(profile)
+        assignment_guard_issues = self._station_command_assignment_rf_guard_issues(profile)
         off_schedule_items = []
         if isinstance(off_schedule_payload, Mapping):
             raw_items = off_schedule_payload.get("items")
@@ -6111,6 +6181,15 @@ class MainWindow(QMainWindow):
                     "Review " + ", ".join(off_schedule_items) + " before trusting scheduler position.",
                 )
             )
+        for severity, message in assignment_guard_issues:
+            issue_items.append(
+                (
+                    "__schedule_assignment_rf_guard__",
+                    "RF Guard",
+                    severity,
+                    message,
+                )
+            )
         healthy_count = 0
         for key, label_text in items:
             info = snapshot.get(key, {})
@@ -6125,6 +6204,9 @@ class MainWindow(QMainWindow):
         if off_schedule_items:
             summary_label = "Off Schedule"
             summary_tooltip = "Off Schedule: " + ", ".join(off_schedule_items)
+        elif assignment_guard_issues:
+            summary_label = "RF Guard"
+            summary_tooltip = "; ".join(message for _severity, message in assignment_guard_issues)
         elif not items:
             summary_label = "No checks"
             summary_tooltip = "No configured software health items for this radio."
@@ -6787,7 +6869,7 @@ class MainWindow(QMainWindow):
             now = self._station_command_now_text_for_summary(snapshot, selected_id)
             next_text = self._station_command_next_text(snapshot)
             plan_text = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
-            frequency_control_available = frequency_controls_available(snapshot if isinstance(snapshot, Mapping) else {})
+            frequency_control_available = self._station_command_frequency_controls_available(snapshot)
             health_summary = self._station_command_health_summary_for_profile(snapshot)
             health_state = str(health_summary.get("state", "warn") or "warn").strip().lower()
             tile = QFrame(parent)

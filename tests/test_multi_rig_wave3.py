@@ -305,6 +305,28 @@ def test_launch_orchestrator_runtime_launch_override_blocks_sequences(monkeypatc
     assert orchestrator.start_manual_sequence([]) is False
 
 
+def test_launch_orchestrator_resolves_radio_scoped_path_override(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app_path = tmp_path / "fio-b-js8call"
+    app_path.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    settings = SettingsManager()
+    settings.set("path_js8call", "/wrong/global/js8call")
+    orchestrator = LaunchOrchestrator(settings)
+
+    cmd, desc = orchestrator._resolve_launch_command(
+        {
+            "name": "JS8Call",
+            "enabled": True,
+            "launch_path_override": str(app_path),
+        }
+    )
+
+    assert desc == "radio configured path"
+    assert cmd == [str(app_path)]
+
+
 def test_scheduler_engine_runtime_scheduler_override_updates_status_and_helper(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

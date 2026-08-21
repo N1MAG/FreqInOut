@@ -43,6 +43,11 @@ def test_settings_source_exposes_radio_first_operating_model_assignment_controls
     assert "self._select_settings_section_group(group)" in source
     assert 'self.schedule_assignments_table = QTableWidget(0, 8)' in source
     assert "def _save_schedule_assignment_editor(self) -> None:" in source
+    assert "def _update_schedule_assignment_editor_hint(self) -> None:" in source
+    assert "validate_frequency_plan_for_device(device_id, plan)" in source
+    assert "RF Guard warning: {warnings[0]}" in source
+    assert '"RF Guard Needs Review"' in source
+    assert 'assignment.get("validation_status_json", "")' in source
     assert "selection_model.selectedRows()" in source
     assert "append_assignment_for_device(device_profile_id)" in source
     assert 'self.schedule_assignment_state_combo.addItem("Inactive", "inactive")' not in source
@@ -623,6 +628,109 @@ def test_schedule_assignment_warns_for_unsupported_antenna_band(monkeypatch, tmp
     assert "40M" in validation["plan_bands"]
     assert "20M" in validation["supported_bands"]
     assert "does not include 40M" in validation["warnings"][0]
+
+
+def test_schedule_assignment_warns_for_unsupported_band_from_schedule_rows(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "Forty Twenty Fifteen Radio",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["40M", "20M", "15M"],
+            "antenna_band_guard_mode": "warn",
+        }
+    )
+    plan = store.save_frequency_plan(
+        {
+            "name": "Plan With Eighty",
+            "schedule_refs": [
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "00:00",
+                    "end_utc": "06:00",
+                    "group": "MAGNET",
+                    "mode": "DIGI",
+                    "band": "80M",
+                    "frequency": "3.585",
+                }
+            ],
+        }
+    )
+
+    validation = store.validate_frequency_plan_for_device(int(radio["id"]), plan)
+
+    assert validation["state"] == "warning"
+    assert "80M" in validation["plan_bands"]
+    assert validation["supported_bands"] == ["40M", "20M", "15M"]
+    assert "does not include 80M" in validation["warnings"][0]
+
+
+def test_schedule_assignment_preview_warns_for_unsaved_radio_antenna_bands(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "schedule_refs": [
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "00:00",
+                    "end_utc": "06:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "80M",
+                    "frequency": "3.588",
+                },
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "06:00",
+                    "end_utc": "16:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "40M",
+                    "frequency": "7.110",
+                },
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "16:00",
+                    "end_utc": "00:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "20M",
+                    "frequency": "14.110",
+                },
+            ],
+        }
+    )
+
+    validation = store.validate_frequency_plan_for_device_payload(
+        {
+            "name": "TS-2000",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "flrig",
+            "antenna_supported_bands": ["15M", "10M"],
+            "antenna_band_guard_mode": "warn",
+        },
+        plan,
+    )
+
+    assert validation["state"] == "warning"
+    assert validation["supported_bands"] == ["15M", "10M"]
+    assert validation["plan_bands"] == ["80M", "40M", "20M"]
+    joined = " ".join(validation["warnings"])
+    assert "does not include 80M" in joined
+    assert "does not include 40M" in joined
+    assert "does not include 20M" in joined
 
 
 def test_schedule_assignment_blocks_unsupported_antenna_band(monkeypatch, tmp_path) -> None:

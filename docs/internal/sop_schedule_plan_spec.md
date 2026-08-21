@@ -121,6 +121,26 @@ before save. Multi-radio plans must surface:
 - close-frequency guard groups
 - simultaneous TX risks where known
 
+RF Guard also applies during initial guided radio configuration and every selected
+radio configuration path. Supported antenna bands are captured before schedule
+assignment so FIO can warn before a user assigns a plan that contains an unsupported
+band. The guard reads the effective plan layers directly: HF Daily rows, HF Net
+rows, SOP rows, structured `schedule_refs`, and summarized `frequency_refs`. A
+schedule row carrying `band: 80M` must warn or block against a radio whose antenna
+supports only 40M/20M/15M even if no separate frequency summary was saved.
+If the operator saves or activates a radio with a warning-level antenna/schedule
+mismatch, the selected radio's Health surface must continue to show RF Guard
+needs review until the antenna bands or assigned plan are corrected. This is a
+core equipment-protection signal, not just a setup note.
+
+Launch Control is a selected-radio management feature. Add Radio may opt a radio
+into launch control, but Settings must show the selected radio's launch bundle
+without requiring that opt-in first. Manual launch actions use the selected radio's
+configured app paths and commands rather than station-default compatibility paths.
+Startup launch policy can still be gated by the radio opt-in and assigned operating
+model, but review and "launch now" are always scoped to the radio the operator is
+editing.
+
 Known Net Resources are included when they are not already represented by HF Net
 rows. If an HF Net row carries the same resource identity or the same
 day/time/frequency/net signature, the resource is treated as already folded into
@@ -181,6 +201,21 @@ For resource-backed entries with a `resource_id`, the operator is prompted to
 save the plan-local edit only or also update the master Net Resource. Master
 resource updates are explicit, happen only after the SOP Schedule Plan save passes
 RF Guard, and mark the resource as manually updated from an SOP Schedule Plan.
+
+## Traffic-Driven SOP Inputs
+
+SOP Builder also consumes operational observations from Messages, ControlFreq,
+and Map. JS8Spotter, CommStat, FLMsg/FLAmp, VarAC, JS8Call, and local reports can
+produce topic-tagged observations that suggest SOP actions or condition-level
+changes. This is specified in
+`docs/internal/superspotter_offline_integration_spec.md`.
+
+Condition-level changes must be rule-driven and configurable by operating group.
+MagNet `MAGCON` traffic is a default template, not a hard-coded behavior. Other
+groups can define their own match patterns, allowed senders, source families,
+authentication requirements, and apply behavior. The default behavior for
+received condition alerts is review-and-apply, so inbound traffic does not
+silently mutate an active SOP.
 
 ## Implementation Slices
 

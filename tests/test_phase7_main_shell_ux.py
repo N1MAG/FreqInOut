@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -3537,6 +3538,45 @@ def test_phase7_station_command_health_marks_off_schedule_as_health_category(mon
     assert summary["state"] == "warn"
     assert summary["issues"][0][1] == "Off Schedule"
     assert "Frequency" in summary["tooltip"]
+
+    app.processEvents()
+
+
+def test_phase7_station_command_health_marks_assignment_rf_guard_warning(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def get_effective_assigned_plan_for_device(self, device_id: int) -> dict[str, str]:
+            assert device_id == 3
+            return {
+                "validation_status_json": json.dumps(
+                    {
+                        "state": "warning",
+                        "warnings": [
+                            "Antenna and schedule mismatch: FIO-C antenna support does not include 80M for Field Plan."
+                        ],
+                    }
+                )
+            }
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_off_schedule_by_radio = {}
+    window.dependency_status_service = SimpleNamespace(software_status_snapshot=lambda: {})
+    window._station_command_health_items = lambda _profile: []
+    window.multi_radio_store = FakeStore()
+
+    summary = MainWindow._station_command_health_summary_for_profile(
+        window,
+        {"id": 3, "name": "FIO-C"},
+    )
+
+    assert summary["label"] == "RF Guard"
+    assert summary["state"] == "warn"
+    assert summary["issues"][0][1] == "RF Guard"
+    assert "does not include 80M" in summary["tooltip"]
 
     app.processEvents()
 

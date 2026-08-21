@@ -411,9 +411,9 @@ def test_settings_source_promotes_radio_readiness_cards() -> None:
     assert "Focused VarAC Cluster Guidance" in source
     assert "Focused VarAC Membership Guidance" in source
     assert "Enable Cluster Mode" in source
-    assert "Projected Launch Bundle" in source
-    assert "Station Default radio:" in source
-    assert "Only apps configured for the current Station Default radio bundle are shown here" in source
+    assert "Selected Radio Launch Bundle" in source
+    assert "Selected radio:" in source
+    assert "Only apps configured for this selected radio are shown here" in source
     assert "Primary Rig Control:" in source
     assert 'QCheckBox("JS8Call")' in source
     assert 'QCheckBox("FIO Spotter")' in source

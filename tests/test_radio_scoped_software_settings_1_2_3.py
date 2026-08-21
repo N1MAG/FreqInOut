@@ -319,7 +319,7 @@ def test_settings_tab_source_mentions_radio_scoped_software_view() -> None:
 
     assert "Radio Software View" in source
     assert "These software pages stay in the familiar single-rig layout" in source
-    assert "Launch Control and operating status still follow the Station Default compatibility projection." in source
+    assert "Launch Control also follows this selected radio bundle." in source
 
 
 def test_settings_tab_source_keeps_radio_context_labels_in_sync() -> None:
@@ -382,8 +382,8 @@ def test_settings_radio_context_labels_and_save_feedback_share_selected_radio() 
     assert "Evening Net (Active)" in tab.device_assignments_scope_label.text()
     assert tab.js8_scope_label.text().startswith("Editing Radio: DX10 (Station Default).")
     assert tab.fast_light_scope_label.text() == tab.js8_scope_label.text()
-    assert "Custom tools are still shared" in tab.custom_tools_scope_label.text()
-    assert "Launch Control currently follows the Station Default projection" in tab.launch_control_scope_label.text()
+    assert "Custom tools remain shared station tools" in tab.custom_tools_scope_label.text()
+    assert "Launch Control reviews and starts this selected radio's configured software" in tab.launch_control_scope_label.text()
     assert tab.settings_action_feedback_label.text() == "Saved DX10 settings."
     events = service.recent(scope="settings")
     assert len(events) == 1
@@ -4057,6 +4057,7 @@ def test_launch_control_chip_visibility_uses_shared_profile_rule() -> None:
     assert SettingsTab._radio_profile_launch_control_enabled(None) is False
     assert SettingsTab._radio_profile_launch_control_enabled({}) is False
     assert SettingsTab._radio_profile_launch_control_enabled({"launch_enabled": 0, "use_launch_control": 0}) is False
+    assert SettingsTab._radio_profile_launch_control_enabled({"launch_enabled": 0, "use_launch_control": 0, "flrig_path": "/apps/flrig.app"}) is True
     assert SettingsTab._radio_profile_launch_control_enabled({"launch_enabled": 1, "use_launch_control": 0}) is True
     assert SettingsTab._radio_profile_launch_control_enabled({"launch_enabled": 0, "use_launch_control": 1}) is True
     assert SettingsTab._radio_profile_launch_opt_in_enabled({"launch_enabled": 1, "use_launch_control": 0}) is True
@@ -4086,11 +4087,52 @@ def test_launch_control_chip_visibility_uses_shared_profile_rule() -> None:
     assert "def _radio_profile_effective_launch_control_enabled" in source
     assert "def _radio_profile_launch_control_summary" in source
     assert "self._radio_profile_launch_control_enabled(profile)" in software_chip_block
-    assert "launch_visible = self._radio_profile_launch_control_enabled(profile)" in visibility_block
+    assert "self._radio_profile_launch_control_enabled(profile)" in visibility_block
+    assert "self._radio_profile_has_software_option(profile)" in visibility_block
     assert 'table.setItem(row, 11, QTableWidgetItem("Opt-in" if self._radio_profile_launch_opt_in_enabled(profile) else "Off"))' in source
     assert 'use_launch_control_chk.setChecked(bool((existing or {}).get("use_launch_control", 0)))' in source
     assert 'launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))' in source
-    assert "Radio launch opt-in:" in source
+    assert "Launch with FIO:" in source
+
+
+def test_launch_control_source_profile_uses_selected_radio_not_station_default() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    selected = {"id": 2, "name": "FIO-B", "runtime_primary": 0, "runtime_active": 1}
+    tab = SettingsTab.__new__(SettingsTab)
+    tab.device_profiles = [
+        {"id": 1, "name": "FIO-A", "runtime_primary": 1, "runtime_active": 1},
+        selected,
+    ]
+    tab._selected_settings_radio_profile = lambda: selected
+
+    assert tab._launch_bundle_source_profile()["name"] == "FIO-B"
+
+
+def test_radio_scoped_launch_items_include_selected_radio_path_overrides() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    profile = {
+        "id": 2,
+        "name": "FIO-B",
+        "use_flrig": 1,
+        "use_js8call": 1,
+        "flrig_path": "/apps/FIO-B/flrig.app",
+        "js8_install_path": "/apps/FIO-B/js8call.app",
+    }
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._launch_items_cache = [
+        {"name": "FLRig", "enabled": True, "startup": False},
+        {"name": "JS8Call", "enabled": True, "startup": False},
+    ]
+    tab._custom_tool_command = lambda _name: ""
+    tab._launch_bundle_source_profile = lambda: profile
+    tab._is_launch_item_configured = lambda name: name in {"FLRig", "JS8Call"}
+
+    items = tab._radio_scoped_launch_items()
+
+    assert items[0]["launch_path_override"] == "/apps/FIO-B/flrig.app"
+    assert items[1]["launch_path_override"] == "/apps/FIO-B/js8call.app"
 
 
 def test_launch_control_defaults_are_explicit_opt_in() -> None:

@@ -1611,8 +1611,13 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'for step_id in ("radio", "software", "connection", "guard", "schedule", "review")' in dialog_block
     assert 'optional_open=optional_toggle.isChecked() or guided_wizard_step_id == "guard"' in dialog_block
     assert 'rf_guard_step_active = guided_wizard_step_id == "guard"' in dialog_block
+    assert "guard_fields_visible = bool(visibility.optional_fields or rf_guard_step_active)" in dialog_block
+    assert "shared_guard_heading.setVisible(guard_fields_visible)" in dialog_block
+    assert "_set_row_visible(widget, guard_fields_visible)" in dialog_block
     assert "optional_toggle.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
     assert "optional_body.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
+    assert '"Optional. Let FIO start the selected software bundle for this radio from Radio Settings."' in dialog_block
+    assert 'launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")' in dialog_block
     assert 'save_review_label.setTextFormat(Qt.RichText)' in dialog_block
     assert "def _endpoint_conflict_lines() -> List[str]:" in dialog_block
     assert "is already used by" in dialog_block
@@ -1621,9 +1626,23 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Software and Control"' in dialog_block
     assert '"Endpoints"' in dialog_block
     assert '"RF Guard and Schedule"' in dialog_block
-    assert '"Files and Launch"' in dialog_block
+    assert '"Files"' in dialog_block
+    assert '"Files and Launch"' not in dialog_block
+    assert '"Launch:"' not in dialog_block
+    assert '"Radio launch"' not in dialog_block
+    assert "launch_group.setVisible(False)" in dialog_block
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
+    assert dialog_block.index("for app_id, prompt_text in app_choice_specs_primary:") < dialog_block.index(
+        "js8_profile_choice_combo = QComboBox()"
+    )
+    assert dialog_block.index("app_choice_layout.addRow(js8_profile_choice_label, js8_profile_choice_combo)") < dialog_block.index(
+        "for app_id, prompt_text in app_choice_specs_secondary:"
+    )
+    assert '("js8call", "Which JS8Call belongs to this radio?")' in dialog_block
+    assert '("varac", "Which VarAC belongs to this radio?")' in dialog_block
+    assert 'title_label.setText(f"{str(item.title or \'\').strip()}: {_guided_step_status_label(status_key)}")' in dialog_block
+    assert "detail_label.setVisible(False)" in dialog_block
     assert 'app_config_review_card.setObjectName("guidedAppConfigReviewCard")' in dialog_block
     assert 'app_config_review_title = QLabel("App Configuration")' in dialog_block
     assert 'app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")' in dialog_block
@@ -1662,7 +1681,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
     assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule")' in dialog_block
     assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
-    assert 'launch_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
+    assert "launch_group.setVisible(False)" in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
     assert 'guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}' in dialog_block
     assert 'step_frame.setObjectName(f"guidedSetupStep_{step_id}")' in dialog_block
@@ -1783,3 +1802,14 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "updated.pop(\"guided_schedule_choice\", \"\")" in source
     assert "self._last_persisted_device_profile = dict(saved)" in source
     assert '"RF Guard Blocked Schedule Assignment"' in source
+    assert "validate_frequency_plan_for_device_payload(" in source
+    assert "def _guided_schedule_assignment_warning_lines(" in source
+    assert "def _guided_schedule_assignment_warning_summary(" in source
+    assert 'schedule_guard_warning_card = QFrame()' in source
+    assert '"guidedScheduleRfGuardWarning"' in source
+    assert "Antenna and schedule mismatch:" in source
+    assert "checkbox.stateChanged.connect(lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))" in source
+    assert "antenna_band_mode_combo.currentIndexChanged.connect(" in source
+    assert "RF Guard warning: {warnings[0]}" in source
+    assert '"RF Guard Needs Review"' in source
+    assert "Assigned the selected Frequency Plan; RF Guard warning needs review." in source
