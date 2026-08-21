@@ -530,6 +530,7 @@ ADD_RADIO_WIZARD_STEPS: Tuple[Tuple[str, str], ...] = (
     ("radio", "Radio"),
     ("software", "Software"),
     ("connection", "Connection"),
+    ("guard", "RF Guard"),
     ("schedule", "Schedule"),
     ("review", "Review"),
 )
@@ -550,7 +551,7 @@ def guided_setup_wizard_view(
     )
     step_ids = [step_id for step_id, _label in visible_steps]
     if requested not in step_ids:
-        requested = "schedule" if requested == "connection" and "schedule" in step_ids else "radio"
+        requested = "guard" if requested == "connection" and "guard" in step_ids else "radio"
     current_index = step_ids.index(requested)
     previous_label = visible_steps[current_index - 1][1] if current_index > 0 else ""
     next_label = visible_steps[current_index + 1][1] if current_index < len(visible_steps) - 1 else ""
@@ -558,12 +559,13 @@ def guided_setup_wizard_view(
         "radio": "Choose the radio model, name, role, and setup type.",
         "software": "Choose the software stack and let FIO fill blank paths and ports where it can.",
         "connection": "Review only the connection fields that apply to this radio.",
-        "schedule": "Assign the Frequency Plan after saving the radio profile; RF Guard checks before it is used.",
-        "review": "Review readiness, launch behavior, and advanced guard notes before saving.",
+        "guard": "Confirm supported bands and shared RF paths before assigning a Frequency Plan.",
+        "schedule": "Choose the Frequency Plan after antenna and RF Guard details are known.",
+        "review": "Review the radio profile and app configuration actions before saving.",
     }
     visible_sections = (requested,)
     if requested == "review":
-        visible_sections = ("review", "launch", "optional")
+        visible_sections = ("review", "launch")
     elif requested == "connection" and not bool(connection_visible):
         visible_sections = tuple()
     return GuidedSetupWizardView(
@@ -886,9 +888,9 @@ def guided_setup_schedule_decision(
     if selected:
         return GuidedScheduleDecision(
             status="review",
-            step_detail=f"Selected plan: {selected}. RF Guard runs after save.",
-            status_text=f"After saving, FIO will assign '{selected}' to this radio with RF Guard.",
-            review_text=f"Assign '{selected}' after save with RF Guard.",
+            step_detail=f"Selected plan: {selected}. RF Guard runs during assignment.",
+            status_text=f"FIO will assign '{selected}' to this radio with RF Guard.",
+            review_text=f"Assign '{selected}' with RF Guard.",
         )
     if bool(open_plan_manager) or count <= 0:
         text = (
@@ -1006,9 +1008,15 @@ def guided_setup_flow_items(
                 status="needs_input",
             ),
             GuidedSetupFlowItem(
+                item_id="guard",
+                title="RF Guard",
+                detail="Confirm supported bands and shared RF paths before schedule assignment.",
+                status="needs_input",
+            ),
+            GuidedSetupFlowItem(
                 item_id="schedule",
                 title="Schedule",
-                detail="Choose or assign a Frequency Plan after software and connection details are reviewed.",
+                detail="Choose or assign a Frequency Plan after RF Guard details are reviewed.",
                 status="needs_input",
             ),
             GuidedSetupFlowItem(
@@ -1067,6 +1075,12 @@ def guided_setup_flow_items(
             title="Connection",
             detail=control_summary.removeprefix("Control: ").rstrip(".") if control_summary else "Enter the endpoint FIO should use.",
             status="review" if plan.manual_review_required else "ready",
+        ),
+        GuidedSetupFlowItem(
+            item_id="guard",
+            title="RF Guard",
+            detail="Supported bands and shared RF paths are checked before schedule assignment.",
+            status="ready",
         ),
         GuidedSetupFlowItem(
             item_id="schedule",

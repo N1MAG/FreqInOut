@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import csv
+import html
 import json
 import platform
 import subprocess
@@ -15,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Mapping, Sequence
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QSignalBlocker
 from PySide6.QtGui import QAction, QIcon, QIntValidator, QColor, QBrush, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QWidget,
@@ -18489,6 +18490,7 @@ class SettingsTab(QWidget):
         save_review_label = QLabel()
         save_review_label.setObjectName("guidedSaveReview")
         save_review_label.setWordWrap(True)
+        save_review_label.setTextFormat(Qt.RichText)
         save_review_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         _add_full_width_row(save_review_form, save_review_label)
         app_config_review_card = QFrame()
@@ -20417,6 +20419,76 @@ class SettingsTab(QWidget):
                 port_text = str(port or "").strip()
                 return f"{label}: {host_text}:{port_text}" if port_text else f"{label}: port not set"
 
+            def _endpoint_conflict_lines() -> List[str]:
+                existing_id = int((existing or {}).get("id", 0) or 0)
+                try:
+                    profiles = list(self.multi_radio_store.list_device_profiles())
+                except Exception:
+                    profiles = list(getattr(self, "device_profiles", []) or [])
+
+                endpoint_specs = [
+                    ("FLRig", flrig_host_edit.text(), flrig_port_edit.text(), "flrig_host", "flrig_port"),
+                    ("FLDigi", fldigi_host_edit.text(), fldigi_port_edit.text(), "fldigi_host", "fldigi_port"),
+                    ("JS8Call", js8_host_edit.text(), js8_port_edit.text(), "js8_host", "js8_port"),
+                    ("RigCtlD", rig_host_edit.text(), rig_port_edit.text(), "rigctld_host", "rigctld_port"),
+                ]
+                conflicts: List[str] = []
+                for label, host, port, host_key, port_key in endpoint_specs:
+                    port_text = str(port or "").strip()
+                    if not port_text:
+                        continue
+                    host_text = str(host or "").strip() or "127.0.0.1"
+                    for profile in profiles:
+                        try:
+                            profile_id = int(profile.get("id", 0) or 0)
+                        except Exception:
+                            profile_id = 0
+                        if profile_id and profile_id == existing_id:
+                            continue
+                        other_port = str(profile.get(port_key, "") or "").strip()
+                        if other_port != port_text:
+                            continue
+                        other_host = str(profile.get(host_key, "") or "").strip() or "127.0.0.1"
+                        if other_host != host_text:
+                            continue
+                        other_name = str(
+                            profile.get("name")
+                            or profile.get("short_name")
+                            or profile.get("label")
+                            or f"radio {profile_id or '?'}"
+                        ).strip()
+                        conflicts.append(f"{label} {host_text}:{port_text} is already used by {other_name}.")
+                return conflicts
+
+            def _review_card_html(title: str, lines: Sequence[str], *, tone: str = "neutral") -> str:
+                theme = resolve_theme(self.settings)
+                colors = {
+                    "warning": theme.get("warning", "#C99700"),
+                    "success": theme.get("success", "#2E7D32"),
+                    "info": theme.get("info", theme.get("accent", "#1565C0")),
+                    "neutral": theme.get("border", "#AEB7BF"),
+                }
+                accent = colors.get(tone, colors["neutral"])
+                safe_title = html.escape(str(title or "").strip())
+                body = "".join(
+                    f"<li>{html.escape(str(line or '').strip())}</li>"
+                    for line in lines
+                    if str(line or "").strip()
+                )
+                if not body:
+                    body = "<li>Not set</li>"
+                return (
+                    "<div style='"
+                    f"border:1px solid {accent};"
+                    "border-radius:6px;"
+                    "padding:8px 10px;"
+                    "margin:0 0 8px 0;"
+                    "'>"
+                    f"<div style='font-weight:700; margin-bottom:4px;'>{safe_title}</div>"
+                    f"<ul style='margin:0 0 0 18px; padding:0;'>{body}</ul>"
+                    "</div>"
+                )
+
             model_payload = _current_radio_model_payload()
             radio_label = (
                 name_edit.text().strip()
@@ -20516,20 +20588,48 @@ class SettingsTab(QWidget):
                 manual_review_required=bool(app_config_plan.manual_review_required),
             )
 
-            review_lines = [
-                "What FIO will save:",
-                f"Radio: {radio_label}",
-                f"Setup: {setup_label}",
-                f"Use in FIO: {enabled_text}; {active_text}",
-                "Software: " + (", ".join(app_labels) if app_labels else "Monitor only"),
-                f"Frequency Control: {frequency_line}",
-                "Endpoints: " + "; ".join(endpoint_lines),
-                "Message/Forms Files: " + "; ".join(file_lines),
-                app_config_summary,
-                "Schedule: " + schedule_line,
-                "Launch: " + launch_line,
+            conflict_lines = _endpoint_conflict_lines()
+            guard_lines = [
+                "Supported bands are checked before assignment.",
+                "Shared antenna/transmit/front-end groups are used by RF Guard when configured.",
             ]
-            save_review_label.setText("\n".join(review_lines))
+            if conflict_lines:
+                guard_lines.extend(conflict_lines)
+            review_html = [
+                _review_card_html(
+                    "Radio Profile",
+                    [
+                        f"Radio: {radio_label}",
+                        f"Setup: {setup_label}",
+                        f"Use in FIO: {enabled_text}; {active_text}",
+                    ],
+                    tone="info",
+                ),
+                _review_card_html(
+                    "Software and Control",
+                    [
+                        "Software: " + (", ".join(app_labels) if app_labels else "Monitor only"),
+                        f"Frequency Control: {frequency_line}",
+                    ],
+                    tone="info",
+                ),
+                _review_card_html(
+                    "Endpoints",
+                    endpoint_lines,
+                    tone="warning" if conflict_lines else "neutral",
+                ),
+                _review_card_html(
+                    "RF Guard and Schedule",
+                    guard_lines + ["Schedule: " + schedule_line],
+                    tone="warning" if conflict_lines else "success",
+                ),
+                _review_card_html(
+                    "Files and Launch",
+                    file_lines + [app_config_summary, "Launch: " + launch_line],
+                    tone="neutral",
+                ),
+            ]
+            save_review_label.setText("".join(review_html))
             save_review_label.setToolTip("\n".join(app_config_lines))
 
         def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
@@ -20567,11 +20667,14 @@ class SettingsTab(QWidget):
             identity_group.setVisible(guided_wizard_step_id == "radio")
             software_group.setVisible(guided_wizard_step_id == "software")
             connection_group.setVisible(guided_wizard_step_id == "connection")
+            optional_toggle.setVisible(guided_wizard_step_id == "guard")
+            with QSignalBlocker(optional_toggle):
+                optional_toggle.setChecked(guided_wizard_step_id == "guard")
+                optional_toggle.setArrowType(Qt.DownArrow if guided_wizard_step_id == "guard" else Qt.RightArrow)
+            optional_body.setVisible(guided_wizard_step_id == "guard")
             schedule_group.setVisible(guided_wizard_step_id == "schedule")
             save_review_group.setVisible(guided_wizard_step_id == "review")
             launch_group.setVisible(guided_wizard_step_id == "review")
-            optional_toggle.setVisible(guided_wizard_step_id == "review")
-            optional_body.setVisible(guided_wizard_step_id == "review" and bool(optional_toggle.isChecked()))
             if guided_wizard_step_id != "review":
                 readiness_card.setVisible(False)
             else:

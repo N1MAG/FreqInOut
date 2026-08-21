@@ -824,17 +824,18 @@ def test_guided_setup_flow_summary_is_human_readable_for_js8_only(tmp_path) -> N
     items = guided_setup_flow_items(blueprint, plan)
     lines = guided_setup_flow_summary_lines(blueprint, plan)
 
-    assert [item.title for item in items] == ["Radio", "Software", "Connection", "Schedule", "Review"]
+    assert [item.title for item in items] == ["Radio", "Software", "Connection", "RF Guard", "Schedule", "Review"]
     assert items[0].detail == "TS-2000"
     assert items[1].detail == "JS8Call"
     assert "JS8Call owns the radio/CAT route" in items[2].detail
-    assert items[3].status == "needs_input"
-    assert "Frequency Plan" in items[3].detail
-    assert items[4].status == "backup"
+    assert items[3].status == "ready"
+    assert items[4].status == "needs_input"
+    assert "Frequency Plan" in items[4].detail
+    assert items[5].status == "backup"
     assert lines[0].startswith("1. Radio: TS-2000")
-    assert "4. Schedule:" in lines[3]
-    assert "(Needs Input)" in lines[3]
-    assert "5. Review:" in lines[-1]
+    assert "5. Schedule:" in lines[4]
+    assert "(Needs Input)" in lines[4]
+    assert "6. Review:" in lines[-1]
 
 
 def test_guided_setup_flow_does_not_show_ready_before_setup_type_selected(tmp_path) -> None:
@@ -853,7 +854,7 @@ def test_guided_setup_flow_does_not_show_ready_before_setup_type_selected(tmp_pa
     items = guided_setup_flow_items(blueprint, plan, setup_started=False)
     lines = guided_setup_flow_summary_lines(blueprint, plan, setup_started=False)
 
-    assert [item.status for item in items] == ["needs_input"] * 5
+    assert [item.status for item in items] == ["needs_input"] * 6
     assert items[0].detail == "Choose the radio or SDR model and setup type."
     assert items[1].detail == "Choose the software this radio uses."
     assert guided_setup_next_action_text(blueprint, plan, setup_started=False).startswith("Next: Radio - ")
@@ -961,8 +962,8 @@ def test_guided_setup_flow_summary_keeps_varac_monitor_only(tmp_path) -> None:
 
     assert items[1].detail == "VarAC"
     assert "monitor/import only" in items[2].detail
-    assert "monitor only" in items[3].detail
-    assert items[4].status == "review"
+    assert "monitor only" in items[4].detail
+    assert items[5].status == "review"
 
 
 def test_guided_setup_operator_guidance_keeps_varac_frequency_out_of_fio(tmp_path) -> None:
@@ -1323,7 +1324,7 @@ def test_guided_setup_next_action_comes_from_flow_status() -> None:
 
     next_item = guided_setup_next_flow_item(blueprint, plan)
 
-    assert next_item.item_id in {"connection", "schedule", "review"}
+    assert next_item.item_id in {"connection", "guard", "schedule", "review"}
     assert guided_setup_next_action_text(blueprint, plan).startswith(f"Next: {next_item.title} - ")
 
 
@@ -1350,7 +1351,7 @@ def test_guided_setup_next_action_uses_selected_schedule_decision() -> None:
     schedule_item = next(item for item in items if item.item_id == "schedule")
 
     assert schedule_item.status == "review"
-    assert schedule_item.detail == "Selected plan: JS8 Standard. RF Guard runs after save."
+    assert schedule_item.detail == "Selected plan: JS8 Standard. RF Guard runs during assignment."
     assert guided_setup_next_action_text(blueprint, plan, schedule_decision=decision).startswith("Next: Schedule - ")
 
 
@@ -1366,14 +1367,20 @@ def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
     assert radio.visible_sections == ("radio",)
 
     schedule = guided_setup_wizard_view("schedule")
-    assert schedule.previous_label == "Connection"
+    assert schedule.previous_label == "RF Guard"
     assert schedule.next_label == "Review"
     assert schedule.visible_sections == ("schedule",)
     assert "RF Guard" in schedule.detail
 
+    guard = guided_setup_wizard_view("guard")
+    assert guard.previous_label == "Connection"
+    assert guard.next_label == "Schedule"
+    assert guard.visible_sections == ("guard",)
+    assert "supported bands" in guard.detail.lower()
+
     review = guided_setup_wizard_view("review")
     assert review.can_go_next is False
-    assert review.visible_sections == ("review", "launch", "optional")
+    assert review.visible_sections == ("review", "launch")
 
 
 def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
@@ -1381,14 +1388,14 @@ def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
 
     view = guided_setup_wizard_view("connection", connection_visible=False)
 
-    assert view.current_step_id == "schedule"
-    assert view.visible_sections == ("schedule",)
+    assert view.current_step_id == "guard"
+    assert view.visible_sections == ("guard",)
     assert view.previous_label == "Software"
-    assert view.next_label == "Review"
+    assert view.next_label == "Schedule"
 
     software = guided_setup_wizard_view("software", connection_visible=False)
-    assert software.next_label == "Schedule"
-    assert [step_id for step_id, _label in software.steps] == ["radio", "software", "schedule", "review"]
+    assert software.next_label == "RF Guard"
+    assert [step_id for step_id, _label in software.steps] == ["radio", "software", "guard", "schedule", "review"]
 
 
 def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> None:
@@ -1399,9 +1406,9 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=False,
     )
     assert selected.status == "review"
-    assert selected.step_detail == "Selected plan: Magnet Main. RF Guard runs after save."
-    assert selected.status_text == "After saving, FIO will assign 'Magnet Main' to this radio with RF Guard."
-    assert selected.review_text == "Assign 'Magnet Main' after save with RF Guard."
+    assert selected.step_detail == "Selected plan: Magnet Main. RF Guard runs during assignment."
+    assert selected.status_text == "FIO will assign 'Magnet Main' to this radio with RF Guard."
+    assert selected.review_text == "Assign 'Magnet Main' with RF Guard."
 
     handoff = guided_setup_schedule_decision(
         scheduler_assignment_allowed=True,
@@ -1599,10 +1606,19 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'if app_name == "JS8Spotter":' in launch_allowed_block
     assert 'profile.get("spotter_launch_path", "")' in launch_allowed_block
     assert 'self._radio_software_enabled(profile, software_key)' in launch_allowed_block
-    assert '"What FIO will save:"' in dialog_block
+    assert "optional_toggle.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
+    assert "optional_body.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
+    assert 'save_review_label.setTextFormat(Qt.RichText)' in dialog_block
+    assert "def _endpoint_conflict_lines() -> List[str]:" in dialog_block
+    assert "is already used by" in dialog_block
+    assert "def _review_card_html(" in dialog_block
+    assert '"Radio Profile"' in dialog_block
+    assert '"Software and Control"' in dialog_block
+    assert '"Endpoints"' in dialog_block
+    assert '"RF Guard and Schedule"' in dialog_block
+    assert '"Files and Launch"' in dialog_block
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
-    assert "Message/Forms Files: " in dialog_block
     assert 'app_config_review_card.setObjectName("guidedAppConfigReviewCard")' in dialog_block
     assert 'app_config_review_title = QLabel("App Configuration")' in dialog_block
     assert 'app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")' in dialog_block
@@ -1624,7 +1640,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "payload = _draft_radio_profile()" in dialog_block
     assert 'payload["name"] = name' in dialog_block
     assert "out.update(normalize_guided_radio_profile_payload(payload))" in dialog_block
-    assert "Assign '{selected}' after save with RF Guard." in Path("freqinout/core/guided_setup.py").read_text(
+    assert "Assign '{selected}' with RF Guard." in Path("freqinout/core/guided_setup.py").read_text(
         encoding="utf-8"
     )
     assert "out[\"guided_frequency_plan_id\"] = guided_plan_id" in dialog_block
