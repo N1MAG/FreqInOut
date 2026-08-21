@@ -1606,6 +1606,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'if app_name == "JS8Spotter":' in launch_allowed_block
     assert 'profile.get("spotter_launch_path", "")' in launch_allowed_block
     assert 'self._radio_software_enabled(profile, software_key)' in launch_allowed_block
+    assert '"Launch Control"' in dialog_block
+    assert '"Launch and Support"' not in dialog_block
+    assert 'for step_id in ("radio", "software", "connection", "guard", "schedule", "review")' in dialog_block
+    assert 'optional_open=optional_toggle.isChecked() or guided_wizard_step_id == "guard"' in dialog_block
+    assert 'rf_guard_step_active = guided_wizard_step_id == "guard"' in dialog_block
     assert "optional_toggle.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
     assert "optional_body.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
     assert 'save_review_label.setTextFormat(Qt.RichText)' in dialog_block

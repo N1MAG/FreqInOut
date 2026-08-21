@@ -18532,8 +18532,8 @@ class SettingsTab(QWidget):
 
         app_config_review_toggle_btn.clicked.connect(_toggle_guided_app_config_review_details)
         launch_group, launch_form = _make_section(
-            "Launch and Support",
-            "Launch settings are optional, but they help FreqInOut guide startup behavior and readiness more accurately.",
+            "Launch Control",
+            "Use this only when FIO should launch an external app or script for this radio.",
         )
 
         radio_model_combo = QComboBox()
@@ -18737,7 +18737,7 @@ class SettingsTab(QWidget):
         guided_step_stack_layout = QVBoxLayout(guided_step_stack)
         guided_step_stack_layout.setContentsMargins(0, 0, 0, 0)
         guided_step_stack_layout.setSpacing(4)
-        for step_id in ("radio", "software", "connection", "schedule", "review"):
+        for step_id in ("radio", "software", "connection", "guard", "schedule", "review"):
             step_frame = QFrame()
             step_frame.setObjectName(f"guidedSetupStep_{step_id}")
             step_frame.setFrameShape(QFrame.StyledPanel)
@@ -20272,7 +20272,7 @@ class SettingsTab(QWidget):
                 use_js8spotter=bool(use_js8spotter_chk.isChecked() or use_external_js8spotter_chk.isChecked()),
                 use_commstat=bool(use_commstat_chk.isChecked()),
                 use_varac=bool(use_varac_chk.isChecked()),
-                optional_open=bool(optional_toggle.isChecked()),
+                optional_open=bool(optional_toggle.isChecked()) or guided_wizard_step_id == "guard",
             )
             return bool(
                 guided_setup_field_visibility(
@@ -20312,9 +20312,9 @@ class SettingsTab(QWidget):
                 allowed_idx = min(requested_idx, guided_wizard_max_index_seen + 1)
                 guided_wizard_step_id = visible_steps[allowed_idx][0]
                 guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, allowed_idx)
-            elif candidate == "connection" and "schedule" in valid_steps:
-                guided_wizard_step_id = "schedule"
-                guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, _guided_wizard_index("schedule"))
+            elif candidate == "connection" and "guard" in valid_steps:
+                guided_wizard_step_id = "guard"
+                guided_wizard_max_index_seen = max(guided_wizard_max_index_seen, _guided_wizard_index("guard"))
             else:
                 guided_wizard_step_id = "radio"
             _update_dialog_visibility()
@@ -20914,7 +20914,7 @@ class SettingsTab(QWidget):
                 use_js8spotter=use_js8spotter or use_external_js8spotter,
                 use_commstat=use_commstat,
                 use_varac=use_varac,
-                optional_open=optional_toggle.isChecked(),
+                optional_open=optional_toggle.isChecked() or guided_wizard_step_id == "guard",
             )
             visibility = guided_setup_field_visibility(blueprint, visibility_state)
             for widget in flrig_field_widgets:
@@ -20984,8 +20984,9 @@ class SettingsTab(QWidget):
                 connection_status_label.setText("Review the endpoint fields below for the selected software stack.")
             else:
                 connection_status_label.setText("No FIO frequency-control endpoint is required for this setup type.")
-            optional_body.setVisible(bool(optional_toggle.isChecked()))
-            optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() else Qt.RightArrow)
+            rf_guard_step_active = guided_wizard_step_id == "guard"
+            optional_body.setVisible(bool(optional_toggle.isChecked()) or rf_guard_step_active)
+            optional_toggle.setArrowType(Qt.DownArrow if optional_toggle.isChecked() or rf_guard_step_active else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
             assignment_allowed = guided_setup_capability_policy(blueprint).scheduler_assignment_allowed
             _set_row_visible(schedule_path_combo, assignment_allowed)
