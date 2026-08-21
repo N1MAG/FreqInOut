@@ -19283,6 +19283,8 @@ class SettingsTab(QWidget):
         for app_id, browse_btn in app_choice_browse_buttons.items():
             browse_btn.clicked.connect(lambda _checked=False, key=app_id: _browse_guided_app_choice(key))
 
+        app_autoconfigure_attempted = False
+
         def _app_choice_app_selected(app_id: str) -> bool:
             key = str(app_id or "").strip().lower()
             backend = str(backend_combo.currentData() or "").strip().lower()
@@ -19371,6 +19373,7 @@ class SettingsTab(QWidget):
                 log.debug("Unable to save Radio Apps Base Folder during guided setup.", exc_info=True)
 
         def _update_app_choice_visibility() -> None:
+            nonlocal app_autoconfigure_attempted
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             any_visible = False
             theme = resolve_theme(self.settings)
@@ -19390,10 +19393,13 @@ class SettingsTab(QWidget):
                 visible = (
                     not observer_mode
                     and selected_for_radio
-                    and (combo.count() > 1 or target_missing)
+                    and (combo.count() > 1 or (app_autoconfigure_attempted and target_missing))
                 )
                 _set_row_visible(row_widget, visible)
-                needs_choice = visible and ((combo.count() > 2 and combo.currentIndex() <= 0) or (combo.count() <= 1 and target_missing))
+                needs_choice = visible and (
+                    (combo.count() > 2 and combo.currentIndex() <= 0)
+                    or (app_autoconfigure_attempted and combo.count() <= 1 and target_missing)
+                )
                 combo.setStyleSheet(attention_style if needs_choice else "")
                 row_widget.setStyleSheet(attention_row_style if needs_choice else "")
                 combo.setToolTip(
@@ -19434,6 +19440,7 @@ class SettingsTab(QWidget):
                 app_choice_group.setStyleSheet(group_style)
 
         def _detected_app_choice_needs_operator_selection() -> bool:
+            nonlocal app_autoconfigure_attempted
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
             if observer_mode:
                 return False
@@ -19444,7 +19451,7 @@ class SettingsTab(QWidget):
                     continue
                 if combo.count() > 2 and combo.currentIndex() <= 0:
                     return True
-                if combo.count() <= 1 and target_missing:
+                if app_autoconfigure_attempted and combo.count() <= 1 and target_missing:
                     return True
             return bool(
                 _js8_app_selected()
@@ -20574,6 +20581,7 @@ class SettingsTab(QWidget):
             _update_guided_save_button()
 
         def _apply_dialog_autoconfigure() -> None:
+            nonlocal app_autoconfigure_attempted
             filled: List[str] = []
             preserved: List[str] = []
             observer_mode = str(device_class_combo.currentData() or "").strip().lower() == "observer"
@@ -20600,6 +20608,7 @@ class SettingsTab(QWidget):
                 js8_results = self.software_path_detector.detect_js8()
                 varac_results = self.software_path_detector.detect_varac()
                 js8_file_profiles = discover_js8call_file_profiles()
+            app_autoconfigure_attempted = True
             _update_detected_app_choices(install_candidates)
             _update_js8_profile_choices(js8_file_profiles)
             suggestions, review_items = self._guided_radio_autofill_suggestions(
