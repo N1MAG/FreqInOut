@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from hashlib import sha1
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -406,6 +407,76 @@ def _issue_deep_link(section_key: str, radio_id: Optional[int]) -> str:
     return target
 
 
+def _assignment_validation_payload(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = row.get("validation_status_json")
+    if isinstance(payload, Mapping):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            return {}
+        if isinstance(parsed, Mapping):
+            return parsed
+    return {}
+
+
+def _assignment_validation_messages(validation: Mapping[str, Any], state: str) -> List[str]:
+    keys = ["blocked"] if state == "blocked" else ["warnings"]
+    messages: List[str] = []
+    for key in keys:
+        value = validation.get(key)
+        if isinstance(value, str) and value.strip():
+            messages.append(value.strip())
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    messages.append(text)
+    return messages
+
+
+def _append_assignment_rf_guard_issues(
+    issues: List[ReadinessIssue],
+    assigned_schedule_status: Iterable[Mapping[str, Any]],
+) -> None:
+    for row in assigned_schedule_status:
+        if not isinstance(row, Mapping):
+            continue
+        validation = _assignment_validation_payload(row)
+        state = str(validation.get("state") or row.get("guard_status") or "").strip().lower()
+        if state not in {"warning", "blocked"}:
+            continue
+        try:
+            radio_id = int(row.get("device_profile_id", 0) or 0) or None
+        except Exception:
+            radio_id = None
+        radio_name = str(row.get("device_name") or (f"Radio {radio_id}" if radio_id else "Radio")).strip()
+        plan_name = str(row.get("frequency_plan_name") or "assigned Frequency Plan").strip()
+        validation_messages = _assignment_validation_messages(validation, state)
+        first_message = validation_messages[0] if validation_messages else "RF Guard found a schedule assignment mismatch."
+        extra_count = max(0, len(validation_messages) - 1)
+        suffix = f" (+{extra_count} more)" if extra_count else ""
+        severity = "required" if state == "blocked" else "recommended"
+        state_key = "needs_setup" if state == "blocked" else "degraded"
+        issues.append(
+            ReadinessIssue(
+                severity=severity,
+                section_key="schedule_assignments",
+                scope=f"radio:{radio_id}" if radio_id else "global",
+                radio_id=radio_id,
+                integration_key="rf_guard",
+                message=f"{radio_name}: RF Guard review needed for {plan_name}: {first_message}{suffix}",
+                resolution_hint=(
+                    "Choose a compatible Frequency Plan, update supported antenna bands, "
+                    "or confirm the RF path before transmitting."
+                ),
+                deep_link_target=_issue_deep_link("schedule_assignments", radio_id),
+                state_key=state_key,
+            )
+        )
+
+
 def visible_status_programs(
     settings: Mapping[str, Any],
     *,
@@ -520,6 +591,7 @@ def build_station_readiness_report(
     *,
     device_profiles: Optional[Iterable[Mapping[str, Any]]] = None,
     operating_groups: Optional[Iterable[Any]] = None,
+    assigned_schedule_status: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> ReadinessReport:
     issues: List[ReadinessIssue] = []
     profiles = _enabled_profiles(device_profiles or [])
@@ -1122,6 +1194,9 @@ def build_station_readiness_report(
                 state_key="degraded",
             )
         )
+
+    if assigned_schedule_status:
+        _append_assignment_rf_guard_issues(issues, assigned_schedule_status)
 
     radio_summaries: List[RadioReadinessSummary] = []
     for profile in profiles:

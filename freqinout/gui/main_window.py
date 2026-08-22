@@ -3638,10 +3638,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            try:
+                assigned_schedule_status = self._station_health_assigned_schedule_status_rows()
+            except Exception:
+                assigned_schedule_status = []
             report = build_station_readiness_report(
                 self.settings.all(),
                 device_profiles=self.multi_radio_store.list_device_profiles(),
                 operating_groups=load_operating_groups(self.settings),
+                assigned_schedule_status=assigned_schedule_status,
             )
             for issue in list(getattr(report, "issues", ()) or ())[:20]:
                 self._quick_search_add_record(

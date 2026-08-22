@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -224,6 +225,57 @@ def test_build_station_readiness_report_recommends_model_selection_for_active_ra
 
     messages = {issue.message for issue in report.issues if issue.severity == "recommended"}
     assert "Desk Radio: radio model not selected" in messages
+
+
+def test_build_station_readiness_report_surfaces_assigned_plan_rf_guard_warning() -> None:
+    from freqinout.core.station_readiness import build_station_readiness_report
+
+    report = build_station_readiness_report(
+        {
+            "callsign": "N1MAG",
+            "grid": "DM79QJ",
+        },
+        device_profiles=[
+            {
+                "id": 21,
+                "name": "TS-2000",
+                "enabled": 1,
+                "runtime_primary": 1,
+                "runtime_active": 1,
+                "control_backend": "manual",
+                "launch_enabled": 1,
+                "radio_model": "TS-2000",
+            }
+        ],
+        operating_groups=[{"name": "@MAGNET"}],
+        assigned_schedule_status=[
+            {
+                "device_profile_id": 21,
+                "device_name": "TS-2000",
+                "frequency_plan_name": "AmRRON",
+                "validation_status_json": json.dumps(
+                    {
+                        "state": "warning",
+                        "warnings": ["Antenna support does not include 80M."],
+                        "supported_bands": ["15M", "10M"],
+                        "plan_bands": ["80M", "40M"],
+                    }
+                ),
+            }
+        ],
+    )
+
+    rf_guard_issues = [issue for issue in report.issues if issue.integration_key == "rf_guard"]
+    assert len(rf_guard_issues) == 1
+    assert rf_guard_issues[0].section_key == "schedule_assignments"
+    assert rf_guard_issues[0].severity == "recommended"
+    assert rf_guard_issues[0].deep_link_target == "schedule_assignments:radio:21"
+    assert "TS-2000: RF Guard review needed for AmRRON" in rf_guard_issues[0].message
+    assert "Antenna support does not include 80M." in rf_guard_issues[0].message
+    summary = report.summary_for_radio(21)
+    assert summary is not None
+    assert summary.overall_state == "degraded"
+    assert any("RF Guard review needed" in message for message in summary.messages)
 
 
 def test_build_station_readiness_report_tracks_js8_bundle_even_when_backend_is_flrig() -> None:
