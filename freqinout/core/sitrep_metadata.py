@@ -15,6 +15,7 @@ _SOURCE_FAMILY_LABELS = {
     "COMMSTAT": "CommStat",
     "JS8SPOTTER": "JS8Spotter",
     "CONDITION_ALERT": "Condition Alert",
+    "RF_PIN": "RF Pin",
     "MANUAL": "Manual",
     "FUSED": "Fused",
     "UNKNOWN": "Unknown",
@@ -24,6 +25,7 @@ _SOURCE_SHORT_LABELS = {
     "COMMSTAT": "CS",
     "JS8SPOTTER": "SPT",
     "CONDITION_ALERT": "ALRT",
+    "RF_PIN": "PIN",
     "MANUAL": "MAN",
     "FUSED": "FUS",
     "UNKNOWN": "UNK",
@@ -87,6 +89,8 @@ def source_family_key(source: object) -> str:
         return "JS8SPOTTER"
     if src in {"CONDITION_ALERT", "CONDITIONALERT", "ALERT"}:
         return "CONDITION_ALERT"
+    if src in {"RF_PIN", "RFPIN", "PIN", "MAP_PIN"}:
+        return "RF_PIN"
     if src == "MANUAL":
         return "MANUAL"
     if src == "FUSED":
@@ -111,7 +115,7 @@ def source_short_label(source: object) -> str:
 def source_families_from_sources(sources: Iterable[object]) -> List[str]:
     families = {source_family_key(src) for src in sources if str(src or "").strip()}
     ordered = []
-    for key in ("COMMSTAT", "JS8SPOTTER", "MANUAL", "FUSED", "UNKNOWN"):
+    for key in ("COMMSTAT", "JS8SPOTTER", "CONDITION_ALERT", "RF_PIN", "MANUAL", "FUSED", "UNKNOWN"):
         if key in families:
             ordered.append(key)
             families.discard(key)

@@ -460,3 +460,5 @@ def test_varac_live_ingest_mirrors_condition_alert_observations(tmp_path: Path) 
 def test_condition_alert_source_family_has_operator_readable_labels() -> None:
     assert source_family_label("condition_alert") == "Condition Alert"
     assert source_short_label("condition_alert") == "ALRT"
+    assert source_family_label("rf_pin") == "RF Pin"
+    assert source_short_label("rf_pin") == "PIN"
