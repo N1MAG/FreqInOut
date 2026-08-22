@@ -4090,6 +4090,7 @@ def test_launch_control_chip_visibility_uses_shared_profile_rule() -> None:
     assert "def _radio_profile_effective_launch_control_enabled" in source
     assert "def _radio_profile_launch_control_summary" in source
     assert "self._radio_profile_launch_control_enabled(profile)" in software_chip_block
+    assert "self._radio_profile_has_software_option(profile)" in software_chip_block
     assert "self._radio_profile_launch_control_enabled(profile)" in visibility_block
     assert "self._radio_profile_has_software_option(profile)" in visibility_block
     assert 'table.setItem(row, 11, QTableWidgetItem("Opt-in" if self._radio_profile_launch_opt_in_enabled(profile) else "Off"))' in source

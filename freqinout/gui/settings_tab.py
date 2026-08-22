@@ -12779,7 +12779,7 @@ class SettingsTab(QWidget):
             add_shortcut("Fast Light Settings", "fast_light", getattr(self, "fast_light_section_group", None))
         if self._radio_software_enabled(profile, "varac"):
             add_shortcut("VarAC Settings", "varac", getattr(self, "varac_section_group", None))
-        if self._radio_profile_launch_control_enabled(profile):
+        if self._radio_profile_launch_control_enabled(profile) or self._radio_profile_has_software_option(profile):
             add_shortcut("Launch Control", "launch_control", getattr(self, "launch_control_section_group", None))
         if not shortcuts:
             label = QLabel("No app stack is enabled for this radio yet. Use Apps to choose the software this radio uses.")
@@ -13719,7 +13719,12 @@ class SettingsTab(QWidget):
                 or self._radio_software_enabled(profile, "rigctld")
             ))),
             ("VarAC", "varac", getattr(self, "varac_section_group", None), bool(isinstance(profile, dict) and self._radio_software_enabled(profile, "varac"))),
-            ("Launch Control", "launch_control", getattr(self, "launch_control_section_group", None), self._radio_profile_launch_control_enabled(profile)),
+            (
+                "Launch Control",
+                "launch_control",
+                getattr(self, "launch_control_section_group", None),
+                self._radio_profile_launch_control_enabled(profile) or self._radio_profile_has_software_option(profile),
+            ),
         ]
         columns = self._radio_profile_software_chip_columns(
             self.radio_profile_software_chips_widget.width()
