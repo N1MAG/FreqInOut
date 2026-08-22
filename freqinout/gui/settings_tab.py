@@ -19001,7 +19001,7 @@ class SettingsTab(QWidget):
         save_button: QPushButton | None = None
         save_review_group, save_review_form = _make_section(
             "Save Review",
-            "Review exactly what FIO will save for this radio profile before applying changes.",
+            "Confirm the radio profile, software, RF Guard, and schedule choices before saving.",
         )
         save_review_label = QLabel()
         save_review_label.setObjectName("guidedSaveReview")
@@ -21011,11 +21011,18 @@ class SettingsTab(QWidget):
                         f"this radio supports {self._human_join(supported)}."
                     )
                 elif supported:
-                    rf_guard_plan_check_title.setText("Plan Check")
-                    rf_guard_plan_check_detail.setText(
-                        f"This radio supports {self._human_join(supported)}. "
-                        "FIO will compare these bands with the selected Frequency Plan before assignment."
-                    )
+                    if _selected_guided_schedule_path() == SCHEDULE_EXISTING_PLAN and guided_schedule_plan_count > 0:
+                        rf_guard_plan_check_title.setText("Plan Check: Choose Frequency Plan")
+                        rf_guard_plan_check_detail.setText(
+                            f"This radio supports {self._human_join(supported)}. "
+                            "Choose the Frequency Plan on the Schedule step so FIO can warn before assignment."
+                        )
+                    else:
+                        rf_guard_plan_check_title.setText("Plan Check")
+                        rf_guard_plan_check_detail.setText(
+                            f"This radio supports {self._human_join(supported)}. "
+                            "FIO will compare these bands with the selected Frequency Plan before assignment."
+                        )
                 else:
                     rf_guard_plan_check_title.setText("Plan Check")
                     rf_guard_plan_check_detail.setText(
@@ -21273,9 +21280,8 @@ class SettingsTab(QWidget):
                 app_config_review_details.setText(details)
                 app_config_review_card.setToolTip("\n".join(lines))
                 app_config_review_toggle_btn.setVisible(bool(lines[1:]))
-                if not lines[1:]:
-                    app_config_review_details.setVisible(False)
-                    app_config_review_toggle_btn.setText("Show Details")
+                app_config_review_details.setVisible(False)
+                app_config_review_toggle_btn.setText("Show Details")
 
             def _compact_value(value: str, *, missing: str = "not set") -> str:
                 text = str(value or "").strip()
@@ -21298,6 +21304,13 @@ class SettingsTab(QWidget):
                 host_text = str(host or "").strip() or "127.0.0.1"
                 port_text = str(port or "").strip()
                 return f"{label}: {host_text}:{port_text}" if port_text else f"{label}: port not set"
+
+            def _line_without_prefix(value: str, prefix: str) -> str:
+                text = str(value or "").strip()
+                marker = f"{prefix}:"
+                if text.startswith(marker):
+                    return text.split(":", 1)[1].strip()
+                return text
 
             def _endpoint_conflict_lines() -> List[str]:
                 existing_id = int((existing or {}).get("id", 0) or 0)
@@ -21438,7 +21451,10 @@ class SettingsTab(QWidget):
                 file_lines.append("No message/forms paths selected")
             app_config_plan = _current_guided_app_config_plan()
             app_config_lines = guided_app_config_review_lines(app_config_plan)
-            app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
+            app_config_summary = _line_without_prefix(
+                app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes.",
+                "App Configuration",
+            )
             _set_app_config_review_card(
                 app_config_lines,
                 backup_required=bool(app_config_plan.backup_required),
@@ -21485,12 +21501,15 @@ class SettingsTab(QWidget):
 
             conflict_lines = _endpoint_conflict_lines()
             guard_lines = [
-                "Supported bands are checked before assignment.",
+                "Supported bands: "
+                + (self._human_join(self._band_check_values(band_checks)) or "not selected"),
                 "Shared antenna/transmit/front-end groups are used by RF Guard when configured.",
             ]
             _guard_tone, _guard_title, guard_detail = _guided_schedule_assignment_warning_summary()
             if guard_detail:
                 guard_lines.append(guard_detail)
+            elif _selected_guided_schedule_path() == SCHEDULE_EXISTING_PLAN and _selected_guided_schedule_plan() is None:
+                guard_lines.append("No plan selected yet, so RF Guard cannot compare antenna bands to a schedule.")
             if conflict_lines:
                 guard_lines.extend(conflict_lines)
             guard_tone = "warning" if conflict_lines or guard_detail else "success"

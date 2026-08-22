@@ -907,12 +907,14 @@ def guided_setup_schedule_decision(
             status_text=text,
             review_text="Open Plan Manager after save so a Frequency Plan can be built and assigned.",
         )
-    text = "No Frequency Plan selected. You can save this radio now and assign a plan later."
+    text = (
+        "Choose a Frequency Plan to run the RF Guard antenna check now, or assign one later."
+    )
     return GuidedScheduleDecision(
         status="needs_input",
-        step_detail="Choose the Frequency Plan this radio should follow, or assign one later.",
+        step_detail="Choose a Frequency Plan so RF Guard can compare it with this radio's antenna bands.",
         status_text=text,
-        review_text="No Frequency Plan selected; assign one later in Radio Settings or Plan Manager.",
+        review_text="No Frequency Plan selected; RF Guard will compare antenna bands when a plan is assigned.",
     )
 
 

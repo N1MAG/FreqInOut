@@ -1890,9 +1890,12 @@ def test_guided_review_computes_app_config_before_file_summary() -> None:
         1,
     )[0]
 
-    assert review_block.index("app_config_summary = app_config_lines[0]") < review_block.index(
+    assert review_block.index("app_config_summary = _line_without_prefix(") < review_block.index(
         "files_review_lines.append(app_config_summary)"
     )
+    assert '"App Configuration"' in review_block
+    assert "No plan selected yet, so RF Guard cannot compare antenna bands to a schedule." in review_block
+    assert "Supported bands: " in review_block
 
 
 def test_guided_schedule_path_change_refreshes_visibility_and_rf_guard_preview() -> None:
