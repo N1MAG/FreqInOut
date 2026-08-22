@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui.controlfreq_tab import ControlFreqTab
-from freqinout.core.observation_projection import Observation
+from freqinout.core.observation_projection import Observation, observation_from_rf_pin
 from freqinout.core.observation_store import upsert_observation
 
 
@@ -393,3 +393,45 @@ def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
     assert "Widemouth 2 Fire" in headline
     assert "K7ETC -> MR08" in headline
     assert "Fire" in topics
+
+
+def test_activity_panel_summarizes_rf_pin_observations(monkeypatch, tmp_path):
+    _app()
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    _write_settings_db(
+        cfg_root,
+        operating_groups=[{"group": "MAGNET", "band": "40M", "frequency": "7.115"}],
+    )
+    _write_nets_db(cfg_root, js8_links=[])
+    upsert_observation(
+        cfg_root / "config" / "freqinout_nets.db",
+        observation_from_rf_pin(
+            {
+                "pin_id": "manual:relay-check",
+                "label": "Relay check",
+                "target": "MAGNET",
+                "groups": ("MAGNET",),
+                "topics": ("Comms",),
+                "grid": "DM79",
+                "status": "PIN",
+                "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+        ),
+    )
+
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+    tab = ControlFreqTab()
+    try:
+        tab._pending_group_filter = "MAGNET"
+        tab._load_group_combo()
+        tab._refresh_activity()
+        headline = tab.operational_activity_label.text()
+        topics = tab.operational_topics_label.text()
+    finally:
+        tab.deleteLater()
+
+    assert "Operational Activity: 1 high-value" in headline
+    assert "RF Pin: Relay check" in headline
+    assert "MAGNET" in headline
+    assert "Comms" in topics
