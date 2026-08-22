@@ -1606,7 +1606,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'if app_name == "JS8Spotter":' in launch_allowed_block
     assert 'profile.get("spotter_launch_path", "")' in launch_allowed_block
     assert 'self._radio_software_enabled(profile, software_key)' in launch_allowed_block
-    assert '"Launch Control"' in dialog_block
+    assert '"Launch Control"' not in dialog_block
     assert '"Launch and Support"' not in dialog_block
     assert 'for step_id in ("radio", "software", "connection", "guard", "schedule", "review")' in dialog_block
     assert 'optional_open=optional_toggle.isChecked() or guided_wizard_step_id == "guard"' in dialog_block
@@ -1616,8 +1616,10 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "_set_row_visible(widget, guard_fields_visible)" in dialog_block
     assert "optional_toggle.setVisible(False)" in dialog_block
     assert "optional_body.setVisible(rf_guard_visible)" in dialog_block
-    assert '"Launch Control is managed after save from the selected radio\'s Settings view."' in dialog_block
-    assert 'launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")' in dialog_block
+    assert '"Launch Control is managed after save from the selected radio\'s Settings view."' not in dialog_block
+    assert 'launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")' not in dialog_block
+    assert "preserved_launch_enabled" in dialog_block
+    assert "preserved_launch_path" in dialog_block
     assert "rf_guard_intro = QLabel(" in dialog_block
     assert 'save_review_label.setTextFormat(Qt.RichText)' in dialog_block
     assert "def _endpoint_conflict_lines() -> List[str]:" in dialog_block
@@ -1634,7 +1636,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Files and Launch"' not in dialog_block
     assert '"Launch:"' not in dialog_block
     assert '"Radio launch"' not in dialog_block
-    assert "launch_group.setVisible(False)" in dialog_block
+    assert "launch_group.setVisible(False)" not in dialog_block
     assert "Use in FIO: {enabled_text}; {active_text}" in dialog_block
     assert "Frequency Control: {frequency_line}" in dialog_block
     assert dialog_block.index("for app_id, prompt_text in app_choice_specs_primary:") < dialog_block.index(
@@ -1690,7 +1692,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
     assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in dialog_block
     assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
-    assert "launch_group.setVisible(False)" in dialog_block
+    assert "launch_group.setVisible(False)" not in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
     assert 'guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}' in dialog_block
     assert 'step_frame.setObjectName(f"guidedSetupStep_{step_id}")' in dialog_block

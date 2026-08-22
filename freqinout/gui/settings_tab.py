@@ -19060,10 +19060,8 @@ class SettingsTab(QWidget):
             app_config_review_toggle_btn.setText("Hide Details" if visible else "Show Details")
 
         app_config_review_toggle_btn.clicked.connect(_toggle_guided_app_config_review_details)
-        launch_group, launch_form = _make_section(
-            "Launch Control",
-            "Launch Control is managed after save from the selected radio's Settings view.",
-        )
+        preserved_launch_enabled = bool((existing or {}).get("launch_enabled", 0))
+        preserved_launch_path = str((existing or {}).get("launch_path", "") or "").strip()
 
         radio_model_combo = QComboBox()
         radio_model_combo.setEditable(True)
@@ -19523,26 +19521,6 @@ class SettingsTab(QWidget):
         varac_launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
         varac_launch_cmd_wrap = _make_browse_row(varac_launch_cmd_edit, title="Select VarAC launch command", mode="folder")
         _add_form_row(connection_form, "VarAC Launch:", varac_launch_cmd_wrap, "Optional VarAC launch override for this radio.")
-
-        launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")
-        launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))
-        launch_form.addRow("", launch_enabled_chk)
-
-        launch_path_edit = QLineEdit(str((existing or {}).get("launch_path", "") or ""))
-        launch_path_btn = QPushButton("Browse")
-        launch_row = QHBoxLayout()
-        launch_row.setContentsMargins(0, 0, 0, 0)
-        launch_row.setSpacing(8)
-        launch_row.addWidget(launch_path_edit, 1)
-        launch_row.addWidget(launch_path_btn)
-        launch_wrap = QWidget()
-        launch_wrap.setLayout(launch_row)
-        _add_form_row(
-            launch_form,
-            "Extra Launch Path:",
-            launch_wrap,
-            "Optional app or script to start with this radio's software bundle.",
-        )
 
         sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
         sdr_port_edit = QLineEdit(str((existing or {}).get("sdr_port", "") or ""))
@@ -20495,8 +20473,8 @@ class SettingsTab(QWidget):
                 "varac_bbs_dir": varac_bbs_edit.text().strip(),
                 "varac_bbs_archive_dir": varac_bbs_archive_edit.text().strip(),
                 "launch_cmd": varac_launch_cmd_edit.text().strip(),
-                "launch_enabled": bool(launch_enabled_chk.isChecked()),
-                "launch_path": launch_path_edit.text().strip(),
+                "launch_enabled": preserved_launch_enabled,
+                "launch_path": preserved_launch_path,
                 "sdr_host": sdr_host_edit.text().strip(),
                 "sdr_port": sdr_port_edit.text().strip(),
                 "ptt_group": ptt_group_edit.text().strip(),
@@ -21601,7 +21579,6 @@ class SettingsTab(QWidget):
             _apply_guided_schedule_assignment_warning_ui()
             schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)
             save_review_group.setVisible(guided_wizard_step_id == "review")
-            launch_group.setVisible(False)
             if guided_wizard_step_id != "review":
                 readiness_card.setVisible(False)
             else:
@@ -22028,15 +22005,6 @@ class SettingsTab(QWidget):
 
         radio_apps_base_browse_btn.clicked.connect(_browse_radio_apps_base_folder)
 
-        def _browse_launch_path() -> None:
-            start = launch_path_edit.text().strip()
-            fn, _ = QFileDialog.getOpenFileName(self, "Select launch path", start)
-            if fn:
-                launch_path_edit.setText(fn)
-                _update_dialog_readiness()
-
-        launch_path_btn.clicked.connect(_browse_launch_path)
-
         for widget in [
             name_edit,
             rig_host_edit,
@@ -22066,7 +22034,6 @@ class SettingsTab(QWidget):
             varac_bbs_edit,
             varac_bbs_archive_edit,
             varac_launch_cmd_edit,
-            launch_path_edit,
             sdr_host_edit,
             sdr_port_edit,
             ptt_group_edit,
@@ -22083,7 +22050,6 @@ class SettingsTab(QWidget):
         for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:
             widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())
         notes_edit.textChanged.connect(_update_dialog_readiness)
-        launch_enabled_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_flrig_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_fldigi_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())
         use_flmsg_chk.stateChanged.connect(lambda _state: _update_dialog_readiness())

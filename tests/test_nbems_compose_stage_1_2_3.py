@@ -380,7 +380,8 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert '("Compose", "Messages")' in shell
     assert 'self._messages_nav_button_indices["inbox"] = btn_idx' in shell
     assert 'self._messages_nav_button_indices["compose"] = btn_idx' in shell
-    assert "def open_messages_section(self, mode: str = \"inbox\") -> None:" in shell
+    assert "def open_messages_section(" in shell
+    assert "mode: str = \"inbox\"" in shell
     assert "def show_compose_from_navigation(self) -> None:" in text
     assert 'self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")' in text
     assert 'self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")' in text
