@@ -154,6 +154,8 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert 'QPushButton("Reports")' in build_block
     assert 'QPushButton("RF Pins")' in build_block
     assert 'QLabel("RF Pins")' in build_block
+    assert 'QLabel("Topic")' in build_block
+    assert '"All Topics"' in build_block
     assert 'QPushButton("Add RF Pin")' in build_block
     assert 'QPushButton("Manage Pins")' in build_block
     assert "Edit Selected" in source
@@ -365,6 +367,25 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
 
     assert [row["callsign"] for row in pin_infrastructure_rows] == ["N1MAG"]
     assert pin_infrastructure_rows[0]["source_family"] == "rf_pin"
+
+    tab._query_cache = {}
+    tab._observation_focus_mode = "all_reports"
+    tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Comms")
+    comms_infrastructure_rows = StationsMapTab._load_observation_operational_reports(
+        tab,
+        layer_name="infrastructure",
+        max_age_sec=0,
+    )
+    assert [row["callsign"] for row in comms_infrastructure_rows] == ["N1MAG", "K0PRA"]
+
+    tab._query_cache = {}
+    tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Fire")
+    fire_alert_rows = StationsMapTab._load_observation_operational_reports(
+        tab,
+        layer_name="alert",
+        max_age_sec=0,
+    )
+    assert [row["callsign"] for row in fire_alert_rows] == ["K7ETC"]
 
 
 def test_map_operational_events_can_place_grid_only_observations() -> None:

@@ -727,6 +727,7 @@ class StationsMapTab(QWidget):
         self._map_rf_pins_button: Optional[QPushButton] = None
         self._map_add_rf_pin_button: Optional[QPushButton] = None
         self._map_manage_rf_pins_button: Optional[QPushButton] = None
+        self._map_topic_filter_combo: Optional[QComboBox] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
         self.operator_rows: List[Dict] = []
@@ -2039,6 +2040,13 @@ class StationsMapTab(QWidget):
         self._map_manage_rf_pins_button = QPushButton("Manage Pins")
         self._map_manage_rf_pins_button.setToolTip("Review or delete saved RF pins.")
         self._map_manage_rf_pins_button.clicked.connect(self._on_manage_rf_pins_clicked)
+        self._map_topic_filter_combo = QComboBox()
+        self._map_topic_filter_combo.addItem("All Topics")
+        self._map_topic_filter_combo.addItems(list(RF_PIN_TOPICS))
+        self._map_topic_filter_combo.setToolTip(
+            "Filter mapped reports and RF pins by message-intelligence topic."
+        )
+        self._map_topic_filter_combo.setMinimumWidth(150)
         for button in (
             self._refresh_links_button,
             self._map_all_stations_button,
@@ -2101,6 +2109,8 @@ class StationsMapTab(QWidget):
         filter_grid.addWidget(self.recency_combo, 2, 1)
         filter_grid.addWidget(QLabel("Paths"), 2, 2)
         filter_grid.addWidget(self.link_mode_combo, 2, 3)
+        filter_grid.addWidget(QLabel("Topic"), 2, 4)
+        filter_grid.addWidget(self._map_topic_filter_combo, 2, 5)
         filter_grid.addWidget(QLabel("Paths to"), 3, 0, alignment=Qt.AlignTop)
         filter_grid.addWidget(path_actions_row, 3, 1, 1, 5)
         layer_toggle_row = QWidget(filter_bar)
@@ -2163,6 +2173,7 @@ class StationsMapTab(QWidget):
         self.map_infrastructure_chk.stateChanged.connect(self._on_map_infrastructure_changed)
         self.city_pop_combo.currentIndexChanged.connect(self._on_city_pop_changed)
         self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
+        self._map_topic_filter_combo.currentIndexChanged.connect(self._on_map_topic_filter_changed)
         self.group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
         self.region_filter_combo.currentIndexChanged.connect(self._on_region_filter_changed)
         self.band_combo.currentIndexChanged.connect(self._on_band_changed)
@@ -2386,6 +2397,17 @@ class StationsMapTab(QWidget):
                 self._query_cache.pop(oldest_key, None)
             except Exception:
                 pass
+
+    def _clear_report_query_caches(self) -> None:
+        """Clear map/report caches after user-visible report inputs change."""
+        try:
+            self._map_query_cache.clear()
+        except Exception:
+            pass
+        try:
+            self._query_cache.clear()
+        except Exception:
+            pass
 
     def _load_operator_activity_summary(self) -> Dict[str, Dict[str, object]]:
         cache_key = ("operator_activity_summary",)
@@ -3360,10 +3382,7 @@ class StationsMapTab(QWidget):
             log.warning("StationsMap: failed to save RF pin: %s", exc, exc_info=True)
             QMessageBox.warning(self, "Add RF Pin", f"FIO could not save this RF pin.\n{exc}")
             return
-        try:
-            self._map_query_cache.clear()
-        except Exception:
-            pass
+        self._clear_report_query_caches()
         if not bool(getattr(self, "_observation_focus_enabled", False)):
             self._set_report_focus_mode("rf_pins")
         else:
@@ -3383,11 +3402,8 @@ class StationsMapTab(QWidget):
         dialog.exec()
         if not dialog.changed:
             return
-        try:
-            self._map_query_cache.clear()
-        except Exception:
-            pass
-        self._request_map_refresh(level="medium", reason="rf_pin_deleted")
+        self._clear_report_query_caches()
+        self._request_map_refresh(level="medium", reason="rf_pin_changed")
 
     def _include_legacy_spotter_report_layers(self) -> bool:
         """Return False when Local Reports should exclude HF Spotter-only report layers."""
@@ -4810,7 +4826,13 @@ class StationsMapTab(QWidget):
         if not bool(getattr(self, "_observation_focus_enabled", False)):
             return []
         focus_mode = str(getattr(self, "_observation_focus_mode", "") or "all_reports").strip().lower()
-        cache_key = (f"observation_{layer_name}_reports", int(max_age_sec or 0), focus_mode)
+        topic_filter = self._selected_map_topic_filter()
+        cache_key = (
+            f"observation_{layer_name}_reports",
+            int(max_age_sec or 0),
+            focus_mode,
+            topic_filter,
+        )
         cached = self._query_cache_get(cache_key, ttl_sec=6.0)
         if isinstance(cached, list):
             return [dict(row) for row in cached if isinstance(row, dict)]
@@ -4857,6 +4879,8 @@ class StationsMapTab(QWidget):
             if eligibility is None or not eligibility_allowed:
                 continue
             topics = {str(topic).strip() for topic in obs.observed_topics if str(topic).strip()}
+            if topic_filter and topic_filter not in topics:
+                continue
             if layer_name == "alert" and source_family == "condition_alert":
                 include = True
                 icon, severity = "warning", "caution"
@@ -4919,6 +4943,18 @@ class StationsMapTab(QWidget):
         if mode == "rf_pins":
             return {"rf_pin"}
         return {"spotter", "local_report", "condition_alert", "rf_pin"}
+
+    def _selected_map_topic_filter(self) -> str:
+        combo = getattr(self, "_map_topic_filter_combo", None)
+        if combo is None:
+            return ""
+        try:
+            value = str(combo.currentText() or "").strip()
+        except Exception:
+            return ""
+        if not value or value == "All Topics":
+            return ""
+        return value
 
     @staticmethod
     def _map_report_age_text(ts_value: object, *, now: Optional[float] = None) -> str:
@@ -8365,6 +8401,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
         }
         self.recency_seconds = mapping.get(val, None)
         self._request_map_refresh(level="medium", reason="recency_filter")
+
+    def _on_map_topic_filter_changed(self, _idx: int):
+        self._clear_report_query_caches()
+        self._request_map_refresh(level="medium", reason="topic_filter")
 
     def _on_relay_target_changed(self, text: str):
         normalized = self._relay_target_callsign_from_text(text)
