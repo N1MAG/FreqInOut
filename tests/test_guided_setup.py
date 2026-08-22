@@ -1867,12 +1867,18 @@ def test_guided_add_radio_detected_app_review_keeps_selected_paths_visible() -> 
     assert "label = f\"Using: {path_text}\"" in dialog_block
     assert "combo.addItem(label, path_text)" in dialog_block
     assert "or bool(target_text)" in dialog_block
+    assert "browse_btn.setMaximumWidth(110)" in dialog_block
     assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
     assert "if selected_single:" in dialog_block
     assert "_apply_detected_app_choice(app_id)" in dialog_block
     assert "_sync_app_choice_combo_to_target(app_id)" in dialog_block
     assert "for app_id in app_choice_combos:" in dialog_block
     assert "if _app_choice_app_selected(app_id):" in dialog_block
+    post_fill_sync = dialog_block[
+        dialog_block.index("for app_id in app_choice_combos:")
+        : dialog_block.index("if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):")
+    ]
+    assert "_update_app_choice_visibility()" in post_fill_sync
     assert "Choose the highlighted app or profile, then continue." in dialog_block
     assert "FIO filled what it could. Review the paths below, then continue." in dialog_block
 

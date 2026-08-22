@@ -19331,11 +19331,12 @@ class SettingsTab(QWidget):
             combo.setObjectName(f"guidedAutoAppChoice_{app_id}")
             combo.setVisible(False)
             combo.setToolTip("FIO found more than one installed app. Choose the one this radio should use.")
-            _configure_combo_width(combo, minimum=260)
+            _configure_combo_width(combo, minimum=420)
             app_choice_combos[app_id] = combo
             browse_btn = QPushButton("Browse")
             browse_btn.setObjectName(f"guidedAutoAppBrowse_{app_id}")
             browse_btn.setMinimumWidth(86)
+            browse_btn.setMaximumWidth(110)
             browse_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             browse_btn.setToolTip("Choose a different app or folder if FIO did not find it.")
             app_choice_browse_buttons[app_id] = browse_btn
@@ -21682,6 +21683,7 @@ class SettingsTab(QWidget):
             for app_id in app_choice_combos:
                 if _app_choice_app_selected(app_id):
                     _sync_app_choice_combo_to_target(app_id)
+            _update_app_choice_visibility()
             if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):
                 _update_js8_profile_choices(js8_file_profiles)
             review = guided_setup_autofill_review(
