@@ -449,12 +449,16 @@ def test_controlfreq_activity_context_navigation_hooks_are_present():
     controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text()
     main_window_source = Path("freqinout/gui/main_window.py").read_text()
     message_viewer_source = Path("freqinout/gui/message_viewer_tab.py").read_text()
+    local_reports_source = Path("freqinout/gui/local_report_history_tab.py").read_text()
 
     assert "_open_operational_activity_messages" in controlfreq_source
     assert "_open_operational_activity_map" in controlfreq_source
+    assert "host.open_local_reports(" in controlfreq_source
     assert "open_spotter_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
     assert "open_local_reports_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
     assert "group_filter=str(context.get(\"group_filter\") or \"\")" in controlfreq_source
+    assert "def open_local_reports(self, callsign: str = \"\", *, topic_filter: str = \"\", query: str = \"\")" in main_window_source
     assert "def open_local_reports_map(self, *, group_filter: str = \"\", topic_filter: str = \"\")" in main_window_source
     assert "_messages_nav_filter_context" in main_window_source
     assert "def show_inbox_with_context" in message_viewer_source
+    assert "def show_context(self, *, callsign: str = \"\", topic: str = \"\", query: str = \"\")" in local_reports_source

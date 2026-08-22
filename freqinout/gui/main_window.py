@@ -3383,13 +3383,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def open_local_reports(self, callsign: str = "") -> None:
+    def open_local_reports(self, callsign: str = "", *, topic_filter: str = "", query: str = "") -> None:
         idx = self._screen_index_by_label.get("Local Reports", -1)
         if idx < 0:
             return
         self._set_screen(idx)
         tab = getattr(self, "local_report_history_tab", None)
-        if tab is not None and hasattr(tab, "show_callsign"):
+        if tab is not None and hasattr(tab, "show_context"):
+            QTimer.singleShot(
+                0,
+                lambda: tab.show_context(
+                    callsign=str(callsign or "").strip().upper(),
+                    topic=str(topic_filter or "").strip(),
+                    query=str(query or "").strip(),
+                ),
+            )
+        elif tab is not None and hasattr(tab, "show_callsign"):
             QTimer.singleShot(0, lambda cs=str(callsign or "").strip().upper(): tab.show_callsign(cs))
 
     def _apply_messages_nav_context(self) -> None:

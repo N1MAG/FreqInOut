@@ -2847,6 +2847,13 @@ class ControlFreqTab(QWidget):
     def _open_operational_activity_messages(self) -> None:
         context = dict(getattr(self, "_operational_activity_context", {}) or {})
         host = self.window()
+        source_family = str(context.get("source_family") or "").lower()
+        if source_family == "local_report" and hasattr(host, "open_local_reports"):
+            host.open_local_reports(
+                topic_filter=str(context.get("topic_filter") or ""),
+                query=str(context.get("search_query") or context.get("group_filter") or ""),
+            )
+            return
         if hasattr(host, "open_messages_section"):
             host.open_messages_section(
                 "inbox",

@@ -167,6 +167,19 @@ class LocalReportHistoryTab(QWidget):
         self.callsign_edit.setText(str(callsign or "").strip().upper())
         self.refresh_reports()
 
+    def show_context(self, *, callsign: str = "", topic: str = "", query: str = "") -> None:
+        self.callsign_edit.setText(str(callsign or "").strip().upper())
+        self.search_edit.setText(str(query or "").strip())
+        topic_key = str(topic or "").strip().lower()
+        if topic_key:
+            for idx in range(self.topic_combo.count()):
+                data = str(self.topic_combo.itemData(idx) or "").strip().lower()
+                text = str(self.topic_combo.itemText(idx) or "").strip().lower()
+                if topic_key in {data, text}:
+                    self.topic_combo.setCurrentIndex(idx)
+                    break
+        self.refresh_reports()
+
     def refresh_reports(self, *_args) -> None:
         try:
             rows = list_local_reports(
