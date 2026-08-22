@@ -3334,7 +3334,7 @@ class MainWindow(QMainWindow):
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
-    def open_spotter_map(self) -> None:
+    def open_spotter_map(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
@@ -3342,7 +3342,10 @@ class MainWindow(QMainWindow):
         if tab is not None:
             focus = getattr(tab, "focus_hf_reports", None) or getattr(tab, "focus_spotter_reports", None)
             if callable(focus):
-                QTimer.singleShot(0, focus)
+                QTimer.singleShot(
+                    0,
+                    lambda: focus(group_filter=group_filter, topic_filter=topic_filter),
+                )
                 QTimer.singleShot(0, self._sync_map_filters_from_tab)
         self._set_screen(idx)
         try:

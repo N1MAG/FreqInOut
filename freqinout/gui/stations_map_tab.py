@@ -3279,7 +3279,28 @@ class StationsMapTab(QWidget):
         self._refresh_relay_targets()
         self._request_map_refresh(level="medium", reason="all_stations_map_focus")
 
-    def _set_report_focus_mode(self, mode: str) -> None:
+    def _set_combo_by_text_or_data(self, combo: QComboBox, value: str, *, fallback_index: int = 0) -> bool:
+        target = str(value or "").strip()
+        try:
+            combo.blockSignals(True)
+            if target:
+                for idx in range(combo.count()):
+                    data = str(combo.itemData(idx) or "").strip()
+                    text = str(combo.itemText(idx) or "").strip()
+                    if target.lower() in {data.lower(), text.lower()}:
+                        combo.setCurrentIndex(idx)
+                        return True
+            combo.setCurrentIndex(max(0, min(int(fallback_index), combo.count() - 1)))
+            return False
+        except Exception:
+            return False
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _set_report_focus_mode(self, mode: str, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a temporary map focus for HF, local, or combined report review."""
         self._sitrep_status_only_enabled = True
         self._observation_focus_enabled = True
@@ -3315,9 +3336,9 @@ class StationsMapTab(QWidget):
                 pass
         try:
             if hasattr(self, "group_filter_combo"):
-                self.group_filter_combo.blockSignals(True)
-                self.group_filter_combo.setCurrentIndex(0)
-                self.group_filter_combo.blockSignals(False)
+                self._set_combo_by_text_or_data(self.group_filter_combo, group_filter)
+            if getattr(self, "_map_topic_filter_combo", None) is not None:
+                self._set_combo_by_text_or_data(self._map_topic_filter_combo, topic_filter)
             if hasattr(self, "band_combo"):
                 self.band_combo.blockSignals(True)
                 self.band_combo.setCurrentIndex(0)
@@ -3336,17 +3357,17 @@ class StationsMapTab(QWidget):
         self._update_map_view_status_label()
         self._request_map_refresh(level="medium", reason=f"{self._observation_focus_mode}_map_focus")
 
-    def focus_hf_reports(self) -> None:
+    def focus_hf_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for HF-derived Spotter/SitRep field reports."""
-        self._set_report_focus_mode("hf_reports")
+        self._set_report_focus_mode("hf_reports", group_filter=group_filter, topic_filter=topic_filter)
 
-    def focus_local_reports(self) -> None:
+    def focus_local_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for confirmed local operator and NCS reports."""
-        self._set_report_focus_mode("local_reports")
+        self._set_report_focus_mode("local_reports", group_filter=group_filter, topic_filter=topic_filter)
 
-    def focus_reports(self) -> None:
+    def focus_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for HF and confirmed local reports together."""
-        self._set_report_focus_mode("all_reports")
+        self._set_report_focus_mode("all_reports", group_filter=group_filter, topic_filter=topic_filter)
 
     def focus_rf_pins(self) -> None:
         """Open a map focus for operator-curated RF pins."""

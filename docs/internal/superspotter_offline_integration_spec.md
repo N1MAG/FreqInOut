@@ -299,7 +299,7 @@ The FIO map should become the spatial counterpart to Messages:
   MCForm halos, CommStat rings, and roster operators
 - "latest" windows such as 30m, 2h, 24h, 72h
 - "View HF Reports Map" from Messages opens Map pre-filtered to HF report
-  observations
+  observations, carrying selected message group/topic context when available
 - local reports stay separate from HF reports but use the same topic vocabulary
 - state-only observations roll up to state/area summaries rather than pretending
   to be precise points
@@ -381,7 +381,8 @@ The center-of-gravity loop is:
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure,
     condition-alert pins, a dedicated RF Pins map focus, and a shared Topic
-    filter for observation-backed report layers. Core RF pin projection, map
+    filter for observation-backed report layers. Messages can hand off selected
+    HF report group/topic context to the Map focus. Core RF pin projection, map
     styling, save/list/delete helpers, and Map-side manual pin
     creation/edit/delete management are done for receive/manual review records;
     send-capable workflows remain open.

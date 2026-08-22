@@ -10197,14 +10197,55 @@ class MessageViewerTab(QWidget):
             self.view_spotter_map_btn.setVisible(new_profile == "field_report")
 
     def _request_spotter_map_view(self) -> None:
+        context = self._message_map_context()
         host = self.window()
         if host is not None and hasattr(host, "open_spotter_map"):
             try:
-                host.open_spotter_map()
+                host.open_spotter_map(**context)
                 return
             except Exception as exc:
                 log.debug("MessageViewer: open_spotter_map failed: %s", exc)
         QMessageBox.information(self, "View HF Reports Map", "The Map view is not available in this runtime profile.")
+
+    def _message_map_context(self) -> Dict[str, str]:
+        row = self._current_message_table_row()
+        group = self._message_map_group_from_row(row)
+        if not group:
+            selected_groups = [
+                self._normalize_message_group_filter_value(group_value)
+                for group_value in (self._selected_message_groups() if self._message_group_filter_active() else [])
+            ]
+            selected_groups = [g for g in selected_groups if g and g.lower() != "unassigned"]
+            if len(selected_groups) == 1:
+                group = selected_groups[0]
+        topic = ""
+        if row is not None:
+            topic = next((str(t).strip() for t in row.topics if str(t).strip()), "")
+        return {"group_filter": group, "topic_filter": topic}
+
+    def _current_message_table_row(self) -> UnifiedMessage | None:
+        if not hasattr(self, "messages_table"):
+            return None
+        try:
+            index = self.messages_table.currentIndex()
+            if not index.isValid():
+                return None
+            row = index.data(Qt.UserRole)
+            return row if isinstance(row, UnifiedMessage) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _message_map_group_from_row(row: UnifiedMessage | None) -> str:
+        if row is None:
+            return ""
+        raw = str(row.to_call or "").strip().upper()
+        if not raw:
+            return ""
+        raw = raw.split(">", 1)[0].strip()
+        raw = raw[1:] if raw.startswith("@") else raw
+        raw = re.sub(r"[^A-Z0-9_-]", "", raw)
+        return raw
 
     def _apply_message_table_profile_widths(self) -> None:
         profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"

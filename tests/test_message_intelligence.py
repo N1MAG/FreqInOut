@@ -5474,3 +5474,39 @@ def test_js8_local_schema_ensure_runs_once_per_db_path(tmp_path, monkeypatch) ->
     MessageViewerTab._load_js8_from_local(tab, force=False, rebuild=True)
 
     assert calls == {"ensure": 1}
+
+
+def test_message_map_context_uses_current_row_group_and_topic() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    row = UnifiedMessage(
+        msg_type="SitRep",
+        status="NEW",
+        from_call="K7ETC",
+        to_call="@MR08",
+        rcv_ts=0.0,
+        rcv_display="",
+        title="Wildfire",
+        origin="spotter",
+        payload=object(),
+        topics=("Fire", "Comms"),
+    )
+    tab._current_message_table_row = lambda: row
+    tab._message_group_filter_active = lambda: False
+    tab._selected_message_groups = lambda: set()
+
+    assert MessageViewerTab._message_map_context(tab) == {
+        "group_filter": "MR08",
+        "topic_filter": "Fire",
+    }
+
+
+def test_message_map_context_falls_back_to_single_group_filter() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._current_message_table_row = lambda: None
+    tab._message_group_filter_active = lambda: True
+    tab._selected_message_groups = lambda: {"@MAGNET"}
+
+    assert MessageViewerTab._message_map_context(tab) == {
+        "group_filter": "MAGNET",
+        "topic_filter": "",
+    }
