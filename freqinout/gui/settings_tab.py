@@ -17648,17 +17648,29 @@ class SettingsTab(QWidget):
                 device_id = int(rows[0].get("device_profile_id", 0) or 0)
             except Exception:
                 device_id = 0
+            warning_tone = ""
+            warning_detail = ""
             if device_id > 0:
                 try:
                     validation = self.multi_radio_store.validate_frequency_plan_for_device(device_id, plan)
                 except ValueError as exc:
-                    bits.append(f"RF Guard blocked: {exc}")
+                    warning_tone = "blocked"
+                    warning_detail = str(exc)
+                    bits.append(f"RF Guard blocked: {warning_detail}")
                 except Exception:
                     log.exception("Failed validating selected schedule assignment.")
                 else:
                     tone, detail = self._schedule_assignment_validation_message(validation)
                     if tone and detail:
+                        warning_tone = tone
+                        warning_detail = detail
                         bits.append(f"RF Guard {tone}: {detail}")
+            if warning_tone and warning_detail:
+                self._set_schedule_assignment_guidance(
+                    "RF Guard Blocked Assignment" if warning_tone == "blocked" else "RF Guard Needs Review",
+                    warning_detail,
+                    "warning",
+                )
         self.schedule_assignment_editor_hint_label.setText(" ".join(bits))
 
     def _show_schedule_assignment_editor(
@@ -19249,28 +19261,30 @@ class SettingsTab(QWidget):
         guided_step_stack = QWidget()
         guided_step_stack_layout = QGridLayout(guided_step_stack)
         guided_step_stack_layout.setContentsMargins(0, 0, 0, 0)
-        guided_step_stack_layout.setHorizontalSpacing(6)
-        guided_step_stack_layout.setVerticalSpacing(6)
+        guided_step_stack_layout.setHorizontalSpacing(5)
+        guided_step_stack_layout.setVerticalSpacing(5)
         for step_id in ("radio", "software", "connection", "guard", "schedule", "review"):
             step_frame = QFrame()
             step_frame.setObjectName(f"guidedSetupStep_{step_id}")
             step_frame.setFrameShape(QFrame.StyledPanel)
             step_frame_layout = QGridLayout(step_frame)
-            step_frame_layout.setContentsMargins(7, 4, 7, 4)
-            step_frame_layout.setHorizontalSpacing(5)
+            step_frame_layout.setContentsMargins(6, 3, 6, 3)
+            step_frame_layout.setHorizontalSpacing(4)
             step_frame_layout.setVerticalSpacing(0)
-            step_frame.setMinimumHeight(32)
+            step_frame.setMinimumHeight(26)
+            step_frame.setMaximumHeight(32)
             step_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             status_label = QLabel()
             status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")
             status_label.setAlignment(Qt.AlignCenter)
-            status_label.setMinimumWidth(50)
+            status_label.setMinimumWidth(44)
             title_label = QLabel()
             title_label.setObjectName(f"guidedSetupStepTitle_{step_id}")
             title_font = title_label.font()
             title_font.setBold(True)
             title_label.setFont(title_font)
             title_label.setWordWrap(False)
+            title_label.setAlignment(Qt.AlignVCenter)
             detail_label = QLabel()
             detail_label.setObjectName(f"guidedSetupStepDetail_{step_id}")
             detail_label.setWordWrap(True)
@@ -21175,6 +21189,8 @@ class SettingsTab(QWidget):
 
         def _guided_save_allowed() -> bool:
             if guided_wizard_step_id != "review":
+                return False
+            if guided_wizard_max_index_seen < _guided_wizard_index("review"):
                 return False
             if not str(setup_type_combo.currentData() or "").strip():
                 return False

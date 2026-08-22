@@ -678,6 +678,7 @@ def test_schedule_assignment_ui_summarizes_antenna_plan_band_mismatch() -> None:
     assert "Antenna and schedule mismatch: this radio supports" in source
     assert "but the selected plan uses" in source
     assert "RF Guard {tone}: {detail}" in source
+    assert "RF Guard Blocked Assignment\" if warning_tone == \"blocked\" else \"RF Guard Needs Review\"" in source
     assert "warning_tone = tone or \"warning\"" in source
 
 

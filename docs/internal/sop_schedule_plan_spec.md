@@ -182,6 +182,10 @@ Endpoints, RF Guard and Schedule, and Files. Long filesystem paths are not shown
 as a paragraph by default; the Files card summarizes how many paths are configured
 or need review, with full path detail available in tooltip/details surfaces. This
 keeps Save Radio understandable while still preserving enough detail for audit.
+Save Radio remains disabled until the operator has actually reached the Review
+step and any highlighted app/profile selections have been resolved. This prevents
+half-configured radios from being saved before the operator has confirmed the
+radio, software, connection, RF Guard, schedule, and managed app setup summary.
 
 Known Net Resources are included when they are not already represented by HF Net
 rows. If an HF Net row carries the same resource identity or the same

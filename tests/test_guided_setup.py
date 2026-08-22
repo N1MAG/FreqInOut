@@ -1713,6 +1713,13 @@ def test_guided_add_radio_save_path_is_inline_and_review_gated() -> None:
 
     assert "if not _guided_save_allowed():" in save_block
     assert "_detected_app_choice_needs_operator_selection()" in save_block
+    save_allowed_block = dialog_block.split("def _guided_save_allowed() -> bool:", 1)[1].split(
+        "        def _update_guided_save_button() -> None:",
+        1,
+    )[0]
+    assert 'if guided_wizard_step_id != "review":' in save_allowed_block
+    assert 'guided_wizard_max_index_seen < _guided_wizard_index("review")' in save_allowed_block
+    assert 'save_button.setToolTip("Walk through the guided setup and review before saving.")' in dialog_block
     assert '_set_guided_wizard_step("software")' in save_block
     assert '_set_guided_wizard_step("review")' in save_block
     assert "guided_wizard_detail_label.setText(" in save_block
@@ -1721,6 +1728,18 @@ def test_guided_add_radio_save_path_is_inline_and_review_gated() -> None:
     assert "QMessageBox.warning" not in save_block
     assert "out.update(" not in save_block
     assert "dlg.accept()" not in save_block
+
+
+def test_guided_setup_status_strip_is_compact_chip_style() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    dialog_block = source.split('guided_wizard_group = QGroupBox("Guided Setup")', 1)[1].split(
+        "        def _update_dialog_readiness() -> None:",
+        1,
+    )[0]
+
+    assert "step_frame.setMaximumHeight(32)" in dialog_block
+    assert "detail_label.setVisible(False)" in dialog_block
+    assert 'app_setup_plan_group = QGroupBox("Setup Status")' in dialog_block
 
 
 def test_settings_preferences_expose_radio_apps_base_folder() -> None:
