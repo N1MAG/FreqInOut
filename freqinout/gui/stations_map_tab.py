@@ -569,6 +569,7 @@ class StationsMapTab(QWidget):
         self._map_hf_reports_button: Optional[QPushButton] = None
         self._map_local_reports_button: Optional[QPushButton] = None
         self._map_reports_button: Optional[QPushButton] = None
+        self._map_rf_pins_button: Optional[QPushButton] = None
         self._map_add_rf_pin_button: Optional[QPushButton] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
@@ -1850,6 +1851,9 @@ class StationsMapTab(QWidget):
         self._map_reports_button = QPushButton("Reports")
         self._map_reports_button.setToolTip("Show HF and confirmed local reports together.")
         self._map_reports_button.clicked.connect(self.focus_reports)
+        self._map_rf_pins_button = QPushButton("RF Pins")
+        self._map_rf_pins_button.setToolTip("Show operator-curated RF pins on the map.")
+        self._map_rf_pins_button.clicked.connect(self.focus_rf_pins)
         self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
@@ -1880,6 +1884,7 @@ class StationsMapTab(QWidget):
             self._map_hf_reports_button,
             self._map_local_reports_button,
             self._map_reports_button,
+            self._map_rf_pins_button,
             self._now_reachable_button,
             self._sitrep_status_button,
             self._paths_help_button,
@@ -1905,6 +1910,7 @@ class StationsMapTab(QWidget):
             self._map_hf_reports_button,
             self._map_local_reports_button,
             self._map_reports_button,
+            self._map_rf_pins_button,
             self._sitrep_status_button,
             self._now_reachable_button,
         ):
@@ -2946,6 +2952,8 @@ class StationsMapTab(QWidget):
                 return "local"
             if focus_mode == "all_reports":
                 return "reports"
+            if focus_mode == "rf_pins":
+                return "pins"
         if bool(getattr(self, "_sitrep_status_only_enabled", False)):
             return "sitrep"
         return "all"
@@ -2959,6 +2967,7 @@ class StationsMapTab(QWidget):
             (getattr(self, "_map_hf_reports_button", None), "hf"),
             (getattr(self, "_map_local_reports_button", None), "local"),
             (getattr(self, "_map_reports_button", None), "reports"),
+            (getattr(self, "_map_rf_pins_button", None), "pins"),
             (getattr(self, "_sitrep_status_button", None), "sitrep"),
             (getattr(self, "_now_reachable_button", None), "peer"),
         )
@@ -2977,6 +2986,8 @@ class StationsMapTab(QWidget):
             return "Map View: Local Reports"
         if mode_key == "reports":
             return "Map View: Reports"
+        if mode_key == "pins":
+            return "Map View: RF Pins"
         if mode_key == "sitrep":
             return "Map View: SitRep Status"
         return "Map View: All Stations"
@@ -3152,6 +3163,10 @@ class StationsMapTab(QWidget):
         """Open a map focus for HF and confirmed local reports together."""
         self._set_report_focus_mode("all_reports")
 
+    def focus_rf_pins(self) -> None:
+        """Open a map focus for operator-curated RF pins."""
+        self._set_report_focus_mode("rf_pins")
+
     def focus_spotter_reports(self) -> None:
         """Compatibility alias for the previous Spotter map action."""
         self.focus_hf_reports()
@@ -3187,7 +3202,7 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
         if not bool(getattr(self, "_observation_focus_enabled", False)):
-            self._set_report_focus_mode("all_reports")
+            self._set_report_focus_mode("rf_pins")
         else:
             self._request_map_refresh(level="medium", reason="rf_pin_saved")
         label = str(payload.get("label") or "RF Pin")
@@ -3200,7 +3215,7 @@ class StationsMapTab(QWidget):
         if not bool(getattr(self, "_observation_focus_enabled", False)):
             return True
         focus_mode = str(getattr(self, "_observation_focus_mode", "") or "").strip().lower()
-        return focus_mode != "local_reports"
+        return focus_mode not in {"local_reports", "rf_pins"}
 
     def _relay_target_callsign_from_text(self, text: str) -> str:
         txt = (text or "").strip()
@@ -4722,6 +4737,8 @@ class StationsMapTab(QWidget):
             return {"spotter", "condition_alert"}
         if mode == "local_reports":
             return {"local_report"}
+        if mode == "rf_pins":
+            return {"rf_pin"}
         return {"spotter", "local_report", "condition_alert", "rf_pin"}
 
     @staticmethod

@@ -117,6 +117,9 @@ def test_map_view_status_text_names_current_review_context() -> None:
     tab._observation_focus_mode = "all_reports"
     assert StationsMapTab._map_view_status_text(tab) == "Map View: Reports"
 
+    tab._observation_focus_mode = "rf_pins"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: RF Pins"
+
     tab._observation_focus_enabled = False
     tab._observation_focus_mode = ""
     tab._sitrep_status_only_enabled = True
@@ -149,6 +152,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert 'QPushButton("HF Reports")' in build_block
     assert 'QPushButton("Local Reports")' in build_block
     assert 'QPushButton("Reports")' in build_block
+    assert 'QPushButton("RF Pins")' in build_block
     assert 'QLabel("RF Pins")' in build_block
     assert 'QPushButton("Add RF Pin")' in build_block
     assert 'QCheckBox("Alerts/Intel")' in build_block
@@ -348,6 +352,17 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
     assert local_alert_rows == []
     assert [row["callsign"] for row in local_infrastructure_rows] == ["K0PRA"]
     assert all(row["callsign"] != "N0PWR" for row in local_alert_rows + local_infrastructure_rows)
+
+    tab._query_cache = {}
+    tab._observation_focus_mode = "rf_pins"
+    pin_infrastructure_rows = StationsMapTab._load_observation_operational_reports(
+        tab,
+        layer_name="infrastructure",
+        max_age_sec=0,
+    )
+
+    assert [row["callsign"] for row in pin_infrastructure_rows] == ["N1MAG"]
+    assert pin_infrastructure_rows[0]["source_family"] == "rf_pin"
 
 
 def test_map_operational_events_can_place_grid_only_observations() -> None:
