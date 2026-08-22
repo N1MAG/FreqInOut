@@ -1875,3 +1875,21 @@ def test_guided_add_radio_detected_app_review_keeps_selected_paths_visible() -> 
     assert "if _app_choice_app_selected(app_id):" in dialog_block
     assert "Choose the highlighted app or profile, then continue." in dialog_block
     assert "FIO filled what it could. Review the paths below, then continue." in dialog_block
+
+
+def test_guided_review_computes_app_config_before_file_summary() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    review_block = source.split("        def _update_guided_save_review() -> None:", 1)[1].split(
+        "        def _apply_guided_wizard_visibility(",
+        1,
+    )[0]
+
+    assert review_block.index("app_config_summary = app_config_lines[0]") < review_block.index(
+        "files_review_lines.append(app_config_summary)"
+    )
+
+
+def test_guided_schedule_path_change_refreshes_rf_guard_preview() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert "schedule_path_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source

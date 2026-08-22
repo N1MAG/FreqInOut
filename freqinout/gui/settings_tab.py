@@ -21435,6 +21435,15 @@ class SettingsTab(QWidget):
                 file_lines.append(_path_summary("Radio Apps Base Folder", radio_apps_base_edit.text()))
             if not file_lines:
                 file_lines.append("No message/forms paths selected")
+            app_config_plan = _current_guided_app_config_plan()
+            app_config_lines = guided_app_config_review_lines(app_config_plan)
+            app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
+            _set_app_config_review_card(
+                app_config_lines,
+                backup_required=bool(app_config_plan.backup_required),
+                manual_review_required=bool(app_config_plan.manual_review_required),
+                has_actions=bool(app_config_plan.actions),
+            )
             configured_file_lines = [
                 line
                 for line in file_lines
@@ -21472,15 +21481,6 @@ class SettingsTab(QWidget):
 
             enabled_text = "Enabled" if int((existing or {}).get("enabled", 1) or 1) == 1 else "Not enabled"
             active_text = "Active now" if int((existing or {}).get("runtime_active", 0) or 0) == 1 else "Inactive until you choose Use Radio"
-            app_config_plan = _current_guided_app_config_plan()
-            app_config_lines = guided_app_config_review_lines(app_config_plan)
-            app_config_summary = app_config_lines[0] if app_config_lines else "App Configuration: no external app setup changes."
-            _set_app_config_review_card(
-                app_config_lines,
-                backup_required=bool(app_config_plan.backup_required),
-                manual_review_required=bool(app_config_plan.manual_review_required),
-                has_actions=bool(app_config_plan.actions),
-            )
 
             conflict_lines = _endpoint_conflict_lines()
             guard_lines = [
@@ -21961,7 +21961,7 @@ class SettingsTab(QWidget):
         use_external_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
-        schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
+        schedule_path_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())
         schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())
         for checkbox in band_checks.values():
             checkbox.stateChanged.connect(lambda _state: _refresh_guided_schedule_guard_review())
