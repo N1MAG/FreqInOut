@@ -21594,7 +21594,7 @@ class SettingsTab(QWidget):
                 optional_toggle.setArrowType(Qt.DownArrow if rf_guard_visible else Qt.RightArrow)
             optional_body.setVisible(rf_guard_visible)
             _apply_guided_schedule_assignment_warning_ui()
-            schedule_group.setVisible(guided_wizard_step_id == "schedule")
+            schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)
             save_review_group.setVisible(guided_wizard_step_id == "review")
             launch_group.setVisible(False)
             if guided_wizard_step_id != "review":

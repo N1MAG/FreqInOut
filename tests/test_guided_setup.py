@@ -1688,7 +1688,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert 'identity_group.setVisible(guided_wizard_step_id == "radio")' in dialog_block
     assert 'software_group.setVisible(guided_wizard_step_id == "software")' in dialog_block
     assert 'connection_group.setVisible(guided_wizard_step_id == "connection")' in dialog_block
-    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule")' in dialog_block
+    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in dialog_block
     assert 'save_review_group.setVisible(guided_wizard_step_id == "review")' in dialog_block
     assert "launch_group.setVisible(False)" in dialog_block
     assert 'guided_next_action_label.setObjectName("guidedSetupNextAction")' in dialog_block
@@ -1846,6 +1846,7 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "optional_body.setVisible(True)" in source
     assert "rf_guard_needs_review = bool(rf_guard_tone)" in source
     assert "rf_guard_visible = guided_wizard_step_id == \"guard\" or rf_guard_needs_review" in source
+    assert 'schedule_group.setVisible(guided_wizard_step_id == "schedule" or rf_guard_needs_review)' in source
     assert "_apply_guided_schedule_assignment_warning_ui()" in source
     assert "def _refresh_guided_schedule_guard_review() -> None:" in source
     assert "schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source
