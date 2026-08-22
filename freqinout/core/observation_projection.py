@@ -211,6 +211,74 @@ def observation_from_condition_alert_match(match: ConditionAlertMatch) -> Observ
     )
 
 
+def observation_from_rf_pin(pin: Mapping[str, Any]) -> Observation:
+    """Project a manually curated RF/map pin into the shared observation model.
+
+    RF pins are intentionally inert: they can inform the map and operator review,
+    but they do not authorize BBS routing or external publication by themselves.
+    """
+    ref = (
+        _clean(pin.get("raw_reference"))
+        or _clean(pin.get("source_ref"))
+        or _clean(pin.get("pin_id"))
+        or _clean(pin.get("id"))
+    )
+    label = _clean(pin.get("label") or pin.get("title") or pin.get("subject"))
+    if not ref:
+        ref = f"rf_pin:{label or _clean(pin.get('grid')) or 'unknown'}"
+    topics = _json_tuple(pin.get("topics_json")) or _tuple_values(pin.get("topics"))
+    target = _clean_target(pin.get("to_target") or pin.get("target") or pin.get("group"))
+    groups = _dedupe(
+        _clean_target(value)
+        for value in (
+            *(_json_tuple(pin.get("groups_json")) or _tuple_values(pin.get("groups"))),
+            pin.get("group"),
+            pin.get("target_group"),
+        )
+    )
+    now = _clean(pin.get("created_utc") or pin.get("received_utc") or utc_now_iso())
+    provenance = {
+        "source_type": "rf_pin",
+        "source_ref": ref,
+        "pin_kind": _clean(pin.get("pin_kind") or pin.get("kind")),
+        "created_by": _clean(pin.get("created_by")),
+        "expires_utc": _clean(pin.get("expires_utc")),
+    }
+    return Observation(
+        observation_id=_observation_id("rf_pin", ref),
+        source_family="rf_pin",
+        source_ref=ref,
+        source_radio_id=_int_or_none(pin.get("source_radio_id")),
+        source_app=_clean(pin.get("source_app")),
+        received_utc=now,
+        event_utc=_clean(pin.get("event_utc") or now),
+        from_call=_clean_call(pin.get("callsign") or pin.get("from_call")),
+        to_target=target,
+        groups=groups,
+        observed_topics=_dedupe(topics),
+        operator_attention=True,
+        status=_clean(pin.get("status") or "PIN"),
+        urgency=_clean(pin.get("urgency")),
+        subject=label,
+        summary=_clean(pin.get("summary") or label or "RF map pin"),
+        state=_clean_state(pin.get("state")),
+        grid=_clean_grid(pin.get("grid")),
+        lat=_float_or_none(pin.get("lat")),
+        lon=_float_or_none(pin.get("lon")),
+        location_confidence=_clean(pin.get("location_confidence")) or _location_confidence(
+            lat=pin.get("lat"),
+            lon=pin.get("lon"),
+            grid=pin.get("grid"),
+            state=pin.get("state"),
+        ),
+        confirmed_state=_clean(pin.get("confirmed_state")),
+        exercise_flag=bool(pin.get("exercise_flag")),
+        route_eligible=False,
+        publish_authorized=False,
+        provenance=provenance,
+    )
+
+
 def _clean_condition_group(value: object) -> str:
     text = _clean_target(value).lstrip("@")
     return text.rstrip(">")

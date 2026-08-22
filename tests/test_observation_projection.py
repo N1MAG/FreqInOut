@@ -6,6 +6,7 @@ from freqinout.core.observation_projection import (
     explain_map_eligibility,
     observation_from_local_report,
     observation_from_message_intelligence,
+    observation_from_rf_pin,
 )
 
 
@@ -152,3 +153,33 @@ def test_commstat_observation_keeps_group_targets_without_js8_marker() -> None:
     assert info.to_call == "MAGNET"
     assert obs.to_target == "MAGNET"
     assert obs.groups == ("MAGNET",)
+
+
+def test_rf_pin_projection_is_mappable_but_not_routing_authorized() -> None:
+    obs = observation_from_rf_pin(
+        {
+            "pin_id": "manual:ridge-repeater",
+            "label": "Ridge repeater",
+            "callsign": "K0PRA",
+            "group": "MAGNET",
+            "topics": ["Comms", "Infrastructure"],
+            "grid": "DM79",
+            "status": "WATCH",
+            "created_by": "N1MAG",
+        }
+    )
+
+    assert obs.observation_id == "rf_pin:manual:ridge-repeater"
+    assert obs.source_family == "rf_pin"
+    assert obs.from_call == "K0PRA"
+    assert obs.to_target == "@MAGNET"
+    assert obs.groups == ("@MAGNET",)
+    assert obs.subject == "Ridge repeater"
+    assert obs.location_confidence == "grid"
+    assert obs.route_eligible is False
+    assert obs.publish_authorized is False
+
+    map_status = explain_map_eligibility(obs, layer_enabled=True)
+    assert map_status.allowed is True
+    assert "location:grid" in map_status.reasons
+    assert json.loads(obs.provenance_json)["source_type"] == "rf_pin"

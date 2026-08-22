@@ -378,7 +378,10 @@ The center-of-gravity loop is:
 14. Add ControlFreq compact activity/alert panel. Done.
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure, and
-    condition-alert pins; explicit RF pin records remain open.
+    condition-alert pins. Core RF pin projection and map styling are done for
+    receive/manual review records, including save/list/delete helpers over the
+    observation store; pin creation/editing UI and send-capable workflows remain
+    open.
 16. Add SOP Builder Traffic Suggestions and condition apply workflow. Core
     condition-alert-to-SOP decision helpers done, including batch evaluation
     against SOP profile schedule layers; ControlFreq compact activity now shows
@@ -414,6 +417,6 @@ The center-of-gravity loop is:
 - Confirm whether MagNet default allowed MAGCON senders should come from explicit
   callsigns, roster role/tier, or both.
 - Confirm which topics should be treated as ControlFreq "high-value" by default.
-- Confirm whether RF pins should be send-capable in the first map-pin slice or
-  receive/manual-only first.
+- Confirm whether RF pins should become send-capable later; first slice is
+  receive/manual review only.
 - Confirm group filename defaults beyond MagNet and AMRRON.

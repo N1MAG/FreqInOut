@@ -4586,7 +4586,7 @@ class StationsMapTab(QWidget):
             return {"spotter", "condition_alert"}
         if mode == "local_reports":
             return {"local_report"}
-        return {"spotter", "local_report", "condition_alert"}
+        return {"spotter", "local_report", "condition_alert", "rf_pin"}
 
     @staticmethod
     def _map_report_age_text(ts_value: object, *, now: Optional[float] = None) -> str:
@@ -4616,6 +4616,8 @@ class StationsMapTab(QWidget):
         app = str(source_app or "").strip()
         if source == "spotter":
             return "HF JS8Spotter"
+        if source == "rf_pin":
+            return "RF Pin"
         if not source:
             return "HF Report"
         if source == "local_report":
@@ -4628,6 +4630,8 @@ class StationsMapTab(QWidget):
         source = str(source_family or "").strip().lower()
         if source == "local_report":
             return "local"
+        if source == "rf_pin":
+            return "pin"
         if source == "mixed":
             return "mixed"
         return "hf"
@@ -7446,6 +7450,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .op-source-hf {{ border-radius: 7px; outline: 2px solid rgba(0,105,92,0.28); }}
     .op-source-local {{ border-radius: 50% 50% 50% 8px; outline: 2px solid rgba(94,53,177,0.32); transform: rotate(-45deg); }}
     .op-source-local svg, .op-source-local .wx-count {{ transform: rotate(45deg); }}
+    .op-source-pin {{ border-radius: 50% 50% 50% 6px; outline: 2px solid rgba(245,127,23,0.38); background: #FFF8E1; }}
     .op-source-mixed {{ border-radius: 50%; outline: 2px solid rgba(69,90,100,0.35); }}
     .op-severe {{ border-color: #B71C1C; }}
     .op-caution {{ border-color: #E65100; }}

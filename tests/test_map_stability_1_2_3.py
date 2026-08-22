@@ -9,6 +9,7 @@ from freqinout.core.observation_projection import (
     Observation,
     observation_from_local_report,
     observation_from_message_intelligence,
+    observation_from_rf_pin,
 )
 from freqinout.core.observation_store import upsert_observation
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
@@ -278,7 +279,19 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
         grid="DM79",
         location_confidence="grid",
     )
-    for obs in (spotter, confirmed_local, unconfirmed_local, condition_alert):
+    rf_pin = observation_from_rf_pin(
+        {
+            "pin_id": "manual:relay-check",
+            "label": "Relay check",
+            "callsign": "N1MAG",
+            "target": "MAGNET",
+            "topics": ("Comms",),
+            "grid": "DM79",
+            "status": "PIN",
+            "created_utc": "2026-08-10T16:30:00+00:00",
+        }
+    )
+    for obs in (spotter, confirmed_local, unconfirmed_local, condition_alert, rf_pin):
         upsert_observation(db_path, obs)
 
     alert_rows = StationsMapTab._load_observation_operational_reports(
@@ -296,7 +309,9 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
     assert alert_rows[0]["source_family"] == "condition_alert"
     assert alert_rows[0]["source_label"] == "Condition Alert"
     assert alert_rows[0]["icon"] == "warning"
-    assert [row["callsign"] for row in infrastructure_rows] == ["K0PRA"]
+    assert [row["callsign"] for row in infrastructure_rows] == ["N1MAG", "K0PRA"]
+    assert infrastructure_rows[0]["source_family"] == "rf_pin"
+    assert infrastructure_rows[0]["source_label"] == "RF Pin"
     assert all(row["callsign"] != "N0PWR" for row in alert_rows + infrastructure_rows)
 
     tab._query_cache = {}
@@ -466,5 +481,6 @@ def test_map_html_legend_and_operational_markers_distinguish_report_sources() ->
     assert "Report Source:" in source
     assert "op-source-hf" in source
     assert "op-source-local" in source
+    assert "op-source-pin" in source
     assert "op-source-mixed" in source
     assert "event.source_kind" in source
