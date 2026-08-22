@@ -9,8 +9,12 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
+from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.core.ingest_source_model import stable_source_id
 from freqinout.core.logger import log
+from freqinout.core.message_intelligence import analyze_commstat_fields
+from freqinout.core.observation_store import ensure_observation_schema, upsert_observation_conn
 from freqinout.core.operator_activity import format_utc_iso, newer_timestamp_text
 
 CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{3,10}$")
@@ -767,6 +771,53 @@ def _update_traits(
     entry["last_updated_ts"] = time.time()
 
 
+def _mirror_varac_condition_alerts(
+    conn: sqlite3.Connection,
+    *,
+    rules,
+    source_ref: str,
+    msg_type: str,
+    subject,
+    body,
+    from_call: str,
+    to_call: str,
+    ts_utc: str,
+    source_key: str,
+    source_label: str,
+) -> int:
+    if not rules:
+        return 0
+    try:
+        info = analyze_commstat_fields(
+            artifact_kind=str(msg_type or "MESSAGE").strip().upper(),
+            title=subject,
+            body=body,
+            from_call=from_call,
+            target=to_call,
+            report_group=to_call,
+            status="",
+            source_family="VarAC",
+            transport="VarAC",
+            event_utc=ts_utc,
+        )
+        count = 0
+        ensure_observation_schema(conn)
+        for observation in condition_alert_observations_for_message_intelligence(
+            info,
+            rules,
+            source_ref=source_ref,
+            source_family="VarAC",
+            source_app=source_label or source_key,
+            received_utc=ts_utc,
+        ):
+            upsert_observation_conn(conn, observation)
+            count += 1
+        return count
+    except Exception as exc:
+        log.debug("VarAC ingest: condition alert projection failed: %s", exc)
+        return 0
+
+
 def ingest_varac(
     settings,
     *,
@@ -845,6 +896,7 @@ def ingest_varac(
         cur_local = local_conn.cursor()
         cur_varac = varac_conn.cursor()
         my_call = (settings.get("operator_callsign", "") or "").strip().upper()
+        condition_alert_rules = settings.get(CONDITION_ALERT_RULES_SETTING_KEY, None)
         stats: Dict[str, Dict] = {}
         traits: Dict[str, Dict[str, float | int]] = {}
         folder_lut: Dict[int, str] = dict(VMAIL_FOLDER_FALLBACK)
@@ -1101,6 +1153,19 @@ def ingest_varac(
                 ),
             )
             _note_table("vmail", written=1)
+            _mirror_varac_condition_alerts(
+                local_conn,
+                rules=condition_alert_rules,
+                source_ref=f"varac_messages:{source_key}:vmail:{int(rid)}",
+                msg_type="VMAIL",
+                subject=subject,
+                body=msg,
+                from_call=from_call,
+                to_call=to_call,
+                ts_utc=format_utc_iso(ts_val),
+                source_key=source_key,
+                source_label=ingest_source_label,
+            )
 
         # Broadcast messages
         broadcast_rows, broadcast_cols = fetch_rows(
@@ -1201,6 +1266,19 @@ def ingest_varac(
                     ),
                 )
                 _note_table("broadcast", written=1)
+                _mirror_varac_condition_alerts(
+                    local_conn,
+                    rules=condition_alert_rules,
+                    source_ref=f"varac_messages:{source_key}:broadcast:{int(rid)}",
+                    msg_type="BROADCAST",
+                    subject="Broadcast",
+                    body=broadcast_message,
+                    from_call=from_call,
+                    to_call=to_call,
+                    ts_utc=format_utc_iso(ts_val),
+                    source_key=source_key,
+                    source_label=ingest_source_label,
+                )
 
         # CQ/Beacon stats
         cq_rows, cq_cols = fetch_rows(

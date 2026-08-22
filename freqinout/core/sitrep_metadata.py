@@ -14,6 +14,7 @@ _STATUS_ORDER = {
 _SOURCE_FAMILY_LABELS = {
     "COMMSTAT": "CommStat",
     "JS8SPOTTER": "JS8Spotter",
+    "CONDITION_ALERT": "Condition Alert",
     "MANUAL": "Manual",
     "FUSED": "Fused",
     "UNKNOWN": "Unknown",
@@ -22,6 +23,7 @@ _SOURCE_FAMILY_LABELS = {
 _SOURCE_SHORT_LABELS = {
     "COMMSTAT": "CS",
     "JS8SPOTTER": "SPT",
+    "CONDITION_ALERT": "ALRT",
     "MANUAL": "MAN",
     "FUSED": "FUS",
     "UNKNOWN": "UNK",
@@ -83,6 +85,8 @@ def source_family_key(source: object) -> str:
         return "COMMSTAT"
     if src in {"JS8SPOTTER", "JS8SPOTTER_IMPORT", "SPOTTER"}:
         return "JS8SPOTTER"
+    if src in {"CONDITION_ALERT", "CONDITIONALERT", "ALERT"}:
+        return "CONDITION_ALERT"
     if src == "MANUAL":
         return "MANUAL"
     if src == "FUSED":

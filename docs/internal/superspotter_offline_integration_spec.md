@@ -138,16 +138,112 @@ When a rule matches:
    projections.
 5. Preserve source provenance so the operator can review the original traffic.
 
+### Auto SOP Invocation Policy
+
+Condition-alert rules may optionally invoke an SOP condition level without a
+separate confirmation, but only when explicitly enabled by the operator.
+
+Defaults:
+
+- New and built-in rules default to `prompt-to-apply`.
+- `auto-apply` is never enabled by a template without operator action.
+- Auto-apply is configured per rule so one group or source can remain prompt-only
+  while another trusted source is automatic.
+
+Auto-apply requirements:
+
+- The rule is enabled and action is `auto-apply`.
+- Sender, target, source family, and authentication requirements pass exactly as
+  configured on the rule.
+- The target operating group has a matching SOP condition layer.
+- RF Guard preflight for affected active radios has no blocking conflicts.
+- FIO records an audit event with source message, rule id, old condition, new
+  condition, affected plans/radios, and timestamp.
+
+UI behavior:
+
+- Prompt mode shows a compact alert with Apply, Ignore Once, and Rule Settings.
+- Auto mode shows a compact applied status in ControlFreq/Station Health with
+  Undo/Review available.
+- Auto-apply failures become operator-visible warnings, not silent no-ops.
+- Manual Apply Level uses the same assigned-plan RF Guard preflight before the
+  condition level is changed.
+- Condition-alert rules should make the action wording plain: `Suggest only`,
+  `Ask before applying`, and `Apply automatically`.
+
+Implementation status:
+
+- A core condition-alert parser/model exists for configurable rules, source
+  family filters, target groups/callsigns, allowed sender modes, auth
+  requirements, regex/template/contains matching, and condition-level extraction.
+- MagNet MAGCON is represented as a disabled built-in template, not hard-coded
+  runtime behavior.
+- Condition alert rules have a core settings serialization/merge contract:
+  saved rules can override built-ins by `id`, built-ins are not duplicated, and
+  malformed saved rows are ignored safely.
+- Matched condition alerts can be projected into the common observation model for
+  later ControlFreq, Map, and SOP Builder surfaces.
+- A side-effect-free ingest bridge converts message intelligence plus configured
+  rules into pending condition-alert observations. The bridge preserves source
+  radio/app identity and does not write to the database or block ingestion.
+- Live JS8Spotter/MCF ingestion now mirrors matching condition-alert
+  observations through the existing observation store path when rules are
+  configured.
+- Spotter and CommStat observation backfill can optionally mirror matching
+  condition-alert observations when configured rules are supplied. Plain
+  CommStat messages that are not otherwise report-worthy can still create a
+  condition-alert observation when they match a rule.
+- FLMsg/FLAmp file observation projection can optionally mirror matching
+  condition-alert observations using the same parsed form intelligence already
+  used for message summaries.
+- Condition alert rules are editable in Settings and saved through the global
+  settings path.
+- Live JS8Spotter/MCF ingest, CommStat UI refresh/backfill, VarAC VMail, and
+  VarAC broadcast ingest can mirror matching condition-alert observations.
+- A core operational activity snapshot helper can query projected observations
+  by existing filters, scope them to an operating group, and return latest rows,
+  high-attention rows, condition alerts, and topic chips for ControlFreq/Map UI
+  use.
+- ControlFreq and SOP Builder now surface recent matching condition alerts as
+  SOP review/suggestion/blocked guidance.
+- SOP Builder can explicitly apply the first matching traffic suggestion after
+  operator confirmation and RF Guard preflight, updating the group-scoped
+  condition level through the shared condition-level helper only when assigned
+  Frequency Plans remain safe.
+- A side-effect-free auto-invocation planner can prepare condition-level
+  updates and audit payloads only when the rule, operator safety gate, matching
+  SOP layer, and RF Guard state allow it.
+- A condition-SOP invocation audit table records planned/applied/blocked
+  decisions as append-only rows for later operator review and undo/revert UI.
+- A core auto-invocation executor can persist audited outcomes and apply at most
+  one ready auto-apply condition-level update per execution pass. Prompt,
+  suggest, blocked, no-change, failed, and deferred outcomes are audited without
+  mutating settings.
+- The background ingest path now evaluates recent condition-alert observations
+  against active SOP profiles and records audited SOP invocation decisions.
+  Before any unattended auto-apply mutation, the matching SOP condition-layer
+  rows are checked against assigned Frequency Plans through RF Guard. Any RF
+  Guard warning, block, missing profile, or failed preflight blocks unattended
+  application and is audited for review.
+- Deferred auto-apply observations remain retryable on later background passes
+  instead of being marked complete when the one-change-per-pass limit is hit.
+- Background audited/applied notifications are queued back onto the controller
+  thread before UI refresh work is signaled.
+- Applied and audited outcomes refresh SOP/scheduler projections and Station
+  Health through the condition-level update handler. Undo/revert handling
+  remains open.
+
 ### FastLight Filename Rules
 
 Operating Groups need compose filename policy settings for FLMsg/FLAmp files.
 
 Fields:
 
-- `fastlight_filename_delimiter`: underscore, hyphen, custom
+- `fastlight_filename_delimiter`: group default, underscore, hyphen, custom
 - `fastlight_custom_delimiter`
-- `fastlight_signed_suffix`: `.sig.k2s`, `.sig.b2s`, group default
-- `fastlight_unsigned_suffix`: `.k2s`, `.b2s`, group default
+- `fastlight_signed_suffix`: group default, `.sig.k2s`, `.sig.b2s`,
+  `-sig.k2s`, `-sig.b2s`
+- `fastlight_unsigned_suffix`: group default, `.k2s`, `.b2s`
 
 Defaults:
 
@@ -164,6 +260,14 @@ Compose behavior:
 - If multiple group policies could apply, require the operator to choose one
   before staging.
 - The preview must show the exact output filename and any signed companion file.
+
+Implementation status:
+
+- Group-level policy fields are stored with HF Operating Groups.
+- Compose filename generation resolves the target group's policy before staging
+  FLMsg/FLAmp output.
+- Unit coverage confirms MagNet underscore plus `.sig` defaults, AMRRON hyphen
+  plus `-sig` defaults, and saved group overrides.
 
 ## UX Model
 
@@ -255,23 +359,61 @@ The center-of-gravity loop is:
 ## Implementation Slices
 
 1. Add this spec and cross-link it from the SOP schedule plan spec.
-2. Add group-level FastLight filename policy fields, defaults, and tests.
-3. Wire compose filename generation to operating-group filename policy.
-4. Add condition-alert rule data model and parser service with tests.
-5. Seed disabled MagNet MAGCON template rule.
-6. Project matched condition alerts into observations.
-7. Add ControlFreq Operational Activity snapshot helper.
-8. Add ControlFreq compact activity/alert panel.
-9. Add Map topic/source layer refinements and RF pin records.
-10. Add SOP Builder Traffic Suggestions and condition apply workflow.
+2. Add group-level FastLight filename policy fields, defaults, and tests. Done.
+3. Wire compose filename generation to operating-group filename policy. Done.
+4. Add condition-alert rule data model and parser service with tests. Done.
+5. Seed disabled MagNet MAGCON template rule. Done.
+6. Project matched condition alerts into observations. Core projection done;
+   automatic ingest storage remains open.
+7. Add condition-alert settings serialization and built-in merge tests. Done.
+8. Add condition-alert ingestion matcher that converts eligible message
+   intelligence into pending observations without blocking ingestion. Done.
+9. Wire live JS8Spotter/MCF ingest to condition-alert observations. Done.
+10. Wire Spotter and CommStat observation backfill to condition-alert
+    observations when rules are supplied. Done.
+11. Wire FLMsg/FLAmp file observation projection to condition-alert observations
+    when rules are supplied. Done.
+12. Wire live CommStat and VarAC paths to condition-alert observations. Done.
+13. Add ControlFreq Operational Activity snapshot helper. Done.
+14. Add ControlFreq compact activity/alert panel. Done.
+15. Add Map topic/source layer refinements and RF pin records. Topic/source
+    map refinements done for observation-backed alerts, infrastructure, and
+    condition-alert pins; explicit RF pin records remain open.
+16. Add SOP Builder Traffic Suggestions and condition apply workflow. Core
+    condition-alert-to-SOP decision helpers done, including batch evaluation
+    against SOP profile schedule layers; ControlFreq compact activity now shows
+    read-only SOP review/suggestion/blocked status for matching condition
+    alerts. SOP Builder now shows a Traffic Suggestions panel for recent
+    matching condition alerts and supports an explicit Apply Level action after
+    operator confirmation and assigned-plan RF Guard preflight.
+17. Add optional auto-SOP invocation from trusted condition alerts with audit,
+    undo/review, and RF Guard gating. Side-effect-free auto-apply policy
+    evaluator done, including per-profile RF Guard block handling. Settings now
+    includes the explicit operator safety gate for automatic SOP invocation.
+    The side-effect-free invocation planner now prepares condition-level
+    updates and audit payloads. Append-only audit storage is implemented. A
+    core execution helper now applies one ready auto-invocation per pass and
+    audits every non-applied outcome. Live background wiring now performs
+    assigned-plan RF Guard preflight before unattended mutation; warnings block
+    auto-apply. Condition-level status and Station Health now surface the
+    latest automation audit outcome with blocked/failed outcomes treated as
+    operator review items, and audited/applied outcomes wake the UI refresh
+    path. Applied outcomes also queue the scheduler refresh path through the
+    condition-level update handler. Deferred observations remain retryable
+    after the apply-per-pass limit, and background signals are marshaled onto
+    the controller thread before UI refresh. Applied automation captures the
+    previous group condition-level state, and SOP Builder now exposes a Review
+    Automation dialog that can revert the latest reversible applied automation
+    row; older audit rows without before-state remain review-only.
 
 ## Product Input Needed
 
-- Confirm initial condition-alert action should be `prompt-to-apply` only.
+- Confirm whether any built-in template should ever ship as auto-apply. Current
+  spec says no: templates ship prompt-only/disabled until the operator enables a
+  rule.
 - Confirm whether MagNet default allowed MAGCON senders should come from explicit
   callsigns, roster role/tier, or both.
 - Confirm which topics should be treated as ControlFreq "high-value" by default.
 - Confirm whether RF pins should be send-capable in the first map-pin slice or
   receive/manual-only first.
 - Confirm group filename defaults beyond MagNet and AMRRON.
-

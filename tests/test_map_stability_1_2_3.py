@@ -6,13 +6,14 @@ from types import SimpleNamespace
 
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.observation_projection import (
+    Observation,
     observation_from_local_report,
     observation_from_message_intelligence,
 )
 from freqinout.core.observation_store import upsert_observation
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.gui.stations_map_tab import StationsMapTab
+from freqinout.gui.stations_map_tab import StationPoint, StationsMapTab
 
 
 def _bare_tab() -> StationsMapTab:
@@ -258,7 +259,26 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
             "confirmed_state": "UNCONFIRMED",
         }
     )
-    for obs in (spotter, confirmed_local, unconfirmed_local):
+    condition_alert = Observation(
+        observation_id="condition_alert:magcon:k7etc:yellow",
+        source_family="condition_alert",
+        source_ref="js8:1",
+        source_app="JS8Call",
+        received_utc="2026-08-10T16:00:00+00:00",
+        event_utc="2026-08-10T16:00:00+00:00",
+        from_call="N1MAG",
+        to_target="MAGNET",
+        groups=("MAGNET",),
+        observed_topics=("General Intel", "Comms"),
+        operator_attention=True,
+        status="CONDITION ALERT",
+        urgency="LEVEL YELLOW",
+        subject="MAGCON: Level YELLOW",
+        summary="MAGNET condition level YELLOW",
+        grid="DM79",
+        location_confidence="grid",
+    )
+    for obs in (spotter, confirmed_local, unconfirmed_local, condition_alert):
         upsert_observation(db_path, obs)
 
     alert_rows = StationsMapTab._load_observation_operational_reports(
@@ -272,7 +292,10 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
         max_age_sec=0,
     )
 
-    assert [row["callsign"] for row in alert_rows] == ["K7ETC"]
+    assert [row["callsign"] for row in alert_rows] == ["N1MAG", "K7ETC"]
+    assert alert_rows[0]["source_family"] == "condition_alert"
+    assert alert_rows[0]["source_label"] == "Condition Alert"
+    assert alert_rows[0]["icon"] == "warning"
     assert [row["callsign"] for row in infrastructure_rows] == ["K0PRA"]
     assert all(row["callsign"] != "N0PWR" for row in alert_rows + infrastructure_rows)
 
@@ -289,7 +312,7 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
         max_age_sec=0,
     )
 
-    assert [row["callsign"] for row in hf_alert_rows] == ["K7ETC"]
+    assert [row["callsign"] for row in hf_alert_rows] == ["N1MAG", "K7ETC"]
     assert hf_infrastructure_rows == []
 
     tab._query_cache = {}
@@ -335,6 +358,44 @@ def test_map_operational_events_can_place_grid_only_observations() -> None:
     assert events[0]["lat"] != 0
     assert events[0]["lon"] != 0
     assert "Observation Alerts: 1" in events[0]["tooltip"]
+
+
+def test_map_operational_events_can_place_condition_alerts_from_station_lookup() -> None:
+    tab = _bare_tab()
+    tab._cached_map_value = lambda _name, _key, loader, ttl_sec=0.0: loader()
+
+    events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        {
+            "N1MAG": StationPoint(
+                callsign="N1MAG",
+                grid="DM79",
+                lat=39.7,
+                lon=-104.9,
+            )
+        },
+        layer_name="alert",
+        display_label="Observation Alerts",
+        reports_loader=lambda: [
+            {
+                "callsign": "N1MAG",
+                "to_target": "MAGNET",
+                "summary": "MAGNET condition level YELLOW",
+                "icon": "warning",
+                "severity": "caution",
+                "utc_ts": 1786363200.0,
+                "source_family": "condition_alert",
+                "source_label": "Condition Alert",
+                "topics": ["General Intel", "Comms"],
+                "location_confidence": "sender lookup",
+            }
+        ],
+    )
+
+    assert len(events) == 1
+    assert events[0]["lat"] == 39.7
+    assert "Condition Alert | N1MAG -&gt; MAGNET" in events[0]["tooltip"]
+    assert "Topics: General Intel, Comms" in events[0]["tooltip"]
 
 
 def test_map_report_popup_text_distinguishes_hf_and_local_contexts(monkeypatch) -> None:

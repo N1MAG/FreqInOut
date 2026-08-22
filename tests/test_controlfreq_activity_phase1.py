@@ -12,6 +12,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.core.observation_projection import Observation
+from freqinout.core.observation_store import upsert_observation
 
 
 def _app():
@@ -282,3 +284,112 @@ def test_db_initializer_adds_controlfreq_support_indexes_for_existing_tables(mon
     assert "idx_js8_messages_utc_ts" in js8_indexes
     assert "idx_spotter_traffic_utc_ts" in spotter_indexes
     assert "idx_fldigi_checkins_last_seen_ts" in fldigi_indexes
+
+
+def test_activity_panel_summarizes_condition_alert_observations(monkeypatch, tmp_path):
+    _app()
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    _write_settings_db(
+        cfg_root,
+        operating_groups=[{"group": "MAGNET", "band": "20M", "frequency": "14.115"}],
+    )
+    _write_nets_db(cfg_root, js8_links=[])
+    upsert_observation(
+        cfg_root / "config" / "freqinout_nets.db",
+        Observation(
+            observation_id="condition_alert:magcon:test",
+            source_family="condition_alert",
+            source_ref="spotter:1",
+            received_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+            event_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+            from_call="N1MAG",
+            to_target="@MAGNET",
+            groups=("MAGNET",),
+            observed_topics=("General Intel", "Comms"),
+            operator_attention=True,
+            status="MAGCON 3",
+            subject="MAGCON: Level 3",
+            summary="MAGCON level changed",
+        ),
+    )
+
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+
+    class _FakeSOPManager:
+        def list_profiles(self):
+            return [{"id": 7, "name": "MagNet Alert SOP"}]
+
+        def get_profile(self, profile_id):
+            assert profile_id == 7
+            return {
+                "id": 7,
+                "name": "MagNet Alert SOP",
+                "schedule_layer": [
+                    {
+                        "group_name": "MAGNET",
+                        "condition_levels": "3",
+                        "band": "40M",
+                        "frequency": "7.115",
+                    }
+                ],
+            }
+
+    tab = ControlFreqTab()
+    try:
+        tab._sop_manager = _FakeSOPManager()
+        tab._refresh_activity()
+        headline = tab.operational_activity_label.text()
+        topics = tab.operational_topics_label.text()
+    finally:
+        tab.deleteLater()
+
+    assert "Condition Alert: MAGCON 3" in headline
+    assert "N1MAG -> MAGNET" in headline
+    assert "SOP: Review MAGNET L3: MagNet Alert SOP" in headline
+    assert "Comms" in topics
+
+
+def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
+    _app()
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    _write_settings_db(
+        cfg_root,
+        operating_groups=[{"group": "MR08", "band": "40M", "frequency": "7.115"}],
+    )
+    _write_nets_db(cfg_root, js8_links=[])
+    upsert_observation(
+        cfg_root / "config" / "freqinout_nets.db",
+        Observation(
+            observation_id="spotter:fire:test",
+            source_family="spotter",
+            source_ref="spotter:2",
+            received_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+            event_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
+            from_call="K7ETC",
+            to_target="@MR08",
+            groups=("MR08",),
+            observed_topics=("Fire", "Logistics"),
+            operator_attention=True,
+            status="INFO",
+            subject="Widemouth 2 Fire",
+            summary="Evacuation posture updated",
+        ),
+    )
+
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+    tab = ControlFreqTab()
+    try:
+        tab._pending_group_filter = "MR08"
+        tab._load_group_combo()
+        tab._refresh_activity()
+        headline = tab.operational_activity_label.text()
+        topics = tab.operational_topics_label.text()
+    finally:
+        tab.deleteLater()
+
+    assert "Operational Activity: 1 high-value" in headline
+    assert "Widemouth 2 Fire" in headline
+    assert "K7ETC -> MR08" in headline
+    assert "Fire" in topics

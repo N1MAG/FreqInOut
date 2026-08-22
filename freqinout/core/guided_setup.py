@@ -565,7 +565,7 @@ def guided_setup_wizard_view(
     }
     visible_sections = (requested,)
     if requested == "review":
-        visible_sections = ("review", "launch")
+        visible_sections = ("review",)
     elif requested == "connection" and not bool(connection_visible):
         visible_sections = tuple()
     return GuidedSetupWizardView(
@@ -718,8 +718,8 @@ def guided_app_config_review_lines(plan: GuidedAppConfigPlan) -> Tuple[str, ...]
         if len(apps) > 4:
             app_text = f"{app_text}, +{len(apps) - 4} more"
         lines.append(
-            f"App Configuration: backup required before FIO prepares {len(write_actions)} profile change(s)"
-            f" for {app_text}."
+            f"App Configuration: save will remember this radio; managed setup can prepare "
+            f"{len(write_actions)} profile change(s) for {app_text} after backup."
         )
     elif remember_actions:
         apps = []
@@ -730,7 +730,7 @@ def guided_app_config_review_lines(plan: GuidedAppConfigPlan) -> Tuple[str, ...]
                 apps.append(label)
                 seen.add(label)
         app_text = ", ".join(apps) if apps else "selected apps"
-        lines.append(f"App Configuration: FIO will remember {app_text} paths; no external app files will be changed.")
+        lines.append(f"App Configuration: save will remember {app_text} paths; no external app files will be changed.")
     else:
         lines.append("App Configuration: no external app setup changes.")
 
@@ -1057,12 +1057,14 @@ def guided_setup_flow_items(
     else:
         review_detail = "Save the radio after the required fields look correct."
         review_status = "ready"
+    radio_label_text = str(blueprint.radio_label or "").strip()
+    radio_ready = bool(radio_label_text and radio_label_text.casefold() != "radio")
     return (
         GuidedSetupFlowItem(
             item_id="radio",
             title="Radio",
-            detail=blueprint.radio_label or "Choose the radio or SDR model.",
-            status="ready" if blueprint.radio_label else "needs_input",
+            detail=radio_label_text if radio_ready else "Choose the radio or SDR model.",
+            status="ready" if radio_ready else "needs_input",
         ),
         GuidedSetupFlowItem(
             item_id="software",

@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import sqlite3
 
+from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
 from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
 from freqinout.core.message_ingest import MessageIngestor
@@ -274,6 +275,51 @@ def test_spotter_directed_ingest_adds_source_and_expect_audit(monkeypatch, tmp_p
     assert observations[0].source_radio_id == 7
     assert observations[0].source_app == "fio-a"
     assert observations[0].provenance["ingest_source"] == "directed"
+
+
+def test_spotter_directed_ingest_mirrors_condition_alert_observation(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-08 12:34:56\t7078000\t0\t-10\tN1MAG: @MAGNET F!701 TO[@MAGNET] FR[N1MAG] NA[MAGCON+4] DA[260808-1234Z] #HHJL *DE* N1MAG \u2662\n",
+        encoding="utf-8",
+    )
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    settings.set(
+        CONDITION_ALERT_RULES_SETTING_KEY,
+        [
+            {
+                "id": "magcon-active",
+                "enabled": True,
+                "name": "MagNet MAGCON",
+                "operating_group": "MAGNET",
+                "source_families": ["JS8Spotter"],
+                "target_groups": ["MAGNET"],
+                "allowed_sender_mode": "explicit list",
+                "allowed_senders": ["N1MAG"],
+                "pattern": r"MAGCON\+?([1-5])",
+            }
+        ],
+    )
+
+    MessageIngestor(settings).ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=7,
+        js8_instance_id="fio-a",
+        offset_key="spotter_directed_offset_radio_7",
+    )
+
+    spotter = list_observations(db_path, source_family="spotter")
+    alerts = list_observations(db_path, source_family="condition_alert")
+    assert len(spotter) == 1
+    assert len(alerts) == 1
+    assert alerts[0].source_ref == "spotter_traffic:1"
+    assert alerts[0].source_radio_id == 7
+    assert alerts[0].source_app == "fio-a"
+    assert alerts[0].groups == ("MAGNET",)
+    assert alerts[0].urgency == "LEVEL 4"
 
 
 def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_path: Path) -> None:

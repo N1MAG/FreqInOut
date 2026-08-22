@@ -1605,9 +1605,9 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert 'configure_auto_wrap.setObjectName("guidedConfigureAutomaticallyCard")' in dialog_block
     assert 'configure_auto_btn.setObjectName("guidedConfigureAutomaticallyButton")' in dialog_block
     assert 'configure_auto_btn.setStyleSheet(button_style("primary", theme))' in dialog_block
-    assert "Recommended next step: let FIO fill blank paths, ports, and message locations." in dialog_block
+    assert "Recommended: let FIO fill blanks, then review highlighted choices." in dialog_block
     assert "Choose the highlighted app or profile, then continue." in dialog_block
-    assert "Settings found. Continue to Connection." in dialog_block
+    assert "FIO filled what it could. Review the paths below, then continue." in dialog_block
     assert "Fill blank paths, ports, and message-file locations for this radio" in dialog_block
     assert "guided_setup_autofill_review(" in dialog_block
     assert "Kept existing:" in guided_setup_source
@@ -1652,7 +1652,7 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"js8call" in normalized_apps' in dialog_block
     assert "_set_row_visible(widget, visibility.technical_identity_fields)" in dialog_block
     assert "for widget in technical_identity_widgets:" in dialog_block
-    assert 'app_setup_plan_group = QGroupBox("Setup Steps")' in dialog_block
+    assert 'app_setup_plan_group = QGroupBox("Setup Status")' in dialog_block
     assert 'app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")' in dialog_block
     assert "build_guided_setup_blueprint(" in dialog_block
     assert "build_app_config_plan_for_blueprint(" in dialog_block
@@ -1672,14 +1672,17 @@ def test_guided_add_radio_configure_automatically_is_user_facing_and_conservativ
     assert '"varac": varac_install_edit.text().strip()' in dialog_block
     assert "_update_detected_app_choices(install_candidates)" in dialog_block
     assert "_update_js8_profile_choices(js8_file_profiles)" in dialog_block
-    assert "def _select_single_detected_choice(combo: QComboBox) -> None:" in dialog_block
+    assert "def _select_single_detected_choice(combo: QComboBox) -> bool:" in dialog_block
     assert "def _detected_app_choice_needs_operator_selection() -> bool:" in dialog_block
     assert "_detected_app_choice_needs_operator_selection()" in dialog_block
     assert '_set_guided_wizard_step("software")' in dialog_block
     assert "if _app_choice_app_selected(app_id):" in dialog_block
-    assert "_select_single_detected_choice(combo)" in dialog_block
+    assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
+    assert "if selected_single:" in dialog_block
+    assert "_apply_detected_app_choice(app_id)" in dialog_block
     assert "if _js8_app_selected():" in dialog_block
-    assert "_select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
+    assert "selected_single = _select_single_detected_choice(js8_profile_choice_combo)" in dialog_block
+    assert "_apply_js8_profile_choice()" in dialog_block
     assert "_update_port_prompt_visibility()" in dialog_block
     assert "for widget in [flrig_port_edit, fldigi_port_edit, js8_port_edit, *port_prompt_fields.values()]:" in dialog_block
     assert "widget.textChanged.connect(lambda _text: _update_port_prompt_visibility())" in dialog_block

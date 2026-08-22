@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel, QPdfWriter
@@ -41,6 +41,20 @@ from PySide6.QtWidgets import (
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.condition_sop_policy import (
+    AUTO_SOP_INVOCATION_SETTING_KEY,
+    evaluate_condition_sop_invocations,
+)
+from freqinout.core.condition_sop_invocation import schedule_layer_rows_for_condition_decision
+from freqinout.core.condition_sop_audit import (
+    append_condition_sop_invocation_audit,
+    condition_sop_audit_display,
+    condition_sop_audit_summary,
+    list_condition_sop_invocation_audit,
+)
+from freqinout.core.condition_level_update import apply_operating_group_condition_level
+from freqinout.core.condition_sop_revert import revert_condition_sop_audit_row
+from freqinout.core.observation_queries import ObservationQuery, operational_activity_snapshot
 from freqinout.core.schedule_source_sets import assigned_plan_rf_guard_impacts_for_sop_update
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
@@ -4259,6 +4273,34 @@ class SOPTab(_LegacySOPTab):
         root.addWidget(self.operating_plan_inputs_label)
         self._refresh_operating_plan_inputs_summary()
 
+        self.traffic_suggestions_box = QGroupBox("Traffic Suggestions")
+        traffic_layout = QHBoxLayout(self.traffic_suggestions_box)
+        traffic_layout.setContentsMargins(8, 8, 8, 8)
+        traffic_layout.setSpacing(8)
+        self.traffic_suggestions_label = QLabel("No recent condition alerts mapped to SOP layers.")
+        self.traffic_suggestions_label.setObjectName("sopTrafficSuggestionsLabel")
+        self.traffic_suggestions_label.setWordWrap(True)
+        self.traffic_suggestions_label.setToolTip(
+            "Read-only view of recent condition-alert traffic that matches configured SOP layers."
+        )
+        traffic_layout.addWidget(self.traffic_suggestions_label, stretch=1)
+        self.traffic_suggestions_apply_btn = QPushButton("Apply Level")
+        self.traffic_suggestions_apply_btn.setToolTip("Apply the first matching condition alert level after review.")
+        self.traffic_suggestions_apply_btn.clicked.connect(self._apply_first_traffic_suggestion)
+        self.traffic_suggestions_apply_btn.setEnabled(False)
+        traffic_layout.addWidget(self.traffic_suggestions_apply_btn)
+        self.traffic_suggestions_refresh_btn = QPushButton("Refresh")
+        self.traffic_suggestions_refresh_btn.setToolTip("Refresh recent condition alerts and matching SOP layer suggestions.")
+        self.traffic_suggestions_refresh_btn.clicked.connect(self.refresh_traffic_suggestions)
+        traffic_layout.addWidget(self.traffic_suggestions_refresh_btn)
+        self.traffic_suggestions_review_btn = QPushButton("Review Automation")
+        self.traffic_suggestions_review_btn.setToolTip("Review recent SOP automation actions and revert the latest reversible applied action.")
+        self.traffic_suggestions_review_btn.clicked.connect(self._open_condition_sop_automation_review)
+        traffic_layout.addWidget(self.traffic_suggestions_review_btn)
+        root.addWidget(self.traffic_suggestions_box)
+        self._traffic_suggestion_decisions: List[Any] = []
+        QTimer.singleShot(0, self.refresh_traffic_suggestions)
+
         header = QHBoxLayout()
         header.setSpacing(8)
         self.profile_combo = QComboBox()
@@ -8053,6 +8095,22 @@ class SOPTab(_LegacySOPTab):
         )
         return response == QMessageBox.Save
 
+    def _traffic_suggestion_rf_guard_impacts(self, decision: Any) -> List[Dict[str, Any]]:
+        """Return assigned-plan RF Guard impacts for a traffic-suggested level change."""
+        try:
+            profile_id = int(str(getattr(decision, "sop_profile_id", "") or "0").strip() or "0")
+        except Exception:
+            profile_id = 0
+        if profile_id <= 0:
+            return []
+        profile = self.manager.get_profile(profile_id)
+        if not isinstance(profile, dict):
+            return []
+        rows = [dict(row) for row in schedule_layer_rows_for_condition_decision(profile, decision)]
+        if not rows:
+            return []
+        return list(assigned_plan_rf_guard_impacts_for_sop_update(profile_id, rows) or [])
+
     def _save_profile(self) -> None:
         timer = getattr(self, "_realtime_conflict_timer", None)
         if timer is not None:
@@ -8118,6 +8176,7 @@ class SOPTab(_LegacySOPTab):
             if post_save_notes:
                 message_lines.append("")
                 message_lines.extend(post_save_notes)
+            self.refresh_traffic_suggestions()
             QMessageBox.information(self, "SOP", "\n".join(message_lines))
         except Exception as e:
             QMessageBox.warning(self, "SOP", str(e))
@@ -8206,6 +8265,380 @@ class SOPTab(_LegacySOPTab):
             return
         self.operating_plan_inputs_label.setText(self._operating_plan_inputs_summary_text())
 
+    def refresh_traffic_suggestions(self) -> None:
+        label = getattr(self, "traffic_suggestions_label", None)
+        if label is None:
+            return
+        self._traffic_suggestion_decisions = []
+        apply_btn = getattr(self, "traffic_suggestions_apply_btn", None)
+        if apply_btn is not None:
+            apply_btn.setEnabled(False)
+        try:
+            db_path = self._condition_sop_db_path()
+        except Exception:
+            db_path = None
+        if not db_path or not Path(db_path).exists():
+            label.setText("Traffic Suggestions: no message activity database found yet.")
+            return
+        try:
+            audit_text = self._condition_sop_audit_text(db_path)
+            since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat()
+            snapshot = operational_activity_snapshot(
+                db_path,
+                ObservationQuery(source_family="condition_alert", since_utc=since, limit=25),
+                limit=25,
+            )
+            alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
+            if not alerts:
+                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: no recent condition alerts in the last 24 hours.", audit_text))
+                return
+            profiles = self._condition_sop_profiles()
+            if not profiles:
+                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: recent condition alerts found, but no SOP layers are configured.", audit_text))
+                return
+            auto_allowed = bool(self.settings.get(AUTO_SOP_INVOCATION_SETTING_KEY, False))
+            decisions = evaluate_condition_sop_invocations(
+                alerts[:5],
+                sop_profiles=profiles,
+                auto_apply_enabled=auto_allowed,
+            )
+            visible = [
+                decision
+                for decision in decisions
+                if decision.operating_group or decision.condition_level is not None or decision.sop_profile_name
+            ]
+            if not visible:
+                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: recent condition alerts found, but none match an SOP layer.", audit_text))
+                return
+            actionable = [d for d in visible if not bool(getattr(d, "blocked", False))]
+            self._traffic_suggestion_decisions = actionable
+            if apply_btn is not None:
+                apply_btn.setEnabled(bool(actionable))
+            label.setText(
+                self._traffic_suggestions_with_audit(
+                    "Traffic Suggestions: " + " | ".join(self._traffic_suggestion_text(d) for d in visible[:3]),
+                    audit_text,
+                )
+            )
+        except Exception as e:
+            log.debug("SOP Builder traffic suggestions unavailable: %s", e)
+            label.setText("Traffic Suggestions: unavailable.")
+
+    def _condition_sop_db_path(self) -> Path | None:
+        try:
+            return Path(self.settings.config_dir) / "freqinout_nets.db"
+        except Exception:
+            return None
+
+    def _condition_sop_audit_text(self, db_path: Path) -> str:
+        try:
+            summary = condition_sop_audit_summary(db_path, limit=10)
+        except Exception:
+            return ""
+        display = condition_sop_audit_display(summary)
+        if not display.text:
+            return ""
+        return display.text
+
+    @staticmethod
+    def _traffic_suggestions_with_audit(text: str, audit_text: str) -> str:
+        base = str(text or "").strip()
+        audit = str(audit_text or "").strip()
+        if not audit:
+            return base
+        return f"{base} {audit}"
+
+    def _apply_first_traffic_suggestion(self) -> None:
+        decisions = list(getattr(self, "_traffic_suggestion_decisions", []) or [])
+        decision = decisions[0] if decisions else None
+        if decision is None:
+            QMessageBox.information(self, "Traffic Suggestions", "No matching condition alert is ready to apply.")
+            return
+        group = str(getattr(decision, "operating_group", "") or "").strip().upper()
+        level = getattr(decision, "condition_level", None)
+        sop_name = str(getattr(decision, "sop_profile_name", "") or "").strip() or "matching SOP"
+        if not group or level is None:
+            QMessageBox.information(self, "Traffic Suggestions", "The selected condition alert is missing a group or level.")
+            return
+        response = QMessageBox.question(
+            self,
+            "Apply Condition Level",
+            f"Apply {group} condition level {level} and refresh SOP projections?\n\n"
+            f"Matching SOP: {sop_name}",
+            QMessageBox.Apply | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Apply:
+            return
+        try:
+            impacts = self._traffic_suggestion_rf_guard_impacts(decision)
+            if impacts:
+                blocked = [
+                    impact
+                    for impact in impacts
+                    if str((impact.get("validation") or {}).get("state") or "").strip().lower() == "blocked"
+                ]
+                warning = [
+                    impact
+                    for impact in impacts
+                    if str((impact.get("validation") or {}).get("state") or "").strip().lower() == "warning"
+                ]
+                lines = self._format_rf_guard_sop_impacts(blocked or warning or impacts)
+                QMessageBox.warning(
+                    self,
+                    "RF Guard Blocks Condition Level",
+                    "Applying this condition level would affect an assigned Frequency Plan with RF Guard issues.\n\n"
+                    + "\n".join(lines)
+                    + "\n\nThe condition level was not changed.",
+                )
+                return
+            result = apply_operating_group_condition_level(
+                {"operating_groups": self.settings.get("operating_groups", []) or []},
+                operating_group=group,
+                condition_level=int(level),
+                create_if_missing=False,
+            )
+            if result.warnings:
+                QMessageBox.warning(
+                    self,
+                    "Condition Level Not Applied",
+                    "\n".join(result.warnings),
+                )
+                return
+            self.settings.set("operating_groups", result.settings_data.get("operating_groups", []))
+            self._refresh_after_condition_level_change()
+            QMessageBox.information(
+                self,
+                "Condition Level Applied",
+                f"{result.operating_group} condition level is now {result.condition_level}.",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Condition Level Not Applied", str(e))
+
+    def _refresh_after_condition_level_change(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._hf_group_condition_meta_cache = None
+        self._condition_level_selector_values_cache = None
+        self._refresh_reference_data()
+        self._refresh_all_rows_dynamic_options()
+        self._schedule_realtime_hf_conflict_check()
+        win = self.window()
+        if win is not None and hasattr(win, "notify_condition_levels_changed"):
+            try:
+                win.notify_condition_levels_changed()
+            except Exception:
+                pass
+        self.refresh_traffic_suggestions()
+
+    def _open_condition_sop_automation_review(self) -> None:
+        db_path = self._condition_sop_db_path()
+        if not db_path or not db_path.exists():
+            QMessageBox.information(
+                self,
+                "SOP Automation Review",
+                "No message activity database is available yet.",
+            )
+            return
+        try:
+            rows = list(list_condition_sop_invocation_audit(db_path, limit=50))
+        except Exception as e:
+            QMessageBox.warning(self, "SOP Automation Review", f"Could not load SOP automation history: {e}")
+            return
+        if not rows:
+            QMessageBox.information(
+                self,
+                "SOP Automation Review",
+                "No SOP automation history has been recorded yet.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("SOP Automation Review")
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Recent condition-alert automation decisions. Rows created before revert tracking are review-only."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        table = QTableWidget(len(rows), 6, dialog)
+        table.setHorizontalHeaderLabels(["When", "Status", "Group", "Level", "SOP", "Message"])
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        for row_idx, row in enumerate(rows):
+            values = self._condition_sop_audit_table_values(row)
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col_idx == 0:
+                    item.setData(Qt.UserRole, int(row.get("id") or 0))
+                table.setItem(row_idx, col_idx, item)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        table.setMinimumHeight(260)
+        layout.addWidget(table)
+
+        buttons = QHBoxLayout()
+        revert_btn = QPushButton("Revert Latest Applied")
+        revert_btn.setToolTip("Restore the previous condition level from the newest applied automation row that captured before-state.")
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(revert_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        def _revert() -> None:
+            if self._revert_latest_condition_sop_audit(rows):
+                dialog.accept()
+
+        revert_btn.clicked.connect(_revert)
+        dialog.resize(920, 420)
+        dialog.exec()
+
+    @staticmethod
+    def _condition_sop_audit_table_values(row: Mapping[str, Any]) -> tuple[str, str, str, str, str, str]:
+        payload = row.get("payload")
+        if not isinstance(payload, Mapping):
+            payload = {}
+        message = str(
+            payload.get("message")
+            or payload.get("summary")
+            or payload.get("reason")
+            or payload.get("revert_summary")
+            or ""
+        ).strip()
+        if not message:
+            reasons = payload.get("reasons")
+            if isinstance(reasons, (list, tuple)):
+                message = "; ".join(str(reason) for reason in reasons if str(reason).strip())
+        message = " ".join(message.split())
+        if len(message) > 110:
+            message = f"{message[:107].rstrip()}..."
+        level = row.get("condition_level")
+        return (
+            str(row.get("created_utc") or ""),
+            str(row.get("status") or ""),
+            str(row.get("operating_group") or ""),
+            "" if level is None else str(level),
+            str(row.get("sop_profile_name") or ""),
+            message,
+        )
+
+    def _revert_latest_condition_sop_audit(self, rows: Sequence[Mapping[str, Any]] | None = None) -> bool:
+        db_path = self._condition_sop_db_path()
+        if not db_path or not db_path.exists():
+            QMessageBox.information(self, "SOP Automation Review", "No message activity database is available yet.")
+            return False
+        if rows is None:
+            try:
+                rows = list_condition_sop_invocation_audit(db_path, limit=50)
+            except Exception as e:
+                QMessageBox.warning(self, "SOP Automation Review", f"Could not load SOP automation history: {e}")
+                return False
+        applied = next(
+            (
+                row
+                for row in rows
+                if str(row.get("status") or "").strip().lower() == "applied"
+            ),
+            None,
+        )
+        if applied is None:
+            QMessageBox.information(
+                self,
+                "SOP Automation Review",
+                "No applied SOP automation row is available to revert.",
+            )
+            return False
+        current = {"operating_groups": self.settings.get("operating_groups", []) or []}
+        result = revert_condition_sop_audit_row(current, applied)
+        if result.warnings:
+            QMessageBox.warning(self, "SOP Automation Review", "\n".join(result.warnings))
+            return False
+        response = QMessageBox.question(
+            self,
+            "Revert SOP Automation",
+            f"Revert {result.operating_group} to the condition level saved before automation audit #{applied.get('id')}?",
+            QMessageBox.Apply | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Apply:
+            return False
+        try:
+            self.settings.set("operating_groups", result.settings_data.get("operating_groups", []))
+            append_condition_sop_invocation_audit(
+                db_path,
+                {
+                    "event": "condition_sop_revert",
+                    "decision": "revert",
+                    "operating_group": result.operating_group,
+                    "condition_level": applied.get("condition_level"),
+                    "reverted_audit_id": applied.get("id"),
+                    "restored_rows": result.restored_rows,
+                    "revert_summary": f"Restored {result.restored_rows} {result.operating_group} condition row(s).",
+                },
+                status="reverted",
+            )
+            self._refresh_after_condition_level_change()
+            QMessageBox.information(
+                self,
+                "SOP Automation Reverted",
+                f"Restored {result.restored_rows} {result.operating_group} condition row(s).",
+            )
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "SOP Automation Review", f"Could not revert SOP automation: {e}")
+            return False
+
+    def _condition_sop_profiles(self) -> List[Dict[str, Any]]:
+        profiles: List[Dict[str, Any]] = []
+        try:
+            summaries = list(self.manager.list_profiles())
+        except Exception:
+            summaries = []
+        for summary in summaries:
+            try:
+                profile_id = int(summary.get("id") or summary.get("profile_id") or 0)
+            except Exception:
+                profile_id = 0
+            if profile_id <= 0:
+                continue
+            try:
+                profile = self.manager.get_profile(profile_id)
+            except Exception as e:
+                log.debug("SOP Builder could not load SOP profile %s for traffic suggestions: %s", profile_id, e)
+                continue
+            if not isinstance(profile, dict):
+                continue
+            if profile.get("schedule_layer"):
+                profiles.append(profile)
+        return profiles
+
+    @staticmethod
+    def _traffic_suggestion_text(decision: Any) -> str:
+        group = str(getattr(decision, "operating_group", "") or "").strip() or "group"
+        level = getattr(decision, "condition_level", None)
+        level_text = f"L{level}" if level is not None else "condition"
+        sop_name = str(getattr(decision, "sop_profile_name", "") or "").strip() or "matching SOP"
+        if bool(getattr(decision, "blocked", False)) or str(getattr(decision, "decision", "") or "") == "blocked":
+            reason = "; ".join(str(r) for r in getattr(decision, "reasons", ()) if str(r).strip())
+            return f"{group} {level_text} blocked: {reason or sop_name}"
+        if bool(getattr(decision, "should_apply", False)):
+            return f"{group} {level_text} ready: {sop_name}"
+        if str(getattr(decision, "decision", "") or "") == "suggest":
+            return f"{group} {level_text} suggested: {sop_name}"
+        return f"{group} {level_text} review: {sop_name}"
+
     def on_hf_schedule_saved(self) -> None:
         self._clear_hf_schedule_slot_cache()
 
@@ -8225,6 +8658,7 @@ class SOPTab(_LegacySOPTab):
         self._refresh_reference_data()
         self._reload_profiles(select_id=selected_id)
         self._update_clock_labels()
+        self.refresh_traffic_suggestions()
 
     def on_local_net_profiles_updated(self) -> None:
         try:

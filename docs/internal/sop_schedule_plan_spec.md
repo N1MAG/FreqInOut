@@ -128,18 +128,60 @@ band. The guard reads the effective plan layers directly: HF Daily rows, HF Net
 rows, SOP rows, structured `schedule_refs`, and summarized `frequency_refs`. A
 schedule row carrying `band: 80M` must warn or block against a radio whose antenna
 supports only 40M/20M/15M even if no separate frequency summary was saved.
+Guided Add Radio must surface this check twice: first in the RF Guard step as a
+plain-language Plan Check tied to the selected antenna bands, then again beside
+the Schedule Assignment controls if a specific Frequency Plan is selected. The
+RF Guard step should therefore never appear "done" in a way that hides a known
+antenna/plan mismatch.
+In Guided Add Radio, the RF Guard step is a direct configuration surface, not a
+collapsed advanced panel. Supported antenna bands are shown first, followed by
+the unsupported-band action, the selected-plan check, and then optional shared
+hardware groups. This ordering lets the operator see equipment-protection
+decisions before choosing or saving a schedule.
+The Schedule Assignment card must use the same validation result and summarize
+the whole mismatch, not only the first event. Example: "this radio supports 15M
+and 10M, but the selected plan uses 80M, 40M, and 20M." This summary appears
+before save and after save whenever warning-level assignment is allowed, so the
+operator does not have to infer equipment risk from a buried RF Guard event row.
 If the operator saves or activates a radio with a warning-level antenna/schedule
 mismatch, the selected radio's Health surface must continue to show RF Guard
 needs review until the antenna bands or assigned plan are corrected. This is a
 core equipment-protection signal, not just a setup note.
 
-Launch Control is a selected-radio management feature. Add Radio may opt a radio
-into launch control, but Settings must show the selected radio's launch bundle
-without requiring that opt-in first. Manual launch actions use the selected radio's
-configured app paths and commands rather than station-default compatibility paths.
-Startup launch policy can still be gated by the radio opt-in and assigned operating
-model, but review and "launch now" are always scoped to the radio the operator is
-editing.
+Launch Control is a selected-radio management feature, not an initial Add Radio
+decision. Add Radio records the app paths and control endpoints needed by the
+radio profile, then selected-radio Settings exposes Launch Control for startup
+opt-in, launch order, and manual launch actions. Manual launch actions use the
+selected radio's configured app paths and commands rather than station-default
+compatibility paths. Startup launch policy can still be gated by the radio opt-in
+and assigned operating model, but review and "launch now" are always scoped to the
+radio the operator is editing.
+
+Guided Add Radio may also prepare managed app configuration, but this is not the
+same action as saving the radio profile. The Review step must clearly separate
+"save this FIO radio profile" from "prepare selected external app profiles".
+External writes are explicit, backup-gated, and limited to supported writers
+such as managed JS8Call MultiSettings updates; VarAC remains read/import-only.
+The UI should therefore summarize what FIO will remember, show any app profiles
+it can prepare, warn about port/path conflicts with existing radio profiles, and
+require a deliberate managed setup action before external app files are changed.
+Detected app review rows are confirmation controls, not primary browse controls.
+After Configure Automatically, any app path FIO filled must be shown as the
+selected value in the detected-app review row. If multiple candidates exist, the
+row is highlighted until the operator chooses the correct app/profile. If nothing
+was found, the row remains highlighted and Browse is the fallback. JS8Call app
+and JS8Call profile selection stay adjacent because the profile, API port, and
+DIRECTED.TXT path are one operational decision.
+The guided setup progress area is a compact Setup Status strip. Each step shows
+only the step title plus Ready, Review, Needed, or Backup; full detail belongs in
+tooltips, the current step body, or the final Review step. This prevents the
+wizard from becoming a text-heavy checklist while still making the next required
+operator action visible through highlighted controls.
+The Review step uses short cards for Radio Profile, Software and Control,
+Endpoints, RF Guard and Schedule, and Files. Long filesystem paths are not shown
+as a paragraph by default; the Files card summarizes how many paths are configured
+or need review, with full path detail available in tooltip/details surfaces. This
+keeps Save Radio understandable while still preserving enough detail for audit.
 
 Known Net Resources are included when they are not already represented by HF Net
 rows. If an HF Net row carries the same resource identity or the same

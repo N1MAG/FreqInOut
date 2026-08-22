@@ -58,6 +58,65 @@ def test_observation_backfill_projects_existing_spotter_traffic_in_batches(tmp_p
     assert get_projection_checkpoint(db_path, "spotter_traffic")["last_source_ref"] == "spotter_traffic:2"
 
 
+def test_observation_backfill_projects_spotter_condition_alert_when_rules_are_passed(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE spotter_traffic (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                utc_str TEXT,
+                from_call TEXT,
+                to_call TEXT,
+                form_id TEXT,
+                raw_text TEXT,
+                state TEXT,
+                source_radio_id TEXT,
+                js8_instance_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO spotter_traffic(utc_str, from_call, to_call, form_id, raw_text, state, source_radio_id, js8_instance_id)
+            VALUES ('2026-08-10 14:10:00', 'N1MAG', '@MAGNET', '701',
+                    'F!701 TO[@MAGNET] FR[N1MAG] NA[MAGCON+4] #D2NT',
+                    'UNREAD', '8', 'fio-b')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = backfill_observations(
+        db_path,
+        include_local_reports=False,
+        include_commstat_artifacts=False,
+        condition_alert_rules=[
+            {
+                "id": "magcon-active",
+                "enabled": True,
+                "name": "MagNet MAGCON",
+                "operating_group": "MAGNET",
+                "source_families": ["JS8Spotter"],
+                "target_groups": ["MAGNET"],
+                "allowed_sender_mode": "explicit list",
+                "allowed_senders": ["N1MAG"],
+                "pattern": r"MAGCON\+?([1-5])",
+            }
+        ],
+    )
+
+    assert result == {"local_reports": 0, "spotter_traffic": 1, "commstat_artifacts": 0}
+    alerts = list_observations(db_path, source_family="condition_alert")
+    assert len(alerts) == 1
+    assert alerts[0].source_ref == "spotter_traffic:1"
+    assert alerts[0].source_radio_id == 8
+    assert alerts[0].source_app == "fio-b"
+    assert alerts[0].urgency == "LEVEL 4"
+
+
 def test_observation_backfill_projects_existing_local_reports_without_routing(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     conn = sqlite3.connect(db_path)
@@ -247,6 +306,67 @@ def test_observation_backfill_skips_plain_commstat_messages_without_report_signa
     assert get_projection_checkpoint(db_path, "commstat_artifacts")["last_source_ref"] == "commstat_artifacts:1"
 
 
+def test_observation_backfill_projects_plain_commstat_condition_alert_without_report_signal(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE commstat_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_key TEXT,
+                artifact_kind TEXT,
+                event_ts_utc TEXT,
+                from_call TEXT,
+                target TEXT,
+                body_text TEXT,
+                status_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO commstat_artifacts(
+                artifact_key, artifact_kind, event_ts_utc, from_call, target, body_text, status_label
+            )
+            VALUES ('commstat-magcon', 'MESSAGE', '2026-08-10T15:05:00+00:00',
+                    'N1MAG', '@MR08', 'MAGCON+3 standby', 'INFO')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = backfill_observations(
+        db_path,
+        include_local_reports=False,
+        include_spotter_traffic=False,
+        condition_alert_rules=[
+            {
+                "id": "commstat-magcon",
+                "enabled": True,
+                "name": "MagNet MAGCON",
+                "operating_group": "MAGNET",
+                "source_families": ["CommStat"],
+                "target_groups": ["MR08"],
+                "allowed_sender_mode": "explicit list",
+                "allowed_senders": ["N1MAG"],
+                "pattern": r"MAGCON\+?([1-5])",
+            }
+        ],
+    )
+
+    assert result == {"local_reports": 0, "spotter_traffic": 0, "commstat_artifacts": 1}
+    assert list_observations(db_path, source_family="commstat") == []
+    alerts = list_observations(db_path, source_family="condition_alert")
+    assert len(alerts) == 1
+    assert alerts[0].source_ref == "commstat_artifacts:1"
+    assert alerts[0].from_call == "N1MAG"
+    assert alerts[0].to_target == "MR08"
+    assert alerts[0].groups == ("MAGNET", "MR08")
+    assert alerts[0].urgency == "LEVEL 3"
+
+
 def test_message_file_projection_uses_existing_form_intelligence_without_authorizing(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     msg_path = tmp_path / "K7ETC-20260803-040212Z-57.k2s"
@@ -284,3 +404,54 @@ UT - Widemouth 2 Fire - DM38ST - evacuation posture updated.
     assert rows[0].grid == "DM38ST"
     assert rows[0].route_eligible is False
     assert rows[0].publish_authorized is False
+
+
+def test_message_file_projection_can_project_condition_alert_from_flmsg_text(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    msg_path = tmp_path / "N1MAG-20260821-183000Z-magcon.k2s"
+    msg_path.write_text(
+        """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID
+260821-1830z
+To
+MAGNET
+From
+N1MAG
+Subject
+MAGCON+5
+Message
+MAGCON+5 applies to the net.
+""",
+        encoding="utf-8",
+    )
+    stat = msg_path.stat()
+    records = {
+        "flmsg": [FileRecord(path=msg_path, origin="flmsg", size=stat.st_size, mtime=stat.st_mtime)],
+    }
+
+    projected = project_message_file_observations(
+        db_path,
+        records,
+        condition_alert_rules=[
+            {
+                "id": "flmsg-magcon",
+                "enabled": True,
+                "name": "MagNet MAGCON",
+                "operating_group": "MAGNET",
+                "source_families": ["FLMsg"],
+                "target_groups": ["MAGNET"],
+                "allowed_sender_mode": "explicit list",
+                "allowed_senders": ["N1MAG"],
+                "pattern": r"MAGCON\+?([1-5])",
+            }
+        ],
+    )
+
+    assert projected == 1
+    assert len(list_observations(db_path, source_family="flmsg")) == 1
+    alerts = list_observations(db_path, source_family="condition_alert")
+    assert len(alerts) == 1
+    assert alerts[0].source_ref == f"file:{msg_path}"
+    assert alerts[0].groups == ("MAGNET",)
+    assert alerts[0].urgency == "LEVEL 5"

@@ -54,6 +54,7 @@ from freqinout.core.station_command_state import (
     scheduler_suspended_manually_for_radio,
     timed_suspend_active_for_radio,
 )
+from freqinout.core.condition_sop_audit import condition_sop_audit_display, condition_sop_audit_summary
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -532,11 +533,16 @@ class MainWindow(QMainWindow):
         self.condition_levels_summary.setWordWrap(True)
         self.condition_levels_summary.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.condition_levels_summary.setVisible(False)
+        self.condition_sop_automation_label = QLabel("")
+        self.condition_sop_automation_label.setWordWrap(True)
+        self.condition_sop_automation_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self.condition_sop_automation_label.setVisible(False)
         self.condition_levels_edit_btn = QToolButton(self.condition_level_container)
         self.condition_levels_edit_btn.setText("Edit Levels")
         self.condition_levels_edit_btn.setAutoRaise(True)
         self.condition_levels_edit_btn.clicked.connect(self._open_condition_levels_editor)
         condition_layout.addWidget(self.condition_levels_rows)
+        condition_layout.addWidget(self.condition_sop_automation_label)
         condition_layout.addWidget(self.condition_levels_edit_btn, alignment=Qt.AlignLeft)
         self.condition_level_container.setStyleSheet(status_title_style)
         status_dock_layout.addWidget(self.condition_level_container)
@@ -827,6 +833,15 @@ class MainWindow(QMainWindow):
             self.settings,
             expect_guard_preflight=build_expect_rf_guard_preflight(self.station_runtime_manager),
         )
+        try:
+            self.background_ingest.condition_sop_invocation_audited.connect(
+                lambda _result=None: self.notify_condition_levels_changed()
+            )
+            self.background_ingest.condition_sop_invocation_applied.connect(
+                lambda _result=None: self.notify_condition_levels_changed()
+            )
+        except Exception:
+            pass
         if self._runtime_background_ingest_enabled(self._active_runtime_profile, startup_policy):
             self.background_ingest.start()
         else:
@@ -4320,6 +4335,11 @@ class MainWindow(QMainWindow):
                     self.freq_planner_tab.on_condition_levels_changed()
                 elif self.freq_planner_tab.isVisible() and hasattr(self.freq_planner_tab, "on_settings_saved"):
                     self.freq_planner_tab.on_settings_saved()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "station_health_tab") and self.station_health_tab is not None:
+                self.station_health_tab.refresh_from_registry()
         except Exception:
             pass
         try:
@@ -8331,6 +8351,43 @@ class MainWindow(QMainWindow):
         out = sorted(by_group.items(), key=lambda x: x[0])
         return [(g, lvl) for g, lvl in out]
 
+    def _condition_sop_automation_status(self) -> tuple[str, str]:
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        if not db_path.exists():
+            return "", "none"
+        try:
+            display = condition_sop_audit_display(condition_sop_audit_summary(db_path, limit=10))
+        except Exception as e:
+            log.debug("Condition SOP automation audit unavailable: %s", e)
+            return "", "none"
+        return display.text, display.severity
+
+    def _style_condition_sop_automation_label(self, severity: str) -> None:
+        label = getattr(self, "condition_sop_automation_label", None)
+        if label is None:
+            return
+        theme = resolve_theme(self.settings)
+        sev = str(severity or "none").strip().lower()
+        if sev == "warning":
+            border = theme.get("warning", "#C99700")
+            bg = theme.get("warning_bg", "#FFF4CC")
+        elif sev == "ok":
+            border = theme.get("success", "#2E7D32")
+            bg = theme.get("success_bg", "#DFF3E3")
+        elif sev == "review":
+            border = theme.get("accent", "#2a6fd3")
+            bg = theme.get("surface", "#FFFFFF")
+        else:
+            border = theme.get("border", "#CCCCCC")
+            bg = theme.get("surface", "#FFFFFF")
+        text = theme.get("text", "#222222")
+        label.setStyleSheet(
+            "QLabel {"
+            f" background-color: {bg}; color: {text}; border: 1px solid {border};"
+            " border-radius: 6px; padding: 3px 6px;"
+            "}"
+        )
+
     def _clear_layout_widgets(self, layout: QVBoxLayout) -> None:
         while layout.count():
             item = layout.takeAt(0)
@@ -8345,16 +8402,20 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "condition_levels_rows_layout"):
             return
         levels = self._collect_condition_levels()
+        audit_text, audit_severity = self._condition_sop_automation_status()
+        audit_signature = (audit_text, audit_severity)
         if not levels:
             self._condition_levels_signature = tuple()
             self._clear_layout_widgets(self.condition_levels_rows_layout)
+            if hasattr(self, "condition_sop_automation_label"):
+                self.condition_sop_automation_label.setVisible(False)
             if hasattr(self, "condition_level_container"):
                 self.condition_level_container.setVisible(False)
             self._auto_collapse_inactive_nav_groups()
             return
         if hasattr(self, "condition_level_container"):
             self.condition_level_container.setVisible(True)
-        signature = tuple((g, int(level)) for g, level in levels)
+        signature = tuple((g, int(level)) for g, level in levels) + (("__audit__", audit_signature),)
         if signature == getattr(self, "_condition_levels_signature", tuple()):
             # If signature is unchanged, still verify rows are rendered as button widgets.
             # This prevents stale row formats from persisting across iterative UI updates.
@@ -8406,6 +8467,10 @@ class MainWindow(QMainWindow):
             )
             row_layout.addWidget(chip, 1)
             self.condition_levels_rows_layout.addWidget(row)
+        if hasattr(self, "condition_sop_automation_label"):
+            self.condition_sop_automation_label.setText(audit_text)
+            self.condition_sop_automation_label.setVisible(bool(audit_text))
+            self._style_condition_sop_automation_label(audit_severity)
         self._auto_collapse_inactive_nav_groups()
 
     def _open_condition_levels_editor(self) -> None:

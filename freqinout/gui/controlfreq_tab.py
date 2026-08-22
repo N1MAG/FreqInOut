@@ -38,10 +38,12 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.condition_sop_policy import evaluate_condition_sop_invocations
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.observation_queries import ObservationQuery, operational_activity_snapshot
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.schedule_targeting import (
@@ -156,6 +158,9 @@ class ControlFreqTab(QWidget):
         self._activity_cache_rows: List[List[str]] = []
         self._activity_cache_ts = 0.0
         self._activity_cache_ttl_sec = 10.0
+        self._operational_snapshot_cache_key: Tuple[Any, ...] = ()
+        self._operational_snapshot_cache_ts = 0.0
+        self._operational_snapshot_cache_ttl_sec = 10.0
         self._my_schedule_entries_cache: List[Dict[str, object]] = []
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
@@ -398,6 +403,14 @@ class ControlFreqTab(QWidget):
         act_header.addWidget(self.activity_window_combo)
         act_header.addStretch(1)
         act_layout.addLayout(act_header)
+        self.operational_activity_label = QLabel("Operational Activity: no recent actionable traffic")
+        self.operational_activity_label.setWordWrap(True)
+        self.operational_activity_label.setStyleSheet("font-weight: 600;")
+        act_layout.addWidget(self.operational_activity_label)
+        self.operational_topics_label = QLabel("")
+        self.operational_topics_label.setWordWrap(True)
+        self.operational_topics_label.setStyleSheet("color: #5b6875;")
+        act_layout.addWidget(self.operational_topics_label)
         self.activity_table = QTableWidget(0, 4)
         self.activity_table.setHorizontalHeaderLabels(
             ["Group", "Band/Freq", "Callsigns Seen", "Traffic"]
@@ -2694,6 +2707,7 @@ class ControlFreqTab(QWidget):
         window_minutes = int(self.activity_window_combo.currentData() or 120)
         search = (self.search_edit.text() or "").strip().upper()
         group_filter = self.group_combo.currentData() or ""
+        self._refresh_operational_activity(window_minutes, search, str(group_filter).strip().upper())
         cache_key = (
             window_minutes,
             search,
@@ -2714,6 +2728,145 @@ class ControlFreqTab(QWidget):
         self._activity_cache_ts = time.time()
         self._activity_cache_rows = [list(row) for row in rows_out]
         self._set_table_rows(self.activity_table, rows_out)
+
+    def _refresh_operational_activity(
+        self,
+        window_minutes: int,
+        search: str = "",
+        group_filter: str = "",
+    ) -> None:
+        db_path = self._db_path()
+        if not db_path.exists():
+            self._set_operational_activity_text("Operational Activity: no traffic database yet", "")
+            return
+        cache_key = (
+            int(window_minutes or 120),
+            str(search or "").strip().upper(),
+            str(group_filter or "").strip().upper(),
+            self._activity_cache_token(),
+        )
+        now_ts = time.time()
+        if (
+            cache_key == self._operational_snapshot_cache_key
+            and now_ts - float(self._operational_snapshot_cache_ts or 0.0) <= self._operational_snapshot_cache_ttl_sec
+        ):
+            return
+        self._operational_snapshot_cache_key = cache_key
+        self._operational_snapshot_cache_ts = now_ts
+        try:
+            since_utc = (
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=max(1, int(window_minutes or 120)))
+            ).replace(microsecond=0).isoformat()
+            snapshot = operational_activity_snapshot(
+                db_path,
+                ObservationQuery(since_utc=since_utc, limit=40),
+                operating_group=str(group_filter or ""),
+                limit=40,
+            )
+            headline = self._format_operational_activity_headline(snapshot, search)
+            sop_decision = self._format_condition_sop_decision(snapshot)
+            if sop_decision:
+                headline = f"{headline} | SOP: {sop_decision}"
+            self._set_operational_activity_text(
+                headline,
+                self._format_operational_activity_topics(snapshot),
+            )
+        except Exception as e:
+            log.debug("ControlFreq: failed to refresh operational activity snapshot: %s", e)
+            self._set_operational_activity_text("Operational Activity: unavailable", "")
+
+    def _set_operational_activity_text(self, headline: str, topics: str) -> None:
+        self.operational_activity_label.setText(str(headline or "").strip() or "Operational Activity: no recent actionable traffic")
+        self.operational_topics_label.setText(str(topics or "").strip())
+        self.operational_topics_label.setVisible(bool(str(topics or "").strip()))
+
+    def _format_operational_activity_headline(self, snapshot: object, search: str = "") -> str:
+        latest = tuple(getattr(snapshot, "latest", ()) or ())
+        alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
+        attention = tuple(getattr(snapshot, "high_attention", ()) or ())
+        if not latest:
+            return "Operational Activity: no recent actionable traffic"
+        if alerts:
+            first = alerts[0]
+            level = str(getattr(first, "status", "") or getattr(first, "subject", "") or "Condition Alert").strip()
+            sender = str(getattr(first, "from_call", "") or "").strip().upper()
+            target = normalize_group_name(getattr(first, "to_target", "") or "")
+            route = " -> ".join(part for part in (sender, target) if part)
+            return f"Condition Alert: {level}" + (f" | {route}" if route else "")
+        first = attention[0] if attention else latest[0]
+        family = source_family_label(str(getattr(first, "source_family", "") or "traffic"))
+        subject = str(getattr(first, "subject", "") or getattr(first, "summary", "") or "").strip()
+        sender = str(getattr(first, "from_call", "") or "").strip().upper()
+        target = normalize_group_name(getattr(first, "to_target", "") or "")
+        route = " -> ".join(part for part in (sender, target) if part)
+        count = len(attention) if attention else len(latest)
+        prefix = f"Operational Activity: {count} high-value" if attention else f"Operational Activity: {len(latest)} recent"
+        if subject:
+            return f"{prefix} | {family}: {subject}" + (f" | {route}" if route else "")
+        return f"{prefix} | {family}" + (f" | {route}" if route else "")
+
+    def _format_condition_sop_decision(self, snapshot: object) -> str:
+        alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
+        if not alerts:
+            return ""
+        profiles = self._condition_sop_profiles()
+        decisions = evaluate_condition_sop_invocations(
+            alerts[:3],
+            sop_profiles=profiles,
+            auto_apply_enabled=False,
+        )
+        meaningful = [decision for decision in decisions if decision.operating_group and decision.condition_level is not None]
+        if not meaningful:
+            return "No matching SOP layer"
+        decision = next((item for item in meaningful if not item.blocked), meaningful[0])
+        name = str(decision.sop_profile_name or "matching SOP").strip()
+        level = f"L{decision.condition_level}" if decision.condition_level is not None else ""
+        target = " ".join(part for part in (decision.operating_group, level) if part)
+        if decision.blocked:
+            reason = str((decision.reasons or ("blocked",))[0])
+            return f"Blocked {target}: {reason}" if target else f"Blocked: {reason}"
+        if decision.decision == "suggest":
+            return f"Suggested {target}: {name}" if target else f"Suggested: {name}"
+        if decision.decision == "apply":
+            return f"Ready {target}: {name}" if target else f"Ready: {name}"
+        return f"Review {target}: {name}" if target else f"Review: {name}"
+
+    def _condition_sop_profiles(self) -> List[Dict[str, Any]]:
+        try:
+            summaries = self._sop_manager.list_profiles()
+        except Exception as e:
+            log.debug("ControlFreq: failed to list SOP profiles for condition alert: %s", e)
+            return []
+        profiles: List[Dict[str, Any]] = []
+        for summary in summaries:
+            try:
+                profile_id = int((summary or {}).get("id") or 0)
+            except Exception:
+                profile_id = 0
+            if profile_id <= 0:
+                continue
+            try:
+                full = self._sop_manager.get_profile(profile_id)
+            except Exception as e:
+                log.debug("ControlFreq: failed to load SOP profile %s for condition alert: %s", profile_id, e)
+                continue
+            if isinstance(full, dict) and full.get("schedule_layer"):
+                profiles.append(full)
+        return profiles
+
+    @staticmethod
+    def _format_operational_activity_topics(snapshot: object) -> str:
+        topics = [
+            str(topic or "").strip()
+            for topic in tuple(getattr(snapshot, "topics", ()) or ())
+            if str(topic or "").strip()
+        ]
+        if not topics:
+            return ""
+        shown = ", ".join(topics[:6])
+        if len(topics) > 6:
+            shown += f", +{len(topics) - 6} more"
+        return f"Topics: {shown}"
 
     def _refresh_frequency_control(self, include_intersections: bool = True) -> None:
         # Avoid clobbering selection while user is interacting

@@ -47,6 +47,14 @@ class ObservationViewRow:
         return " | ".join(part for part in parts if part)
 
 
+@dataclass(frozen=True)
+class OperationalActivitySnapshot:
+    latest: tuple[Observation, ...] = ()
+    high_attention: tuple[Observation, ...] = ()
+    condition_alerts: tuple[Observation, ...] = ()
+    topics: tuple[str, ...] = ()
+
+
 def query_observations(
     db_path: str | Path,
     query: ObservationQuery | None = None,
@@ -117,3 +125,65 @@ def eligible_map_observations(rows: Sequence[ObservationViewRow]) -> tuple[Obser
         for row in rows
         if row.map_eligibility is not None and row.map_eligibility.allowed
     )
+
+
+def operational_activity_snapshot(
+    db_path: str | Path,
+    query: ObservationQuery | None = None,
+    *,
+    operating_group: str = "",
+    limit: int = 50,
+) -> OperationalActivitySnapshot:
+    """Return a compact, UI-ready activity snapshot from projected observations."""
+    q = query or ObservationQuery(limit=limit)
+    q = ObservationQuery(
+        source_family=q.source_family,
+        topic=q.topic,
+        from_call=q.from_call,
+        to_target=q.to_target,
+        status=q.status,
+        state=q.state,
+        grid=q.grid,
+        since_utc=q.since_utc,
+        limit=max(limit, q.limit or limit),
+    )
+    group = _normalize_group(operating_group)
+    observations = tuple(
+        observation
+        for observation in query_observations(db_path, q)
+        if not group or _observation_matches_group(observation, group)
+    )[: max(1, int(limit or 50))]
+    high_attention = tuple(observation for observation in observations if observation.operator_attention)
+    condition_alerts = tuple(
+        observation
+        for observation in observations
+        if str(observation.source_family or "").strip().lower() == "condition_alert"
+    )
+    topics = tuple(
+        sorted(
+            {
+                str(topic or "").strip()
+                for observation in observations
+                for topic in observation.observed_topics
+                if str(topic or "").strip()
+            }
+        )
+    )
+    return OperationalActivitySnapshot(
+        latest=observations,
+        high_attention=high_attention,
+        condition_alerts=condition_alerts,
+        topics=topics,
+    )
+
+
+def _normalize_group(value: str) -> str:
+    return str(value or "").strip().upper().lstrip("@")
+
+
+def _observation_matches_group(observation: Observation, group: str) -> bool:
+    candidates = [
+        observation.to_target,
+        *observation.groups,
+    ]
+    return any(_normalize_group(candidate) == group for candidate in candidates)

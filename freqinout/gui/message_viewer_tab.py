@@ -222,6 +222,7 @@ from freqinout.core.js8_send_service import (
     js8_endpoint_from_radio_profile,
     send_js8_message_guarded,
 )
+from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry, JS8ApiEndpoint
 from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
 from freqinout.core.js8_msg_auth import MsgAuthKey, encode_short_datecode, sign_js8_text, verify_js8_text
@@ -243,7 +244,7 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
-from freqinout.core.observation_backfill import project_message_file_observations
+from freqinout.core.observation_backfill import backfill_observations, project_message_file_observations
 from freqinout.core.message_intelligence import (
     MessageIntelligence,
     analyze_commstat_fields,
@@ -302,6 +303,7 @@ from freqinout.core.nbems_compose import (
     format_compose_zulu,
     parse_compose_template_fields,
     plan_compose_destinations,
+    resolve_fastlight_filename_policy,
     resolve_compose_message_folder,
     resolve_flamp_transmit_dir,
     safe_varac_bbs_filename,
@@ -5552,7 +5554,37 @@ class MessageViewerTab(QWidget):
     def _compose_output_extension(self) -> str:
         return ".b2s" if self._compose_template_kind == "blank" else ".k2s"
 
+    def _compose_fastlight_target_group(self) -> str:
+        values = self._compose_field_values()
+        raw = (
+            values.get("TO")
+            or values.get("To")
+            or values.get("to")
+            or values.get("REGION")
+            or values.get("GROUP")
+            or ""
+        )
+        target = str(raw or "").strip().upper().lstrip("@")
+        if target:
+            return target
+        radio_target = self._selected_compose_radio_target()
+        profile = radio_target.profile if radio_target is not None else {}
+        for key in ("operating_group", "group", "group_name", "schedule_group"):
+            candidate = str(profile.get(key, "") or "").strip().upper().lstrip("@")
+            if candidate:
+                return candidate
+        return ""
+
+    def _compose_fastlight_filename_policy(self):
+        try:
+            groups = self.settings.get("operating_groups", []) or []
+        except Exception:
+            groups = []
+        return resolve_fastlight_filename_policy(groups if isinstance(groups, list) else [], self._compose_fastlight_target_group())
+
     def _compose_base_filename(self) -> str:
+        target_group = self._compose_fastlight_target_group()
+        filename_policy = self._compose_fastlight_filename_policy()
         return build_compose_filename(
             self._compose_operator_callsign(),
             self._compose_operator_state(),
@@ -5560,6 +5592,8 @@ class MessageViewerTab(QWidget):
             self._compose_timestamp_utc,
             self.compose_report_title_edit.text() if hasattr(self, "compose_report_title_edit") else "Report",
             extension=self._compose_output_extension(),
+            filename_policy=filename_policy,
+            operating_group=target_group,
         )
 
     def _compose_current_payload(self) -> str:
@@ -6102,6 +6136,8 @@ class MessageViewerTab(QWidget):
         msg_paths = self._compose_radio_message_paths(radio_target)
         bbs_target = self._selected_compose_bbs_target()
         bbs_dir = str((bbs_target or {}).get("path", "") or "").strip()
+        target_group = self._compose_fastlight_target_group()
+        filename_policy = self._compose_fastlight_filename_policy()
         return plan_compose_destinations(
             self._compose_base_filename(),
             send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
@@ -6114,6 +6150,8 @@ class MessageViewerTab(QWidget):
                 hasattr(self, "compose_sign_flamp_chk")
                 and self.compose_sign_flamp_chk.isChecked()
             ),
+            filename_policy=filename_policy,
+            operating_group=target_group,
         )
 
     def _compose_varac_outbox_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:
@@ -6916,7 +6954,7 @@ class MessageViewerTab(QWidget):
             )
         if sign_flamp_selected:
             metadata.append(
-                f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename))}</div>"
+                f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename, filename_policy=self._compose_fastlight_filename_policy(), operating_group=self._compose_fastlight_target_group()))}</div>"
             )
             selected_signer = self._selected_compose_signing_fingerprint()
             if selected_signer:
@@ -8251,12 +8289,32 @@ class MessageViewerTab(QWidget):
                 db_path,
                 records,
                 origins=("flmsg", "flamp"),
+                condition_alert_rules=self.settings.get(CONDITION_ALERT_RULES_SETTING_KEY, None),
                 batch_limit=max(1, min(250, limit)),
             )
             if projected:
                 log.debug("MessageViewer: projected %s message file observations", projected)
         except Exception as exc:
             log.debug("MessageViewer: message file observation projection failed: %s", exc)
+
+    def _project_commstat_alerts_to_observations(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        rules = self.settings.get(CONDITION_ALERT_RULES_SETTING_KEY, None)
+        if not rules:
+            return
+        try:
+            backfill_observations(
+                db_path,
+                include_local_reports=False,
+                include_spotter_traffic=False,
+                include_commstat_artifacts=True,
+                condition_alert_rules=rules,
+                batch_limit=100,
+            )
+        except Exception as exc:
+            log.debug("MessageViewer: CommStat condition alert projection failed: %s", exc)
 
     def _refresh_js8_messages(self, force: bool = False, rebuild: bool = True):
         if self._is_shutting_down:
@@ -8775,6 +8833,7 @@ class MessageViewerTab(QWidget):
             msgs.append(msg)
         self.commstat_messages = msgs
         self._commstat_local_snapshot_fp = fingerprint or None
+        self._project_commstat_alerts_to_observations()
         if rebuild:
             self._populate_messages_table(force=force)
 

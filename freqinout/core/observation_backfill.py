@@ -6,8 +6,9 @@ import datetime as dt
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
 from freqinout.core.message_file_scanner import FileRecord, IMAGE_EXTS
-from freqinout.core.message_intelligence import analyze_commstat_fields, analyze_spotter_text
+from freqinout.core.message_intelligence import MessageIntelligence, analyze_commstat_fields, analyze_form_text, analyze_spotter_text
 from freqinout.core.observation_projection import (
     observation_from_local_report,
     observation_from_message_intelligence,
@@ -29,6 +30,7 @@ def backfill_observations(
     include_local_reports: bool = True,
     include_spotter_traffic: bool = True,
     include_commstat_artifacts: bool = True,
+    condition_alert_rules: Any = None,
     batch_limit: int = 500,
 ) -> dict[str, int]:
     conn = connect_sqlite(db_path)
@@ -39,9 +41,17 @@ def backfill_observations(
             if include_local_reports:
                 counts["local_reports"] = _backfill_local_reports(conn, batch_limit=batch_limit)
             if include_spotter_traffic:
-                counts["spotter_traffic"] = _backfill_spotter_traffic(conn, batch_limit=batch_limit)
+                counts["spotter_traffic"] = _backfill_spotter_traffic(
+                    conn,
+                    batch_limit=batch_limit,
+                    condition_alert_rules=condition_alert_rules,
+                )
             if include_commstat_artifacts:
-                counts["commstat_artifacts"] = _backfill_commstat_artifacts(conn, batch_limit=batch_limit)
+                counts["commstat_artifacts"] = _backfill_commstat_artifacts(
+                    conn,
+                    batch_limit=batch_limit,
+                    condition_alert_rules=condition_alert_rules,
+                )
         return counts
     finally:
         conn.close()
@@ -52,6 +62,7 @@ def project_message_file_observations(
     records: Mapping[str, Sequence[FileRecord]],
     *,
     origins: Sequence[str] = ("flmsg", "flamp"),
+    condition_alert_rules: Any = None,
     batch_limit: int = 100,
 ) -> int:
     allowed = {str(origin or "").strip().lower() for origin in origins if str(origin or "").strip()}
@@ -77,10 +88,19 @@ def project_message_file_observations(
         count = 0
         with conn:
             for record in candidates:
-                observation = _observation_from_file_record(record)
-                if observation is None:
+                projection = _file_record_projection(record)
+                if projection is None:
                     continue
+                info, observation = projection
                 upsert_observation_conn(conn, observation)
+                _upsert_condition_alert_observations(
+                    conn,
+                    info,
+                    condition_alert_rules=condition_alert_rules,
+                    source_ref=observation.source_ref,
+                    source_family=observation.source_family,
+                    received_utc=observation.received_utc,
+                )
                 count += 1
         return count
     finally:
@@ -143,7 +163,7 @@ def _backfill_local_reports(conn: sqlite3.Connection, *, batch_limit: int) -> in
     return count
 
 
-def _observation_from_file_record(record: FileRecord):
+def _file_record_projection(record: FileRecord) -> tuple[MessageIntelligence, Any] | None:
     origin = str(record.origin or "").strip().lower()
     if origin not in FORM_FILE_ORIGINS:
         return None
@@ -152,32 +172,40 @@ def _observation_from_file_record(record: FileRecord):
         return None
     info = analyze_spotter_text(text) if text.strip().upper().startswith("F!") else None
     if info is None:
-        from freqinout.core.message_intelligence import analyze_form_text
-
         info = analyze_form_text(
             text,
             source_type=origin,
             path=record.path,
         )
     mtime_utc = _mtime_utc(record.mtime)
-    return observation_from_message_intelligence(
+    return (
         info,
-        source_ref=f"file:{record.path}",
-        source_family=origin,
-        received_utc=mtime_utc,
-        event_utc=mtime_utc,
-        status="NEW",
-        extra_provenance={
-            "file_path": str(record.path),
-            "file_name": record.path.name,
-            "file_mtime": float(record.mtime or 0.0),
-            "file_size": int(record.size or 0),
-            "projection_source": "message_file_scan",
-        },
+        observation_from_message_intelligence(
+            info,
+            source_ref=f"file:{record.path}",
+            source_family=origin,
+            received_utc=mtime_utc,
+            event_utc=mtime_utc,
+            status="NEW",
+            extra_provenance={
+                "file_path": str(record.path),
+                "file_name": record.path.name,
+                "file_mtime": float(record.mtime or 0.0),
+                "file_size": int(record.size or 0),
+                "projection_source": "message_file_scan",
+            },
+        ),
     )
 
 
-def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> int:
+def _observation_from_file_record(record: FileRecord):
+    projection = _file_record_projection(record)
+    if projection is None:
+        return None
+    return projection[1]
+
+
+def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int, condition_alert_rules: Any = None) -> int:
     if not table_exists(conn, "spotter_traffic"):
         return 0
     last_id = _checkpoint_id(conn, SPOTTER_TRAFFIC_SOURCE_KEY)
@@ -229,6 +257,16 @@ def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> 
                 extra_provenance={"backfill_source": "spotter_traffic"},
             ),
         )
+        _upsert_condition_alert_observations(
+            conn,
+            info,
+            condition_alert_rules=condition_alert_rules,
+            source_ref=f"spotter_traffic:{imported_id}",
+            source_family="JS8Spotter",
+            source_radio_id=_int_or_none(row[7]),
+            source_app=str(row[8] or "").strip(),
+            received_utc=str(row[1] or ""),
+        )
         count += 1
         last_seen = max(last_seen, imported_id)
     if count:
@@ -236,7 +274,7 @@ def _backfill_spotter_traffic(conn: sqlite3.Connection, *, batch_limit: int) -> 
     return count
 
 
-def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int) -> int:
+def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int, condition_alert_rules: Any = None) -> int:
     if not table_exists(conn, "commstat_artifacts"):
         return 0
     last_id = _checkpoint_id(conn, COMMSTAT_ARTIFACT_SOURCE_KEY)
@@ -305,7 +343,18 @@ def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int) 
             source_family="CommStat",
             event_utc=artifact.get("event_ts_utc"),
         )
+        alert_count = _upsert_condition_alert_observations(
+            conn,
+            info,
+            condition_alert_rules=condition_alert_rules,
+            source_ref=f"commstat_artifacts:{artifact_id}",
+            source_family="CommStat",
+            source_app="CommStat",
+            received_utc=str(artifact.get("event_ts_utc") or ""),
+        )
         if not _commstat_artifact_has_observation_signal(artifact, info):
+            if alert_count:
+                count += 1
             continue
         upsert_observation_conn(
             conn,
@@ -337,6 +386,34 @@ def _backfill_commstat_artifacts(conn: sqlite3.Connection, *, batch_limit: int) 
         count += 1
     if rows:
         _set_checkpoint(conn, COMMSTAT_ARTIFACT_SOURCE_KEY, last_id=last_seen)
+    return count
+
+
+def _upsert_condition_alert_observations(
+    conn: sqlite3.Connection,
+    info,
+    *,
+    condition_alert_rules: Any,
+    source_ref: str,
+    source_family: str,
+    source_radio_id: int | None = None,
+    source_app: str = "",
+    received_utc: str = "",
+) -> int:
+    if not condition_alert_rules:
+        return 0
+    count = 0
+    for observation in condition_alert_observations_for_message_intelligence(
+        info,
+        condition_alert_rules,
+        source_ref=source_ref,
+        source_family=source_family,
+        source_radio_id=source_radio_id,
+        source_app=source_app,
+        received_utc=received_utc,
+    ):
+        upsert_observation_conn(conn, observation)
+        count += 1
     return count
 
 

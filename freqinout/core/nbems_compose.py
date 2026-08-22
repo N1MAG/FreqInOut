@@ -30,6 +30,9 @@ VARAC_BBS_SAFE_SUFFIXES: Tuple[str, ...] = (
     ".asc",
     ".gpg",
 )
+FASTLIGHT_FILENAME_DELIMITER_OPTIONS = {"group_default", "underscore", "hyphen", "custom"}
+FASTLIGHT_SIGNED_SUFFIX_OPTIONS = {"group_default", "dot_sig", "dash_sig"}
+FASTLIGHT_UNSIGNED_SUFFIX_OPTIONS = {"group_default", "k2s", "b2s"}
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,111 @@ class ComposeMessageFolderOption:
     label: str
     relative_path: str
     path: Path
+
+
+@dataclass(frozen=True)
+class FastLightFilenamePolicy:
+    delimiter: str = "-"
+    signed_marker: str = "-sig"
+    unsigned_extension: str = ""
+    source_group: str = ""
+    source_label: str = "Default"
+
+
+def _normalize_fastlight_group_name(value: object) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(value or "").strip().upper().lstrip("@"))
+
+
+def _fastlight_group_default_policy(group_name: object = "") -> FastLightFilenamePolicy:
+    normalized = _normalize_fastlight_group_name(group_name)
+    if normalized.startswith("MAGNET") or re.fullmatch(r"MR\d{1,2}[A-Z0-9]*", normalized or ""):
+        return FastLightFilenamePolicy(
+            delimiter="_",
+            signed_marker=".sig",
+            source_group=str(group_name or "").strip().upper().lstrip("@"),
+            source_label="MagNet default",
+        )
+    if normalized.startswith("AMRRON"):
+        return FastLightFilenamePolicy(
+            delimiter="-",
+            signed_marker="-sig",
+            source_group=str(group_name or "").strip().upper().lstrip("@"),
+            source_label="AMRRON default",
+        )
+    return FastLightFilenamePolicy(
+        delimiter="-",
+        signed_marker="-sig",
+        source_group=str(group_name or "").strip().upper().lstrip("@"),
+        source_label="FIO default",
+    )
+
+
+def normalize_fastlight_filename_policy(
+    values: Mapping[str, object] | FastLightFilenamePolicy | None = None,
+    *,
+    group_name: object = "",
+) -> FastLightFilenamePolicy:
+    """Resolve a FastLight compose filename policy with group-aware defaults."""
+    if isinstance(values, FastLightFilenamePolicy):
+        return values
+    base = _fastlight_group_default_policy(group_name)
+    data = values if isinstance(values, Mapping) else {}
+
+    delimiter_mode = str(data.get("fastlight_filename_delimiter", "group_default") or "group_default").strip().lower()
+    custom_delimiter = str(data.get("fastlight_custom_delimiter", "") or "").strip()
+    if delimiter_mode == "underscore":
+        delimiter = "_"
+    elif delimiter_mode == "hyphen":
+        delimiter = "-"
+    elif delimiter_mode == "custom" and custom_delimiter:
+        delimiter = sanitize_filename_component(custom_delimiter, replacement="-")[:3] or base.delimiter
+    else:
+        delimiter = base.delimiter
+    if delimiter not in {"-", "_", "."} and not re.fullmatch(r"[A-Za-z0-9_.-]{1,3}", delimiter):
+        delimiter = base.delimiter
+
+    signed_mode = str(data.get("fastlight_signed_suffix", "group_default") or "group_default").strip().lower()
+    if signed_mode in {"dot_sig", ".sig", "sig_dot"}:
+        signed_marker = ".sig"
+    elif signed_mode in {"dash_sig", "-sig", "sig_dash"}:
+        signed_marker = "-sig"
+    else:
+        signed_marker = base.signed_marker
+
+    unsigned_mode = str(data.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip().lower()
+    if unsigned_mode in {"k2s", ".k2s"}:
+        unsigned_extension = ".k2s"
+    elif unsigned_mode in {"b2s", ".b2s"}:
+        unsigned_extension = ".b2s"
+    else:
+        unsigned_extension = ""
+
+    group_txt = str(group_name or data.get("group") or data.get("group_name") or "").strip().upper().lstrip("@")
+    return FastLightFilenamePolicy(
+        delimiter=delimiter,
+        signed_marker=signed_marker,
+        unsigned_extension=unsigned_extension,
+        source_group=group_txt,
+        source_label=base.source_label if delimiter_mode == "group_default" and signed_mode == "group_default" else "Configured",
+    )
+
+
+def resolve_fastlight_filename_policy(
+    operating_groups: Iterable[Mapping[str, object]] | None,
+    target_group: object = "",
+) -> FastLightFilenamePolicy:
+    """Resolve filename policy for a target group from saved HF Operating Groups."""
+    target_norm = _normalize_fastlight_group_name(target_group)
+    matched: Mapping[str, object] | None = None
+    if target_norm and operating_groups is not None:
+        for row in operating_groups:
+            if not isinstance(row, Mapping):
+                continue
+            row_group = row.get("group") or row.get("group_name") or row.get("name") or ""
+            if _normalize_fastlight_group_name(row_group) == target_norm:
+                matched = row
+                break
+    return normalize_fastlight_filename_policy(matched, group_name=target_group)
 
 
 def resolve_flamp_transmit_dir(path_text: str) -> str:
@@ -514,27 +622,45 @@ def build_compose_filename(
     report_title: str,
     *,
     extension: str = ".k2s",
+    filename_policy: Mapping[str, object] | FastLightFilenamePolicy | None = None,
+    operating_group: str = "",
 ) -> str:
+    policy = normalize_fastlight_filename_policy(filename_policy, group_name=operating_group)
     call = sanitize_filename_component(str(callsign or "").strip().upper(), replacement="")
     state_norm = sanitize_filename_component(str(state or "").strip().upper(), replacement="")
     priority_norm = sanitize_filename_component(str(priority or "").strip().upper(), replacement="")
     if priority_norm not in {"RR", "PP"}:
         priority_norm = "RR"
     title = sanitize_report_name(report_title)
-    ext = str(extension or ".k2s").strip()
+    ext = str(extension or policy.unsigned_extension or ".k2s").strip()
     if not ext.startswith("."):
         ext = f".{ext}"
-    return f"{call or 'CALLSIGN'}-{state_norm or 'STATE'}-{priority_norm}-{format_compose_filename_stamp(when_utc)}-{title}{ext}"
+    sep = policy.delimiter or "-"
+    return sep.join(
+        [
+            call or "CALLSIGN",
+            state_norm or "STATE",
+            priority_norm,
+            format_compose_filename_stamp(when_utc),
+            title,
+        ]
+    ) + ext
 
 
-def build_signed_filename(name: str) -> str:
+def build_signed_filename(
+    name: str,
+    *,
+    filename_policy: Mapping[str, object] | FastLightFilenamePolicy | None = None,
+    operating_group: str = "",
+) -> str:
+    policy = normalize_fastlight_filename_policy(filename_policy, group_name=operating_group)
     text = str(name or "").strip()
     lower = text.lower()
     for suffix in (".k2s", ".b2s"):
         if lower.endswith(suffix):
-            return f"{text[:-len(suffix)]}-sig{text[-len(suffix):]}"
+            return f"{text[:-len(suffix)]}{policy.signed_marker}{text[-len(suffix):]}"
     stem, suffix = os.path.splitext(text)
-    return f"{stem}-sig{suffix}"
+    return f"{stem}{policy.signed_marker}{suffix}"
 
 
 def _flmsg_field_length(value: str) -> int:
@@ -755,6 +881,8 @@ def plan_compose_destinations(
     varac_outbox_dir: str = "",
     varac_bbs_dir: str = "",
     sign_flamp_copy: bool = False,
+    filename_policy: Mapping[str, object] | FastLightFilenamePolicy | None = None,
+    operating_group: str = "",
 ) -> List[ComposeDestinationPlan]:
     send_mode = str(send_target or "").strip().lower()
     varac_mode = str(varac_target or "").strip().lower()
@@ -762,7 +890,15 @@ def plan_compose_destinations(
     if send_mode in {"flmsg", "both"}:
         requested.append(("flmsg", "FLMsg", flmsg_dir, base_filename, False))
     if send_mode in {"flamp", "both"}:
-        flamp_name = build_signed_filename(base_filename) if sign_flamp_copy else base_filename
+        flamp_name = (
+            build_signed_filename(
+                base_filename,
+                filename_policy=filename_policy,
+                operating_group=operating_group,
+            )
+            if sign_flamp_copy
+            else base_filename
+        )
         requested.append(("flamp", "FLAmp", flamp_dir, flamp_name, False))
     if varac_mode in {"outbox", "both"}:
         requested.append(("varac_outbox", "VarAC Outbox", varac_outbox_dir, base_filename, False))

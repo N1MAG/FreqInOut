@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
+from freqinout.core.condition_alerts import ConditionAlertMatch
 from freqinout.core.message_intelligence import MessageIntelligence
 
 
@@ -167,6 +168,52 @@ def observation_from_local_report(report: Mapping[str, Any]) -> Observation:
         publish_authorized=False,
         provenance=provenance,
     )
+
+
+def observation_from_condition_alert_match(match: ConditionAlertMatch) -> Observation:
+    provenance = {
+        "source_type": "condition_alert",
+        "source_ref": match.source_ref,
+        "rule_id": match.rule_id,
+        "rule_name": match.rule_name,
+        "condition_level": match.condition_level,
+        "action": match.action,
+        "scope": match.scope,
+        "matched_text": match.matched_text,
+        **dict(match.provenance or {}),
+    }
+    group = _clean_condition_group(match.operating_group)
+    groups = _dedupe([group, *(_clean_condition_group(value) for value in match.groups)])
+    subject = f"{match.rule_name or 'Condition Alert'}: Level {match.condition_level}"
+    summary = f"{match.operating_group or match.to_target}: condition level {match.condition_level}"
+    return Observation(
+        observation_id=_observation_id("condition_alert", f"{match.rule_id}:{match.source_ref}:{match.condition_level}"),
+        source_family="condition_alert",
+        source_ref=match.source_ref,
+        source_radio_id=match.source_radio_id,
+        source_app=_clean(match.source_app),
+        received_utc=_clean(match.received_utc),
+        event_utc=_clean(match.received_utc),
+        from_call=_clean_call(match.from_call),
+        to_target=_clean_target(match.to_target),
+        groups=groups,
+        observed_topics=("General Intel", "Comms"),
+        operator_attention=True,
+        status="CONDITION ALERT",
+        urgency=f"LEVEL {match.condition_level}",
+        subject=subject,
+        summary=summary,
+        auth_state="",
+        trusted_state="",
+        route_eligible=False,
+        publish_authorized=False,
+        provenance=provenance,
+    )
+
+
+def _clean_condition_group(value: object) -> str:
+    text = _clean_target(value).lstrip("@")
+    return text.rstrip(">")
 
 
 def explain_map_eligibility(

@@ -4,10 +4,18 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
+from freqinout.core.condition_sop_execution import execute_condition_sop_invocation_plans
+from freqinout.core.condition_sop_invocation import (
+    ConditionSopInvocationPlan,
+    plan_condition_sop_invocations,
+    schedule_layer_rows_for_condition_decision,
+)
+from freqinout.core.condition_sop_policy import AUTO_SOP_INVOCATION_SETTING_KEY
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.ingest_health import source_health_key
 from freqinout.core.ingest_refresh_planner import ingest_sources_fingerprint, plan_ingest_refresh
@@ -23,11 +31,14 @@ from freqinout.core.multi_rig_runtime_status import (
 )
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.observation_backfill import backfill_observations
+from freqinout.core.observation_queries import ObservationQuery, query_observations
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
 from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
+from freqinout.core.sop_manager import SOPManager
+from freqinout.core.schedule_source_sets import assigned_plan_rf_guard_impacts_for_sop_update
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_vault import (
     VaracBbsVaultRunResult,
@@ -96,6 +107,8 @@ class BackgroundIngestController(QObject):
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
     _controller_thread_call = Signal(object)
     job_finished = Signal(str)
+    condition_sop_invocation_audited = Signal(object)
+    condition_sop_invocation_applied = Signal(object)
 
     def __init__(self, settings: SettingsManager, *, expect_guard_preflight: Optional[GuardPreflightCallback] = None):
         super().__init__()
@@ -135,6 +148,7 @@ class BackgroundIngestController(QObject):
         self._varac_vault_no_change_runs: int = 0
         self._varac_vault_full_interval_ms: int = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
         self._varac_vault_refresh_pending: bool = False
+        self._condition_sop_seen_observation_ids: set[str] = set()
         self._controller_thread_call.connect(self._run_controller_thread_call)
 
     def _run_controller_thread_call(self, callback: object) -> None:
@@ -819,6 +833,10 @@ class BackgroundIngestController(QObject):
                     self._run_observation_backfill(worker_settings)
                 except Exception as e:
                     log.debug("BackgroundIngest: observation backfill failed: %s", e)
+                try:
+                    self._run_condition_sop_invocation(worker_settings)
+                except Exception as e:
+                    log.debug("BackgroundIngest: condition SOP invocation failed: %s", e)
         finally:
             worker_settings.close()
 
@@ -929,10 +947,191 @@ class BackgroundIngestController(QObject):
             limit = 100
         limit = max(1, min(500, limit))
         db_path = worker_settings.config_dir / "freqinout_nets.db"
-        result = backfill_observations(db_path, batch_limit=limit)
+        condition_alert_rules = worker_settings.get(CONDITION_ALERT_RULES_SETTING_KEY, None)
+        result = backfill_observations(
+            db_path,
+            batch_limit=limit,
+            condition_alert_rules=condition_alert_rules,
+        )
         total = sum(int(value or 0) for value in result.values())
         if total:
             log.debug("BackgroundIngest: observation backfill projected=%s detail=%s", total, result)
+
+    def _run_condition_sop_invocation(self, worker_settings: SettingsManager) -> None:
+        """Audit condition-alert SOP decisions from background ingest.
+
+        This path is intentionally conservative: condition-alert auto-apply
+        must pass the explicit operator gate and assigned-plan RF Guard preflight
+        before any setting is changed.
+        """
+        auto_apply_enabled = self._truthy(worker_settings.get(AUTO_SOP_INVOCATION_SETTING_KEY, False), False)
+        db_path = worker_settings.config_dir / "freqinout_nets.db"
+        observations = tuple(
+            observation
+            for observation in query_observations(
+                db_path,
+                ObservationQuery(source_family="condition_alert", limit=25),
+            )
+            if observation.observation_id not in self._condition_sop_seen_observation_ids
+        )
+        if not observations:
+            return
+
+        sop_profiles = self._active_condition_sop_profiles(db_path)
+        if not sop_profiles:
+            return
+
+        provisional_plans = plan_condition_sop_invocations(
+            observations,
+            settings_data={"operating_groups": worker_settings.get("operating_groups", [])},
+            sop_profiles=sop_profiles,
+            auto_apply_enabled=auto_apply_enabled,
+            rf_guard_state_by_profile={},
+        )
+        if not provisional_plans:
+            return
+
+        plans = plan_condition_sop_invocations(
+            observations,
+            settings_data={"operating_groups": worker_settings.get("operating_groups", [])},
+            sop_profiles=sop_profiles,
+            auto_apply_enabled=auto_apply_enabled,
+            rf_guard_state_by_profile=self._condition_sop_rf_guard_state_by_profile(sop_profiles, provisional_plans),
+        )
+        if not plans:
+            return
+
+        result = execute_condition_sop_invocation_plans(worker_settings, db_path, plans, apply_limit=1)
+        deferred_ids = {record.observation_id for record in result.records if record.status == "deferred"}
+        for observation in observations:
+            if observation.observation_id not in deferred_ids:
+                self._condition_sop_seen_observation_ids.add(observation.observation_id)
+        if result.audited_count:
+            log.info(
+                "BackgroundIngest condition SOP decisions audited=%s applied=%s failed=%s",
+                result.audited_count,
+                result.applied_count,
+                result.failed_count,
+            )
+            self._queue_controller_thread_call(
+                lambda result=result: self.condition_sop_invocation_audited.emit(result)
+            )
+        if result.applied_count:
+            self._queue_controller_thread_call(
+                lambda result=result: self.condition_sop_invocation_applied.emit(result)
+            )
+
+    def _active_condition_sop_profiles(self, db_path: Path) -> tuple[Mapping[str, Any], ...]:
+        manager = SOPManager(db_path=db_path)
+        try:
+            profiles: list[Mapping[str, Any]] = []
+            for summary in manager.list_profiles():
+                if not self._truthy(summary.get("active", False), False):
+                    continue
+                try:
+                    profile_id = int(summary.get("id", 0) or 0)
+                except Exception:
+                    profile_id = 0
+                if profile_id <= 0:
+                    continue
+                profile = manager.get_profile(profile_id)
+                if not profile:
+                    continue
+                if not self._condition_sop_profile_layers(profile):
+                    continue
+                profiles.append(dict(profile))
+            return tuple(profiles)
+        finally:
+            try:
+                manager.settings.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _condition_sop_profile_layers(profile: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+        raw_layers = profile.get("schedule_layer") or profile.get("layers") or ()
+        if isinstance(raw_layers, (str, bytes)) or not isinstance(raw_layers, Sequence):
+            return ()
+        return tuple(layer for layer in raw_layers if isinstance(layer, Mapping))
+
+    def _condition_sop_rf_guard_state_by_profile(
+        self,
+        profiles: Sequence[Mapping[str, Any]],
+        plans: Sequence[ConditionSopInvocationPlan],
+    ) -> Mapping[str, Mapping[str, object]]:
+        profile_by_id = {
+            str(profile.get("id") or profile.get("profile_id") or profile.get("sop_profile_id") or "").strip(): profile
+            for profile in profiles
+        }
+        states: dict[str, Mapping[str, object]] = {}
+        for plan in plans:
+            profile_id = str(plan.decision.sop_profile_id or "").strip()
+            if not profile_id:
+                continue
+            if profile_id in states:
+                continue
+            profile = profile_by_id.get(profile_id)
+            if not profile:
+                states[profile_id] = {
+                    "state": "blocked",
+                    "messages": ["RF Guard preflight could not find the matching SOP profile."],
+                }
+                continue
+            rows = schedule_layer_rows_for_condition_decision(profile, plan.decision)
+            if not rows:
+                states[profile_id] = {
+                    "state": "blocked",
+                    "messages": ["RF Guard preflight found no enabled SOP schedule rows for this condition level."],
+                }
+                continue
+            try:
+                impacts = assigned_plan_rf_guard_impacts_for_sop_update(int(profile_id), [dict(row) for row in rows])
+            except Exception as exc:
+                states[profile_id] = {
+                    "state": "blocked",
+                    "messages": [f"RF Guard preflight failed: {exc}"],
+                }
+                continue
+            if impacts:
+                states[profile_id] = {
+                    "state": "blocked",
+                    "messages": list(self._condition_sop_rf_guard_messages(impacts)),
+                }
+                continue
+            states[profile_id] = {
+                "state": "ok",
+                "messages": ["RF Guard preflight passed for assigned plans."],
+            }
+        return states
+
+    @staticmethod
+    def _condition_sop_rf_guard_messages(impacts: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+        messages: list[str] = []
+        for impact in impacts:
+            plan = impact.get("plan") if isinstance(impact, Mapping) else {}
+            device = impact.get("device") if isinstance(impact, Mapping) else {}
+            validation = impact.get("validation") if isinstance(impact, Mapping) else {}
+            plan_name = str((plan or {}).get("name") or (plan or {}).get("plan_name") or "Frequency Plan").strip()
+            radio_name = str((device or {}).get("radio_name") or (device or {}).get("name") or "Radio").strip()
+            prefix = f"{radio_name} / {plan_name}: "
+            if not isinstance(validation, Mapping):
+                messages.append(prefix + "RF Guard reported a schedule conflict.")
+                continue
+            raw_messages = []
+            for key in ("blocked", "warnings", "messages"):
+                value = validation.get(key)
+                if isinstance(value, str):
+                    raw_messages.append(value)
+                elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                    raw_messages.extend(str(item) for item in value if str(item or "").strip())
+            if not raw_messages:
+                raw_messages.append("RF Guard reported a schedule conflict.")
+            for message in raw_messages:
+                clean = str(message or "").strip()
+                if clean:
+                    messages.append(prefix + clean)
+        deduped = list(dict.fromkeys(messages))
+        return tuple(deduped[:6] or ["RF Guard reported a condition-alert SOP conflict."])
 
     def _active_js8_spotter_profiles(self) -> list[Dict[str, object]]:
         try:

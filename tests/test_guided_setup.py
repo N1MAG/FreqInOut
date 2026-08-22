@@ -877,7 +877,7 @@ def test_guided_app_config_review_summarizes_managed_external_writes(tmp_path) -
 
     lines = guided_app_config_review_lines(plan)
 
-    assert lines[0].startswith("App Configuration: backup required before FIO prepares")
+    assert lines[0].startswith("App Configuration: save will remember this radio; managed setup can prepare")
     assert "FLRig" in lines[0]
     assert "FLDigi" in lines[0]
     assert "JS8Call" in lines[0]
@@ -899,7 +899,7 @@ def test_guided_app_config_review_summarizes_read_only_references(tmp_path) -> N
 
     lines = guided_app_config_review_lines(plan)
 
-    assert lines[0] == "App Configuration: FIO will remember VarAC paths; no external app files will be changed."
+    assert lines[0] == "App Configuration: save will remember VarAC paths; no external app files will be changed."
     assert "VarAC: read/import only; FIO will not change VarAC.ini or VarAC.db." in lines
 
 
@@ -1380,7 +1380,7 @@ def test_guided_setup_wizard_view_returns_ui_ready_navigation_state() -> None:
 
     review = guided_setup_wizard_view("review")
     assert review.can_go_next is False
-    assert review.visible_sections == ("review", "launch")
+    assert review.visible_sections == ("review",)
 
 
 def test_guided_setup_wizard_view_handles_hidden_connection_step() -> None:
@@ -1614,10 +1614,11 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "guard_fields_visible = bool(visibility.optional_fields or rf_guard_step_active)" in dialog_block
     assert "shared_guard_heading.setVisible(guard_fields_visible)" in dialog_block
     assert "_set_row_visible(widget, guard_fields_visible)" in dialog_block
-    assert "optional_toggle.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
-    assert "optional_body.setVisible(guided_wizard_step_id == \"guard\")" in dialog_block
-    assert '"Optional. Let FIO start the selected software bundle for this radio from Radio Settings."' in dialog_block
+    assert "optional_toggle.setVisible(False)" in dialog_block
+    assert "optional_body.setVisible(rf_guard_visible)" in dialog_block
+    assert '"Launch Control is managed after save from the selected radio\'s Settings view."' in dialog_block
     assert 'launch_enabled_chk = QCheckBox("Enable Launch Control for this radio")' in dialog_block
+    assert "rf_guard_intro = QLabel(" in dialog_block
     assert 'save_review_label.setTextFormat(Qt.RichText)' in dialog_block
     assert "def _endpoint_conflict_lines() -> List[str]:" in dialog_block
     assert "is already used by" in dialog_block
@@ -1627,6 +1628,9 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Endpoints"' in dialog_block
     assert '"RF Guard and Schedule"' in dialog_block
     assert '"Files"' in dialog_block
+    assert "files_review_lines = [" in dialog_block
+    assert "Paths configured: {len(configured_file_lines)}" in dialog_block
+    assert "save_review_label.setToolTip(\"\\n\".join(file_lines + app_config_lines))" in dialog_block
     assert '"Files and Launch"' not in dialog_block
     assert '"Launch:"' not in dialog_block
     assert '"Radio launch"' not in dialog_block
@@ -1641,13 +1645,18 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     )
     assert '("js8call", "Which JS8Call belongs to this radio?")' in dialog_block
     assert '("varac", "Which VarAC belongs to this radio?")' in dialog_block
-    assert 'title_label.setText(f"{str(item.title or \'\').strip()}: {_guided_step_status_label(status_key)}")' in dialog_block
+    assert 'title_label.setText(str(item.title or "").strip())' in dialog_block
     assert "detail_label.setVisible(False)" in dialog_block
     assert 'app_config_review_card.setObjectName("guidedAppConfigReviewCard")' in dialog_block
     assert 'app_config_review_title = QLabel("App Configuration")' in dialog_block
     assert 'app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")' in dialog_block
+    assert 'app_config_apply_btn.setObjectName("guidedAppConfigApply")' in dialog_block
+    assert "def _apply_guided_app_configuration() -> None:" in dialog_block
+    assert "apply_guided_external_app_config_plan(" in dialog_block
+    assert "app_config_apply_btn.clicked.connect(_apply_guided_app_configuration)" in dialog_block
     assert "def _toggle_guided_app_config_review_details() -> None:" in dialog_block
     assert "def _set_app_config_review_card(" in dialog_block
+    assert "has_actions: bool" in dialog_block
     assert "app_config_plan = _current_guided_app_config_plan()" in dialog_block
     assert "app_config_lines = guided_app_config_review_lines(app_config_plan)" in dialog_block
     assert "app_config_summary" in dialog_block
@@ -1757,7 +1766,7 @@ def test_guided_add_radio_reviewed_fields_are_in_single_draft_save_payload() -> 
         assert f'"{key}"' not in save_block
     assert "app_setup_plan_label.setVisible(False)" in dialog_block
     assert '"spotter_launch_path": (js8spotter_launch_edit, "External JS8Spotter app")' in dialog_block
-    assert 'QGroupBox("Setup Steps")' in dialog_block
+    assert 'QGroupBox("Setup Status")' in dialog_block
     assert dialog_block.index('setup_type_combo.addItem("TriMode - FastLight/JS8Call/VarAC", LANE_TRI_MODE)') < dialog_block.index(
         'setup_type_combo.addItem("Custom software mix", "custom")'
     )
@@ -1807,9 +1816,43 @@ def test_guided_add_radio_assigns_selected_plan_after_profile_save() -> None:
     assert "def _guided_schedule_assignment_warning_summary(" in source
     assert 'schedule_guard_warning_card = QFrame()' in source
     assert '"guidedScheduleRfGuardWarning"' in source
+    assert 'rf_guard_plan_check_card = QFrame()' in source
+    assert '"guidedRfGuardPlanCheck"' in source
+    assert "def _apply_guided_rf_guard_plan_check_ui(" in source
+    assert '"Plan Check: Ready"' in source
+    assert "FIO will compare these bands with the selected Frequency Plan before assignment." in source
     assert "Antenna and schedule mismatch:" in source
-    assert "checkbox.stateChanged.connect(lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))" in source
+    assert "optional_toggle.setVisible(False)" in source
+    assert "optional_toggle.setArrowType(Qt.DownArrow if" in source
+    assert "optional_body.setVisible(True)" in source
+    assert "rf_guard_needs_review = bool(rf_guard_tone)" in source
+    assert "rf_guard_visible = guided_wizard_step_id == \"guard\" or rf_guard_needs_review" in source
+    assert "_apply_guided_schedule_assignment_warning_ui()" in source
+    assert "def _refresh_guided_schedule_guard_review() -> None:" in source
+    assert "schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source
+    assert "checkbox.stateChanged.connect(lambda _state: _refresh_guided_schedule_guard_review())" in source
     assert "antenna_band_mode_combo.currentIndexChanged.connect(" in source
     assert "RF Guard warning: {warnings[0]}" in source
     assert '"RF Guard Needs Review"' in source
     assert "Assigned the selected Frequency Plan; RF Guard warning needs review." in source
+
+
+def test_guided_add_radio_detected_app_review_keeps_selected_paths_visible() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    dialog_block = source.split('guided_wizard_group = QGroupBox("Guided Setup")', 1)[1].split(
+        "        def _update_dialog_readiness() -> None:",
+        1,
+    )[0]
+
+    assert "def _sync_app_choice_combo_to_target(app_id: str) -> None:" in dialog_block
+    assert "label = f\"Using: {path_text}\"" in dialog_block
+    assert "combo.addItem(label, path_text)" in dialog_block
+    assert "or bool(target_text)" in dialog_block
+    assert "selected_single = _select_single_detected_choice(combo)" in dialog_block
+    assert "if selected_single:" in dialog_block
+    assert "_apply_detected_app_choice(app_id)" in dialog_block
+    assert "_sync_app_choice_combo_to_target(app_id)" in dialog_block
+    assert "for app_id in app_choice_combos:" in dialog_block
+    assert "if _app_choice_app_selected(app_id):" in dialog_block
+    assert "Choose the highlighted app or profile, then continue." in dialog_block
+    assert "FIO filled what it could. Review the paths below, then continue." in dialog_block

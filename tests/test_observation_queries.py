@@ -1,5 +1,6 @@
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.observation_projection import (
+    Observation,
     observation_from_local_report,
     observation_from_message_intelligence,
 )
@@ -8,6 +9,7 @@ from freqinout.core.observation_queries import (
     bbs_observation_rows,
     eligible_map_observations,
     map_observation_rows,
+    operational_activity_snapshot,
     query_observations,
 )
 from freqinout.core.observation_store import upsert_observation
@@ -106,3 +108,48 @@ def test_bbs_query_facade_stays_review_only_until_rule_context_is_explicit(tmp_p
     assert "no enabled rule" in blocked[0].bbs_eligibility.reasons
     assert allowed[0].bbs_eligibility.allowed is True
     assert allowed[0].observation.publish_authorized is False
+
+
+def test_operational_activity_snapshot_scopes_by_group_and_highlights_alerts(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    spotter = observation_from_message_intelligence(
+        analyze_spotter_text("F!307 TO[@MR08] FR[K7ETC] ST[UT] GR[DM38ST] NA[Wildfire status] #D2NT"),
+        source_ref="spotter_traffic:1",
+        source_family="spotter",
+        event_utc="2026-08-10T14:00:00+00:00",
+    )
+    alert = Observation(
+        observation_id="condition_alert:spotter_traffic:2",
+        source_family="condition_alert",
+        source_ref="spotter_traffic:2",
+        event_utc="2026-08-21T20:00:00+00:00",
+        from_call="N1MAG",
+        to_target="@MAGNET",
+        groups=("MAGNET",),
+        observed_topics=("General Intel",),
+        operator_attention=True,
+        urgency="LEVEL 3",
+        subject="MAGCON: Level 3",
+    )
+    other = observation_from_local_report(
+        {
+            "id": 3,
+            "created_utc": "2026-08-21T20:05:00+00:00",
+            "callsign": "K0PRA",
+            "state": "CO",
+            "grid": "DM79",
+            "topics": ("Comms",),
+            "subject": "Repeater degraded",
+            "confirmed_state": "CONFIRMED",
+        }
+    )
+    upsert_observation(db_path, spotter)
+    upsert_observation(db_path, alert)
+    upsert_observation(db_path, other)
+
+    snapshot = operational_activity_snapshot(db_path, operating_group="MAGNET")
+
+    assert [row.source_family for row in snapshot.latest] == ["condition_alert"]
+    assert snapshot.condition_alerts == snapshot.latest
+    assert snapshot.high_attention == snapshot.latest
+    assert "General Intel" in snapshot.topics

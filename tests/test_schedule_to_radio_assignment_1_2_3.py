@@ -671,6 +671,16 @@ def test_schedule_assignment_warns_for_unsupported_band_from_schedule_rows(monke
     assert "does not include 80M" in validation["warnings"][0]
 
 
+def test_schedule_assignment_ui_summarizes_antenna_plan_band_mismatch() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert "def _schedule_assignment_validation_message(" in source
+    assert "Antenna and schedule mismatch: this radio supports" in source
+    assert "but the selected plan uses" in source
+    assert "RF Guard {tone}: {detail}" in source
+    assert "warning_tone = tone or \"warning\"" in source
+
+
 def test_schedule_assignment_preview_warns_for_unsaved_radio_antenna_bands(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -731,6 +741,88 @@ def test_schedule_assignment_preview_warns_for_unsaved_radio_antenna_bands(monke
     assert "does not include 80M" in joined
     assert "does not include 40M" in joined
     assert "does not include 20M" in joined
+
+
+def test_schedule_assignment_validation_refreshes_when_radio_antenna_changes(monkeypatch, tmp_path) -> None:
+    from freqinout.core.station_health_summary import runtime_observability_items
+
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    radio = store.save_device_profile(
+        {
+            "name": "TS-2000",
+            "enabled": 1,
+            "device_class": "tx_rx",
+            "control_backend": "manual",
+            "antenna_supported_bands": ["80M", "40M", "20M"],
+            "antenna_band_guard_mode": "warn",
+        }
+    )
+    plan = store.save_frequency_plan(
+        {
+            "name": "AmRRON Plan",
+            "schedule_refs": [
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "00:00",
+                    "end_utc": "06:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "80M",
+                    "frequency": "3.588",
+                },
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "06:00",
+                    "end_utc": "16:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "40M",
+                    "frequency": "7.110",
+                },
+                {
+                    "day_utc": "ALL",
+                    "start_utc": "16:00",
+                    "end_utc": "00:00",
+                    "group": "AMRRON",
+                    "mode": "DIGI",
+                    "band": "20M",
+                    "frequency": "14.110",
+                },
+            ],
+        }
+    )
+
+    assigned = store.set_assigned_plan(int(radio["id"]), int(plan["id"]))
+    initial_validation = json.loads(str(assigned["validation_status_json"]))
+    assert initial_validation["state"] == "ok"
+
+    store.save_device_profile(
+        {
+            **radio,
+            "antenna_supported_bands": ["15M", "10M"],
+            "antenna_band_guard_mode": "warn",
+        }
+    )
+    refreshed = store.get_effective_assigned_plan_for_device(int(radio["id"]))
+    assert refreshed is not None
+    validation = json.loads(str(refreshed["validation_status_json"]))
+
+    assert validation["state"] == "warning"
+    assert validation["supported_bands"] == ["15M", "10M"]
+    assert validation["plan_bands"] == ["80M", "40M", "20M"]
+    joined = " ".join(validation["warnings"])
+    assert "does not include 80M" in joined
+    assert "does not include 40M" in joined
+    assert "does not include 20M" in joined
+    items = runtime_observability_items(assigned_schedule_status=[refreshed])
+    assert len(items) == 1
+    assert items[0]["dependency"] == "Schedule Assignment RF Guard"
+    assert items[0]["severity"] == "warning"
+    assert "TS-2000 / AmRRON Plan" in str(items[0]["last_issue"])
 
 
 def test_schedule_assignment_blocks_unsupported_antenna_band(monkeypatch, tmp_path) -> None:

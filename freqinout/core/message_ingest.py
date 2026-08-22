@@ -21,6 +21,8 @@ from freqinout.core.js8_spotter_forms import (
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text
 from freqinout.core.js8_expect_store import ExpectEvaluationResult, evaluate_expect_request
 from freqinout.core.logger import log
+from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
+from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.observation_projection import observation_from_message_intelligence
 from freqinout.core.observation_store import upsert_observation_conn
@@ -571,6 +573,16 @@ class MessageIngestor:
                 },
             )
             upsert_observation_conn(conn, observation)
+            for alert_observation in condition_alert_observations_for_message_intelligence(
+                info,
+                self.settings.get(CONDITION_ALERT_RULES_SETTING_KEY, None),
+                source_ref=f"spotter_traffic:{int(imported_id or 0)}",
+                source_family="JS8Spotter",
+                source_radio_id=self._int_or_none(source_radio_id),
+                source_app=str(js8_instance_id or "").strip(),
+                received_utc=utc_str,
+            ):
+                upsert_observation_conn(conn, alert_observation)
         except Exception as exc:
             log.debug("MessageIngest: observation projection mirror failed: %s", exc)
 

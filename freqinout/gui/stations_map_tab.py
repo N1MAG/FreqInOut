@@ -4512,25 +4512,44 @@ class StationsMapTab(QWidget):
             obs = view_row.observation
             if obs.source_family not in wanted_sources:
                 continue
+            source_family = str(obs.source_family or "").strip().lower()
             eligibility = view_row.map_eligibility
-            if eligibility is None or not eligibility.allowed:
+            eligibility_allowed = bool(eligibility is not None and eligibility.allowed)
+            if (
+                not eligibility_allowed
+                and source_family == "condition_alert"
+                and str(obs.from_call or "").strip()
+            ):
+                # Condition alerts often carry the sender/target and condition
+                # level, not a report grid. Let the event builder place them
+                # from the station/roster lookup when available.
+                eligibility_allowed = True
+            if eligibility is None or not eligibility_allowed:
                 continue
             topics = {str(topic).strip() for topic in obs.observed_topics if str(topic).strip()}
-            if layer_name == "alert":
+            if layer_name == "alert" and source_family == "condition_alert":
+                include = True
+                icon, severity = "warning", "caution"
+            elif source_family == "condition_alert":
+                include = False
+                icon, severity = "warning", "caution"
+            elif layer_name == "alert":
                 include = bool(
                     topics.intersection({"Fire", "Weather", "Shelter", "Medical", "General Intel"})
                     or str(obs.status or "").strip().upper() in {"WATCH", "PRIORITY", "EMERGENCY", "RED", "YELLOW"}
                 )
                 classifier = self._classify_alert_text
+                text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
+                icon, severity = classifier(text)
             else:
                 include = bool(
                     topics.intersection({"Infrastructure", "Power", "Water", "Comms", "Fuel", "Travel/Roads"})
                 )
                 classifier = self._classify_infrastructure_text
+                text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
+                icon, severity = classifier(text)
             if not include:
                 continue
-            text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
-            icon, severity = classifier(text)
             form = str((obs.provenance or {}).get("form_name", "") or "").strip()
             out.append(
                 {
@@ -4564,10 +4583,10 @@ class StationsMapTab(QWidget):
     def _observation_focus_sources(focus_mode: str) -> Set[str]:
         mode = str(focus_mode or "").strip().lower()
         if mode == "hf_reports":
-            return {"spotter"}
+            return {"spotter", "condition_alert"}
         if mode == "local_reports":
             return {"local_report"}
-        return {"spotter", "local_report"}
+        return {"spotter", "local_report", "condition_alert"}
 
     @staticmethod
     def _map_report_age_text(ts_value: object, *, now: Optional[float] = None) -> str:

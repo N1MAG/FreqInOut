@@ -3127,7 +3127,57 @@ def _effective_assigned_plan_for_device(conn: sqlite3.Connection, device_profile
         """,
         (int(device_profile_id), *tuple(EFFECTIVE_ASSIGNMENT_STATES)),
     )
-    return _fetchone_dict(cur)
+    assignment = _fetchone_dict(cur)
+    if not assignment:
+        return None
+    device = _record_by_id(conn, "device_profiles", int(device_profile_id)) or {}
+    frequency_plan = _record_by_id(conn, "frequency_plans", int(assignment.get("frequency_plan_id", 0) or 0)) or {}
+    device_name = _coerce_text(device.get("name", ""), "")
+    plan_name = _coerce_text(frequency_plan.get("name", ""), "")
+    if device_name:
+        assignment.setdefault("device_name", device_name)
+        assignment.setdefault("radio_name", device_name)
+    if plan_name:
+        assignment.setdefault("frequency_plan_name", plan_name)
+        assignment.setdefault("plan_name", plan_name)
+    return assignment
+
+
+def _refresh_assigned_plan_validation_for_device_conn(
+    conn: sqlite3.Connection,
+    device_profile_id: int,
+    *,
+    emit_events: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Recompute stored RF Guard status for the device's effective Frequency Plan."""
+    if int(device_profile_id or 0) <= 0:
+        return None
+    device = _record_by_id(conn, "device_profiles", int(device_profile_id))
+    assignment = _effective_assigned_plan_for_device(conn, int(device_profile_id))
+    if not device or not assignment:
+        return None
+    plan_id = int(assignment.get("frequency_plan_id", 0) or 0)
+    if plan_id <= 0:
+        return None
+    frequency_plan = _record_by_id(conn, "frequency_plans", plan_id)
+    if not frequency_plan:
+        return None
+    validation = _schedule_assignment_validation_status_conn(
+        conn,
+        device,
+        frequency_plan,
+        emit_events=emit_events,
+    )
+    conn.execute(
+        """
+        UPDATE assigned_plans
+           SET validation_status_json=?, updated_utc=?
+         WHERE id=?
+        """,
+        (json.dumps(validation, sort_keys=True), _utc_now_iso(), int(assignment.get("id", 0) or 0)),
+    )
+    refreshed = _effective_assigned_plan_for_device(conn, int(device_profile_id))
+    return dict(refreshed) if refreshed else None
 
 
 def _effective_assignment_for_device(conn: sqlite3.Connection, device_profile_id: int) -> Optional[Dict[str, Any]]:
@@ -5046,6 +5096,9 @@ class MultiRadioStore:
             saved = _record_by_system_key(conn, "device_profiles", system_key) or {}
 
         _sync_derived_coordination_policies_conn(conn)
+        if saved:
+            _refresh_assigned_plan_validation_for_device_conn(conn, int(saved.get("id", 0) or 0), emit_events=False)
+            conn.commit()
         if _coerce_bool_int(payload.get("runtime_active"), False):
             if record["runtime_primary"]:
                 return MultiRadioStore._set_runtime_primary_device_conn(

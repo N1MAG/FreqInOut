@@ -174,6 +174,7 @@ from freqinout.core.guided_setup import (
     infer_guided_setup_lane,
     normalize_guided_radio_profile_payload,
 )
+from freqinout.core.guided_app_config_plan import apply_guided_external_app_config_plan
 from freqinout.core.secret_store import (
     credential_store_available,
     delete_gpg_signing_passphrase,
@@ -186,6 +187,15 @@ from freqinout.core.hash_tools import (
     normalize_hash_hex,
     normalize_trusted_hash_entries,
 )
+from freqinout.core.condition_alerts import (
+    CONDITION_ALERT_RULES_SETTING_KEY,
+    ConditionAlertRule,
+    condition_alert_rule_to_settings,
+    condition_alert_rules_from_settings,
+    condition_alert_rules_to_settings,
+    normalize_condition_alert_rule,
+)
+from freqinout.core.condition_sop_policy import AUTO_SOP_INVOCATION_SETTING_KEY
 from freqinout.core.js8_expect_store import (
     delete_expect_entry,
     delete_expect_allow_policy,
@@ -691,6 +701,8 @@ class SettingsTab(QWidget):
         self.operating_groups: List[Dict[str, str]] = []
         self.known_operating_group_catalog: List[Dict[str, Any]] = []
         self.local_net_profiles: List[Dict[str, str]] = []
+        self.condition_alert_rules: List[ConditionAlertRule] = []
+        self._condition_alert_rules_loading = False
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
@@ -4541,6 +4553,22 @@ class SettingsTab(QWidget):
         self.op_group_fldigi_offset_edit.setValidator(QIntValidator(0, 99999, self.op_group_fldigi_offset_edit))
         self.op_group_auto_tune_chk = QCheckBox("Auto-Tune on QSY")
         self.op_group_condition_levels_chk = QCheckBox("Use Condition Levels")
+        self.op_group_fastlight_delim_combo = QComboBox()
+        self.op_group_fastlight_delim_combo.addItem("Group Default", "group_default")
+        self.op_group_fastlight_delim_combo.addItem("Underscore (_)", "underscore")
+        self.op_group_fastlight_delim_combo.addItem("Hyphen (-)", "hyphen")
+        self.op_group_fastlight_delim_combo.addItem("Custom", "custom")
+        self.op_group_fastlight_custom_delim_edit = QLineEdit()
+        self.op_group_fastlight_custom_delim_edit.setMaximumWidth(90)
+        self.op_group_fastlight_custom_delim_edit.setPlaceholderText("_")
+        self.op_group_fastlight_signed_combo = QComboBox()
+        self.op_group_fastlight_signed_combo.addItem("Group Default", "group_default")
+        self.op_group_fastlight_signed_combo.addItem(".sig.k2s / .sig.b2s", "dot_sig")
+        self.op_group_fastlight_signed_combo.addItem("-sig.k2s / -sig.b2s", "dash_sig")
+        self.op_group_fastlight_unsigned_combo = QComboBox()
+        self.op_group_fastlight_unsigned_combo.addItem("Group Default", "group_default")
+        self.op_group_fastlight_unsigned_combo.addItem(".k2s", "k2s")
+        self.op_group_fastlight_unsigned_combo.addItem(".b2s", "b2s")
         self.op_group_add_config_btn = QPushButton("Add Configuration")
         self.op_group_add_config_btn.clicked.connect(self._add_operating_group_inline)
         self.op_group_save_btn = QPushButton("Save Changes")
@@ -4562,11 +4590,19 @@ class SettingsTab(QWidget):
         op_group_detail_layout.addWidget(self.op_group_fldigi_offset_edit, 4, 1)
         op_group_detail_layout.addWidget(self.op_group_auto_tune_chk, 4, 2)
         op_group_detail_layout.addWidget(self.op_group_condition_levels_chk, 4, 3)
+        op_group_detail_layout.addWidget(QLabel("FastLight Names"), 5, 0)
+        op_group_detail_layout.addWidget(self.op_group_fastlight_delim_combo, 5, 1)
+        op_group_detail_layout.addWidget(QLabel("Signed"), 5, 2)
+        op_group_detail_layout.addWidget(self.op_group_fastlight_signed_combo, 5, 3)
+        op_group_detail_layout.addWidget(QLabel("Custom Delimiter"), 6, 0)
+        op_group_detail_layout.addWidget(self.op_group_fastlight_custom_delim_edit, 6, 1)
+        op_group_detail_layout.addWidget(QLabel("Unsigned"), 6, 2)
+        op_group_detail_layout.addWidget(self.op_group_fastlight_unsigned_combo, 6, 3)
         editor_actions = QHBoxLayout()
         editor_actions.addStretch()
         editor_actions.addWidget(self.op_group_add_config_btn)
         editor_actions.addWidget(self.op_group_save_btn)
-        op_group_detail_layout.addLayout(editor_actions, 5, 0, 1, 4)
+        op_group_detail_layout.addLayout(editor_actions, 7, 0, 1, 4)
         op_group_detail_layout.setColumnStretch(1, 1)
         op_group_detail_layout.setColumnStretch(3, 1)
         op_configs_layout.addWidget(self.op_group_detail_card)
@@ -6914,6 +6950,116 @@ class SettingsTab(QWidget):
         self._add_settings_section(self.varac_memberships_section_group, scope="radio")
         self.message_auth_section_group = gpg_group
 
+        # Condition Alerts
+        condition_alert_group = QGroupBox("Condition Alerts")
+        condition_alert_v = QVBoxLayout()
+        condition_alert_v.setContentsMargins(8, 8, 8, 8)
+        condition_alert_v.setSpacing(8)
+        condition_alert_group.setLayout(condition_alert_v)
+        condition_alert_hint = QLabel(
+            "Configure short received-message triggers that can prompt an SOP condition change. "
+            "Rules stay disabled until you enable them and choose who is allowed to send the alert."
+        )
+        condition_alert_hint.setWordWrap(True)
+        condition_alert_v.addWidget(condition_alert_hint)
+
+        self.condition_alert_auto_sop_chk = QCheckBox(
+            "Allow trusted condition alerts to apply matching SOP layers automatically"
+        )
+        self.condition_alert_auto_sop_chk.setToolTip(
+            "Only rules set to Apply automatically can use this. RF Guard still checks before any SOP-driven schedule change."
+        )
+        self.condition_alert_auto_sop_chk.stateChanged.connect(self._mark_settings_dirty)
+        condition_alert_v.addWidget(self.condition_alert_auto_sop_chk)
+
+        condition_alert_actions = QHBoxLayout()
+        condition_alert_actions.setContentsMargins(0, 0, 0, 0)
+        condition_alert_actions.setSpacing(8)
+        self.condition_alert_add_btn = QPushButton("Add Rule")
+        self.condition_alert_add_btn.clicked.connect(self._add_condition_alert_rule)
+        self.condition_alert_save_btn = QPushButton("Save Rules")
+        self.condition_alert_save_btn.clicked.connect(self._save_condition_alert_rules)
+        self.condition_alert_reset_builtin_btn = QPushButton("Reset MagNet Template")
+        self.condition_alert_reset_builtin_btn.setToolTip(
+            "Restore the built-in MagNet MAGCON template as disabled. Custom rules are kept."
+        )
+        self.condition_alert_reset_builtin_btn.clicked.connect(self._reset_condition_alert_builtin_template)
+        self.condition_alert_delete_btn = QPushButton("Delete Selected")
+        self.condition_alert_delete_btn.clicked.connect(self._delete_selected_condition_alert_rules)
+        condition_alert_actions.addStretch()
+        condition_alert_actions.addWidget(self.condition_alert_add_btn)
+        condition_alert_actions.addWidget(self.condition_alert_save_btn)
+        condition_alert_actions.addWidget(self.condition_alert_reset_builtin_btn)
+        condition_alert_actions.addWidget(self.condition_alert_delete_btn)
+        condition_alert_v.addLayout(condition_alert_actions)
+
+        self.condition_alert_rules_table = QTableWidget(0, 12)
+        self.condition_alert_rules_table.setObjectName("conditionAlertRulesTable")
+        self.condition_alert_rules_table.setHorizontalHeaderLabels(
+            [
+                "Use",
+                "Name",
+                "Group",
+                "Sources",
+                "Targets",
+                "Sender Mode",
+                "Senders",
+                "Auth",
+                "Match",
+                "Pattern",
+                "Level",
+                "Action",
+            ]
+        )
+        self.condition_alert_rules_table.verticalHeader().setVisible(False)
+        self.condition_alert_rules_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.condition_alert_rules_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.condition_alert_rules_table.setAlternatingRowColors(True)
+        self.condition_alert_rules_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        condition_alert_header = self.condition_alert_rules_table.horizontalHeader()
+        condition_alert_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(9, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        self.condition_alert_rules_table.setMinimumHeight(170)
+        self.condition_alert_rules_table.setMaximumHeight(320)
+        self.condition_alert_rules_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.condition_alert_rules_table.itemChanged.connect(self._on_condition_alert_table_item_changed)
+        self.condition_alert_rules_table.itemSelectionChanged.connect(self._refresh_condition_alert_detail)
+        condition_alert_v.addWidget(self.condition_alert_rules_table)
+
+        condition_alert_detail = QGroupBox("Selected Rule")
+        condition_alert_detail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        condition_alert_detail_layout = QGridLayout(condition_alert_detail)
+        condition_alert_detail_layout.setContentsMargins(8, 8, 8, 8)
+        condition_alert_detail_layout.setHorizontalSpacing(8)
+        condition_alert_detail_layout.setVerticalSpacing(6)
+        self.condition_alert_detail_label = QLabel("Select a rule to review how it will be matched.")
+        self.condition_alert_detail_label.setWordWrap(True)
+        condition_alert_detail_layout.addWidget(self.condition_alert_detail_label, 0, 0, 1, 4)
+        condition_alert_v.addWidget(condition_alert_detail)
+
+        condition_alert_container = QWidget()
+        condition_alert_container.setLayout(condition_alert_v)
+        condition_alert_group = self._make_collapsible_group(
+            "Condition Alerts",
+            condition_alert_container,
+            checked=True,
+            fit_content=True,
+            help_context_key="settings.condition-alerts",
+        )
+        self._register_collapsible_group(condition_alert_group, self._summary_condition_alert_rules)
+        condition_alert_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.condition_alert_section_group = condition_alert_group
+
         custom_tools_group = QGroupBox("Custom Tools")
         custom_tools_v = QVBoxLayout()
         custom_tools_v.setSpacing(6)
@@ -7120,6 +7266,7 @@ class SettingsTab(QWidget):
         sop_export_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(sop_export_group, scope="global")
         self._add_settings_section(self.message_auth_section_group, scope="global")
+        self._add_settings_section(self.condition_alert_section_group, scope="global")
         self._add_settings_section(logging_section, scope="global")
 
         # bottom save
@@ -7566,6 +7713,7 @@ class SettingsTab(QWidget):
             "VarAC Clusters": "Clusters",
             "VarAC Memberships": "Memberships",
             "Message Auth (Key/Hash)": "Message Auth",
+            "Condition Alerts": "Condition Alerts",
             "Custom Tools": "Custom Tools",
             "Launch Control": "Launch",
             "SOP Export": "SOP Export",
@@ -8605,6 +8753,235 @@ class SettingsTab(QWidget):
             f"JS8 {'on' if js8_auth_enabled else 'off'}, GPG {'set' if path_set else 'auto'}, "
             f"{trusted} keys, {local_hashes} hashes"
         )
+
+    def _summary_condition_alert_rules(self) -> str:
+        rules = list(getattr(self, "condition_alert_rules", []) or [])
+        enabled = len([rule for rule in rules if bool(getattr(rule, "enabled", False))])
+        return f"{enabled}/{len(rules)} rule{'s' if len(rules) != 1 else ''} enabled"
+
+    @staticmethod
+    def _condition_alert_join(values: Sequence[str]) -> str:
+        return ", ".join(str(value or "").strip() for value in values if str(value or "").strip())
+
+    @staticmethod
+    def _condition_alert_split(text: str) -> List[str]:
+        parts = re.split(r"[,;\n]+", str(text or ""))
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _condition_alert_table_text(table: QTableWidget, row: int, col: int) -> str:
+        item = table.item(row, col)
+        return str(item.text() if item is not None else "").strip()
+
+    @staticmethod
+    def _condition_alert_action_label(action: str) -> str:
+        value = str(action or "").strip().lower()
+        return {
+            "suggest": "Suggest only",
+            "prompt-to-apply": "Ask before applying",
+            "auto-apply": "Apply automatically",
+        }.get(value, str(action or "").strip())
+
+    @staticmethod
+    def _condition_alert_action_value(label: str) -> str:
+        value = str(label or "").strip().lower()
+        return {
+            "suggest only": "suggest",
+            "suggest": "suggest",
+            "ask before applying": "prompt-to-apply",
+            "prompt-to-apply": "prompt-to-apply",
+            "prompt to apply": "prompt-to-apply",
+            "apply automatically": "auto-apply",
+            "auto-apply": "auto-apply",
+            "auto apply": "auto-apply",
+        }.get(value, value)
+
+    def _make_condition_alert_item(
+        self,
+        text: str,
+        *,
+        editable: bool = True,
+        checkable: bool = False,
+        checked: bool = False,
+    ) -> QTableWidgetItem:
+        item = QTableWidgetItem(str(text or ""))
+        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if editable:
+            flags |= Qt.ItemIsEditable
+        if checkable:
+            flags |= Qt.ItemIsUserCheckable
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        item.setFlags(flags)
+        return item
+
+    def _refresh_condition_alert_rules_table(self) -> None:
+        table = getattr(self, "condition_alert_rules_table", None)
+        if table is None:
+            return
+        self._condition_alert_rules_loading = True
+        try:
+            table.setRowCount(0)
+            for rule in list(getattr(self, "condition_alert_rules", []) or []):
+                normalized = normalize_condition_alert_rule(condition_alert_rule_to_settings(rule))
+                row = table.rowCount()
+                table.insertRow(row)
+                use_item = self._make_condition_alert_item("", editable=False, checkable=True, checked=normalized.enabled)
+                use_item.setData(Qt.UserRole, normalized.id)
+                use_item.setData(Qt.UserRole + 1, condition_alert_rule_to_settings(normalized))
+                table.setItem(row, 0, use_item)
+                table.setItem(row, 1, self._make_condition_alert_item(normalized.name or normalized.id))
+                table.setItem(row, 2, self._make_condition_alert_item(normalized.operating_group))
+                table.setItem(row, 3, self._make_condition_alert_item(self._condition_alert_join(normalized.source_families)))
+                table.setItem(row, 4, self._make_condition_alert_item(self._condition_alert_join(normalized.target_groups)))
+                table.setItem(row, 5, self._make_condition_alert_item(normalized.allowed_sender_mode))
+                table.setItem(row, 6, self._make_condition_alert_item(self._condition_alert_join(normalized.allowed_senders)))
+                table.setItem(row, 7, self._make_condition_alert_item(normalized.required_auth_state))
+                table.setItem(row, 8, self._make_condition_alert_item(normalized.match_mode))
+                table.setItem(row, 9, self._make_condition_alert_item(normalized.pattern))
+                level_text = "" if normalized.fixed_level is None else str(normalized.fixed_level)
+                table.setItem(row, 10, self._make_condition_alert_item(level_text))
+                table.setItem(row, 11, self._make_condition_alert_item(self._condition_alert_action_label(normalized.action)))
+            self._fit_table_height_to_rows(table, min_rows=2, max_rows=8, extra_rows=1)
+        finally:
+            self._condition_alert_rules_loading = False
+        self._refresh_condition_alert_detail()
+
+    def _table_to_condition_alert_rules(self) -> List[ConditionAlertRule]:
+        table = getattr(self, "condition_alert_rules_table", None)
+        if table is None:
+            return list(getattr(self, "condition_alert_rules", []) or [])
+        rules: List[ConditionAlertRule] = []
+        for row in range(table.rowCount()):
+            use_item = table.item(row, 0)
+            stored = use_item.data(Qt.UserRole + 1) if use_item is not None else {}
+            stored_map = dict(stored) if isinstance(stored, Mapping) else {}
+            rule_id = str(use_item.data(Qt.UserRole) if use_item is not None else "" or stored_map.get("id") or "").strip()
+            if not rule_id:
+                rule_id = f"custom-condition-alert-{row + 1}"
+            fixed_level_text = self._condition_alert_table_text(table, row, 10)
+            fixed_level: int | None
+            try:
+                fixed_level = int(fixed_level_text) if fixed_level_text else None
+            except ValueError:
+                fixed_level = None
+            payload = {
+                **stored_map,
+                "id": rule_id,
+                "enabled": bool(use_item is not None and use_item.checkState() == Qt.Checked),
+                "name": self._condition_alert_table_text(table, row, 1),
+                "operating_group": self._condition_alert_table_text(table, row, 2),
+                "source_families": self._condition_alert_split(self._condition_alert_table_text(table, row, 3)),
+                "target_groups": self._condition_alert_split(self._condition_alert_table_text(table, row, 4)),
+                "allowed_sender_mode": self._condition_alert_table_text(table, row, 5),
+                "allowed_senders": self._condition_alert_split(self._condition_alert_table_text(table, row, 6)),
+                "required_auth_state": self._condition_alert_table_text(table, row, 7),
+                "match_mode": self._condition_alert_table_text(table, row, 8),
+                "pattern": self._condition_alert_table_text(table, row, 9),
+                "fixed_level": fixed_level,
+                "action": self._condition_alert_action_value(self._condition_alert_table_text(table, row, 11)),
+            }
+            rule = normalize_condition_alert_rule(payload)
+            if rule.name or rule.pattern:
+                rules.append(rule)
+        self.condition_alert_rules = rules
+        return rules
+
+    def _on_condition_alert_table_item_changed(self, _item: QTableWidgetItem) -> None:
+        if bool(getattr(self, "_condition_alert_rules_loading", False)):
+            return
+        self.condition_alert_rules = self._table_to_condition_alert_rules()
+        self._refresh_condition_alert_detail()
+        self._mark_settings_dirty()
+
+    def _refresh_condition_alert_detail(self) -> None:
+        label = getattr(self, "condition_alert_detail_label", None)
+        table = getattr(self, "condition_alert_rules_table", None)
+        if label is None or table is None:
+            return
+        row = table.currentRow()
+        if row < 0:
+            label.setText("Select a rule to review how it will be matched.")
+            return
+        rules = self._table_to_condition_alert_rules()
+        if row >= len(rules):
+            label.setText("Select a rule to review how it will be matched.")
+            return
+        rule = rules[row]
+        source_text = self._condition_alert_join(rule.source_families) or "all sources"
+        target_text = self._condition_alert_join(rule.target_groups) or "any target"
+        sender_text = self._condition_alert_join(rule.allowed_senders) or rule.allowed_sender_mode
+        level_text = f"level {rule.fixed_level}" if rule.fixed_level is not None else f"captured level group {rule.level_capture_group}"
+        state_text = "Enabled" if rule.enabled else "Disabled"
+        action_text = self._condition_alert_action_label(rule.action)
+        label.setText(
+            f"{state_text}: {rule.name or rule.id} listens to {source_text} for {target_text}. "
+            f"Allowed senders: {sender_text}. Match: {rule.match_mode} {rule.pattern!r}; {level_text}; action {action_text}."
+        )
+
+    def _add_condition_alert_rule(self) -> None:
+        existing_ids = {str(rule.id or "").strip() for rule in list(getattr(self, "condition_alert_rules", []) or [])}
+        suffix = 1
+        while f"custom-condition-alert-{suffix}" in existing_ids:
+            suffix += 1
+        self.condition_alert_rules = list(getattr(self, "condition_alert_rules", []) or []) + [
+            ConditionAlertRule(
+                id=f"custom-condition-alert-{suffix}",
+                enabled=False,
+                name=f"Custom Alert {suffix}",
+                operating_group="",
+                source_families=("JS8CALL", "COMMSTAT", "JS8SPOTTER"),
+                target_groups=(),
+                allowed_sender_mode="explicit list",
+                allowed_senders=(),
+                required_auth_state="none",
+                match_mode="contains",
+                pattern="",
+                action="prompt-to-apply",
+                notes="",
+            )
+        ]
+        self._refresh_condition_alert_rules_table()
+        self._mark_settings_dirty()
+
+    def _delete_selected_condition_alert_rules(self) -> None:
+        table = getattr(self, "condition_alert_rules_table", None)
+        if table is None:
+            return
+        selected_rows = sorted({index.row() for index in table.selectedIndexes()}, reverse=True)
+        if not selected_rows:
+            QMessageBox.information(self, "Condition Alerts", "Select one or more condition alert rules to delete.")
+            return
+        rules = list(self._table_to_condition_alert_rules())
+        remaining = [rule for idx, rule in enumerate(rules) if idx not in set(selected_rows)]
+        self.condition_alert_rules = remaining
+        self._refresh_condition_alert_rules_table()
+        self._mark_settings_dirty()
+
+    def _reset_condition_alert_builtin_template(self) -> None:
+        custom_rules = [
+            rule
+            for rule in self._table_to_condition_alert_rules()
+            if str(rule.id or "").strip() != "builtin-magnet-magcon"
+        ]
+        self.condition_alert_rules = list(condition_alert_rules_from_settings(custom_rules, include_builtin=True))
+        self._refresh_condition_alert_rules_table()
+        self._mark_settings_dirty()
+
+    def _save_condition_alert_rules(self) -> None:
+        self.condition_alert_rules = self._table_to_condition_alert_rules()
+        payload = condition_alert_rules_to_settings(self.condition_alert_rules)
+        if hasattr(self.settings, "set"):
+            self.settings.set(CONDITION_ALERT_RULES_SETTING_KEY, payload)
+            self.settings.set(
+                AUTO_SOP_INVOCATION_SETTING_KEY,
+                bool(
+                    self.condition_alert_auto_sop_chk.isChecked()
+                    if hasattr(self, "condition_alert_auto_sop_chk")
+                    else False
+                ),
+            )
+        self._set_settings_action_feedback_status("success", "Condition alert rules saved.")
+        self._refresh_section_nav_health()
 
     def _summary_varac_settings(self) -> str:
         install_set = bool(hasattr(self, "varac_path_edit") and self.varac_path_edit.text().strip())
@@ -9845,6 +10222,10 @@ class SettingsTab(QWidget):
                             "auto_tune": bool(g.get("auto_tune", False)),
                             "use_condition_levels": bool(g.get("use_condition_levels", False)),
                             "condition_level": cond_level,
+                            "fastlight_filename_delimiter": str(g.get("fastlight_filename_delimiter", "group_default") or "group_default").strip(),
+                            "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
+                            "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
+                            "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
                         }
                     )
         except Exception:
@@ -9868,6 +10249,17 @@ class SettingsTab(QWidget):
         except Exception:
             self.local_net_profiles = []
         self._refresh_local_net_profiles_table()
+
+        try:
+            self.condition_alert_rules = condition_alert_rules_from_settings(
+                data.get(CONDITION_ALERT_RULES_SETTING_KEY),
+                include_builtin=True,
+            )
+        except Exception:
+            self.condition_alert_rules = condition_alert_rules_from_settings(None, include_builtin=True)
+        if hasattr(self, "condition_alert_auto_sop_chk"):
+            self.condition_alert_auto_sop_chk.setChecked(bool(data.get(AUTO_SOP_INVOCATION_SETTING_KEY, False)))
+        self._refresh_condition_alert_rules_table()
 
         self.js8_directed_edit.setText(data.get("js8_directed_path", "") or "")
 
@@ -10393,6 +10785,14 @@ class SettingsTab(QWidget):
 
         data["operating_groups"] = self._table_to_operating_groups()
         data["local_net_profiles"] = self._table_to_local_net_profiles()
+        data[CONDITION_ALERT_RULES_SETTING_KEY] = condition_alert_rules_to_settings(
+            self._table_to_condition_alert_rules()
+        )
+        data[AUTO_SOP_INVOCATION_SETTING_KEY] = bool(
+            self.condition_alert_auto_sop_chk.isChecked()
+            if hasattr(self, "condition_alert_auto_sop_chk")
+            else False
+        )
         if not self._persist_staged_radio_software_bundles():
             return
         try:
@@ -10441,6 +10841,8 @@ class SettingsTab(QWidget):
                 ),
                 "operating_groups": data.get("operating_groups", []),
                 "local_net_profiles": data.get("local_net_profiles", []),
+                CONDITION_ALERT_RULES_SETTING_KEY: data.get(CONDITION_ALERT_RULES_SETTING_KEY, []),
+                AUTO_SOP_INVOCATION_SETTING_KEY: data.get(AUTO_SOP_INVOCATION_SETTING_KEY, False),
             }
             for prog_name, meta in self.PROGRAMS.items():
                 auto_key = meta["autostart_key"]
@@ -10499,6 +10901,8 @@ class SettingsTab(QWidget):
             self.settings.set("autostart_js8call", data.get("autostart_js8call", False))
             self.settings.set("operating_groups", data.get("operating_groups", []))
             self.settings.set("local_net_profiles", data.get("local_net_profiles", []))
+            self.settings.set(CONDITION_ALERT_RULES_SETTING_KEY, data.get(CONDITION_ALERT_RULES_SETTING_KEY, []))
+            self.settings.set(AUTO_SOP_INVOCATION_SETTING_KEY, data.get(AUTO_SOP_INVOCATION_SETTING_KEY, False))
         elif hasattr(self.settings, "_data"):
             # Fallback: update the internal dict only
             self.settings._data = data  # type: ignore[attr-defined]
@@ -17200,6 +17604,24 @@ class SettingsTab(QWidget):
         self._refresh_schedule_assignment_editor_summary()
         self._update_schedule_assignment_editor_hint()
 
+    def _schedule_assignment_validation_message(self, validation: Mapping[str, Any]) -> Tuple[str, str]:
+        blocked = [str(item).strip() for item in validation.get("blocked", []) if str(item).strip()]
+        warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
+        if not blocked and not warnings:
+            return "", ""
+        supported = [str(item).strip() for item in validation.get("supported_bands", []) if str(item).strip()]
+        plan_bands = [str(item).strip() for item in validation.get("plan_bands", []) if str(item).strip()]
+        unsupported = [band for band in plan_bands if supported and band not in supported]
+        if unsupported and supported:
+            detail = (
+                f"Antenna and schedule mismatch: this radio supports {self._human_join(supported)}, "
+                f"but the selected plan uses {self._human_join(unsupported)}. "
+                "Choose a different plan, update the supported antenna bands, or do not transmit until the antenna path is confirmed."
+            )
+        else:
+            detail = blocked[0] if blocked else warnings[0]
+        return ("blocked" if blocked else "warning"), detail
+
     def _update_schedule_assignment_editor_hint(self) -> None:
         if not hasattr(self, "schedule_assignment_editor_hint_label"):
             return
@@ -17234,12 +17656,9 @@ class SettingsTab(QWidget):
                 except Exception:
                     log.exception("Failed validating selected schedule assignment.")
                 else:
-                    blocked = [str(item).strip() for item in validation.get("blocked", []) if str(item).strip()]
-                    warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
-                    if blocked:
-                        bits.append(f"RF Guard blocked: {blocked[0]}")
-                    elif warnings:
-                        bits.append(f"RF Guard warning: {warnings[0]}")
+                    tone, detail = self._schedule_assignment_validation_message(validation)
+                    if tone and detail:
+                        bits.append(f"RF Guard {tone}: {detail}")
         self.schedule_assignment_editor_hint_label.setText(" ".join(bits))
 
     def _show_schedule_assignment_editor(
@@ -17428,18 +17847,20 @@ class SettingsTab(QWidget):
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
         warning_text = ""
+        warning_tone = "warning"
         for assignment in saved_assignments:
             try:
                 validation = json.loads(str(assignment.get("validation_status_json", "") or "{}"))
             except Exception:
                 validation = {}
-            warnings = [str(item).strip() for item in validation.get("warnings", []) if str(item).strip()]
-            if warnings:
-                warning_text = warnings[0]
+            tone, detail = self._schedule_assignment_validation_message(validation)
+            if detail:
+                warning_text = detail
+                warning_tone = tone or "warning"
                 break
         if warning_text:
             self._set_schedule_assignment_guidance(
-                "RF Guard Needs Review",
+                "RF Guard Blocked Assignment" if warning_tone == "blocked" else "RF Guard Needs Review",
                 warning_text,
                 "warning",
             )
@@ -18601,10 +19022,18 @@ class SettingsTab(QWidget):
         app_config_review_toggle_btn.setObjectName("guidedAppConfigReviewToggle")
         app_config_review_toggle_btn.setStyleSheet(button_style("secondary", theme))
         app_config_review_toggle_btn.setToolTip("Show the app configuration details FIO reviewed for this radio.")
+        app_config_apply_btn = QPushButton("Prepare App Setup")
+        app_config_apply_btn.setObjectName("guidedAppConfigApply")
+        app_config_apply_btn.setStyleSheet(button_style("primary", theme))
+        app_config_apply_btn.setToolTip(
+            "Create needed folders and, after backup, apply supported managed app profile settings."
+        )
+        app_config_apply_btn.setVisible(False)
         app_config_review_layout.addWidget(app_config_review_title, 0, 0)
         app_config_review_layout.addWidget(app_config_review_status, 1, 0)
-        app_config_review_layout.addWidget(app_config_review_toggle_btn, 0, 1, 2, 1)
-        app_config_review_layout.addWidget(app_config_review_details, 2, 0, 1, 2)
+        app_config_review_layout.addWidget(app_config_apply_btn, 0, 1, 2, 1)
+        app_config_review_layout.addWidget(app_config_review_toggle_btn, 0, 2, 2, 1)
+        app_config_review_layout.addWidget(app_config_review_details, 2, 0, 1, 3)
         app_config_review_layout.setColumnStretch(0, 1)
         _add_full_width_row(save_review_form, app_config_review_card)
 
@@ -18616,7 +19045,7 @@ class SettingsTab(QWidget):
         app_config_review_toggle_btn.clicked.connect(_toggle_guided_app_config_review_details)
         launch_group, launch_form = _make_section(
             "Launch Control",
-            "Optional. Let FIO start the selected software bundle for this radio from Radio Settings.",
+            "Launch Control is managed after save from the selected radio's Settings view.",
         )
 
         radio_model_combo = QComboBox()
@@ -18794,7 +19223,7 @@ class SettingsTab(QWidget):
         configure_auto_btn.setToolTip(
             "Fill blank paths, ports, and message-file locations for this radio using installed apps and existing app settings."
         )
-        configure_auto_status = QLabel("Recommended next step: let FIO fill blank paths, ports, and message locations.")
+        configure_auto_status = QLabel("Recommended: let FIO fill blanks, then review highlighted choices.")
         configure_auto_status.setObjectName("guidedConfigureAutomaticallyStatus")
         configure_auto_status.setWordWrap(True)
         configure_auto_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -18802,50 +19231,59 @@ class SettingsTab(QWidget):
         configure_auto_row.addWidget(configure_auto_status, 1)
         _add_full_width_row(software_form, configure_auto_wrap)
 
-        app_setup_plan_group = QGroupBox("Setup Steps")
+        app_setup_plan_group = QGroupBox("Setup Status")
         app_setup_plan_group.setObjectName("guidedAutoAppSetupPlan")
         app_setup_plan_group.setVisible(False)
         app_setup_plan_layout = QVBoxLayout(app_setup_plan_group)
-        app_setup_plan_layout.setContentsMargins(10, 8, 10, 8)
-        app_setup_plan_layout.setSpacing(6)
+        app_setup_plan_layout.setContentsMargins(8, 6, 8, 6)
+        app_setup_plan_layout.setSpacing(4)
         guided_next_action_label = QLabel()
         guided_next_action_label.setObjectName("guidedSetupNextAction")
         guided_next_action_label.setWordWrap(True)
         guided_next_action_font = guided_next_action_label.font()
         guided_next_action_font.setBold(True)
         guided_next_action_label.setFont(guided_next_action_font)
+        guided_next_action_label.setVisible(False)
         app_setup_plan_layout.addWidget(guided_next_action_label)
         guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
         guided_step_stack = QWidget()
-        guided_step_stack_layout = QVBoxLayout(guided_step_stack)
+        guided_step_stack_layout = QGridLayout(guided_step_stack)
         guided_step_stack_layout.setContentsMargins(0, 0, 0, 0)
-        guided_step_stack_layout.setSpacing(4)
+        guided_step_stack_layout.setHorizontalSpacing(6)
+        guided_step_stack_layout.setVerticalSpacing(6)
         for step_id in ("radio", "software", "connection", "guard", "schedule", "review"):
             step_frame = QFrame()
             step_frame.setObjectName(f"guidedSetupStep_{step_id}")
             step_frame.setFrameShape(QFrame.StyledPanel)
             step_frame_layout = QGridLayout(step_frame)
-            step_frame_layout.setContentsMargins(8, 6, 8, 6)
-            step_frame_layout.setHorizontalSpacing(8)
-            step_frame_layout.setVerticalSpacing(2)
+            step_frame_layout.setContentsMargins(7, 4, 7, 4)
+            step_frame_layout.setHorizontalSpacing(5)
+            step_frame_layout.setVerticalSpacing(0)
+            step_frame.setMinimumHeight(32)
+            step_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             status_label = QLabel()
             status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")
             status_label.setAlignment(Qt.AlignCenter)
+            status_label.setMinimumWidth(50)
             title_label = QLabel()
             title_label.setObjectName(f"guidedSetupStepTitle_{step_id}")
             title_font = title_label.font()
             title_font.setBold(True)
             title_label.setFont(title_font)
+            title_label.setWordWrap(False)
             detail_label = QLabel()
             detail_label.setObjectName(f"guidedSetupStepDetail_{step_id}")
             detail_label.setWordWrap(True)
-            step_frame_layout.addWidget(status_label, 0, 0)
-            step_frame_layout.addWidget(title_label, 0, 1)
+            step_frame_layout.addWidget(title_label, 0, 0)
+            step_frame_layout.addWidget(status_label, 0, 1)
             step_frame_layout.addWidget(detail_label, 1, 0, 1, 2)
             detail_label.setVisible(False)
-            step_frame_layout.setColumnStretch(1, 1)
-            guided_step_stack_layout.addWidget(step_frame)
+            step_frame_layout.setColumnStretch(0, 1)
+            step_index = len(guided_step_widgets)
+            guided_step_stack_layout.addWidget(step_frame, step_index // 3, step_index % 3)
             guided_step_widgets[step_id] = (step_frame, status_label, title_label, detail_label)
+        for col in range(3):
+            guided_step_stack_layout.setColumnStretch(col, 1)
         app_setup_plan_layout.addWidget(guided_step_stack)
         app_setup_plan_label = QLabel()
         app_setup_plan_label.setWordWrap(True)
@@ -18883,6 +19321,8 @@ class SettingsTab(QWidget):
             app_choice_combos[app_id] = combo
             browse_btn = QPushButton("Browse")
             browse_btn.setObjectName(f"guidedAutoAppBrowse_{app_id}")
+            browse_btn.setMinimumWidth(86)
+            browse_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             browse_btn.setToolTip("Choose a different app or folder if FIO did not find it.")
             app_choice_browse_buttons[app_id] = browse_btn
             choice_row = QHBoxLayout()
@@ -19134,7 +19574,7 @@ class SettingsTab(QWidget):
         _add_full_width_row(software_form, port_prompt_group)
 
         optional_toggle = QToolButton(dlg)
-        optional_toggle.setText("Radio Safety / RF Guard")
+        optional_toggle.setText("RF Guard Details")
         optional_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         optional_toggle.setArrowType(Qt.RightArrow)
         optional_toggle.setCheckable(True)
@@ -19149,6 +19589,13 @@ class SettingsTab(QWidget):
         _configure_guided_form(optional_form)
         optional_layout.addLayout(optional_form)
         body_layout.addWidget(optional_body)
+
+        rf_guard_intro = QLabel(
+            "Start with the bands this antenna path can safely use. FIO checks those bands against the "
+            "assigned Frequency Plan before the radio is activated."
+        )
+        rf_guard_intro.setWordWrap(True)
+        _add_full_width_row(optional_form, rf_guard_intro)
 
         band_grid_widget = QWidget()
         band_grid = QGridLayout(band_grid_widget)
@@ -19182,6 +19629,21 @@ class SettingsTab(QWidget):
             antenna_band_mode_combo,
             "Choose whether FIO should warn or block if a plan tries to use a band that is not checked above.",
         )
+
+        rf_guard_plan_check_card = QFrame()
+        rf_guard_plan_check_card.setObjectName("guidedRfGuardPlanCheck")
+        rf_guard_plan_check_layout = QVBoxLayout(rf_guard_plan_check_card)
+        rf_guard_plan_check_layout.setContentsMargins(10, 8, 10, 8)
+        rf_guard_plan_check_layout.setSpacing(4)
+        rf_guard_plan_check_title = QLabel("Plan Check")
+        rf_guard_plan_check_title_font = rf_guard_plan_check_title.font()
+        rf_guard_plan_check_title_font.setBold(True)
+        rf_guard_plan_check_title.setFont(rf_guard_plan_check_title_font)
+        rf_guard_plan_check_detail = QLabel()
+        rf_guard_plan_check_detail.setWordWrap(True)
+        rf_guard_plan_check_layout.addWidget(rf_guard_plan_check_title)
+        rf_guard_plan_check_layout.addWidget(rf_guard_plan_check_detail)
+        _add_full_width_row(optional_form, rf_guard_plan_check_card)
 
         shared_guard_heading = QLabel("Shared Hardware")
         shared_guard_heading.setObjectName("guidedSharedHardwareHeading")
@@ -19314,8 +19776,10 @@ class SettingsTab(QWidget):
             varac_launch_cmd_wrap,
         ]
         optional_field_widgets = [
+            rf_guard_intro,
             band_grid_widget,
             antenna_band_mode_combo,
+            rf_guard_plan_check_card,
             antenna_group_edit,
             ptt_group_edit,
             band_overlap_edit,
@@ -19423,6 +19887,34 @@ class SettingsTab(QWidget):
                 configure_auto_status.setText(f"Using selected {label} app for this radio.")
             _update_dialog_readiness()
 
+        def _app_choice_selected_path(app_id: str) -> str:
+            target = app_choice_targets.get(app_id)
+            if target is None:
+                return ""
+            return str(target.text() or "").strip()
+
+        def _sync_app_choice_combo_to_target(app_id: str) -> None:
+            combo = app_choice_combos.get(app_id)
+            if combo is None:
+                return
+            path_text = _app_choice_selected_path(app_id)
+            if not path_text:
+                return
+            matched_idx = -1
+            for idx in range(1, combo.count()):
+                if str(combo.itemData(idx) or "").strip() == path_text:
+                    matched_idx = idx
+                    break
+            if matched_idx < 0:
+                label = f"Using: {path_text}"
+                combo.blockSignals(True)
+                combo.addItem(label, path_text)
+                matched_idx = combo.count() - 1
+                combo.blockSignals(False)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(matched_idx)
+            combo.blockSignals(False)
+
         def _apply_js8_profile_choice() -> None:
             payload = js8_profile_choice_combo.currentData()
             if not isinstance(payload, Mapping):
@@ -19482,12 +19974,14 @@ class SettingsTab(QWidget):
             for app_id, combo in app_choice_combos.items():
                 row_widget = app_choice_rows.get(app_id, combo)
                 target_edit = app_choice_targets.get(app_id)
-                target_missing = target_edit is not None and not target_edit.text().strip()
+                target_text = str(target_edit.text() or "").strip() if target_edit is not None else ""
+                target_missing = target_edit is not None and not target_text
                 selected_for_radio = _app_choice_app_selected(app_id)
                 visible = (
                     not observer_mode
                     and selected_for_radio
-                    and (combo.count() > 1 or (app_autoconfigure_attempted and target_missing))
+                    and app_autoconfigure_attempted
+                    and (combo.count() > 1 or bool(target_text) or target_missing)
                 )
                 _set_row_visible(row_widget, visible)
                 combo.setVisible(visible)
@@ -19509,7 +20003,12 @@ class SettingsTab(QWidget):
             js8_profile_visible = (
                 not observer_mode
                 and _js8_app_selected()
-                and js8_profile_choice_combo.count() > 1
+                and app_autoconfigure_attempted
+                and (
+                    js8_profile_choice_combo.count() > 1
+                    or bool(js8_profile_edit.text().strip())
+                    or bool(js8_directed_edit.text().strip())
+                )
             )
             _set_row_visible(js8_profile_choice_combo, js8_profile_visible)
             js8_profile_needs_choice = (
@@ -19554,12 +20053,13 @@ class SettingsTab(QWidget):
                 and js8_profile_choice_combo.currentIndex() <= 0
             )
 
-        def _select_single_detected_choice(combo: QComboBox) -> None:
+        def _select_single_detected_choice(combo: QComboBox) -> bool:
             if combo.count() != 2 or combo.currentIndex() > 0:
-                return
+                return False
             was_blocked = combo.blockSignals(True)
             combo.setCurrentIndex(1)
             combo.blockSignals(was_blocked)
+            return True
 
         def _update_detected_app_choices(candidates: Sequence[Any]) -> None:
             placeholder_labels = {
@@ -19581,7 +20081,10 @@ class SettingsTab(QWidget):
                     combo.addItem(label_text, path_text)
                 combo.blockSignals(False)
                 if _app_choice_app_selected(app_id):
-                    _select_single_detected_choice(combo)
+                    selected_single = _select_single_detected_choice(combo)
+                    if selected_single:
+                        _apply_detected_app_choice(app_id)
+                    _sync_app_choice_combo_to_target(app_id)
                 _configure_combo_width(combo, minimum=360)
             _update_app_choice_visibility()
 
@@ -19594,7 +20097,44 @@ class SettingsTab(QWidget):
                 js8_profile_choice_combo.addItem(label_text, payload)
             js8_profile_choice_combo.blockSignals(False)
             if _js8_app_selected():
-                _select_single_detected_choice(js8_profile_choice_combo)
+                selected_single = _select_single_detected_choice(js8_profile_choice_combo)
+                if selected_single:
+                    _apply_js8_profile_choice()
+                elif js8_profile_edit.text().strip() or js8_directed_edit.text().strip():
+                    profile_path = js8_profile_edit.text().strip()
+                    directed_path = js8_directed_edit.text().strip()
+                    port = js8_port_edit.text().strip()
+                    matched_idx = -1
+                    for idx in range(1, js8_profile_choice_combo.count()):
+                        payload = js8_profile_choice_combo.itemData(idx)
+                        if not isinstance(payload, Mapping):
+                            continue
+                        if (
+                            (profile_path and str(payload.get("profile_path", "") or "").strip() == profile_path)
+                            or (directed_path and str(payload.get("directed_path", "") or "").strip() == directed_path)
+                        ):
+                            matched_idx = idx
+                            break
+                    if matched_idx < 0:
+                        label_parts = ["Using JS8Call profile"]
+                        if port:
+                            label_parts.append(f"API {port}")
+                        if profile_path:
+                            label_parts.append(profile_path)
+                        js8_profile_choice_combo.blockSignals(True)
+                        js8_profile_choice_combo.addItem(
+                            " | ".join(label_parts),
+                            {
+                                "port": port,
+                                "profile_path": profile_path,
+                                "directed_path": directed_path,
+                            },
+                        )
+                        matched_idx = js8_profile_choice_combo.count() - 1
+                        js8_profile_choice_combo.blockSignals(False)
+                    js8_profile_choice_combo.blockSignals(True)
+                    js8_profile_choice_combo.setCurrentIndex(matched_idx)
+                    js8_profile_choice_combo.blockSignals(False)
             _configure_combo_width(js8_profile_choice_combo, minimum=420)
             _update_app_choice_visibility()
 
@@ -20103,7 +20643,7 @@ class SettingsTab(QWidget):
                     f" QLabel#{detail_label.objectName()} {{ color: {muted_color}; }}"
                 )
                 status_label.setText(_guided_step_status_label(status_key))
-                title_label.setText(f"{str(item.title or '').strip()}: {_guided_step_status_label(status_key)}")
+                title_label.setText(str(item.title or "").strip())
                 detail_label.setText(str(item.detail or "").strip())
                 detail_label.setVisible(False)
             for step_id, widgets in guided_step_widgets.items():
@@ -20143,7 +20683,7 @@ class SettingsTab(QWidget):
             )
             status_label.setText(_guided_step_status_label(status_key))
             if title:
-                title_label.setText(f"{title}: {_guided_step_status_label(status_key)}")
+                title_label.setText(title)
             if detail:
                 detail_label.setText(detail)
             detail_label.setVisible(False)
@@ -20195,6 +20735,59 @@ class SettingsTab(QWidget):
                 config_root=get_config_dir(),
                 app_paths=app_paths,
             )
+
+        def _apply_guided_app_configuration() -> None:
+            plan = _current_guided_app_config_plan()
+            if not plan.actions:
+                QMessageBox.information(
+                    dlg,
+                    "Prepare App Setup",
+                    "There is no managed app setup to prepare for this radio.",
+                )
+                return
+            write_actions = [action for action in plan.actions if action.writes_external_config]
+            if write_actions:
+                response = QMessageBox.question(
+                    dlg,
+                    "Prepare App Setup",
+                    (
+                        "FIO will create a backup before applying supported external app profile changes. "
+                        "Save Radio remains a separate FIO profile save.\n\n"
+                        "Continue with managed app setup?"
+                    ),
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if response != QMessageBox.Yes:
+                    return
+            try:
+                result = apply_guided_external_app_config_plan(
+                    plan,
+                    allow_external_writes=True,
+                    backup_reason="guided-add-radio-app-config",
+                )
+            except Exception as exc:
+                log.exception("Failed applying guided app configuration.")
+                QMessageBox.warning(dlg, "Prepare App Setup", f"FIO could not prepare app setup.\n{exc}")
+                return
+            statuses: Dict[str, int] = {}
+            for item in result.items:
+                statuses[str(item.status or "unknown")] = statuses.get(str(item.status or "unknown"), 0) + 1
+            summary = ", ".join(f"{key}: {value}" for key, value in sorted(statuses.items())) or "no changes"
+            backup_text = ""
+            if result.backup is not None and getattr(result.backup, "backup_dir", None):
+                backup_text = f"\nBackup: {result.backup.backup_dir}"
+            message = f"App setup reviewed. {summary}.{backup_text}"
+            if result.ok:
+                QMessageBox.information(dlg, "Prepare App Setup", message)
+            else:
+                failed = [item for item in result.items if item.status == "failed"]
+                detail = "\n".join(f"- {item.app_id}: {item.detail}" for item in failed[:5])
+                QMessageBox.warning(dlg, "Prepare App Setup", f"{message}\n\nNeeds review:\n{detail}")
+            _update_guided_app_setup_plan_review()
+            _update_guided_save_review()
+
+        app_config_apply_btn.clicked.connect(_apply_guided_app_configuration)
 
         def _update_guided_app_setup_plan_review() -> None:
             if str(device_class_combo.currentData() or "").strip().lower() == "observer":
@@ -20344,6 +20937,7 @@ class SettingsTab(QWidget):
 
         def _apply_guided_schedule_assignment_warning_ui() -> None:
             tone, title, detail = _guided_schedule_assignment_warning_summary()
+            _apply_guided_rf_guard_plan_check_ui(tone=tone, title=title, detail=detail)
             if not tone:
                 schedule_guard_warning_card.setVisible(False)
                 schedule_guard_warning_title.setText("")
@@ -20367,6 +20961,62 @@ class SettingsTab(QWidget):
                 f" QLabel {{ color: {fg}; border: none; background: transparent; }}"
             )
             schedule_guard_warning_card.setVisible(True)
+            if hasattr(optional_body, "setVisible"):
+                optional_body.setVisible(True)
+
+        def _apply_guided_rf_guard_plan_check_ui(
+            *,
+            tone: str = "",
+            title: str = "",
+            detail: str = "",
+        ) -> None:
+            if not hasattr(rf_guard_plan_check_card, "setVisible"):
+                return
+            theme = resolve_theme(self.settings)
+            supported = self._band_check_values(band_checks)
+            plan = _selected_guided_schedule_plan()
+            if tone:
+                border = theme.get("danger", "#B3261E") if tone == "blocked" else theme.get("warning", "#C99700")
+                bg = QColor(border)
+                bg.setAlpha(28)
+                rf_guard_plan_check_title.setText(title or "RF Guard Needs Review")
+                rf_guard_plan_check_detail.setText(detail)
+                rf_guard_plan_check_card.setToolTip(detail)
+            else:
+                border = theme.get("success", "#2E7D32") if supported else theme.get("muted_border", "#C9D3DD")
+                bg = QColor(border)
+                bg.setAlpha(18)
+                if plan is not None and supported:
+                    validation = _guided_schedule_assignment_validation()
+                    plan_bands = [str(item).strip() for item in validation.get("plan_bands", []) if str(item).strip()]
+                    rf_guard_plan_check_title.setText("Plan Check: Ready")
+                    rf_guard_plan_check_detail.setText(
+                        f"{_selected_guided_schedule_plan_name() or 'Selected plan'} uses "
+                        f"{self._human_join(plan_bands) if plan_bands else 'no scheduled transmit bands'}; "
+                        f"this radio supports {self._human_join(supported)}."
+                    )
+                elif supported:
+                    rf_guard_plan_check_title.setText("Plan Check")
+                    rf_guard_plan_check_detail.setText(
+                        f"This radio supports {self._human_join(supported)}. "
+                        "FIO will compare these bands with the selected Frequency Plan before assignment."
+                    )
+                else:
+                    rf_guard_plan_check_title.setText("Plan Check")
+                    rf_guard_plan_check_detail.setText(
+                        "No antenna bands are selected yet. Select the bands this radio and antenna can safely use."
+                    )
+                rf_guard_plan_check_card.setToolTip(rf_guard_plan_check_detail.text())
+            fg = theme.get("text", "#1C1F21")
+            rf_guard_plan_check_card.setStyleSheet(
+                "QFrame#guidedRfGuardPlanCheck {"
+                f" background-color: {bg.name(QColor.HexArgb)};"
+                f" border: 2px solid {border};"
+                " border-radius: 6px;"
+                "}"
+                f" QLabel {{ color: {fg}; border: none; background: transparent; }}"
+            )
+            rf_guard_plan_check_card.setVisible(True)
 
         def _selected_guided_schedule_path() -> str:
             if not hasattr(schedule_path_combo, "currentData"):
@@ -20558,6 +21208,7 @@ class SettingsTab(QWidget):
                 *,
                 backup_required: bool,
                 manual_review_required: bool,
+                has_actions: bool,
             ) -> None:
                 theme = resolve_theme(self.settings)
                 text_color = theme.get("text", "#1C1F21")
@@ -20587,6 +21238,14 @@ class SettingsTab(QWidget):
                     f" QLabel#{app_config_review_details.objectName()} {{ color: {muted_color}; }}"
                 )
                 app_config_review_toggle_btn.setStyleSheet(button_style("secondary", theme))
+                app_config_apply_btn.setVisible(has_actions)
+                app_config_apply_btn.setEnabled(has_actions)
+                app_config_apply_btn.setStyleSheet(button_style("primary" if has_actions else "secondary", theme))
+                app_config_apply_btn.setToolTip(
+                    "Prepare folders and supported managed app profiles after backup."
+                    if has_actions
+                    else "No managed app setup is needed for this radio."
+                )
                 summary = str(lines[0] if lines else "App Configuration: no external app setup changes.").strip()
                 if summary.startswith("App Configuration:"):
                     summary = summary.split(":", 1)[1].strip()
@@ -20760,6 +21419,24 @@ class SettingsTab(QWidget):
                 file_lines.append(_path_summary("Radio Apps Base Folder", radio_apps_base_edit.text()))
             if not file_lines:
                 file_lines.append("No message/forms paths selected")
+            configured_file_lines = [
+                line
+                for line in file_lines
+                if str(line or "").strip() and not str(line or "").strip().endswith("not set")
+            ]
+            missing_file_lines = [
+                line
+                for line in file_lines
+                if str(line or "").strip().endswith("not set")
+            ]
+            files_review_lines = [
+                f"Paths configured: {len(configured_file_lines)}",
+            ]
+            if missing_file_lines:
+                files_review_lines.append(f"Needs review: {len(missing_file_lines)} path(s)")
+            else:
+                files_review_lines.append("No missing paths for the selected software.")
+            files_review_lines.append(app_config_summary)
 
             policy = guided_setup_capability_policy(_current_guided_blueprint())
             schedule_line = guided_setup_schedule_decision(
@@ -20786,6 +21463,7 @@ class SettingsTab(QWidget):
                 app_config_lines,
                 backup_required=bool(app_config_plan.backup_required),
                 manual_review_required=bool(app_config_plan.manual_review_required),
+                has_actions=bool(app_config_plan.actions),
             )
 
             conflict_lines = _endpoint_conflict_lines()
@@ -20829,12 +21507,12 @@ class SettingsTab(QWidget):
                 ),
                 _review_card_html(
                     "Files",
-                    file_lines + [app_config_summary],
+                    files_review_lines,
                     tone="neutral",
                 ),
             ]
             save_review_label.setText("".join(review_html))
-            save_review_label.setToolTip("\n".join(app_config_lines))
+            save_review_label.setToolTip("\n".join(file_lines + app_config_lines))
 
         def _apply_guided_wizard_visibility(connection_visible: bool) -> None:
             nonlocal guided_wizard_step_id
@@ -20871,11 +21549,15 @@ class SettingsTab(QWidget):
             identity_group.setVisible(guided_wizard_step_id == "radio")
             software_group.setVisible(guided_wizard_step_id == "software")
             connection_group.setVisible(guided_wizard_step_id == "connection")
-            optional_toggle.setVisible(guided_wizard_step_id == "guard")
+            rf_guard_tone, _rf_guard_title, _rf_guard_detail = _guided_schedule_assignment_warning_summary()
+            rf_guard_needs_review = bool(rf_guard_tone)
+            rf_guard_visible = guided_wizard_step_id == "guard" or rf_guard_needs_review
+            optional_toggle.setVisible(False)
             with QSignalBlocker(optional_toggle):
-                optional_toggle.setChecked(guided_wizard_step_id == "guard")
-                optional_toggle.setArrowType(Qt.DownArrow if guided_wizard_step_id == "guard" else Qt.RightArrow)
-            optional_body.setVisible(guided_wizard_step_id == "guard")
+                optional_toggle.setChecked(rf_guard_visible)
+                optional_toggle.setArrowType(Qt.DownArrow if rf_guard_visible else Qt.RightArrow)
+            optional_body.setVisible(rf_guard_visible)
+            _apply_guided_schedule_assignment_warning_ui()
             schedule_group.setVisible(guided_wizard_step_id == "schedule")
             save_review_group.setVisible(guided_wizard_step_id == "review")
             launch_group.setVisible(False)
@@ -20981,6 +21663,11 @@ class SettingsTab(QWidget):
                     continue
                 edit, label = target
                 _fill_blank(edit, value, label, filled, preserved)
+            for app_id in app_choice_combos:
+                if _app_choice_app_selected(app_id):
+                    _sync_app_choice_combo_to_target(app_id)
+            if _js8_app_selected() and (js8_profile_edit.text().strip() or js8_directed_edit.text().strip()):
+                _update_js8_profile_choices(js8_file_profiles)
             review = guided_setup_autofill_review(
                 filled=filled,
                 preserved=preserved,
@@ -20990,7 +21677,7 @@ class SettingsTab(QWidget):
             if _detected_app_choice_needs_operator_selection():
                 configure_auto_status.setText("Choose the highlighted app or profile, then continue.")
             else:
-                configure_auto_status.setText("Settings found. Continue to Connection.")
+                configure_auto_status.setText("FIO filled what it could. Review the paths below, then continue.")
             configure_auto_status.setToolTip("\n".join(review.detail_lines))
             _update_guided_app_setup_plan_review()
             _update_port_prompt_visibility()
@@ -21192,6 +21879,7 @@ class SettingsTab(QWidget):
             else:
                 connection_status_label.setText("No FIO frequency-control endpoint is required for this setup type.")
             optional_body.setVisible(guard_fields_visible)
+            optional_toggle.setVisible(False)
             optional_toggle.setArrowType(Qt.DownArrow if guard_fields_visible else Qt.RightArrow)
             connection_group.setVisible(visibility.connection_group)
             assignment_allowed = guided_setup_capability_policy(blueprint).scheduler_assignment_allowed
@@ -21235,6 +21923,12 @@ class SettingsTab(QWidget):
                     use_flrig_chk.setChecked(False)
             _update_dialog_visibility()
 
+        def _refresh_guided_schedule_guard_review() -> None:
+            _update_guided_schedule_assignment_status()
+            _apply_guided_schedule_assignment_warning_ui()
+            _update_guided_save_review()
+            _update_dialog_readiness()
+
         setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
         for step_id, btn in guided_wizard_buttons.items():
             btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
@@ -21252,14 +21946,14 @@ class SettingsTab(QWidget):
         use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
         schedule_path_combo.currentIndexChanged.connect(lambda _index: _update_dialog_visibility())
-        schedule_plan_combo.currentIndexChanged.connect(lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
+        schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())
         for checkbox in band_checks.values():
-            checkbox.stateChanged.connect(lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review()))
+            checkbox.stateChanged.connect(lambda _state: _refresh_guided_schedule_guard_review())
         antenna_band_mode_combo.currentIndexChanged.connect(
-            lambda _index: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
+            lambda _index: _refresh_guided_schedule_guard_review()
         )
         schedule_open_plan_manager_chk.stateChanged.connect(
-            lambda _state: (_update_guided_schedule_assignment_status(), _update_guided_save_review())
+            lambda _state: _refresh_guided_schedule_guard_review()
         )
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_radio_model_hint())
         radio_model_combo.currentTextChanged.connect(lambda _text: _update_dialog_readiness())
@@ -23474,6 +24168,10 @@ class SettingsTab(QWidget):
         fldigi_offset: str = "",
         use_condition_levels: bool = False,
         condition_level: int | None = None,
+        fastlight_filename_delimiter: str | None = None,
+        fastlight_custom_delimiter: str | None = None,
+        fastlight_signed_suffix: str | None = None,
+        fastlight_unsigned_suffix: str | None = None,
     ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
@@ -23499,6 +24197,14 @@ class SettingsTab(QWidget):
                 g["fldigi_mode"] = fldigi_mode
                 g["fldigi_offset"] = fldigi_offset
                 g["use_condition_levels"] = bool(use_condition_levels)
+                if fastlight_filename_delimiter is not None:
+                    g["fastlight_filename_delimiter"] = str(fastlight_filename_delimiter or "group_default").strip()
+                if fastlight_custom_delimiter is not None:
+                    g["fastlight_custom_delimiter"] = str(fastlight_custom_delimiter or "").strip()
+                if fastlight_signed_suffix is not None:
+                    g["fastlight_signed_suffix"] = str(fastlight_signed_suffix or "group_default").strip()
+                if fastlight_unsigned_suffix is not None:
+                    g["fastlight_unsigned_suffix"] = str(fastlight_unsigned_suffix or "group_default").strip()
                 if cond_level is not None:
                     g["condition_level"] = cond_level
                 elif "condition_level" not in g:
@@ -23518,12 +24224,24 @@ class SettingsTab(QWidget):
                     "auto_tune": bool(auto_tune),
                     "use_condition_levels": bool(use_condition_levels),
                     "condition_level": 5 if cond_level is None else cond_level,
+                    "fastlight_filename_delimiter": str(fastlight_filename_delimiter or "group_default").strip(),
+                    "fastlight_custom_delimiter": str(fastlight_custom_delimiter or "").strip(),
+                    "fastlight_signed_suffix": str(fastlight_signed_suffix or "group_default").strip(),
+                    "fastlight_unsigned_suffix": str(fastlight_unsigned_suffix or "group_default").strip(),
                 }
             )
         # Condition-level participation is group-scoped (not per band/mode row).
         for g in self.operating_groups:
             if str(g.get("group", "")).strip().upper() == name:
                 g["use_condition_levels"] = bool(use_condition_levels)
+                if fastlight_filename_delimiter is not None:
+                    g["fastlight_filename_delimiter"] = str(fastlight_filename_delimiter or "group_default").strip()
+                if fastlight_custom_delimiter is not None:
+                    g["fastlight_custom_delimiter"] = str(fastlight_custom_delimiter or "").strip()
+                if fastlight_signed_suffix is not None:
+                    g["fastlight_signed_suffix"] = str(fastlight_signed_suffix or "group_default").strip()
+                if fastlight_unsigned_suffix is not None:
+                    g["fastlight_unsigned_suffix"] = str(fastlight_unsigned_suffix or "group_default").strip()
         self._refresh_operating_groups_table()
         # Persist immediately so additions survive app restarts without requiring an explicit Save click.
         try:
@@ -23846,6 +24564,10 @@ class SettingsTab(QWidget):
         fldigi_offset: str = "",
         use_condition_levels: bool = False,
         condition_level: int | None = None,
+        fastlight_filename_delimiter: str | None = None,
+        fastlight_custom_delimiter: str | None = None,
+        fastlight_signed_suffix: str | None = None,
+        fastlight_unsigned_suffix: str | None = None,
     ) -> None:
         name = str(name or "").strip().upper()
         band = str(band or "").strip().upper()
@@ -23863,6 +24585,26 @@ class SettingsTab(QWidget):
                 and normalize_operating_group_mode(g.get("mode", ""), g.get("band", "")) == mode
                 and str(g.get("band", "")).strip().upper() == band
             ):
+                next_fastlight_filename_delimiter = (
+                    str(g.get("fastlight_filename_delimiter") or "group_default").strip()
+                    if fastlight_filename_delimiter is None
+                    else str(fastlight_filename_delimiter or "group_default").strip()
+                )
+                next_fastlight_custom_delimiter = (
+                    str(g.get("fastlight_custom_delimiter") or "").strip()
+                    if fastlight_custom_delimiter is None
+                    else str(fastlight_custom_delimiter or "").strip()
+                )
+                next_fastlight_signed_suffix = (
+                    str(g.get("fastlight_signed_suffix") or "group_default").strip()
+                    if fastlight_signed_suffix is None
+                    else str(fastlight_signed_suffix or "group_default").strip()
+                )
+                next_fastlight_unsigned_suffix = (
+                    str(g.get("fastlight_unsigned_suffix") or "group_default").strip()
+                    if fastlight_unsigned_suffix is None
+                    else str(fastlight_unsigned_suffix or "group_default").strip()
+                )
                 g.update(
                     {
                         "frequency": freq_display,
@@ -23872,6 +24614,10 @@ class SettingsTab(QWidget):
                         "fldigi_offset": fldigi_offset,
                         "use_condition_levels": bool(use_condition_levels),
                         "condition_level": cond_level,
+                        "fastlight_filename_delimiter": next_fastlight_filename_delimiter,
+                        "fastlight_custom_delimiter": next_fastlight_custom_delimiter,
+                        "fastlight_signed_suffix": next_fastlight_signed_suffix,
+                        "fastlight_unsigned_suffix": next_fastlight_unsigned_suffix,
                     }
                 )
                 return
@@ -23887,6 +24633,10 @@ class SettingsTab(QWidget):
                 "auto_tune": bool(auto_tune),
                 "use_condition_levels": bool(use_condition_levels),
                 "condition_level": cond_level,
+                "fastlight_filename_delimiter": str(fastlight_filename_delimiter or "group_default").strip(),
+                "fastlight_custom_delimiter": str(fastlight_custom_delimiter or "").strip(),
+                "fastlight_signed_suffix": str(fastlight_signed_suffix or "group_default").strip(),
+                "fastlight_unsigned_suffix": str(fastlight_unsigned_suffix or "group_default").strip(),
             }
         )
 
@@ -23929,6 +24679,10 @@ class SettingsTab(QWidget):
                     "auto_tune": bool(g.get("auto_tune", False)),
                     "use_condition_levels": bool(g.get("use_condition_levels", False)),
                     "condition_level": g.get("condition_level", 5),
+                    "fastlight_filename_delimiter": str(g.get("fastlight_filename_delimiter", "group_default") or "group_default").strip(),
+                    "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
+                    "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
+                    "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
                 }
                 for g in self.operating_groups
             ],
@@ -24100,6 +24854,40 @@ class SettingsTab(QWidget):
         elif combo.isEditable():
             combo.setCurrentText(text)
 
+    def _set_combo_data_if_present(self, combo: QComboBox, value: str, fallback: str = "group_default") -> None:
+        data_text = str(value or fallback or "").strip()
+        for idx in range(combo.count()):
+            if str(combo.itemData(idx) or "").strip() == data_text:
+                combo.setCurrentIndex(idx)
+                return
+        for idx in range(combo.count()):
+            if str(combo.itemData(idx) or "").strip() == str(fallback or "").strip():
+                combo.setCurrentIndex(idx)
+                return
+
+    def _combo_data_text(self, combo: QComboBox, fallback: str = "group_default") -> str:
+        data = combo.currentData()
+        text = str(data if data is not None else combo.currentText() or "").strip()
+        return text or fallback
+
+    def _operating_group_policy_for(self, group: str) -> Dict[str, str]:
+        group_key = str(group or "").strip().upper()
+        for g in self.operating_groups:
+            if str(g.get("group", "")).strip().upper() != group_key:
+                continue
+            return {
+                "fastlight_filename_delimiter": str(g.get("fastlight_filename_delimiter", "group_default") or "group_default").strip(),
+                "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
+                "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
+                "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
+            }
+        return {
+            "fastlight_filename_delimiter": "group_default",
+            "fastlight_custom_delimiter": "",
+            "fastlight_signed_suffix": "group_default",
+            "fastlight_unsigned_suffix": "group_default",
+        }
+
     def _refresh_op_group_detail_panel(self) -> None:
         table = getattr(self, "op_groups_table", None)
         if table is None:
@@ -24174,6 +24962,7 @@ class SettingsTab(QWidget):
             fldigi_offset = ""
             auto_enabled = False
             cond_enabled = False
+            policy = self._operating_group_policy_for(group)
             original_key = None
         else:
             def _item_text(column: int, fallback: str = "") -> str:
@@ -24191,6 +24980,7 @@ class SettingsTab(QWidget):
             auto_enabled = bool(auto_widget.findChild(QCheckBox).isChecked()) if isinstance(auto_widget, QWidget) and auto_widget.findChild(QCheckBox) else False
             cond_widget = table.cellWidget(row, 9)
             cond_enabled = bool(cond_widget.findChild(QCheckBox).isChecked()) if isinstance(cond_widget, QWidget) and cond_widget.findChild(QCheckBox) else False
+            policy = self._operating_group_policy_for(group)
             original_key = (group.strip().upper(), mode, band.strip().upper())
 
         self._op_group_editor_original_key = original_key
@@ -24203,6 +24993,10 @@ class SettingsTab(QWidget):
         self.op_group_fldigi_offset_edit.setText(fldigi_offset)
         self.op_group_auto_tune_chk.setChecked(bool(auto_enabled))
         self.op_group_condition_levels_chk.setChecked(bool(cond_enabled))
+        self._set_combo_data_if_present(self.op_group_fastlight_delim_combo, policy.get("fastlight_filename_delimiter", "group_default"))
+        self.op_group_fastlight_custom_delim_edit.setText(policy.get("fastlight_custom_delimiter", ""))
+        self._set_combo_data_if_present(self.op_group_fastlight_signed_combo, policy.get("fastlight_signed_suffix", "group_default"))
+        self._set_combo_data_if_present(self.op_group_fastlight_unsigned_combo, policy.get("fastlight_unsigned_suffix", "group_default"))
 
     def _focus_operating_group_editor(self) -> None:
         self._refresh_op_group_detail_panel()
@@ -24264,6 +25058,10 @@ class SettingsTab(QWidget):
             fldigi_mode=self.op_group_fldigi_mode_combo.currentText().strip(),
             fldigi_offset=offset_txt,
             use_condition_levels=self.op_group_condition_levels_chk.isChecked(),
+            fastlight_filename_delimiter=self._combo_data_text(self.op_group_fastlight_delim_combo),
+            fastlight_custom_delimiter=self.op_group_fastlight_custom_delim_edit.text().strip(),
+            fastlight_signed_suffix=self._combo_data_text(self.op_group_fastlight_signed_combo),
+            fastlight_unsigned_suffix=self._combo_data_text(self.op_group_fastlight_unsigned_combo),
         )
 
     def _update_op_group_action_buttons(self):
@@ -24358,6 +25156,10 @@ class SettingsTab(QWidget):
                     "auto_tune": bool(g.get("auto_tune", False)),
                     "use_condition_levels": bool(g.get("use_condition_levels", False)),
                     "condition_level": level,
+                    "fastlight_filename_delimiter": str(g.get("fastlight_filename_delimiter", "group_default") or "group_default").strip(),
+                    "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
+                    "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
+                    "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
                 }
             )
         return result

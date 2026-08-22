@@ -11,6 +11,7 @@ from freqinout.core.nbems_compose import (
     discover_compose_message_folders,
     parse_compose_template_fields,
     plan_compose_destinations,
+    resolve_fastlight_filename_policy,
     resolve_compose_message_folder,
     resolve_flamp_transmit_dir,
     sanitize_report_name,
@@ -50,6 +51,87 @@ def test_signed_filename_uses_sig_suffix_before_payload_extension() -> None:
     assert build_signed_filename("W8UFO-TN-RR-20260423-1325z-Report.b2s") == (
         "W8UFO-TN-RR-20260423-1325z-Report-sig.b2s"
     )
+
+
+def test_fastlight_filename_policy_uses_magnet_underscore_defaults() -> None:
+    when = dt.datetime(2026, 4, 23, 13, 25, tzinfo=dt.timezone.utc)
+    policy = resolve_fastlight_filename_policy([], "MAGNET")
+
+    name = build_compose_filename(
+        "N1MAG",
+        "CO",
+        "RR",
+        when,
+        "Road Closure",
+        extension=".k2s",
+        filename_policy=policy,
+        operating_group="MAGNET",
+    )
+
+    assert name == "N1MAG_CO_RR_20260423-1325z_RoadClosure.k2s"
+    assert build_signed_filename(name, filename_policy=policy, operating_group="MAGNET") == (
+        "N1MAG_CO_RR_20260423-1325z_RoadClosure.sig.k2s"
+    )
+
+
+def test_fastlight_filename_policy_uses_amrron_hyphen_defaults() -> None:
+    when = dt.datetime(2026, 4, 23, 13, 25, tzinfo=dt.timezone.utc)
+    policy = resolve_fastlight_filename_policy([], "AMRRON")
+
+    name = build_compose_filename(
+        "W8UFO",
+        "TN",
+        "RR",
+        when,
+        "Weekly Snapshot",
+        extension=".b2s",
+        filename_policy=policy,
+        operating_group="AMRRON",
+    )
+
+    assert name == "W8UFO-TN-RR-20260423-1325z-WeeklySnapshot.b2s"
+    assert build_signed_filename(name, filename_policy=policy, operating_group="AMRRON") == (
+        "W8UFO-TN-RR-20260423-1325z-WeeklySnapshot-sig.b2s"
+    )
+
+
+def test_fastlight_filename_policy_uses_saved_group_overrides_for_destinations(tmp_path: Path) -> None:
+    when = dt.datetime(2026, 4, 23, 13, 25, tzinfo=dt.timezone.utc)
+    policy = resolve_fastlight_filename_policy(
+        [
+            {
+                "group": "FIELD",
+                "fastlight_filename_delimiter": "underscore",
+                "fastlight_signed_suffix": "dot_sig",
+            }
+        ],
+        "FIELD",
+    )
+    base_name = build_compose_filename(
+        "K7FIO",
+        "UT",
+        "PP",
+        when,
+        "Ops Check",
+        extension=".k2s",
+        filename_policy=policy,
+        operating_group="FIELD",
+    )
+    flamp_dir = tmp_path / "flamp-tx"
+    flamp_dir.mkdir()
+
+    plans = plan_compose_destinations(
+        base_name,
+        send_target="FLAmp",
+        varac_target="None",
+        flamp_dir=str(flamp_dir),
+        sign_flamp_copy=True,
+        filename_policy=policy,
+        operating_group="FIELD",
+    )
+
+    assert base_name == "K7FIO_UT_PP_20260423-1325z_OpsCheck.k2s"
+    assert plans[0].path.endswith("K7FIO_UT_PP_20260423-1325z_OpsCheck.sig.k2s")
 
 
 def test_plan_compose_destinations_adds_varac_outbox_and_bbs_targets(tmp_path: Path) -> None:
