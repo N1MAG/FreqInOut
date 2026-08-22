@@ -156,6 +156,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert 'QLabel("RF Pins")' in build_block
     assert 'QPushButton("Add RF Pin")' in build_block
     assert 'QPushButton("Manage Pins")' in build_block
+    assert "Edit Selected" in source
     assert 'QCheckBox("Alerts/Intel")' in build_block
     assert 'QCheckBox("Infrastructure/Utilities")' in build_block
     assert 'QPushButton("Show Filters & Layers")' in build_block

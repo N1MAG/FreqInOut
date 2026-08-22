@@ -380,8 +380,8 @@ The center-of-gravity loop is:
     map refinements done for observation-backed alerts, infrastructure,
     condition-alert pins, and a dedicated RF Pins map focus. Core RF pin
     projection, map styling, save/list/delete helpers, and Map-side manual pin
-    creation plus deletion management are done for receive/manual review
-    records; pin editing and send-capable workflows remain open.
+    creation/edit/delete management are done for receive/manual review records;
+    send-capable workflows remain open.
 16. Add SOP Builder Traffic Suggestions and condition apply workflow. Core
     condition-alert-to-SOP decision helpers done, including batch evaluation
     against SOP profile schedule layers; ControlFreq compact activity now shows

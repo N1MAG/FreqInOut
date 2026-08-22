@@ -178,9 +178,10 @@ RF_PIN_TOPICS = (
 
 
 class _RfPinDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None, *, pin: Optional[Any] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Add RF Pin")
+        self._source_ref = str(getattr(pin, "source_ref", "") or "").strip()
+        self.setWindowTitle("Edit RF Pin" if self._source_ref else "Add RF Pin")
         self.title_edit = QLineEdit(self)
         self.title_edit.setPlaceholderText("Short label shown in map details")
         self.group_edit = QLineEdit(self)
@@ -208,6 +209,20 @@ class _RfPinDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+        if pin is not None:
+            self._load_pin(pin)
+
+    def _load_pin(self, pin: Any) -> None:
+        self.title_edit.setText(str(getattr(pin, "subject", "") or "").strip())
+        self.group_edit.setText(str(getattr(pin, "to_target", "") or "").strip().lstrip("@"))
+        self.grid_edit.setText(str(getattr(pin, "grid", "") or "").strip().upper())
+        self.state_edit.setText(str(getattr(pin, "state", "") or "").strip().upper())
+        topics = tuple(getattr(pin, "observed_topics", ()) or ())
+        if topics:
+            idx = self.topic_combo.findText(str(topics[0]).strip())
+            if idx >= 0:
+                self.topic_combo.setCurrentIndex(idx)
+        self.summary_edit.setText(str(getattr(pin, "summary", "") or "").strip())
 
     def pin_payload(self) -> Dict[str, Any]:
         label = self.title_edit.text().strip()
@@ -219,7 +234,7 @@ class _RfPinDialog(QDialog):
         created_utc = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         ref_seed = label or grid or state or "pin"
         payload: Dict[str, Any] = {
-            "raw_reference": f"rf_pin:{int(time.time() * 1000)}:{ref_seed}",
+            "raw_reference": self._source_ref or f"rf_pin:{int(time.time() * 1000)}:{ref_seed}",
             "label": label or summary or "RF Pin",
             "group": group,
             "groups": [group] if group else [],
@@ -249,6 +264,8 @@ class _RfPinManagerDialog(QDialog):
         self.setWindowTitle("Manage RF Pins")
         self._db_path = Path(db_path)
         self._deleted = False
+        self._changed = False
+        self._pins_by_ref: Dict[str, Any] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
@@ -266,19 +283,22 @@ class _RfPinManagerDialog(QDialog):
         layout.addWidget(self.table)
 
         actions = QHBoxLayout()
+        self.edit_button = QPushButton("Edit Selected", self)
         self.delete_button = QPushButton("Delete Selected", self)
         self.close_button = QPushButton("Close", self)
+        self.edit_button.clicked.connect(self._edit_selected)
         self.delete_button.clicked.connect(self._delete_selected)
         self.close_button.clicked.connect(self.accept)
         actions.addStretch(1)
+        actions.addWidget(self.edit_button)
         actions.addWidget(self.delete_button)
         actions.addWidget(self.close_button)
         layout.addLayout(actions)
         self._load_rows()
 
     @property
-    def deleted(self) -> bool:
-        return self._deleted
+    def changed(self) -> bool:
+        return self._changed or self._deleted
 
     def _load_rows(self) -> None:
         try:
@@ -287,7 +307,11 @@ class _RfPinManagerDialog(QDialog):
             log.warning("StationsMap: failed to list RF pins: %s", exc, exc_info=True)
             pins = ()
         self.table.setRowCount(0)
+        self._pins_by_ref = {}
         for pin in pins:
+            source_ref = str(pin.source_ref or "").strip()
+            if source_ref:
+                self._pins_by_ref[source_ref] = pin
             row = self.table.rowCount()
             self.table.insertRow(row)
             topic = ", ".join(str(t).strip() for t in pin.observed_topics if str(t).strip())
@@ -302,8 +326,9 @@ class _RfPinManagerDialog(QDialog):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value or ""))
                 if col == self.COL_LABEL:
-                    item.setData(Qt.UserRole, pin.source_ref)
+                    item.setData(Qt.UserRole, source_ref)
                 self.table.setItem(row, col, item)
+        self.edit_button.setEnabled(self.table.rowCount() > 0)
         self.delete_button.setEnabled(self.table.rowCount() > 0)
 
     def _selected_source_refs(self) -> List[str]:
@@ -314,6 +339,31 @@ class _RfPinManagerDialog(QDialog):
             if source_ref:
                 refs.append(source_ref)
         return refs
+
+    def _edit_selected(self) -> None:
+        refs = self._selected_source_refs()
+        if len(refs) != 1:
+            QMessageBox.information(self, "Manage RF Pins", "Select one RF pin to edit.")
+            return
+        pin = self._pins_by_ref.get(refs[0])
+        if pin is None:
+            QMessageBox.warning(self, "Manage RF Pins", "FIO could not find the selected RF pin.")
+            return
+        dialog = _RfPinDialog(self, pin=pin)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        payload = dialog.pin_payload()
+        if not payload.get("grid"):
+            QMessageBox.warning(self, "Edit RF Pin", "Add a grid square so FIO can place the RF pin on the map.")
+            return
+        try:
+            save_rf_pin(self._db_path, payload)
+        except Exception as exc:
+            log.warning("StationsMap: failed to update RF pin: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "Edit RF Pin", f"FIO could not update this RF pin.\n{exc}")
+            return
+        self._changed = True
+        self._load_rows()
 
     def _delete_selected(self) -> None:
         refs = self._selected_source_refs()
@@ -3331,7 +3381,7 @@ class StationsMapTab(QWidget):
             return
         dialog = _RfPinManagerDialog(db_path, self)
         dialog.exec()
-        if not dialog.deleted:
+        if not dialog.changed:
             return
         try:
             self._map_query_cache.clear()
