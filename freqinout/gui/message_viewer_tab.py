@@ -6210,6 +6210,38 @@ class MessageViewerTab(QWidget):
     def show_inbox_from_navigation(self) -> None:
         self._set_messages_mode("Inbox", save=False)
 
+    def show_inbox_with_context(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        source_family: str = "",
+    ) -> None:
+        self.show_inbox_from_navigation()
+        source = str(source_family or "").strip().lower()
+        focus = {
+            "flmsg": "forms",
+            "flamp": "forms",
+            "js8spotter": "spotter",
+            "spotter": "spotter",
+            "commstat": "commstat",
+            "js8call": "js8call",
+            "varac": "varac",
+        }.get(source, "all")
+        self._set_inbox_focus(focus)
+        search = " ".join(
+            part
+            for part in (
+                str(group_filter or "").strip().lstrip("@"),
+                str(topic_filter or "").strip(),
+            )
+            if part
+        )
+        if hasattr(self, "rcv_search"):
+            self.rcv_search.setText(search)
+        else:
+            self._apply_message_filters()
+
     def show_compose_from_navigation(self) -> None:
         self._set_messages_mode("Compose", save=False)
 

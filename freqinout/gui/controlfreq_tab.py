@@ -161,6 +161,7 @@ class ControlFreqTab(QWidget):
         self._operational_snapshot_cache_key: Tuple[Any, ...] = ()
         self._operational_snapshot_cache_ts = 0.0
         self._operational_snapshot_cache_ttl_sec = 10.0
+        self._operational_activity_context: Dict[str, str] = {}
         self._my_schedule_entries_cache: List[Dict[str, object]] = []
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
@@ -411,6 +412,21 @@ class ControlFreqTab(QWidget):
         self.operational_topics_label.setWordWrap(True)
         self.operational_topics_label.setStyleSheet("color: #5b6875;")
         act_layout.addWidget(self.operational_topics_label)
+        activity_actions = QHBoxLayout()
+        activity_actions.setContentsMargins(0, 0, 0, 0)
+        activity_actions.setSpacing(6)
+        self.operational_messages_btn = QPushButton("Messages")
+        self.operational_messages_btn.setToolTip("Open Messages with this activity context.")
+        self.operational_messages_btn.setEnabled(False)
+        self.operational_messages_btn.clicked.connect(self._open_operational_activity_messages)
+        activity_actions.addWidget(self.operational_messages_btn)
+        self.operational_map_btn = QPushButton("Map")
+        self.operational_map_btn.setToolTip("Open the Map filtered to this activity context.")
+        self.operational_map_btn.setEnabled(False)
+        self.operational_map_btn.clicked.connect(self._open_operational_activity_map)
+        activity_actions.addWidget(self.operational_map_btn)
+        activity_actions.addStretch(1)
+        act_layout.addLayout(activity_actions)
         self.activity_table = QTableWidget(0, 4)
         self.activity_table.setHorizontalHeaderLabels(
             ["Group", "Band/Freq", "Callsigns Seen", "Traffic"]
@@ -2737,6 +2753,7 @@ class ControlFreqTab(QWidget):
     ) -> None:
         db_path = self._db_path()
         if not db_path.exists():
+            self._operational_activity_context = {}
             self._set_operational_activity_text("Operational Activity: no traffic database yet", "")
             return
         cache_key = (
@@ -2767,18 +2784,76 @@ class ControlFreqTab(QWidget):
             sop_decision = self._format_condition_sop_decision(snapshot)
             if sop_decision:
                 headline = f"{headline} | SOP: {sop_decision}"
+            self._operational_activity_context = self._activity_context_from_snapshot(snapshot, group_filter)
             self._set_operational_activity_text(
                 headline,
                 self._format_operational_activity_topics(snapshot),
             )
         except Exception as e:
             log.debug("ControlFreq: failed to refresh operational activity snapshot: %s", e)
+            self._operational_activity_context = {}
             self._set_operational_activity_text("Operational Activity: unavailable", "")
 
     def _set_operational_activity_text(self, headline: str, topics: str) -> None:
         self.operational_activity_label.setText(str(headline or "").strip() or "Operational Activity: no recent actionable traffic")
         self.operational_topics_label.setText(str(topics or "").strip())
         self.operational_topics_label.setVisible(bool(str(topics or "").strip()))
+        enabled = bool(getattr(self, "_operational_activity_context", {}) or {})
+        for btn in (getattr(self, "operational_messages_btn", None), getattr(self, "operational_map_btn", None)):
+            if btn is not None:
+                btn.setEnabled(enabled)
+
+    @staticmethod
+    def _activity_context_from_snapshot(snapshot: object, group_filter: str = "") -> Dict[str, str]:
+        latest = tuple(getattr(snapshot, "latest", ()) or ())
+        attention = tuple(getattr(snapshot, "high_attention", ()) or ())
+        alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
+        observations = alerts or attention or latest
+        topics = [
+            str(topic or "").strip()
+            for topic in tuple(getattr(snapshot, "topics", ()) or ())
+            if str(topic or "").strip()
+        ]
+        group = normalize_group_name(str(group_filter or ""))
+        source_family = ""
+        if observations:
+            first = observations[0]
+            source_family = str(getattr(first, "source_family", "") or "").strip().lower()
+            if not group:
+                group = normalize_group_name(getattr(first, "to_target", "") or "")
+        topic = topics[0] if topics else ""
+        if not (group or topic or source_family):
+            return {}
+        return {
+            "group_filter": group,
+            "topic_filter": topic,
+            "source_family": source_family,
+            "search_query": " ".join(part for part in (group, topic) if part),
+        }
+
+    def _open_operational_activity_map(self) -> None:
+        context = dict(getattr(self, "_operational_activity_context", {}) or {})
+        if not context:
+            return
+        host = self.window()
+        group_filter = str(context.get("group_filter") or "")
+        topic_filter = str(context.get("topic_filter") or "")
+        source_family = str(context.get("source_family") or "").lower()
+        if source_family == "local_report" and hasattr(host, "open_local_reports_map"):
+            host.open_local_reports_map(group_filter=group_filter, topic_filter=topic_filter)
+        elif hasattr(host, "open_spotter_map"):
+            host.open_spotter_map(group_filter=group_filter, topic_filter=topic_filter)
+
+    def _open_operational_activity_messages(self) -> None:
+        context = dict(getattr(self, "_operational_activity_context", {}) or {})
+        host = self.window()
+        if hasattr(host, "open_messages_section"):
+            host.open_messages_section(
+                "inbox",
+                group_filter=str(context.get("group_filter") or ""),
+                topic_filter=str(context.get("topic_filter") or ""),
+                source_family=str(context.get("source_family") or ""),
+            )
 
     def _format_operational_activity_headline(self, snapshot: object, search: str = "") -> str:
         latest = tuple(getattr(snapshot, "latest", ()) or ())

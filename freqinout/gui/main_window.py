@@ -299,6 +299,7 @@ class MainWindow(QMainWindow):
         self._settings_nav_context = "main"
         self._settings_nav_button_indices: dict[str, int] = {}
         self._messages_nav_context = "inbox"
+        self._messages_nav_filter_context: dict[str, str] = {}
         self._messages_nav_button_indices: dict[str, int] = {}
         # Sidebar button order/text requested by user.
         self._nav_specs = [
@@ -3325,12 +3326,24 @@ class MainWindow(QMainWindow):
                 return ident
         return None
 
-    def open_messages_section(self, mode: str = "inbox") -> None:
+    def open_messages_section(
+        self,
+        mode: str = "inbox",
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        source_family: str = "",
+    ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
         if idx < 0:
             return
         mode_key = str(mode or "inbox").strip().lower()
         self._messages_nav_context = "compose" if mode_key == "compose" else "inbox"
+        self._messages_nav_filter_context = {
+            "group_filter": str(group_filter or ""),
+            "topic_filter": str(topic_filter or ""),
+            "source_family": str(source_family or ""),
+        }
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
@@ -3353,13 +3366,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def open_local_reports_map(self) -> None:
+    def open_local_reports_map(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
         tab = getattr(self, "stations_map_tab", None)
         if tab is not None and hasattr(tab, "focus_local_reports"):
-            QTimer.singleShot(0, tab.focus_local_reports)
+            QTimer.singleShot(
+                0,
+                lambda: tab.focus_local_reports(group_filter=group_filter, topic_filter=topic_filter),
+            )
             QTimer.singleShot(0, self._sync_map_filters_from_tab)
         self._set_screen(idx)
         try:
@@ -3391,6 +3407,12 @@ class MainWindow(QMainWindow):
         try:
             if mode == "compose" and hasattr(tab, "show_compose_from_navigation"):
                 tab.show_compose_from_navigation()
+            elif hasattr(tab, "show_inbox_with_context"):
+                context = dict(getattr(self, "_messages_nav_filter_context", {}) or {})
+                if any(str(value or "").strip() for value in context.values()):
+                    tab.show_inbox_with_context(**context)
+                elif hasattr(tab, "show_inbox_from_navigation"):
+                    tab.show_inbox_from_navigation()
             elif hasattr(tab, "show_inbox_from_navigation"):
                 tab.show_inbox_from_navigation()
         except Exception:

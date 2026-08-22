@@ -379,7 +379,9 @@ The center-of-gravity loop is:
     when rules are supplied. Done.
 12. Wire live CommStat and VarAC paths to condition-alert observations. Done.
 13. Add ControlFreq Operational Activity snapshot helper. Done.
-14. Add ControlFreq compact activity/alert panel. Done.
+14. Add ControlFreq compact activity/alert panel. Done. The panel now keeps a
+    compact group/topic/source context for the latest actionable traffic and
+    provides one-click handoff buttons to Messages and Map using that context.
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure,
     condition-alert pins, a dedicated RF Pins map focus, and a shared Topic

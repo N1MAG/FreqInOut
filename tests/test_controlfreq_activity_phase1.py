@@ -386,6 +386,9 @@ def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
         tab._refresh_activity()
         headline = tab.operational_activity_label.text()
         topics = tab.operational_topics_label.text()
+        context = dict(tab._operational_activity_context)
+        messages_enabled = tab.operational_messages_btn.isEnabled()
+        map_enabled = tab.operational_map_btn.isEnabled()
     finally:
         tab.deleteLater()
 
@@ -394,6 +397,10 @@ def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
     assert "K7ETC -> MR08" in headline
     assert "Fire" in topics
     assert "Logistics" in topics
+    assert context["group_filter"] == "MR08"
+    assert context["topic_filter"] == "Fire"
+    assert messages_enabled is True
+    assert map_enabled is True
 
 
 def test_activity_panel_summarizes_rf_pin_observations(monkeypatch, tmp_path):
@@ -436,3 +443,18 @@ def test_activity_panel_summarizes_rf_pin_observations(monkeypatch, tmp_path):
     assert "RF Pin: Relay check" in headline
     assert "MAGNET" in headline
     assert "Comms" in topics
+
+
+def test_controlfreq_activity_context_navigation_hooks_are_present():
+    controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text()
+    main_window_source = Path("freqinout/gui/main_window.py").read_text()
+    message_viewer_source = Path("freqinout/gui/message_viewer_tab.py").read_text()
+
+    assert "_open_operational_activity_messages" in controlfreq_source
+    assert "_open_operational_activity_map" in controlfreq_source
+    assert "open_spotter_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
+    assert "open_local_reports_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
+    assert "group_filter=str(context.get(\"group_filter\") or \"\")" in controlfreq_source
+    assert "def open_local_reports_map(self, *, group_filter: str = \"\", topic_filter: str = \"\")" in main_window_source
+    assert "_messages_nav_filter_context" in main_window_source
+    assert "def show_inbox_with_context" in message_viewer_source
