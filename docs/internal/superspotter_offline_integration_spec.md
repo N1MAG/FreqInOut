@@ -294,7 +294,9 @@ The FIO map should become the spatial counterpart to Messages:
 - topic layer chips using the same taxonomy as Messages
 - source chips for Spotter, CommStat, FLMsg/FLAmp, JS8Call, VarAC, Local
 - a compact topic filter that narrows HF reports, local reports, condition
-  alerts, and RF pins through the shared message-intelligence vocabulary
+  alerts, and RF pins through the shared message-intelligence vocabulary:
+  Weather, Fire, Medical, Power, Water, Fuel, Food, Travel/Roads, Comms,
+  Security, Shelter, Logistics, Infrastructure, and General Intel
 - visual distinction between report markers, station activity, map pins,
   MCForm halos, CommStat rings, and roster operators
 - "latest" windows such as 30m, 2h, 24h, 72h
@@ -381,8 +383,10 @@ The center-of-gravity loop is:
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure,
     condition-alert pins, a dedicated RF Pins map focus, and a shared Topic
-    filter for observation-backed report layers. Messages can hand off selected
-    HF report group/topic context to the Map focus. Core RF pin projection, map
+    filter for observation-backed report layers. The Map topic selector now
+    uses the shared message-intelligence taxonomy instead of a separate RF pin
+    topic list. Messages can hand off selected HF report group/topic context to
+    the Map focus. Core RF pin projection, map
     styling, save/list/delete helpers, and Map-side manual pin
     creation/edit/delete management are done for receive/manual review records;
     send-capable workflows remain open.

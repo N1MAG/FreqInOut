@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
-from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.message_intelligence import TOPIC_TAXONOMY, analyze_spotter_text
 from freqinout.core.observation_projection import (
     Observation,
     observation_from_local_report,
@@ -258,6 +258,18 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
             "confirmed_state": "CONFIRMED",
         }
     )
+    food_local = observation_from_local_report(
+        {
+            "id": 3,
+            "created_utc": "2026-08-10T14:30:00+00:00",
+            "callsign": "K0FOOD",
+            "state": "CO",
+            "grid": "DM79",
+            "topics": ("Food",),
+            "subject": "Food distribution available",
+            "confirmed_state": "CONFIRMED",
+        }
+    )
     unconfirmed_local = observation_from_local_report(
         {
             "id": 2,
@@ -301,7 +313,7 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
             "created_utc": "2026-08-10T16:30:00+00:00",
         }
     )
-    for obs in (spotter, confirmed_local, unconfirmed_local, condition_alert, rf_pin):
+    for obs in (spotter, confirmed_local, food_local, unconfirmed_local, condition_alert, rf_pin):
         upsert_observation(db_path, obs)
 
     alert_rows = StationsMapTab._load_observation_operational_reports(
@@ -319,7 +331,7 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
     assert alert_rows[0]["source_family"] == "condition_alert"
     assert alert_rows[0]["source_label"] == "Condition Alert"
     assert alert_rows[0]["icon"] == "warning"
-    assert [row["callsign"] for row in infrastructure_rows] == ["N1MAG", "K0PRA"]
+    assert [row["callsign"] for row in infrastructure_rows] == ["N1MAG", "K0PRA", "K0FOOD"]
     assert infrastructure_rows[0]["source_family"] == "rf_pin"
     assert infrastructure_rows[0]["source_label"] == "RF Pin"
     assert all(row["callsign"] != "N0PWR" for row in alert_rows + infrastructure_rows)
@@ -354,7 +366,7 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
     )
 
     assert local_alert_rows == []
-    assert [row["callsign"] for row in local_infrastructure_rows] == ["K0PRA"]
+    assert [row["callsign"] for row in local_infrastructure_rows] == ["K0PRA", "K0FOOD"]
     assert all(row["callsign"] != "N0PWR" for row in local_alert_rows + local_infrastructure_rows)
 
     tab._query_cache = {}
@@ -386,6 +398,15 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
         max_age_sec=0,
     )
     assert [row["callsign"] for row in fire_alert_rows] == ["K7ETC"]
+
+    tab._query_cache = {}
+    tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Food")
+    food_infrastructure_rows = StationsMapTab._load_observation_operational_reports(
+        tab,
+        layer_name="infrastructure",
+        max_age_sec=0,
+    )
+    assert [row["callsign"] for row in food_infrastructure_rows] == ["K0FOOD"]
 
 
 def test_map_operational_events_can_place_grid_only_observations() -> None:
@@ -524,3 +545,12 @@ def test_map_html_legend_and_operational_markers_distinguish_report_sources() ->
     assert "op-source-pin" in source
     assert "op-source-mixed" in source
     assert "event.source_kind" in source
+
+
+def test_map_topic_controls_use_message_intelligence_taxonomy() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "RF_PIN_TOPICS = TOPIC_TAXONOMY" in source
+    assert "Food" in TOPIC_TAXONOMY
+    assert "Security" in TOPIC_TAXONOMY
+    assert "Logistics" in TOPIC_TAXONOMY

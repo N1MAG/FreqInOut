@@ -75,6 +75,7 @@ from freqinout.core.operator_activity import (
 )
 from freqinout.core.observation_queries import ObservationQuery, map_observation_rows
 from freqinout.core.rf_pins import delete_rf_pins, list_rf_pins, save_rf_pin
+from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
@@ -162,18 +163,10 @@ PROP_DEFAULT_PROFILES = {
     "10M": {"ideal_km": 4200, "spread_km": 3600, "day": 0.8, "night": 0.2},
 }
 
-RF_PIN_TOPICS = (
-    "General Intel",
-    "Comms",
-    "Infrastructure",
-    "Power",
-    "Water",
-    "Fuel",
-    "Travel/Roads",
-    "Fire",
-    "Weather",
-    "Shelter",
-    "Medical",
+RF_PIN_TOPICS = TOPIC_TAXONOMY
+ALERT_MAP_TOPICS = frozenset({"Fire", "Weather", "Shelter", "Medical", "Security", "General Intel"})
+INFRASTRUCTURE_MAP_TOPICS = frozenset(
+    {"Infrastructure", "Power", "Water", "Comms", "Fuel", "Food", "Travel/Roads", "Logistics"}
 )
 
 
@@ -4910,16 +4903,14 @@ class StationsMapTab(QWidget):
                 icon, severity = "warning", "caution"
             elif layer_name == "alert":
                 include = bool(
-                    topics.intersection({"Fire", "Weather", "Shelter", "Medical", "General Intel"})
+                    topics.intersection(ALERT_MAP_TOPICS)
                     or str(obs.status or "").strip().upper() in {"WATCH", "PRIORITY", "EMERGENCY", "RED", "YELLOW"}
                 )
                 classifier = self._classify_alert_text
                 text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
                 icon, severity = classifier(text)
             else:
-                include = bool(
-                    topics.intersection({"Infrastructure", "Power", "Water", "Comms", "Fuel", "Travel/Roads"})
-                )
+                include = bool(topics.intersection(INFRASTRUCTURE_MAP_TOPICS))
                 classifier = self._classify_infrastructure_text
                 text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
                 icon, severity = classifier(text)
