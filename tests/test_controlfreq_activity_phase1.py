@@ -393,6 +393,7 @@ def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
     assert "Widemouth 2 Fire" in headline
     assert "K7ETC -> MR08" in headline
     assert "Fire" in topics
+    assert "Logistics" in topics
 
 
 def test_activity_panel_summarizes_rf_pin_observations(monkeypatch, tmp_path):
