@@ -19259,7 +19259,6 @@ class SettingsTab(QWidget):
         guided_next_action_font.setBold(True)
         guided_next_action_label.setFont(guided_next_action_font)
         guided_next_action_label.setVisible(False)
-        app_setup_plan_layout.addWidget(guided_next_action_label)
         guided_step_widgets: Dict[str, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
         guided_step_stack = QWidget()
         guided_step_stack_layout = QGridLayout(guided_step_stack)
@@ -20814,6 +20813,7 @@ class SettingsTab(QWidget):
                     setup_started=setup_started,
                 )
             )
+            guided_next_action_label.setVisible(False)
             _update_guided_step_widgets(
                 blueprint,
                 plan,

@@ -1742,6 +1742,7 @@ def test_guided_setup_status_strip_is_compact_chip_style() -> None:
     assert "step_frame.setMaximumHeight(32)" in dialog_block
     assert "detail_label.setVisible(False)" in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Setup Status")' in dialog_block
+    assert "app_setup_plan_layout.addWidget(guided_next_action_label)" not in dialog_block
 
 
 def test_settings_preferences_expose_radio_apps_base_folder() -> None:
