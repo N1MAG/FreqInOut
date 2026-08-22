@@ -1889,7 +1889,8 @@ def test_guided_review_computes_app_config_before_file_summary() -> None:
     )
 
 
-def test_guided_schedule_path_change_refreshes_rf_guard_preview() -> None:
+def test_guided_schedule_path_change_refreshes_visibility_and_rf_guard_preview() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
 
-    assert "schedule_path_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())" in source
+    assert "def _on_guided_schedule_path_changed() -> None:" in source
+    assert "schedule_path_combo.currentIndexChanged.connect(lambda _index: _on_guided_schedule_path_changed())" in source

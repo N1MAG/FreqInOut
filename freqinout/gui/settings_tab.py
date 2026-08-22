@@ -21945,6 +21945,9 @@ class SettingsTab(QWidget):
             _update_guided_save_review()
             _update_dialog_readiness()
 
+        def _on_guided_schedule_path_changed() -> None:
+            _update_dialog_visibility()
+
         setup_type_combo.currentIndexChanged.connect(lambda _index: _apply_setup_type_choice())
         for step_id, btn in guided_wizard_buttons.items():
             btn.clicked.connect(lambda _checked=False, sid=step_id: _set_guided_wizard_step(sid))
@@ -21961,7 +21964,7 @@ class SettingsTab(QWidget):
         use_external_js8spotter_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_commstat_chk.stateChanged.connect(lambda _state: _mark_custom_mix_from_software_edit())
         use_varac_chk.stateChanged.connect(_on_varac_state_changed)
-        schedule_path_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())
+        schedule_path_combo.currentIndexChanged.connect(lambda _index: _on_guided_schedule_path_changed())
         schedule_plan_combo.currentIndexChanged.connect(lambda _index: _refresh_guided_schedule_guard_review())
         for checkbox in band_checks.values():
             checkbox.stateChanged.connect(lambda _state: _refresh_guided_schedule_guard_review())
