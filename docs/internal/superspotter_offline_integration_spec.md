@@ -230,8 +230,8 @@ Implementation status:
 - Background audited/applied notifications are queued back onto the controller
   thread before UI refresh work is signaled.
 - Applied and audited outcomes refresh SOP/scheduler projections and Station
-  Health through the condition-level update handler. Undo/revert handling
-  remains open.
+  Health through the condition-level update handler. SOP Builder exposes review
+  and revert for the latest reversible applied automation row.
 
 ### FastLight Filename Rules
 
@@ -364,7 +364,7 @@ The center-of-gravity loop is:
 4. Add condition-alert rule data model and parser service with tests. Done.
 5. Seed disabled MagNet MAGCON template rule. Done.
 6. Project matched condition alerts into observations. Core projection done;
-   automatic ingest storage remains open.
+   live/backfill storage wiring is covered by the later completed ingest slices.
 7. Add condition-alert settings serialization and built-in merge tests. Done.
 8. Add condition-alert ingestion matcher that converts eligible message
    intelligence into pending observations without blocking ingestion. Done.
