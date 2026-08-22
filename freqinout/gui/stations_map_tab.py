@@ -38,6 +38,9 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QToolButton,
     QStyle,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
 )
 from freqinout.core.config_paths import get_config_dir
 
@@ -71,7 +74,7 @@ from freqinout.core.operator_activity import (
     load_operator_activity_summary,
 )
 from freqinout.core.observation_queries import ObservationQuery, map_observation_rows
-from freqinout.core.rf_pins import save_rf_pin
+from freqinout.core.rf_pins import delete_rf_pins, list_rf_pins, save_rf_pin
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
@@ -232,6 +235,108 @@ class _RfPinDialog(QDialog):
             "pin_kind": "operator",
         }
         return payload
+
+
+class _RfPinManagerDialog(QDialog):
+    COL_LABEL = 0
+    COL_GROUP = 1
+    COL_TOPIC = 2
+    COL_AREA = 3
+    COL_SUMMARY = 4
+
+    def __init__(self, db_path: Path, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage RF Pins")
+        self._db_path = Path(db_path)
+        self._deleted = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        self.table = QTableWidget(0, 5, self)
+        self.table.setHorizontalHeaderLabels(["Pin", "Group", "Topic", "Area", "Summary"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(self.COL_LABEL, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_GROUP, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_TOPIC, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_AREA, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_SUMMARY, QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        actions = QHBoxLayout()
+        self.delete_button = QPushButton("Delete Selected", self)
+        self.close_button = QPushButton("Close", self)
+        self.delete_button.clicked.connect(self._delete_selected)
+        self.close_button.clicked.connect(self.accept)
+        actions.addStretch(1)
+        actions.addWidget(self.delete_button)
+        actions.addWidget(self.close_button)
+        layout.addLayout(actions)
+        self._load_rows()
+
+    @property
+    def deleted(self) -> bool:
+        return self._deleted
+
+    def _load_rows(self) -> None:
+        try:
+            pins = list_rf_pins(self._db_path, limit=500)
+        except Exception as exc:
+            log.warning("StationsMap: failed to list RF pins: %s", exc, exc_info=True)
+            pins = ()
+        self.table.setRowCount(0)
+        for pin in pins:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            topic = ", ".join(str(t).strip() for t in pin.observed_topics if str(t).strip())
+            area = " / ".join(part for part in (pin.state, pin.grid) if str(part).strip())
+            values = [
+                pin.subject or "RF Pin",
+                pin.to_target,
+                topic,
+                area,
+                pin.summary,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if col == self.COL_LABEL:
+                    item.setData(Qt.UserRole, pin.source_ref)
+                self.table.setItem(row, col, item)
+        self.delete_button.setEnabled(self.table.rowCount() > 0)
+
+    def _selected_source_refs(self) -> List[str]:
+        refs: List[str] = []
+        for index in self.table.selectionModel().selectedRows():
+            item = self.table.item(index.row(), self.COL_LABEL)
+            source_ref = str(item.data(Qt.UserRole) if item is not None else "").strip()
+            if source_ref:
+                refs.append(source_ref)
+        return refs
+
+    def _delete_selected(self) -> None:
+        refs = self._selected_source_refs()
+        if not refs:
+            QMessageBox.information(self, "Manage RF Pins", "Select one or more RF pins to delete.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete RF Pins",
+            f"Delete {len(refs)} selected RF pin(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            delete_rf_pins(self._db_path, refs)
+        except Exception as exc:
+            log.warning("StationsMap: failed to delete RF pins: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "Delete RF Pins", f"FIO could not delete the selected RF pin(s).\n{exc}")
+            return
+        self._deleted = True
+        self._load_rows()
 
 US_STATE_NAMES = {
     "AL": "ALABAMA",
@@ -571,6 +676,7 @@ class StationsMapTab(QWidget):
         self._map_reports_button: Optional[QPushButton] = None
         self._map_rf_pins_button: Optional[QPushButton] = None
         self._map_add_rf_pin_button: Optional[QPushButton] = None
+        self._map_manage_rf_pins_button: Optional[QPushButton] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
         self.operator_rows: List[Dict] = []
@@ -1562,6 +1668,8 @@ class StationsMapTab(QWidget):
             self._refresh_links_button.setStyleSheet(button_style("primary", theme))
         if self._map_add_rf_pin_button is not None:
             self._map_add_rf_pin_button.setStyleSheet(button_style("secondary", theme))
+        if self._map_manage_rf_pins_button is not None:
+            self._map_manage_rf_pins_button.setStyleSheet(button_style("secondary", theme))
         self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
         self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep", theme=theme)
         self._update_map_mode_buttons(theme=theme)
@@ -1878,6 +1986,9 @@ class StationsMapTab(QWidget):
             "Add an operator-curated RF observation to the map using a grid, topic, and short note."
         )
         self._map_add_rf_pin_button.clicked.connect(self._on_add_rf_pin_clicked)
+        self._map_manage_rf_pins_button = QPushButton("Manage Pins")
+        self._map_manage_rf_pins_button.setToolTip("Review or delete saved RF pins.")
+        self._map_manage_rf_pins_button.clicked.connect(self._on_manage_rf_pins_clicked)
         for button in (
             self._refresh_links_button,
             self._map_all_stations_button,
@@ -1889,6 +2000,7 @@ class StationsMapTab(QWidget):
             self._sitrep_status_button,
             self._paths_help_button,
             self._map_add_rf_pin_button,
+            self._map_manage_rf_pins_button,
         ):
             try:
                 button.setMinimumWidth(button.sizeHint().width() + 6)
@@ -1956,6 +2068,7 @@ class StationsMapTab(QWidget):
         pins_layout.setContentsMargins(0, 0, 0, 0)
         pins_layout.setSpacing(8)
         pins_layout.addWidget(self._map_add_rf_pin_button, 0)
+        pins_layout.addWidget(self._map_manage_rf_pins_button, 0)
         pins_layout.addStretch(1)
         filter_grid.addWidget(QLabel("Intelligence"), 4, 0)
         filter_grid.addWidget(layer_toggle_row, 4, 1, 1, 5)
@@ -3209,6 +3322,22 @@ class StationsMapTab(QWidget):
         status = getattr(self, "_map_view_status_label", None)
         if status is not None:
             status.setText(f"RF Pin saved: {label}")
+
+    def _on_manage_rf_pins_clicked(self) -> None:
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as exc:
+            QMessageBox.warning(self, "Manage RF Pins", f"FIO could not open RF pin storage.\n{exc}")
+            return
+        dialog = _RfPinManagerDialog(db_path, self)
+        dialog.exec()
+        if not dialog.deleted:
+            return
+        try:
+            self._map_query_cache.clear()
+        except Exception:
+            pass
+        self._request_map_refresh(level="medium", reason="rf_pin_deleted")
 
     def _include_legacy_spotter_report_layers(self) -> bool:
         """Return False when Local Reports should exclude HF Spotter-only report layers."""
