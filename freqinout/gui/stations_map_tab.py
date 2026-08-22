@@ -19,12 +19,17 @@ import queue
 from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication, QSize
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QCheckBox,
     QComboBox,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QFrame,
     QGridLayout,
@@ -66,6 +71,7 @@ from freqinout.core.operator_activity import (
     load_operator_activity_summary,
 )
 from freqinout.core.observation_queries import ObservationQuery, map_observation_rows
+from freqinout.core.rf_pins import save_rf_pin
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
@@ -152,6 +158,80 @@ PROP_DEFAULT_PROFILES = {
     "15M": {"ideal_km": 3600, "spread_km": 3000, "day": 0.9, "night": 0.35},
     "10M": {"ideal_km": 4200, "spread_km": 3600, "day": 0.8, "night": 0.2},
 }
+
+RF_PIN_TOPICS = (
+    "General Intel",
+    "Comms",
+    "Infrastructure",
+    "Power",
+    "Water",
+    "Fuel",
+    "Travel/Roads",
+    "Fire",
+    "Weather",
+    "Shelter",
+    "Medical",
+)
+
+
+class _RfPinDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add RF Pin")
+        self.title_edit = QLineEdit(self)
+        self.title_edit.setPlaceholderText("Short label shown in map details")
+        self.group_edit = QLineEdit(self)
+        self.group_edit.setPlaceholderText("Operating group or target, optional")
+        self.grid_edit = QLineEdit(self)
+        self.grid_edit.setPlaceholderText("Grid square, e.g. DM79QJ")
+        self.state_edit = QLineEdit(self)
+        self.state_edit.setPlaceholderText("State/province, optional")
+        self.topic_combo = QComboBox(self)
+        self.topic_combo.addItems(list(RF_PIN_TOPICS))
+        self.summary_edit = QLineEdit(self)
+        self.summary_edit.setPlaceholderText("Brief note, optional")
+
+        form = QFormLayout(self)
+        form.setContentsMargins(18, 18, 18, 18)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.addRow("Pin Name", self.title_edit)
+        form.addRow("Group", self.group_edit)
+        form.addRow("Grid", self.grid_edit)
+        form.addRow("State", self.state_edit)
+        form.addRow("Topic", self.topic_combo)
+        form.addRow("Summary", self.summary_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def pin_payload(self) -> Dict[str, Any]:
+        label = self.title_edit.text().strip()
+        group = self.group_edit.text().strip().lstrip("@")
+        grid = self.grid_edit.text().strip().upper()
+        state = self.state_edit.text().strip().upper()
+        topic = self.topic_combo.currentText().strip()
+        summary = self.summary_edit.text().strip()
+        created_utc = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        ref_seed = label or grid or state or "pin"
+        payload: Dict[str, Any] = {
+            "raw_reference": f"rf_pin:{int(time.time() * 1000)}:{ref_seed}",
+            "label": label or summary or "RF Pin",
+            "group": group,
+            "groups": [group] if group else [],
+            "to_target": group,
+            "grid": grid,
+            "state": state,
+            "topics": [topic] if topic else [],
+            "summary": summary or label or "RF map pin",
+            "source_app": "FIO",
+            "created_utc": created_utc,
+            "event_utc": created_utc,
+            "status": "PIN",
+            "pin_kind": "operator",
+        }
+        return payload
 
 US_STATE_NAMES = {
     "AL": "ALABAMA",
@@ -489,6 +569,7 @@ class StationsMapTab(QWidget):
         self._map_hf_reports_button: Optional[QPushButton] = None
         self._map_local_reports_button: Optional[QPushButton] = None
         self._map_reports_button: Optional[QPushButton] = None
+        self._map_add_rf_pin_button: Optional[QPushButton] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
         self.operator_rows: List[Dict] = []
@@ -1478,6 +1559,8 @@ class StationsMapTab(QWidget):
             self._paths_help_button.setStyleSheet(button_style("secondary", theme))
         if self._refresh_links_button is not None:
             self._refresh_links_button.setStyleSheet(button_style("primary", theme))
+        if self._map_add_rf_pin_button is not None:
+            self._map_add_rf_pin_button.setStyleSheet(button_style("secondary", theme))
         self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
         self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep", theme=theme)
         self._update_map_mode_buttons(theme=theme)
@@ -1786,6 +1869,11 @@ class StationsMapTab(QWidget):
         self._paths_help_button = QPushButton("Paths Help")
         self._paths_help_button.setToolTip("Open focused help for Paths, Paths To, and Peer Sched Now.")
         self._paths_help_button.clicked.connect(lambda: self._open_context_help("map.paths"))
+        self._map_add_rf_pin_button = QPushButton("Add RF Pin")
+        self._map_add_rf_pin_button.setToolTip(
+            "Add an operator-curated RF observation to the map using a grid, topic, and short note."
+        )
+        self._map_add_rf_pin_button.clicked.connect(self._on_add_rf_pin_clicked)
         for button in (
             self._refresh_links_button,
             self._map_all_stations_button,
@@ -1795,6 +1883,7 @@ class StationsMapTab(QWidget):
             self._now_reachable_button,
             self._sitrep_status_button,
             self._paths_help_button,
+            self._map_add_rf_pin_button,
         ):
             try:
                 button.setMinimumWidth(button.sizeHint().width() + 6)
@@ -1856,10 +1945,18 @@ class StationsMapTab(QWidget):
         layer_toggle_layout.addWidget(self.map_alerts_chk, 0)
         layer_toggle_layout.addWidget(self.map_infrastructure_chk, 0)
         layer_toggle_layout.addStretch(1)
+        pins_row = QWidget(filter_bar)
+        pins_layout = QHBoxLayout(pins_row)
+        pins_layout.setContentsMargins(0, 0, 0, 0)
+        pins_layout.setSpacing(8)
+        pins_layout.addWidget(self._map_add_rf_pin_button, 0)
+        pins_layout.addStretch(1)
         filter_grid.addWidget(QLabel("Intelligence"), 4, 0)
         filter_grid.addWidget(layer_toggle_row, 4, 1, 1, 5)
-        filter_grid.addWidget(self._map_view_status_label, 5, 0, 1, 6, alignment=Qt.AlignLeft)
-        filter_grid.addWidget(self._now_reachable_label, 6, 0, 1, 6, alignment=Qt.AlignLeft)
+        filter_grid.addWidget(QLabel("RF Pins"), 5, 0)
+        filter_grid.addWidget(pins_row, 5, 1, 1, 5)
+        filter_grid.addWidget(self._map_view_status_label, 6, 0, 1, 6, alignment=Qt.AlignLeft)
+        filter_grid.addWidget(self._now_reachable_label, 7, 0, 1, 6, alignment=Qt.AlignLeft)
         filter_grid.setColumnStretch(6, 1)
         map_layout.addWidget(filter_bar)
 
@@ -3058,6 +3155,45 @@ class StationsMapTab(QWidget):
     def focus_spotter_reports(self) -> None:
         """Compatibility alias for the previous Spotter map action."""
         self.focus_hf_reports()
+
+    def _on_add_rf_pin_clicked(self) -> None:
+        dialog = _RfPinDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        payload = dialog.pin_payload()
+        if not payload.get("grid") and not payload.get("state"):
+            QMessageBox.warning(
+                self,
+                "Add RF Pin",
+                "Add a grid square or state/province so FIO can place the RF pin in context.",
+            )
+            return
+        if not payload.get("grid"):
+            QMessageBox.warning(
+                self,
+                "Add RF Pin",
+                "A state-only pin can be saved later when rollup markers are supported. Add a grid square for this map pin.",
+            )
+            return
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            save_rf_pin(db_path, payload)
+        except Exception as exc:
+            log.warning("StationsMap: failed to save RF pin: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "Add RF Pin", f"FIO could not save this RF pin.\n{exc}")
+            return
+        try:
+            self._map_query_cache.clear()
+        except Exception:
+            pass
+        if not bool(getattr(self, "_observation_focus_enabled", False)):
+            self._set_report_focus_mode("all_reports")
+        else:
+            self._request_map_refresh(level="medium", reason="rf_pin_saved")
+        label = str(payload.get("label") or "RF Pin")
+        status = getattr(self, "_map_view_status_label", None)
+        if status is not None:
+            status.setText(f"RF Pin saved: {label}")
 
     def _include_legacy_spotter_report_layers(self) -> bool:
         """Return False when Local Reports should exclude HF Spotter-only report layers."""

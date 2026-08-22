@@ -378,9 +378,9 @@ The center-of-gravity loop is:
 14. Add ControlFreq compact activity/alert panel. Done.
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure, and
-    condition-alert pins. Core RF pin projection and map styling are done for
-    receive/manual review records, including save/list/delete helpers over the
-    observation store; pin creation/editing UI and send-capable workflows remain
+    condition-alert pins. Core RF pin projection, map styling, save/list/delete
+    helpers, and Map-side manual pin creation are done for receive/manual review
+    records; pin editing/deletion management and send-capable workflows remain
     open.
 16. Add SOP Builder Traffic Suggestions and condition apply workflow. Core
     condition-alert-to-SOP decision helpers done, including batch evaluation
