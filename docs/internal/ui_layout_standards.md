@@ -24,6 +24,12 @@ Required behavior:
   with scrollable category content instead of long horizontal button rows.
 - Settings-style views should keep the left rail bounded and scrollable, with the
   selected content pane owning the remaining width.
+- Settings must always provide a clear path to create custom user-defined
+  operating groups. `Settings > Main > HF Operating Groups` and the local group
+  views may offer built-in or imported group presets, but those presets must not
+  replace the user's ability to add a new custom group name and associated
+  frequency/local configuration. Potential bug to verify: adding a new group
+  under `Settings > Main` is currently not working.
 
 Acceptance check for future UI slices:
 

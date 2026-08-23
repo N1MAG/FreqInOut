@@ -28,6 +28,7 @@ def ingest_js8_messages_for_runtime_sources(
     inventory: IngestSourceInventory | None = None,
     profiles: Sequence[Mapping[str, Any]] | None = None,
     evaluate_expect: bool = False,
+    force_rebuild: bool = False,
 ) -> JS8RuntimeMessageIngestResult:
     """
     Warm the local JS8/Spotter message cache from runtime JS8Call sources.
@@ -41,7 +42,10 @@ def ingest_js8_messages_for_runtime_sources(
     if not js8_instances:
         ingestor = MessageIngestor(settings)
         ingestor.ingest_js8_messages()
-        inserted = ingestor.ingest_spotter_from_directed(evaluate_expect=evaluate_expect)
+        inserted = ingestor.ingest_spotter_from_directed(
+            evaluate_expect=evaluate_expect,
+            force_rebuild=force_rebuild,
+        )
         return JS8RuntimeMessageIngestResult(
             used_runtime_sources=False,
             js8_inbox_sources=1,
@@ -98,6 +102,7 @@ def ingest_js8_messages_for_runtime_sources(
                 source_key=directed_source.source_id,
                 offset_key=f"spotter_directed_offset_{directed_source.source_id}",
                 evaluate_expect=evaluate_expect,
+                force_rebuild=force_rebuild,
             )
             spotter_count += 1
             spotter_inserted += int(inserted or 0)

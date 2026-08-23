@@ -3332,6 +3332,7 @@ class MainWindow(QMainWindow):
         *,
         group_filter: str = "",
         topic_filter: str = "",
+        query_filter: str = "",
         source_family: str = "",
     ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
@@ -3342,6 +3343,7 @@ class MainWindow(QMainWindow):
         self._messages_nav_filter_context = {
             "group_filter": str(group_filter or ""),
             "topic_filter": str(topic_filter or ""),
+            "query_filter": str(query_filter or ""),
             "source_family": str(source_family or ""),
         }
         self._set_screen(idx)

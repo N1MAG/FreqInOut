@@ -298,6 +298,9 @@ from freqinout.core.varac_bbs_vault import (
 )
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
+from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
+from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
+from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import (
     resolve_theme,
@@ -28009,42 +28012,67 @@ class SettingsTab(QWidget):
         This is intentionally a full reload, not incremental.
         """
         self._refresh_operator_history_views()
-        directed_path = self.js8_directed_edit.text().strip()
-        if not directed_path:
-            QMessageBox.warning(self, "Missing path", "Please set JS8Call DIRECTED.TXT path first.")
-            return
-        path = Path(directed_path)
-        if not path.exists():
-            QMessageBox.warning(self, "File not found", f"DIRECTED.TXT not found at:\n{path}")
-            return
-        from freqinout.core.config_paths import get_config_dir
-
         db_path = get_config_dir() / "config" / "freqinout_nets.db"
         self._set_js8_load_busy(True, "Rebuilding JS8 traffic from logs...")
         self._set_loading(True, "Loading JS8 traffic...")
         try:
-            self._set_js8_load_busy(True, "Preparing JS8 traffic rebuild...")
-            indexer = JS8LogLinkIndexer(self.settings, db_path)
-            indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
-            self._maybe_backfill_js8_geo()
-            # Force a true full reload so swapped/replaced logs are fully re-read.
-            self.settings.set_many(
-                {
-                    "js8_links_directed_offset": 0,
-                    "js8_links_all_offset": 0,
-                    "js8_links_last_load_utc": 0,
-                }
+            runtime_inventory = active_runtime_ingest_inventory()
+            runtime_sources = tuple(
+                source
+                for source in runtime_inventory.sources_for_family("js8call")
+                if str(getattr(source, "source_type", "") or "").strip().lower() == "file"
+                and str((getattr(source, "metadata", {}) or {}).get("role", "") or "").strip().lower() == "directed"
             )
-            self._set_js8_load_busy(True, "Clearing prior JS8 traffic rows...")
-            conn = sqlite3.connect(db_path)
-            try:
-                indexer._ensure_table(conn)
-                indexer._clear_table(conn)
-            finally:
-                conn.close()
+            legacy_path_text = self.js8_directed_edit.text().strip() if hasattr(self, "js8_directed_edit") else ""
+            legacy_path = Path(legacy_path_text).expanduser() if legacy_path_text else None
+            if not runtime_sources:
+                if legacy_path is None:
+                    QMessageBox.warning(self, "Missing path", "Please set a JS8Call DIRECTED.TXT path first.")
+                    return
+                if not legacy_path.exists():
+                    QMessageBox.warning(self, "File not found", f"DIRECTED.TXT not found at:\n{legacy_path}")
+                    return
+            self._set_js8_load_busy(True, "Preparing JS8 traffic rebuild...")
+            self._maybe_backfill_js8_geo()
             self._set_js8_load_busy(True, "Scanning JS8 logs (this may take a while)...")
-            count = int(indexer.update(since_ts=0) or 0)
-            latest_ts = float(indexer._ensure_latest_ts(last_default=0.0) or 0.0)
+            if runtime_sources:
+                link_result = ingest_js8_links_for_runtime_sources(
+                    self.settings,
+                    db_path,
+                    inventory=runtime_inventory,
+                    force_rebuild=True,
+                )
+                message_result = ingest_js8_messages_for_runtime_sources(
+                    self.settings,
+                    inventory=runtime_inventory,
+                    evaluate_expect=False,
+                    force_rebuild=True,
+                )
+                count = int(link_result.inserted or 0)
+                latest_ts = float(link_result.latest_ts or 0.0)
+                source_labels = [
+                    str(source.label or source.source_id or "JS8Call").strip()
+                    for source in runtime_sources
+                ]
+                source_text = ", ".join(source_labels[:4])
+                if len(source_labels) > 4:
+                    source_text += f", +{len(source_labels) - 4} more"
+                detail_text = (
+                    f"Runtime JS8 sources: {source_text or 'configured radios'}.\n"
+                    f"Link rows rebuilt: {count}.\n"
+                    f"Spotter/MCF rows imported: {int(message_result.spotter_inserted or 0)}."
+                )
+            else:
+                indexer = JS8LogLinkIndexer(self.settings, db_path)
+                conn = sqlite3.connect(db_path)
+                try:
+                    indexer._ensure_table(conn)
+                    indexer._clear_table(conn)
+                finally:
+                    conn.close()
+                count = int(indexer.update_from_directed_path(legacy_path, since_ts=None, force_rebuild=True) or 0)
+                latest_ts = float(indexer._ensure_latest_ts(last_default=0.0) or 0.0)
+                detail_text = f"Legacy JS8 source: {legacy_path}.\nLink rows rebuilt: {count}."
             self._set_js8_load_busy(True, "Finalizing JS8 traffic rebuild...")
             self.settings.set("js8_links_last_load_utc", latest_ts)
             self._set_js8_load_busy(False)
@@ -28052,7 +28080,7 @@ class SettingsTab(QWidget):
             QMessageBox.information(
                 self,
                 "JS8 Traffic Loaded",
-                f"JS8 logs rebuilt successfully ({count} link rows loaded).",
+                f"JS8 traffic rebuilt successfully.\n\n{detail_text}",
             )
             self._refresh_operator_history_views()
         except Exception as e:

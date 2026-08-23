@@ -2992,6 +2992,9 @@ class MessageViewerTab(QWidget):
         if not db_path:
             return
         save_message_file_metadata_from_rows(db_path, rows, ensure_scan_cache_table=self._ensure_file_scan_cache_table)
+        records = getattr(self, "files", None)
+        if isinstance(records, dict):
+            self._project_message_files_to_observations(records)
 
     def _load_message_file_metadata_map(
         self,
@@ -6215,6 +6218,7 @@ class MessageViewerTab(QWidget):
         *,
         group_filter: str = "",
         topic_filter: str = "",
+        query_filter: str = "",
         source_family: str = "",
     ) -> None:
         self.show_inbox_from_navigation()
@@ -6229,14 +6233,21 @@ class MessageViewerTab(QWidget):
             "varac": "varac",
         }.get(source, "all")
         self._set_inbox_focus(focus)
-        search = " ".join(
-            part
-            for part in (
-                str(group_filter or "").strip().lstrip("@"),
-                str(topic_filter or "").strip(),
-            )
-            if part
-        )
+        search_parts: list[str] = []
+        seen_parts: set[str] = set()
+        for part in (
+            str(query_filter or "").strip().lstrip("@"),
+            str(group_filter or "").strip().lstrip("@"),
+            str(topic_filter or "").strip(),
+        ):
+            if not part:
+                continue
+            key = part.lower()
+            if key in seen_parts:
+                continue
+            search_parts.append(part)
+            seen_parts.add(key)
+        search = " ".join(search_parts)
         if hasattr(self, "rcv_search"):
             self.rcv_search.setText(search)
         else:

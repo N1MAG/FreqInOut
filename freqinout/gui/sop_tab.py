@@ -4299,6 +4299,7 @@ class SOPTab(_LegacySOPTab):
         traffic_layout.addWidget(self.traffic_suggestions_review_btn)
         root.addWidget(self.traffic_suggestions_box)
         self._traffic_suggestion_decisions: List[Any] = []
+        self._traffic_focus_context: Dict[str, str] = {}
         QTimer.singleShot(0, self.refresh_traffic_suggestions)
 
         header = QHBoxLayout()
@@ -8273,12 +8274,13 @@ class SOPTab(_LegacySOPTab):
         apply_btn = getattr(self, "traffic_suggestions_apply_btn", None)
         if apply_btn is not None:
             apply_btn.setEnabled(False)
+        focus_prefix = self._traffic_focus_prefix()
         try:
             db_path = self._condition_sop_db_path()
         except Exception:
             db_path = None
         if not db_path or not Path(db_path).exists():
-            label.setText("Traffic Suggestions: no message activity database found yet.")
+            label.setText(f"{focus_prefix}Traffic Suggestions: no message activity database found yet.")
             return
         try:
             audit_text = self._condition_sop_audit_text(db_path)
@@ -8290,11 +8292,11 @@ class SOPTab(_LegacySOPTab):
             )
             alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
             if not alerts:
-                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: no recent condition alerts in the last 24 hours.", audit_text))
+                label.setText(self._traffic_suggestions_with_audit(f"{focus_prefix}Traffic Suggestions: no recent condition alerts in the last 24 hours.", audit_text))
                 return
             profiles = self._condition_sop_profiles()
             if not profiles:
-                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: recent condition alerts found, but no SOP layers are configured.", audit_text))
+                label.setText(self._traffic_suggestions_with_audit(f"{focus_prefix}Traffic Suggestions: recent condition alerts found, but no SOP layers are configured.", audit_text))
                 return
             auto_allowed = bool(self.settings.get(AUTO_SOP_INVOCATION_SETTING_KEY, False))
             decisions = evaluate_condition_sop_invocations(
@@ -8308,7 +8310,7 @@ class SOPTab(_LegacySOPTab):
                 if decision.operating_group or decision.condition_level is not None or decision.sop_profile_name
             ]
             if not visible:
-                label.setText(self._traffic_suggestions_with_audit("Traffic Suggestions: recent condition alerts found, but none match an SOP layer.", audit_text))
+                label.setText(self._traffic_suggestions_with_audit(f"{focus_prefix}Traffic Suggestions: recent condition alerts found, but none match an SOP layer.", audit_text))
                 return
             actionable = [d for d in visible if not bool(getattr(d, "blocked", False))]
             self._traffic_suggestion_decisions = actionable
@@ -8316,13 +8318,46 @@ class SOPTab(_LegacySOPTab):
                 apply_btn.setEnabled(bool(actionable))
             label.setText(
                 self._traffic_suggestions_with_audit(
-                    "Traffic Suggestions: " + " | ".join(self._traffic_suggestion_text(d) for d in visible[:3]),
+                    f"{focus_prefix}Traffic Suggestions: " + " | ".join(self._traffic_suggestion_text(d) for d in visible[:3]),
                     audit_text,
                 )
             )
         except Exception as e:
             log.debug("SOP Builder traffic suggestions unavailable: %s", e)
-            label.setText("Traffic Suggestions: unavailable.")
+            label.setText(f"{focus_prefix}Traffic Suggestions: unavailable.")
+
+    def focus_traffic_context(
+        self,
+        *,
+        group: str = "",
+        topic: str = "",
+        source_family: str = "",
+    ) -> None:
+        """Focus SOP review around a map/message traffic context."""
+        self._traffic_focus_context = {
+            "group": str(group or "").strip().upper().lstrip("@"),
+            "topic": str(topic or "").strip(),
+            "source_family": str(source_family or "").strip(),
+        }
+        try:
+            box = getattr(self, "traffic_suggestions_box", None)
+            if box is not None:
+                box.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
+        self.refresh_traffic_suggestions()
+
+    def _traffic_focus_prefix(self) -> str:
+        context = getattr(self, "_traffic_focus_context", {}) or {}
+        if not isinstance(context, Mapping):
+            return ""
+        parts = [
+            str(context.get("group") or "").strip(),
+            str(context.get("topic") or "").strip(),
+            str(context.get("source_family") or "").strip(),
+        ]
+        text = " | ".join(part for part in parts if part)
+        return f"Map context: {text}. " if text else ""
 
     def _condition_sop_db_path(self) -> Path | None:
         try:

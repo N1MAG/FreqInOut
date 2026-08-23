@@ -279,6 +279,7 @@ class MessageIngestor:
         source_key: object = "",
         offset_key: str = "",
         evaluate_expect: bool = True,
+        force_rebuild: bool = False,
     ) -> int:
         directed_path = directed_path or self._resolve_directed_path()
         if not directed_path or not directed_path.exists():
@@ -288,6 +289,8 @@ class MessageIngestor:
         try:
             offset = int(self.settings.get(offset_key or self._spotter_offset_key(directed_path, source_radio_id), 0) or 0)
         except Exception:
+            offset = 0
+        if force_rebuild:
             offset = 0
         try:
             size_now = directed_path.stat().st_size

@@ -116,7 +116,7 @@ class JS8LogLinkIndexer:
         if len(parts) < 5:
             return None
         dt_str, freq_txt, _shift, snr_txt, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
-        origin, dest = self._extract_origin_dest(msg)
+        origin, dest, relay_via = self._extract_origin_dest_relay(msg)
         if not origin or not dest:
             return None
         try:
@@ -131,7 +131,7 @@ class JS8LogLinkIndexer:
             snr = float(snr_txt)
         except Exception:
             snr = None
-        return (ts, origin, dest, snr, freq_hz)
+        return (ts, origin, dest, snr, freq_hz, bool(relay_via), relay_via)
 
     def _maybe_capture_group_grid(self, line: str) -> None:
         """
@@ -501,7 +501,7 @@ class JS8LogLinkIndexer:
             msg_part = line.split(":", 1)[1]
         # Trim leading colon/space
         msg_part = msg_part.lstrip(": ").strip()
-        origin, dest = self._extract_origin_dest(msg_part)
+        origin, dest, relay_via = self._extract_origin_dest_relay(msg_part)
         if not origin or not dest:
             return None
         snr = None
@@ -511,16 +511,60 @@ class JS8LogLinkIndexer:
                 break
             except Exception:
                 continue
-        return (ts, origin, dest, snr, freq_hz)
+        return (ts, origin, dest, snr, freq_hz, bool(relay_via), relay_via)
 
     def _extract_origin_dest(self, msg: str) -> tuple[str, str]:
-        if ":" not in msg:
-            return "", ""
-        origin, rest = msg.split(":", 1)
-        origin = origin.strip().upper()
-        first = (rest.strip().split() or [""])[0]
-        dest = first.strip().strip(",").strip().upper()
+        origin, dest, _relay_via = self._extract_origin_dest_relay(msg)
         return origin, dest
+
+    def _extract_origin_call(self, msg: str) -> str:
+        if ":" not in msg:
+            return ""
+        origin, _rest = msg.split(":", 1)
+        origin = self._clean_route_token(origin)
+        return origin if self._looks_like_station_call(origin) else ""
+
+    @staticmethod
+    def _clean_route_token(token: str) -> str:
+        text = (token or "").strip().upper()
+        text = text.strip(" ,;[](){}<>")
+        if text.startswith("@"):
+            return ""
+        text = re.sub(r"[^A-Z0-9/]", "", text)
+        return text
+
+    @staticmethod
+    def _looks_like_station_call(token: str) -> bool:
+        text = (token or "").strip().upper()
+        if not text or len(text) < 3 or len(text) > 14:
+            return False
+        if not any(ch.isdigit() for ch in text) or not any(ch.isalpha() for ch in text):
+            return False
+        if text in {"ALLCALL", "ALL", "CQ", "HEARTBEAT", "HB"}:
+            return False
+        return bool(re.match(r"^[A-Z0-9]+(?:/[A-Z0-9]{1,4})?$", text))
+
+    def _extract_origin_dest_relay(self, msg: str) -> tuple[str, str, str]:
+        if ":" not in msg:
+            return "", "", ""
+        origin, rest = msg.split(":", 1)
+        origin = self._clean_route_token(origin)
+        first = (rest.strip().split() or [""])[0]
+        first = first.strip().strip(",").strip().upper()
+        relay_via = ""
+        if ">" in first:
+            parts = [self._clean_route_token(part) for part in first.split(">")]
+            parts = [part for part in parts if part]
+            if len(parts) >= 2:
+                relay_via = ">".join(parts[:-1])
+                dest = parts[-1]
+            else:
+                dest = parts[0] if parts else ""
+        else:
+            dest = self._clean_route_token(first)
+        if not self._looks_like_station_call(origin) or not self._looks_like_station_call(dest):
+            return "", "", ""
+        return origin, dest, relay_via
 
     # -------- DB helpers -------- #
     def _ensure_table(self, conn: sqlite3.Connection) -> None:
@@ -591,8 +635,18 @@ class JS8LogLinkIndexer:
             pass
         return float(last_default or 0.0)
 
+    def link_count(self) -> int:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.execute("SELECT COUNT(*) FROM js8_links")
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
     # -------- public API -------- #
-    def update(self, since_ts: Optional[float] = None) -> int:
+    def update(self, since_ts: Optional[float] = None, *, force_rebuild: bool = False) -> int:
         """
         Rebuild js8_links from DIRECTED.TXT and ALL.TXT.
         Returns number of rows inserted.
@@ -603,6 +657,7 @@ class JS8LogLinkIndexer:
             since_ts=since_ts,
             directed_offset_key="js8_links_directed_offset",
             all_offset_key="js8_links_all_offset",
+            force_rebuild=force_rebuild,
         )
 
     def update_from_directed_path(
@@ -615,6 +670,7 @@ class JS8LogLinkIndexer:
         source_id: str = "",
         app_instance_id: str = "",
         source_radio_id: str = "",
+        force_rebuild: bool = False,
     ) -> int:
         """
         Incrementally index one JS8Call log source.
@@ -646,7 +702,11 @@ class JS8LogLinkIndexer:
             all_offset = int(self.settings.get(all_offset_key, 0) or 0)
         except Exception:
             all_offset = 0
-        if not using_legacy_offsets and directed_offset <= 0 and all_offset <= 0:
+        if force_rebuild:
+            directed_offset = 0
+            all_offset = 0
+            effective_since = None
+        elif not using_legacy_offsets and directed_offset <= 0 and all_offset <= 0:
             effective_since = None
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
@@ -656,7 +716,11 @@ class JS8LogLinkIndexer:
         def handle_parsed(parsed: Optional[tuple]) -> None:
             if not parsed:
                 return
-            ts, origin, dest, snr, freq_hz = parsed
+            if len(parsed) >= 7:
+                ts, origin, dest, snr, freq_hz, is_relay, relay_via = parsed[:7]
+            else:
+                ts, origin, dest, snr, freq_hz = parsed[:5]
+                is_relay, relay_via = False, ""
             if effective_since and (not ts or ts < effective_since):
                 return
             a = (origin or "").strip().upper()
@@ -673,11 +737,23 @@ class JS8LogLinkIndexer:
                 pass
             band = self._freq_to_band(freq_hz)
             key = (tuple(sorted((a, b))), band)
-            entry = agg.setdefault(key, {"last_ts": ts, "snr_sum": 0.0, "snr_count": 0, "freq_hz": freq_hz})
+            entry = agg.setdefault(
+                key,
+                {
+                    "last_ts": ts,
+                    "snr_sum": 0.0,
+                    "snr_count": 0,
+                    "freq_hz": freq_hz,
+                    "is_relay": bool(is_relay),
+                    "relay_via": str(relay_via or "").strip().upper(),
+                },
+            )
             if ts and (entry["last_ts"] is None or ts > entry["last_ts"]):
                 entry["last_ts"] = ts
                 if freq_hz is not None:
                     entry["freq_hz"] = freq_hz
+                entry["is_relay"] = bool(is_relay)
+                entry["relay_via"] = str(relay_via or "").strip().upper()
             try:
                 if snr is not None:
                     entry["snr_sum"] += float(snr)
@@ -703,7 +779,7 @@ class JS8LogLinkIndexer:
                         last_pos = fh.tell()
                         parts = line.split("\t", 4)
                         msg = parts[4] if len(parts) >= 5 else ""
-                        origin, _dest = self._extract_origin_dest(msg)
+                        origin = self._extract_origin_call(msg)
                         freq_hz = None
                         try:
                             freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
@@ -741,7 +817,7 @@ class JS8LogLinkIndexer:
                             elif ":" in line:
                                 msg_part = line.split(":", 1)[1]
                             msg_part = msg_part.lstrip(": ").strip()
-                            origin, _dest = self._extract_origin_dest(msg_part)
+                            origin = self._extract_origin_call(msg_part)
                             freq_hz = None
                             try:
                                 mhz_part = line.split("Transmitting", 1)[1]
@@ -790,8 +866,8 @@ class JS8LogLinkIndexer:
                         source_id_txt,
                         app_instance_id_txt,
                         source_radio_id_txt,
-                        0,
-                        None,
+                        1 if entry.get("is_relay") else 0,
+                        entry.get("relay_via") or None,
                         0,
                     )
                 )
@@ -840,6 +916,7 @@ class JS8LogLinkIndexer:
         sources: Iterable[object],
         *,
         since_ts: Optional[float] = None,
+        force_rebuild: bool = False,
     ) -> Dict[str, int]:
         """
         Incrementally index JS8Call log sources described by the ingest inventory.
@@ -889,6 +966,7 @@ class JS8LogLinkIndexer:
                 source_id=source_id,
                 app_instance_id=str(getattr(directed_source or all_source, "app_instance_id", "") or ""),
                 source_radio_id=str(getattr(directed_source or all_source, "radio_id", "") or ""),
+                force_rebuild=force_rebuild,
             )
         return counts
 
@@ -998,7 +1076,7 @@ class JS8LogLinkIndexer:
                     scanned += 1
                     parts = line.split("\t", 4)
                     msg = parts[4] if len(parts) >= 5 else ""
-                    origin, _dest = self._extract_origin_dest(msg)
+                    origin = self._extract_origin_call(msg)
                     freq_hz = None
                     try:
                         freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
@@ -1021,7 +1099,7 @@ class JS8LogLinkIndexer:
                         elif ":" in line:
                             msg_part = line.split(":", 1)[1]
                         msg_part = msg_part.lstrip(": ").strip()
-                        origin, _dest = self._extract_origin_dest(msg_part)
+                        origin = self._extract_origin_call(msg_part)
                         freq_hz = None
                         try:
                             mhz_part = line.split("Transmitting", 1)[1]

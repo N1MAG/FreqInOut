@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
@@ -26,6 +27,7 @@ def ingest_js8_links_for_runtime_sources(
     *,
     since_ts: Optional[float] = None,
     inventory: IngestSourceInventory | None = None,
+    force_rebuild: bool = False,
 ) -> JS8RuntimeLinkIngestResult:
     """
     Index JS8Call link traffic using runtime source descriptors when available.
@@ -35,6 +37,7 @@ def ingest_js8_links_for_runtime_sources(
     """
     target_db = Path(db_path)
     indexer = JS8LogLinkIndexer(settings, target_db)
+    was_empty = indexer.link_count() == 0
     runtime_inventory = inventory if inventory is not None else active_runtime_ingest_inventory()
     js8_sources = tuple(runtime_inventory.sources_for_family("js8call"))
     file_sources = tuple(
@@ -43,17 +46,43 @@ def ingest_js8_links_for_runtime_sources(
         if str(getattr(source, "source_type", "") or "").strip().lower() == "file"
     )
     if file_sources:
-        counts = indexer.update_from_ingest_sources(file_sources, since_ts=since_ts)
+        if force_rebuild:
+            try:
+                conn = sqlite3.connect(target_db)
+                try:
+                    indexer._ensure_table(conn)
+                    indexer._clear_table(conn)
+                finally:
+                    conn.close()
+            except Exception:
+                log.debug("JS8 runtime ingest: failed to clear js8_links before forced rebuild", exc_info=True)
+        counts = indexer.update_from_ingest_sources(
+            file_sources,
+            since_ts=None if force_rebuild else since_ts,
+            force_rebuild=force_rebuild,
+        )
+        inserted = sum(int(value or 0) for value in counts.values())
+        if inserted <= 0 and was_empty:
+            log.info("JS8 runtime ingest: rebuilding empty js8_links from runtime log sources")
+            counts = indexer.update_from_ingest_sources(
+                file_sources,
+                since_ts=None,
+                force_rebuild=True,
+            )
+            inserted = sum(int(value or 0) for value in counts.values())
         latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
         return JS8RuntimeLinkIngestResult(
-            inserted=sum(int(value or 0) for value in counts.values()),
+            inserted=inserted,
             latest_ts=latest_ts,
             used_runtime_sources=True,
             counts_by_source=dict(counts),
         )
 
     try:
-        count = int(indexer.update(since_ts=since_ts) or 0)
+        count = int(indexer.update(since_ts=None if force_rebuild else since_ts, force_rebuild=force_rebuild) or 0)
+        if count <= 0 and was_empty:
+            log.info("JS8 runtime ingest: rebuilding empty js8_links from legacy log source")
+            count = int(indexer.update(since_ts=None, force_rebuild=True) or 0)
     except Exception:
         log.exception("JS8 runtime ingest: legacy JS8 link update failed")
         raise

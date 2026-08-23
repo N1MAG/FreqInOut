@@ -1221,6 +1221,36 @@ def test_map_html_uses_bottom_docked_inline_legend_rows():
     assert 'color:\\"' not in html
 
 
+def test_map_detail_button_action_overrides_payload_action():
+    dummy = SimpleNamespace(
+        settings=_MemorySettings(),
+        _now_reachable_enabled=False,
+        show_grids=False,
+        show_grid_labels=False,
+        show_regions=False,
+        show_states=False,
+        show_cities=False,
+        _resolve_prop_band_colors=lambda: {},
+    )
+
+    html = StationsMapTab._build_leaflet_html(
+        dummy,
+        markers=[],
+        links=[],
+        max_zoom=18,
+        leaflet_js="leaflet.js",
+        leaflet_css="leaflet.css",
+        geojson_urls=[],
+        cities_geojson=None,
+        city_min_pop=0,
+        show_city_labels=False,
+        initial_view=None,
+    )
+
+    assert "Object.assign({}, payload || {}, {action: action})" in html
+    assert "Object.assign({action: action}, payload || {})" not in html
+
+
 def test_map_controls_keep_action_buttons_readable(monkeypatch, tmp_path):
     _app()
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))

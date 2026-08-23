@@ -683,8 +683,13 @@ class BackgroundIngestController(QObject):
     def _run_js8_links_for_sources(self, indexer: JS8LogLinkIndexer, *, last_ts: float = 0.0) -> int:
         inventory = self._runtime_ingest_inventory()
         instances = [instance for instance in inventory.app_instances if instance.family == "js8call"]
+        was_empty = indexer.link_count() == 0
         if not instances:
-            return indexer.update(since_ts=last_ts if last_ts > 0 else None)
+            count = indexer.update(since_ts=last_ts if last_ts > 0 else None)
+            if count <= 0 and was_empty:
+                log.info("BackgroundIngest: rebuilding empty js8_links from legacy source")
+                count = indexer.update(since_ts=None, force_rebuild=True)
+            return count
         total = 0
         for instance in instances:
             source_by_role = {
@@ -707,6 +712,17 @@ class BackgroundIngestController(QObject):
                     since_ts=last_ts if last_ts > 0 else None,
                 )
                 inserted = sum(int(value or 0) for value in counts.values())
+                if inserted <= 0 and was_empty:
+                    log.info(
+                        "BackgroundIngest: rebuilding empty js8_links for %s",
+                        directed_source.label,
+                    )
+                    counts = indexer.update_from_ingest_sources(
+                        source_by_role.values(),
+                        since_ts=None,
+                        force_rebuild=True,
+                    )
+                    inserted = sum(int(value or 0) for value in counts.values())
                 total += inserted
                 self._health.record_success(
                     health_key,

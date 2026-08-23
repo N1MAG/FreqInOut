@@ -518,6 +518,79 @@ def test_js8_runtime_link_ingest_prefers_runtime_inventory_sources(tmp_path: Pat
     assert rows == [("K7AAA", "N1MAG", "40M", "A"), ("K7BBB", "N2MAG", "20M", "B")]
 
 
+def test_js8_runtime_link_ingest_rebuilds_empty_table_with_stale_offsets(tmp_path: Path) -> None:
+    directed = tmp_path / "radio-a" / "DIRECTED.TXT"
+    directed.parent.mkdir()
+    directed.write_text(
+        "2026-08-12 10:00:00\t7.115000\t1500\t+05\tN1MAG: K7AAA SNR -12\n",
+        encoding="utf-8",
+    )
+    inventory = build_ingest_source_inventory(
+        [{"id": "A", "name": "FIO-A", "use_js8call": True, "js8_directed_path": str(directed)}]
+    )
+    settings = DictSettings({"operating_groups": []})
+    for source in inventory.sources_for_family("js8call"):
+        path = Path(source.path)
+        if source.source_type == "file" and path.exists():
+            settings.set(source.checkpoint_key, path.stat().st_size)
+
+    result = ingest_js8_links_for_runtime_sources(
+        settings,  # type: ignore[arg-type]
+        tmp_path / "fio.db",
+        since_ts=2_000_000_000.0,
+        inventory=inventory,
+    )
+
+    assert result.used_runtime_sources is True
+    assert result.inserted == 1
+    conn = sqlite3.connect(tmp_path / "fio.db")
+    try:
+        rows = conn.execute("SELECT origin, destination, band FROM js8_links").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("K7AAA", "N1MAG", "40M")]
+
+
+def test_js8_runtime_link_ingest_force_rebuild_uses_runtime_sources_not_stale_rows(tmp_path: Path) -> None:
+    directed_a = tmp_path / "radio-a" / "DIRECTED.TXT"
+    directed_b = tmp_path / "radio-b" / "DIRECTED.TXT"
+    directed_a.parent.mkdir()
+    directed_b.parent.mkdir()
+    directed_a.write_text(
+        "2026-08-12 10:00:00\t7.115000\t1500\t+05\tN1MAG: K7AAA SNR -12\n",
+        encoding="utf-8",
+    )
+    directed_b.write_text(
+        "2026-08-12 10:01:00\t14.115000\t1500\t+04\tN2MAG: K7BBB SNR -10\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "fio.db"
+    seed_settings = DictSettings({"js8_directed_path": str(directed_a), "operating_groups": []})
+    JS8LogLinkIndexer(seed_settings, db_path).update(force_rebuild=True)
+    inventory = build_ingest_source_inventory(
+        [{"id": "B", "name": "FIO-B", "use_js8call": True, "js8_directed_path": str(directed_b)}]
+    )
+    settings = DictSettings({"js8_directed_path": str(directed_a), "operating_groups": []})
+
+    result = ingest_js8_links_for_runtime_sources(
+        settings,  # type: ignore[arg-type]
+        db_path,
+        inventory=inventory,
+        force_rebuild=True,
+    )
+
+    assert result.used_runtime_sources is True
+    assert result.inserted == 1
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT origin, destination, band, source_radio_id FROM js8_links ORDER BY origin"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("K7BBB", "N2MAG", "20M", "B")]
+
+
 def test_js8_link_indexer_keeps_same_link_from_different_sources(tmp_path: Path) -> None:
     directed_a = tmp_path / "radio-a" / "DIRECTED.TXT"
     directed_b = tmp_path / "radio-b" / "DIRECTED.TXT"
@@ -648,6 +721,49 @@ def test_js8_new_source_scoped_offset_does_not_skip_older_history(tmp_path: Path
     )
 
     assert inserted == 1
+
+
+def test_js8_link_indexer_parses_relay_route_to_final_station(tmp_path: Path) -> None:
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-12 10:00:00\t7.115000\t1500\t+05\tN1MAG: K7RIE>KC7WOK SNR -12\n",
+        encoding="utf-8",
+    )
+    settings = DictSettings({"operating_groups": []})
+    indexer = JS8LogLinkIndexer(settings, tmp_path / "fio.db")  # type: ignore[arg-type]
+
+    inserted = indexer.update_from_directed_path(directed)
+
+    assert inserted == 1
+    conn = sqlite3.connect(tmp_path / "fio.db")
+    try:
+        rows = conn.execute(
+            "SELECT origin, destination, is_relay, relay_via FROM js8_links"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("KC7WOK", "N1MAG", 1, "K7RIE")]
+
+
+def test_js8_link_indexer_ignores_group_targets_but_keeps_station_relays(tmp_path: Path) -> None:
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-12 10:00:00\t7.115000\t1500\t+05\tN1MAG: @MAGNET GRID DM79QJ\n"
+        "2026-08-12 10:01:00\t7.115000\t1500\t+04\tN1MAG: K7RIE>KC7WOK SNR -12\n",
+        encoding="utf-8",
+    )
+    settings = DictSettings({"operating_groups": []})
+    indexer = JS8LogLinkIndexer(settings, tmp_path / "fio.db")  # type: ignore[arg-type]
+
+    inserted = indexer.update_from_directed_path(directed)
+
+    assert inserted == 1
+    conn = sqlite3.connect(tmp_path / "fio.db")
+    try:
+        rows = conn.execute("SELECT origin, destination FROM js8_links").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("KC7WOK", "N1MAG")]
 
 
 def test_js8_inbox_ingest_keeps_same_native_id_from_two_sources(monkeypatch, tmp_path: Path) -> None:

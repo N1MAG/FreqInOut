@@ -3774,6 +3774,87 @@ def test_message_file_metadata_cache_persists_display_ready_file_rows(tmp_path) 
     assert stored[14] == "FIO-A FLMSG"
 
 
+def test_message_file_metadata_save_projects_file_report_to_observations(tmp_path) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    msg_path = tmp_path / "K7ETC-20260803-FIRE.k2s"
+    msg_path.write_text(
+        """
+MAGNET General Use Form - v1.1.1
+Date/Time/Msg ID
+260729-0354z
+To
+MR08
+From
+K7ETC
+Subject
+Widemouth 2 Fire
+Message
+UT - Widemouth 2 Fire - DM38ST - wildfire evacuation posture updated.
+""",
+        encoding="utf-8",
+    )
+    stat = msg_path.stat()
+    rec = FileRecord(
+        path=msg_path,
+        origin="flmsg",
+        size=stat.st_size,
+        mtime=stat.st_mtime,
+        source_id="source-flmsg-a",
+        source_label="FIO-A FLMSG",
+    )
+    row = UnifiedMessage(
+        "General",
+        "NEW",
+        "K7ETC",
+        "MR08",
+        datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp(),
+        "20 days",
+        "Widemouth 2 Fire",
+        "flmsg",
+        rec,
+        topics=("Fire",),
+        actionable=True,
+        search_text="K7ETC MR08 Widemouth 2 Fire wildfire DM38ST",
+        report_ts=datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp(),
+        age_ts_source="report",
+    )
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._db_path = lambda: db_path
+    tab._effective_watch_dirs = lambda: [{"origin": "flmsg", "path": str(tmp_path)}]
+    tab.settings = {}
+    tab.files = {"flmsg": [rec], "flamp": []}
+    MessageViewerTab._ensure_file_scan_cache_table(tab)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO message_scan_cache(origin, path, mtime, size) VALUES (?, ?, ?, ?)",
+        ("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size)),
+    )
+    conn.commit()
+    conn.close()
+
+    MessageViewerTab._save_message_file_metadata_from_rows(tab, [row])
+
+    conn = sqlite3.connect(db_path)
+    stored = conn.execute(
+        """
+        SELECT source_family, from_call, to_target, subject, observed_topics_json, summary
+        FROM observation_projection
+        WHERE source_ref=?
+        """,
+        (f"file:{msg_path}",),
+    ).fetchone()
+    conn.close()
+
+    assert stored is not None
+    assert stored[0] == "flmsg"
+    assert stored[1] == "K7ETC"
+    assert stored[2] == "MR08"
+    assert stored[3] == "Widemouth 2 Fire"
+    assert "Fire" in stored[4]
+    assert "Widemouth 2 Fire" in stored[5]
+
+
 def test_message_file_metadata_table_adds_source_and_report_indexes(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     conn = sqlite3.connect(db_path)

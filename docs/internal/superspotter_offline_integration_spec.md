@@ -297,10 +297,13 @@ The FIO map should become the spatial counterpart to Messages:
   alerts, and RF pins through the shared message-intelligence vocabulary:
   Weather, Fire, Medical, Power, Water, Fuel, Food, Travel/Roads, Comms,
   Security, Shelter, Logistics, Infrastructure, and General Intel
+- topic, group, source, and advanced filters must narrow both report overlays
+  and the station marker scope in traffic-focused views; filter changes are part
+  of the map render signature so the map cannot skip a refresh as "unchanged"
 - visual distinction between report markers, station activity, map pins,
   MCForm halos, CommStat rings, and roster operators
 - "latest" windows such as 30m, 2h, 24h, 72h
-- "View HF Reports Map" from Messages opens Map pre-filtered to HF report
+- "View HF Traffic Map" from Messages opens Map pre-filtered to HF traffic
   observations, carrying selected message group/topic context when available
 - local reports stay separate from HF reports but use the same topic vocabulary
 - state-only observations roll up to state/area summaries rather than pretending
@@ -384,7 +387,7 @@ The center-of-gravity loop is:
     provides one-click handoff buttons to Messages and Map using that context.
 15. Add Map topic/source layer refinements and RF pin records. Topic/source
     map refinements done for observation-backed alerts, infrastructure,
-    condition-alert pins, a dedicated RF Pins map focus, and a shared Topic
+    condition-alert pins, a dedicated Planning Pins map focus, and a shared Topic
     filter for observation-backed report layers. The Map topic selector now
     uses the shared message-intelligence taxonomy instead of a separate RF pin
     topic list. Messages can hand off selected HF report group/topic context to
@@ -392,6 +395,157 @@ The center-of-gravity loop is:
     styling, save/list/delete helpers, and Map-side manual pin
     creation/edit/delete management are done for receive/manual review records;
     send-capable workflows remain open.
+15a. Reimagine the Map as an operator-first canvas. Done for the first UI
+    slice: the always-visible map strip now carries only the primary view
+    presets plus high-value filters (`Group`, `Since`, `Topic`), while detail
+    labels, propagation, path tools, intelligence layer toggles, and RF pin
+    management live behind a single `Map Tools` drawer. The map legend is a
+    compact in-map overlay and is collapsed by default. The first dedicated
+    decision preset is `RF Planning`: it enables stations, path links, RF pins,
+    and the propagation overlay for band/path decisions while keeping report
+    layers quiet. Marker interaction uses a two-level model: hover shows only a
+    compact glance tooltip, while click opens a native selected-detail side
+    panel on wider layouts and falls back to an in-map panel on constrained
+    screens. The selected-detail view is intentionally lightweight but
+    actionable: it can center the selected point, apply the same group/topic
+    filters used by the map strip, open Messages with the selected context, and
+    jump to SOP Builder Traffic Suggestions with the selected group/topic/source
+    context when the selection has condition or operational relevance. The
+    native selected-detail panel should render operator cards, not raw payloads:
+    condition alerts show level/group/route/age/source first, stations show
+    recent activity and schedule context, Spotter cards prioritize MCF/route/
+    age/area/trust, CommStat cards prioritize route/age/reach/area/status,
+    local report cards prioritize reporter/area/age/status/source, and RF pins
+    prioritize purpose/area/band/group/updated. Groups and topics should read as
+    compact chips so the operator can quickly filter or jump to the SOP context
+    without interpreting database fields. Map handoffs should be source-aware:
+    Spotter/CommStat/JS8/VarAC selections open Messages with matching group,
+    topic, and source focus; station selections open Messages as a callsign
+    search; local report selections open the Local Traffic history; planning pins do
+    not open Messages because they are planning records, not received traffic.
+    Future map work should preserve this laptop-first model: the map canvas
+    stays dominant, advanced controls are opt-in, and topic/source filtering
+    remains aligned with message intelligence so Messages, Map, ControlFreq, and
+    SOP Builder present the same operational picture.
+    Map detail source language must be operator-facing. Do not show technical
+    fusion labels such as `Fused`; when FIO combines station/report evidence
+    from more than one source, display `Source: Multiple Sources`. If the user
+    expands or drills into source detail, show the specific contributing source
+    families, such as `JS8Call, Roster, Spotter`, rather than database/internal
+    labels.
+15b. Harden Map traffic/path actions and terminology. `HF Traffic` means HF/app-
+    derived observations from Spotter, CommStat, JS8Call, VarAC, FLMsg, FLAmp,
+    and condition alerts. `Local Traffic` means local operator/NCS reports.
+    `All Traffic` combines both. `Paths` is the RF reachability/topology layer
+    and is intentionally separate from message/report content. Filter changes
+    never turn path links on by themselves; only the `Paths` chip or selected-
+    station `Show Paths` action enables path lines, and clicking them again
+    turns paths off. `RF Planning` is a planning preset, not a traffic preset:
+    it defaults to station markers, recent path links, planning pins, and the
+    propagation overlay while message/report layers remain quiet. Topic or
+    search selection from a normal station view promotes the map into
+    `All Traffic` instead of silently refreshing an unchanged station-only view.
+    Selected-detail bridge actions include a nonce so repeated clicks on the
+    same marker action still fire. Observation-backed traffic layers now honor
+    the same Group and Region filters as station/path views. The `Map Tools`
+    drawer now includes advanced filters for station-vs-traffic scope,
+    state/province, source family, operational status, and authentication/trust.
+    These filters are intentionally kept out of the primary map strip so the
+    laptop layout keeps the map canvas dominant. `Stations Only` hides
+    operational traffic overlays; `Traffic Only` hides station and link clutter;
+    `Stations + Traffic` shows both. Source filtering is source-family based
+    (`HF Apps`, Spotter, CommStat, JS8Call, VarAC, FastLight, Local Traffic,
+    Condition Alerts, Planning Pins) so operators do not have to understand raw
+    database fields. Topic and source changes clear report query caches and
+    trigger a medium map refresh. Station-to-station link rendering remains
+    data-dependent: if the ingest database has no link rows, the map status
+    must explain whether paths are hidden, disabled, filtered out, unavailable
+    for the selected station/group, or shown. Operators should never have to
+    infer the difference between "links are off" and "there are no link records."
+    Operator-triggered `Refresh Links` is stronger than timer refresh: it
+    force-rebuilds JS8 link rows from active runtime sources and widens the
+    `Since` filter when imported or migrated traffic is older than the current
+    recency window, so a successful load never looks like a no-op simply because
+    the map was set to a recent window.
+15c. Harden multi-rig JS8 manual reloads. `Load JS8 Traffic` must rebuild from
+    the active runtime ingest inventory when JS8Call file sources exist. In
+    multi-rig mode it must not clear `js8_links` and then reload from the
+    legacy singleton `js8_directed_path`; each active radio's configured
+    `DIRECTED.TXT` is its own source, offsets are reset for an explicit reload,
+    and Spotter/MCF message ingest uses the same source identity.
+15d. Make Paths and Planning Pins first-class map tools. A top-level `Paths`
+    preset shows station markers plus signal/path links without report or
+    planning overlays. `Show Paths` from a selected station must explicitly
+    enable the Links layer and target that station; it must not depend on
+    whatever hidden link filter state happened to be active. `Planning Pins` are
+    saved planning/reference markers, not received traffic, so the Planning Pins
+    map focus shows pins without station traffic clutter. Station/report clicks
+    use one native right-side inspector panel; selecting another marker replaces
+    that panel instead of opening a second over-map detail card. The inspector
+    is the home for cross-links such as Center, Show Paths, Messages, Send
+    Spotter, and SOP review. If a station or report is backed by multiple
+    evidence sources, display `Multiple Sources` and reserve the exact source
+    list for drill-in/detail text. The green map status strip includes a concise
+    path-state sentence: links hidden, path mode off, N links shown, loaded but
+    filtered out, or no links found for the current station/group/filters.
+15e. Align Map traffic filters with Message Intelligence. `HF Traffic`,
+    `Local Traffic`, and `All Traffic` are traffic-observation views, not narrow
+    legacy form-code overlays. If Messages can summarize a mapped report by
+    callsign/group/topic/search text, the Map must be able to show that same
+    report when the corresponding source, group, topic, age, and search filters
+    are selected. Alert-worthy reports render in the alert layer; other
+    actionable reports render in the report/infrastructure layer so topic
+    filters such as `Fire` or searches such as `wildfire` do not silently miss
+    FLMsg/FLAmp or Spotter traffic. Message metadata rows are eligible map
+    traffic even before a separate observation row exists; they should create
+    report events and station scope so a topic/search refinement never returns
+    zero solely because the projection backfill has not run yet.
+15f. Treat filters and layers as separate map concepts. Filters choose which
+    records are eligible: group, time window, topic, source, state, search text,
+    and selected callsign. Layers choose which eligible records are drawn:
+    stations, traffic, paths, propagation/RF planning, and planning pins. A
+    layer chip is a toggle; clicking an active layer turns that layer off
+    without changing filters. `Clear Filters` restores data scope without
+    changing active layers. `Clear Layers` hides optional overlays such as
+    paths, RF planning, and planning pins without changing filter fields.
+    Path links preserve `origin`, `destination`, observed SNR, source, and
+    relay metadata. Directional rendering uses `origin -> destination` semantics
+    with quality color and direction markers so operators can distinguish
+    "I hear them", "they hear me", and "another station reported this path."
+    The right-side inspector is the single station/report detail home; selecting
+    another marker replaces it. Station detail must explain operational state:
+    last status, source, age, area, and evidence that determines marker color.
+    Do not promote raw question text, internal fusion labels, or hidden legacy
+    popups as the primary explanation.
+15g. Use a tabbed map inspector for operator questions. The right-side inspector
+    has `Overview`, `Status`, `Paths`, and `Messages` tabs. `Overview` gives the
+    compact station/report identity. `Status` explains why the marker has its
+    color/status, using labels such as `Multiple Sources` instead of internal
+    terms such as fused. `Paths` explains the active topology scope and the
+    meaning of directional link arrows. `Messages` explains the filtered Inbox or
+    Local Report target behind the selected marker. Station clicks must replace
+    the current inspector content; they must not open a second map-overlaid
+    detail surface.
+15h. Make path topology reversible and context-preserving. `Show Paths` from the
+    selected-station inspector is a layer toggle: the first click enables
+    directional path links for that station and switches the inspector to the
+    `Paths` tab; the next click disables that station path layer and restores the
+    report/station context the operator was using before the path drill-down.
+    Changing the top-level path scope to `My Station` or `Network` follows the
+    same rule: preserve the prior view while paths are active and restore it when
+    path scope returns to `Off`. The top-level `Paths` chip follows the same
+    on/off contract: first click opens network topology, second click hides path
+    links and restores the prior report/station context. `Clear Layers` may hide
+    paths, RF planning, and planning pins, but it must not silently change
+    `Group`, `Since`, `Topic`, search text, or the active report context. `Center`
+    must work from a report payload coordinate, report grid, matching station
+    coordinate, or matching station grid so operators can center selected
+    stations even when the click payload is summary-only. Path status text should
+    describe the operator state, for example `Path layer hidden`, `Path scope is
+    Off`, `N directional path links shown`, or `No path links found for group
+    MR08`. If a finite `Since` window hides all drawable links but older matching
+    links exist, the status should say that and point the operator to `Since:
+    Any`.
 16. Add SOP Builder Traffic Suggestions and condition apply workflow. Core
     condition-alert-to-SOP decision helpers done, including batch evaluation
     against SOP profile schedule layers; ControlFreq compact activity now shows
