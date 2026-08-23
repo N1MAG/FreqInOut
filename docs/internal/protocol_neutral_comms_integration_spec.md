@@ -1,0 +1,639 @@
+# Protocol-Neutral Comms Integration Spec
+
+## Intent
+
+FIO should become the operator's common portal for radio and resilient-network
+communications without collapsing every protocol into one confusing UI. HF
+digital, local voice/manual reports, VHF/UHF/GMRS workflows, MeshCore,
+Meshtastic, Reticulum/LXMF, VarAC, CommStat, JS8Call, FastLight, and future MQTT
+bridges all have different operational realities. FIO's advantage is to ingest
+them cleanly, normalize the useful intelligence, and present the operator with a
+coherent answer to the center of gravity:
+
+- where to be
+- when to be there
+- what to do when there
+- who can reach whom
+- what important information has moved or still needs to move
+
+This spec covers the full integration direction. It is intentionally
+architecture-first so later UI and connector work can proceed without creating
+duplicate maps, duplicate message stores, or protocol-specific dead ends.
+
+## Product Goal
+
+Support local mutual-assistance groups and wider emergency communications flows
+where not every participant can run HF digital.
+
+The target operating chain is:
+
+- local neighborhood/team
+- local NCS or mutual-assistance group
+- county
+- state
+- regional
+- national
+
+FIO should help each level use the right available transport:
+
+- voice/manual local reports when that is all an operator can do
+- VHF/UHF/GMRS local or county relays
+- mesh/Meshtastic/MeshCore local packet paths
+- Reticulum/LXMF store-and-forward when available
+- HF JS8Call/FastLight/VarAC/CommStat for wider-area traffic
+- optional internet-backed services, such as MQTT or CommStat maximum-reach
+  propagation, only when explicitly configured
+
+The product experience should feel like FIO understands capabilities and routes
+information appropriately, while still leaving the operator in control of
+transmit, relay, and SOP decisions.
+
+## Non-Goals
+
+- Do not merge a third-party mesh client UI wholesale into FIO.
+- Do not make FIO an offline map-tile management application.
+- Do not make internet services required for any core map, message, SOP, or
+  local-report workflow.
+- Do not hide protocol-specific safety or trust details behind a single generic
+  status.
+- Do not let map or message UI tabs poll protocol APIs, scan files, or parse
+  external databases directly.
+- Do not add unattended transmit/relay behavior without explicit policy,
+  auditability, and per-protocol safety gates.
+
+## Reviewed Mesh Client Concepts
+
+The local `mesh-client` project at
+`/Users/bill/RadioTools/Programs/mesh-client` is useful as a concept reference,
+not as code to copy without a separate license and integration review.
+
+Relevant ideas:
+
+- Protocol adapters stay separate for Meshtastic, MeshCore, Reticulum, MQTT, and
+  other transports.
+- Capability gating keeps UI actions aligned with what a protocol can actually
+  do.
+- Reticulum/RMAP discovery stores topology, reachable interfaces, last-heard
+  age, hop count, and RF quality fields.
+- Path history can score route quality using reliability, latency, freshness,
+  and route weight.
+- Topology views answer a different question than geographic maps: reachability
+  and relay paths, not just location.
+
+FIO should borrow those architecture concepts while preserving FIO's existing
+theme, tab model, message intelligence, SOP Builder, RF Guard, and map
+projection system.
+
+## Core Principle
+
+Keep transport connectors separate. Unify intelligence after ingestion.
+
+Connector-specific layers own:
+
+- external app/file/API discovery
+- polling cadence and backoff
+- raw protocol parsing
+- source health
+- protocol-specific send/write capabilities
+- protocol-specific safety and trust checks
+
+Shared FIO layers own:
+
+- normalized messages/reports
+- station/operator/node identity resolution
+- operating group and jurisdiction mapping
+- topic and condition-alert extraction
+- path/link/reachability projections
+- map and topology projections
+- SOP relevance and action suggestions
+- BBS/relay routing previews
+
+The UI reads shared projections. It does not perform ingestion work.
+
+## Unified Data Model
+
+### Comms Source
+
+A `CommsSource` identifies where an observation came from.
+
+Fields:
+
+- `source_key`
+- `source_family`: JS8Call, FastLight, CommStat, VarAC, Local, VoiceLog,
+  MeshCore, Meshtastic, Reticulum, LXMF, MQTT, Import
+- `radio_id` when tied to a configured FIO radio
+- `app_instance_id` or connector instance id
+- `endpoint_or_path`
+- `enabled`
+- `health`
+- `last_seen_utc`
+- `capabilities`: receive, send, frequency-control, bbs, store-forward,
+  topology, location, authenticated-identity
+
+Rules:
+
+- Each source has its own checkpoint identity.
+- Multiple JS8Call, VarAC, Reticulum, or mesh instances must never share offsets,
+  cached state, or message ids.
+- UI filters use `source_family` and friendly labels, not raw paths.
+
+### Comms Node
+
+A `CommsNode` is an operator, station, device, peer, or relay endpoint.
+
+Fields:
+
+- stable node id
+- callsign when available
+- mesh/Reticulum/MQTT identity when available
+- display name
+- known groups and jurisdictions
+- role and tier from operator/roster data when available
+- capabilities by protocol
+- last known grid, lat/lon, state/province, county, and confidence
+- trust/auth status by source
+- latest activity age
+
+Rules:
+
+- A callsign is not an operating group.
+- A node can belong to multiple groups and jurisdictions.
+- A mesh-only participant can still be represented and routed into local/county
+  workflows.
+
+### Comms Report
+
+A `CommsReport` is an actionable or informative piece of traffic.
+
+Fields:
+
+- source key and raw source reference
+- from node
+- to node, group, or jurisdiction
+- topic taxonomy
+- severity/status
+- report title/summary
+- report timestamp and received timestamp
+- location/grid/state/county
+- auth/trust state
+- original protocol payload reference
+- message viewer target
+- SOP relevance hints
+
+Rules:
+
+- Topic filters must apply to all eligible report types: FLMsg/FLAmp,
+  JS8Spotter/MCF, CommStat, VarAC, Local Reports, future mesh/Reticulum/MQTT.
+- If a user selects topic `Fire`, the map shows stations/reports with fire
+  evidence, regardless of whether that evidence came from HF, local, or mesh.
+- Raw protocol fields stay available for diagnostics, not primary operator
+  display.
+
+### Comms Link Event
+
+A `CommsLinkEvent` represents observed reachability or signal/path quality.
+
+Fields:
+
+- origin node: the station whose signal quality is being reported
+- destination node: the station that heard or was heard
+- observer node: the station/source that observed or relayed the report
+- direction: origin-to-destination semantics
+- protocol/method: JS8Call, VarAC, Reticulum, MeshCore, Meshtastic, manual,
+  unknown
+- quality values: SNR, RSSI, hop count, latency, retry count, delivery status,
+  confidence
+- band/channel/frequency when meaningful
+- timestamp and age
+- source key
+
+Rules:
+
+- Direction must be explicit. A line on the map should be able to explain:
+  "A reported B at +10", "I heard A poorly", or "B heard me poorly."
+- Direction arrows must point along the path direction or be omitted when the
+  view cannot display them accurately.
+- Links may be asymmetric; two stations can have different quality each way.
+- Third-party observed links are first-class, not discarded because they do not
+  include my station.
+
+### Comms Path Projection
+
+A `CommsPathProjection` aggregates link events into operator-facing path insight.
+
+Modes:
+
+- `Off`: no path layer
+- `My Station`: links involving my configured station identity
+- `Selected Station`: links involving the selected station/node
+- `Network`: all eligible links for the current filters
+- `Relay Candidates`: stations that may bridge from me to a target I cannot
+  reach directly
+
+Each projection should include:
+
+- best known path quality
+- age
+- directionality
+- protocol
+- source evidence count
+- whether the path is direct, reciprocal, asymmetric, or relay-only
+
+### SOP Signal Event
+
+An `SopSignalEvent` is a condition or action trigger extracted from traffic.
+
+Examples:
+
+- configurable MagCon/MAGCON condition message
+- local NCS manually logged condition change
+- county status escalation
+- Reticulum/LXMF message matching a group rule
+- MQTT alert from an explicitly configured trusted source
+
+Rules:
+
+- Condition-alert parsing is configured per operating group, not hard-coded.
+- Auto SOP invocation is opt-in, audited, and gated by trust and RF Guard when
+  radio actions are affected.
+- The same signal can feed ControlFreq, Map, Messages, and SOP Builder.
+
+## Map And Topology Model
+
+FIO should keep one primary comms map experience with two complementary views:
+
+### Geographic View
+
+Answers:
+
+- where are stations/reports
+- what is the latest status in an area
+- what topics are active
+- what groups or jurisdictions are affected
+
+Required behavior:
+
+- Filters compose predictably: view, group, age, topic, path scope, and search
+  all narrow the same eligible data set until cleared.
+- Layer chips are true toggles. Clicking an active layer disables it.
+- `Clear Filters` resets data scope only.
+- `Clear Layers` hides optional overlays only.
+- The right inspector is the single detail surface; station/report clicks replace
+  its content and never open a competing map popup.
+- The inspector tabs are `Overview`, `Status`, `Paths`, and `Messages`, with SOP
+  actions available when applicable.
+- Marker color and icon must be explainable in `Status`: last status, source,
+  age, and evidence, not raw question text.
+
+### Topology View
+
+Answers:
+
+- who can reach whom
+- who heard whom
+- who might relay traffic
+- what method worked
+- where path quality is strong or weak
+
+This can be a map mode first and a graph view later.
+
+Controls:
+
+- path scope: Off, My Station, Selected Station, Network, Relay Candidates
+- method layer: JS8Call, FastLight, VarAC, Local, Mesh, Reticulum, MQTT
+- direction filter: heard by me, heard me, third-party observed, reciprocal
+- age window
+- quality threshold
+
+Rendering:
+
+- link color indicates quality
+- arrow or endpoint decoration indicates direction
+- line style indicates method/source when multiple methods are shown
+- aggregated links expose evidence count and latest report in the inspector
+
+## Offline Map Strategy
+
+FIO should be useful offline without becoming a large map-tile cache manager.
+
+Recommended model:
+
+- Keep the current local/vector geographic outline as the guaranteed offline
+  baseline.
+- Include lightweight states/provinces, country boundaries, major region labels,
+  and grid overlays where practical.
+- Do not require online tiles for any operational workflow.
+- If online or cached tiles are later offered, make them optional with a clear
+  cache size limit, cache status, and clear-cache action.
+- For mesh/Reticulum nodes without coordinates, use topology/list views and grid
+  or region fallback rather than pretending to know a precise location.
+
+The map should optimize operational questions, not cartographic detail.
+
+## Ingestion Architecture
+
+### Connector Families
+
+Existing and near-term connectors:
+
+- JS8Call API/files, including multiple active instances
+- FastLight / FLMsg / FLAmp files
+- CommStat artifacts and reach metadata
+- VarAC monitor/import folders and DB
+- Local Reports and Local NCS/manual logs
+- operator/roster imports
+
+Future connector families:
+
+- MeshCore / Meshtastic via serial, BLE, TCP, or MQTT bridge
+- Reticulum sidecar / RMAP / LXMF
+- generic MQTT topics for trusted group infrastructure
+- manually logged HF/VHF/UHF voice contacts
+
+### Pipeline
+
+1. Connector polls or receives protocol-specific data.
+2. Raw immutable event is stored with source identity.
+3. Parser creates normalized message/report/link/node candidates.
+4. Deduper merges by source-specific stable keys and content fingerprints.
+5. Projection builders update message, map, path, roster, BBS, and SOP views.
+6. UI receives cheap projection fingerprints and refreshes only affected views.
+
+Requirements:
+
+- Background workers do scanning, API calls, DB reads, and parsing.
+- UI refresh reads bounded indexed projections.
+- Each connector has backoff, error state, and checkpoint visibility.
+- Source checkpoints include path, endpoint, app instance, and radio id.
+- Historical imports can be older than current traffic and still project
+  correctly.
+- Projection updates are coalesced so large ingest bursts do not repaint the UI
+  repeatedly.
+
+## Performance And Stability
+
+The integration must preserve FIO's operator trust under load.
+
+Requirements:
+
+- No UI tab directly performs full file-system scans or external DB sweeps.
+- Map renders use stable signatures and update only changed layers.
+- Message and map filter queries are indexed and paginated where needed.
+- Large topology/link sets are bounded by view, age, quality, and node caps.
+- Connector failures degrade the affected source only, not the whole UI.
+- Station command/scheduler performance remains isolated from message/map
+  ingestion.
+- Memory caps exist for in-memory graph/link projections.
+- Startup should restore projections from local DB first, then refresh in the
+  background.
+- Diagnostics show which source is stale, failed, or still loading.
+
+## Safety, Trust, And Permissions
+
+Trust must be visible but not noisy.
+
+Sources of trust:
+
+- MsgAuth for JS8 text/Spotter messages
+- FLAmp/GPG signature state where available
+- Reticulum identity trust when implemented
+- configured operator roster role/tier/trusted flag
+- source provenance and import path
+- future MQTT topic/auth configuration
+
+Rules:
+
+- Unsigned traffic is not an alarm by itself.
+- If a signature is present, verification state should be displayed.
+- Auto SOP invocation requires configured trust policy.
+- BBS/relay routing must honor allowed callsigns/groups/jurisdictions.
+- Internet-backed propagation is explicitly labeled when it was not RF-only.
+
+## Local-To-National Flow
+
+FIO should allow a report to move from local to broader reach without making a
+local-only operator learn HF digital.
+
+Example flow:
+
+1. A local VHF/GMRS operator gives a voice report to local NCS.
+2. NCS enters it as a Local Report with topic, location, status, and source.
+3. FIO shows it on the map and in Messages/Local Report History.
+4. SOP rules identify that it should be summarized to county or state.
+5. FIO suggests eligible routes based on capability:
+   - local mesh/Reticulum to county gateway
+   - HF JS8/FLMsg to regional group
+   - VarAC BBS posting
+   - CommStat maximum reach if configured and appropriate
+6. The operator chooses or confirms the route.
+7. FIO records provenance so downstream users know the original source and relay
+   path.
+
+Capability-aware routing should be advisory first. Operators decide whether to
+transmit, relay, or publish unless a group explicitly enables audited automation.
+
+## SOP Builder Integration
+
+SOP Builder becomes the decision bridge between traffic and action.
+
+It should consume:
+
+- topic-tagged reports
+- condition-alert signals
+- local NCS observations
+- path/reachability insight
+- BBS/relay routing suggestions
+- RF Guard and schedule state
+
+It should produce:
+
+- condition-level changes
+- "where/when/what" schedule/action guidance
+- suggested relay actions
+- BBS file placement rules
+- message compose templates
+- map filters for affected areas/groups/topics
+
+Automation rules:
+
+- Suggest by default.
+- Prompt-to-apply where the group wants semi-automatic workflow.
+- Auto-apply only after explicit policy, trust, RF Guard, and audit gates pass.
+
+## UI Integration
+
+### Messages
+
+Messages remains the most detailed read/triage view.
+
+Requirements:
+
+- Source filters include HF, Local, JS8Call, FastLight, Spotter, CommStat,
+  VarAC, Mesh, Reticulum, MQTT when implemented.
+- Topic filters use the shared taxonomy.
+- Opening Messages from Map carries current context: station, group, topic,
+  source family, age window, and selected report id where available.
+- Message intelligence feeds map, BBS, and SOP projections.
+
+### Map
+
+Map is the operational visualization, not just a pin board.
+
+Primary labels should answer:
+
+- All Stations: who/where is active
+- HF Traffic: HF-sourced reports and activity
+- Local Traffic: local/NCS/manual reports
+- All Traffic: all report-capable sources
+- Paths: reachability and relay topology
+- RF Planning: propagation and frequency planning overlays
+- Planning Pins: operator/RF planning annotations
+- SitRep: status-focused reports
+- Peer Sched Now: schedule location of peers
+
+Map details should avoid internal words such as `fused`. Use `Multiple Sources`
+or `Source: JS8Spotter + CommStat`.
+
+### ControlFreq
+
+ControlFreq should surface high-value operational context:
+
+- current assigned radio/schedule state
+- recent condition alerts
+- recent traffic matching active group/topic
+- off-schedule and RF Guard warnings
+- path/reachability cues if the selected schedule/group has weak reachability
+
+### Settings
+
+Settings owns connector configuration and operating policy.
+
+Future protocol connector setup should be separate from HF radio setup unless a
+radio profile actually owns that connector. Mesh/Reticulum/MQTT connectors may
+be station-level services rather than per-radio services.
+
+Operating group settings should include:
+
+- supported protocol capabilities
+- condition-alert rules
+- SOP policies
+- FastLight filename policy
+- BBS/relay permissions
+- jurisdiction/subgroup mapping
+- allowed forwarding scopes
+
+## RF Guard Boundaries
+
+RF Guard applies to RF-emitting and frequency-control actions where FIO can
+protect equipment:
+
+- radio scheduler assignment
+- QSY/manual/timed control
+- transmit path conflicts
+- shared antenna/front-end conflicts
+- unsupported band checks
+
+Mesh/Reticulum/MQTT may later need separate safety concepts such as airtime,
+channel, identity, or forwarding guards, but those are not RF Guard unless they
+affect radio hardware or transmit paths.
+
+VarAC standalone remains monitor/import-only for frequency control unless a safe
+future API changes that contract.
+
+## BBS And Relay Routing
+
+Message intelligence should feed managed BBS and relay decisions.
+
+Examples:
+
+- S2/intelligence reports sweep to configured intelligence folders.
+- Fire/infrastructure reports sweep to county and regional folders.
+- Local-only reports become summarized HF or Reticulum messages when allowed.
+- Operator/group permissions decide who can retrieve what.
+
+Rules:
+
+- Routing previews use the same topic/source/group/jurisdiction projections as
+  Messages and Map.
+- Long callsign allowlists should be generated from operating group/subgroup and
+  roster membership, with manual exceptions.
+- Every automatic placement or relay suggestion retains provenance.
+
+## Implementation Phases
+
+### Phase 1: Protocol-Neutral Projection For Existing Data
+
+- Normalize existing JS8Call, FastLight, Spotter, CommStat, VarAC, and Local
+  Report records into `CommsReport`, `CommsNode`, and `CommsLinkEvent`
+  projections.
+- Keep existing UI behavior but make filters use the shared projection.
+- Add tests for topic, group, age, source, and station filters across source
+  families.
+
+### Phase 2: Map And Path Stabilization
+
+- Make map filters and layers strictly composable.
+- Make Paths a true toggle with My Station, Selected Station, Network, and Relay
+  Candidates scopes.
+- Fix directional link semantics and quality rendering.
+- Ensure right-side inspector is the only detail surface.
+
+### Phase 3: SOP Signal Pipeline
+
+- Feed condition alerts and local report events into SOP Builder.
+- Add configurable group-specific condition alert patterns.
+- Add audited prompt/auto-apply paths.
+
+### Phase 4: Mesh/Reticulum Read-Only Prototype
+
+- Add read-only connector fixtures or sidecar import for mesh/Reticulum topology
+  and message events.
+- Project nodes, locations, path links, and messages without send/write support.
+- Validate offline map/topology behavior with no tile downloads.
+
+### Phase 5: MQTT And Store-And-Forward Routing
+
+- Add explicitly configured MQTT/Reticulum routing previews.
+- Keep internet-enabled flows opt-in and visibly labeled.
+- Connect BBS/relay suggestions to operator permissions.
+
+### Phase 6: Connector Setup UX
+
+- Add guided setup for station-level mesh/Reticulum/MQTT connectors only after
+  the projection and read-only paths are stable.
+- Reuse Add Radio wizard visual language and core helper pattern.
+
+## Acceptance Criteria
+
+- Selecting topic `Fire` on Map shows every station/report with fire evidence
+  across FLMsg/FLAmp, JS8Spotter, CommStat, Local Reports, and future
+  mesh/Reticulum/MQTT sources.
+- Selecting a station and `Show Paths` displays only path links relevant to that
+  station until toggled off.
+- Network path view can show third-party observed links such as `A -> B` even
+  when my station is only the observer.
+- Directional path rendering can distinguish `I hear them`, `they hear me`, and
+  `another station reported this path`.
+- Opening Messages from Map preserves station, group, topic, source, and age
+  filters.
+- Local-only reports can participate in SOP suggestions and BBS/relay routing
+  without requiring HF digital configuration.
+- FIO remains useful offline with no map tile downloads.
+- UI remains responsive during high-volume ingest and does not flicker or
+  rebuild whole map/control surfaces unnecessarily.
+- Connector failure degrades only that connector's health and does not block the
+  rest of FIO.
+
+## Product Decisions To Confirm
+
+- Which mesh protocol should be first for a read-only prototype: Reticulum/RMAP,
+  Meshtastic, or MeshCore?
+- Should topology be a map mode first, then a graph view later, or should graph
+  topology ship with the first mesh/Reticulum prototype?
+- What local-to-county/state default jurisdiction fields should be stored for
+  operators and local groups?
+- Should MQTT be read-only first, or should it include publish/relay previews in
+  the same first slice?
+- Which condition alert templates beyond MagNet MAGCON should ship disabled as
+  examples?
+

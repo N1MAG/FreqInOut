@@ -61,6 +61,11 @@ Future-facing notes:
   transports, but they should enter through the same message/observation model.
 - VarAC remains read/import/monitor unless a future VarAC API supports safe
   direct automation.
+- The broader mesh/Reticulum/MQTT and local-to-county/state/regional/national
+  integration model is specified in
+  `docs/internal/protocol_neutral_comms_integration_spec.md`. SuperSpotter
+  concepts should feed that protocol-neutral model rather than creating a second
+  map, message, or activity subsystem.
 
 ## Target Data Model
 

@@ -11427,3 +11427,24 @@ Acceptance:
 - If no Frequency Plan exists, the user can save the radio and land in Plan Manager with radio-specific plan-building guidance, without seeing FLDigi/FLMsg/FLAmp fields for JS8Call-only setups or VarAC frequency controls for VarAC-only setups.
 - Add Radio can be walked with Back/Next through Radio, Software, Connection, RF Guard, Schedule, and Review without revealing unrelated integration fields for the selected setup type; setup types without FIO-controlled connection fields skip Connection cleanly and still show RF Guard before Schedule.
 - Tests cover the core wizard-state helper so Back/Next labels and visible step sections do not drift from the Add Radio setup model.
+
+## Addendum: Protocol-Neutral Comms Integration (2026-08-23)
+
+FIO's long-term integration path for HF digital, local reports, VHF/UHF/GMRS
+manual workflows, MeshCore, Meshtastic, Reticulum/LXMF, VarAC, CommStat, JS8Call,
+FastLight, and future MQTT bridges is specified in
+`docs/internal/protocol_neutral_comms_integration_spec.md`.
+
+The governing rule is: connector-specific ingestion stays separate, but
+operator-facing intelligence is normalized after ingestion. Messages, Map,
+ControlFreq, BBS routing, and SOP Builder should consume shared projections for
+nodes, reports, links, paths, source provenance, topics, trust, and SOP signals.
+This keeps protocol-specific stability and safety intact while supporting the
+local -> county -> state -> regional -> national flow for groups whose members
+have different communication capabilities.
+
+Implementation must not create a second map or parallel message/activity store
+for mesh or Reticulum. The existing FIO map becomes a communications
+intelligence surface with geographic and topology/path modes. Offline operation
+remains mandatory; optional online/cached tiles must never become a dependency
+for core workflows.
