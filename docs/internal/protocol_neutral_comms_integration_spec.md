@@ -73,10 +73,16 @@ Relevant ideas:
   other transports.
 - Capability gating keeps UI actions aligned with what a protocol can actually
   do.
+- Local DB history is a first-class feature. Messages, nodes, node notes,
+  position history, route/path history, delivery state, and identity activity are
+  persisted independently from the live connector.
 - Reticulum/RMAP discovery stores topology, reachable interfaces, last-heard
   age, hop count, and RF quality fields.
 - Path history can score route quality using reliability, latency, freshness,
   and route weight.
+- Large route/path render sets are bounded before they reach the renderer; long
+  geometries are down-sampled and high-cardinality paths are scoped by current
+  view.
 - Topology views answer a different question than geographic maps: reachability
   and relay paths, not just location.
 
@@ -211,11 +217,17 @@ Rules:
 
 - Direction must be explicit. A line on the map should be able to explain:
   "A reported B at +10", "I heard A poorly", or "B heard me poorly."
+- The observed-by/source station is distinct from the path endpoints. This is
+  critical for third-party reports where my station heard B ask A for signal
+  quality, then heard A reply to B.
 - Direction arrows must point along the path direction or be omitted when the
   view cannot display them accurately.
 - Links may be asymmetric; two stations can have different quality each way.
 - Third-party observed links are first-class, not discarded because they do not
   include my station.
+- Link events are immutable evidence. Path projections aggregate them, but never
+  overwrite the individual observations needed to explain "who said this" and
+  "when."
 
 ### Comms Path Projection
 
@@ -238,6 +250,9 @@ Each projection should include:
 - protocol
 - source evidence count
 - whether the path is direct, reciprocal, asymmetric, or relay-only
+- observer summary: my station, selected station, third-party, imported, or
+  mixed
+- route confidence and why it was selected
 
 ### SOP Signal Event
 
@@ -334,6 +349,7 @@ Controls:
 - direction filter: heard by me, heard me, third-party observed, reciprocal
 - age window
 - quality threshold
+- target station/group/jurisdiction where applicable
 
 Rendering:
 
@@ -341,6 +357,10 @@ Rendering:
 - arrow or endpoint decoration indicates direction
 - line style indicates method/source when multiple methods are shown
 - aggregated links expose evidence count and latest report in the inspector
+- high-density link sets must summarize first. Render the best or most recent
+  links by default, then let the operator expand to more detail.
+- when a station is selected, the inspector should explain inbound, outbound,
+  reciprocal, and relay-candidate paths separately.
 
 Topology may be geography-backed or graph-backed. The first implementation can
 draw paths on the map, but the data model must be ready for a future graph view
@@ -358,6 +378,17 @@ Path controls are layer controls, not hidden filters:
 - Direction markers must follow link bearing. If a direction marker cannot be
   rendered accurately at the current zoom or link density, omit it rather than
   showing a misleading sideways arrow.
+
+Path insight should support the operator question from single-rig users:
+
+- "Who can reach this station?"
+- "Who can this station reach?"
+- "Who can relay between me and that station?"
+- "Which report produced this path?"
+- "Is this path RF-only, internet-assisted, mesh, store-and-forward, or mixed?"
+
+The map can answer this spatially first. A later graph view can answer it when
+nodes lack coordinates or when geography is less useful than topology.
 
 Planning pins are planning/reference records. They are not normal received
 traffic. The `Planning Pins` focus shows only saved planning/reference markers,
@@ -389,6 +420,68 @@ the operational projection. FIO should not depend on downloading map tiles to
 answer "who can reach whom" or "where is the fire report."
 
 ## Ingestion Architecture
+
+### Connector Contract
+
+Every protocol/app connector must behave like a small service behind a stable
+contract. The connector may know about JS8Call APIs, Reticulum identities,
+Meshtastic serial packets, MeshCore path payloads, MQTT topics, VarAC DB rows,
+or file-system quirks. The rest of FIO should not.
+
+Each connector provides:
+
+- stable connector id
+- source family and friendly label
+- instance configuration and validation state
+- checkpoint read/write for its own source only
+- source health and latest error
+- capability flags: receive, send, frequency-control, path/topology, location,
+  bbs, store-forward, internet-assisted
+- `scan_once` or event callback that emits raw source records
+- parser that emits normalized candidates for nodes, reports, messages, links,
+  and SOP signals
+- explicit send/write methods only when the protocol is approved for that
+  release
+
+Rules:
+
+- A connector never updates UI widgets directly.
+- A connector never mutates another connector's checkpoint or health.
+- A connector can be disabled without deleting historical projections.
+- A connector can be stale or failed while the rest of FIO remains healthy.
+- Connectors are tested with fixtures before they are tested against live
+  devices, sockets, sidecars, or external applications.
+- Send/write support must be a separate capability, not implied by receive
+  support.
+
+This gives FIO room to support multiple JS8Call instances, a VarAC import
+folder, a Reticulum sidecar, a MeshCore USB device, and MQTT subscriptions at
+the same time without the map or message UI caring how each record arrived.
+
+### Projection Contract
+
+Projection builders transform normalized candidates into UI-ready views. They
+are the only layer that decides how raw evidence becomes an operator summary.
+
+Projection builders provide:
+
+- stable fingerprints for cheap UI refresh decisions
+- indexed queries for Messages, Map, SOP, BBS, Local Reports, and ControlFreq
+- source-family, group, topic, age, trust, status, and text filtering
+- explainability fields: why a marker has this color, why a path is shown, why
+  a report matched a topic
+- bounded result sets for high-cardinality map and path views
+- diagnostics for dropped, stale, duplicate, or low-confidence records
+
+Rules:
+
+- UI tabs consume projections, not raw protocol tables.
+- Projection queries are composable. A topic filter, group filter, search term,
+  source filter, and age filter all narrow the same result set.
+- Projections preserve source references so the operator can open the original
+  message or diagnostic record when needed.
+- Low-confidence identity/location matches are displayed with humility, not
+  silently promoted to facts.
 
 ### Connector Families
 
@@ -423,10 +516,16 @@ Requirements:
 - UI refresh reads bounded indexed projections.
 - Each connector has backoff, error state, and checkpoint visibility.
 - Source checkpoints include path, endpoint, app instance, and radio id.
+- Mesh/Reticulum/MQTT checkpoints include connector identity, protocol account
+  or node identity, channel/topic/room where relevant, and read position.
 - Historical imports can be older than current traffic and still project
   correctly.
 - Projection updates are coalesced so large ingest bursts do not repaint the UI
   repeatedly.
+- Connector workers emit raw records and normalized candidates; UI tabs never
+  call protocol SDKs directly.
+- First mesh/Reticulum/MQTT implementation is read-only ingestion unless a
+  separate send/write policy is explicitly designed.
 
 ## Performance And Stability
 
@@ -442,6 +541,8 @@ Requirements:
 - Station command/scheduler performance remains isolated from message/map
   ingestion.
 - Memory caps exist for in-memory graph/link projections.
+- Graph/path caches are LRU-bounded by node and query signature. Expensive path
+  scoring should be done in services, not in the map widget.
 - Startup should restore projections from local DB first, then refresh in the
   background.
 - Diagnostics show which source is stale, failed, or still loading.
@@ -568,6 +669,89 @@ group, source family, age window, search text, and topic. If the user is viewing
 `Fire` on the map, the Messages view opened from that marker should also be
 filtered to the fire evidence unless the user clears it.
 
+#### Recommended Map Interaction Model
+
+The map should feel like a guided visualization tool. The default view should be
+calm and obvious; deeper reachability tools should appear as progressive
+controls.
+
+Primary controls:
+
+- `View`: All Stations, HF Traffic, Local Traffic, All Traffic, Paths, RF
+  Planning, Planning Pins, SitRep, Peer Sched Now
+- `Group`: configured groups first, discovered groups only when requested
+- `Since`: compact chip with quick ranges and custom range
+- `Topic`: shared message intelligence taxonomy
+- `Search`: callsign, group, topic, state/grid, report title, keyword
+
+Secondary controls live in `Map Tools`:
+
+- path scope and method layers
+- RF planning and propagation controls
+- planning pin management
+- advanced filters such as state, source, status, trust, and protocol method
+- map detail overlays such as callsigns, grids, regions, and population
+
+Behavior:
+
+- Active chips are visually active and can be clicked again to disable when
+  they represent optional layers.
+- `All Stations`, `HF Traffic`, `Local Traffic`, and `All Traffic` are view
+  modes, not optional layers. Selecting one replaces the previous view mode.
+- `Paths`, `RF Planning`, `Planning Pins`, and detail overlays are layers and
+  can be toggled off.
+- If `Map Tools` is open, primary controls must still wrap cleanly on laptop
+  screens. The primary controls should not stretch labels and selectors far
+  apart or clip chips.
+- The map status line should summarize the current projection in plain language,
+  for example: `Ready: 12 fire reports from 7 stations, 4 path links shown.`
+
+#### Method Layers
+
+Method layers explain how evidence or reachability moved:
+
+- JS8Call
+- FastLight / FLMsg / FLAmp
+- VarAC
+- CommStat RF-only
+- CommStat internet-assisted
+- Local voice/manual
+- MeshCore / Meshtastic
+- Reticulum / LXMF
+- MQTT / internet bridge
+
+The first implementation can display method as labels, line styles, and
+inspector summaries. Future work can add a dedicated graph topology view without
+changing the underlying data model.
+
+#### Station Inspector
+
+The right-side inspector should be the operator's launch point for context
+actions.
+
+Actions:
+
+- `Center`: center the selected station/report on the map
+- `Show Paths`: toggle selected-station path layer
+- `Messages`: open Messages with station/report/topic/group/age context
+- `Send Spotter`: open JS8Spotter compose when a JS8-capable source is
+  configured
+- `SOP`: open or filter SOP Builder for matching group/topic/condition context
+- `Filter Group` / `Filter Topic`: quick context filters when appropriate
+
+Tabs:
+
+- `Overview`: identity, area, source summary, last activity, latest important
+  report
+- `Status`: why the marker is green/yellow/red/blue and which evidence set that
+  status
+- `Paths`: inbound, outbound, reciprocal, relay candidates, method, quality, and
+  who reported each path
+- `Messages`: recent relevant reports with topic/source/age summaries
+
+The inspector should never show raw HTML, escaped entities, protocol JSON, or
+internal terms such as `fused`.
+
 ### ControlFreq
 
 ControlFreq should surface high-value operational context:
@@ -664,12 +848,18 @@ Rules:
   and message events.
 - Project nodes, locations, path links, and messages without send/write support.
 - Validate offline map/topology behavior with no tile downloads.
+- Start with a fixture-backed adapter and local DB projection tests before
+  touching live BLE/serial/MQTT/sidecar connections.
+- Preserve source protocol fields for diagnostics while projecting operator
+  summaries into the shared Messages, Map, and SOP surfaces.
 
 ### Phase 5: MQTT And Store-And-Forward Routing
 
 - Add explicitly configured MQTT/Reticulum routing previews.
 - Keep internet-enabled flows opt-in and visibly labeled.
 - Connect BBS/relay suggestions to operator permissions.
+- Label RF-only, internet-assisted, mesh-only, and mixed reach clearly in map
+  paths and message provenance.
 
 ### Phase 6: Connector Setup UX
 
