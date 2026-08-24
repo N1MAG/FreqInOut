@@ -549,6 +549,150 @@ The first prototype should prove that a mesh/Reticulum fixture can add nodes,
 reports, link events, and store-and-forward hints to the shared projections
 without adding new map code paths.
 
+### Mesh Client Review Findings
+
+The local `mesh-client` project is valuable as a reference for connector
+behavior, persistence, and health management. FIO should borrow these concepts,
+not embed the application UI.
+
+Patterns to carry into FIO:
+
+- MQTT connectors use explicit connection state, reconnect/backoff, watchdog
+  timers, source-specific error reporting, and clear teardown paths.
+- Mesh/MQTT ingestion preserves channel/topic identity and distinguishes RF,
+  MQTT, and mixed provenance before projecting a user-facing message.
+- Reticulum integration is managed through a sidecar boundary with health
+  polling, restart controls, response/body caps, and failure isolation.
+- Local persistence uses WAL-mode SQLite, schema-version checks, retention
+  pruning, and search/index support rather than repeatedly scanning large raw
+  files in the UI.
+- Message/node/link dedupe is source-aware. A source checkpoint belongs to one
+  connector instance and must never be shared with another radio, account,
+  topic, room, path, or protocol.
+- High-volume topology views are bounded. The service chooses relevant links
+  for the current query before the UI renders them.
+
+Patterns not to carry into FIO:
+
+- Do not create a second mesh-only inbox or second unrelated map interface.
+- Do not make FIO depend on online map tiles or become a bulk offline tile
+  cache manager.
+- Do not expose protocol internals as the primary operator UI. Use diagnostics
+  for packet, topic, room, sidecar, or protobuf details.
+- Do not enable transmit, publish, bridge, or relay behavior merely because a
+  connector can receive. Send/write/relay are separate policy-gated
+  capabilities.
+
+### Unified Portal Decision
+
+FIO should keep HF, local voice/manual, mesh, Reticulum, and MQTT traffic in one
+shared operator model, while preserving protocol context in the UI.
+
+This means:
+
+- Messages is the shared triage funnel.
+- Map is the shared geographic and topology workbench.
+- SOP Builder is the shared decision/action bridge.
+- BBS and relay routing use the same report/topic/group/provenance projection.
+- Settings owns protocol-specific connector configuration and policy.
+
+Separate views are allowed when the operator task is genuinely different. For
+example, Local Report History can remain distinct from HF message reading, and a
+future graph topology view can sit beside the geographic map. However, those
+views must consume the same normalized projections so topic, group, station,
+source, trust, and age filters behave consistently across the application.
+
+### Offline Map Decision
+
+FIO's required offline map is an operational outline and topology surface, not a
+downloaded-tile product.
+
+Baseline:
+
+- bundled lightweight country/state/province/region/grid context
+- station, report, status, path, and planning overlays
+- optional user/imported reference pins
+- topology views that work without precise coordinates
+
+Future optional enhancement:
+
+- bounded regional map packs or cached tiles with an explicit size limit,
+  status, and clear-cache action
+
+No operator workflow should require internet map access. If a mesh or Reticulum
+node lacks coordinates, FIO should show it in topology, roster, region, group,
+or jurisdiction context instead of inventing a map location.
+
+### Protocol-Neutral Event Types
+
+The shared ingestion store should be able to represent at least these event
+families:
+
+- `MessageEvent`: raw or normalized message traffic, including JS8 directed
+  text, FLMsg/FLAmp files, Spotter MCF, CommStat messages, VarAC messages, local
+  notes, mesh messages, LXMF, and MQTT payloads.
+- `ReportObservation`: an actionable/informative report with topic, location,
+  severity/status, group/jurisdiction, source, and message handoff.
+- `LinkObservation`: directional reachability evidence with source, observer,
+  subject, target, protocol, method, quality, timestamp, and provenance.
+- `NodeObservation`: callsign/node identity, alias, role, group, capability,
+  location, and trust evidence.
+- `ConditionSignal`: a traffic-derived or manually entered condition-level or
+  SOP trigger.
+- `RouteCandidate`: a suggested path, BBS placement, relay, or forwarding route
+  generated from source capability, trust, SOP, and path evidence.
+
+All of these records are immutable evidence or derived projections. Editing UI
+state should not rewrite source observations; it should create a corrected
+operator record, alias, annotation, or policy decision that projections can use.
+
+### Cross-Protocol Provenance Labels
+
+Operator-facing provenance must be short and consistent:
+
+- `RF-only`
+- `Internet-assisted`
+- `Store-forward`
+- `Imported`
+- `Manual`
+- `Mixed`
+- `Unknown`
+
+Diagnostics may retain protocol-specific detail such as CommStat maximum reach,
+MQTT topic, MeshCore room, Reticulum/LXMF propagation node, JS8Call instance,
+VarAC folder, or FLMsg file path. Primary UI should prefer the short label plus
+source family, for example `CommStat | Internet-assisted` or
+`Reticulum | Store-forward`.
+
+### Connector Health Model
+
+Station Health should summarize every configured source without making the map
+or messages UI poll connectors directly.
+
+Each connector health record should include:
+
+- source key and friendly label
+- protocol family
+- radio id when radio-owned
+- station-level connector id when not radio-owned
+- last successful ingest
+- last error and operator-facing recovery hint
+- checkpoint position
+- stale/failing/ready state
+- capability summary
+
+Connector failure examples:
+
+- JS8Call FIO-B API unavailable
+- FIO Spotter MCF folder missing
+- VarAC inbox folder unreadable
+- Reticulum sidecar stopped
+- MQTT broker disconnected
+
+Failures should degrade only the affected connector and any views depending on
+it. Scheduler, RF Guard, ControlFreq, and unrelated message/map sources must
+continue working.
+
 ## Ingestion Architecture
 
 ### Connector Contract
@@ -994,6 +1138,29 @@ Rules:
 
 ## Implementation Phases
 
+### Recommended Build Order
+
+The safest implementation order is:
+
+1. Stabilize existing HF/local projections before adding a new protocol.
+2. Add canonical link/path observations for existing JS8Call/CommStat/FastLight
+   evidence.
+3. Make Map and Messages consume the same topic/group/source/age projection.
+4. Add topology/path scopes and right-inspector actions on top of those
+   projections.
+5. Add fixture-backed mesh/Reticulum/MQTT importers with no live connection and
+   no send/write support.
+6. Add connector health/status visibility.
+7. Add live read-only connector services one family at a time.
+8. Add SOP condition-signal rules and optional audited auto-invocation.
+9. Add BBS/relay routing previews.
+10. Add send/write/relay only after policy, trust, audit, and safety gates are
+    complete.
+
+This order protects the current FIO center of gravity. Existing radios,
+schedulers, RF Guard, Messages, and Map must become more consistent before FIO
+adds live mesh/Reticulum/MQTT complexity.
+
 ### Phase 0: Architecture Guardrails
 
 - Add or formalize the source capability registry.
@@ -1017,6 +1184,11 @@ Rules:
 - Keep existing UI behavior but make filters use the shared projection.
 - Add tests for topic, group, age, source, and station filters across source
   families.
+- Backfill existing map and message metadata into the projection store without
+  changing external app files.
+- Preserve the multi-rig source key on every projected record so FIO-A,
+  FIO-B, VarAC, CommStat, and future station-level connectors cannot overwrite
+  or mask each other.
 
 ### Phase 2: Map And Path Stabilization
 
@@ -1025,12 +1197,25 @@ Rules:
   Candidates scopes.
 - Fix directional link semantics and quality rendering.
 - Ensure right-side inspector is the only detail surface.
+- Implement path query tests for:
+  - links involving my station
+  - selected-station inbound links
+  - selected-station outbound links
+  - third-party observed links
+  - asymmetric link quality
+  - relay candidates between two stations
+- Make link rendering explainable in the inspector before adding dense visual
+  features. The operator should always be able to answer "who reported this
+  path and when?"
 
 ### Phase 3: SOP Signal Pipeline
 
 - Feed condition alerts and local report events into SOP Builder.
 - Add configurable group-specific condition alert patterns.
 - Add audited prompt/auto-apply paths.
+- Add condition-signal examples as disabled templates, not hard-coded behavior.
+- Persist every automatic or prompted SOP invocation as an auditable event with
+  source evidence, trust state, and affected radios/plans.
 
 ### Phase 4: Mesh/Reticulum Read-Only Prototype
 
@@ -1042,6 +1227,13 @@ Rules:
   touching live BLE/serial/MQTT/sidecar connections.
 - Preserve source protocol fields for diagnostics while projecting operator
   summaries into the shared Messages, Map, and SOP surfaces.
+- The first fixture should include:
+  - nodes with and without coordinates
+  - direct and third-party link observations
+  - store-and-forward messages
+  - a topic-tagged local/county report
+  - internet-assisted and RF-only provenance
+  - a condition signal that is detected but not auto-applied by default
 
 ### Phase 5: MQTT And Store-And-Forward Routing
 
@@ -1060,6 +1252,36 @@ Rules:
 - Reuse Add Radio wizard visual language and core helper pattern.
 - Keep station-level connector setup separate from Add Radio unless the
   connector is truly owned by a radio profile.
+- Station-level connector setup should ask what the connector represents:
+  local mesh, regional mesh, MQTT bridge, Reticulum/LXMF, imported archive, or
+  other trusted infrastructure.
+- Setup must clearly show whether FIO will read only, monitor live, publish,
+  relay, or manage files. The default for new protocols is read-only.
+
+### Phase 7: Send, Publish, Relay, And Automation
+
+This phase is intentionally last.
+
+Before any cross-protocol send/write/relay action is enabled, FIO must have:
+
+- source capability checks
+- trust policy
+- operating group scope policy
+- BBS/relay permission policy
+- duplicate/replay protection where practical
+- clear provenance labels
+- operator preview
+- audit log
+- RF Guard when radio hardware or transmit paths are involved
+
+Automation levels:
+
+- `Suggest`: FIO recommends an action.
+- `Prompt`: FIO prepares the action and waits for confirmation.
+- `Auto`: FIO performs the action only when group policy, trust, RF Guard, and
+  audit gates pass.
+
+No connector should default to `Auto`.
 
 ## Acceptance Criteria
 
