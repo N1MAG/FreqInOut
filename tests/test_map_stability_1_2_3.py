@@ -405,7 +405,7 @@ def test_map_selected_status_explains_marker_without_raw_question_noise() -> Non
 
     assert "Station Status" in html
     assert "Functioning" in html
-    assert "Multiple sources" in html
+    assert "Multiple Sources" in html
     assert "Phone landline functioning" not in html
     assert "No latest status report detail" in html
 
@@ -422,7 +422,7 @@ def test_map_selected_station_detail_suppresses_raw_question_prompt() -> None:
                 {"label": "Area", "value": "MT / DN28FI"},
                 {"label": "SitRep", "value": "Functioning"},
                 {"label": "Marker", "value": "Green: latest status is functioning"},
-                {"label": "Source", "value": "Multiple sources"},
+                {"label": "Source", "value": "Multiple Sources"},
             ],
         },
         summary="Phone landline functioning?",
@@ -468,7 +468,7 @@ def test_hidden_path_layer_is_not_an_active_filter_even_with_saved_scope() -> No
     tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("K7ETC", ("station", "K7ETC"))])
     tab.link_mode_combo.setCurrentIndex(1)
 
-    assert StationsMapTab._current_link_selection(tab) == ("station", "K7ETC")
+    assert StationsMapTab._current_link_selection(tab) == ("off", "")
     assert StationsMapTab._links_active(tab) is False
 
 
@@ -806,7 +806,7 @@ def test_map_report_cluster_call_label_drives_title_detail_and_message_filter() 
     detail_html = StationsMapTab._map_selected_detail_html(tab, payload)
     assert "K7ETC" in detail_html
     assert "Widemouth 2 Fire" in detail_html
-    assert "Multiple sources" in detail_html
+    assert "Multiple Sources" in detail_html
     assert "&lt;br" not in detail_html
     assert "&amp;lt;br" not in detail_html
     assert "<br/>" not in detail_html
@@ -835,7 +835,7 @@ def test_map_report_detail_uses_plain_summary_and_cross_source_topic_handoff() -
         "callsigns": ["K7ETC"],
         "rows": [
             {"label": "Reporter", "value": "K7ETC"},
-            {"label": "Source", "value": "Multiple sources"},
+            {"label": "Source", "value": "Multiple Sources"},
             {"label": "Area", "value": "UT / DM38ST"},
         ],
     }
@@ -848,7 +848,7 @@ def test_map_report_detail_uses_plain_summary_and_cross_source_topic_handoff() -
 
     assert "Widemouth 2 Fire" in detail_html
     assert "K7ETC" in detail_html
-    assert "Multiple sources" in detail_html
+    assert "Multiple Sources" in detail_html
     assert "&lt;br" not in detail_html
     assert "&amp;gt" not in detail_html
 
@@ -2798,7 +2798,7 @@ def test_map_link_renderer_preserves_direction_and_quality_visuals() -> None:
     assert "let linkDirectionMarkers" in source
     assert "function linkBearingDeg" in source
     assert "const showDirectionMarkers = !!linkDirectionMarkers" in source
-    assert "const arrowRotation = bearing;" in source
+    assert "const arrowRotation = bearing - 90;" in source
     assert "fio-link-arrow" in source
     assert "rotate(${{arrowRotation}}deg)" in source
     assert "&#10148;" in source
@@ -2929,7 +2929,7 @@ def test_map_detail_payload_cleans_html_tooltip_fallback() -> None:
     assert "summary: cleanMapDetailText(event.summary || event.tooltip || title)" in source
     assert "map.closePopup();" in source
     assert "document.querySelectorAll('.leaflet-popup')" in source
-    assert "return 'Multiple sources';" in source
+    assert "return 'Multiple Sources';" in source
     assert "return 'Planning Pin';" in source
     assert ".replace(/&lt;/g, '<')" in source
     assert ".replace(/<br\\s*\\/?>/gi, '\\\\n')" in source
@@ -3063,6 +3063,66 @@ def test_map_fire_topic_refines_paths_layer_with_report_focus_events() -> None:
     assert len(events) == 1
     assert events[0]["primary_topic"] == "Fire"
     assert events[0]["icon"] == "fire"
+
+
+def test_spotter_layer_reports_any_recency_keeps_historical_reports(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path
+    db_dir = config_dir / "config"
+    db_dir.mkdir()
+    db_path = db_dir / "freqinout_nets.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE spotter_traffic (
+            id INTEGER PRIMARY KEY,
+            from_call TEXT,
+            form_id TEXT,
+            utc_ts REAL,
+            utc_str TEXT,
+            decoded_text TEXT,
+            raw_text TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO spotter_traffic (from_call, form_id, utc_ts, utc_str, decoded_text, raw_text)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("K7ETC", "307", 100.0, "2026-08-02T11:56:42Z", "Wildfire report DM38ST", ""),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: config_dir)
+
+    tab = _bare_tab()
+    rows = StationsMapTab._load_spotter_layer_reports(
+        tab,
+        layer_name="alert",
+        form_codes={"F!307"},
+        max_age_sec=0,
+        classifier=lambda _text: ("fire", "severe"),
+        summarizer=lambda text: str(text),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["callsign"] == "K7ETC"
+    assert rows[0]["form_id"] == "F!307"
+
+
+def test_map_group_and_region_filter_helpers_normalize_all_and_js8_targets() -> None:
+    tab = _bare_tab()
+    tab.group_filter_combo = _FakeCombo([("All", ""), ("@MR08>", "@MR08>")])
+    tab.region_filter_combo = _FakeCombo([("All Regions", ""), ("Region MR08", "Region MR08")])
+
+    assert tab._selected_map_group_filter() == ""
+    assert tab._selected_map_region_filter() == ""
+
+    tab.group_filter_combo.setCurrentIndex(1)
+    tab.region_filter_combo.setCurrentIndex(1)
+
+    assert tab._selected_map_group_filter() == "MR08"
+    assert tab._selected_map_region_filter() == "MR08"
 
 
 def test_message_context_applies_filters_after_search_is_set() -> None:

@@ -697,7 +697,7 @@ class StationsMapTab(QWidget):
         self.show_cities = False
         self.show_states = False
         self.show_station_markers = True
-        self.show_link_paths = True
+        self.show_link_paths = False
         self.show_grids = False
         self.show_grid_labels = False  # driven by the "Show grids" toggle
         self.show_weather_reports = True
@@ -921,7 +921,7 @@ class StationsMapTab(QWidget):
         apply_chk(self.show_cities_chk, "show_cities", "map_show_cities", False)
         apply_chk(self.show_grid_labels_chk, "show_grids", "map_show_grids", False)
         apply_chk(self.map_stations_chk, "show_station_markers", "map_show_station_markers", True)
-        apply_chk(self.map_links_chk, "show_link_paths", "map_show_link_paths", True)
+        apply_chk(self.map_links_chk, "show_link_paths", "map_show_link_paths", False)
         apply_chk(self.map_weather_chk, "show_weather_reports", "map_show_weather_reports", True)
         apply_chk(self.map_alerts_chk, "show_alert_reports", "map_show_alert_reports", True)
         apply_chk(self.map_infrastructure_chk, "show_infrastructure_reports", "map_show_infrastructure_reports", True)
@@ -2120,12 +2120,12 @@ class StationsMapTab(QWidget):
         self.link_mode_combo.addItem("Off", ("off", ""))
         self.link_mode_combo.addItem("My Station", ("my_station", ""))
         self.link_mode_combo.addItem("All", ("all", ""))
-        self.link_mode_combo.setCurrentText("My Station")
+        self.link_mode_combo.setCurrentText("Off")
         self._map_path_scope_combo = QComboBox()
         self._map_path_scope_combo.addItem("Off", ("off", ""))
         self._map_path_scope_combo.addItem("My Station", ("my_station", ""))
         self._map_path_scope_combo.addItem("Network", ("all", ""))
-        self._map_path_scope_combo.setCurrentIndex(1)
+        self._map_path_scope_combo.setCurrentIndex(0)
         self._map_path_scope_combo.setToolTip(
             "Choose which path links are shown: links involving my station, the visible network, or none."
         )
@@ -2945,7 +2945,7 @@ class StationsMapTab(QWidget):
             return ""
         return (
             "<div class='fio-detail-row'>"
-            f"<span class='fio-detail-label'>{html.escape(label)}</span>"
+            f"<span class='fio-detail-label'>{html.escape(label)}:</span>"
             f"<span class='fio-detail-value'>{html.escape(text)}</span>"
             "</div>"
         )
@@ -4378,7 +4378,7 @@ class StationsMapTab(QWidget):
         if restore_idx >= 0:
             self.link_mode_combo.setCurrentIndex(restore_idx)
         else:
-            self.link_mode_combo.setCurrentIndex(max(0, self.link_mode_combo.findData(("my_station", ""))))
+            self.link_mode_combo.setCurrentIndex(max(0, self.link_mode_combo.findData(("off", ""))))
         self.link_mode_combo.blockSignals(False)
         self.link_mode, self.link_value = self._parse_link_selection(self.link_mode_combo.currentData())
         self._sync_path_scope_combo((self.link_mode, self.link_value))
@@ -6394,7 +6394,7 @@ class StationsMapTab(QWidget):
             source_chips = self._encode_source_chips(summary)
             summary_source = str(next(iter(summary.keys()), "FUSED") or "").strip()
             if source_count > 1 or summary_source.upper() == "FUSED":
-                source = "Multiple sources"
+                source = "Multiple Sources"
             else:
                 source = source_family_label(summary_source)
             updated_ts = self._safe_float(latest_event_ts, 0.0)
@@ -6748,7 +6748,7 @@ class StationsMapTab(QWidget):
     ) -> List[Dict[str, object]]:
         if not form_codes:
             return []
-        cache_key = (f"spotter_{layer_name}_reports", tuple(sorted(form_codes)))
+        cache_key = (f"spotter_{layer_name}_reports", tuple(sorted(form_codes)), int(max_age_sec or 0))
         cached = self._query_cache_get(cache_key)
         if isinstance(cached, list):
             return [dict(row) for row in cached if isinstance(row, dict)]
@@ -6759,7 +6759,7 @@ class StationsMapTab(QWidget):
             return out
         if not db_path.exists():
             return out
-        cutoff = time.time() - max_age_sec
+        cutoff = time.time() - max_age_sec if max_age_sec and max_age_sec > 0 else 0.0
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -6841,8 +6841,8 @@ class StationsMapTab(QWidget):
         )
         topic_filter = self._selected_map_topic_filter()
         search_text = self._selected_map_search_text()
-        group_filter = str(self.group_filter_combo.currentData() or "") if hasattr(self, "group_filter_combo") else ""
-        region_filter = str(self.region_filter_combo.currentData() or "") if hasattr(self, "region_filter_combo") else ""
+        group_filter = self._selected_map_group_filter()
+        region_filter = self._selected_map_region_filter()
         advanced_sig = self._map_advanced_filters_signature()
         cache_key = (
             f"observation_{layer_name}_reports",
@@ -7357,8 +7357,8 @@ class StationsMapTab(QWidget):
             return []
         topic_filter = self._selected_map_topic_filter()
         search_text = self._selected_map_search_text()
-        group_filter = str(self.group_filter_combo.currentData() or "") if hasattr(self, "group_filter_combo") else ""
-        region_filter = str(self.region_filter_combo.currentData() or "") if hasattr(self, "region_filter_combo") else ""
+        group_filter = self._selected_map_group_filter()
+        region_filter = self._selected_map_region_filter()
         advanced_sig = self._map_advanced_filters_signature()
         cache_key = (
             f"message_metadata_{layer_name}_reports",
@@ -7492,8 +7492,8 @@ class StationsMapTab(QWidget):
         focus_mode = self._effective_map_report_focus_mode()
         topic_filter = self._selected_map_topic_filter()
         search_text = self._selected_map_search_text()
-        group_filter = str(self.group_filter_combo.currentData() or "") if hasattr(self, "group_filter_combo") else ""
-        region_filter = str(self.region_filter_combo.currentData() or "") if hasattr(self, "region_filter_combo") else ""
+        group_filter = self._selected_map_group_filter()
+        region_filter = self._selected_map_region_filter()
         cache_key = (
             "observation_station_scope_calls",
             int(max_age_sec or 0),
@@ -7617,6 +7617,40 @@ class StationsMapTab(QWidget):
         except Exception:
             return ""
 
+    def _selected_map_group_filter(self) -> str:
+        combo = getattr(self, "group_filter_combo", None)
+        if combo is None:
+            return ""
+        try:
+            data = combo.currentData()
+        except Exception:
+            data = None
+        try:
+            text = str(combo.currentText() or "").strip()
+        except Exception:
+            text = ""
+        value = data if data not in (None, "") else text
+        return self._normalize_map_group_value(value)
+
+    def _selected_map_region_filter(self) -> str:
+        combo = getattr(self, "region_filter_combo", None)
+        if combo is None:
+            return ""
+        try:
+            data = combo.currentData()
+        except Exception:
+            data = None
+        try:
+            text = str(combo.currentText() or "").strip()
+        except Exception:
+            text = ""
+        value = str(data if data not in (None, "") else text or "").strip().upper()
+        if value in {"", "ALL", "ANY", "ALL REGIONS", "REGION ALL"}:
+            return ""
+        if value.startswith("REGION "):
+            value = value[7:].strip()
+        return value
+
     def _map_filter_combo_signature(self, attr: str) -> object:
         combo = getattr(self, attr, None)
         if combo is None:
@@ -7644,8 +7678,8 @@ class StationsMapTab(QWidget):
             "focus": self._effective_map_report_focus_mode(),
             "topic": self._selected_map_topic_filter(),
             "search": self._selected_map_search_text(),
-            "group": self._map_filter_combo_signature("group_filter_combo"),
-            "region": self._map_filter_combo_signature("region_filter_combo"),
+            "group": self._selected_map_group_filter(),
+            "region": self._selected_map_region_filter(),
             "band": self._map_filter_combo_signature("band_combo"),
             "source": self._map_filter_combo_signature("_map_source_filter_combo"),
             "state": self._map_filter_combo_signature("_map_state_filter_combo"),
@@ -8021,8 +8055,8 @@ class StationsMapTab(QWidget):
         return True
 
     def _map_filters_active(self) -> bool:
-        group = str(self.group_filter_combo.currentData() or "") if hasattr(self, "group_filter_combo") else ""
-        region = str(self.region_filter_combo.currentData() or "") if hasattr(self, "region_filter_combo") else ""
+        group = self._selected_map_group_filter()
+        region = self._selected_map_region_filter()
         band_data = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
         band_active = False
         if isinstance(band_data, dict):
@@ -8030,8 +8064,8 @@ class StationsMapTab(QWidget):
         topic = self._selected_map_topic_filter()
         advanced = self._map_advanced_filters_signature()
         return bool(
-            self._normalize_map_group_value(group)
-            or str(region or "").strip()
+            group
+            or region
             or band_active
             or self.recency_seconds
             or str(topic or "").strip()
@@ -8401,7 +8435,7 @@ class StationsMapTab(QWidget):
         if source == "rf_pin":
             return "Planning Pin"
         if source in {"fused", "mixed", "multiple_sources", "multiple sources"}:
-            return "Multiple sources"
+            return "Multiple Sources"
         if not source:
             return "HF Report"
         if source == "local_report":
@@ -9191,13 +9225,12 @@ class StationsMapTab(QWidget):
         return bool(combo_mode and combo_mode.lower() != "off")
 
     def _current_link_selection(self) -> tuple[str, str]:
+        if not bool(getattr(self, "show_link_paths", False)):
+            return "off", ""
         mode = str(getattr(self, "link_mode", "") or "").strip().lower()
         value = str(getattr(self, "link_value", "") or "").strip().upper()
         if mode and mode != "off":
             return mode, value
-        combo = getattr(self, "link_mode_combo", None)
-        if combo is not None:
-            return self._parse_link_selection(combo.currentData())
         return "off", ""
 
     def _map_link_status_text(
@@ -10410,12 +10443,8 @@ class StationsMapTab(QWidget):
                 )
 
         selection = self._current_link_selection()
-        group_filter = ""
-        region_filter = ""
-        if hasattr(self, "group_filter_combo"):
-            group_filter = self.group_filter_combo.currentData() or ""
-        if hasattr(self, "region_filter_combo"):
-            region_filter = self.region_filter_combo.currentData() or ""
+        group_filter = self._selected_map_group_filter()
+        region_filter = self._selected_map_region_filter()
         topic_filter = self._selected_map_topic_filter()
         search_text = self._selected_map_search_text()
         observation_focus_enabled = self._effective_map_observation_focus_enabled()
@@ -12129,7 +12158,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
       const raw = cleanMapDetailText(value);
       const key = raw.toLowerCase().replace(/[_-]+/g, ' ').trim();
       if (!key) return '';
-      if (['fused', 'mixed', 'multiple', 'multiple source', 'multiple sources'].includes(key)) return 'Multiple sources';
+      if (['fused', 'mixed', 'multiple', 'multiple source', 'multiple sources'].includes(key)) return 'Multiple Sources';
       if (key === 'js8spotter') return 'JS8Spotter';
       if (key === 'js8call' || key === 'js8') return 'JS8Call';
       if (key === 'flmsg') return 'FLMsg';
@@ -12603,7 +12632,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
             const midLat = (lat1 + lat2) / 2.0;
             const midLon = (lon1 + lon2) / 2.0;
             const bearing = linkBearingDeg(lat1, lon1, lat2, lon2);
-            const arrowRotation = bearing;
+            // The arrow glyph points east at zero degrees; bearing zero is north.
+            const arrowRotation = bearing - 90;
             const arrowIcon = L.divIcon({{
               className: '',
               html: `<div class="fio-link-arrow" style="color:${{color}}; transform: rotate(${{arrowRotation}}deg);">&#10148;</div>`,
@@ -12786,6 +12816,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
         combo = getattr(self, "_map_path_scope_combo", None)
         data = combo.itemData(idx) if combo is not None else ("off", "")
         mode, value = self._parse_link_selection(data)
+        if (mode or "off").lower() == "off":
+            self._set_path_layer_off()
+            self._update_map_mode_buttons()
+            self._update_map_view_status_label()
+            self._update_clear_filter_buttons_visual()
+            self._request_map_refresh(level="medium", reason="path_scope")
+            return
         hidden_combo = getattr(self, "link_mode_combo", None)
         if hidden_combo is not None and mode in {"off", "my_station", "all"}:
             target = (mode, "")
