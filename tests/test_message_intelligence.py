@@ -1941,6 +1941,7 @@ def test_inbox_status_and_search_filters_are_core_row_logic() -> None:
     assert "widemouth" in row_search_text(searchable)
     assert row_matches_search_query(searchable, "MR08") is True
     assert row_matches_search_query(searchable, "widemouth") is True
+    assert row_matches_search_query(searchable, "K7ETC Fire MR08") is True
     assert row_matches_search_query(searchable, "not-present") is False
 
 

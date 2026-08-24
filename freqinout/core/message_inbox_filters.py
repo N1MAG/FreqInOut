@@ -516,7 +516,13 @@ def row_matches_search_query(row: MessageRowLike, query: str) -> bool:
     query = str(query or "").strip().lower()
     if not query:
         return True
-    return query in row_search_text(row)
+    haystack = row_search_text(row)
+    if query in haystack:
+        return True
+    tokens = [token for token in re.split(r"[\s,;/|]+", query) if token]
+    if not tokens:
+        return True
+    return all(token in haystack for token in tokens)
 
 
 def row_matches_excluded_types(row: MessageRowLike, excluded_types: set[str] | frozenset[str]) -> bool:
