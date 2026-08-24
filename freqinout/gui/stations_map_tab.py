@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextBrowser,
     QTabWidget,
+    QSpinBox,
 )
 from freqinout.core.config_paths import get_config_dir
 
@@ -1711,10 +1712,12 @@ class StationsMapTab(QWidget):
                 combo.blockSignals(True)
                 combo.setCurrentIndex(idx)
                 combo.blockSignals(False)
+                self._map_recency_label = "Any"
                 self._update_map_since_button_text("Any")
             self.recency_seconds = None
         except Exception:
             self.recency_seconds = None
+            self._map_recency_label = "Any"
 
     def _map_recency_options(self) -> List[Tuple[str, Optional[int]]]:
         return [
@@ -1736,7 +1739,7 @@ class StationsMapTab(QWidget):
 
     def _map_recency_display_label(self, value: str) -> str:
         label = str(value or "").strip() or "Any"
-        return "Any" if label == "Any" else label
+        return "Age: Any" if label == "Any" else f"Age: {label}"
 
     def _map_recency_menu_label(self, value: str) -> str:
         label = str(value or "").strip() or "Any"
@@ -1748,30 +1751,96 @@ class StationsMapTab(QWidget):
             return
         label = str(value or "").strip()
         if not label:
+            label = str(getattr(self, "_map_recency_label", "") or "").strip()
+        if not label:
             combo = getattr(self, "recency_combo", None)
             try:
                 label = str(combo.currentText() or "").strip() if combo is not None else ""
             except Exception:
                 label = ""
+        self._map_recency_label = label or "Any"
         button.setText(self._map_recency_display_label(label or "Any"))
 
     def _build_map_since_menu(self) -> None:
         button = getattr(self, "_map_since_button", None)
         if button is None:
             return
-        menu = QMenu(button)
-        for idx, (label, _seconds) in enumerate(self._map_recency_options()):
-            if idx in {1, 8, 11}:
-                menu.addSeparator()
-            action = menu.addAction(self._map_recency_menu_label(label))
-            action.setData(label)
-            action.triggered.connect(
-                lambda _checked=False, selected=label: self._set_map_recency_from_label(selected)
+        button.clicked.connect(self._show_map_since_popover)
+
+    def _show_map_since_popover(self) -> None:
+        button = getattr(self, "_map_since_button", None)
+        if button is None:
+            return
+        existing = getattr(self, "_map_since_popover", None)
+        if existing is not None:
+            try:
+                existing.close()
+            except Exception:
+                pass
+        popover = QDialog(self, Qt.Popup)
+        popover.setObjectName("MapSincePopover")
+        popover.setWindowTitle("Map Time Window")
+        layout = QVBoxLayout(popover)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        title = QLabel("Show map activity age", popover)
+        title.setStyleSheet("font-weight: 700;")
+        layout.addWidget(title)
+
+        quick_groups = (
+            ("Recent", ("15m", "30m", "1h", "3h", "6h", "12h", "24h")),
+            ("Days", ("3d", "7d", "14d")),
+            ("Archive", ("30d", "60d", "90d", "Any")),
+        )
+        for group_label, labels in quick_groups:
+            group_title = QLabel(group_label, popover)
+            group_title.setStyleSheet("color: #5f6b76; font-weight: 700;")
+            layout.addWidget(group_title)
+            row = QGridLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setHorizontalSpacing(6)
+            row.setVerticalSpacing(6)
+            for idx, label in enumerate(labels):
+                chip = QPushButton(label, popover)
+                chip.setMinimumWidth(58)
+                chip.setToolTip(f"Show mapped stations, traffic, and paths up to {label} old.")
+                if label == "Any":
+                    chip.setToolTip("Show all indexed mapped stations, traffic, and paths.")
+                chip.clicked.connect(
+                    lambda _checked=False, selected=label, dialog=popover: (
+                        self._set_map_recency_from_label(selected),
+                        dialog.close(),
+                    )
+                )
+                row.addWidget(chip, idx // 4, idx % 4)
+            layout.addLayout(row)
+
+        custom_row = QHBoxLayout()
+        custom_row.setContentsMargins(0, 2, 0, 0)
+        custom_row.addWidget(QLabel("Custom days", popover))
+        custom_spin = QSpinBox(popover)
+        custom_spin.setRange(1, 365)
+        custom_spin.setValue(30)
+        custom_spin.setSuffix(" d")
+        custom_spin.setMinimumWidth(88)
+        custom_row.addWidget(custom_spin)
+        apply_btn = QPushButton("Apply", popover)
+        apply_btn.clicked.connect(
+            lambda _checked=False, spin=custom_spin, dialog=popover: (
+                self._set_map_recency_from_label(f"{int(spin.value())}d"),
+                dialog.close(),
             )
-        button.setMenu(menu)
+        )
+        custom_row.addWidget(apply_btn)
+        layout.addLayout(custom_row)
+        self._map_since_popover = popover
+        pos = button.mapToGlobal(button.rect().bottomLeft())
+        popover.move(pos)
+        popover.show()
 
     def _set_map_recency_from_label(self, label: str) -> None:
         combo = getattr(self, "recency_combo", None)
+        label = str(label or "").strip() or "Any"
         if combo is not None:
             try:
                 idx = combo.findText(label)
@@ -1788,6 +1857,13 @@ class StationsMapTab(QWidget):
                 return
         mapping = dict(self._map_recency_options())
         self.recency_seconds = mapping.get(label)
+        if self.recency_seconds is None and str(label or "").strip().lower().endswith("d"):
+            try:
+                days = int(str(label).strip()[:-1])
+                self.recency_seconds = max(1, days) * 24 * 60 * 60
+            except Exception:
+                self.recency_seconds = None
+        self._map_recency_label = label
         self._update_map_since_button_text(label)
         self._clear_report_query_caches()
         self._update_clear_filter_buttons_visual()
@@ -2084,9 +2160,10 @@ class StationsMapTab(QWidget):
         ])
         self.recency_combo.setCurrentText("3h")
         self.recency_seconds = 3 * 60 * 60
+        self._map_recency_label = "3h"
         self.recency_combo.setVisible(False)
         self._map_since_button = QToolButton()
-        self._map_since_button.setPopupMode(QToolButton.InstantPopup)
+        self._map_since_button.setPopupMode(QToolButton.DelayedPopup)
         self._map_since_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self._map_since_button.setMinimumWidth(118)
         self._map_since_button.setMaximumWidth(145)
@@ -2379,13 +2456,14 @@ class StationsMapTab(QWidget):
             maximum_width: int = 0,
         ) -> QWidget:
             field = QWidget(filter_bar)
-            field_layout = QVBoxLayout(field)
+            field_layout = QHBoxLayout(field)
             field_layout.setContentsMargins(0, 0, 0, 0)
-            field_layout.setSpacing(2)
+            field_layout.setSpacing(6)
             label = QLabel(label_text, field)
             label.setStyleSheet("font-weight: 700;")
+            label.setMinimumWidth(label.sizeHint().width())
             field_layout.addWidget(label)
-            field_layout.addWidget(widget)
+            field_layout.addWidget(widget, stretch=1)
             if minimum_width:
                 field.setMinimumWidth(minimum_width)
             if maximum_width:
@@ -6791,10 +6869,15 @@ class StationsMapTab(QWidget):
         if max_age_sec and max_age_sec > 0:
             cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=max_age_sec)
             since_utc = cutoff.replace(microsecond=0).isoformat()
+        wanted_sources = self._observation_focus_sources(focus_mode)
         try:
             view_rows = map_observation_rows(
                 db_path,
-                ObservationQuery(since_utc=since_utc, limit=1500),
+                ObservationQuery(
+                    source_families=tuple(sorted(wanted_sources)),
+                    since_utc=since_utc,
+                    limit=1500,
+                ),
                 layer_enabled=True,
                 allow_unconfirmed_local=False,
                 exercise_layer=False,
@@ -6803,7 +6886,6 @@ class StationsMapTab(QWidget):
             log.debug("StationsMap: failed to load observation %s reports: %s", layer_name, e)
             return out
 
-        wanted_sources = self._observation_focus_sources(focus_mode)
         metadata_lookup = self._message_file_metadata_lookup(db_path)
         for view_row in view_rows:
             obs = view_row.observation
@@ -6912,16 +6994,42 @@ class StationsMapTab(QWidget):
             meta_state = str(metadata.get("state") or "").strip().upper()
             meta_title = str(metadata.get("title") or "").strip()
             report_ts = self._safe_float(metadata.get("report_ts"), 0.0)
+            group_values: List[str] = []
+            for raw_group in (
+                metadata.get("to_call"),
+                obs.to_target,
+                *(obs.groups or ()),
+            ):
+                group = str(raw_group or "").strip().upper().lstrip("@").rstrip(">")
+                if group and group not in group_values:
+                    group_values.append(group)
+            search_parts = [
+                metadata.get("search_text"),
+                meta_title,
+                metadata.get("display_type"),
+                metadata.get("msg_type"),
+                obs.subject,
+                obs.summary,
+                form,
+                obs.from_call,
+                obs.to_target,
+                " ".join(group_values),
+                " ".join(sorted(topics)),
+                effective_grid,
+                meta_state or obs.state,
+            ]
             eligibility_reason = (
                 getattr(eligibility, "reason_text", "") if eligibility is not None else "placed from message metadata"
             )
             out.append(
                 {
                     "callsign": str(metadata.get("from_call") or obs.from_call or "").strip().upper(),
+                    "from_call": str(metadata.get("from_call") or obs.from_call or "").strip().upper(),
                     "form_id": form,
                     "utc_ts": report_ts or self._observation_ts(obs.event_utc or obs.received_utc),
                     "utc_str": str(obs.event_utc or obs.received_utc or "").strip(),
                     "summary": str(meta_title or obs.subject or obs.summary or "Observation received").strip(),
+                    "title": str(meta_title or obs.subject or "").strip(),
                     "icon": icon,
                     "severity": severity,
                     "lat": obs.lat if use_observation_coordinates else None,
@@ -6932,9 +7040,10 @@ class StationsMapTab(QWidget):
                     or self._map_report_source_label(obs.source_family, obs.source_app),
                     "source_app": obs.source_app,
                     "to_target": str(metadata.get("to_call") or obs.to_target or "").strip(),
-                    "groups": list(obs.groups or ()),
+                    "groups": group_values,
                     "topics": sorted(topics),
                     "state": meta_state or obs.state,
+                    "search_text": " ".join(str(part or "") for part in search_parts if str(part or "").strip()),
                     "location_confidence": obs.location_confidence,
                     "auth_state": obs.auth_state,
                     "trusted_state": obs.trusted_state,
@@ -7197,7 +7306,16 @@ class StationsMapTab(QWidget):
         *,
         preferred_topic: str = "",
     ) -> tuple[str, str]:
-        primary_topic = str(preferred_topic or "").strip() or self._map_preferred_topic_for_values(topics)
+        selected_topic = ""
+        try:
+            selected_topic = self._selected_map_topic_filter()
+        except Exception:
+            selected_topic = ""
+        primary_topic = (
+            str(preferred_topic or "").strip()
+            or str(selected_topic or "").strip()
+            or self._map_preferred_topic_for_values(topics)
+        )
         event_icon = self._map_icon_for_topics(topics, preferred_topic=primary_topic)
         if not event_icon:
             fallback = str(fallback_icon or "general").strip().lower() or "general"
@@ -7334,7 +7452,7 @@ class StationsMapTab(QWidget):
             return {"local_report"}
         if mode == "rf_pins":
             return {"rf_pin"}
-        return {"spotter", "commstat", "js8call", "varac", "flmsg", "flamp", "local_report", "condition_alert", "rf_pin"}
+        return {"spotter", "commstat", "js8call", "varac", "flmsg", "flamp", "local_report", "condition_alert"}
 
     def _observation_matches_map_scope(self, obs, *, group_filter: str = "", region_filter: str = "") -> bool:
         group_key = self._normalize_map_group_value(group_filter)
@@ -7400,22 +7518,14 @@ class StationsMapTab(QWidget):
             cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=max_age_sec)
             since_utc = cutoff.replace(microsecond=0).isoformat()
         try:
-            calls = set(
-                matching_observation_callsigns(
-                    db_path,
-                    ObservationQuery(
-                        source_families=tuple(sorted(self._observation_focus_sources(focus_mode))),
-                        topic=topic_filter,
-                        operating_group=group_filter,
-                        search_text=search_text,
-                        since_utc=since_utc,
-                        limit=2500,
-                    ),
-                )
-            )
+            calls: Set[str] = set()
             view_rows = map_observation_rows(
                 db_path,
-                ObservationQuery(since_utc=since_utc, limit=2500),
+                ObservationQuery(
+                    source_families=tuple(sorted(self._observation_focus_sources(focus_mode))),
+                    since_utc=since_utc,
+                    limit=2500,
+                ),
                 layer_enabled=True,
                 allow_unconfirmed_local=False,
                 exercise_layer=False,
@@ -7458,7 +7568,7 @@ class StationsMapTab(QWidget):
                     if base_call:
                         calls.add(base_call)
         for event in self._load_message_metadata_operational_reports(
-            layer_name="infrastructure",
+            layer_name="report_focus",
             max_age_sec=max_age_sec,
         ):
             if not isinstance(event, dict):
@@ -8006,6 +8116,7 @@ class StationsMapTab(QWidget):
         if hasattr(self, "band_combo"):
             self._set_combo_to_first_matching_data_or_text(self.band_combo, "All")
         self.recency_seconds = None
+        self._map_recency_label = "Any"
         self._update_map_since_button_text("Any")
         edit = getattr(self, "_map_search_edit", None)
         if edit is not None:
@@ -8619,6 +8730,7 @@ class StationsMapTab(QWidget):
                     "topics": set(),
                     "states": set(),
                     "grids": set(),
+                    "search_terms": [],
                 },
             )
             bucket["lat_sum"] = float(bucket.get("lat_sum", 0.0)) + lat
@@ -8633,6 +8745,31 @@ class StationsMapTab(QWidget):
                 bucket["states"].add(state)
             if grid:
                 bucket["grids"].add(grid)
+            search_terms = bucket.setdefault("search_terms", [])
+            if isinstance(search_terms, list):
+                search_terms.extend(
+                    str(part or "")
+                    for part in (
+                        report.get("search_text"),
+                        report.get("summary"),
+                        report.get("title"),
+                        report.get("form_id"),
+                        report.get("form_name"),
+                        report.get("message"),
+                        report.get("details"),
+                        report.get("tooltip"),
+                        report.get("source_label"),
+                        report.get("source_family"),
+                        report.get("callsign"),
+                        report.get("from_call"),
+                        report.get("to_target"),
+                        report.get("state"),
+                        report.get("grid"),
+                        " ".join(self._map_report_group_values(report)),
+                        " ".join(self._map_report_topic_values(report)),
+                    )
+                    if str(part or "").strip()
+                )
             if rank > int(bucket.get("max_rank", 0) or 0) or ts >= self._safe_float(bucket.get("latest_ts"), 0.0):
                 if rank >= int(bucket.get("max_rank", 0) or 0):
                     bucket["icon"] = icon
@@ -8753,6 +8890,13 @@ class StationsMapTab(QWidget):
             plain_summary = "\n".join(dict.fromkeys(summary_lines[:4]))
             if not plain_summary:
                 plain_summary = "\n".join(clean_detail_lines[:8])
+            cluster_search_text = "\n".join(
+                dict.fromkeys(
+                    str(term or "").strip()
+                    for term in bucket.get("search_terms", [])
+                    if str(term or "").strip()
+                )
+            )
             event_title = f"{primary_topic} Reports: {count}" if primary_topic else f"{display_label}: {count}"
             route_parts = []
             if groups:
@@ -8778,9 +8922,9 @@ class StationsMapTab(QWidget):
                     "topics": topics,
                     "primary_topic": primary_topic,
                     "topic": primary_topic,
-                    "topic": primary_topic,
                     "group": groups[0] if groups else "",
                     "title": event_title,
+                    "source_label": source_label,
                     "source_mix": source_label,
                     "source_kind": source_kind,
                     "source_family": primary_source_family,
@@ -8789,6 +8933,8 @@ class StationsMapTab(QWidget):
                     "route": " | ".join(route_parts),
                     "rows": row_items,
                     "summary": plain_summary,
+                    "details": plain_summary or cluster_search_text,
+                    "search_text": cluster_search_text,
                     "tooltip": "<br/>".join(html.escape(line) for line in detail_lines if line),
                 }
             )
@@ -12335,7 +12481,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (kind === 'evacuation') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
       if (kind === 'rfi') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M9 9a3 3 0 1 1 4.5 2.6c-1 .6-1.5 1.2-1.5 2.4"/><path ${{common}} d="M12 18h.01"/><circle ${{common}} cx="12" cy="12" r="10"/></svg>`;
       if (kind === 'warning' || layerType === 'alert') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
-      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 3h8l4 4v14H6z"/><path ${{common}} d="M14 3v5h5"/><path ${{common}} d="M8 13h8M8 17h6"/></svg>`;
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><circle ${{common}} cx="12" cy="12" r="9"/><path ${{common}} d="M12 10v6"/><path ${{common}} d="M12 7h.01"/></svg>`;
     }}
 
     function operationalIcon(event, layerType) {{
@@ -12700,6 +12846,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         val = self.recency_combo.itemText(idx)
         mapping = dict(self._map_recency_options())
         self.recency_seconds = mapping.get(val, None)
+        self._map_recency_label = val
         self._update_map_since_button_text(val)
         self._clear_report_query_caches()
         self._update_clear_filter_buttons_visual()

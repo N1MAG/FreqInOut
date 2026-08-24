@@ -996,9 +996,10 @@ def test_map_observation_focus_sources_cover_current_traffic_families() -> None:
     }
     assert StationsMapTab._observation_focus_sources("local_reports") == {"local_report"}
     assert StationsMapTab._observation_focus_sources("rf_pins") == {"rf_pin"}
-    assert {"spotter", "commstat", "local_report", "rf_pin"}.issubset(
+    assert {"spotter", "commstat", "local_report"}.issubset(
         StationsMapTab._observation_focus_sources("all_reports")
     )
+    assert "rf_pin" not in StationsMapTab._observation_focus_sources("all_reports")
 
 
 def test_map_observation_scope_filters_group_and_region_without_callsign_noise() -> None:
@@ -2003,9 +2004,9 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
     assert alert_rows[0]["source_family"] == "condition_alert"
     assert alert_rows[0]["source_label"] == "Condition Alert"
     assert alert_rows[0]["icon"] == "warning"
-    assert [row["callsign"] for row in infrastructure_rows] == ["N1MAG", "K0PRA", "K0FOOD"]
-    assert infrastructure_rows[0]["source_family"] == "rf_pin"
-    assert infrastructure_rows[0]["source_label"] == "Planning Pin"
+    assert [row["callsign"] for row in infrastructure_rows] == ["K0PRA", "K0FOOD"]
+    assert infrastructure_rows[0]["source_family"] == "local_report"
+    assert infrastructure_rows[0]["source_label"] == "Local Report"
     assert all(row["callsign"] != "N0PWR" for row in alert_rows + infrastructure_rows)
 
     tab._query_cache = {}
@@ -2060,7 +2061,7 @@ def test_map_observation_loader_uses_read_only_eligibility(monkeypatch, tmp_path
         layer_name="infrastructure",
         max_age_sec=0,
     )
-    assert [row["callsign"] for row in comms_infrastructure_rows] == ["N1MAG", "K0PRA"]
+    assert [row["callsign"] for row in comms_infrastructure_rows] == ["K0PRA"]
 
     tab._query_cache = {}
     tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Fire")
@@ -2290,6 +2291,14 @@ def test_map_file_location_fallback_places_flmsg_when_projection_grid_is_group(m
     assert rows[0]["state"] == "UT"
     assert len(events) == 1
     assert events[0]["icon"] == "fire"
+    assert "Widemouth 2 Fire" in events[0]["search_text"]
+    assert StationsMapTab._map_event_matches_primary_filters(
+        tab,
+        events[0],
+        group_filter="MR08",
+        topic_filter="Fire",
+        search_text="widemouth",
+    )
     assert "Widemouth 2 Fire" in events[0]["tooltip"]
 
 
@@ -2867,12 +2876,14 @@ def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
     assert StationsMapTab._map_event_topic_and_icon(
         tab, ["Water", "Fire"], "water", preferred_topic="Fire"
     ) == ("Fire", "fire")
+    assert StationsMapTab._map_event_topic_and_icon(tab, ["Water"], "water") == ("Fire", "fire")
+    tab._map_topic_filter_combo = SimpleNamespace(currentData=lambda: "", currentText=lambda: "All Topics")
     assert StationsMapTab._map_event_topic_and_icon(tab, ["Comms"], "water") == ("Comms", "comms")
     assert "def _map_topic_icon" in source
     assert "def _map_event_topic_and_icon" in source
     assert "primary_topic, event_icon = self._map_event_topic_and_icon" in source
     assert "if (kind === 'fire')" in source
-    assert "M6 3h8l4 4v14H6z" in source
+    assert "M12 10v6" in source
     for topic in (
         '"weather": "storm"',
         '"fire": "fire"',
