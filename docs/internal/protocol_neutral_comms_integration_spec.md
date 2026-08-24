@@ -102,6 +102,7 @@ Connector-specific layers own:
 - source health
 - protocol-specific send/write capabilities
 - protocol-specific safety and trust checks
+- protocol-specific retention and replay semantics
 
 Shared FIO layers own:
 
@@ -113,8 +114,85 @@ Shared FIO layers own:
 - map and topology projections
 - SOP relevance and action suggestions
 - BBS/relay routing previews
+- retention, dedupe, and projection policies that span multiple sources
 
 The UI reads shared projections. It does not perform ingestion work.
+
+## Operating Model
+
+FIO should not force operators to think in protocol silos. The user-facing model
+is:
+
+- `People and stations`: who is participating and what capabilities they have
+- `Groups and jurisdictions`: who the traffic is for and what area it affects
+- `Reports`: what information moved
+- `Paths`: who can reach whom and by what method
+- `Plans and SOPs`: where to be, when to be there, and what to do
+
+Protocols are still visible where they affect safety, trust, delivery, or
+available actions. A local GMRS report, a JS8Spotter form, a Reticulum LXMF
+message, and a MeshCore room post can all become reports, but FIO must preserve
+how they arrived, who relayed them, and whether the path was RF-only,
+internet-assisted, store-and-forward, or imported.
+
+The local-to-national flow is a scope model, not a protocol model. A county
+report may arrive by local voice, MeshCore, Reticulum, HF digital, MQTT, or a
+manual operator entry. Scope drives SOP/BBS/routing decisions; protocol
+capabilities drive what FIO can safely do next.
+
+## Protocol Capability Registry
+
+Every source family and connector instance must declare capabilities before the
+UI offers actions. Capabilities are data, not hard-coded tab assumptions.
+
+Core capability fields:
+
+- `receive_messages`
+- `receive_reports`
+- `receive_links`
+- `receive_nodes`
+- `send_message`
+- `send_form`
+- `frequency_control`
+- `launch_control`
+- `bbs_read`
+- `bbs_write`
+- `store_forward`
+- `topology`
+- `location`
+- `authenticated_identity`
+- `rf_only`
+- `internet_assisted`
+- `read_only`
+- `config_write_supported`
+
+Rules:
+
+- The UI enables actions only when the selected source/radio/connector supports
+  the relevant capability.
+- A source can support ingestion and BBS monitoring without supporting FIO
+  frequency control. VarAC standalone is the current example.
+- A source can support topology without map coordinates. Reticulum peers and
+  some mesh nodes may be reachable but not geographically located.
+- Internet-assisted transport is a provenance flag, not a downgrade. It should
+  be clear to the operator when traffic was RF-only, internet-assisted, mixed,
+  or imported.
+- Connector setup and health use the same capability registry, so station-level
+  services such as Reticulum or MQTT do not get forced into radio-specific
+  settings unless a configured radio truly owns them.
+
+Recommended first capability labels:
+
+| Source Family | Ingest | Send | Frequency Control | Topology | BBS/Store | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| JS8Call | Yes | Yes | Optional via radio route | Yes | No | Multiple instances; source checkpoint per profile/API/files |
+| FastLight | Yes | Yes | No | Limited | File-based | FLMsg/FLAmp reports feed topics/BBS/SOP |
+| CommStat | Yes | Existing/future | No | Yes | No | Preserve RF-only vs maximum reach/internet-assisted |
+| VarAC | Yes | Future | No | Limited | Yes | Monitor/import-only for scheduler/QSY in this release |
+| Local/VoiceLog | Yes | Manual | No | Manual | No | Local NCS/operator reports |
+| MeshCore/Meshtastic | Future read-only first | Future | No | Yes | MeshCore Rooms | Connector may be RF, MQTT, or both |
+| Reticulum/LXMF | Future read-only first | Future | No | Yes | Store-forward | Prefer sidecar/import boundary |
+| MQTT | Future read-only first | Future | No | Optional | Optional | Explicitly configured trusted topics only |
 
 ## Unified Data Model
 
@@ -135,6 +213,8 @@ Fields:
 - `last_seen_utc`
 - `capabilities`: receive, send, frequency-control, bbs, store-forward,
   topology, location, authenticated-identity
+- `provenance`: RF-only, internet-assisted, mixed, imported, manual, unknown
+- `scope_hint`: local, county, state, regional, national, group, direct, unknown
 
 Rules:
 
@@ -142,6 +222,9 @@ Rules:
 - Multiple JS8Call, VarAC, Reticulum, or mesh instances must never share offsets,
   cached state, or message ids.
 - UI filters use `source_family` and friendly labels, not raw paths.
+- Source identity must survive migration, backup/restore, and external app
+  profile changes. A renamed radio or app path update must not silently create a
+  new ingestion stream unless the endpoint/profile identity actually changed.
 
 ### Comms Node
 
@@ -166,6 +249,9 @@ Rules:
 - A node can belong to multiple groups and jurisdictions.
 - A mesh-only participant can still be represented and routed into local/county
   workflows.
+- A node's capabilities can be inferred from observed traffic, configured
+  roster/operator data, or explicit user settings, but inferred capabilities
+  should be lower confidence than configured capabilities.
 
 ### Comms Report
 
@@ -182,6 +268,7 @@ Fields:
 - report timestamp and received timestamp
 - location/grid/state/county
 - auth/trust state
+- provenance and delivery scope
 - original protocol payload reference
 - message viewer target
 - SOP relevance hints
@@ -194,6 +281,9 @@ Rules:
   evidence, regardless of whether that evidence came from HF, local, or mesh.
 - Raw protocol fields stay available for diagnostics, not primary operator
   display.
+- A report may be actionable even if it has no precise location. In that case it
+  should still appear in Messages, SOP, BBS/routing previews, and topology, with
+  map display falling back to group/jurisdiction/region when possible.
 
 ### Comms Link Event
 
@@ -207,6 +297,8 @@ Fields:
 - direction: origin-to-destination semantics
 - protocol/method: JS8Call, VarAC, Reticulum, MeshCore, Meshtastic, manual,
   unknown
+- transport provenance: RF-only, internet-assisted, store-forward, imported,
+  mixed, unknown
 - quality values: SNR, RSSI, hop count, latency, retry count, delivery status,
   confidence
 - band/channel/frequency when meaningful
@@ -228,6 +320,8 @@ Rules:
 - Link events are immutable evidence. Path projections aggregate them, but never
   overwrite the individual observations needed to explain "who said this" and
   "when."
+- Do not discard one-way or third-party link events simply because a reciprocal
+  event is absent. That asymmetry is operationally useful.
 
 ### Comms Path Projection
 
@@ -419,6 +513,42 @@ be useful later, but they must be optional, bounded, and visibly separate from
 the operational projection. FIO should not depend on downloading map tiles to
 answer "who can reach whom" or "where is the fire report."
 
+## Mesh/Reticulum/MQTT Integration Strategy
+
+FIO should adopt the architectural concepts from `mesh-client`, not its UI as a
+separate embedded application. The first FIO integration should be read-only and
+fixture-backed before any live protocol dependency is added.
+
+Recommended approach:
+
+- Add protocol-neutral connector contracts and fixture importers first.
+- Use a sidecar/import boundary for Reticulum rather than importing a Reticulum
+  runtime into the PySide UI process.
+- Treat Meshtastic/MeshCore/MQTT as connector families with their own
+  checkpoints, health, identity, and capability declarations.
+- Store raw observations and normalized candidates locally before rendering.
+- Build topology and report projections from the same local DB used by Messages,
+  Map, SOP, and BBS.
+- Add send/relay only after read-only ingestion, projection, trust, policy, and
+  audit paths are stable.
+
+Mesh/MQTT provenance rules:
+
+- RF and MQTT copies of the same mesh message should dedupe into one operator
+  report/message with provenance `mixed` when appropriate.
+- MQTT-only traffic must be visibly internet-assisted unless the configured
+  source policy says otherwise.
+- FIO should not rebroadcast MQTT traffic over RF without a separate relay policy
+  and operator confirmation/automation rule.
+- MeshCore Rooms and Reticulum/LXMF propagation are store-and-forward
+  capabilities. They should feed BBS/relay concepts, but they should not be
+  represented as ordinary instant chat unless the protocol actually delivered
+  instant peer traffic.
+
+The first prototype should prove that a mesh/Reticulum fixture can add nodes,
+reports, link events, and store-and-forward hints to the shared projections
+without adding new map code paths.
+
 ## Ingestion Architecture
 
 ### Connector Contract
@@ -526,6 +656,12 @@ Requirements:
   call protocol SDKs directly.
 - First mesh/Reticulum/MQTT implementation is read-only ingestion unless a
   separate send/write policy is explicitly designed.
+- Each connector must be stoppable and restartable independently. A failed
+  Reticulum sidecar, MQTT broker, JS8Call API, or VarAC import path must not
+  block scheduler, RF Guard, ControlFreq, or unrelated message ingestion.
+- Connector health is source-specific. The global Station Health view can
+  summarize failures, but the underlying error must name the affected source and
+  configured radio/connector.
 
 ## Performance And Stability
 
@@ -590,6 +726,45 @@ Example flow:
 
 Capability-aware routing should be advisory first. Operators decide whether to
 transmit, relay, or publish unless a group explicitly enables audited automation.
+
+## Scope, Routing, And Relay Policy
+
+FIO should separate three ideas that are easy to confuse:
+
+- `Audience`: who the message/report is for, such as a callsign, group,
+  jurisdiction, BBS audience, or public/shared channel.
+- `Scope`: how broadly the information should move, such as local, county,
+  state, regional, national, direct, group-only, or private.
+- `Transport`: how it can move, such as voice/manual, JS8Call, FastLight,
+  CommStat RF-only, CommStat maximum reach, VarAC BBS, MeshCore Room,
+  Reticulum/LXMF, or MQTT.
+
+Rules:
+
+- A report can be local in scope even if it later rides HF or Reticulum.
+- A report can be national in scope without requiring every participant to have
+  HF digital capability.
+- Transport selection is a routing decision that should be suggested from
+  capabilities, path evidence, permissions, and SOP, not hard-coded to the
+  report type.
+- FIO should surface when a route changes provenance. Example: `Local voice
+  report -> HF FLMsg summary -> CommStat maximum reach` is valuable, but the
+  operator should see that the final reach is mixed RF/internet-assisted.
+- Relay and BBS placement should be previewed before transmit/write unless a
+  group-specific audited automation rule explicitly allows it.
+
+Routing previews should answer:
+
+- Which configured radios/connectors can move this report?
+- Which stations or gateways can likely relay it?
+- Which group/jurisdiction/BBS audience should receive it?
+- Is the route RF-only, internet-assisted, store-and-forward, mesh-only, or
+  mixed?
+- What trust/auth/signature/provenance is attached?
+- What SOP or condition rule is driving the suggestion?
+
+This is the bridge between Map, Messages, BBS, and SOP Builder. It must be a
+shared service, not separate ad hoc logic in each tab.
 
 ## SOP Builder Integration
 
@@ -819,6 +994,18 @@ Rules:
 
 ## Implementation Phases
 
+### Phase 0: Architecture Guardrails
+
+- Add or formalize the source capability registry.
+- Define connector, raw event, normalized candidate, and projection contracts
+  before adding new live protocols.
+- Ensure existing map/message/SOP/BBS code paths can consume shared projections
+  without directly scanning files or protocol databases.
+- Add fixture-driven tests for protocol-neutral reports, nodes, links, scopes,
+  provenance, and topic matching.
+- Confirm UI actions are capability-gated: no frequency control for VarAC-only,
+  no send action for read-only connectors, no relay action without policy.
+
 ### Phase 1: Protocol-Neutral Projection For Existing Data
 
 - Normalize existing JS8Call, FastLight, Spotter, CommStat, VarAC, and Local
@@ -844,8 +1031,8 @@ Rules:
 
 ### Phase 4: Mesh/Reticulum Read-Only Prototype
 
-- Add read-only connector fixtures or sidecar import for mesh/Reticulum topology
-  and message events.
+- Add read-only connector fixtures or sidecar import for mesh/Reticulum/MQTT
+  topology and message events.
 - Project nodes, locations, path links, and messages without send/write support.
 - Validate offline map/topology behavior with no tile downloads.
 - Start with a fixture-backed adapter and local DB projection tests before
@@ -860,12 +1047,16 @@ Rules:
 - Connect BBS/relay suggestions to operator permissions.
 - Label RF-only, internet-assisted, mesh-only, and mixed reach clearly in map
   paths and message provenance.
+- Support MeshCore Rooms and Reticulum/LXMF propagation as store-and-forward
+  evidence in routing previews before offering write actions.
 
 ### Phase 6: Connector Setup UX
 
 - Add guided setup for station-level mesh/Reticulum/MQTT connectors only after
   the projection and read-only paths are stable.
 - Reuse Add Radio wizard visual language and core helper pattern.
+- Keep station-level connector setup separate from Add Radio unless the
+  connector is truly owned by a radio profile.
 
 ## Acceptance Criteria
 
@@ -882,6 +1073,18 @@ Rules:
   filters.
 - Local-only reports can participate in SOP suggestions and BBS/relay routing
   without requiring HF digital configuration.
+- A manually entered local report can be previewed for county/state forwarding
+  using the same routing service that previews HF, VarAC, mesh, Reticulum, or
+  MQTT paths.
+- A mesh/Reticulum/MQTT fixture can add nodes, messages, reports, and links to
+  the same Messages and Map filters without adding a second map or protocol-only
+  inbox.
+- RF-only, internet-assisted, store-and-forward, imported, and mixed provenance
+  display consistently in Messages, Map inspector, BBS routing previews, and SOP
+  action prompts.
+- Capability gates prevent unsupported actions: read-only connectors do not show
+  send/write controls, VarAC-only radios do not show FIO frequency controls, and
+  connector failures name the affected source.
 - FIO remains useful offline with no map tile downloads.
 - UI remains responsive during high-volume ingest and does not flicker or
   rebuild whole map/control surfaces unnecessarily.
@@ -900,3 +1103,11 @@ Rules:
   the same first slice?
 - Which condition alert templates beyond MagNet MAGCON should ship disabled as
   examples?
+- Which source should be the first live connector after fixtures: a Reticulum
+  sidecar import, a MeshCore/Meshtastic file/API fixture, or MQTT subscription?
+- What provenance label should CommStat maximum reach use in the UI:
+  `Internet-assisted`, `CommStat Max Reach`, or another operator-facing term?
+- Should local/county/state/region/national scope be configured per operating
+  group, per local group, or both?
+- For future automatic relay, which actions are allowed to become unattended
+  after policy approval, and which should always remain operator-confirmed?
