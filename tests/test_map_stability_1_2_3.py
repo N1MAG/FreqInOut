@@ -393,7 +393,7 @@ def test_map_selected_status_explains_marker_without_raw_question_noise() -> Non
 
     assert "Station Status" in html
     assert "Functioning" in html
-    assert "Multiple Sources" in html
+    assert "Multiple sources" in html
     assert "Phone landline functioning" not in html
     assert "No latest status report detail" in html
 
@@ -410,7 +410,7 @@ def test_map_selected_station_detail_suppresses_raw_question_prompt() -> None:
                 {"label": "Area", "value": "MT / DN28FI"},
                 {"label": "SitRep", "value": "Functioning"},
                 {"label": "Marker", "value": "Green: latest status is functioning"},
-                {"label": "Source", "value": "Multiple Sources"},
+                {"label": "Source", "value": "Multiple sources"},
             ],
         },
         summary="Phone landline functioning?",
@@ -440,11 +440,88 @@ def test_map_selected_paths_html_names_topology_scope() -> None:
 def test_map_current_link_selection_prefers_programmatic_station_focus() -> None:
     tab = _bare_tab()
     tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])
+    tab.show_link_paths = True
     tab.link_mode = "station"
     tab.link_value = "K7ETC"
 
     assert StationsMapTab._current_link_selection(tab) == ("station", "K7ETC")
     assert StationsMapTab._links_active(tab)
+
+
+def test_hidden_path_layer_is_not_an_active_filter_even_with_saved_scope() -> None:
+    tab = _bare_tab()
+    tab.show_link_paths = False
+    tab.link_mode = "station"
+    tab.link_value = "K7ETC"
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("K7ETC", ("station", "K7ETC"))])
+    tab.link_mode_combo.setCurrentIndex(1)
+
+    assert StationsMapTab._current_link_selection(tab) == ("station", "K7ETC")
+    assert StationsMapTab._links_active(tab) is False
+
+
+def test_links_layer_toggle_off_clears_path_scope_and_restores_report_context() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "paths"
+    tab._paths_previous_observation_focus = (True, "all_reports")
+    tab.show_link_paths = True
+    tab.link_mode = "station"
+    tab.link_value = "K7ETC"
+    tab._paths_focus_station = "K7ETC"
+    tab.relay_target = "K7ETC"
+    tab.map_links_chk = _FakeCheck(True)
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("K7ETC", ("station", "K7ETC"))])
+    tab.link_mode_combo.setCurrentIndex(2)
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("K7ETC", ("station", "K7ETC"))])
+    tab._map_path_scope_combo.setCurrentIndex(2)
+    tab.relay_target_combo = _FakeCombo([("", ""), ("K7ETC", "K7ETC")])
+    tab._save_display_preferences = lambda: None
+    tab._update_selected_paths_button_visual = lambda *_args, **_kwargs: None
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._on_map_links_changed(tab, False)
+
+    assert tab.show_link_paths is False
+    assert tab.link_mode == "off"
+    assert tab.link_value == ""
+    assert tab._paths_focus_station == ""
+    assert tab._observation_focus_enabled is True
+    assert tab._observation_focus_mode == "all_reports"
+    assert tab.link_mode_combo.index == 0
+    assert tab._map_path_scope_combo.index == 0
+    assert refreshes == ["toggle_link_paths"]
+
+
+def test_links_layer_toggle_on_defaults_to_my_station_scope() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab.show_link_paths = False
+    tab.link_mode = "off"
+    tab.link_value = ""
+    tab.map_links_chk = _FakeCheck(False)
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("Network", ("all", ""))])
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("Network", ("all", ""))])
+    tab._save_display_preferences = lambda: None
+    tab._update_selected_paths_button_visual = lambda *_args, **_kwargs: None
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._on_map_links_changed(tab, True)
+
+    assert tab.show_link_paths is True
+    assert tab.link_mode == "my_station"
+    assert tab.link_value == ""
+    assert tab.link_mode_combo.currentData() == ("my_station", "")
+    assert tab._map_path_scope_combo.currentData() == ("my_station", "")
+    assert StationsMapTab._links_active(tab) is True
+    assert refreshes == ["toggle_link_paths"]
 
 
 def test_clear_map_layers_turns_off_path_focus_and_preserves_filters() -> None:
@@ -516,7 +593,7 @@ def test_map_selected_message_context_routes_by_source_family() -> None:
         "group_filter": "MR08",
         "topic_filter": "Fire",
         "query_filter": "",
-        "source_family": "spotter",
+        "source_family": "",
     }
 
     station_context = StationsMapTab._map_selected_message_context(
@@ -552,6 +629,7 @@ def test_map_selected_message_context_routes_by_source_family() -> None:
         "source_family": "",
     }
 
+    tab._selected_map_topic_filter = lambda: ""
     local_context = StationsMapTab._map_selected_message_context(
         tab,
         {
@@ -588,7 +666,191 @@ def test_map_detail_clean_text_removes_html_fragments() -> None:
         StationsMapTab._map_detail_clean_text("Message Reports: 8<br/>K7ETC -&gt; MR08", multiline=True)
         == "Message Reports: 8\nK7ETC -> MR08"
     )
+    assert (
+        StationsMapTab._map_detail_clean_text(
+            "Message Reports: 8&amp;lt;br/&amp;gt;Newest: 20 days ago&amp;lt;br/&amp;gt;From: K7ETC",
+            multiline=True,
+        )
+        == "Message Reports: 8\nNewest: 20 days ago\nFrom: K7ETC"
+    )
     assert StationsMapTab._map_detail_callsigns_from_text("From: K7ETC<br/>To: MR08") == ["K7ETC"]
+
+
+def test_map_payload_rows_clean_html_and_report_context_stays_topic_scoped() -> None:
+    tab = _bare_tab()
+    tab._selected_map_topic_filter = lambda: "Fire"
+    payload = {
+        "type": "report",
+        "source_family": "flmsg",
+        "group": "MR08",
+        "topic": "Comms",
+        "topics": ["Comms", "Fire", "Water"],
+        "title": "Message Reports: 8",
+        "rows": [
+            {
+                "label": "Reports",
+                "value": "Message Reports: 8&lt;br/&gt;Newest: 20 days ago&lt;br/&gt;From: K7ETC",
+            }
+        ],
+    }
+
+    rows = StationsMapTab._map_payload_rows(payload)
+    assert "<br" not in rows["reports"]
+    assert "Message Reports: 8" in rows["reports"]
+    assert "From: K7ETC" in rows["reports"]
+    assert StationsMapTab._map_selected_display_title(tab, payload, "Message Reports: 8", rows) == "MR08 Fire Reports"
+
+    context = StationsMapTab._map_selected_message_context(tab, payload)
+    assert context == {
+        "target": "messages",
+        "group_filter": "MR08",
+        "topic_filter": "Fire",
+        "query_filter": "",
+        "source_family": "",
+    }
+
+
+def test_map_report_detail_uses_plain_summary_and_cross_source_topic_handoff() -> None:
+    tab = _bare_tab()
+    tab._selected_map_topic_filter = lambda: "Fire"
+    payload = {
+        "type": "report",
+        "source_family": "mixed",
+        "title": "Fire Reports: 8",
+        "route": "MR08 | Fire | from K7ETC",
+        "group": "MR08",
+        "topic": "Fire",
+        "topics": ["Fire", "Water"],
+        "callsigns": ["K7ETC"],
+        "rows": [
+            {"label": "Reporter", "value": "K7ETC"},
+            {"label": "Source", "value": "Multiple sources"},
+            {"label": "Area", "value": "UT / DM38ST"},
+        ],
+    }
+
+    detail_html = StationsMapTab._map_selected_detail_html(
+        tab,
+        payload,
+        summary="Widemouth 2 Fire<br/>K7ETC -&gt; MR08",
+    )
+
+    assert "Widemouth 2 Fire" in detail_html
+    assert "K7ETC" in detail_html
+    assert "Multiple sources" in detail_html
+    assert "&lt;br" not in detail_html
+    assert "&amp;gt" not in detail_html
+
+    context = StationsMapTab._map_selected_message_context(tab, payload)
+    assert context == {
+        "target": "messages",
+        "group_filter": "MR08",
+        "topic_filter": "Fire",
+        "query_filter": "",
+        "source_family": "",
+    }
+
+
+def test_map_report_cache_signature_changes_with_refinement_filters() -> None:
+    tab = _bare_tab()
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "all_reports"
+    tab.recency_seconds = 7 * 24 * 60 * 60
+    tab.group_filter_combo = _FakeCombo([("All", ""), ("MAGNET", "MAGNET")])
+    tab.region_filter_combo = _FakeCombo([("All", "")])
+    tab.band_combo = _FakeCombo([("All", {"type": "all"})])
+    tab._map_source_filter_combo = _FakeCombo([("All Sources", "")])
+    tab._map_state_filter_combo = _FakeCombo([("All States", "")])
+    tab._map_status_filter_combo = _FakeCombo([("All Statuses", "")])
+    tab._map_scope_filter_combo = _FakeCombo([("Stations + Traffic", "all")])
+    tab._map_trust_filter_combo = _FakeCombo([("All Auth/Trust", "")])
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", ""), ("Fire", "Fire")])
+    tab._map_search_edit = SimpleNamespace(text=lambda: "")
+
+    first = StationsMapTab._map_report_cache_signature(tab, "report_focus")
+    tab._map_topic_filter_combo.setCurrentIndex(1)
+    second = StationsMapTab._map_report_cache_signature(tab, "report_focus")
+    tab.group_filter_combo.setCurrentIndex(1)
+    third = StationsMapTab._map_report_cache_signature(tab, "report_focus")
+
+    assert first["topic"] == ""
+    assert second["topic"] == "Fire"
+    assert third["group"] == "MAGNET"
+    assert first != second
+    assert second != third
+
+
+def test_map_report_events_use_filter_aware_cache_key() -> None:
+    tab = _bare_tab()
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "all_reports"
+    tab.recency_seconds = 0
+    tab._map_query_cache = {}
+    tab.group_filter_combo = _FakeCombo([("All", "")])
+    tab.region_filter_combo = _FakeCombo([("All", "")])
+    tab.band_combo = _FakeCombo([("All", {"type": "all"})])
+    tab._map_source_filter_combo = _FakeCombo([("All Sources", "")])
+    tab._map_state_filter_combo = _FakeCombo([("All States", "")])
+    tab._map_status_filter_combo = _FakeCombo([("All Statuses", "")])
+    tab._map_scope_filter_combo = _FakeCombo([("Stations + Traffic", "all")])
+    tab._map_trust_filter_combo = _FakeCombo([("All Auth/Trust", "")])
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", ""), ("Fire", "Fire")])
+    tab._map_search_edit = SimpleNamespace(text=lambda: "")
+    station_lookup = {"K7ETC": StationPoint(callsign="K7ETC", grid="DM38ST", lat=38.0, lon=-112.0)}
+    calls: list[str] = []
+
+    def loader() -> list[dict[str, object]]:
+        calls.append(StationsMapTab._selected_map_topic_filter(tab) or "all")
+        return [
+            {
+                "callsign": "K7ETC",
+                "grid": "DM38ST",
+                "topics": [StationsMapTab._selected_map_topic_filter(tab) or "Comms"],
+                "source_family": "flmsg",
+                "summary": "Widemouth 2 Fire",
+                "utc_ts": 1000,
+            }
+        ]
+
+    all_events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        station_lookup,
+        layer_name="report_focus",
+        display_label="Traffic Reports",
+        reports_loader=loader,
+    )
+    tab._map_topic_filter_combo.setCurrentIndex(1)
+    fire_events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        station_lookup,
+        layer_name="report_focus",
+        display_label="Traffic Reports",
+        reports_loader=loader,
+    )
+
+    assert calls == ["all", "Fire"]
+    assert all_events[0]["topic"] == "Comms"
+    assert fire_events[0]["topic"] == "Fire"
+
+
+def test_map_report_title_prefers_single_reporter_and_active_topic() -> None:
+    tab = _bare_tab()
+    tab._selected_map_topic_filter = lambda: "Fire"
+    payload = {
+        "type": "report",
+        "source_family": "flmsg",
+        "topic": "Comms",
+        "topics": ["Comms", "Fire"],
+        "title": "Message Reports: 8",
+        "rows": [{"label": "From", "value": "K7ETC"}],
+    }
+    rows = StationsMapTab._map_payload_rows(payload)
+
+    assert StationsMapTab._map_selected_display_title(tab, payload, "Message Reports: 8", rows) == "K7ETC Fire Reports"
+
+    detail_html = StationsMapTab._map_selected_detail_html(tab, payload, summary="")
+    assert "&lt;br" not in detail_html
+    assert "<br/>" not in detail_html
 
 
 def test_map_selected_sop_context_uses_cluster_group_and_topic() -> None:
@@ -917,13 +1179,13 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert '"Intelligence Layers"' in build_block
     assert 'QPushButton("All Stations")' in build_block
     assert 'QPushButton("HF Traffic")' in build_block
-    assert 'QPushButton("Local")' in build_block
+    assert 'QPushButton("Local Traffic")' in build_block
     assert 'QPushButton("All Traffic")' in build_block
     assert 'QPushButton("Paths")' in build_block
-    assert 'QPushButton("RF Plan")' in build_block
-    assert 'QPushButton("Pins")' in build_block
+    assert 'QPushButton("RF Planning")' in build_block
+    assert 'QPushButton("Planning Pins")' in build_block
     assert '"Path Tools"' in build_block
-    assert 'QLabel("Topic")' in build_block
+    assert 'filter_field("Topic", self._map_topic_filter_combo' in build_block
     assert '"All Topics"' in build_block
     assert 'QPushButton("Add Planning Pin")' in build_block
     assert 'QPushButton("Manage Pins")' in build_block
@@ -934,9 +1196,9 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "def focus_propagation" in source
     assert 'label.setText(' in source
     assert 'f"Ready:' in source
-    assert 'marker_noun = "planning pins"' in source
-    assert 'marker_noun = "traffic items"' in source
-    assert 'marker_noun = "stations"' in source
+    assert 'return "planning pins"' in source
+    assert 'return "traffic items"' in source
+    assert 'return "stations"' in source
     assert "} links." in source
     assert "self._map_retry_btn.setVisible(not ready)" in source
     assert 'id="legendToggle"' in source
@@ -1020,12 +1282,42 @@ def test_planning_pins_do_not_scope_or_display_station_traffic() -> None:
 def test_planning_pin_ui_language_is_operator_facing() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
-    assert 'QPushButton("Pins")' in source
+    assert 'QPushButton("Planning Pins")' in source
     assert 'QPushButton("Add Planning Pin")' in source
     assert 'setWindowTitle("Manage Planning Pins")' in source
     assert "Planning Pin saved:" in source
     assert "operator curated" not in source.lower()
     assert "Fused" not in source
+
+
+def test_map_ready_text_matches_active_view_type() -> None:
+    tab = _bare_tab()
+    tab._map_marker_count = 8
+    tab._map_link_count = 2
+
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "all_reports"
+    assert StationsMapTab._map_marker_noun(tab) == "traffic items"
+    assert StationsMapTab._map_ready_detail_text(tab) == "Map is ready with 8 traffic items and 2 links."
+
+    tab._observation_focus_mode = "rf_pins"
+    assert StationsMapTab._map_marker_noun(tab) == "planning pins"
+    assert StationsMapTab._map_ready_detail_text(tab) == "Map is ready with 8 planning pins and 2 links."
+
+    tab._observation_focus_enabled = False
+    assert StationsMapTab._map_marker_noun(tab) == "stations"
+    assert StationsMapTab._map_ready_detail_text(tab) == "Map is ready with 8 stations and 2 links."
+
+
+def test_report_map_counts_event_layers_not_station_markers() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_start = source.index("report_event_count =")
+    render_block = source[render_start : source.index("self._map_link_count = len(display_links)", render_start)]
+
+    assert "len(weather_events) + len(alert_events) + len(infrastructure_events)" in render_block
+    assert 'observation_focus_mode in {"hf_reports", "local_reports", "all_reports"}' in render_block
+    assert "self._map_marker_count = report_event_count" in render_block
+    assert "planning_pins_mode" in render_block
 
 
 def test_clear_layers_preserves_report_view_context() -> None:
@@ -1668,7 +1960,7 @@ def test_map_fire_search_uses_file_metadata_and_any_age_from_all_stations(monkey
         from_call="K7ETC",
         to_target="",
         groups=("MR08",),
-        observed_topics=("Fire",),
+        observed_topics=(),
         status="NEW",
         subject="040212Z 57",
         summary="<customform> | K7ETC | 040212Z 57 | 260803-0355z",
@@ -1735,6 +2027,118 @@ def test_map_fire_search_uses_file_metadata_and_any_age_from_all_stations(monkey
     assert rows[0]["summary"] == "Widemouth 2 Fire"
     assert rows[0]["grid"] == "DM38ST"
     assert len(events) == 1
+    assert "Widemouth 2 Fire" in events[0]["tooltip"]
+    scope_calls = StationsMapTab._observation_station_scope_calls(tab, max_age_sec=0)
+    assert "K7ETC" in scope_calls
+
+
+def test_map_file_location_fallback_places_flmsg_when_projection_grid_is_group(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    msg_path = tmp_path / "K7ETC-20260729-141819Z-50.k2s"
+    msg_path.write_text(
+        "\n".join(
+            [
+                "MAGNET General Use Form - v1.1.1",
+                "FromK7ETC",
+                "ToMR08",
+                "SubjectWidemouth 2 Fire",
+                "StateUT",
+                "GridDM38ST",
+                "MessageFire status remains active near Widemouth.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+
+    tab = _bare_tab()
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "all_reports"
+    tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Fire")
+    tab._map_search_edit = SimpleNamespace(text=lambda: "")
+    tab.group_filter_combo = SimpleNamespace(currentData=lambda: "")
+    tab.region_filter_combo = SimpleNamespace(currentData=lambda: "")
+    tab.operator_index = {}
+    tab._cached_map_value = lambda _name, _key, loader, ttl_sec=0.0: loader()
+
+    obs = Observation(
+        observation_id="flmsg:file:k7etc-fire-real-index-gap",
+        source_family="flmsg",
+        source_ref=f"file:{msg_path}",
+        source_app="FLMsg",
+        received_utc="2026-08-03T17:33:15+00:00",
+        event_utc="2026-07-29T03:54:00+00:00",
+        from_call="K7ETC",
+        to_target="MR08",
+        groups=("MR08",),
+        observed_topics=(),
+        status="NEW",
+        subject="141819Z 50",
+        summary="<customform> | K7ETC | 141819Z 50",
+        grid="MR08",
+    )
+    upsert_observation(db_path, obs)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE message_file_metadata (
+                path TEXT PRIMARY KEY,
+                source_family TEXT,
+                msg_type TEXT,
+                display_type TEXT,
+                status TEXT,
+                from_call TEXT,
+                to_call TEXT,
+                title TEXT,
+                topics_json TEXT,
+                search_text TEXT,
+                report_ts REAL,
+                source_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO message_file_metadata (
+                path, source_family, msg_type, display_type, status, from_call,
+                to_call, title, topics_json, search_text, report_ts, source_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(msg_path),
+                "flmsg",
+                "FLMSG",
+                "General",
+                "NEW",
+                "K7ETC",
+                "MR08",
+                "Widemouth 2 Fire",
+                '["Fire","Weather"]',
+                "flmsg new k7etc mr08 widemouth fire",
+                1785297240.0,
+                "FLMsg",
+            ),
+        )
+        conn.commit()
+
+    metadata = StationsMapTab._message_file_metadata_lookup(tab, db_path)
+    rows = StationsMapTab._load_observation_operational_reports(
+        tab,
+        layer_name="report_focus",
+        max_age_sec=0,
+    )
+    events = StationsMapTab._build_map_report_focus_events(tab, {}, max_age_sec=0)
+
+    assert metadata[str(msg_path)]["grid"] == "DM38ST"
+    assert metadata[str(msg_path)]["state"] == "UT"
+    assert [row["callsign"] for row in rows] == ["K7ETC"]
+    assert rows[0]["grid"] == "DM38ST"
+    assert rows[0]["state"] == "UT"
+    assert len(events) == 1
+    assert events[0]["icon"] == "fire"
     assert "Widemouth 2 Fire" in events[0]["tooltip"]
 
 
@@ -1820,6 +2224,109 @@ def test_map_topic_filter_uses_message_metadata_without_observation_rows(monkeyp
     assert "K7ETC" in calls
     assert len(events) == 1
     assert "Widemouth 2 Fire" in events[0]["tooltip"]
+
+
+def test_map_report_focus_builds_fire_events_from_metadata_without_layer_toggles(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    msg_path = tmp_path / "K7ETC-20260729-040212Z-57.k2s"
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+
+    tab = _bare_tab()
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "all_reports"
+    tab._map_topic_filter_combo = SimpleNamespace(currentText=lambda: "Fire")
+    tab._map_search_edit = SimpleNamespace(text=lambda: "wildfire")
+    tab.group_filter_combo = SimpleNamespace(currentData=lambda: "")
+    tab.region_filter_combo = SimpleNamespace(currentData=lambda: "")
+    tab.operator_index = {}
+    tab._cached_map_value = lambda _name, _key, loader, ttl_sec=0.0: loader()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE message_file_metadata (
+                path TEXT PRIMARY KEY,
+                source_family TEXT,
+                msg_type TEXT,
+                display_type TEXT,
+                status TEXT,
+                from_call TEXT,
+                to_call TEXT,
+                title TEXT,
+                topics_json TEXT,
+                search_text TEXT,
+                report_ts REAL,
+                source_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO message_file_metadata (
+                path, source_family, msg_type, display_type, status, from_call,
+                to_call, title, topics_json, search_text, report_ts, source_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(msg_path),
+                "flmsg",
+                "FLMSG",
+                "General",
+                "NEW",
+                "K7ETC",
+                "MR08",
+                "Widemouth 2 Fire",
+                '["Fire","Water"]',
+                "K7ETC MR08 Widemouth 2 Fire wildfire UT DM38ST",
+                1785297240.0,
+                "FLMsg",
+            ),
+        )
+        conn.commit()
+
+    events = StationsMapTab._build_map_report_focus_events(tab, {}, max_age_sec=0)
+
+    assert len(events) == 1
+    assert events[0]["count"] == 1
+    assert events[0]["icon"] == "fire"
+    assert events[0]["primary_topic"] == "Fire"
+    assert "Widemouth 2 Fire" in events[0]["tooltip"]
+
+
+def test_map_observed_file_paths_use_current_projection_schema(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    msg_path = tmp_path / "K7ETC-20260729-040212Z-57.k2s"
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+
+    tab = _bare_tab()
+
+    upsert_observation(
+        db_path,
+        Observation(
+            observation_id="flmsg:file:k7etc-fire",
+            source_family="flmsg",
+            source_ref=f"file:{msg_path}",
+            source_app="FLMsg",
+            received_utc="2026-08-03T17:33:15+00:00",
+            event_utc="2026-07-29T03:54:00+00:00",
+            from_call="K7ETC",
+            to_target="",
+            groups=("MR08",),
+            observed_topics=(),
+            status="NEW",
+            subject="040212Z 57",
+            summary="Widemouth 2 Fire",
+            grid="MR08",
+        ),
+    )
+
+    assert str(msg_path) in StationsMapTab._observed_message_file_paths(tab, db_path)
 
 
 def test_map_operational_events_can_place_grid_only_observations() -> None:
@@ -1964,13 +2471,45 @@ def test_map_report_popup_text_distinguishes_hf_and_local_contexts(monkeypatch) 
 
     tooltip = events[0]["tooltip"]
     assert events[0]["source_kind"] == "mixed"
-    assert "Source Type: HF JS8Spotter 1, Local Report 1" in tooltip
+    assert "Source: HF JS8Spotter 1, Local Report 1" in tooltip
     assert "HF JS8Spotter | F!307 | K7ETC -&gt; MR08 | 17 min ago" in tooltip
     assert "Topics: Fire, Travel/Roads" in tooltip
     assert "Auth: Valid, Trusted" in tooltip
     assert "Local Report | K0PRA -&gt; County GMRS | 1:42 h ago" in tooltip
     assert "Local: Confirmed" in tooltip
     assert "Area: CO / DM38ST (Grid)" in tooltip
+
+
+def test_map_operational_event_primary_topic_uses_active_filter(monkeypatch) -> None:
+    tab = _bare_tab()
+    tab._cached_map_value = lambda _name, _key, loader, ttl_sec=0.0: loader()
+    tab._selected_map_topic_filter = lambda: "Fire"
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.time.time", lambda: 1786365000.0)
+
+    events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        {},
+        layer_name="alert",
+        display_label="Message Reports",
+        reports_loader=lambda: [
+            {
+                "callsign": "K7ETC",
+                "to_target": "MR08",
+                "grid": "DM38ST",
+                "summary": "Widemouth 2 Fire",
+                "icon": "general",
+                "severity": "unknown",
+                "utc_ts": 1786363200.0,
+                "source_family": "flmsg",
+                "source_label": "FLMsg",
+                "topics": ["Comms", "Fire", "Water"],
+            }
+        ],
+    )
+
+    assert len(events) == 1
+    assert events[0]["primary_topic"] == "Fire"
+    assert events[0]["icon"] == "fire"
 
 
 def test_map_html_legend_and_operational_markers_distinguish_report_sources() -> None:
@@ -1997,7 +2536,10 @@ def test_map_link_renderer_preserves_direction_and_quality_visuals() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
     assert "function linkBearingDeg" in source
+    assert "const arrowRotation = bearing;" in source
     assert "fio-link-arrow" in source
+    assert "rotate(${{arrowRotation}}deg)" in source
+    assert "&#9650;" in source
     assert "origin" in source
     assert "destination" in source
     assert "\\u2192" in source
@@ -2013,6 +2555,8 @@ def test_map_center_action_uses_leaflet_center_helper() -> None:
     assert "window.centerMapOn" in source
     assert "def _map_payload_latlon" in source
     assert "maidenhead_to_latlon(token)" in source
+    assert "Number.isFinite(targetLat)" in source
+    assert "return true;" in source
     assert "runJavaScript" in method_body
     assert "setView" in method_body
 
@@ -2034,16 +2578,28 @@ def test_map_since_filter_uses_chip_menu_with_extended_windows() -> None:
     assert "self._build_map_since_menu()" in source
     assert 'filter_field("Age", self._map_since_button' in source
     assert "def _map_recency_menu_label" in source
-    assert 'return "Age: Any"' in source
-    assert 'return f"Age: {label}"' in source
+    assert 'return "Any time"' in source
+    assert 'return f"Last {label}"' in source
     assert '"15m": "15 min"' in source
     assert '("15m", 15 * 60)' in source
     assert '("90d", 90 * 24 * 60 * 60)' in source
 
 
+def test_map_view_mode_controls_wrap_to_grid() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "mode_action_buttons = (" in source
+    assert "QGridLayout(mode_actions_row)" in source
+    assert "idx // 5, idx % 5" in source
+    assert "mode_actions_layout.addStretch" not in source
+
+
 def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
+    assert StationsMapTab._map_topic_icon("Fire") == "fire"
+    assert StationsMapTab._map_topic_icon("Wildfire") == "fire"
+    assert StationsMapTab._map_icon_for_topics(["Water"], preferred_topic="Fire") == "fire"
     assert "def _map_topic_icon" in source
     assert "topic_icon = self._map_icon_for_topics" in source
     assert "if (kind === 'fire')" in source

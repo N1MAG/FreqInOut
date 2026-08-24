@@ -1295,10 +1295,7 @@ class StationsMapTab(QWidget):
             return
         if not self._map_page_loading and self._map_runtime_state != "degraded":
             link_detail = str(getattr(self, "_map_link_status_detail", "") or "").strip()
-            detail = (
-                f"Map is ready with {int(self._map_marker_count)} station markers "
-                f"and {int(self._map_link_count)} links."
-            )
+            detail = self._map_ready_detail_text()
             if link_detail:
                 detail = f"{detail} {link_detail}"
             self._set_map_runtime_state(
@@ -1365,18 +1362,8 @@ class StationsMapTab(QWidget):
             if ready:
                 link_detail = str(getattr(self, "_map_link_status_detail", "") or "").strip()
                 suffix = f" {link_detail}" if link_detail else ""
-                marker_noun = "stations"
-                try:
-                    if self._effective_map_observation_focus_enabled():
-                        mode = self._effective_map_observation_focus_mode()
-                        if mode == "rf_pins":
-                            marker_noun = "planning pins"
-                        elif mode in {"hf_reports", "local_reports", "all_reports"}:
-                            marker_noun = "traffic items"
-                except Exception:
-                    marker_noun = "stations"
                 label.setText(
-                    f"Ready: {int(getattr(self, '_map_marker_count', 0) or 0)} {marker_noun}, "
+                    f"Ready: {int(getattr(self, '_map_marker_count', 0) or 0)} {self._map_marker_noun()}, "
                     f"{int(getattr(self, '_map_link_count', 0) or 0)} links.{suffix}"
                 )
             else:
@@ -1393,6 +1380,24 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
         theme = self._theme_snapshot()
+
+    def _map_marker_noun(self) -> str:
+        try:
+            if self._effective_map_observation_focus_enabled():
+                mode = self._effective_map_observation_focus_mode()
+                if mode == "rf_pins":
+                    return "planning pins"
+                if mode in {"hf_reports", "local_reports", "all_reports"}:
+                    return "traffic items"
+        except Exception:
+            pass
+        return "stations"
+
+    def _map_ready_detail_text(self) -> str:
+        return (
+            f"Map is ready with {int(getattr(self, '_map_marker_count', 0) or 0)} {self._map_marker_noun()} "
+            f"and {int(getattr(self, '_map_link_count', 0) or 0)} links."
+        )
         border = theme.get("border", "#cccccc")
         role = "muted"
         if self._map_runtime_state == "degraded":
@@ -1732,8 +1737,8 @@ class StationsMapTab(QWidget):
     def _map_recency_display_label(self, value: str) -> str:
         label = str(value or "").strip() or "Any"
         if label == "Any":
-            return "Age: Any"
-        return f"Age: {label}"
+            return "Any time"
+        return f"Last {label}"
 
     def _map_recency_menu_label(self, value: str) -> str:
         label = str(value or "").strip() or "Any"
@@ -2101,7 +2106,8 @@ class StationsMapTab(QWidget):
         self._map_since_button = QToolButton()
         self._map_since_button.setPopupMode(QToolButton.InstantPopup)
         self._map_since_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self._map_since_button.setMinimumWidth(150)
+        self._map_since_button.setMinimumWidth(118)
+        self._map_since_button.setMaximumWidth(145)
         self._map_since_button.setToolTip("Choose how far back mapped stations, traffic, and paths should be considered.")
         self._build_map_since_menu()
         self._update_map_since_button_text("3h")
@@ -2232,11 +2238,12 @@ class StationsMapTab(QWidget):
         # Keep filters highly accessible at the top of the map content area.
         self.link_mode_combo.setMinimumWidth(120)
         self._map_path_scope_combo.setMinimumWidth(150)
+        self._map_path_scope_combo.setMaximumWidth(210)
         self.group_filter_combo.setMinimumWidth(170)
+        self.group_filter_combo.setMaximumWidth(230)
         self.region_filter_combo.setMinimumWidth(150)
         self.band_combo.setMinimumWidth(120)
         self.recency_combo.setMinimumWidth(90)
-        self._map_since_button.setMinimumWidth(118)
         self.relay_target_combo.setMinimumWidth(180)
         self._refresh_links_button = QPushButton("Refresh Links")
         self._refresh_links_button.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False, operator_refresh=True))
@@ -2246,7 +2253,7 @@ class StationsMapTab(QWidget):
         self._map_hf_reports_button = QPushButton("HF Traffic")
         self._map_hf_reports_button.setToolTip("Show HF/app message intelligence from Spotter, CommStat, JS8Call, FLMsg/FLAmp, VarAC, and condition alerts.")
         self._map_hf_reports_button.clicked.connect(self.focus_hf_reports)
-        self._map_local_reports_button = QPushButton("Local")
+        self._map_local_reports_button = QPushButton("Local Traffic")
         self._map_local_reports_button.setToolTip("Show local operator and NCS field reports only.")
         self._map_local_reports_button.clicked.connect(self.focus_local_reports)
         self._map_reports_button = QPushButton("All Traffic")
@@ -2255,12 +2262,12 @@ class StationsMapTab(QWidget):
         self._map_paths_button = QPushButton("Paths")
         self._map_paths_button.setToolTip("Toggle path topology links. Use Path Scope to choose My Station or Network.")
         self._map_paths_button.clicked.connect(self.focus_paths)
-        self._map_propagation_button = QPushButton("RF Plan")
+        self._map_propagation_button = QPushButton("RF Planning")
         self._map_propagation_button.setToolTip(
             "Show stations, path links, planning pins, and propagation support for band and routing decisions."
         )
         self._map_propagation_button.clicked.connect(self.focus_propagation)
-        self._map_rf_pins_button = QPushButton("Pins")
+        self._map_rf_pins_button = QPushButton("Planning Pins")
         self._map_rf_pins_button.setToolTip("Show saved planning/reference pins only. These are not received traffic.")
         self._map_rf_pins_button.clicked.connect(self.focus_rf_pins)
         self._map_clear_filters_button = QPushButton("Clear Filters")
@@ -2271,7 +2278,7 @@ class StationsMapTab(QWidget):
             "Turn off temporary layers such as paths, RF planning, pins, and SitRep status. Filters stay unchanged."
         )
         self._map_clear_layers_button.clicked.connect(self.clear_map_layers)
-        self._now_reachable_button = QPushButton("Peer Sched")
+        self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
         self._sitrep_status_button = QPushButton("SitRep Status")
@@ -2304,7 +2311,8 @@ class StationsMapTab(QWidget):
         self._map_topic_filter_combo.setToolTip(
             "Filter mapped reports and planning pins by message-intelligence topic."
         )
-        self._map_topic_filter_combo.setMinimumWidth(150)
+        self._map_topic_filter_combo.setMinimumWidth(180)
+        self._map_topic_filter_combo.setMaximumWidth(260)
         self._map_search_edit = QLineEdit()
         self._map_search_edit.setPlaceholderText("Search map: callsign, group, topic, state/grid, keyword...")
         self._map_search_edit.setClearButtonEnabled(True)
@@ -2382,7 +2390,12 @@ class StationsMapTab(QWidget):
         self._map_view_status_label.setWordWrap(True)
         filter_bar = QFrame(map_container)
         self._map_filter_bar = filter_bar
-        def filter_field(label_text: str, widget: QWidget, minimum_width: int = 0) -> QWidget:
+        def filter_field(
+            label_text: str,
+            widget: QWidget,
+            minimum_width: int = 0,
+            maximum_width: int = 0,
+        ) -> QWidget:
             field = QWidget(filter_bar)
             field_layout = QVBoxLayout(field)
             field_layout.setContentsMargins(0, 0, 0, 0)
@@ -2393,13 +2406,15 @@ class StationsMapTab(QWidget):
             field_layout.addWidget(widget)
             if minimum_width:
                 field.setMinimumWidth(minimum_width)
+            if maximum_width:
+                field.setMaximumWidth(maximum_width)
             return field
 
         mode_actions_row = QWidget(filter_bar)
-        mode_actions_layout = QHBoxLayout(mode_actions_row)
+        mode_actions_layout = QGridLayout(mode_actions_row)
         mode_actions_layout.setContentsMargins(0, 0, 0, 0)
         mode_actions_layout.setSpacing(8)
-        for button in (
+        mode_action_buttons = (
             self._map_all_stations_button,
             self._map_hf_reports_button,
             self._map_local_reports_button,
@@ -2409,9 +2424,11 @@ class StationsMapTab(QWidget):
             self._map_rf_pins_button,
             self._sitrep_status_button,
             self._now_reachable_button,
-        ):
-            mode_actions_layout.addWidget(button, 0)
-        mode_actions_layout.addStretch(1)
+        )
+        for idx, button in enumerate(mode_action_buttons):
+            mode_actions_layout.addWidget(button, idx // 5, idx % 5)
+        for col in range(5):
+            mode_actions_layout.setColumnStretch(col, 1)
         path_tools_layout = self._add_collapsible_group(controls_layout, "Path Tools", expanded=False)
         path_tools_grid = QGridLayout()
         path_tools_grid.setContentsMargins(0, 0, 0, 0)
@@ -2464,19 +2481,23 @@ class StationsMapTab(QWidget):
         filter_grid.setVerticalSpacing(6)
         filter_grid.addWidget(QLabel("View"), 0, 0, alignment=Qt.AlignTop)
         filter_grid.addWidget(mode_actions_row, 0, 1, 1, 7)
-        filter_grid.addWidget(filter_field("Group", self.group_filter_combo, 180), 1, 0, 1, 2)
-        filter_grid.addWidget(filter_field("Age", self._map_since_button, 118), 1, 2)
-        filter_grid.addWidget(filter_field("Topic", self._map_topic_filter_combo, 200), 1, 3, 1, 2)
-        filter_grid.addWidget(filter_field("Path Scope", self._map_path_scope_combo, 150), 1, 5)
+        filter_grid.addWidget(filter_field("Group", self.group_filter_combo, 180, 240), 1, 0, 1, 2)
+        filter_grid.addWidget(filter_field("Age", self._map_since_button, 118, 150), 1, 2)
+        filter_grid.addWidget(filter_field("Topic", self._map_topic_filter_combo, 200, 280), 1, 3, 1, 2)
+        filter_grid.addWidget(filter_field("Path Scope", self._map_path_scope_combo, 150, 220), 1, 5)
         filter_grid.addWidget(self._map_clear_filters_button, 1, 6, alignment=Qt.AlignBottom)
         filter_grid.addWidget(self._map_clear_layers_button, 1, 7, alignment=Qt.AlignBottom)
         filter_grid.addWidget(filter_field("Search", self._map_search_edit), 2, 0, 1, 8)
         filter_grid.addWidget(self._map_view_status_label, 3, 0, 1, 8, alignment=Qt.AlignLeft)
         filter_grid.addWidget(self._now_reachable_label, 4, 0, 1, 8, alignment=Qt.AlignLeft)
-        filter_grid.setColumnStretch(0, 1)
-        filter_grid.setColumnStretch(1, 1)
-        filter_grid.setColumnStretch(3, 1)
-        filter_grid.setColumnStretch(4, 1)
+        filter_grid.setColumnStretch(0, 0)
+        filter_grid.setColumnStretch(1, 0)
+        filter_grid.setColumnStretch(2, 0)
+        filter_grid.setColumnStretch(3, 0)
+        filter_grid.setColumnStretch(4, 0)
+        filter_grid.setColumnStretch(5, 0)
+        filter_grid.setColumnStretch(6, 0)
+        filter_grid.setColumnStretch(7, 1)
         map_layout.addWidget(filter_bar)
 
         self._map_canvas_splitter = QSplitter(Qt.Horizontal, map_container)
@@ -2634,7 +2655,10 @@ class StationsMapTab(QWidget):
         }))
         topic_btn.clicked.connect(lambda: self._handle_map_detail_action({
             "action": "filter_topic",
-            "topic": str(self._map_selected_payload.get("topic") or ""),
+            "topic": (
+                self._map_preferred_topic_for_values(self._map_selected_payload.get("topics"))
+                or str(self._map_selected_payload.get("topic") or "")
+            ),
         }))
         messages_btn.clicked.connect(self._open_map_selected_messages)
         spotter_btn.clicked.connect(self._compose_spotter_for_selected_station)
@@ -2702,7 +2726,7 @@ class StationsMapTab(QWidget):
 
         lat, lon = self._map_selected_latlon(payload)
         group = str(payload.get("group") or "").strip()
-        topic = str(payload.get("topic") or "").strip()
+        topic = self._map_preferred_topic_for_values(payload.get("topics")) or str(payload.get("topic") or "").strip()
         source_family = self._map_payload_source_family(payload)
         kind = str(payload.get("type") or "").strip().lower()
         message_context = self._map_selected_message_context(payload)
@@ -2757,7 +2781,7 @@ class StationsMapTab(QWidget):
             if not isinstance(row, dict):
                 continue
             label = str(row.get("label") or "").strip()
-            value = str(row.get("value") or "").strip()
+            value = StationsMapTab._map_detail_clean_text(row.get("value"), multiline=True)
             if label and value:
                 out[label.lower()] = value
         return out
@@ -2841,7 +2865,12 @@ class StationsMapTab(QWidget):
 
     @staticmethod
     def _map_detail_clean_text(value: object, *, multiline: bool = False) -> str:
-        text = html.unescape(str(value or ""))
+        text = str(value or "")
+        for _ in range(3):
+            unescaped = html.unescape(text)
+            if unescaped == text:
+                break
+            text = unescaped
         if not text:
             return ""
         text = re.sub(r"(?i)<br\s*/?>", "\n" if multiline else " | ", text)
@@ -2863,7 +2892,36 @@ class StationsMapTab(QWidget):
             candidate = token.strip().lstrip("@").rstrip(">")
             if not re.fullmatch(r"[A-Z0-9]{3,10}", candidate):
                 continue
-            if candidate in {"ALL", "ANY", "ANYNET", "MAGNET", "AMRRON", "COMMS", "COMMSTAT", "SITREP"}:
+            if candidate in {
+                "AGE",
+                "ALL",
+                "AMRRON",
+                "ANY",
+                "ANYNET",
+                "AREA",
+                "AUTH",
+                "CALL",
+                "COMMS",
+                "COMMSTAT",
+                "FORM",
+                "FROM",
+                "GRID",
+                "GROUP",
+                "GROUPS",
+                "MAGNET",
+                "MODE",
+                "MODES",
+                "NAME",
+                "REPORTER",
+                "ROUTE",
+                "SITREP",
+                "SOURCE",
+                "STATUS",
+                "TO",
+                "TOPIC",
+                "TOPICS",
+                "UPDATED",
+            }:
                 continue
             if re.fullmatch(r"MR\d{1,2}[A-Z]*", candidate):
                 continue
@@ -2875,11 +2933,37 @@ class StationsMapTab(QWidget):
     def _map_selected_display_title(self, payload: Dict[str, object], title: str, rows: Dict[str, str]) -> str:
         if title and not title.lower().startswith("message reports"):
             return title
+        raw_callsigns = payload.get("callsigns")
+        callsign_text = ""
+        if isinstance(raw_callsigns, (list, tuple, set)):
+            callsign_text = " ".join(str(value or "") for value in raw_callsigns)
+        else:
+            callsign_text = str(raw_callsigns or "")
         callsigns = self._map_detail_callsigns_from_text(
-            self._map_detail_first_value(payload.get("callsign"), payload.get("call"), rows.get("from"), rows.get("reporter"))
+            self._map_detail_first_value(
+                payload.get("callsign"),
+                payload.get("call"),
+                callsign_text,
+                rows.get("from"),
+                rows.get("reporter"),
+            )
         )
+        topic = self._map_preferred_topic_for_values(payload.get("topics")) or str(payload.get("topic") or "").strip()
+        if not topic:
+            raw_topics = payload.get("topics")
+            if isinstance(raw_topics, (list, tuple, set)) and raw_topics:
+                topic = str(next(iter(raw_topics)) or "").strip()
         if len(callsigns) == 1:
+            if topic:
+                return f"{callsigns[0]} {topic} Reports"
             return f"{callsigns[0]} {title or 'Reports'}"
+        group = str(payload.get("group") or rows.get("group") or "").strip().lstrip("@")
+        if group and topic:
+            return f"{group} {topic} Reports"
+        if group:
+            return f"{group} Reports"
+        if topic:
+            return f"{topic} Reports"
         return title or "Selection"
 
     @staticmethod
@@ -2889,6 +2973,27 @@ class StationsMapTab(QWidget):
             if text:
                 return text
         return ""
+
+    def _map_preferred_topic_for_values(self, topics: object) -> str:
+        """Return the map topic that should drive labels and message handoff.
+
+        A cluster may contain several topics, often sorted alphabetically. If
+        the operator has an active topic filter, that topic is the mental model
+        for the view even when the underlying report also mentions Comms,
+        Weather, or Water.
+        """
+        selected = self._selected_map_topic_filter()
+        values: List[str] = []
+        if isinstance(topics, (list, tuple, set)):
+            values = [str(topic or "").strip() for topic in topics if str(topic or "").strip()]
+        elif str(topics or "").strip():
+            values = [str(topics or "").strip()]
+        if selected:
+            if not values or self._map_text_matches_query(selected, *values):
+                return selected
+            if self._map_topic_icon(selected):
+                return selected
+        return values[0] if values else ""
 
     @staticmethod
     def _map_detail_shell_html(heading: str, rows: List[tuple[str, object]], *, note: str = "") -> str:
@@ -3046,7 +3151,7 @@ class StationsMapTab(QWidget):
         source_family = self._map_payload_source_family(payload)
         source_label = self._map_selected_source_label(payload, rows)
         group = str(payload.get("group") or rows.get("group") or "").strip().lstrip("@")
-        topic = str(payload.get("topic") or "").strip()
+        topic = self._map_preferred_topic_for_values(payload.get("topics")) or str(payload.get("topic") or "").strip()
         if not topic:
             raw_topics = payload.get("topics")
             if isinstance(raw_topics, (list, tuple, set)) and raw_topics:
@@ -3128,7 +3233,11 @@ class StationsMapTab(QWidget):
                 parts.append("<div class='fio-detail-section'><div class='fio-detail-heading'>Operational Report</div>")
                 parts.append(self._map_detail_row_html("Source", source_label))
                 parts.append(self._map_detail_row_html("Route", str(payload.get("route") or rows.get("route") or "").replace(" | ", " -> ")))
-                parts.append(self._map_detail_row_html("Reports", rows.get("reports")))
+                report_count = self._map_detail_first_value(rows.get("report count"), rows.get("count"))
+                if not report_count:
+                    report_count_match = re.search(r"\bmessage reports:\s*(\d+)\b", f"{payload.get('title') or ''} {rows.get('reports') or ''}", re.I)
+                    report_count = report_count_match.group(1) if report_count_match else ""
+                parts.append(self._map_detail_row_html("Reports", report_count))
                 parts.append(self._map_detail_row_html("Age", rows.get("age")))
                 parts.append(self._map_detail_row_html("Severity", rows.get("severity")))
                 parts.append("</div>")
@@ -3165,7 +3274,7 @@ class StationsMapTab(QWidget):
     def _center_map_selected_detail(self) -> None:
         payload = dict(getattr(self, "_map_selected_payload", {}) or {})
         lat, lon = self._map_selected_latlon(payload)
-        if not (lat or lon) or getattr(self, "web", None) is None:
+        if (lat == 0.0 and lon == 0.0) or getattr(self, "web", None) is None:
             return
         try:
             js = (
@@ -3277,6 +3386,47 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
 
+    def _restore_path_focus_if_needed(self) -> None:
+        if str(getattr(self, "_observation_focus_mode", "") or "") != "paths":
+            self._paths_previous_observation_focus = None
+            return
+        previous_focus = getattr(self, "_paths_previous_observation_focus", None)
+        if isinstance(previous_focus, tuple) and len(previous_focus) >= 2:
+            self._observation_focus_enabled = bool(previous_focus[0])
+            self._observation_focus_mode = str(previous_focus[1] or "")
+        else:
+            self._observation_focus_enabled = False
+            self._observation_focus_mode = ""
+        self._paths_previous_observation_focus = None
+
+    def _set_path_layer_off(self) -> None:
+        self.show_link_paths = False
+        self.link_mode = "off"
+        self.link_value = ""
+        self.relay_target = ""
+        self._paths_focus_station = ""
+        self._restore_path_focus_if_needed()
+        links_chk = getattr(self, "map_links_chk", None)
+        if links_chk is not None:
+            try:
+                links_chk.blockSignals(True)
+                links_chk.setChecked(False)
+                links_chk.blockSignals(False)
+            except Exception:
+                pass
+        self._sync_link_mode_combo_to_off()
+        relay_combo = getattr(self, "relay_target_combo", None)
+        if relay_combo is not None:
+            try:
+                relay_combo.blockSignals(True)
+                if relay_combo.isEditable():
+                    relay_combo.setEditText("")
+                else:
+                    relay_combo.setCurrentIndex(0)
+                relay_combo.blockSignals(False)
+            except Exception:
+                pass
+
     def _show_paths_for_selected_station(self) -> None:
         callsign = self._map_selected_station_callsign()
         if not callsign:
@@ -3290,20 +3440,7 @@ class StationsMapTab(QWidget):
                 links_chk.setChecked(not turning_off)
                 links_chk.blockSignals(False)
             if turning_off:
-                self.link_mode = "off"
-                self.link_value = ""
-                self._paths_focus_station = ""
-                self.relay_target = ""
-                previous_focus = getattr(self, "_paths_previous_observation_focus", None)
-                if isinstance(previous_focus, tuple) and len(previous_focus) >= 2:
-                    self._observation_focus_enabled = bool(previous_focus[0])
-                    self._observation_focus_mode = str(previous_focus[1] or "")
-                else:
-                    self._observation_focus_enabled = False
-                    if str(getattr(self, "_observation_focus_mode", "") or "") == "paths":
-                        self._observation_focus_mode = ""
-                self._paths_previous_observation_focus = None
-                self._sync_link_mode_combo_to_off()
+                self._set_path_layer_off()
                 reason = "selected_detail_paths_off"
             else:
                 if str(getattr(self, "_observation_focus_mode", "") or "") != "paths":
@@ -3406,6 +3543,10 @@ class StationsMapTab(QWidget):
         kind = str(payload.get("type") or "").strip().lower()
         source_family = self._map_payload_source_family(payload)
         group = str(payload.get("group") or rows.get("group") or "").strip().lstrip("@")
+        if not group:
+            raw_groups = payload.get("groups")
+            if isinstance(raw_groups, (list, tuple, set)) and raw_groups:
+                group = str(next(iter(raw_groups)) or "").strip().lstrip("@")
         active_topic = self._selected_map_topic_filter()
         topic = active_topic or str(payload.get("topic") or "").strip()
         summary = self._map_detail_clean_text(payload.get("summary") or "", multiline=True)
@@ -3445,16 +3586,16 @@ class StationsMapTab(QWidget):
                 "source_family": "" if topic else (source_family or "js8call"),
             }
         inbox_source = source_family
-        if inbox_source == "condition_alert":
+        source_key = inbox_source.strip().lower().replace(" ", "_")
+        if source_key in {"condition_alert", "fused", "mixed", "multiple_sources"}:
             inbox_source = ""
-        callsigns = self._map_detail_callsigns_from_text(
-            self._map_detail_first_value(payload.get("callsign"), payload.get("call"), rows.get("from"), rows.get("reporter"))
-        )
+        if kind == "report" and topic:
+            inbox_source = ""
         return {
             "target": "messages",
             "group_filter": group,
             "topic_filter": topic,
-            "query_filter": callsigns[0] if len(callsigns) == 1 else "",
+            "query_filter": "",
             "source_family": inbox_source,
         }
 
@@ -4439,7 +4580,7 @@ class StationsMapTab(QWidget):
             return
         if theme is None:
             theme = self._theme_snapshot()
-        self._now_reachable_button.setText("Peer Sched")
+        self._now_reachable_button.setText("Peer Sched Now")
         if enabled:
             self._now_reachable_button.setStyleSheet(button_style("eligible_info", theme))
             self._now_reachable_button.setToolTip(
@@ -4700,29 +4841,8 @@ class StationsMapTab(QWidget):
 
     def focus_paths(self) -> None:
         """Open the station path/link view without report or planning overlays."""
-        if self._current_map_mode_key() == "paths":
-            previous_focus = getattr(self, "_paths_previous_observation_focus", None)
-            self.show_link_paths = False
-            self.link_mode = "off"
-            self.link_value = ""
-            self.relay_target = ""
-            self._paths_focus_station = ""
-            if isinstance(previous_focus, tuple) and len(previous_focus) >= 2:
-                self._observation_focus_enabled = bool(previous_focus[0])
-                self._observation_focus_mode = str(previous_focus[1] or "")
-            else:
-                self._observation_focus_enabled = False
-                self._observation_focus_mode = ""
-            self._paths_previous_observation_focus = None
-            links_chk = getattr(self, "map_links_chk", None)
-            if links_chk is not None:
-                try:
-                    links_chk.blockSignals(True)
-                    links_chk.setChecked(False)
-                    links_chk.blockSignals(False)
-                except Exception:
-                    pass
-            self._sync_link_mode_combo_to_off()
+        if self._current_map_mode_key() == "paths" or bool(getattr(self, "show_link_paths", False)):
+            self._set_path_layer_off()
             self._update_selected_paths_button_visual()
             self._update_map_mode_buttons()
             self._update_map_view_status_label()
@@ -6115,7 +6235,7 @@ class StationsMapTab(QWidget):
             source_chips = self._encode_source_chips(summary)
             summary_source = str(next(iter(summary.keys()), "FUSED") or "").strip()
             if source_count > 1 or summary_source.upper() == "FUSED":
-                source = "Multiple Sources"
+                source = "Multiple sources"
             else:
                 source = source_family_label(summary_source)
             updated_ts = self._safe_float(latest_event_ts, 0.0)
@@ -6606,6 +6726,8 @@ class StationsMapTab(QWidget):
             if source_family not in wanted_sources:
                 continue
             metadata = self._metadata_for_observation(obs, metadata_lookup)
+            meta_grid_for_position = str(metadata.get("grid") or "").strip().upper()
+            meta_has_usable_position = self._map_grid_looks_usable(meta_grid_for_position)
             if not self._observation_matches_map_scope(
                 obs,
                 group_filter=group_filter,
@@ -6627,13 +6749,32 @@ class StationsMapTab(QWidget):
                 # level, not a report grid. Let the event builder place them
                 # from the station/roster lookup when available.
                 eligibility_allowed = True
-            if eligibility is None or not eligibility_allowed:
+            if not eligibility_allowed and layer_name == "report_focus" and meta_has_usable_position:
+                # FLMsg/FLAmp/Spotter metadata often has the report grid even
+                # when the raw observation row was created before the file was
+                # decoded. In report views, prefer the decoded message metadata
+                # so topic/search filters can still place the traffic on the map.
+                eligibility_allowed = True
+            if not eligibility_allowed:
                 continue
             topics = {str(topic).strip() for topic in obs.observed_topics if str(topic).strip()}
             topics.update(str(topic).strip() for topic in (metadata.get("topics") or ()) if str(topic).strip())
-            if topic_filter and not self._map_text_matches_query(topic_filter, " ".join(sorted(topics))):
+            if not self._observation_matches_topic_filter(obs, metadata, topic_filter):
                 continue
-            if layer_name == "alert" and source_family == "condition_alert":
+            if layer_name == "report_focus" and source_family == "condition_alert":
+                include = True
+                icon, severity = "warning", "caution"
+            elif layer_name == "report_focus":
+                classifier = self._classify_infrastructure_text
+                text = " ".join(part for part in (obs.subject, obs.summary, " ".join(sorted(topics))) if part)
+                icon, severity = classifier(text)
+                include = bool(
+                    getattr(obs, "operator_attention", False)
+                    or topics
+                    or str(obs.subject or "").strip()
+                    or str(obs.summary or "").strip()
+                )
+            elif layer_name == "alert" and source_family == "condition_alert":
                 include = True
                 icon, severity = "warning", "caution"
             elif source_family == "condition_alert":
@@ -6672,14 +6813,23 @@ class StationsMapTab(QWidget):
                     include = bool(topics.intersection(INFRASTRUCTURE_MAP_TOPICS))
             if not include:
                 continue
+            topic_icon = self._map_icon_for_topics(sorted(topics), preferred_topic=topic_filter)
+            if topic_icon and icon not in {"warning"}:
+                icon = topic_icon
             form = str((obs.provenance or {}).get("form_name", "") or "").strip()
             display_type = str(metadata.get("display_type") or metadata.get("msg_type") or "").strip()
             if display_type and display_type.upper() not in {"FLMSG", "FLAMP"}:
                 form = display_type
-            meta_grid = str(metadata.get("grid") or "").strip().upper()
+            obs_grid = str(obs.grid or "").strip().upper()
+            meta_grid = meta_grid_for_position if self._map_grid_looks_usable(meta_grid_for_position) else ""
+            effective_grid = meta_grid or (obs_grid if self._map_grid_looks_usable(obs_grid) else "")
+            use_observation_coordinates = not meta_grid
             meta_state = str(metadata.get("state") or "").strip().upper()
             meta_title = str(metadata.get("title") or "").strip()
             report_ts = self._safe_float(metadata.get("report_ts"), 0.0)
+            eligibility_reason = (
+                getattr(eligibility, "reason_text", "") if eligibility is not None else "placed from message metadata"
+            )
             out.append(
                 {
                     "callsign": str(metadata.get("from_call") or obs.from_call or "").strip().upper(),
@@ -6689,9 +6839,9 @@ class StationsMapTab(QWidget):
                     "summary": str(meta_title or obs.subject or obs.summary or "Observation received").strip(),
                     "icon": icon,
                     "severity": severity,
-                    "lat": obs.lat,
-                    "lon": obs.lon,
-                    "grid": meta_grid or obs.grid,
+                    "lat": obs.lat if use_observation_coordinates else None,
+                    "lon": obs.lon if use_observation_coordinates else None,
+                    "grid": effective_grid,
                     "source_family": obs.source_family,
                     "source_label": str(metadata.get("source_label") or "").strip()
                     or self._map_report_source_label(obs.source_family, obs.source_app),
@@ -6704,7 +6854,7 @@ class StationsMapTab(QWidget):
                     "auth_state": obs.auth_state,
                     "trusted_state": obs.trusted_state,
                     "confirmed_state": obs.confirmed_state,
-                    "eligibility": eligibility.reason_text,
+                    "eligibility": eligibility_reason,
                 }
             )
         self._query_cache_set(cache_key, list(out))
@@ -6719,23 +6869,30 @@ class StationsMapTab(QWidget):
         try:
             with sqlite3.connect(str(db_path)) as conn:
                 exists = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='observations'"
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='observation_projection'"
                 ).fetchone()
                 if not exists:
                     self._query_cache_set(cache_key, paths)
                     return paths
                 rows = conn.execute(
                     """
-                    SELECT provenance_json
-                    FROM observations
-                    WHERE provenance_json LIKE '%file_path%'
+                    SELECT source_ref, provenance_json
+                    FROM observation_projection
+                    WHERE source_ref LIKE 'file:%'
+                       OR source_ref LIKE '%/%'
+                       OR provenance_json LIKE '%file_path%'
                        OR provenance_json LIKE '%"path"%'
                     """
                 ).fetchall()
         except Exception:
             self._query_cache_set(cache_key, paths)
             return paths
-        for (provenance_json,) in rows:
+        for source_ref, provenance_json in rows:
+            source_ref_text = str(source_ref or "").strip()
+            if source_ref_text.startswith("file:"):
+                paths.add(source_ref_text[5:])
+            elif "/" in source_ref_text:
+                paths.add(source_ref_text)
             try:
                 provenance = json.loads(provenance_json or "{}")
             except Exception:
@@ -6745,6 +6902,28 @@ class StationsMapTab(QWidget):
                     path = str(provenance.get(key) or "").strip()
                     if path:
                         paths.add(path)
+        if not paths:
+            try:
+                legacy_rows = conn.execute(
+                    """
+                    SELECT provenance_json
+                    FROM observations
+                    WHERE provenance_json LIKE '%file_path%'
+                       OR provenance_json LIKE '%"path"%'
+                    """
+                ).fetchall()
+            except Exception:
+                legacy_rows = []
+            for (provenance_json,) in legacy_rows:
+                try:
+                    provenance = json.loads(provenance_json or "{}")
+                except Exception:
+                    provenance = {}
+                if isinstance(provenance, dict):
+                    for key in ("file_path", "path"):
+                        path = str(provenance.get(key) or "").strip()
+                        if path:
+                            paths.add(path)
         self._query_cache_set(cache_key, set(paths))
         return paths
 
@@ -6812,6 +6991,40 @@ class StationsMapTab(QWidget):
             meta.get("title"),
             meta.get("display_type"),
             meta.get("msg_type"),
+            meta.get("search_text"),
+        )
+
+    def _observation_matches_topic_filter(
+        self,
+        obs,
+        metadata: Optional[Dict[str, object]],
+        topic_filter: str,
+    ) -> bool:
+        """Match map observations with the same topic clues used by Messages."""
+        if not str(topic_filter or "").strip():
+            return True
+        provenance = getattr(obs, "provenance", {}) or {}
+        if not isinstance(provenance, dict):
+            provenance = {}
+        meta = metadata or {}
+        topics = [
+            str(topic or "").strip()
+            for topic in (getattr(obs, "observed_topics", ()) or ())
+            if str(topic or "").strip()
+        ]
+        topics.extend(str(topic or "").strip() for topic in (meta.get("topics") or ()) if str(topic or "").strip())
+        return self._map_text_matches_query(
+            topic_filter,
+            " ".join(sorted(set(topics))),
+            getattr(obs, "subject", ""),
+            getattr(obs, "summary", ""),
+            provenance.get("form_name", ""),
+            provenance.get("form_id", ""),
+            provenance.get("message_type", ""),
+            meta.get("title"),
+            meta.get("display_type"),
+            meta.get("msg_type"),
+            meta.get("form_id"),
             meta.get("search_text"),
         )
 
@@ -6947,13 +7160,10 @@ class StationsMapTab(QWidget):
         if not db_path.exists():
             return []
         metadata_lookup = self._message_file_metadata_lookup(db_path)
-        observed_paths = self._observed_message_file_paths(db_path)
         now_ts = time.time()
         out: List[Dict[str, object]] = []
         for path, meta in metadata_lookup.items():
             if not isinstance(meta, dict):
-                continue
-            if path in observed_paths:
                 continue
             source_family = str(meta.get("source_family") or meta.get("source_label") or "").strip().lower()
             if not self._message_metadata_source_allowed(source_family, focus_mode):
@@ -7117,7 +7327,7 @@ class StationsMapTab(QWidget):
                 continue
             topics = {str(topic).strip() for topic in obs.observed_topics if str(topic).strip()}
             topics.update(str(topic).strip() for topic in (metadata.get("topics") or ()) if str(topic).strip())
-            if topic_filter and not self._map_text_matches_query(topic_filter, " ".join(sorted(topics))):
+            if not self._observation_matches_topic_filter(obs, metadata, topic_filter):
                 continue
             for value in (
                 metadata.get("from_call"),
@@ -7172,6 +7382,44 @@ class StationsMapTab(QWidget):
             return str(edit.text() or "").strip()
         except Exception:
             return ""
+
+    def _map_filter_combo_signature(self, attr: str) -> object:
+        combo = getattr(self, attr, None)
+        if combo is None:
+            return ""
+        try:
+            data = combo.currentData()
+        except Exception:
+            data = None
+        try:
+            text = str(combo.currentText() or "").strip()
+        except Exception:
+            text = ""
+        if isinstance(data, dict):
+            return {str(key): data[key] for key in sorted(data)}
+        if isinstance(data, (list, tuple, set)):
+            return [str(value) for value in data]
+        if data not in (None, ""):
+            return str(data).strip()
+        return text
+
+    def _map_report_cache_signature(self, layer_name: str) -> Dict[str, object]:
+        if layer_name not in {"report_focus", "alert", "infrastructure", "message_metadata_infrastructure"}:
+            return {}
+        return {
+            "focus": self._effective_map_observation_focus_mode(),
+            "topic": self._selected_map_topic_filter(),
+            "search": self._selected_map_search_text(),
+            "group": self._map_filter_combo_signature("group_filter_combo"),
+            "region": self._map_filter_combo_signature("region_filter_combo"),
+            "band": self._map_filter_combo_signature("band_combo"),
+            "source": self._map_filter_combo_signature("_map_source_filter_combo"),
+            "state": self._map_filter_combo_signature("_map_state_filter_combo"),
+            "status": self._map_filter_combo_signature("_map_status_filter_combo"),
+            "scope": self._map_filter_combo_signature("_map_scope_filter_combo"),
+            "trust": self._map_filter_combo_signature("_map_trust_filter_combo"),
+            "recency_seconds": int(getattr(self, "recency_seconds", 0) or 0),
+        }
 
     @staticmethod
     def _normalize_map_search_text(value: object) -> str:
@@ -7278,6 +7526,8 @@ class StationsMapTab(QWidget):
                 topics = []
             search_text = str(row[9] or "").strip()
             grid, state = self._extract_state_grid_from_map_text(search_text)
+            if not self._map_grid_looks_usable(grid):
+                grid, state = self._map_message_file_location(path)
             lookup[path] = {
                 "path": path,
                 "source_family": row[1] or "",
@@ -7297,22 +7547,96 @@ class StationsMapTab(QWidget):
         self._query_cache_set(cache_key, dict(lookup))
         return lookup
 
+    def _map_message_file_location(self, path: object) -> Tuple[str, str]:
+        """Extract a map-safe state/grid from a message file when the index lacks it.
+
+        Older metadata rows can have enough message summary to be useful but no
+        decoded location. Read only the individual file, cap the read size, and
+        cache by file fingerprint so map refresh stays cheap.
+        """
+        path_text = str(path or "").strip()
+        if not path_text:
+            return "", ""
+        try:
+            file_path = Path(path_text).expanduser()
+            stat = file_path.stat()
+        except Exception:
+            return "", ""
+        cache_key = (
+            "map_message_file_location",
+            str(file_path),
+            float(getattr(stat, "st_mtime", 0.0) or 0.0),
+            int(getattr(stat, "st_size", 0) or 0),
+        )
+        cached = self._query_cache_get(cache_key, ttl_sec=120.0)
+        if isinstance(cached, (tuple, list)) and len(cached) == 2:
+            grid = str(cached[0] or "").strip().upper()
+            state = str(cached[1] or "").strip().upper()
+            return grid, state
+        text = ""
+        try:
+            with file_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read(256 * 1024)
+        except Exception as exc:
+            log.debug("StationsMap: failed to read message location from %s: %s", file_path, exc)
+        grid, state = self._extract_state_grid_from_map_text(text)
+        if not self._map_grid_looks_usable(grid):
+            grid = ""
+        self._query_cache_set(cache_key, (grid, state))
+        return grid, state
+
     @staticmethod
     def _extract_state_grid_from_map_text(text: object) -> Tuple[str, str]:
         haystack = str(text or "").upper()
-        grid_candidates = [
-            match.group(1)
-            for match in re.finditer(r"\b([A-R]{2}\d{2}(?:[A-X]{2})?)\b", haystack)
-            if not re.fullmatch(r"MR\d{2}", match.group(1))
-        ]
-        grid = grid_candidates[-1] if grid_candidates else ""
+        state_values = set(STATE_TO_FEMA_REGION) | set(US_STATE_ABBR_FROM_NAME.values())
+
+        def usable_grid(candidate: object) -> str:
+            value = str(candidate or "").strip().upper()
+            if re.fullmatch(r"MR\d{1,2}[A-Z]*", value):
+                return ""
+            if re.fullmatch(r"[A-R]{2}\d{2}(?:[A-X]{2})?", value):
+                return value
+            return ""
+
+        def usable_state(candidate: object) -> str:
+            value = str(candidate or "").strip().upper()
+            return value if value in state_values else ""
+
+        grid = ""
         state = ""
+        explicit_patterns = [
+            r"\b(?:AREA|QTH|LOCATION|LOC)\s*[:=\[]?\s*([A-Z]{2})\]?\s*/\s*([A-R]{2}\d{2}(?:[A-X]{2})?)\b",
+            r"\b(?:STATE|ST)\s*[:=\[]?\s*([A-Z]{2})\]?\s*(?:/|\s+)\s*(?:GRID|GR)?\s*[:=\[]?\s*([A-R]{2}\d{2}(?:[A-X]{2})?)\b",
+            r"\b([A-Z]{2})\s*/\s*([A-R]{2}\d{2}(?:[A-X]{2})?)\b",
+        ]
+        for pattern in explicit_patterns:
+            match = re.search(pattern, haystack)
+            if not match:
+                continue
+            candidate_state = usable_state(match.group(1))
+            candidate_grid = usable_grid(match.group(2))
+            if candidate_grid:
+                return candidate_grid, candidate_state
+        grid_match = re.search(r"\b(?:GRID|GR)\s*[:=\[]?\s*([A-R]{2}\d{2}(?:[A-X]{2})?)\]?\b", haystack)
+        if grid_match:
+            grid = usable_grid(grid_match.group(1))
+        if not grid:
+            grid_candidates = [
+                candidate
+                for candidate in (
+                    usable_grid(match.group(1))
+                    for match in re.finditer(r"\b([A-R]{2}\d{2}(?:[A-X]{2})?)\b", haystack)
+                )
+                if candidate
+            ]
+            grid = grid_candidates[-1] if grid_candidates else ""
+        state_match = re.search(r"\b(?:STATE|ST)\s*[:=\[]?\s*([A-Z]{2})\]?\b", haystack)
+        if state_match:
+            state = usable_state(state_match.group(1))
         if grid:
             state_match = re.search(rf"\b([A-Z]{{2}})\s+{re.escape(grid)}\b", haystack)
             if state_match:
-                candidate = state_match.group(1)
-                if candidate in STATE_TO_FEMA_REGION or candidate in US_STATE_ABBR_FROM_NAME.values():
-                    state = candidate
+                state = usable_state(state_match.group(1)) or state
         return grid, state
 
     @staticmethod
@@ -7806,7 +8130,7 @@ class StationsMapTab(QWidget):
         if source == "rf_pin":
             return "Planning Pin"
         if source in {"fused", "mixed", "multiple_sources", "multiple sources"}:
-            return "Multiple Sources"
+            return "Multiple sources"
         if not source:
             return "HF Report"
         if source == "local_report":
@@ -8040,7 +8364,8 @@ class StationsMapTab(QWidget):
             topics = sorted(str(t) for t in bucket.get("topics", set()) if str(t))
             states = sorted(str(s) for s in bucket.get("states", set()) if str(s))
             grids = sorted(str(g) for g in bucket.get("grids", set()) if str(g))
-            topic_icon = self._map_icon_for_topics(topics, preferred_topic=self._selected_map_topic_filter())
+            primary_topic = self._map_preferred_topic_for_values(topics)
+            topic_icon = self._map_icon_for_topics(topics, preferred_topic=primary_topic)
             event_icon = topic_icon or str(bucket.get("icon") or "general")
             detail_lines = [
                 f"Weather Reports: {count}",
@@ -8068,7 +8393,7 @@ class StationsMapTab(QWidget):
                     "groups": groups,
                     "primary_group": groups[0] if groups else "",
                     "topics": topics,
-                    "primary_topic": topics[0] if topics else "",
+                    "primary_topic": primary_topic,
                     "title": f"Weather Reports: {count}",
                     "tooltip": "<br/>".join(html.escape(line) for line in detail_lines if line),
                 }
@@ -8092,7 +8417,7 @@ class StationsMapTab(QWidget):
     ) -> List[Dict[str, object]]:
         reports = self._cached_map_value(
             f"spotter_{layer_name}_reports",
-            {},
+            self._map_report_cache_signature(layer_name),
             reports_loader,
             ttl_sec=6.0,
         )
@@ -8170,7 +8495,8 @@ class StationsMapTab(QWidget):
             topics = sorted(str(t) for t in bucket.get("topics", set()) if str(t))
             states = sorted(str(s) for s in bucket.get("states", set()) if str(s))
             grids = sorted(str(g) for g in bucket.get("grids", set()) if str(g))
-            topic_icon = self._map_icon_for_topics(topics, preferred_topic=self._selected_map_topic_filter())
+            primary_topic = self._map_preferred_topic_for_values(topics)
+            topic_icon = self._map_icon_for_topics(topics, preferred_topic=primary_topic)
             event_icon = topic_icon or str(bucket.get("icon") or "general")
             source_counts: Dict[str, int] = {}
             source_kinds: Set[str] = set()
@@ -8193,19 +8519,83 @@ class StationsMapTab(QWidget):
                 primary_source_family = "condition_alert"
             else:
                 primary_source_family = ""
+            source_label = source_text or self._map_report_source_label(primary_source_family)
+            if len(calls) == 1:
+                call_label = calls[0]
+            elif calls:
+                call_label = f"{calls[0]} +{len(calls) - 1}"
+            else:
+                call_label = ""
+            area_parts = []
+            if states:
+                area_parts.append(", ".join(states[:3]) + ("..." if len(states) > 3 else ""))
+            if grids:
+                area_parts.append(", ".join(grids[:3]) + ("..." if len(grids) > 3 else ""))
             detail_lines = [
                 f"{display_label}: {count}",
                 f"Newest: {age_label}",
                 f"Severity: {str(bucket.get('severity') or 'unknown').title()}",
-                f"Source Type: {source_text}" if source_text else "",
+                f"Source: {source_label}" if source_label else "",
                 f"Groups: {', '.join(groups[:5])}" + ("..." if len(groups) > 5 else "") if groups else "",
                 f"Topics: {', '.join(topics[:5])}" + ("..." if len(topics) > 5 else "") if topics else "",
                 f"From: {', '.join(calls[:6])}" + ("..." if len(calls) > 6 else ""),
             ]
+            row_items = [
+                {"label": "Reports", "value": str(count)},
+                {"label": "Newest", "value": age_label},
+                {"label": "Severity", "value": str(bucket.get("severity") or "unknown").title()},
+                {"label": "Source", "value": source_label},
+            ]
+            if call_label:
+                row_items.append({"label": "Reporter", "value": call_label})
+            if groups:
+                row_items.append(
+                    {
+                        "label": "Groups",
+                        "value": ", ".join(groups[:5]) + ("..." if len(groups) > 5 else ""),
+                    }
+                )
+            if topics:
+                row_items.append(
+                    {
+                        "label": "Topics",
+                        "value": ", ".join(topics[:5]) + ("..." if len(topics) > 5 else ""),
+                    }
+                )
+            if calls:
+                row_items.append(
+                    {
+                        "label": "From",
+                        "value": ", ".join(calls[:6]) + ("..." if len(calls) > 6 else ""),
+                    }
+                )
+            if area_parts:
+                row_items.append({"label": "Area", "value": " / ".join(area_parts)})
+            summary_lines: List[str] = []
             for idx, report in enumerate(reports_sorted[:4]):
                 if idx:
                     detail_lines.append("")
-                detail_lines.extend(self._map_report_detail_lines(report, now=now))
+                report_lines = self._map_report_detail_lines(report, now=now)
+                detail_lines.extend(report_lines)
+                summary = self._map_detail_clean_text(report.get("summary") or "", multiline=True)
+                if summary and not self._map_station_summary_is_noise(summary):
+                    summary_lines.append(summary)
+                elif report_lines:
+                    clean_line = self._map_detail_clean_text(report_lines[0])
+                    if clean_line and not self._map_station_summary_is_noise(clean_line):
+                        summary_lines.append(clean_line)
+            clean_detail_lines = [self._map_detail_clean_text(line, multiline=True) for line in detail_lines if line]
+            plain_summary = "\n".join(dict.fromkeys(summary_lines[:4]))
+            if not plain_summary:
+                plain_summary = "\n".join(clean_detail_lines[:8])
+            event_title = f"{primary_topic} Reports: {count}" if primary_topic else f"{display_label}: {count}"
+            route_parts = []
+            if groups:
+                route_parts.append(groups[0])
+            if primary_topic:
+                route_parts.append(primary_topic)
+            if call_label:
+                route_parts.append(f"from {call_label}")
             events.append(
                 {
                     "lat": float(bucket.get("lat_sum", 0.0)) / count,
@@ -8216,16 +8606,23 @@ class StationsMapTab(QWidget):
                     "latest_ts": latest_ts,
                     "age": age_label,
                     "callsigns": calls,
+                    "callsign": calls[0] if len(calls) == 1 else "",
+                    "call_label": call_label,
                     "groups": groups,
                     "primary_group": groups[0] if groups else "",
                     "topics": topics,
-                    "primary_topic": topics[0] if topics else "",
-                    "title": f"{display_label}: {count}",
-                    "source_mix": source_text,
+                    "primary_topic": primary_topic,
+                    "topic": primary_topic,
+                    "group": groups[0] if groups else "",
+                    "title": event_title,
+                    "source_mix": source_label,
                     "source_kind": source_kind,
                     "source_family": primary_source_family,
                     "state": ", ".join(states[:3]) + ("..." if len(states) > 3 else ""),
                     "grid": ", ".join(grids[:3]) + ("..." if len(grids) > 3 else ""),
+                    "route": " | ".join(route_parts),
+                    "rows": row_items,
+                    "summary": plain_summary,
                     "tooltip": "<br/>".join(html.escape(line) for line in detail_lines if line),
                 }
             )
@@ -8236,6 +8633,44 @@ class StationsMapTab(QWidget):
                 self._safe_float(row.get("latest_ts"), 0.0),
             ),
             reverse=True,
+        )
+
+    def _build_map_report_focus_events(
+        self,
+        station_lookup: Dict[str, StationPoint],
+        *,
+        max_age_sec: int,
+    ) -> List[Dict[str, object]]:
+        """Build the unified operator-facing traffic layer for map report views.
+
+        HF Traffic, Local Traffic, All Traffic, and implicit topic/search focus
+        should act like one refinement model. Do not make those views depend on
+        legacy alert/infrastructure layer toggles.
+        """
+        if not self._effective_map_observation_focus_enabled():
+            return []
+        focus_mode = self._effective_map_observation_focus_mode()
+        if focus_mode not in {"hf_reports", "local_reports", "all_reports"}:
+            return []
+
+        def load_rows() -> List[Dict[str, object]]:
+            rows = self._load_observation_operational_reports(
+                layer_name="report_focus",
+                max_age_sec=max_age_sec,
+            )
+            rows.extend(
+                self._load_message_metadata_operational_reports(
+                    layer_name="report_focus",
+                    max_age_sec=max_age_sec,
+                )
+            )
+            return rows
+
+        return self._build_spotter_operational_events(
+            station_lookup,
+            layer_name="report_focus",
+            display_label="Traffic Reports",
+            reports_loader=load_rows,
         )
 
     def _load_sitrep_state_rollup(self, report_group: str = "") -> List[Dict[str, object]]:
@@ -8438,6 +8873,8 @@ class StationsMapTab(QWidget):
         return 7.0 <= lat <= 83.0 and -172.0 <= lon <= -50.0
 
     def _links_active(self) -> bool:
+        if not bool(getattr(self, "show_link_paths", False)):
+            return False
         combo_mode, _ = self._current_link_selection()
         return bool(combo_mode and combo_mode.lower() != "off")
 
@@ -10015,7 +10452,24 @@ class StationsMapTab(QWidget):
             base_map.setdefault(key, []).append(pt)
 
         observation_report_max_age_sec = int(self.recency_seconds or 0)
-        weather_events = self._build_weather_map_events(weather_station_lookup) if effective_show_weather_reports and reports_allowed else []
+        report_focus_active = bool(
+            observation_focus_enabled and observation_focus_mode in {"hf_reports", "local_reports", "all_reports"}
+        )
+        report_focus_events = (
+            self._build_map_report_focus_events(
+                weather_station_lookup,
+                max_age_sec=observation_report_max_age_sec,
+            )
+            if report_focus_active and reports_allowed
+            else []
+        )
+        weather_events = (
+            []
+            if report_focus_active
+            else self._build_weather_map_events(weather_station_lookup)
+            if effective_show_weather_reports and reports_allowed
+            else []
+        )
         include_legacy_spotter_reports = self._include_legacy_spotter_report_layers()
         alert_events = (
             self._build_spotter_operational_events(
@@ -10027,7 +10481,7 @@ class StationsMapTab(QWidget):
             if effective_show_alert_reports and include_legacy_spotter_reports and reports_allowed
             else []
         )
-        if effective_show_alert_reports and reports_allowed and observation_focus_enabled:
+        if effective_show_alert_reports and reports_allowed and observation_focus_enabled and not report_focus_active:
             alert_events.extend(
                 self._build_spotter_operational_events(
                     weather_station_lookup,
@@ -10049,7 +10503,10 @@ class StationsMapTab(QWidget):
             if effective_show_infrastructure_reports and include_legacy_spotter_reports and reports_allowed
             else []
         )
-        if effective_show_infrastructure_reports and reports_allowed and observation_focus_enabled:
+        if report_focus_active:
+            alert_events = []
+            infrastructure_events = report_focus_events
+        elif effective_show_infrastructure_reports and reports_allowed and observation_focus_enabled:
             infrastructure_events.extend(
                 self._build_spotter_operational_events(
                     weather_station_lookup,
@@ -10236,7 +10693,6 @@ class StationsMapTab(QWidget):
                     event.get("source_family") or event.get("primary_source_family") or event.get("source_kind")
                 )
                 == "rf_pin"
-                or str(event.get("source_kind") or "").strip().lower() == "pin"
             ]
             display_markers = []
             display_links = []
@@ -10252,7 +10708,13 @@ class StationsMapTab(QWidget):
             all_time_link_count=int(getattr(self, "_map_last_link_all_time_count", 0) or 0),
             recency_seconds=int(self.recency_seconds or 0),
         )
-        self._map_marker_count = len(display_markers)
+        report_event_count = len(weather_events) + len(alert_events) + len(infrastructure_events)
+        if planning_pins_mode:
+            self._map_marker_count = len(infrastructure_events)
+        elif observation_focus_enabled and observation_focus_mode in {"hf_reports", "local_reports", "all_reports"}:
+            self._map_marker_count = report_event_count
+        else:
+            self._map_marker_count = len(display_markers)
         self._map_link_count = len(display_links)
         self._last_map_render_input_sig = map_input_sig
 
@@ -10371,10 +10833,7 @@ class StationsMapTab(QWidget):
         else:
             self._set_map_runtime_state(
                 "ready",
-                (
-                    f"Map is ready with {int(getattr(self, '_map_marker_count', 0) or 0)} station markers "
-                    f"and {int(getattr(self, '_map_link_count', 0) or 0)} links."
-                ),
+                self._map_ready_detail_text(),
             )
         if not ok or self.web is None:
             return
@@ -11173,8 +11632,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
     window._leafletMap = map;
     window._lastView = {{lat: {init_lat}, lon: {init_lon}, zoom: {init_zoom}}};
     window.centerMapOn = function(lat, lon, minZoom) {{
-      const targetZoom = Math.max(map.getZoom(), minZoom || 6);
-      map.setView([lat, lon], targetZoom);
+      const targetLat = Number(lat);
+      const targetLon = Number(lon);
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) return false;
+      const targetZoom = Math.max(map.getZoom(), Number(minZoom || 6));
+      map.invalidateSize(true);
+      map.setView([targetLat, targetLon], targetZoom);
+      return true;
     }};
     {tile_layer}
     const regionLabelLayer = L.layerGroup();
@@ -11383,29 +11847,36 @@ function addGridLabels(res, level, bounds, maxLabels) {
       const sourceFamily = event.source_family || event.primary_source_family || '';
       const group = event.primary_group || (Array.isArray(event.groups) && event.groups.length ? event.groups[0] : '');
       const topic = event.primary_topic || (Array.isArray(event.topics) && event.topics.length ? event.topics[0] : '');
+      const calls = Array.isArray(event.callsigns) ? event.callsigns.filter(Boolean) : [];
+      const callLabel = event.call_label || (calls.length === 1 ? calls[0] : (calls.length ? (calls[0] + ' +' + (calls.length - 1)) : ''));
+      const route = event.route || [group, topic, callLabel ? ('from ' + callLabel) : ''].filter(Boolean).join(' | ');
       return {{
         action: 'select_detail',
         type: 'report',
         source_family: sourceFamily,
         title: title,
-        route: [group, topic].filter(Boolean).join(' | '),
+        route: route,
         lat: event.lat,
         lon: event.lon,
         group: group,
         topic: topic,
         groups: event.groups || [],
         topics: event.topics || [],
-        summary: event.tooltip || title,
+        callsigns: calls,
+        callsign: event.callsign || (calls.length === 1 ? calls[0] : ''),
+        call_label: callLabel,
+        summary: event.summary || event.tooltip || title,
         rows: [
           detailRowPayload('MCF', title),
           detailRowPayload('Reports', event.count),
           detailRowPayload('Severity', event.severity),
           detailRowPayload('Age', event.age),
           detailRowPayload('Source', source),
+          detailRowPayload('Reporter', callLabel),
           detailRowPayload('Status', event.severity),
           detailRowPayload('Groups', Array.isArray(event.groups) ? event.groups.join(', ') : ''),
           detailRowPayload('Topics', Array.isArray(event.topics) ? event.topics.join(', ') : ''),
-          detailRowPayload('From', Array.isArray(event.callsigns) ? event.callsigns.join(', ') : ''),
+          detailRowPayload('From', calls.join(', ')),
           detailRowPayload('Area', [event.state, event.grid].filter(Boolean).join(' / ')),
           detailRowPayload('Location', [event.state, event.grid].filter(Boolean).join(' / '))
         ].filter(Boolean)
@@ -11758,9 +12229,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
             const midLat = (lat1 + lat2) / 2.0;
             const midLon = (lon1 + lon2) / 2.0;
             const bearing = linkBearingDeg(lat1, lon1, lat2, lon2);
+            const arrowRotation = bearing;
             const arrowIcon = L.divIcon({{
               className: '',
-              html: `<div class="fio-link-arrow" style="color:${{color}}; transform: rotate(${{bearing}}deg);">&#10148;</div>`,
+              html: `<div class="fio-link-arrow" style="color:${{color}}; transform: rotate(${{arrowRotation}}deg);">&#9650;</div>`,
               iconSize: [18, 18],
               iconAnchor: [9, 9]
             }});
@@ -11840,7 +12312,29 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     def _on_map_links_changed(self, state):
         self.show_link_paths = bool(state)
+        if not self.show_link_paths:
+            self._set_path_layer_off()
+        elif not self._links_active():
+            self.link_mode = "my_station"
+            self.link_value = ""
+            self._sync_path_scope_combo(("my_station", ""))
+            combo = getattr(self, "link_mode_combo", None)
+            if combo is not None:
+                try:
+                    idx = combo.findData(("my_station", ""))
+                    if idx < 0:
+                        idx = combo.findText("My Station")
+                    if idx >= 0:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(idx)
+                        combo.blockSignals(False)
+                except Exception:
+                    pass
         self._save_display_preferences()
+        self._update_selected_paths_button_visual()
+        self._update_map_mode_buttons()
+        self._update_map_view_status_label()
+        self._update_clear_filter_buttons_visual()
         self._request_map_refresh(level="medium", reason="toggle_link_paths")
 
     def _on_map_weather_changed(self, state):
@@ -11946,15 +12440,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
                 )
             self._observation_focus_enabled = True
             self._observation_focus_mode = "paths"
-        elif str(getattr(self, "_observation_focus_mode", "") or "") == "paths":
-            previous_focus = getattr(self, "_paths_previous_observation_focus", None)
-            if isinstance(previous_focus, tuple) and len(previous_focus) >= 2:
-                self._observation_focus_enabled = bool(previous_focus[0])
-                self._observation_focus_mode = str(previous_focus[1] or "")
-            else:
-                self._observation_focus_enabled = False
-                self._observation_focus_mode = ""
-            self._paths_previous_observation_focus = None
+        else:
+            self._restore_path_focus_if_needed()
         self._update_selected_paths_button_visual()
         self._update_map_mode_buttons()
         self._update_map_view_status_label()

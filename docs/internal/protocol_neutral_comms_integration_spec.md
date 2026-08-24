@@ -262,6 +262,15 @@ Rules:
 
 FIO should keep one primary comms map experience with two complementary views:
 
+Design rule: the map is not a form viewer and not a raw protocol monitor. It is
+the operator's spatial and reachability workbench. Every visible control should
+answer one of four questions:
+
+- what is happening
+- where is it happening
+- who can reach whom
+- what should I do next
+
 ### Geographic View
 
 Answers:
@@ -284,6 +293,19 @@ Required behavior:
   actions available when applicable.
 - Marker color and icon must be explainable in `Status`: last status, source,
   age, and evidence, not raw question text.
+- Topic filters are evidence filters. Selecting `Fire` must show stations and
+  reports that have fire evidence in message metadata, observations, local
+  reports, or future mesh/Reticulum/MQTT traffic. It must not require the marker
+  itself to have been originally created as a fire-specific pin.
+- Search is also an evidence filter. Searching `wildfire` should find the same
+  report on the map that Messages can find, provided the other map filters still
+  allow it.
+- If a filter combination yields zero traffic, the status line should explain
+  which scope is active and whether older or different-source matching evidence
+  exists. Zero should feel informative, not broken.
+- The age control should be a compact chip/popover with quick ranges and a
+  custom range, not a long dropdown. It should read as `Any time`, `Last 3h`,
+  `Last 7d`, or a custom label.
 
 ### Topology View
 
@@ -312,6 +334,28 @@ Rendering:
 - line style indicates method/source when multiple methods are shown
 - aggregated links expose evidence count and latest report in the inspector
 
+Topology may be geography-backed or graph-backed. The first implementation can
+draw paths on the map, but the data model must be ready for a future graph view
+where geographic location is unknown or less important than reachability. This
+matters for Reticulum, MeshCore, Meshtastic, MQTT bridges, and store-and-forward
+systems where a node may be reachable without a precise map coordinate.
+
+Path controls are layer controls, not hidden filters:
+
+- `Paths` first click enables topology for the current scope.
+- `Paths` second click disables topology and restores the previous map context.
+- `Show Paths` from the inspector is the same toggle for the selected station.
+- `Clear Layers` disables paths, RF planning, propagation, and planning pins
+  without changing `Group`, `Since`, `Topic`, search, or current view.
+- Direction markers must follow link bearing. If a direction marker cannot be
+  rendered accurately at the current zoom or link density, omit it rather than
+  showing a misleading sideways arrow.
+
+Planning pins are planning/reference records. They are not normal received
+traffic. The `Planning Pins` focus shows only saved planning/reference markers,
+and the tooltip/labels should avoid wording such as "operator curated" unless
+the current user actually created or imported that record.
+
 ## Offline Map Strategy
 
 FIO should be useful offline without becoming a large map-tile cache manager.
@@ -329,6 +373,12 @@ Recommended model:
   or region fallback rather than pretending to know a precise location.
 
 The map should optimize operational questions, not cartographic detail.
+
+The baseline map should remain a lightweight bundled outline/vector layer for
+states, provinces, countries, major regions, and grid context. Online tiles can
+be useful later, but they must be optional, bounded, and visibly separate from
+the operational projection. FIO should not depend on downloading map tiles to
+answer "who can reach whom" or "where is the fire report."
 
 ## Ingestion Architecture
 
@@ -494,6 +544,22 @@ Primary labels should answer:
 Map details should avoid internal words such as `fused`. Use `Multiple Sources`
 or `Source: JS8Spotter + CommStat`.
 
+The map inspector is the single selected-object surface. Marker clicks must not
+open a second over-map card when the right inspector is visible. The inspector
+should use tabs or equivalent compact sections:
+
+- `Overview`: callsign/report identity, area, source, age, summary.
+- `Status`: why the marker is this color and what evidence set that status.
+- `Paths`: path evidence, direction, quality, method, relay candidates.
+- `Messages`: exact message/report handoff context that will open in Messages.
+- `Actions`: Send Spotter, filter group/topic, SOP review, and other safe
+  context actions when applicable.
+
+Map-to-Messages handoff must preserve the current selected station/report,
+group, source family, age window, search text, and topic. If the user is viewing
+`Fire` on the map, the Messages view opened from that marker should also be
+filtered to the fire evidence unless the user clears it.
+
 ### ControlFreq
 
 ControlFreq should surface high-value operational context:
@@ -636,4 +702,3 @@ Rules:
   the same first slice?
 - Which condition alert templates beyond MagNet MAGCON should ship disabled as
   examples?
-
