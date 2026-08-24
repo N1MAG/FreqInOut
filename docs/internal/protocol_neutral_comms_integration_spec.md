@@ -997,6 +997,9 @@ Rules:
 ### Phase 0: Architecture Guardrails
 
 - Add or formalize the source capability registry.
+  - Implemented: `freqinout.core.protocol_capabilities` defines transport
+    capability hints for current and future sources, and runtime ingest
+    descriptors now carry capability, provenance, and scope hints.
 - Define connector, raw event, normalized candidate, and projection contracts
   before adding new live protocols.
 - Ensure existing map/message/SOP/BBS code paths can consume shared projections

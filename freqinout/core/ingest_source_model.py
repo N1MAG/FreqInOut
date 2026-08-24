@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from freqinout.core.commstat_config import load_commstat_group_state
+from freqinout.core.protocol_capabilities import capabilities_dict_for, provenance_hint_for, scope_hint_for
 
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -44,6 +45,17 @@ class AppInstanceDescriptor:
     paths: Mapping[str, str] = field(default_factory=dict)
     db_path: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
+    capabilities: Mapping[str, bool] = field(default_factory=dict)
+    provenance: str = ""
+    scope_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.capabilities:
+            object.__setattr__(self, "capabilities", capabilities_dict_for(self.family, metadata=self.metadata))
+        if not self.provenance:
+            object.__setattr__(self, "provenance", provenance_hint_for(self.family, self.metadata))
+        if not self.scope_hint:
+            object.__setattr__(self, "scope_hint", scope_hint_for(self.family, self.metadata))
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,21 @@ class IngestSourceDescriptor:
     checkpoint_key: str = ""
     enabled: bool = True
     metadata: Mapping[str, object] = field(default_factory=dict)
+    capabilities: Mapping[str, bool] = field(default_factory=dict)
+    provenance: str = ""
+    scope_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.capabilities:
+            object.__setattr__(
+                self,
+                "capabilities",
+                capabilities_dict_for(self.family, self.source_type, self.metadata),
+            )
+        if not self.provenance:
+            object.__setattr__(self, "provenance", provenance_hint_for(self.family, self.metadata))
+        if not self.scope_hint:
+            object.__setattr__(self, "scope_hint", scope_hint_for(self.family, self.metadata))
 
 
 @dataclass(frozen=True)

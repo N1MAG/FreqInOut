@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 
 from freqinout.core.ingest_source_model import (
+    AppInstanceDescriptor,
+    IngestSourceDescriptor,
     app_instance_from_device_profile,
     build_ingest_source_inventory,
     dedupe_ingest_sources,
@@ -12,6 +14,7 @@ from freqinout.core.ingest_source_model import (
     js8_api_endpoint_collisions,
     js8_ingest_sources,
 )
+from freqinout.core.protocol_capabilities import protocol_capabilities_for
 from freqinout.core.js8_source_context import resolve_js8_endpoint_context, resolve_js8_source_context
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
@@ -87,6 +90,42 @@ def test_js8_profile_builds_file_and_api_sources(tmp_path: Path) -> None:
     assert roles["all"].path.endswith("ALL.TXT")
     assert roles["api"].endpoint == "127.0.0.1:2442"
     assert roles["directed"].checkpoint_key != roles["all"].checkpoint_key
+    assert instance.capabilities["receive_links"] is True
+    assert instance.capabilities["send_message"] is True
+    assert instance.capabilities["frequency_control"] is False
+    assert roles["directed"].capabilities["receive_links"] is True
+    assert roles["directed"].capabilities["send_message"] is False
+    assert roles["directed"].provenance == "rf"
+    assert roles["directed"].scope_hint == "station_or_group"
+
+
+def test_protocol_capability_registry_keeps_varac_read_import_only() -> None:
+    capabilities = protocol_capabilities_for("varac").as_dict()
+
+    assert capabilities["receive_messages"] is True
+    assert capabilities["bbs_read"] is True
+    assert capabilities["store_forward"] is True
+    assert capabilities["frequency_control"] is False
+    assert capabilities["config_write_supported"] is False
+    assert capabilities["bbs_write"] is False
+    assert capabilities["read_only"] is True
+
+
+def test_ingest_descriptors_self_populate_capability_hints() -> None:
+    app = AppInstanceDescriptor(source_id="app_commstat", family="commstat", label="CommStat")
+    source = IngestSourceDescriptor(
+        source_id="source_commstat",
+        family="commstat",
+        source_type="sqlite",
+        label="CommStat DB",
+        metadata={"scope_hint": "group"},
+    )
+
+    assert app.capabilities["internet_assisted"] is True
+    assert app.provenance == "mixed"
+    assert source.capabilities["receive_reports"] is True
+    assert source.capabilities["topology"] is True
+    assert source.scope_hint == "group"
 
 
 def test_js8_profile_defaults_api_endpoint_when_enabled(tmp_path: Path) -> None:
