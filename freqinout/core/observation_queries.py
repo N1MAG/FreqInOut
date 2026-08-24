@@ -16,9 +16,12 @@ from freqinout.core.observation_store import list_observations
 @dataclass(frozen=True)
 class ObservationQuery:
     source_family: str = ""
+    source_families: tuple[str, ...] = ()
     topic: str = ""
     from_call: str = ""
     to_target: str = ""
+    operating_group: str = ""
+    search_text: str = ""
     status: str = ""
     state: str = ""
     grid: str = ""
@@ -60,19 +63,71 @@ def query_observations(
     query: ObservationQuery | None = None,
 ) -> tuple[Observation, ...]:
     q = query or ObservationQuery()
-    rows = list_observations(
-        db_path,
-        source_family=q.source_family,
-        from_call=q.from_call,
-        to_target=q.to_target,
-        topic=q.topic,
-        status=q.status,
-        state=q.state,
-        grid=q.grid,
-        since_utc=q.since_utc,
-        limit=q.limit,
+    source_families = tuple(
+        _normalize_source_family(source)
+        for source in (q.source_families or ())
+        if _normalize_source_family(source)
     )
-    return tuple(rows)
+    if source_families:
+        rows: list[Observation] = []
+        per_source_limit = max(1, int(q.limit or 200))
+        for source_family in source_families:
+            rows.extend(
+                list_observations(
+                    db_path,
+                    source_family=source_family,
+                    from_call=q.from_call,
+                    to_target=q.to_target,
+                    topic=q.topic,
+                    status=q.status,
+                    state=q.state,
+                    grid=q.grid,
+                    since_utc=q.since_utc,
+                    limit=per_source_limit,
+                )
+            )
+    else:
+        rows = list_observations(
+            db_path,
+            source_family=q.source_family,
+            from_call=q.from_call,
+            to_target=q.to_target,
+            topic=q.topic,
+            status=q.status,
+            state=q.state,
+            grid=q.grid,
+            since_utc=q.since_utc,
+            limit=q.limit,
+        )
+    group = _normalize_group(q.operating_group)
+    search_text = str(q.search_text or "").strip()
+    filtered = [
+        observation
+        for observation in rows
+        if (not source_families or _normalize_source_family(observation.source_family) in source_families)
+        and (not group or _observation_matches_group(observation, group))
+        and _observation_matches_search(observation, search_text)
+    ]
+    filtered.sort(key=_observation_sort_key, reverse=True)
+    return tuple(filtered[: max(1, int(q.limit or 200))])
+
+
+def matching_observation_callsigns(
+    db_path: str | Path,
+    query: ObservationQuery | None = None,
+) -> frozenset[str]:
+    """Return station callsigns represented by a shared observation query."""
+    calls: set[str] = set()
+    for observation in query_observations(db_path, query):
+        for value in (observation.from_call,):
+            call = _normalize_callsign(value)
+            if not call:
+                continue
+            calls.add(call)
+            base = _base_callsign(call)
+            if base:
+                calls.add(base)
+    return frozenset(calls)
 
 
 def map_observation_rows(
@@ -138,9 +193,12 @@ def operational_activity_snapshot(
     q = query or ObservationQuery(limit=limit)
     q = ObservationQuery(
         source_family=q.source_family,
+        source_families=q.source_families,
         topic=q.topic,
         from_call=q.from_call,
         to_target=q.to_target,
+        operating_group=q.operating_group or operating_group,
+        search_text=q.search_text,
         status=q.status,
         state=q.state,
         grid=q.grid,
@@ -181,9 +239,73 @@ def _normalize_group(value: str) -> str:
     return str(value or "").strip().upper().lstrip("@")
 
 
+def _normalize_source_family(value: object) -> str:
+    source = str(value or "").strip().lower()
+    aliases = {
+        "js8": "js8call",
+        "js8spotter": "spotter",
+        "spotter_traffic": "spotter",
+        "local": "local_report",
+        "local_report": "local_report",
+        "planning_pin": "rf_pin",
+        "rf_pins": "rf_pin",
+    }
+    return aliases.get(source, source)
+
+
 def _observation_matches_group(observation: Observation, group: str) -> bool:
     candidates = [
         observation.to_target,
         *observation.groups,
     ]
     return any(_normalize_group(candidate) == group for candidate in candidates)
+
+
+def _normalize_callsign(value: object) -> str:
+    call = str(value or "").strip().upper().lstrip("@").rstrip(">")
+    if not call or call in {"ALL", "ANY", "ANYNET", "UNASSIGNED"}:
+        return ""
+    return call
+
+
+def _base_callsign(value: object) -> str:
+    call = _normalize_callsign(value)
+    if not call:
+        return ""
+    for separator in (">", "/", "-", " "):
+        if separator in call:
+            call = call.split(separator, 1)[0]
+    return call.strip().upper()
+
+
+def _observation_matches_search(observation: Observation, search_text: str) -> bool:
+    query = str(search_text or "").strip().lower()
+    if not query:
+        return True
+    provenance = observation.provenance if isinstance(observation.provenance, dict) else {}
+    values = [
+        observation.source_family,
+        observation.source_app,
+        observation.from_call,
+        observation.to_target,
+        *observation.groups,
+        *observation.observed_topics,
+        observation.status,
+        observation.urgency,
+        observation.subject,
+        observation.summary,
+        observation.state,
+        observation.grid,
+        provenance.get("form_name", ""),
+        provenance.get("form_id", ""),
+        provenance.get("message_type", ""),
+        provenance.get("search_text", ""),
+    ]
+    return query in " ".join(str(value or "") for value in values).lower()
+
+
+def _observation_sort_key(observation: Observation) -> tuple[str, str]:
+    return (
+        str(observation.event_utc or observation.received_utc or ""),
+        str(observation.observation_id or ""),
+    )

@@ -8,6 +8,7 @@ from freqinout.core.observation_queries import (
     ObservationQuery,
     bbs_observation_rows,
     eligible_map_observations,
+    matching_observation_callsigns,
     map_observation_rows,
     operational_activity_snapshot,
     query_observations,
@@ -44,6 +45,50 @@ def test_observation_query_facade_returns_filtered_read_only_rows(tmp_path) -> N
     assert rows[0].source_family == "spotter"
     assert rows[0].route_eligible is False
     assert rows[0].publish_authorized is False
+
+
+def test_observation_query_combines_topic_group_source_and_search(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    spotter = observation_from_message_intelligence(
+        analyze_spotter_text("F!307 TO[@MR08] FR[K7ETC] ST[UT] GR[DM38ST] NA[Wildfire status] #D2NT"),
+        source_ref="spotter_traffic:1",
+        source_family="spotter",
+        event_utc="2026-08-10T14:00:00+00:00",
+    )
+    local = observation_from_local_report(
+        {
+            "id": 1,
+            "created_utc": "2026-08-10T15:00:00+00:00",
+            "callsign": "K0PRA",
+            "state": "CO",
+            "grid": "DM79",
+            "topics": ("Comms",),
+            "subject": "Repeater degraded",
+            "confirmed_state": "CONFIRMED",
+        }
+    )
+    upsert_observation(db_path, spotter)
+    upsert_observation(db_path, local)
+
+    rows = query_observations(
+        db_path,
+        ObservationQuery(
+            source_families=("spotter", "flmsg", "flamp"),
+            topic="Fire",
+            operating_group="MR08",
+            search_text="wildfire",
+        ),
+    )
+
+    assert [row.from_call for row in rows] == ["K7ETC"]
+    assert query_observations(
+        db_path,
+        ObservationQuery(source_families=("local",), topic="Fire", operating_group="@MR08"),
+    ) == ()
+    assert matching_observation_callsigns(
+        db_path,
+        ObservationQuery(source_families=("spotter",), topic="Fire", operating_group="@MR08"),
+    ) == frozenset({"K7ETC"})
 
 
 def test_map_query_facade_explains_allowed_and_blocked_rows(tmp_path) -> None:

@@ -77,7 +77,7 @@ from freqinout.core.operator_activity import (
     load_js8_direct_contact_summary,
     load_operator_activity_summary,
 )
-from freqinout.core.observation_queries import ObservationQuery, map_observation_rows
+from freqinout.core.observation_queries import ObservationQuery, map_observation_rows, matching_observation_callsigns
 from freqinout.core.rf_pins import delete_rf_pins, list_rf_pins, save_rf_pin
 from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.message_ingest import MessageIngestor
@@ -7400,6 +7400,19 @@ class StationsMapTab(QWidget):
             cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=max_age_sec)
             since_utc = cutoff.replace(microsecond=0).isoformat()
         try:
+            calls = set(
+                matching_observation_callsigns(
+                    db_path,
+                    ObservationQuery(
+                        source_families=tuple(sorted(self._observation_focus_sources(focus_mode))),
+                        topic=topic_filter,
+                        operating_group=group_filter,
+                        search_text=search_text,
+                        since_utc=since_utc,
+                        limit=2500,
+                    ),
+                )
+            )
             view_rows = map_observation_rows(
                 db_path,
                 ObservationQuery(since_utc=since_utc, limit=2500),
@@ -7412,7 +7425,6 @@ class StationsMapTab(QWidget):
             return set()
         wanted_sources = self._observation_focus_sources(focus_mode)
         metadata_lookup = self._message_file_metadata_lookup(db_path)
-        calls: Set[str] = set()
         for view_row in view_rows:
             obs = view_row.observation
             source_family = str(obs.source_family or "").strip().lower()
