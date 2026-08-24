@@ -6223,6 +6223,7 @@ class MessageViewerTab(QWidget):
     ) -> None:
         self.show_inbox_from_navigation()
         source = str(source_family or "").strip().lower()
+        source_values = self._message_context_source_values(source)
         focus = {
             "flmsg": "forms",
             "flamp": "forms",
@@ -6230,15 +6231,19 @@ class MessageViewerTab(QWidget):
             "spotter": "spotter",
             "commstat": "commstat",
             "js8call": "js8call",
+            "js8": "js8call",
             "varac": "varac",
         }.get(source, "all")
         self._set_inbox_focus(focus)
+        selected_group = self._select_context_group_filter(group_filter)
+        selected_source = self._select_context_source_filter(source_values)
         search_parts: list[str] = []
         seen_parts: set[str] = set()
         for part in (
             str(query_filter or "").strip().lstrip("@"),
-            str(group_filter or "").strip().lstrip("@"),
             str(topic_filter or "").strip(),
+            "" if selected_group else str(group_filter or "").strip().lstrip("@"),
+            "" if selected_source else self._message_context_source_search_fallback(source),
         ):
             if not part:
                 continue
@@ -6250,8 +6255,78 @@ class MessageViewerTab(QWidget):
         search = " ".join(search_parts)
         if hasattr(self, "rcv_search"):
             self.rcv_search.setText(search)
-        else:
-            self._apply_message_filters()
+        self._apply_message_filters()
+
+    @staticmethod
+    def _message_context_source_values(source_family: object) -> list[str]:
+        source = str(source_family or "").strip().lower()
+        if source in {"", "fused", "mixed", "multiple_sources", "condition_alert"}:
+            return []
+        if source == "js8call":
+            return ["js8"]
+        if source == "forms":
+            return ["flmsg", "flamp"]
+        if source == "fastlight":
+            return ["flmsg", "flamp"]
+        if source == "js8spotter":
+            return ["spotter"]
+        return [source]
+
+    @staticmethod
+    def _message_context_source_search_fallback(source_family: object) -> str:
+        source = str(source_family or "").strip().lower()
+        return {
+            "js8call": "JS8Call",
+            "js8": "JS8Call",
+            "js8spotter": "Spotter",
+            "spotter": "Spotter",
+            "commstat": "CommStat",
+            "varac": "VarAC",
+            "flmsg": "FLMSG",
+            "flamp": "FLAMP",
+        }.get(source, "")
+
+    @staticmethod
+    def _dropdown_option_values(widget: object) -> set[str]:
+        options = getattr(widget, "_options", []) or []
+        values: set[str] = set()
+        for option in options:
+            if not isinstance(option, (list, tuple)) or not option:
+                continue
+            value = str(option[0] or "").strip()
+            if value:
+                values.add(value)
+        return values
+
+    def _select_context_group_filter(self, group_filter: object) -> bool:
+        if not hasattr(self, "operating_group_filter"):
+            return False
+        group = self._normalize_message_group_filter_value(group_filter)
+        if not group:
+            return False
+        options = self._dropdown_option_values(self.operating_group_filter)
+        if group not in options:
+            return False
+        self.operating_group_filter.blockSignals(True)
+        try:
+            self.operating_group_filter.set_selected_values([group])
+        finally:
+            self.operating_group_filter.blockSignals(False)
+        return group in self.operating_group_filter.selected_values()
+
+    def _select_context_source_filter(self, source_values: list[str]) -> bool:
+        if not hasattr(self, "source_filter") or not source_values:
+            return False
+        options = self._dropdown_option_values(self.source_filter)
+        wanted = [value for value in source_values if value in options]
+        if not wanted:
+            return False
+        self.source_filter.blockSignals(True)
+        try:
+            self.source_filter.set_selected_values(wanted)
+        finally:
+            self.source_filter.blockSignals(False)
+        return bool(self.source_filter.selected_values() & set(wanted))
 
     def show_compose_from_navigation(self) -> None:
         self._set_messages_mode("Compose", save=False)

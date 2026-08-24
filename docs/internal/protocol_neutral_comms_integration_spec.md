@@ -297,9 +297,17 @@ Required behavior:
   reports that have fire evidence in message metadata, observations, local
   reports, or future mesh/Reticulum/MQTT traffic. It must not require the marker
   itself to have been originally created as a fire-specific pin.
+- Topic icons follow the same evidence rule. If the active topic is `Fire` and
+  the selected/clustered evidence includes fire, the marker uses the fire icon
+  even when that evidence also mentions water, weather, comms, or logistics.
+  FIO must not repaint unrelated evidence as fire simply because the topic chip
+  is selected.
 - Search is also an evidence filter. Searching `wildfire` should find the same
   report on the map that Messages can find, provided the other map filters still
   allow it.
+- Topic and search refinements must not silently change the selected view chip,
+  path scope, or age window. The user-selected map context stays in place until
+  the user changes it or clicks `Clear Filters` / `Clear Layers`.
 - If a filter combination yields zero traffic, the status line should explain
   which scope is active and whether older or different-source matching evidence
   exists. Zero should feel informative, not broken.
