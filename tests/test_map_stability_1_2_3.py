@@ -3948,6 +3948,12 @@ def test_map_to_messages_context_uses_real_filters_before_search_fallback() -> N
     assert "selected_source = self._select_context_source_filter(source_values)" in source
     assert '"" if selected_group else str(group_filter or "").strip().lstrip("@")' in source
     assert '"" if selected_source else self._message_context_source_search_fallback(source)' in source
+    assert 'self.map_context_filter_label = QLabel("")' in source
+    assert 'self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")' in source
+    assert "def _update_map_context_filter_label" in source
+    assert "Map filter active:" in source
+    assert "Use Clear Filters to return to the normal inbox." in source
+    assert "Map non-green/status evidence only" in source
 
 
 def test_map_leaflet_template_includes_operator_zoom_presets() -> None:

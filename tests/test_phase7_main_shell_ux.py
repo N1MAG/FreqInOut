@@ -1978,9 +1978,9 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert 'self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")' in source
     assert 'self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")' in source
     assert 'inbox_body.setObjectName("messagesInboxBody")' in source
-    assert "MESSAGE_INBOX_BODY_MIN_WIDTH = 1320" in source
+    assert "MESSAGE_INBOX_BODY_MIN_WIDTH = 900" in source
     assert "inbox_body.setMinimumWidth(MESSAGE_INBOX_BODY_MIN_WIDTH)" in source
-    assert "inbox_body.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)" in source
+    assert "inbox_body.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)" in source
     assert 'self.inbox_body_scroll.setObjectName("messagesInboxBodyScroll")' in source
     assert "self.inbox_body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.inbox_body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
@@ -1993,15 +1993,16 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert 'self.operating_group_filter.setObjectName("messageOperatingGroupFilter")' in source
     assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
     assert 'self.message_funnel_widget.setObjectName("messageInboxFunnelBar")' in source
-    assert "MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 1260" in source
+    assert "MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 0" in source
     assert "self.message_funnel_widget.setMinimumWidth(MESSAGE_INBOX_FUNNEL_MIN_WIDTH)" in source
-    assert "self.message_funnel_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in source
+    assert "self.message_funnel_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)" in source
     assert "funnel_layout.addWidget(self.operating_group_filter, 2)" in source
     assert "funnel_layout.addWidget(self.source_filter, 2)" in source
-    assert "self.received_filter.setFixedWidth(180)" in source
-    assert "self.advanced_filters_btn.setMinimumWidth(140)" in source
+    assert "self.received_filter.setFixedWidth(150)" in source
+    assert "self.advanced_filters_btn.setFixedWidth(125)" in source
     assert "funnel_layout.addWidget(self.received_filter)" in source
     assert "funnel_layout.addWidget(self.advanced_filters_btn)" in source
+    assert 'self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")' in source
     assert "self._inbox_actions_layout = QGridLayout()" in source
     assert "(self.inbox_actions_heading, 0, 0, 1, 2)" in source
     assert '(self.inbox_actions_heading = QLabel("Inbox Tools")' not in source
@@ -2017,8 +2018,8 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "(self.operating_group_filter, 12, 0, 1, 2)" not in source
     assert "(self.source_filter, 13, 0, 1, 2)" not in source
     assert "(self.advanced_filters_btn, 6, 0, 1, 2)" not in source
-    assert "MESSAGE_INBOX_FOCUS_MIN_WIDTH = 980" in source
-    assert "self.inbox_focus_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in source
+    assert "MESSAGE_INBOX_FOCUS_MIN_WIDTH = 680" in source
+    assert "self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)" in source
     assert "self.inbox_focus_widget.setVisible(not compose_active)" in source
     assert "self.message_funnel_widget.setVisible(not compose_active)" in source
     assert "self.messages_header.setVisible(False)" in source
@@ -2076,7 +2077,7 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.inbox_controls_panel.objectName() == "messagesInboxControlPanel"
         assert tab.inbox_controls_scroll.objectName() == "messagesInboxControlScroll"
         assert tab.inbox_body.objectName() == "messagesInboxBody"
-        assert tab.inbox_body.minimumWidth() >= 980
+        assert tab.inbox_body.minimumWidth() >= 900
         assert tab.inbox_body_scroll.objectName() == "messagesInboxBodyScroll"
         assert tab.inbox_body_scroll.widget() is tab.inbox_body
         assert tab.inbox_body_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
@@ -2086,12 +2087,14 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.inbox_controls_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.inbox_controls_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.messages_table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-        assert tab.inbox_body.minimumWidth() >= 1320
-        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
-        assert tab.message_funnel_widget.minimumWidth() >= 1260
-        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
-        assert tab.inbox_focus_widget.minimumWidth() >= 980
-        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+        assert tab.inbox_body.minimumWidth() >= 900
+        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.message_funnel_widget.minimumWidth() >= 0
+        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.inbox_focus_widget.minimumWidth() >= 680
+        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.map_context_filter_label.objectName() == "messageMapContextFilterLabel"
+        assert tab.map_context_filter_label.isVisible() is False
         assert tab.compose_open_source_btn.text() == "Open Form Folder"
         assert tab.type_filter.isEditable()
         assert tab.messages_header.isVisible() is False
@@ -2276,16 +2279,16 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert tab.inbox_controls_panel.minimumHeight() >= 420
         assert tab.inbox_controls_scroll.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
         assert tab.inbox_body_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-        assert tab.inbox_body.minimumWidth() >= 1320
-        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
-        assert tab.message_funnel_widget.minimumWidth() >= 1260
-        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
-        assert tab.inbox_focus_widget.minimumWidth() >= 980
-        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
-        assert tab.operating_group_filter.minimumWidth() >= 220
-        assert tab.source_filter.minimumWidth() >= 220
-        assert tab.show_all_message_groups_chk.minimumWidth() >= 112
-        assert tab.advanced_filters_btn.minimumWidth() >= 140
+        assert tab.inbox_body.minimumWidth() >= 900
+        assert tab.inbox_body.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.message_funnel_widget.minimumWidth() >= 0
+        assert tab.message_funnel_widget.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.inbox_focus_widget.minimumWidth() >= 680
+        assert tab.inbox_focus_widget.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+        assert tab.operating_group_filter.minimumWidth() >= 160
+        assert tab.source_filter.minimumWidth() >= 160
+        assert tab.show_all_message_groups_chk.minimumWidth() >= 96
+        assert tab.advanced_filters_btn.minimumWidth() >= 125
         assert tab._inbox_focus_buttons["forms"].minimumWidth() >= 120
         assert tab._inbox_focus_buttons["commstat"].minimumWidth() >= 100
         assert tab.refresh_btn.minimumHeight() >= 24

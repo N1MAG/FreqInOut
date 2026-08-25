@@ -4556,6 +4556,11 @@ class MessageViewerTab(QWidget):
         funnel_layout.addWidget(self.received_filter)
         funnel_layout.addWidget(self.clear_filters_btn)
         funnel_layout.addWidget(self.advanced_filters_btn)
+        self.map_context_filter_label = QLabel("")
+        self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")
+        self.map_context_filter_label.setWordWrap(True)
+        self.map_context_filter_label.setVisible(False)
+        self.map_context_filter_label.setStyleSheet("font-weight: 700; color: #0078A8;")
         self.exclude_types_btn = QPushButton("Hide Types")
         self.exclude_types_btn.setMinimumWidth(130)
         self.exclude_types_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -4599,6 +4604,7 @@ class MessageViewerTab(QWidget):
         self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
+        messages_layout.insertWidget(3, self.map_context_filter_label)
         messages_layout.insertWidget(4, self.bulk_selection_bar)
 
         self._arrange_inbox_action_controls(compact=False)
@@ -6360,6 +6366,7 @@ class MessageViewerTab(QWidget):
             self.rcv_search.setText(search)
         self._select_context_age_filter(age_seconds)
         self._apply_message_filters()
+        self._update_map_context_filter_label()
 
     def _select_context_age_filter(self, age_seconds: int) -> None:
         if not hasattr(self, "received_filter"):
@@ -6504,6 +6511,7 @@ class MessageViewerTab(QWidget):
             self.inbox_focus_widget.setVisible(not compose_active)
         if hasattr(self, "message_funnel_widget"):
             self.message_funnel_widget.setVisible(not compose_active)
+        self._update_map_context_filter_label()
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setVisible(True)
         if hasattr(self, "bbs_status_btn"):
@@ -10398,6 +10406,7 @@ class MessageViewerTab(QWidget):
             filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
         self._update_clear_filters_style()
+        self._update_map_context_filter_label()
         self._update_mark_all_read_style()
         self._refresh_workspace_filter_options(self._rows_for_group_filter_options(rows))
         selected_groups = self._selected_message_groups()
@@ -11122,8 +11131,23 @@ class MessageViewerTab(QWidget):
         )
         context = getattr(self, "_map_context_filter", {}) or {}
         if isinstance(context, dict) and context.get("concern_only"):
-            return f"{summary}; Map concern only" if summary else "Map concern only"
+            map_summary = "Map non-green/status evidence only"
+            return f"{summary}; {map_summary}" if summary else map_summary
         return summary
+
+    def _update_map_context_filter_label(self) -> None:
+        label = getattr(self, "map_context_filter_label", None)
+        if label is None:
+            return
+        context = getattr(self, "_map_context_filter", {}) or {}
+        active = bool(isinstance(context, dict) and context)
+        if not active:
+            label.setText("")
+            label.setVisible(False)
+            return
+        summary = self._active_message_scope_summary() or "map-selected evidence"
+        label.setText(f"Map filter active: {summary}. Use Clear Filters to return to the normal inbox.")
+        label.setVisible(str(getattr(self, "_messages_mode", "Inbox") or "Inbox") != "Compose")
 
     @staticmethod
     def _bulk_delete_sample_lines(rows: Sequence[UnifiedMessage], *, limit: int = 8) -> List[str]:
