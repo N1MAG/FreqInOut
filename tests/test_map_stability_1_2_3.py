@@ -407,8 +407,8 @@ def test_map_path_scope_combo_controls_link_layer_without_filter_side_effects() 
     assert tab.link_mode == "all"
     assert tab.link_value == ""
     assert tab.link_mode_combo.currentData() == ("all", "")
-    assert tab._observation_focus_enabled is True
-    assert tab._observation_focus_mode == "paths"
+    assert tab._observation_focus_enabled is False
+    assert tab._observation_focus_mode == ""
 
     tab._map_path_scope_combo.setCurrentIndex(0)
     StationsMapTab._on_map_path_scope_changed(tab, 0)
@@ -417,6 +417,7 @@ def test_map_path_scope_combo_controls_link_layer_without_filter_side_effects() 
     assert tab.map_links_chk.checked is False
     assert tab.link_mode == "off"
     assert tab._observation_focus_enabled is False
+    assert tab._observation_focus_mode == ""
     assert refreshes == ["path_scope", "path_scope"]
 
 
@@ -435,7 +436,7 @@ def test_path_scope_off_restores_previous_report_context() -> None:
 
     tab._map_path_scope_combo.setCurrentIndex(2)
     StationsMapTab._on_map_path_scope_changed(tab, 2)
-    assert tab._observation_focus_mode == "paths"
+    assert tab._observation_focus_mode == "all_reports"
 
     tab._map_path_scope_combo.setCurrentIndex(0)
     StationsMapTab._on_map_path_scope_changed(tab, 0)
@@ -528,14 +529,24 @@ def test_map_operator_language_uses_status_not_severity() -> None:
     assert "f\"Status: {str(bucket.get('severity')" in source
     assert 'detailRowPayload(\'Severity\', event.severity)' not in source
     assert "f\"Severity: {str(bucket.get('severity')" not in source
+    assert "Severity:" not in source
 
 
 def test_regional_intel_summary_hides_green_rows_by_default() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     assert "function regionalActionableRollupsByScore" in source
-    assert ".filter(rollup => regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green'))" in source
+    assert "function regionalRollupIsActionable" in source
+    assert ".filter(regionalRollupIsActionable)" in source
     assert "const states = regionalActionableRollupsByScore('state', 5);" in source
     assert "const regions = regionalActionableRollupsByScore('region', 3);" in source
+
+
+def test_regional_intel_visible_boundaries_ignore_green_rollups_by_default() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    assert "function regionalQuietStateStyle()" in source
+    assert "if (!regionalRollupIsActionable(rollup))" in source
+    assert "return regionalQuietStateStyle();" in source
+    assert "if (regionalRollupIsActionable(rollup))" in source
 
 
 def test_station_status_mode_hides_unknown_station_inventory() -> None:
@@ -3575,16 +3586,41 @@ def test_map_view_mode_controls_use_compact_selector_with_drawer_fallback() -> N
 
     assert "self._map_mode_combo = QComboBox()" in source
     assert 'filter_field("View", self._map_mode_combo' in source
+    assert 'filter_field("Paths", self._map_path_scope_combo' in source
     assert "def _on_map_mode_combo_changed" in source
     assert "def _sync_map_mode_combo" in source
     assert "def _update_map_compact_control_visibility" in source
     assert "sensitivity_field.setVisible(key == \"regional\")" in source
-    assert 'path_scope_field.setVisible(key in {"paths", "propagation", "peer"})' in source
+    assert "path_scope_field.setVisible(True)" in source
     assert "mode_action_buttons = (" in source
     assert "QGridLayout(mode_actions_row)" in source
     assert 'self._add_collapsible_group(controls_layout, "Operator Views", expanded=False)' in source
     assert "idx // 5, idx % 5" in source
     assert "mode_actions_layout.addStretch" not in source
+
+
+def test_path_scope_control_adds_links_without_switching_main_view() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "regional_intelligence"
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])
+    tab._map_path_scope_combo.setCurrentIndex(1)
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])
+    tab.map_links_chk = _FakeCheck(False)
+    tab._update_selected_paths_button_visual = lambda *_args, **_kwargs: None
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda *_args, **_kwargs: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._on_map_path_scope_changed(tab, 1)
+
+    assert tab.show_link_paths is True
+    assert tab.link_mode == "my_station"
+    assert tab._current_map_mode_key() == "regional"
+    assert tab._observation_focus_mode == "regional_intelligence"
+    assert refreshes == ["path_scope"]
 
 
 def test_map_mode_combo_syncs_to_active_operator_view() -> None:

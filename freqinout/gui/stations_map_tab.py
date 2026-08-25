@@ -2341,7 +2341,7 @@ class StationsMapTab(QWidget):
         )
         self._map_regional_intel_button.clicked.connect(self.focus_regional_intelligence)
         self._map_paths_button = QPushButton("Paths")
-        self._map_paths_button.setToolTip("Toggle path topology links. Use Path Scope to choose My Station or Network.")
+        self._map_paths_button.setToolTip("Open the topology-first path view. Use Paths to add My Station or Network links as an overlay.")
         self._map_paths_button.clicked.connect(self.focus_paths)
         self._map_propagation_button = QPushButton("RF Planning")
         self._map_propagation_button.setToolTip(
@@ -2589,7 +2589,7 @@ class StationsMapTab(QWidget):
         controls_layout.addStretch()
 
         self._map_intel_sensitivity_field = filter_field("Sensitivity", self._map_intel_sensitivity_combo, 155, 190)
-        self._map_path_scope_field = filter_field("Path Scope", self._map_path_scope_combo, 150, 220)
+        self._map_path_scope_field = filter_field("Paths", self._map_path_scope_combo, 150, 220)
         filter_grid = QGridLayout(filter_bar)
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(10)
@@ -5200,7 +5200,7 @@ class StationsMapTab(QWidget):
             sensitivity_field.setVisible(key == "regional")
         path_scope_field = getattr(self, "_map_path_scope_field", None)
         if path_scope_field is not None:
-            path_scope_field.setVisible(key in {"paths", "propagation", "peer"})
+            path_scope_field.setVisible(True)
         intelligence_section = getattr(self, "_map_intelligence_layers_section", None)
         if intelligence_section is not None:
             intelligence_section.setVisible(key not in {"regional"})
@@ -12808,7 +12808,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             const displayLabel = stateAbbr || (props.name || props.STATE_NAME || props.state);
             if (window.regionalIntelligenceEnabled && stateAbbr) {{
               const rollup = regionalStateRollup(stateAbbr);
-              if (rollup) {{
+              if (regionalRollupIsActionable(rollup)) {{
                 layer.bindTooltip(regionalTooltipHtml(rollup), {{direction:'top', sticky:true, className:'cs-tooltip regional-rollup-tip'}});
                 layer.on('click', function(e) {{
                   if (e && window.L && L.DomEvent) {{
@@ -13355,14 +13355,20 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (key === 'green') return 0.18;
       return 0.06;
     }}
+    function regionalRollupIsActionable(rollup) {{
+      return regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green');
+    }}
+    function regionalQuietStateStyle() {{
+      return {{color: '{state_border}', weight: 1, opacity: 0.45, fillOpacity: 0}};
+    }}
     function regionalStateRollup(stateAbbr) {{
       const states = (regionalIntelligence && regionalIntelligence.states) || {{}};
       return states[String(stateAbbr || '').toUpperCase()] || null;
     }}
     function regionalStateStyle(stateAbbr) {{
       const rollup = regionalStateRollup(stateAbbr);
-      if (!rollup) {{
-        return {{color: '{state_border}', weight: 1, opacity: 0.45, fillOpacity: 0.04, fillColor: '#B0BEC5'}};
+      if (!regionalRollupIsActionable(rollup)) {{
+        return regionalQuietStateStyle();
       }}
       const color = regionalLevelColor(rollup.level);
       return {{color: color, weight: 1.6, opacity: 0.95, fillOpacity: regionalFillOpacity(rollup.level), fillColor: color}};
@@ -13423,7 +13429,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     }}
     function regionalActionableRollupsByScore(kind, limit) {{
       return regionalRollupsByScore(kind, 500)
-        .filter(rollup => regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green'))
+        .filter(regionalRollupIsActionable)
         .slice(0, limit);
     }}
     function regionalNationalRollup() {{
@@ -14418,15 +14424,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
                 links_chk.blockSignals(False)
             except Exception:
                 pass
-        if self.show_link_paths:
-            if str(getattr(self, "_observation_focus_mode", "") or "") != "paths":
-                self._paths_previous_observation_focus = (
-                    bool(getattr(self, "_observation_focus_enabled", False)),
-                    str(getattr(self, "_observation_focus_mode", "") or ""),
-                )
-            self._observation_focus_enabled = True
-            self._observation_focus_mode = "paths"
-        else:
+        if not self.show_link_paths:
             self._restore_path_focus_if_needed()
         self._update_selected_paths_button_visual()
         self._update_map_mode_buttons()
