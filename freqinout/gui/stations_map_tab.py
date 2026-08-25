@@ -2765,6 +2765,13 @@ class StationsMapTab(QWidget):
         messages_btn = QPushButton("Messages")
         spotter_btn = QPushButton("Compose Message")
         sop_btn = QPushButton("SOP")
+        center_btn.setToolTip("Center the map on this selected station, report, or area.")
+        paths_btn.setToolTip("Show observed paths to and from the selected station.")
+        group_btn.setToolTip("Filter the map to this station or report group.")
+        topic_btn.setToolTip("Filter the map to this report topic.")
+        messages_btn.setToolTip("Open the related message evidence for this map selection.")
+        spotter_btn.setToolTip("Open Compose and prefill the selected station callsign.")
+        sop_btn.setToolTip("Open SOP guidance related to this selection.")
         center_btn.clicked.connect(self._center_map_selected_detail)
         paths_btn.clicked.connect(self._show_paths_for_selected_station)
         group_btn.clicked.connect(lambda: self._handle_map_detail_action({
@@ -3514,7 +3521,10 @@ class StationsMapTab(QWidget):
         elif kind == "station":
             parts.append("<div class='fio-detail-section'><div class='fio-detail-heading'>Station Activity</div>")
             parts.append(self._map_detail_row_html("Callsign", payload.get("title")))
+            parts.append(self._map_detail_row_html("Name", rows.get("name")))
             parts.append(self._map_detail_row_html("Area", rows.get("area")))
+            parts.append(self._map_detail_row_html("FEMA Region", rows.get("fema region")))
+            parts.append(self._map_detail_row_html("Groups", rows.get("groups")))
             parts.append(self._map_detail_row_html("Modes", rows.get("modes")))
             parts.append(self._map_detail_row_html("Activity", rows.get("activity")))
             parts.append(self._map_detail_row_html("Status", self._map_detail_first_value(rows.get("sitrep"), rows.get("status"), rows.get("severity"))))
@@ -3522,6 +3532,11 @@ class StationsMapTab(QWidget):
             parts.append(self._map_detail_row_html("Updated", self._map_detail_first_value(rows.get("updated"), rows.get("age"))))
             parts.append(self._map_detail_row_html("Source", source_label))
             parts.append(self._map_detail_row_html("Schedule", rows.get("schedule")))
+            parts.append(self._map_detail_row_html("JS8 Heard", rows.get("js8 heard")))
+            parts.append(self._map_detail_row_html("JS8 Contact", rows.get("js8 contact")))
+            parts.append(self._map_detail_row_html("JS8 SNR", rows.get("js8 snr")))
+            parts.append(self._map_detail_row_html("VarAC Heard", rows.get("varac heard")))
+            parts.append(self._map_detail_row_html("Trust", rows.get("trust")))
             parts.append("</div>")
         else:
             if source_family == "spotter":
@@ -12052,6 +12067,9 @@ class StationsMapTab(QWidget):
                         "state": pt.state,
                         "grid": pt.grid,
                         "group": pt.group,
+                        "groups": list(pt.groups or ([pt.group] if pt.group else [])),
+                        "trusted": bool(pt.trusted),
+                        "fema_region": STATE_TO_FEMA_REGION.get(str(pt.state or "").strip().upper(), ""),
                         "modes": modes,
                         "spotter_map_form": spotter_map_form,
                         "spotter_map_summary": spotter_map_summary,
@@ -12376,8 +12394,10 @@ class StationsMapTab(QWidget):
             if link_direction_markers is None
             else bool(link_direction_markers)
         )
+        map_mode = self._current_map_mode_key()
         if getattr(self, "_map_page_loading", False) or not getattr(self, "_map_initialized", False):
             self._pending_map_payload = {
+                "map_mode": map_mode,
                 "markers": list(markers),
                 "links": list(links),
                 "weather_events": list(weather_events or []),
@@ -12402,6 +12422,7 @@ class StationsMapTab(QWidget):
         try:
             payload = json.dumps(
                 {
+                    "map_mode": map_mode,
                     "markers": markers,
                     "links": links,
                     "weather_events": list(weather_events or []),
@@ -12416,13 +12437,14 @@ class StationsMapTab(QWidget):
             )
         except Exception:
             payload = (
-                '{"markers": [], "links": [], "weather_events": [], "alert_events": [], "infrastructure_events": [], "link_direction_markers": false, "sitrep_state_summary": [], "sitrep_summary_group": "", '
+                '{"map_mode": "all", "markers": [], "links": [], "weather_events": [], "alert_events": [], "infrastructure_events": [], "link_direction_markers": false, "sitrep_state_summary": [], "sitrep_summary_group": "", '
                 f'"now_reachable_enabled": {str(now_reachable_flag).lower()}}}'
             )
         sig = str(hash(payload))
         if sig == self._last_map_payload_sig:
             return
         pending_payload = {
+            "map_mode": map_mode,
             "markers": list(markers),
             "links": list(links),
             "weather_events": list(weather_events or []),
@@ -12537,6 +12559,7 @@ class StationsMapTab(QWidget):
         sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
         sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
         regional_intelligence_json = json.dumps(regional_intelligence or {})
+        map_mode_json = json.dumps(str(self._current_map_mode_key() or "all"))
         init_lat = initial_view.get("lat") if initial_view else 45
         init_lon = initial_view.get("lon") if initial_view else -97
         init_zoom = initial_view.get("zoom") if initial_view else 3
@@ -13106,6 +13129,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     let sitrepStateSummary = {sitrep_state_summary_json};
     let sitrepSummaryGroup = {sitrep_summary_group_json};
     let regionalIntelligence = {regional_intelligence_json};
+    let mapMode = {map_mode_json};
     window.regionalIntelligenceEnabled = !!(regionalIntelligence && regionalIntelligence.enabled);
     window.FEMA_LOOKUP_ABBR = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
     window.FEMA_LOOKUP_NAME = {json.dumps({US_STATE_NAMES[s]:r[1:] for r,states in FEMA_REGIONS.items() for s in states if s in US_STATE_NAMES})};
@@ -13647,12 +13671,27 @@ function addGridLabels(res, level, bounds, maxLabels) {
     function stationDetailPayload(m) {{
       const call = m.callsign || (m.title || '').split('\\n')[0] || 'Station';
       const group = m.group || m.spotter_status_group || '';
+      const groups = Array.isArray(m.groups) ? m.groups.filter(Boolean) : (group ? [group] : []);
       const area = [m.state, m.grid].filter(Boolean).join(' / ');
       const modeText = Array.isArray(m.modes) ? m.modes.join(', ') : (m.modes || '');
       const activityBits = [
         m.last_band ? ('JS8 ' + m.last_band) : '',
         m.varac_last_band ? ('VarAC ' + m.varac_last_band) : '',
         m.last_contact_band ? ('Contact ' + m.last_contact_band) : ''
+      ].filter(Boolean).join(' | ');
+      const js8SnrBits = [
+        m.direct_snr !== undefined && m.direct_snr !== null ? ('direct ' + formatSnr(m.direct_snr)) : '',
+        m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? ('network avg ' + formatSnr(m.avg_snr_excl_my)) : ''
+      ].filter(Boolean).join(' / ');
+      const js8ContactBits = [
+        m.last_contact || '',
+        m.last_contact_band ? ('band ' + m.last_contact_band) : '',
+        m.last_contact_snr !== undefined && m.last_contact_snr !== null ? ('SNR ' + formatSnr(m.last_contact_snr)) : ''
+      ].filter(Boolean).join(' | ');
+      const varacBits = [
+        m.varac_last_seen || '',
+        m.varac_last_band ? ('band ' + m.varac_last_band) : '',
+        m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? ('avg SNR ' + formatSnr(m.varac_avg_snr)) : ''
       ].filter(Boolean).join(' | ');
       const markerMeaningByStatus = {{
         green: 'Green: latest status is functioning',
@@ -13673,11 +13712,14 @@ function addGridLabels(res, level, bounds, maxLabels) {
         lat: m.lat,
         lon: m.lon,
         group: group,
+        groups: groups,
         topic: '',
         summary: summary,
         rows: [
           detailRowPayload('Name', m.name),
           detailRowPayload('Area', area),
+          detailRowPayload('FEMA Region', m.fema_region),
+          detailRowPayload('Groups', groups.join(', ')),
           detailRowPayload('Modes', modeText),
           detailRowPayload('Activity', activityBits),
           detailRowPayload('SitRep', m.spotter_status_label),
@@ -13685,6 +13727,11 @@ function addGridLabels(res, level, bounds, maxLabels) {
           detailRowPayload('Updated', m.spotter_status_age || m.spotter_status_ts),
           detailRowPayload('Source', normalizeMapSourceLabel(m.spotter_status_source || m.spotter_status_source_chips)),
           detailRowPayload('Schedule', m.qsy_text),
+          detailRowPayload('JS8 Heard', m.last_seen || m.last_spotter),
+          detailRowPayload('JS8 Contact', js8ContactBits),
+          detailRowPayload('JS8 SNR', js8SnrBits),
+          detailRowPayload('VarAC Heard', varacBits),
+          detailRowPayload('Trust', m.trusted ? 'Trusted roster entry' : ''),
           detailRowPayload('Form', m.spotter_map_form)
         ].filter(Boolean)
       }};
@@ -13894,9 +13941,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
     const propOverlayLegendEnabled = {'true' if prop_overlay_enabled else 'false'};
     function buildLegendHtml(showPeerSchedNow) {{
       const rows = [];
-      if (window.regionalIntelligenceEnabled) {{
+      const mode = String(mapMode || '').toLowerCase();
+      if (mode === 'regional' && window.regionalIntelligenceEnabled) {{
         rows.push(legendRow('Regional Concern:', [
-          legendItem(regionalLevelColor('green'), '&#9632;', 'Normal'),
           legendItem(regionalLevelColor('blue'), '&#9632;', 'Activity'),
           legendItem(regionalLevelColor('yellow'), '&#9632;', 'Watch'),
           legendItem(regionalLevelColor('orange'), '&#9632;', 'Concern'),
@@ -13904,19 +13951,23 @@ function addGridLabels(res, level, bounds, maxLabels) {
           legendItem(regionalLevelColor('gray'), '&#9632;', 'No Data')
         ]));
       }}
-      rows.push(legendRow('Link SNR:', [
-        legendItem(linkColor(5), '&#9632;', '&gt;= 5'),
-        legendItem(linkColor(0), '&#9632;', '0 to &lt;5'),
-        legendItem(linkColor(-5), '&#9632;', '-5 to &lt;0'),
-        legendItem(linkColor(-6), '&#9632;', '-10 to &lt;-5'),
-        legendItem(linkColor(-11), '&#9632;', '&lt; -10')
-      ]));
-      rows.push(legendRow('Station Status:', [
+      if (mode === 'paths' || links.length || linkDirectionMarkers) {{
+        rows.push(legendRow('Link SNR:', [
+          legendItem(linkColor(5), '&#9632;', '&gt;= 5'),
+          legendItem(linkColor(0), '&#9632;', '0 to &lt;5'),
+          legendItem(linkColor(-5), '&#9632;', '-5 to &lt;0'),
+          legendItem(linkColor(-6), '&#9632;', '-10 to &lt;-5'),
+          legendItem(linkColor(-11), '&#9632;', '&lt; -10')
+        ]));
+      }}
+      if (mode === 'sitrep' || mode === 'all' || mode === 'peer') {{
+        rows.push(legendRow('Station Status:', [
         legendItem('#43A047', '&#9679;', 'Functioning'),
         legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
         legendItem('#D32F2F', '&#9679;', 'Not Functioning'),
         legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report')
-      ]));
+        ]));
+      }}
       if (showPeerSchedNow) {{
         rows.push(legendRow('Peer Sched Now:', [
           legendItem('#2E7D32', '&#9679;', 'NOW'),
@@ -13924,11 +13975,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
           legendItem('#7E57C2', '&#9679;', 'QSY &lt;10m')
         ]));
       }}
-      rows.push(legendRow('Report Source:', [
-        legendItem('#00695C', '&#9632;', 'HF'),
-        legendItem('#5E35B1', '&#9670;', 'Local'),
-        legendItem('#455A64', '&#9679;', 'Mixed')
-      ]));
+      if (mode === 'reports' || mode === 'hf' || mode === 'local' || mode === 'regional') {{
+        rows.push(legendRow('Report Source:', [
+          legendItem('#00695C', '&#9632;', 'HF'),
+          legendItem('#5E35B1', '&#9670;', 'Local'),
+          legendItem('#455A64', '&#9679;', 'Mixed')
+        ]));
+      }}
       if (propOverlayLegendEnabled) {{
         rows.push(legendRow(
           'Best Band Now:',
@@ -14155,6 +14208,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     window.updateMapData = function(payload) {{
       if (!payload) return;
+      if (Object.prototype.hasOwnProperty.call(payload, 'map_mode')) {{
+        mapMode = payload.map_mode || mapMode || 'all';
+      }}
       if (Object.prototype.hasOwnProperty.call(payload, 'link_direction_markers')) {{
         linkDirectionMarkers = !!payload.link_direction_markers;
       }}
@@ -14184,6 +14240,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     }};
     window.updateMapData({{
       markers: markers,
+      map_mode: mapMode,
       links: links,
       weather_events: weatherEvents,
       alert_events: alertEvents,

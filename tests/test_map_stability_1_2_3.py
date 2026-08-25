@@ -1676,10 +1676,14 @@ def test_leaflet_html_includes_regional_intelligence_heatmap_hooks() -> None:
     assert "regional-summary-panel" in html
     assert "regionalFindRollup" in html
     assert "regionalNationalRollup" in html
+    assert "mapMode" in html
+    assert "function regionalActionableRollupsByScore" in html
     assert "regional-summary-heading-button" in html
     assert "reports from ${rollup.reporter_count || 0} stations" in html
     assert "stateAbbr.length !== 2" in html
     assert "Regional Concern:" in html
+    assert "mode === 'regional'" in html
+    assert "mode === 'sitrep'" in html
     assert "L.DomEvent.stop(e)" in html
     assert "CA" in html
     assert "TX" in html
@@ -2207,10 +2211,25 @@ def test_map_selected_detail_clicks_use_single_native_panel() -> None:
     assert "emitMapAction('select_detail'" in open_block
     assert "markerMeaningByStatus" in station_payload_block
     assert "detailRowPayload('Marker', markerMeaning)" in station_payload_block
+    assert "detailRowPayload('FEMA Region', m.fema_region)" in station_payload_block
+    assert "detailRowPayload('Groups', groups.join(', '))" in station_payload_block
+    assert "detailRowPayload('JS8 SNR', js8SnrBits)" in station_payload_block
+    assert "detailRowPayload('VarAC Heard', varacBits)" in station_payload_block
     assert "selectedDetailPanel.addTo(map)" not in source
     assert "selected-detail-panel empty" not in source
     assert "showSelectedDetail" not in source
     assert "sidePanelEligible" not in source
+
+
+def test_map_station_action_buttons_use_operator_language() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    panel_block = source[
+        source.index("def _build_map_selected_detail_panel") : source.index("def _clear_map_selected_detail")
+    ]
+
+    assert 'QPushButton("Show Paths To")' in panel_block
+    assert 'QPushButton("Compose Message")' in panel_block
+    assert 'QPushButton("Send Spotter")' not in panel_block
 
 
 def test_map_selected_detail_html_formats_operator_cards() -> None:
@@ -2248,10 +2267,18 @@ def test_map_selected_detail_html_formats_operator_cards() -> None:
             "title": "K7ETC",
             "group": "MR08",
             "rows": [
+                {"label": "Name", "value": "Keith"},
                 {"label": "Area", "value": "UT / DM38ST"},
+                {"label": "FEMA Region", "value": "R08"},
+                {"label": "Groups", "value": "MR08, MAGNET"},
                 {"label": "Activity", "value": "JS8 20M"},
                 {"label": "Marker", "value": "Green: latest status is functioning"},
                 {"label": "Schedule", "value": "MAGNET 20M"},
+                {"label": "JS8 Heard", "value": "2026-08-25 18:00:00 UTC"},
+                {"label": "JS8 Contact", "value": "2026-08-25 18:01:00 UTC | band 20M | SNR -8"},
+                {"label": "JS8 SNR", "value": "direct -8 / network avg -10"},
+                {"label": "VarAC Heard", "value": "2026-08-25 17:55:00 UTC | band 20M"},
+                {"label": "Trust", "value": "Trusted roster entry"},
             ],
         },
         summary="Wildfire report",
@@ -2259,7 +2286,13 @@ def test_map_selected_detail_html_formats_operator_cards() -> None:
 
     assert "Station Activity" in station_html
     assert "K7ETC" in station_html
+    assert "Keith" in station_html
     assert "UT / DM38ST" in station_html
+    assert "R08" in station_html
+    assert "MR08, MAGNET" in station_html
+    assert "JS8 Contact" in station_html
+    assert "direct -8 / network avg -10" in station_html
+    assert "Trusted roster entry" in station_html
     assert "Green: latest status is functioning" in station_html
 
     spotter_html = StationsMapTab._map_selected_detail_html(
@@ -3552,6 +3585,28 @@ def test_map_view_mode_controls_use_compact_selector_with_drawer_fallback() -> N
     assert 'self._add_collapsible_group(controls_layout, "Operator Views", expanded=False)' in source
     assert "idx // 5, idx % 5" in source
     assert "mode_actions_layout.addStretch" not in source
+
+
+def test_map_mode_combo_syncs_to_active_operator_view() -> None:
+    tab = _bare_tab()
+    tab._map_mode_combo = _FakeCombo(
+        [
+            ("All Stations", "all"),
+            ("Recent Traffic", "reports"),
+            ("Station Status", "sitrep"),
+            ("Regional Intel", "regional"),
+            ("Paths", "paths"),
+        ]
+    )
+
+    StationsMapTab._sync_map_mode_combo(tab, "sitrep")
+    assert tab._map_mode_combo.currentText() == "Station Status"
+
+    StationsMapTab._sync_map_mode_combo(tab, "regional")
+    assert tab._map_mode_combo.currentText() == "Regional Intel"
+
+    StationsMapTab._sync_map_mode_combo(tab, "paths")
+    assert tab._map_mode_combo.currentText() == "Paths"
 
 
 def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
