@@ -522,6 +522,30 @@ def test_map_selected_paths_html_names_topology_scope() -> None:
     assert "who reported hearing whom" in html
 
 
+def test_map_selected_messages_html_explains_context_filters() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 24 * 60 * 60
+    tab._selected_map_topic_filter = lambda: "Fire"
+    html = StationsMapTab._map_selected_messages_html(
+        tab,
+        {
+            "type": "regional_intelligence",
+            "area_type": "state",
+            "state": "NV",
+            "topic": "Fire",
+            "group": "MR09",
+        },
+    )
+
+    assert "Related Messages" in html
+    assert "Message Inbox" in html
+    assert "Age: 24h" in html
+    assert "Non-green/status evidence" in html
+    assert "MR09" in html
+    assert "Fire" in html
+    assert "NV" in html
+
+
 def test_map_operator_language_uses_status_not_severity() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
@@ -1906,6 +1930,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "Station Activity" in source
     assert "def _show_paths_for_selected_station" in source
     assert "def _open_map_selected_messages" in source
+    assert "def _compose_message_for_selected_station" in source
     assert "def _compose_spotter_for_selected_station" in source
     assert "def _open_map_selected_sop" in source
     assert "QPushButton(\"Messages\")" in source
@@ -1919,6 +1944,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert '"action": "filter_group"' in source
     assert '"action": "filter_topic"' in source
     assert "messages_btn.clicked.connect(self._open_map_selected_messages)" in source
+    assert "spotter_btn.clicked.connect(self._compose_message_for_selected_station)" in source
     assert "sop_btn.clicked.connect(self._open_map_selected_sop)" in source
     assert "if action == \"open_messages\":" in source
     assert "if action == \"review_sop\":" in source

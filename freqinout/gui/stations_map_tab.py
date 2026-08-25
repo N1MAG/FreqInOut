@@ -2786,7 +2786,7 @@ class StationsMapTab(QWidget):
             ),
         }))
         messages_btn.clicked.connect(self._open_map_selected_messages)
-        spotter_btn.clicked.connect(self._compose_spotter_for_selected_station)
+        spotter_btn.clicked.connect(self._compose_message_for_selected_station)
         sop_btn.clicked.connect(self._open_map_selected_sop)
         for idx, btn in enumerate((center_btn, paths_btn, group_btn, topic_btn, messages_btn, spotter_btn, sop_btn)):
             action_grid.addWidget(btn, idx // 2, idx % 2)
@@ -3435,17 +3435,45 @@ class StationsMapTab(QWidget):
         group = str(context.get("group_filter") or context.get("query") or "").strip().lstrip("@")
         topic = str(context.get("topic_filter") or "").strip()
         source_family = str(context.get("source_family") or "").strip()
+        query = str(context.get("query_filter") or context.get("callsign") or "").strip().lstrip("@")
+        try:
+            age_seconds = int(context.get("age_filter_seconds") or 0)
+        except Exception:
+            age_seconds = 0
+        age_label = self._map_message_context_age_label(age_seconds)
+        status_filter = "Non-green/status evidence" if bool(context.get("concern_only")) else ""
         destination = "Local report history" if target == "local_reports" else "Message Inbox"
         return self._map_detail_shell_html(
             "Related Messages",
             [
                 ("Open", destination),
+                ("Age", age_label),
+                ("Status Filter", status_filter),
                 ("Group", group),
                 ("Topic", topic),
                 ("Source", self._map_report_source_label(source_family) if source_family else ""),
+                ("Search", query),
             ],
             note="Use the Messages action below to open the filtered traffic behind this map item.",
         )
+
+    def _map_message_context_age_label(self, seconds: int) -> str:
+        value = int(seconds or 0)
+        if value <= 0:
+            return "Any"
+        for label, option_seconds in self._map_recency_options():
+            if option_seconds == value:
+                return self._map_recency_display_label(label)
+        if value % (24 * 60 * 60) == 0:
+            days = value // (24 * 60 * 60)
+            return f"Age: {days}d"
+        if value % (60 * 60) == 0:
+            hours = value // (60 * 60)
+            return f"Age: {hours}h"
+        if value % 60 == 0:
+            minutes = value // 60
+            return f"Age: {minutes}m"
+        return f"Age: {value}s"
 
     def _map_selected_detail_html(self, payload: Dict[str, object], *, summary: str = "") -> str:
         rows = self._map_payload_rows(payload)
@@ -3821,7 +3849,7 @@ class StationsMapTab(QWidget):
         except Exception as exc:
             log.debug("StationsMap: failed showing paths for selected station %s: %s", callsign, exc)
 
-    def _compose_spotter_for_selected_station(self) -> None:
+    def _compose_message_for_selected_station(self) -> None:
         callsign = self._map_selected_station_callsign()
         main_window = self.window()
         if main_window is None or not hasattr(main_window, "open_messages_section"):
@@ -3849,6 +3877,9 @@ class StationsMapTab(QWidget):
                 log.debug("StationsMap: failed prefilling Spotter compose target %s: %s", callsign, exc)
 
         QTimer.singleShot(0, _prefill_spotter_target)
+
+    def _compose_spotter_for_selected_station(self) -> None:
+        self._compose_message_for_selected_station()
 
     @staticmethod
     def _canonical_map_source_family(value: object) -> str:
