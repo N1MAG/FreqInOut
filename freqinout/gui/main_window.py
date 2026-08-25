@@ -68,6 +68,7 @@ from freqinout.core.js8spotter_archive import load_js8spotter_archive_records
 from freqinout.core.js8_expect_runtime import build_expect_rf_guard_preflight
 from freqinout.core.ingest_runtime_status import active_runtime_source_view_rows, runtime_source_view_rows_from_skip_reasons
 from freqinout.core.station_health_summary import runtime_observability_items, summarize_station_health
+from freqinout.core.launch_orchestrator import LAUNCH_APP_ORDER
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.utils.timezones import get_timezone
@@ -3334,6 +3335,8 @@ class MainWindow(QMainWindow):
         topic_filter: str = "",
         query_filter: str = "",
         source_family: str = "",
+        age_filter_seconds: object = 0,
+        concern_only: object = False,
     ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
         if idx < 0:
@@ -3345,6 +3348,8 @@ class MainWindow(QMainWindow):
             "topic_filter": str(topic_filter or ""),
             "query_filter": str(query_filter or ""),
             "source_family": str(source_family or ""),
+            "age_filter_seconds": age_filter_seconds,
+            "concern_only": concern_only,
         }
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
@@ -6154,13 +6159,72 @@ class MainWindow(QMainWindow):
             pass
         return dict(selected) if isinstance(selected, Mapping) else None
 
-    def _station_command_health_items(self, profile: dict | None) -> list[tuple[str, str]]:
-        if not isinstance(profile, dict):
+    def _station_command_health_items(self, profile: object | None) -> list[tuple[str, str]]:
+        profile_map = dict(profile) if isinstance(profile, Mapping) else None
+        if profile_map is None:
+            ident = self._station_command_snapshot_id(profile) if profile is not None else 0
+            if ident > 0:
+                profile_map = self._station_command_health_profile(profile, ident)
+        if not isinstance(profile_map, dict):
             return []
         try:
-            return visible_status_programs(dict(self.settings.all()), device_profiles=[profile])
+            items = visible_status_programs(dict(self.settings.all()), device_profiles=[profile_map])
+            return self._station_command_health_monitored_items(items)
         except Exception:
             return []
+
+    @staticmethod
+    def _station_command_launch_health_key(name: str) -> str:
+        app_name = str(name or "").strip()
+        return "JS8Call_API" if app_name == "JS8Call" else app_name
+
+    def _station_command_health_monitored_items(self, items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        try:
+            raw_items = self.settings.get("launch_control_items", [])
+        except Exception:
+            raw_items = []
+        if not isinstance(raw_items, list):
+            return items
+        monitored_by_key: dict[str, bool] = {}
+        builtin_names = set(LAUNCH_APP_ORDER)
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if name not in builtin_names:
+                continue
+            monitored_by_key[self._station_command_launch_health_key(name)] = bool(item.get("enabled", True))
+        if not monitored_by_key:
+            return items
+        return [(key, label) for key, label in items if monitored_by_key.get(key, True)]
+
+    def _station_command_health_status_snapshot(self, profile: object | None) -> Mapping[str, object]:
+        service_states = self._station_command_value(profile, "service_states", {}) if profile is not None else {}
+        if isinstance(service_states, Mapping) and service_states:
+            return service_states
+        try:
+            return self.dependency_status_service.software_status_snapshot()
+        except Exception:
+            return {}
+
+    def _station_command_control_health_issue(self, profile: object | None) -> tuple[str, str, str, str] | None:
+        if profile is None:
+            return None
+        backend = str(self._station_command_value(profile, "control_backend", "") or "").strip().lower()
+        if backend in {"", "manual"}:
+            return None
+        control_ready = self._station_command_value(profile, "control_ready", None)
+        if control_ready is None or self._station_command_bool(control_ready, default=False):
+            return None
+        label = {
+            "flrig": "FLRig",
+            "rigctld": "RigCtlD",
+            "js8call": "JS8",
+        }.get(backend, backend.upper())
+        tooltip = str(self._station_command_value(profile, "status_summary", "") or "").strip()
+        if not tooltip:
+            tooltip = f"{label} control is not reachable."
+        return ("__control_ready__", label, "warn", tooltip)
 
     @staticmethod
     def _station_command_health_state(info: Mapping[str, object]) -> str:
@@ -6219,7 +6283,7 @@ class MainWindow(QMainWindow):
         severity = "error" if state == "blocked" else "warn"
         return [(severity, message) for message in messages]
 
-    def _station_command_health_summary_for_profile(self, profile: dict | None) -> dict[str, object]:
+    def _station_command_health_summary_for_profile(self, profile: object | None) -> dict[str, object]:
         items = self._station_command_health_items(profile)
         off_schedule_payload = self._station_command_off_schedule_payload_for_profile(profile)
         assignment_guard_issues = self._station_command_assignment_rf_guard_issues(profile)
@@ -6228,10 +6292,7 @@ class MainWindow(QMainWindow):
             raw_items = off_schedule_payload.get("items")
             if isinstance(raw_items, list):
                 off_schedule_items = [str(item).strip() for item in raw_items if str(item).strip()]
-        try:
-            snapshot = self.dependency_status_service.software_status_snapshot()
-        except Exception:
-            snapshot = {}
+        snapshot = self._station_command_health_status_snapshot(profile)
         issue_items: list[tuple[str, str, str, str]] = []
         if off_schedule_items:
             issue_items.append(
@@ -6260,6 +6321,11 @@ class MainWindow(QMainWindow):
                 healthy_count += 1
             else:
                 issue_items.append((key, label_text, state, tooltip))
+        control_issue = self._station_command_control_health_issue(profile)
+        if control_issue is not None:
+            _control_key, control_label, _control_state, _control_tooltip = control_issue
+            if not any(label == control_label for _key, label, _state, _tooltip in issue_items):
+                issue_items.append(control_issue)
         issue_states = [state for _key, _label, state, _tooltip in issue_items]
         summary_state = self._station_command_health_summary_state(issue_states)
         if off_schedule_items:

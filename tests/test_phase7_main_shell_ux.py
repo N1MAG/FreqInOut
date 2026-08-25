@@ -1724,6 +1724,81 @@ def test_phase7_station_command_health_collapses_all_green(monkeypatch, tmp_path
         app.processEvents()
 
 
+def test_phase7_station_command_health_snapshot_idle_configured_app_is_not_green(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    class FakeStore:
+        def list_device_profiles(self):
+            return [
+                {
+                    "id": 8,
+                    "name": "FIO-A",
+                    "enabled": 1,
+                    "runtime_active": 1,
+                    "control_backend": "flrig",
+                    "use_flrig": 1,
+                    "use_js8call": 1,
+                }
+            ]
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace(all=lambda: {})
+    window.multi_radio_store = FakeStore()
+    window._station_command_off_schedule_by_radio = {}
+    window._station_command_assignment_rf_guard_issues = lambda _profile: []
+    window.dependency_status_service = SimpleNamespace(
+        software_status_snapshot=lambda: (_ for _ in ()).throw(AssertionError("global status should not be used"))
+    )
+    snapshot = SimpleNamespace(
+        device_profile_id=8,
+        name="FIO-A",
+        control_backend="flrig",
+        control_ready=False,
+        status_summary="FLRig control unavailable",
+        service_states={
+            "FLRig": {"state": "idle", "tooltip": "FLRig is not running.", "running": False},
+            "JS8Call_API": {"state": "ok", "tooltip": "JS8 API reachable", "running": True},
+        },
+    )
+
+    summary = MainWindow._station_command_health_summary_for_profile(window, snapshot)
+
+    assert summary["state"] == "warn"
+    assert summary["label"] == "Needs Review"
+    assert ("FLRig", "FLRig", "warn", "FLRig is not running.") in summary["issues"]
+
+    app.processEvents()
+
+
+def test_phase7_station_command_health_monitor_flag_filters_unchecked_apps(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    QApplication.instance() or QApplication([])
+
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SimpleNamespace(
+        get=lambda key, default=None: [
+            {"name": "FLMsg", "enabled": False, "startup": False},
+            {"name": "JS8Call", "enabled": True, "startup": False},
+        ]
+        if key == "launch_control_items"
+        else default
+    )
+
+    items = MainWindow._station_command_health_monitored_items(
+        window,
+        [("FLMsg", "FLMsg"), ("JS8Call_API", "JS8"), ("FLRig", "FLRig")],
+    )
+
+    assert items == [("JS8Call_API", "JS8"), ("FLRig", "FLRig")]
+
+
 def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))

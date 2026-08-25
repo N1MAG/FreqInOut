@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -73,86 +74,31 @@ class StationHealthTab(QWidget):
         action_row.addWidget(self.refresh_btn, 0, Qt.AlignRight)
         layout.addLayout(action_row)
 
-        self.note_label = QLabel(
-            "This view shows external software responsiveness and scheduler holds based on what FIO has observed."
-        )
+        self.note_label = QLabel("Review current issues first; select a row for paths, timing, and diagnostics.")
         self.note_label.setWordWrap(True)
         layout.addWidget(self.note_label)
 
-        runtime_label = QLabel("Runtime Sources")
-        runtime_label.setStyleSheet("font-size: 14px; font-weight: 700;")
-        layout.addWidget(runtime_label)
+        self.health_tabs = QTabWidget(self)
+        layout.addWidget(self.health_tabs, 1)
 
-        self.runtime_sources_table = QTableWidget(0, 7, self)
-        self.runtime_sources_table.setHorizontalHeaderLabels(
-            [
-                "Source",
-                "State",
-                "Kind",
-                "Radio/App",
-                "Path or Endpoint",
-                "Projected Data",
-                "Suggested Fix",
-            ]
-        )
-        self.runtime_sources_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.runtime_sources_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.runtime_sources_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.runtime_sources_table.setAlternatingRowColors(True)
-        self.runtime_sources_table.setWordWrap(True)
-        self.runtime_sources_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.runtime_sources_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.runtime_sources_table.itemSelectionChanged.connect(self._render_runtime_source_detail)
-        runtime_header = self.runtime_sources_table.horizontalHeader()
-        runtime_header.setStretchLastSection(False)
-        runtime_header.setSectionResizeMode(0, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(1, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(2, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(3, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(4, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(5, QHeaderView.Interactive)
-        runtime_header.setSectionResizeMode(6, QHeaderView.Interactive)
-        self.runtime_sources_table.setColumnWidth(0, 210)
-        self.runtime_sources_table.setColumnWidth(1, 130)
-        self.runtime_sources_table.setColumnWidth(2, 170)
-        self.runtime_sources_table.setColumnWidth(3, 150)
-        self.runtime_sources_table.setColumnWidth(4, 260)
-        self.runtime_sources_table.setColumnWidth(5, 150)
-        self.runtime_sources_table.setColumnWidth(6, 230)
-        self.runtime_sources_empty_label = QLabel("No runtime ingest sources are currently configured or active.")
-        self.runtime_sources_empty_label.setObjectName("stationHealthRuntimeSourcesEmptyState")
-        self.runtime_sources_empty_label.setWordWrap(True)
-        self.runtime_sources_empty_label.setVisible(False)
-        layout.addWidget(self.runtime_sources_empty_label, 0)
-        layout.addWidget(self.runtime_sources_table, 0)
-        self.runtime_source_detail_label = QLabel("Select a runtime source to review details.")
-        self.runtime_source_detail_label.setObjectName("stationHealthRuntimeSourceDetail")
-        self.runtime_source_detail_label.setWordWrap(True)
-        layout.addWidget(self.runtime_source_detail_label, 0)
-        runtime_source_action_row = QHBoxLayout()
-        runtime_source_action_row.setSpacing(8)
-        runtime_source_action_row.addStretch(1)
-        self.runtime_source_open_related_btn = QPushButton("Open Related View")
-        self.runtime_source_open_related_btn.setObjectName("stationHealthOpenRuntimeSourceRelated")
-        self.runtime_source_open_related_btn.setToolTip("Open the settings area related to the selected runtime source.")
-        self.runtime_source_open_related_btn.setEnabled(False)
-        self.runtime_source_open_related_btn.clicked.connect(self._on_open_related_runtime_source)
-        runtime_source_action_row.addWidget(self.runtime_source_open_related_btn, 0, Qt.AlignRight)
-        layout.addLayout(runtime_source_action_row)
-        self._update_runtime_sources_empty_state()
+        issues_tab = QWidget(self.health_tabs)
+        self.issues_tab = issues_tab
+        issues_layout = QVBoxLayout(issues_tab)
+        issues_layout.setContentsMargins(8, 8, 8, 8)
+        issues_layout.setSpacing(8)
 
-        self.table = QTableWidget(0, 9, self)
+        issues_label = QLabel("Current Issues")
+        issues_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        issues_layout.addWidget(issues_label)
+
+        self.table = QTableWidget(0, 5, issues_tab)
         self.table.setHorizontalHeaderLabels(
             [
                 "Scope",
                 "Dependency",
                 "State",
                 "What FIO Is Doing",
-                "Last Issue",
-                "Issue Since",
-                "Cooldown",
                 "Last Check",
-                "Last Duration",
             ]
         )
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -165,37 +111,101 @@ class StationHealthTab(QWidget):
         self.table.itemSelectionChanged.connect(self._on_health_table_selection_changed)
         header_view = self.table.horizontalHeader()
         header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(1, QHeaderView.Interactive)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(3, QHeaderView.Stretch)
-        header_view.setSectionResizeMode(4, QHeaderView.Stretch)
-        header_view.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(1, 280)
         self.health_empty_label = QLabel("No station health dependency issues are currently being tracked.")
         self.health_empty_label.setObjectName("stationHealthEmptyState")
         self.health_empty_label.setWordWrap(True)
         self.health_empty_label.setVisible(False)
-        layout.addWidget(self.health_empty_label, 0)
-        layout.addWidget(self.table, 1)
+        issues_layout.addWidget(self.health_empty_label, 0)
+        issues_layout.addWidget(self.table, 1)
+        self.health_detail_label = QLabel("Select a health item to review details.")
+        self.health_detail_label.setObjectName("stationHealthDependencyDetail")
+        self.health_detail_label.setWordWrap(True)
+        issues_layout.addWidget(self.health_detail_label, 0)
         health_action_row = QHBoxLayout()
         health_action_row.setSpacing(8)
         health_action_row.addStretch(1)
-        self.health_open_related_btn = QPushButton("Open Related View")
+        self.health_open_related_btn = QPushButton("Open Settings")
         self.health_open_related_btn.setObjectName("stationHealthOpenRelated")
-        self.health_open_related_btn.setToolTip("Open the settings or operational view related to the selected health item.")
+        self.health_open_related_btn.setToolTip("Open the settings area related to the selected health item.")
         self.health_open_related_btn.setEnabled(False)
         self.health_open_related_btn.clicked.connect(self._on_open_related_health_item)
         health_action_row.addWidget(self.health_open_related_btn, 0, Qt.AlignRight)
-        layout.addLayout(health_action_row)
+        issues_layout.addLayout(health_action_row)
         self._update_health_table_empty_state()
+        self.health_tabs.addTab(issues_tab, "Issues")
 
+        runtime_tab = QWidget(self.health_tabs)
+        self.runtime_sources_tab = runtime_tab
+        runtime_layout = QVBoxLayout(runtime_tab)
+        runtime_layout.setContentsMargins(8, 8, 8, 8)
+        runtime_layout.setSpacing(8)
+
+        runtime_label = QLabel("Runtime Sources")
+        runtime_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        runtime_layout.addWidget(runtime_label)
+
+        self.runtime_sources_table = QTableWidget(0, 4, runtime_tab)
+        self.runtime_sources_table.setHorizontalHeaderLabels(
+            [
+                "Source",
+                "State",
+                "Activity",
+                "Suggested Fix",
+            ]
+        )
+        self.runtime_sources_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.runtime_sources_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.runtime_sources_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.runtime_sources_table.setAlternatingRowColors(True)
+        self.runtime_sources_table.setWordWrap(True)
+        self.runtime_sources_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.runtime_sources_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.runtime_sources_table.itemSelectionChanged.connect(self._render_runtime_source_detail)
+        runtime_header = self.runtime_sources_table.horizontalHeader()
+        runtime_header.setStretchLastSection(True)
+        runtime_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        runtime_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        runtime_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        runtime_header.setSectionResizeMode(3, QHeaderView.Stretch)
+        self.runtime_sources_table.setColumnWidth(0, 260)
+        self.runtime_sources_empty_label = QLabel("No runtime ingest sources are currently configured or active.")
+        self.runtime_sources_empty_label.setObjectName("stationHealthRuntimeSourcesEmptyState")
+        self.runtime_sources_empty_label.setWordWrap(True)
+        self.runtime_sources_empty_label.setVisible(False)
+        runtime_layout.addWidget(self.runtime_sources_empty_label, 0)
+        runtime_layout.addWidget(self.runtime_sources_table, 1)
+        self.runtime_source_detail_label = QLabel("Select a runtime source to review details.")
+        self.runtime_source_detail_label.setObjectName("stationHealthRuntimeSourceDetail")
+        self.runtime_source_detail_label.setWordWrap(True)
+        runtime_layout.addWidget(self.runtime_source_detail_label, 0)
+        runtime_source_action_row = QHBoxLayout()
+        runtime_source_action_row.setSpacing(8)
+        runtime_source_action_row.addStretch(1)
+        self.runtime_source_open_related_btn = QPushButton("Open Settings")
+        self.runtime_source_open_related_btn.setObjectName("stationHealthOpenRuntimeSourceRelated")
+        self.runtime_source_open_related_btn.setToolTip("Open the settings area related to the selected runtime source.")
+        self.runtime_source_open_related_btn.setEnabled(False)
+        self.runtime_source_open_related_btn.clicked.connect(self._on_open_related_runtime_source)
+        runtime_source_action_row.addWidget(self.runtime_source_open_related_btn, 0, Qt.AlignRight)
+        runtime_layout.addLayout(runtime_source_action_row)
+        self._update_runtime_sources_empty_state()
+        self.health_tabs.addTab(runtime_tab, "Runtime Sources")
+
+        scheduler_tab = QWidget(self.health_tabs)
+        self.scheduler_log_tab = scheduler_tab
+        scheduler_layout = QVBoxLayout(scheduler_tab)
+        scheduler_layout.setContentsMargins(8, 8, 8, 8)
+        scheduler_layout.setSpacing(8)
         recent_label = QLabel("Latest Scheduler Success and Issue Log")
         recent_label.setStyleSheet("font-size: 14px; font-weight: 700;")
-        layout.addWidget(recent_label)
+        scheduler_layout.addWidget(recent_label)
 
-        self.scheduler_table = QTableWidget(0, 6, self)
+        self.scheduler_table = QTableWidget(0, 6, scheduler_tab)
         self.scheduler_table.setHorizontalHeaderLabels(
             ["UTC Time", "Decision", "Source", "What FIO Did", "Detail", "Target"]
         )
@@ -216,9 +226,10 @@ class StationHealthTab(QWidget):
         self.scheduler_empty_label.setObjectName("stationHealthSchedulerEmptyState")
         self.scheduler_empty_label.setWordWrap(True)
         self.scheduler_empty_label.setVisible(False)
-        layout.addWidget(self.scheduler_empty_label, 0)
-        layout.addWidget(self.scheduler_table, 1)
+        scheduler_layout.addWidget(self.scheduler_empty_label, 0)
+        scheduler_layout.addWidget(self.scheduler_table, 1)
         self._update_scheduler_table_empty_state()
+        self.health_tabs.addTab(scheduler_tab, "Scheduler Log")
         self.apply_theme()
 
     def set_scope_resolver(self, resolver: Optional[ScopeResolver]) -> None:
@@ -286,6 +297,7 @@ class StationHealthTab(QWidget):
         self._render_runtime_sources()
         self._render_table()
         self._render_scheduler_events()
+        self._update_tab_labels()
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -351,11 +363,7 @@ class StationHealthTab(QWidget):
                 item.get("dependency", ""),
                 item.get("state", ""),
                 item.get("action", ""),
-                item.get("last_issue", ""),
-                item.get("issue_since", ""),
-                item.get("cooldown", ""),
                 item.get("last_check", ""),
-                item.get("last_duration", ""),
             ]
             for col, value in enumerate(values):
                 self.table.setItem(row, col, self._item(value, severity=severity if col == 2 else ""))
@@ -364,6 +372,7 @@ class StationHealthTab(QWidget):
         self._apply_pending_focus_scope()
         current_row = self.table.currentRow() if hasattr(self, "table") else -1
         self._set_open_related_health_item_enabled(bool(self._health_row_related_payload(current_row)))
+        self._render_health_item_detail(current_row)
 
     def _on_health_table_cell_clicked(self, row: int, _column: int) -> None:
         self._focus_runtime_sources_from_health_row(row)
@@ -371,6 +380,7 @@ class StationHealthTab(QWidget):
     def _on_health_table_selection_changed(self) -> None:
         row = self.table.currentRow() if hasattr(self, "table") else -1
         self._set_open_related_health_item_enabled(bool(self._health_row_related_payload(row)))
+        self._render_health_item_detail(row)
         self._focus_runtime_sources_from_health_row(row)
 
     def _focus_runtime_sources_from_health_row(self, row: int) -> None:
@@ -385,6 +395,8 @@ class StationHealthTab(QWidget):
     def focus_runtime_sources(self) -> None:
         if not hasattr(self, "runtime_sources_table") or self.runtime_sources_table.rowCount() <= 0:
             return
+        if hasattr(self, "health_tabs") and hasattr(self, "runtime_sources_tab"):
+            self.health_tabs.setCurrentWidget(self.runtime_sources_tab)
         target_row = 0
         for row in range(self.runtime_sources_table.rowCount()):
             state_item = self.runtime_sources_table.item(row, 1)
@@ -450,10 +462,7 @@ class StationHealthTab(QWidget):
             values = [
                 row.get("title", "") or row.get("source_id", ""),
                 row.get("state_label", "") or row.get("state", ""),
-                row.get("source_kind", ""),
-                radio_app,
-                row.get("location", ""),
-                self._runtime_source_cached_traffic(row),
+                self._runtime_source_activity_summary(row),
                 row.get("action_hint", ""),
             ]
             for col, value in enumerate(values):
@@ -465,6 +474,16 @@ class StationHealthTab(QWidget):
         self.runtime_sources_table.resizeRowsToContents()
         self._update_runtime_sources_empty_state()
         self._render_runtime_source_detail()
+
+    def _runtime_source_activity_summary(self, row: Mapping[str, object]) -> str:
+        cached = self._runtime_source_cached_traffic(row)
+        last_activity = str(row.get("last_activity_label", "") or "").strip()
+        metadata = row.get("metadata", {})
+        freshness = self._runtime_source_freshness_text(metadata if isinstance(metadata, Mapping) else {})
+        for candidate in (cached, last_activity, freshness):
+            if candidate:
+                return candidate
+        return ""
 
     def _update_runtime_sources_empty_state(self) -> None:
         if not hasattr(self, "runtime_sources_empty_label") or not hasattr(self, "runtime_sources_table"):
@@ -574,11 +593,69 @@ class StationHealthTab(QWidget):
         btn = getattr(self, "runtime_source_open_related_btn", None)
         if btn is not None:
             btn.setEnabled(bool(enabled))
+            btn.setVisible(bool(enabled))
 
     def _set_open_related_health_item_enabled(self, enabled: bool) -> None:
         btn = getattr(self, "health_open_related_btn", None)
         if btn is not None:
             btn.setEnabled(bool(enabled))
+            btn.setVisible(bool(enabled))
+
+    def _render_health_item_detail(self, row: int | None = None) -> None:
+        label = getattr(self, "health_detail_label", None)
+        if label is None:
+            return
+        item = self._selected_health_item(row)
+        if item is None:
+            label.setText("Select a health item to review details.")
+            return
+        parts = [
+            f"{str(item.get('dependency', '') or 'Dependency').strip()}: {str(item.get('state', '') or 'Observed').strip()}",
+        ]
+        for heading, key in (
+            ("Scope", "scope"),
+            ("What FIO Is Doing", "action"),
+            ("Last Issue", "last_issue"),
+            ("Issue Since", "issue_since"),
+            ("Cooldown", "cooldown"),
+            ("Last Check", "last_check"),
+            ("Last Duration", "last_duration"),
+        ):
+            text = str(item.get(key, "") or "").strip()
+            if text:
+                parts.append(f"{heading}: {text}")
+        guidance = self._operator_guidance_for_text(
+            " ".join(
+                str(item.get(key, "") or "").strip()
+                for key in ("dependency", "state", "action", "last_issue")
+            )
+        )
+        if guidance:
+            parts.append(f"Check: {guidance}")
+        label.setText("\n".join(parts))
+
+    @staticmethod
+    def _operator_guidance_for_text(text: object) -> str:
+        haystack = str(text or "").strip().lower()
+        if not haystack:
+            return ""
+        if any(token in haystack for token in ("connection refused", "unreachable", "backoff", "not checked")):
+            return "confirm the app is running, then verify the host, port, and launch path for the selected radio."
+        if any(token in haystack for token in ("missing", "not found")):
+            return "verify the configured file or folder path exists for this radio profile."
+        if any(token in haystack for token in ("shared endpoint", "same endpoint")):
+            return "give each running app instance its own port or data folder."
+        if "js8" in haystack:
+            return "review the selected radio's JS8Call settings and confirm the JS8Call API port matches that instance."
+        if any(token in haystack for token in ("flmsg", "flamp", "fldigi", "flrig", "fast light")):
+            return "review Fast Light paths, per-instance config folders, and XML-RPC or ARQ ports."
+        if "commstat" in haystack:
+            return "review the selected radio's CommStat launch path and data source."
+        if "varac" in haystack:
+            return "review VarAC paths and message folders."
+        if "rf guard" in haystack:
+            return "review the radio profile, assigned plan, and antenna/band compatibility before transmitting."
+        return ""
 
     def _selected_health_item(self, row: int | None = None) -> Mapping[str, object] | None:
         if not hasattr(self, "table"):
@@ -601,6 +678,10 @@ class StationHealthTab(QWidget):
             return {}
         dependency = str(item.get("dependency", "") or "").strip()
         scope = str(item.get("scope", "") or "").strip()
+        text = " ".join(
+            str(item.get(key, "") or "").strip()
+            for key in ("scope", "dependency", "state", "action", "last_issue")
+        )
         if dependency == "Schedule Assignment RF Guard":
             return {
                 "target": "settings",
@@ -609,15 +690,57 @@ class StationHealthTab(QWidget):
                 "scope": scope,
                 "dependency": dependency,
             }
-        if dependency == "RF Guard":
-            return {
-                "target": "settings",
-                "settings_nav_context": "radios",
-                "health_key": "radio_profiles",
+        payload = self._related_payload_for_text(text)
+        if not payload:
+            return {}
+        payload.update(
+            {
                 "scope": scope,
                 "dependency": dependency,
+                "radio_id": self._radio_id_from_scope(scope),
             }
-        return {}
+        )
+        return payload
+
+    @staticmethod
+    def _radio_id_from_scope(scope: object) -> object:
+        text = str(scope or "").strip().lower()
+        if text.startswith("radio:"):
+            raw = text.split(":", 1)[1].strip()
+            try:
+                ident = int(raw)
+                return ident if ident > 0 else ""
+            except Exception:
+                return ""
+        return ""
+
+    @staticmethod
+    def _related_payload_for_text(text: object) -> dict[str, object]:
+        haystack = str(text or "").strip().lower()
+        if not haystack:
+            return {}
+        context = "radios"
+        health_key = "radio_profiles"
+        if "schedule assignment" in haystack:
+            health_key = "schedule_assignments"
+        elif any(token in haystack for token in ("js8", "spotter", "commstat", "directed.txt", "all.txt")):
+            health_key = "js8call"
+        elif any(token in haystack for token in ("flmsg", "flamp", "fldigi", "flrig", "fast light", "nbems")):
+            health_key = "fast_light"
+        elif "varac" in haystack:
+            health_key = "varac"
+        elif any(token in haystack for token in ("message auth", "msgauth", "gpg", "key")):
+            context = "main"
+            health_key = "message_auth"
+        elif any(token in haystack for token in ("rf guard", "radio profile", "runtime ingest")):
+            health_key = "radio_profiles"
+        else:
+            return {}
+        return {
+            "target": "settings",
+            "settings_nav_context": context,
+            "health_key": health_key,
+        }
 
     def _on_open_related_health_item(self) -> None:
         payload = self._health_row_related_payload()
@@ -641,17 +764,13 @@ class StationHealthTab(QWidget):
             str(row.get(key, "") or "").strip().lower()
             for key in ("source_kind", "title", "source_id", "app_instance_id")
         )
-        health_key = "radio_profiles"
-        context = "radios"
-        if any(token in text for token in ("js8", "spotter", "commstat", "directed.txt", "all.txt")):
-            health_key = "js8call"
-        elif any(token in text for token in ("flmsg", "flamp", "fldigi", "fast light", "nbems")):
-            health_key = "fast_light"
-        elif "varac" in text:
-            health_key = "varac"
-        elif any(token in text for token in ("message auth", "msgauth", "gpg", "key")):
-            context = "main"
-            health_key = "message_auth"
+        payload = StationHealthTab._related_payload_for_text(text) or {
+            "target": "settings",
+            "settings_nav_context": "radios",
+            "health_key": "radio_profiles",
+        }
+        context = str(payload.get("settings_nav_context", "") or "radios")
+        health_key = str(payload.get("health_key", "") or "radio_profiles")
         return {
             "target": "settings",
             "settings_nav_context": context,
@@ -680,6 +799,14 @@ class StationHealthTab(QWidget):
         has_rows = self.table.rowCount() > 0
         self.health_empty_label.setVisible(not has_rows)
         self.table.setVisible(has_rows)
+        if hasattr(self, "health_detail_label"):
+            self.health_detail_label.setVisible(has_rows)
+            if not has_rows:
+                self.health_detail_label.setText("Select a health item to review details.")
+        if hasattr(self, "health_open_related_btn"):
+            self.health_open_related_btn.setVisible(has_rows)
+            if not has_rows:
+                self.health_open_related_btn.setEnabled(False)
 
     def _apply_pending_focus_scope(self) -> None:
         scope_name = str(getattr(self, "_pending_focus_scope", "") or "").strip()
@@ -775,3 +902,31 @@ class StationHealthTab(QWidget):
         has_rows = self.scheduler_table.rowCount() > 0
         self.scheduler_empty_label.setVisible(not has_rows)
         self.scheduler_table.setVisible(has_rows)
+
+    def _update_tab_labels(self) -> None:
+        tabs = getattr(self, "health_tabs", None)
+        if tabs is None:
+            return
+        try:
+            issue_count = int(self.current_issue_count() or 0)
+        except Exception:
+            issue_count = 0
+        runtime_count = self.runtime_sources_table.rowCount() if hasattr(self, "runtime_sources_table") else 0
+        scheduler_count = self.scheduler_table.rowCount() if hasattr(self, "scheduler_table") else 0
+        labels = [
+            (getattr(self, "issues_tab", None), f"Issues ({issue_count})" if issue_count else "Issues"),
+            (
+                getattr(self, "runtime_sources_tab", None),
+                f"Runtime Sources ({runtime_count})" if runtime_count else "Runtime Sources",
+            ),
+            (
+                getattr(self, "scheduler_log_tab", None),
+                f"Scheduler Log ({scheduler_count})" if scheduler_count else "Scheduler Log",
+            ),
+        ]
+        for widget, label in labels:
+            if widget is None:
+                continue
+            idx = tabs.indexOf(widget)
+            if idx >= 0:
+                tabs.setTabText(idx, label)

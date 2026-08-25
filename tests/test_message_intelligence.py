@@ -13,6 +13,7 @@ from freqinout.core.message_intelligence import (
     analyze_commstat_fields,
     analyze_form_text,
     analyze_spotter_text,
+    collect_topic_evidence,
     normalize_topic_terms,
 )
 from freqinout.core.message_ingest import MessageIngestor
@@ -25,6 +26,7 @@ from freqinout.core.message_file_metadata import (
     file_metadata_key,
     form_report_timestamp_from_summary,
     has_stale_message_file_metadata,
+    load_existing_message_file_metadata_records,
     normalize_cached_message_file_metadata,
     remove_file_record_from_groups,
 )
@@ -125,9 +127,11 @@ from freqinout.core.commstat_artifacts import (
 from freqinout.core.commstat_config import CommStatGroupState
 from freqinout.gui.message_viewer_tab import (
     CommStatArtifact,
+    ComposeRadioTarget,
     JS8Message,
     MessageTableModel,
     MessageViewerTab,
+    SitrepMessage,
     SpotterMessage,
     UnifiedMessage,
     VarACMessage,
@@ -701,6 +705,43 @@ def test_topic_terms_are_canonical_and_do_not_overmatch_short_codes() -> None:
     assert "General Intel" not in normalize_topic_terms("pass2 checksum only")
 
 
+def test_topic_evidence_ignores_no_report_structured_fields() -> None:
+    evidence = collect_topic_evidence({"status": {"food": "not_reported", "power": "green"}})
+
+    assert "Food" not in evidence
+    assert "Power" in evidence
+
+
+def test_topic_evidence_preserves_real_power_status_values() -> None:
+    evidence = collect_topic_evidence({"status": {"power": "Grid down"}})
+
+    assert "Power" in evidence
+
+
+def test_topic_evidence_ignores_no_report_status_lines() -> None:
+    evidence = collect_topic_evidence(
+        {
+            "commstat": "\n".join(
+                [
+                    "Status Fields",
+                    "Overall: Not Reported",
+                    "Power: Not Reported",
+                    "Food: Not Reported",
+                    "Water: Not Reported",
+                ]
+            )
+        }
+    )
+
+    assert "Food" not in evidence
+    assert "Power" not in evidence
+    assert "Water" not in evidence
+
+    evidence = collect_topic_evidence({"commstat": "Food: Limited pantry supply\nPower: Not Reported"})
+    assert "Food" in evidence
+    assert "Power" not in evidence
+
+
 def test_commstat_alert_flattens_to_actionable_operator_summary() -> None:
     info = analyze_commstat_fields(
         artifact_kind="ALERT",
@@ -1153,6 +1194,74 @@ def test_transport_row_presenters_keep_operator_labels_and_search_context() -> N
     assert varac.to_call == "MAGNET"
 
 
+def test_cached_file_message_search_ignores_topic_tags_without_content(tmp_path) -> None:
+    path = tmp_path / "MCF103_GYQV.txt"
+    path.write_text("MCF103 (#GYQV)\n", encoding="utf-8")
+    rec = FileRecord(path=path, origin="flmsg", size=path.stat().st_size, mtime=path.stat().st_mtime)
+    metadata = {
+        "source_family": "flmsg",
+        "msg_type": "FLMSG",
+        "display_type": "MCF103",
+        "status": "NEW",
+        "from_call": "AL1Q",
+        "to_call": "W3BFO",
+        "title": "MCF103 (#GYQV)",
+        "topics_json": '["Fire"]',
+        "search_text": "",
+    }
+
+    weak = cached_file_message_row_candidate(rec, metadata, origin="flmsg", status="NEW")
+    assert weak is not None
+    weak_row = SimpleNamespace(
+        msg_type=weak.msg_type,
+        status=weak.status,
+        origin="flmsg",
+        payload=None,
+        rcv_ts=weak.rcv_ts,
+        rcv_display="now",
+        from_call=weak.from_call,
+        to_call=weak.to_call,
+        title=weak.title,
+        search_text=file_message_search_text(
+            weak.msg_type,
+            weak.status,
+            weak.from_call,
+            weak.to_call,
+            "now",
+            weak.search_detail,
+        ),
+        actionable=weak.actionable,
+        topics=weak.topics,
+    )
+    assert row_matches_search_query(weak_row, "fire") is False
+
+    strong_metadata = dict(metadata, title="Widemouth 2 Fire", topics_json='["Fire"]')
+    strong = cached_file_message_row_candidate(rec, strong_metadata, origin="flmsg", status="NEW")
+    assert strong is not None
+    strong_row = SimpleNamespace(
+        msg_type=strong.msg_type,
+        status=strong.status,
+        origin="flmsg",
+        payload=None,
+        rcv_ts=strong.rcv_ts,
+        rcv_display="now",
+        from_call=strong.from_call,
+        to_call=strong.to_call,
+        title=strong.title,
+        search_text=file_message_search_text(
+            strong.msg_type,
+            strong.status,
+            strong.from_call,
+            strong.to_call,
+            "now",
+            strong.search_detail,
+        ),
+        actionable=strong.actionable,
+        topics=strong.topics,
+    )
+    assert row_matches_search_query(strong_row, "fire") is True
+
+
 def test_commstat_row_presenter_flattens_category_without_losing_intelligence() -> None:
     row = commstat_message_row_presentation(
         SimpleNamespace(
@@ -1185,6 +1294,23 @@ def test_commstat_row_presenter_flattens_category_without_losing_intelligence() 
     assert {"Water", "Comms"}.issubset(set(row.topics))
     assert "EM48EQ" in row.search_detail
     assert "Internet only" in row.search_detail
+
+
+def test_commstat_field_intelligence_infers_other_location_state_from_body() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="STATREP",
+        title="CommStat StatRep | COUNTY | YELLOW",
+        body="Reno-Sparks NV Evacuation Center||4590 S Virginia St Reno NV 89502",
+        from_call="KD9DSS",
+        target="@COMMSTAT",
+        grid="DM09CL",
+        scope="COUNTY",
+        status="YELLOW",
+    )
+
+    assert info.state == "NV"
+    assert info.grid == "DM09CL"
+    assert info.metadata["state_confidence"] == "remarks"
 
 
 def test_form_metadata_parser_is_core_and_handles_missing_templates(tmp_path) -> None:
@@ -1786,6 +1912,110 @@ def test_message_group_filter_parent_selection_matches_roster_child_region() -> 
     assert MessageViewerTab._row_matches_workspace_filters(tab, row) is True
 
 
+def test_message_search_includes_decoded_payload_metadata() -> None:
+    payload = {
+        "groups": ["KC7VQR", "MAGNET"],
+        "topics": ["Food", "Power"],
+        "summary": "Food report from KI6QDB",
+        "from_call": "KI6QDB",
+        "route": "KC7VQR -> Food -> from KI6QDB",
+    }
+    row = UnifiedMessage(
+        "F!104",
+        "NEW",
+        "KI6QDB",
+        "MAGNET",
+        1.0,
+        "",
+        "Food Reports",
+        "spotter",
+        payload,
+    )
+
+    assert row_matches_search_query(row, "Food KC7VQR")
+    assert row_matches_search_query(row, "KI6QDB Power")
+    assert row_matches_search_query(row, "@MAGNET")
+
+
+def test_message_search_ignores_no_report_structured_fields() -> None:
+    payload = {
+        "status": {"food": "not_reported", "power": "green"},
+        "summary": "Routine status update",
+    }
+    row = UnifiedMessage("F!304", "NEW", "K7ABC", "MAGNET", 1.0, "", "Status Update", "spotter", payload)
+
+    assert not row_matches_search_query(row, "food")
+    assert row_matches_search_query(row, "power")
+
+
+def test_message_search_matches_real_power_status_value() -> None:
+    payload = {"status": {"power": "Grid down"}, "summary": "Routine status update"}
+    row = UnifiedMessage("F!304", "NEW", "K7ABC", "MAGNET", 1.0, "", "Status Update", "spotter", payload)
+
+    assert row_matches_search_query(row, "power")
+
+
+def test_message_search_ignores_no_report_status_lines() -> None:
+    payload = {
+        "status_fields": "\n".join(
+            [
+                "Status Fields",
+                "Overall: Not Reported",
+                "Power: Not Reported",
+                "Food: Not Reported",
+                "Water: Not Reported",
+            ]
+        ),
+        "summary": "Routine status update",
+    }
+    row = UnifiedMessage("SitRep", "INFO", "K7ABC", "MAGNET", 1.0, "", "CommStat", "commstat", payload)
+
+    assert not row_matches_search_query(row, "food")
+    assert not row_matches_search_query(row, "power")
+
+    payload["status_fields"] = "Food: Limited supply\nPower: Not Reported"
+    row = UnifiedMessage("SitRep", "INFO", "K7ABC", "MAGNET", 1.0, "", "CommStat", "commstat", payload)
+    assert row_matches_search_query(row, "food")
+    assert not row_matches_search_query(row, "power")
+
+
+def test_spotter_form_discovery_prefers_selected_radio_profile_path(tmp_path) -> None:
+    global_forms = tmp_path / "global" / "forms"
+    radio_forms = tmp_path / "radio-a" / "forms"
+    global_forms.mkdir(parents=True)
+    radio_forms.mkdir(parents=True)
+    (global_forms / "MCF307.txt").write_text("Global Wildfire Form\n?Global", encoding="utf-8")
+    (radio_forms / "MCF104.txt").write_text("Radio Status Form\n?Radio", encoding="utf-8")
+
+    class Settings:
+        def get(self, key, default=None):
+            values = {"js8_forms_path": str(global_forms)}
+            return values.get(key, default)
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = Settings()
+    tab.forms_path = str(global_forms)
+    tab._compose_mode = "spotter"
+    tab._form_cache = {}
+    tab._form_title_cache = {}
+    tab._cache_max_form_entries = 20
+    tab._cache_max_form_title_entries = 20
+    target = ComposeRadioTarget(
+        radio_id=1,
+        label="FIO-A",
+        profile={"id": 1, "name": "FIO-A", "js8_forms_path": str(radio_forms)},
+        capabilities=("JS8Call",),
+    )
+    tab._selected_compose_radio_target = lambda: target
+
+    entries = MessageViewerTab._compose_family_entries(tab)
+    spotter_entry = next(entry for entry in entries if entry["kind"] == "spotter")
+
+    assert [form.form_code for form in spotter_entry["forms"]] == ["F!104"]
+    assert MessageViewerTab._load_form_title(tab, "104") == "Radio Status Form"
+    assert MessageViewerTab._load_form_title(tab, "307") == ""
+
+
 def test_message_group_expansion_default_selection_excludes_other_discovered_groups() -> None:
     tab = MessageViewerTab.__new__(MessageViewerTab)
     tab.settings = type(
@@ -1943,6 +2173,19 @@ def test_inbox_status_and_search_filters_are_core_row_logic() -> None:
     assert row_matches_search_query(searchable, "widemouth") is True
     assert row_matches_search_query(searchable, "K7ETC Fire MR08") is True
     assert row_matches_search_query(searchable, "not-present") is False
+
+
+def test_map_concern_context_filters_green_messages_but_keeps_caution() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._map_context_filter = {"concern_only": True}
+    green_payload = SimpleNamespace(status_label="GREEN", alert_color="green", overall_status="Functioning")
+    yellow_payload = SimpleNamespace(status_label="YELLOW", alert_color="yellow", overall_status="Caution")
+
+    green = UnifiedMessage("CommStat", "INFO", "K7ETC", "MAGNET", 1.0, "", "GREEN", "commstat", green_payload)
+    yellow = UnifiedMessage("CommStat", "INFO", "K7ETC", "MAGNET", 1.0, "", "YELLOW", "commstat", yellow_payload)
+
+    assert MessageViewerTab._row_matches_map_context_filter(tab, yellow) is True
+    assert MessageViewerTab._row_matches_map_context_filter(tab, green) is False
 
 
 def test_inbox_filter_criteria_combines_common_row_filters() -> None:
@@ -4145,6 +4388,163 @@ def test_message_file_metadata_cache_loads_only_current_file_identity(tmp_path) 
     assert loaded[("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size))]["display_type"] == "General"
 
 
+def test_existing_message_file_metadata_records_load_existing_files_only(tmp_path) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    current_path = tmp_path / "KJ4RMO-20260408-Op_net4-83.b2s"
+    stale_path = tmp_path / "stale.b2s"
+    missing_path = tmp_path / "missing.b2s"
+    current_path.write_text("current", encoding="utf-8")
+    stale_path.write_text("stale changed", encoding="utf-8")
+    current_stat = current_path.stat()
+    stale_stat = stale_path.stat()
+    with sqlite3.connect(db_path) as conn:
+        ensure_message_file_metadata_table(conn)
+        conn.executemany(
+            """
+            INSERT INTO message_file_metadata (
+                origin, path, mtime, size, source_family, msg_type, display_type, status, from_call,
+                to_call, title, rcv_display, topics_json, actionable, search_text, parser_version, indexed_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "flmsg",
+                    str(current_path),
+                    float(current_stat.st_mtime),
+                    int(current_stat.st_size),
+                    "flmsg",
+                    "FLMSG",
+                    "Blank",
+                    "READ",
+                    "KJ4RMO",
+                    "",
+                    "OpNet4 83",
+                    "2026-08-04 15:31:00",
+                    '["Food"]',
+                    1,
+                    "op net4 kj4rmo food",
+                    FILE_METADATA_PARSER_VERSION,
+                    1.0,
+                ),
+                (
+                    "flmsg",
+                    str(stale_path),
+                    float(stale_stat.st_mtime) - 10.0,
+                    int(stale_stat.st_size),
+                    "flmsg",
+                    "FLMSG",
+                    "Blank",
+                    "READ",
+                    "STALE",
+                    "",
+                    "Stale",
+                    "",
+                    "[]",
+                    0,
+                    "stale",
+                    FILE_METADATA_PARSER_VERSION,
+                    1.0,
+                ),
+                (
+                    "flmsg",
+                    str(missing_path),
+                    1.0,
+                    1,
+                    "flmsg",
+                    "FLMSG",
+                    "Blank",
+                    "READ",
+                    "MISSING",
+                    "",
+                    "Missing",
+                    "",
+                    "[]",
+                    0,
+                    "missing",
+                    FILE_METADATA_PARSER_VERSION,
+                    1.0,
+                ),
+            ],
+        )
+
+    records, metadata = load_existing_message_file_metadata_records(db_path)
+
+    assert [rec.path for rec in records["flmsg"]] == [current_path]
+    key = ("flmsg", str(current_path), float(current_stat.st_mtime), int(current_stat.st_size))
+    assert set(metadata) == {key}
+    assert metadata[key]["from_call"] == "KJ4RMO"
+
+
+def test_messages_rows_include_existing_cached_files_outside_current_scan(tmp_path) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    cached_path = tmp_path / "KJ4RMO-20260408-Op_net4-83.b2s"
+    cached_path.write_text("cached", encoding="utf-8")
+    stat = cached_path.stat()
+    with sqlite3.connect(db_path) as conn:
+        ensure_message_file_metadata_table(conn)
+        conn.execute(
+            """
+            INSERT INTO message_file_metadata (
+                origin, path, mtime, size, source_family, msg_type, display_type, status, from_call,
+                to_call, title, rcv_display, topics_json, actionable, search_text, parser_version, indexed_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "flmsg",
+                str(cached_path),
+                float(stat.st_mtime),
+                int(stat.st_size),
+                "flmsg",
+                "FLMSG",
+                "Blank",
+                "READ",
+                "KJ4RMO",
+                "",
+                "OpNet4 83",
+                "2026-08-04 15:31:00",
+                '["Food"]',
+                1,
+                "op net4 kj4rmo food",
+                FILE_METADATA_PARSER_VERSION,
+                1.0,
+            ),
+        )
+
+    class Settings:
+        def get(self, key, default=None):
+            return default
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = Settings()
+    tab.js8_messages = []
+    tab.spotter_messages = []
+    tab.varac_messages = []
+    tab.sitrep_messages = []
+    tab.commstat_messages = []
+    tab.files = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+    tab._file_metadata_map = {}
+    tab._db_path = lambda: db_path
+    def ensure_cache_table():
+        with sqlite3.connect(db_path) as conn:
+            ensure_message_file_metadata_table(conn)
+
+    tab._ensure_file_scan_cache_table = ensure_cache_table
+    tab._get_read_state = lambda rec: "READ"
+    tab._is_image_file = lambda path: False
+    tab._is_transport_form_ext = lambda suffix: True
+    tab._extract_form_file_metadata = lambda rec: {}
+    tab._extract_sender_from_file = lambda rec: ""
+    tab._format_rcv_display = lambda ts, raw=None: "2026-08-04 15:31:00"
+    tab._is_auth_verifiable_file = lambda rec: False
+    tab._is_truthy = staticmethod(lambda value, default=False: bool(default if value is None else value))
+
+    rows = MessageViewerTab._build_message_rows(tab)
+
+    assert [row.from_call for row in rows] == ["KJ4RMO"]
+    assert row_matches_search_query(rows[0], "KJ4RMO")
+    assert row_matches_search_query(rows[0], "food")
+
+
 def test_stale_message_file_metadata_check_is_limited_to_current_files(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     current_path = tmp_path / "K7ETC-20260803-FIRE.k2s"
@@ -4400,6 +4800,139 @@ def test_message_intelligence_header_shows_report_date_separate_from_received() 
     assert "  Received: 2026-08-03 17:33" in text
 
 
+def test_sitrep_detail_hides_internal_report_key() -> None:
+    class Label:
+        text = ""
+
+        def setText(self, value):
+            self.text = value
+
+    class Viewer:
+        text = ""
+
+        def setAcceptRichText(self, _value):
+            pass
+
+        def setPlainText(self, value):
+            self.text = value
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = {}
+    tab._current_time_mode = lambda: "UTC"
+    tab._format_rcv_display = lambda *_args: "2026-08-24 12:00"
+    tab.info_label = Label()
+    tab.viewer = Viewer()
+    msg = SitrepMessage(
+        event_id=1,
+        report_key="8f2d4b6a7c",
+        event_ts=1.0,
+        event_ts_utc="2026-08-24T12:00:00Z",
+        from_call="K7ABC",
+        target="@MAGNET",
+        report_group="MAGNET",
+        grid="DM38ST",
+        state_code="UT",
+        state_confidence="high",
+        geo_confidence="grid",
+        scope="My Location",
+        subtype="COMMSTAT",
+        subtype_label="CommStat",
+        transport_mode="js8",
+        transport_label="JS8/RF",
+        remarks_text="",
+        brevity_code="",
+        brevity_summary="",
+        source_family_label="CommStat",
+        overall_status="not_reported",
+        power="grid_down",
+        water="not_reported",
+        medical="not_reported",
+        communications="not_reported",
+        internet="not_reported",
+        travel="not_reported",
+        food="not_reported",
+        fuel="not_reported",
+        crime="not_reported",
+        civil_unrest="not_reported",
+        political="not_reported",
+        source_first="CommStat",
+        source_last="CommStat",
+        source_count=1,
+        sources_json="[]",
+        source_refs_json="[]",
+        raw_payload_json="{}",
+        updated_ts=1.0,
+    )
+
+    MessageViewerTab._load_sitrep_content(tab, msg)
+
+    assert "Report: 8f2d4b6a7c" not in tab.viewer.text
+    assert "Radio: 8f2d4b6a7c" not in tab.viewer.text
+    assert "Power:" in tab.viewer.text
+
+
+def test_sitrep_search_ignores_not_reported_status_dataclass_fields() -> None:
+    msg = SitrepMessage(
+        event_id=1,
+        report_key="8f2d4b6a7c",
+        event_ts=1.0,
+        event_ts_utc="2026-08-24T12:00:00Z",
+        from_call="KG5RKW",
+        target="@MAGNET",
+        report_group="MAGNET",
+        grid="EL06VD",
+        state_code="",
+        state_confidence="",
+        geo_confidence="",
+        scope="My Location",
+        subtype="COMMSTAT",
+        subtype_label="CommStat",
+        transport_mode="",
+        transport_label="Unknown",
+        remarks_text="",
+        brevity_code="",
+        brevity_summary="",
+        source_family_label="JS8Spotter",
+        overall_status="not_reported",
+        power="not_reported",
+        water="not_reported",
+        medical="not_reported",
+        communications="not_reported",
+        internet="not_reported",
+        travel="not_reported",
+        food="not_reported",
+        fuel="not_reported",
+        crime="not_reported",
+        civil_unrest="not_reported",
+        political="not_reported",
+        source_first="JS8SPOTTER",
+        source_last="JS8SPOTTER",
+        source_count=1,
+        sources_json="[]",
+        source_refs_json="[]",
+        raw_payload_json="{}",
+        updated_ts=1.0,
+    )
+    row = UnifiedMessage(
+        "SitRep",
+        "INFO",
+        "KG5RKW",
+        "MAGNET",
+        1.0,
+        "19 days",
+        "CommStat | My Location | NOT_REPORTED",
+        "sitrep",
+        msg,
+        search_text="SitRep INFO KG5RKW MAGNET 19 days CommStat My Location JS8Spotter Unknown",
+    )
+
+    assert not row_matches_search_query(row, "food")
+    assert not row_matches_search_query(row, "power")
+
+    msg.power = "grid_down"
+    assert row_matches_search_query(row, "power")
+
+
 def test_message_file_metadata_cache_prunes_rows_not_in_current_scan(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     kept_path = tmp_path / "kept.k2s"
@@ -4468,6 +5001,74 @@ def test_remove_file_record_clears_file_caches_and_read_state(tmp_path) -> None:
     MessageViewerTab._ensure_signature_cache_table(tab)
     conn = sqlite3.connect(db_path)
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS observation_projection (
+            observation_id TEXT PRIMARY KEY,
+            source_family TEXT,
+            source_ref TEXT,
+            source_radio_id INTEGER,
+            source_app TEXT,
+            received_utc TEXT,
+            event_utc TEXT,
+            from_call TEXT,
+            to_target TEXT,
+            groups_json TEXT,
+            observed_topics_json TEXT,
+            operator_attention INTEGER,
+            status TEXT,
+            urgency TEXT,
+            subject TEXT,
+            summary TEXT,
+            state TEXT,
+            grid TEXT,
+            lat REAL,
+            lon REAL,
+            location_confidence TEXT,
+            auth_state TEXT,
+            trusted_state TEXT,
+            confirmed_state TEXT,
+            exercise_flag INTEGER,
+            route_eligible INTEGER,
+            publish_authorized INTEGER,
+            provenance_json TEXT,
+            projected_utc TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS observation_projection_topics (
+            observation_id TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            PRIMARY KEY (observation_id, topic)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO observation_projection (
+            observation_id, source_family, source_ref, received_utc, event_utc, from_call,
+            observed_topics_json, subject, summary, projected_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "flmsg:file:" + str(msg_path),
+            "flmsg",
+            "file:" + str(msg_path),
+            "2026-08-03T00:00:00+00:00",
+            "2026-08-03T00:00:00+00:00",
+            "K7ETC",
+            '["Fire"]',
+            "Widemouth 2 Fire",
+            "Widemouth 2 Fire",
+            "2026-08-24T00:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO observation_projection_topics(observation_id, topic) VALUES (?, ?)",
+        ("flmsg:file:" + str(msg_path), "Fire"),
+    )
+    conn.execute(
         "INSERT INTO message_scan_cache(origin, path, mtime, size) VALUES (?, ?, ?, ?)",
         ("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size)),
     )
@@ -4505,6 +5106,8 @@ def test_remove_file_record_clears_file_caches_and_read_state(tmp_path) -> None:
     conn = sqlite3.connect(db_path)
     for table in ("message_scan_cache", "message_file_metadata", "message_signature_cache", "message_read_state"):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM observation_projection").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM observation_projection_topics").fetchone()[0] == 0
     conn.close()
 
 

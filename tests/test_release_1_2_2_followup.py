@@ -97,11 +97,13 @@ def test_scheduler_status_summary_reports_next_transition_frequency(monkeypatch,
         engine.deleteLater()
 
 
-def test_station_health_marks_stale_ok_checks_as_informational_not_alerts():
-    from freqinout.core.station_health_summary import summarize_station_health
+def test_station_health_marks_stale_ok_checks_as_informational_not_alerts(monkeypatch):
+    from freqinout.core import station_health_summary as summary_module
 
-    stale_ts = time.monotonic() - (23 * 3600)
-    summary = summarize_station_health(
+    now = 100_000.0
+    monkeypatch.setattr(summary_module.time, "monotonic", lambda: now)
+    stale_ts = now - (23 * 3600)
+    summary = summary_module.summarize_station_health(
         {
             "fldigi:127.0.0.1:7362": {
                 "key": "fldigi:127.0.0.1:7362",
@@ -569,10 +571,10 @@ def test_station_health_runtime_sources_drilldown_renders_operator_rows():
     assert tab.runtime_sources_table.rowCount() == 2
     assert tab.runtime_sources_table.item(0, 0).text() == "FIO-A JS8Call API"
     assert tab.runtime_sources_table.item(0, 1).text() == "Shared Endpoint"
-    assert tab.runtime_sources_table.item(0, 3).text() == "FIO-A / JS8Call"
-    assert tab.runtime_sources_table.horizontalHeaderItem(5).text() == "Projected Data"
-    assert tab.runtime_sources_table.item(0, 6).text() == "Give each JS8Call instance a unique TCP port"
-    assert tab.runtime_sources_table.item(1, 5).text() == "12 links / 5 pairs"
+    assert tab.runtime_sources_table.horizontalHeaderItem(2).text() == "Activity"
+    assert tab.runtime_sources_table.horizontalHeaderItem(3).text() == "Suggested Fix"
+    assert tab.runtime_sources_table.item(0, 3).text() == "Give each JS8Call instance a unique TCP port"
+    assert tab.runtime_sources_table.item(1, 2).text() == "12 links / 5 pairs"
 
 
 def test_station_health_runtime_sources_table_preserves_minimized_readability():
@@ -582,10 +584,12 @@ def test_station_health_runtime_sources_table_preserves_minimized_readability():
         source.index("self.runtime_sources_table = QTableWidget") : source.index("self.runtime_sources_empty_label")
     ]
     assert "setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)" in runtime_block
-    assert "runtime_header.setStretchLastSection(False)" in runtime_block
+    assert "runtime_header.setStretchLastSection(True)" in runtime_block
     assert "QHeaderView.Interactive" in runtime_block
-    assert "self.runtime_sources_table.setColumnWidth(4, 260)" in runtime_block
-    assert "self.runtime_sources_table.setColumnWidth(6, 230)" in runtime_block
+    assert "self.runtime_sources_table = QTableWidget(0, 4, runtime_tab)" in runtime_block
+    assert "runtime_header.setSectionResizeMode(3, QHeaderView.Stretch)" in runtime_block
+    assert "self.health_tabs = QTabWidget(self)" in source
+    assert 'self.health_tabs.addTab(runtime_tab, "Runtime Sources")' in source
 
 
 def test_station_health_runtime_sources_summary_row_focuses_drilldown():
@@ -735,7 +739,7 @@ def test_station_health_runtime_source_cached_traffic_does_not_echo_backoff_deta
         ]
     )
 
-    assert tab.runtime_sources_table.item(0, 5).text() == ""
+    assert tab.runtime_sources_table.item(0, 2).text() == "Just now"
 
     tab.runtime_sources_table.selectRow(0)
     tab._render_runtime_source_detail()
@@ -834,6 +838,50 @@ def test_station_health_assigned_schedule_rf_guard_row_opens_schedule_assignment
     assert emitted[0]["target"] == "settings"
     assert emitted[0]["settings_nav_context"] == "radios"
     assert emitted[0]["health_key"] == "schedule_assignments"
+
+
+def test_station_health_generic_dependency_row_opens_related_settings_area():
+    app = _app()
+    assert app is not None
+
+    from freqinout.gui.station_health_tab import StationHealthTab
+
+    tab = StationHealthTab()
+    tab.set_runtime_item_provider(lambda: [])
+    tab.set_runtime_source_provider(lambda: [])
+    tab._last_summary = {
+        "issue_count": 1,
+        "severity": "danger",
+        "items": [
+            {
+                "scope": "Radio 12",
+                "dependency": "JS8Call API (127.0.0.1:2242)",
+                "state": "Backoff",
+                "severity": "danger",
+                "action": "Backing off to keep FIO responsive",
+                "last_issue": "Connection refused",
+                "issue_since": "since 2m ago",
+                "cooldown": "30s",
+                "last_check": "5s ago",
+                "last_duration": "0 ms",
+            }
+        ],
+    }
+
+    emitted = []
+    tab.related_view_requested.connect(lambda payload: emitted.append(dict(payload)))
+    tab._render_table()
+    tab.table.selectRow(0)
+
+    assert tab.health_open_related_btn.isEnabled()
+    assert "Connection refused" in tab.health_detail_label.text()
+
+    tab.health_open_related_btn.click()
+
+    assert emitted
+    assert emitted[0]["target"] == "settings"
+    assert emitted[0]["settings_nav_context"] == "radios"
+    assert emitted[0]["health_key"] == "js8call"
 
 
 def test_station_health_runtime_source_related_view_resolves_radio_label_to_profile_id():

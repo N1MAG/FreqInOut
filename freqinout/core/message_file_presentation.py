@@ -193,7 +193,6 @@ def file_message_row_presentation(
             getattr(intelligence, "form_name", "") if intelligence else "",
             getattr(intelligence, "subject", "") if intelligence else "",
             getattr(intelligence, "date_summary", "") if intelligence else "",
-            " ".join(topics),
             getattr(intelligence, "state", "") if intelligence else "",
             getattr(intelligence, "grid", "") if intelligence else "",
         )
@@ -258,7 +257,6 @@ def cached_file_message_row_candidate(
         for part in (
             cached.title,
             cached.display_type,
-            " ".join(cached.topics),
             rec.path.name,
         )
         if part

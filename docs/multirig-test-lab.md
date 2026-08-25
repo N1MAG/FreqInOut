@@ -2,6 +2,16 @@
 
 This is a repeatable way to test multi-rig startup behavior without touching your production FIO configuration.
 
+## Safety Note For Debugging
+
+Always confirm which `FREQINOUT_CONFIG_DIR` or runtime profile the app is using
+before inspecting SQLite data or diagnosing UI behavior. The default
+`~/.freqinout/config` database may not be the active multi-rig workspace. For
+multi-rig lab/runtime work, the active app configuration is often under
+`/Users/bill/RadioCode/runtime/multi-rig/config` or one of the disposable lab
+profiles below. Radio launch paths can also live in linked app-instance rows,
+such as `device_profiles.js8_instance_id -> js8_instances.commstat_launch_path`.
+
 The harness creates disposable FIO config profiles under:
 
 ```text

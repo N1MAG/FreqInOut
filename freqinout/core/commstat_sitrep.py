@@ -84,6 +84,59 @@ VALID_STATE_CODES = {
     "YT",
 }
 
+STATE_NAME_TO_CODE = {
+    "ALABAMA": "AL",
+    "ALASKA": "AK",
+    "ARIZONA": "AZ",
+    "ARKANSAS": "AR",
+    "CALIFORNIA": "CA",
+    "COLORADO": "CO",
+    "CONNECTICUT": "CT",
+    "DELAWARE": "DE",
+    "FLORIDA": "FL",
+    "GEORGIA": "GA",
+    "HAWAII": "HI",
+    "IDAHO": "ID",
+    "ILLINOIS": "IL",
+    "INDIANA": "IN",
+    "IOWA": "IA",
+    "KANSAS": "KS",
+    "KENTUCKY": "KY",
+    "LOUISIANA": "LA",
+    "MAINE": "ME",
+    "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA",
+    "MICHIGAN": "MI",
+    "MINNESOTA": "MN",
+    "MISSISSIPPI": "MS",
+    "MISSOURI": "MO",
+    "MONTANA": "MT",
+    "NEBRASKA": "NE",
+    "NEVADA": "NV",
+    "NEW HAMPSHIRE": "NH",
+    "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM",
+    "NEW YORK": "NY",
+    "NORTH CAROLINA": "NC",
+    "NORTH DAKOTA": "ND",
+    "OHIO": "OH",
+    "OKLAHOMA": "OK",
+    "OREGON": "OR",
+    "PENNSYLVANIA": "PA",
+    "RHODE ISLAND": "RI",
+    "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD",
+    "TENNESSEE": "TN",
+    "TEXAS": "TX",
+    "UTAH": "UT",
+    "VERMONT": "VT",
+    "VIRGINIA": "VA",
+    "WASHINGTON": "WA",
+    "WEST VIRGINIA": "WV",
+    "WISCONSIN": "WI",
+    "WYOMING": "WY",
+}
+
 _BREVITY_RE = re.compile(r"\b([1-5][A-Z]{5})\b")
 _STANDARD_MARKERS = (
     ("{&%3}", "{&%}"),
@@ -193,17 +246,17 @@ def extract_brevity_code(remarks: object) -> str:
 
 def infer_state_and_geo(grid: object, remarks: object) -> Tuple[str, str, str]:
     grid_txt = str(grid or "").strip().upper()
-    state_code = _leading_state_code(remarks)
+    state_code, state_confidence = _state_code_from_remarks(remarks)
     if len(grid_txt) >= 6:
         if state_code:
-            return state_code, "explicit", "grid6"
+            return state_code, state_confidence, "grid6"
         return "", "unknown", "grid6"
     if len(grid_txt) == 4:
         if state_code:
-            return state_code, "grid4_remarks", "grid4_state"
+            return state_code, "grid4_remarks" if state_confidence == "explicit" else state_confidence, "grid4_state"
         return "", "unknown", "unknown"
     if state_code:
-        return state_code, "explicit", "state_only"
+        return state_code, state_confidence, "state_only"
     return "", "unknown", "unknown"
 
 
@@ -401,6 +454,34 @@ def _leading_state_code(remarks: object) -> str:
         if second in VALID_STATE_CODES:
             return second
     return ""
+
+
+def _state_code_from_remarks(remarks: object) -> Tuple[str, str]:
+    leading = _leading_state_code(remarks)
+    if leading:
+        return leading, "explicit"
+    text = str(remarks or "").upper()
+    if not text:
+        return "", "unknown"
+    for name, abbr in sorted(STATE_NAME_TO_CODE.items(), key=lambda item: -len(item[0])):
+        for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+            trailing = text[match.end() : match.end() + 12]
+            if re.match(r"\s+(?:ST|STREET|AVE|AVENUE|RD|ROAD|DR|DRIVE|LN|LANE|BLVD)\b", trailing):
+                continue
+            return abbr, "remarks"
+    patterns = (
+        r"^\s*([A-Z]{2})\s*[:;-]",
+        r"\b([A-Z]{2})\s*/\s*[A-R]{2}\d{2}(?:[A-X]{2})?\b",
+        r"\b(?:STATE|ST|LOC|LOCATION|AREA)\s*[:=]?\s*([A-Z]{2})\b",
+        r"\b[A-Z][A-Z .'-]{2,40}\s+([A-Z]{2})\s+\d{5}(?:-\d{4})?\b",
+        r"\b[A-Z][A-Z .'-]{2,40}\s+([A-Z]{2})\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            abbr = str(match.group(1) or "").strip().upper()
+            if abbr in VALID_STATE_CODES:
+                return abbr, "remarks"
+    return "", "unknown"
 
 
 def _lookup_named_code(section: object, code: str) -> str:

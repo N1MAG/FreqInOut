@@ -4,6 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from freqinout.core.commstat_sitrep import infer_state_and_geo, parse_commstat_message
 from freqinout.core.sitrep_fusion import _build_report_key
 from freqinout.core.sitrep_ingest import _ensure_local_tables, _ingest_commstat3
 
@@ -360,6 +361,92 @@ def test_commstat3_statrep_and_message_copy_merge_into_one_artifact(tmp_path: Pa
         assert "statrep:1" in refs_json
         assert "messages:1" in refs_json
         assert "NTR NH 4BBGUB" in body_text
+    finally:
+        local_conn.close()
+
+
+def test_commstat_other_location_remarks_infer_impacted_state_without_street_false_positive() -> None:
+    state, state_confidence, geo_confidence = infer_state_and_geo(
+        "DM09CL",
+        "Reno-Sparks NV Evacuation Center||4590 S Virginia St Reno NV 89502",
+    )
+
+    assert state == "NV"
+    assert state_confidence == "remarks"
+    assert geo_confidence == "grid6"
+
+
+def test_commstat_standard_message_parser_preserves_other_location_state() -> None:
+    parsed = parse_commstat_message(
+        "KD9DSS: @COMMSTAT ,DM09CL,2,R123,211111111111,Reno-Sparks NV Evacuation Center,{&%3}",
+        target_hint="@COMMSTAT",
+        source_value=3,
+    )
+
+    assert parsed is not None
+    assert parsed["grid"] == "DM09CL"
+    assert parsed["scope"] == "My Community"
+    assert parsed["metadata"]["state_code"] == "NV"
+    assert parsed["metadata"]["state_confidence"] == "remarks"
+
+
+def test_commstat3_statrep_ingest_sets_state_from_other_location_remarks(tmp_path: Path) -> None:
+    source_db = tmp_path / "traffic.db3"
+    _create_commstat3_db(source_db)
+    conn = sqlite3.connect(source_db)
+    try:
+        conn.execute(
+            """
+            INSERT INTO statrep(
+                datetime, date, freq, db, source, sr_id, from_callsign, target, grid, scope,
+                map, power, water, med, telecom, travel, internet, fuel, food, crime, civil, political, comments
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-08-25 19:45:44",
+                "2026-08-25",
+                0,
+                30,
+                3,
+                "Reno1",
+                "KD9DSS",
+                "@COMMSTAT",
+                "DM09CL",
+                "COUNTY",
+                "2",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "1",
+                "Reno-Sparks NV Evacuation Center||4590 S Virginia St Reno NV 89502",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    local_conn = sqlite3.connect(":memory:")
+    try:
+        _ensure_local_tables(local_conn)
+        _ingest_commstat3(local_conn, source_db, max_rows=50)
+
+        row = local_conn.execute(
+            """
+            SELECT state_code, grid, scope, body_text, payload_json
+            FROM commstat_artifacts
+            """
+        ).fetchone()
+        assert row[0] == "NV"
+        assert row[1] == "DM09CL"
+        assert row[2] == "COUNTY"
+        assert "Reno-Sparks NV" in row[3]
     finally:
         local_conn.close()
 

@@ -2859,8 +2859,8 @@ class SettingsTab(QWidget):
         configured_radios_group = QGroupBox("Configured Radios")
         configured_radios_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         configured_radios_layout = QVBoxLayout(configured_radios_group)
-        configured_radios_layout.setContentsMargins(10, 10, 10, 12)
-        configured_radios_layout.setSpacing(6)
+        configured_radios_layout.setContentsMargins(8, 6, 8, 8)
+        configured_radios_layout.setSpacing(4)
         self.add_device_profile_btn = QPushButton("Add Radio")
         self.add_device_profile_btn.setToolTip(
             "Start guided setup for a new radio or SDR: identity, software used, connection, and readiness."
@@ -2886,13 +2886,13 @@ class SettingsTab(QWidget):
         self.device_profile_selector_scroll.setFrameShape(QFrame.NoFrame)
         self.device_profile_selector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.device_profile_selector_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.device_profile_selector_scroll.setMinimumHeight(72)
-        self.device_profile_selector_scroll.setMaximumHeight(92)
+        self.device_profile_selector_scroll.setMinimumHeight(44)
+        self.device_profile_selector_scroll.setMaximumHeight(54)
         self.device_profile_selector_scroll.setWidget(self.device_profile_selector_widget)
         configured_radios_layout.addWidget(self.device_profile_selector_scroll)
         radio_selector_actions = QHBoxLayout()
         radio_selector_actions.setContentsMargins(0, 0, 0, 0)
-        radio_selector_actions.setSpacing(8)
+        radio_selector_actions.setSpacing(6)
         self.selector_activate_device_profile_btn = QPushButton("Use Radio")
         self.selector_activate_device_profile_btn.setToolTip("Activate the selected radio so FIO can use it now.")
         self.selector_activate_device_profile_btn.setAccessibleName("Use selected radio")
@@ -2911,10 +2911,10 @@ class SettingsTab(QWidget):
         )
         self.selector_remove_device_profile_btn.setAccessibleName("Remove selected radio")
         self.selector_remove_device_profile_btn.clicked.connect(self._delete_device_profiles)
-        radio_selector_actions.addWidget(QLabel("Selected Radio:"))
+        radio_selector_actions.addWidget(QLabel("Selected:"))
         self.selector_selected_device_profile_label = QLabel("--")
         self.selector_selected_device_profile_label.setAccessibleName("Selected radio name")
-        self.selector_selected_device_profile_label.setMinimumWidth(120)
+        self.selector_selected_device_profile_label.setMinimumWidth(90)
         radio_selector_actions.addWidget(self.selector_selected_device_profile_label)
         radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
@@ -5017,6 +5017,20 @@ class SettingsTab(QWidget):
             )
         )
 
+        self.js8_profile_edit = QLineEdit()
+        self.js8_profile_edit.setPlaceholderText("Folder containing this radio's JS8Call save files")
+        self.js8_profile_edit.setToolTip(
+            "JS8Call profile/save folder for the selected radio. FIO uses this with DIRECTED.TXT, ALL.TXT, "
+            "and inbox.db3 to keep multi-rig JS8 traffic scoped to the correct radio."
+        )
+        js8_v.addWidget(
+            build_js8_path_row(
+                "JS8Call Profile Folder:",
+                self.js8_profile_edit,
+                self._choose_js8_profile_path,
+            )
+        )
+
         self.js8_directed_edit = QLineEdit()
         js8_directed_autofill_btn = self._make_contextual_autofill_button(
             "js8_directed_log",
@@ -5310,6 +5324,7 @@ class SettingsTab(QWidget):
         self.js8_expect_requests_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         js8_v.addWidget(self.js8_expect_requests_table)
 
+        self.js8_profile_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(lambda _text: self._refresh_spotter_form_mapper())
@@ -7126,7 +7141,6 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(custom_tools_group, self._summary_custom_tools)
         custom_tools_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.custom_tools_section_group = custom_tools_group
-        self._add_settings_section(custom_tools_group, scope="radio")
 
         # Launch Control
         launch_group = QGroupBox("Launch Control")
@@ -7142,7 +7156,7 @@ class SettingsTab(QWidget):
             self.launch_guidance_card,
             self.launch_guidance_title_label,
             self.launch_guidance_status_label,
-        ) = _make_support_card("Selected Radio Launch Bundle", "launchControlGuidanceStatus")
+        ) = _make_support_card("Selected Radio Launch Apps", "launchControlGuidanceStatus")
         launch_v.addWidget(self.launch_guidance_card)
 
         self.launch_hint_label = QLabel()
@@ -7152,12 +7166,14 @@ class SettingsTab(QWidget):
         launch_global_row.setContentsMargins(0, 0, 0, 0)
         launch_global_row.setSpacing(8)
         launch_global_row.addWidget(self.launch_hint_label, 1)
-        self.launch_all_with_startup_chk = QCheckBox("Launch this radio with FreqInOut")
+        self.launch_all_with_startup_chk = QCheckBox("Allow startup launch for this radio")
         launch_global_row.addWidget(self.launch_all_with_startup_chk)
         launch_v.addLayout(launch_global_row)
 
-        self.launch_control_table = QTableWidget(0, 3)
-        self.launch_control_table.setHorizontalHeaderLabels(["Application", "Enabled", "Launch on Startup"])
+        self.launch_control_table = QTableWidget(0, 5)
+        self.launch_control_table.setHorizontalHeaderLabels(
+            ["App", "Monitor Health", "Launch at Startup", "Start", "Status"]
+        )
         self.launch_control_table.verticalHeader().setVisible(False)
         self.launch_control_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.launch_control_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -7165,6 +7181,8 @@ class SettingsTab(QWidget):
         launch_header.setSectionResizeMode(0, QHeaderView.Stretch)
         launch_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         launch_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        launch_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        launch_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.launch_control_table.setMinimumHeight(150)
         self.launch_control_table.setMaximumHeight(260)
         self.launch_control_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -7177,7 +7195,7 @@ class SettingsTab(QWidget):
         self.launch_order_up_btn = QPushButton("Up")
         self.launch_order_down_btn = QPushButton("Down")
         self.launch_reset_order_btn = QPushButton("Reset Default Order")
-        self.launch_configured_now_btn = QPushButton("Launch This Radio")
+        self.launch_configured_now_btn = QPushButton("Start Startup Apps")
         self.launch_stop_btn = QPushButton("Stop Launch Sequence")
         self.launch_stop_btn.setEnabled(False)
         launch_actions_grid.addWidget(QLabel("Order:"), 0, 0)
@@ -7193,6 +7211,7 @@ class SettingsTab(QWidget):
         self.launch_summary_label = QLabel("Launch status: Idle")
         self.launch_summary_label.setWordWrap(True)
         launch_v.addWidget(self.launch_summary_label)
+        launch_v.addWidget(custom_tools_group)
 
         self.launch_order_up_btn.clicked.connect(lambda: self._move_launch_row(-1))
         self.launch_order_down_btn.clicked.connect(lambda: self._move_launch_row(1))
@@ -7742,7 +7761,7 @@ class SettingsTab(QWidget):
         btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
         self._settings_section_task_buttons[group] = btn
         count = layout.count()
-        columns = 6 if str(scope or "").strip().lower() == "global" else 5
+        columns = 6
         row = count // columns
         col = count % columns
         layout.addWidget(btn, row, col)
@@ -7935,18 +7954,20 @@ class SettingsTab(QWidget):
         if hasattr(self, "configured_radios_group"):
             self.configured_radios_group.setVisible(radio_mode)
         if hasattr(self, "settings_global_tasks_label"):
-            self.settings_global_tasks_label.setVisible(not radio_mode)
+            self.settings_global_tasks_label.setVisible(False)
         if hasattr(self, "settings_global_tasks_widget"):
-            self.settings_global_tasks_widget.setVisible(not radio_mode)
+            self.settings_global_tasks_widget.setVisible(False)
         if hasattr(self, "settings_radio_tasks_label"):
-            self.settings_radio_tasks_label.setVisible(radio_mode)
+            self.settings_radio_tasks_label.setVisible(False)
         if hasattr(self, "settings_radio_tasks_widget"):
-            self.settings_radio_tasks_widget.setVisible(radio_mode)
+            self.settings_radio_tasks_widget.setVisible(False)
         if hasattr(self, "add_device_profile_btn"):
             self.add_device_profile_btn.setVisible(radio_mode)
         if hasattr(self, "settings_task_title_label"):
+            self.settings_task_title_label.setVisible(False)
             self.settings_task_title_label.setText("Radio Settings" if radio_mode else "Global Settings")
         if hasattr(self, "settings_task_hint_label"):
+            self.settings_task_hint_label.setVisible(False)
             self.settings_task_hint_label.setText(
                 "Select the radio, then choose the setting area to review or finish."
                 if radio_mode
@@ -8723,13 +8744,14 @@ class SettingsTab(QWidget):
         return f"{count} entr{'y' if count == 1 else 'ies'} in {groups} group{'s' if groups != 1 else ''}"
 
     def _summary_js8_settings(self) -> str:
+        profile = "set" if hasattr(self, "js8_profile_edit") and self.js8_profile_edit.text().strip() else "missing"
         directed = "set" if self.js8_directed_edit.text().strip() else "missing"
         fio_spotter_forms = "set" if self.js8_forms_edit.text().strip() else "missing"
         js8call = "set" if hasattr(self, "js8call_path_edit") and self.js8call_path_edit.text().strip() else "missing"
         external_spotter = "set" if hasattr(self, "js8spotter_path_edit") and self.js8spotter_path_edit.text().strip() else "not used"
         commstat = "set" if hasattr(self, "commstat_path_edit") and self.commstat_path_edit.text().strip() else "missing"
         return (
-            f"JS8Call {js8call}, FIO Spotter forms {fio_spotter_forms}, "
+            f"JS8Call {js8call}, profile {profile}, FIO Spotter forms {fio_spotter_forms}, "
             f"External JS8Spotter app {external_spotter}, CommStat {commstat}, DIRECTED {directed}"
         )
 
@@ -10265,6 +10287,8 @@ class SettingsTab(QWidget):
         self._refresh_condition_alert_rules_table()
 
         self.js8_directed_edit.setText(data.get("js8_directed_path", "") or "")
+        if hasattr(self, "js8_profile_edit"):
+            self.js8_profile_edit.setText(data.get("js8_profile_path", "") or "")
 
         for prog_name, meta in self.PROGRAMS.items():
             path_key = meta["setting_key"]
@@ -10716,6 +10740,7 @@ class SettingsTab(QWidget):
         data["primary_js8_groups"] = groups
 
         data["js8_directed_path"] = self.js8_directed_edit.text().strip()
+        data["js8_profile_path"] = self.js8_profile_edit.text().strip() if hasattr(self, "js8_profile_edit") else ""
 
         # Radio software paths from UI
         for prog_name, meta in self.PROGRAMS.items():
@@ -11467,6 +11492,7 @@ class SettingsTab(QWidget):
             self.js8_host_edit,
             self.js8_port_edit,
             self.js8_offset_edit,
+            self.js8_profile_edit,
             self.js8_directed_edit,
             self.js8_forms_edit,
             self.js8call_path_edit,
@@ -12211,6 +12237,7 @@ class SettingsTab(QWidget):
         self._refresh_radio_specific_section_visibility()
         self._refresh_radio_settings_nav_label()
         self._refresh_radio_context_labels()
+        self._refresh_launch_control_table()
         self._update_device_profiles_hint()
         self._refresh_multi_rig_status_card()
 
@@ -12374,12 +12401,9 @@ class SettingsTab(QWidget):
             status_bits.append("Default")
         if self._profile_needs_operator_name(profile):
             status_bits.append("Name Needed")
-        device_class = self._device_class_label(str(profile.get("device_class", "") or ""))
-        if device_class and device_class.lower() != "transceiver":
-            status_bits.append(device_class)
         if selected:
             status_bits.insert(0, "SELECTED")
-        return f"{name}\n{' | '.join(dict.fromkeys(status_bits))}"
+        return f"{name} | {' | '.join(dict.fromkeys(status_bits))}"
 
     def _radio_selector_readiness_summary(
         self,
@@ -12433,8 +12457,8 @@ class SettingsTab(QWidget):
             btn = QPushButton(self._radio_selector_button_text(profile, readiness_report, selected=selected))
             btn.setCheckable(True)
             btn.setChecked(selected)
-            btn.setMinimumWidth(190 if selected else 170)
-            btn.setMinimumHeight(52)
+            btn.setMinimumWidth(150 if selected else 135)
+            btn.setMinimumHeight(34)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setAccessibleName(
                 f"Selected radio: {self._profile_display_name(profile)}"
@@ -13944,7 +13968,6 @@ class SettingsTab(QWidget):
             varac_visible and self._varac_cluster_mode_enabled(),
         )
         self._set_settings_section_visible(getattr(self, "launch_control_section_group", None), launch_visible)
-        self._set_settings_section_visible(getattr(self, "custom_tools_section_group", None), launch_visible)
         self._refresh_radio_profile_software_chips()
         self._select_radio_profile_guided_task(getattr(self, "radio_profile_guided_task_key", "review"), scroll=False)
 
@@ -14325,7 +14348,7 @@ class SettingsTab(QWidget):
         current_id = int(self._software_radio_current_id or 0)
         if current_id > 0 and self._device_profile_by_id(current_id):
             return current_id
-        focused_id = self._current_device_profile_focus_id()
+        focused_id = int(self._settings_radio_focus_id or 0) or self._current_device_profile_focus_id()
         if focused_id and self._device_profile_by_id(int(focused_id)):
             focused_profile = self._device_profile_by_id(int(focused_id))
             if focused_profile and str(focused_profile.get("device_class", "") or "").strip().lower() != "observer":
@@ -14778,12 +14801,17 @@ class SettingsTab(QWidget):
     def _sync_software_radio_to_device_focus(self) -> None:
         if not hasattr(self, "software_radio_combo") or self._software_radio_combo_loading:
             return
-        focused_id = self._current_device_profile_focus_id()
+        focused_id = int(self._settings_radio_focus_id or 0) or self._current_device_profile_focus_id()
         profile = self._device_profile_by_id(int(focused_id or 0)) if focused_id else None
         if not profile or str(profile.get("device_class", "") or "").strip().lower() == "observer":
             return
         target_index = self.software_radio_combo.findData(int(focused_id or 0))
-        if target_index < 0 or target_index == self.software_radio_combo.currentIndex():
+        if target_index < 0:
+            return
+        if target_index == self.software_radio_combo.currentIndex():
+            if int(self._software_radio_current_id or 0) != int(focused_id or 0):
+                self._software_radio_current_id = int(focused_id or 0)
+                self._load_selected_software_radio_state()
             return
         self.software_radio_combo.setCurrentIndex(target_index)
 
@@ -23103,7 +23131,57 @@ class SettingsTab(QWidget):
 
     def _launch_bundle_source_profile(self) -> Optional[Dict[str, Any]]:
         profile = self._selected_settings_radio_profile()
-        return dict(profile) if isinstance(profile, dict) else None
+        if not isinstance(profile, dict):
+            return None
+        out = dict(profile)
+        radio_id = int(out.get("id", 0) or 0)
+        state: Optional[Dict[str, Any]] = None
+        try:
+            if radio_id > 0 and int(self._software_radio_current_id or 0) == radio_id:
+                state = self._capture_radio_software_view_state()
+            elif radio_id > 0 and radio_id in self._software_radio_drafts:
+                state = dict(self._software_radio_drafts[radio_id])
+        except Exception:
+            state = None
+        if isinstance(state, dict):
+            path_updates = {
+                "js8_install_path": "path_js8call",
+                "spotter_launch_path": "path_js8spotter",
+                "commstat_launch_path": "path_commstat",
+                "flrig_path": "path_flrig",
+                "fldigi_path": "path_fldigi",
+                "flmsg_path": "path_flmsg",
+                "flamp_path": "path_flamp",
+                "varac_install_path": "varac_path",
+                "launch_cmd": "varac_launch_cmd",
+            }
+            for profile_key, state_key in path_updates.items():
+                value = str(state.get(state_key, "") or "").strip()
+                if value:
+                    out[profile_key] = value
+        return out
+
+    @staticmethod
+    def _launch_item_profile_path(profile: Optional[Dict[str, Any]], name: str) -> str:
+        if not isinstance(profile, dict):
+            return ""
+        app_name = str(name or "").strip()
+        if app_name == "VarAC":
+            return (
+                str(profile.get("varac_install_path", "") or "").strip()
+                or str(profile.get("launch_cmd", "") or "").strip()
+            )
+        path_map = {
+            "FLRig": "flrig_path",
+            "FLDigi": "fldigi_path",
+            "FLMsg": "flmsg_path",
+            "FLAmp": "flamp_path",
+            "JS8Call": "js8_install_path",
+            "JS8Spotter": "spotter_launch_path",
+            "CommStat": "commstat_launch_path",
+        }
+        path_key = path_map.get(app_name, "")
+        return str(profile.get(path_key, "") or "").strip() if path_key else ""
 
     @staticmethod
     def _profile_display_name(profile: Dict[str, Any]) -> str:
@@ -23136,8 +23214,8 @@ class SettingsTab(QWidget):
         software_key = mapping.get(app_name)
         if not software_key:
             return True
-        if app_name == "JS8Spotter":
-            return bool(str(profile.get("spotter_launch_path", "") or "").strip())
+        if self._launch_item_profile_path(profile, app_name):
+            return True
         return bool(self._radio_software_enabled(profile, software_key))
 
     def _is_launch_item_configured(self, name: str) -> bool:
@@ -23147,26 +23225,7 @@ class SettingsTab(QWidget):
         if self._custom_tool_command(name):
             return True
         if isinstance(profile, dict):
-            if name == "VarAC":
-                return bool(
-                    str(profile.get("varac_install_path", "") or "").strip()
-                    or str(profile.get("launch_cmd", "") or "").strip()
-                )
-            if name == "JS8Call":
-                return bool(str(profile.get("js8_install_path", "") or "").strip())
-            if name == "JS8Spotter":
-                return bool(str(profile.get("spotter_launch_path", "") or "").strip())
-            if name == "CommStat":
-                return bool(str(profile.get("commstat_launch_path", "") or "").strip())
-            if name == "FLRig":
-                return bool(str(profile.get("flrig_path", "") or "").strip())
-            if name == "FLDigi":
-                return bool(str(profile.get("fldigi_path", "") or "").strip())
-            if name == "FLMsg":
-                return bool(str(profile.get("flmsg_path", "") or "").strip())
-            if name == "FLAmp":
-                return bool(str(profile.get("flamp_path", "") or "").strip())
-            return False
+            return bool(self._launch_item_profile_path(profile, name))
         settings_data = self.settings.all()
         if name == "VarAC":
             path_val = str(settings_data.get("varac_path", "") or "").strip()
@@ -23233,6 +23292,64 @@ class SettingsTab(QWidget):
                     item["startup"] = startup
                     break
 
+    @staticmethod
+    def _launch_control_status_key(name: str) -> str:
+        app_name = str(name or "").strip()
+        return "JS8Call_API" if app_name == "JS8Call" else app_name
+
+    @staticmethod
+    def _launch_control_status_text(info: object) -> str:
+        if not isinstance(info, dict):
+            return "Unknown"
+        if bool(info.get("running", False)):
+            reachable = info.get("reachable", None)
+            if reachable is True:
+                return "Running, connected"
+            if reachable is False and "reachable" in info:
+                return "Running, not connected"
+            return "Running"
+        return "Not running"
+
+    def _launch_control_status_snapshot(self) -> Dict[str, Dict[str, object]]:
+        try:
+            snapshot = self._selected_radio_status_snapshot(force=True)
+            if snapshot:
+                return snapshot
+        except Exception:
+            pass
+        try:
+            return self._software_status_probe.status_snapshot(force=True)
+        except Exception:
+            return {}
+
+    def _start_launch_control_item(self, name: str) -> None:
+        app_name = str(name or "").strip()
+        if not app_name:
+            return
+        self._sync_launch_cache_from_table()
+        scoped_items = self._radio_scoped_launch_items()
+        item = next((dict(row) for row in scoped_items if str(row.get("name", "")).strip() == app_name), None)
+        if item is None:
+            item = {"name": app_name}
+            item.update(self._radio_launch_overrides_for_name(app_name, self._launch_bundle_source_profile()))
+        item["enabled"] = True
+        item["startup"] = True
+        if hasattr(self.settings, "set"):
+            self.settings.set("custom_tool_items", [dict(row) for row in self._custom_tool_items_cache])
+        if not self.launch_orchestrator.start_manual_sequence([item]):
+            self._publish_launch_control_feedback(
+                status="blocked",
+                summary=f"Launch blocked: {app_name} was not started.",
+                detail="Check the configured launch path or wait for the current launch sequence to finish.",
+            )
+            return
+        self._publish_launch_control_feedback(
+            status="in_progress",
+            summary=f"Starting {app_name}.",
+            detail="FreqInOut is starting the selected configured application.",
+        )
+        self._update_launch_control_buttons()
+
     def _refresh_launch_control_table(self) -> None:
         _perf_t0 = time.perf_counter()
         if not hasattr(self, "launch_control_table"):
@@ -23290,6 +23407,7 @@ class SettingsTab(QWidget):
         self._launch_table_loading = True
         self.launch_control_table.blockSignals(True)
         self.launch_control_table.setRowCount(len(visible_items))
+        snapshot = self._launch_control_status_snapshot()
         for row, item in enumerate(visible_items):
             name = str(item.get("name", "")).strip()
             app_item = QTableWidgetItem(name)
@@ -23305,6 +23423,17 @@ class SettingsTab(QWidget):
             startup_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             startup_item.setCheckState(Qt.Checked if bool(item.get("startup", False)) else Qt.Unchecked)
             self.launch_control_table.setItem(row, 2, startup_item)
+
+            start_btn = QPushButton("Start")
+            start_btn.setEnabled(not self.launch_orchestrator.is_active())
+            start_btn.clicked.connect(lambda _checked=False, app_name=name: self._start_launch_control_item(app_name))
+            self.launch_control_table.setCellWidget(row, 3, start_btn)
+
+            status_key = self._launch_control_status_key(name)
+            status_text = self._launch_control_status_text(snapshot.get(status_key, {}))
+            status_item = QTableWidgetItem(status_text)
+            status_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.launch_control_table.setItem(row, 4, status_item)
         self.launch_control_table.blockSignals(False)
         self._launch_table_loading = False
         if self.launch_control_table.rowCount() > 0 and self.launch_control_table.currentRow() < 0:
@@ -23332,8 +23461,20 @@ class SettingsTab(QWidget):
         self.launch_order_up_btn.setEnabled(bool(can_move and row > 0))
         self.launch_order_down_btn.setEnabled(bool(can_move and row < self.launch_control_table.rowCount() - 1))
         self.launch_reset_order_btn.setEnabled(has_rows)
-        self.launch_configured_now_btn.setEnabled(has_rows and launch_allowed and not self.launch_orchestrator.is_active())
+        has_startup_rows = False
+        if has_rows:
+            for item in getattr(self, "_launch_items_cache", []):
+                if isinstance(item, dict) and bool(item.get("startup", False)):
+                    has_startup_rows = True
+                    break
+        self.launch_configured_now_btn.setEnabled(
+            has_rows and has_startup_rows and launch_allowed and not self.launch_orchestrator.is_active()
+        )
         self.launch_stop_btn.setEnabled(self.launch_orchestrator.is_active())
+        for row in range(self.launch_control_table.rowCount() if has_rows else 0):
+            widget = self.launch_control_table.cellWidget(row, 3)
+            if isinstance(widget, QPushButton):
+                widget.setEnabled(launch_allowed and not self.launch_orchestrator.is_active())
 
     def _refresh_launch_control_guidance(self) -> None:
         if not hasattr(self, "launch_guidance_card"):
@@ -23344,7 +23485,7 @@ class SettingsTab(QWidget):
                 self.launch_guidance_card,
                 self.launch_guidance_title_label,
                 self.launch_guidance_status_label,
-                title="Selected Radio Launch Bundle",
+                title="Selected Radio Launch Apps",
                 text="Select a radio profile to review or start that radio's configured software.",
                 level="warning",
             )
@@ -23362,13 +23503,13 @@ class SettingsTab(QWidget):
         text = (
             f"Selected radio: {radio_name}. Frequency control: {backend_label}. "
             f"Software: {bundle}. Endpoints: {endpoint}. "
-            f"Launch with FIO: {'enabled' if launch_enabled else 'off'}."
+            f"Startup launch: {'enabled' if launch_enabled else 'off'}."
         )
         self._set_guidance_card_state(
             self.launch_guidance_card,
             self.launch_guidance_title_label,
             self.launch_guidance_status_label,
-            title=f"{radio_name} Launch Bundle",
+            title=f"{radio_name} Launch Apps",
             text=text,
             level=level,
         )
@@ -23380,8 +23521,8 @@ class SettingsTab(QWidget):
             ]
             active_text = f" Active radios: {', '.join(active_names)}." if active_names else ""
             self.launch_hint_label.setText(
-                "Only apps configured for this selected radio are shown here, along with shared custom tools. "
-                "Launch order controls this radio's startup sequence."
+                "Configured apps and shared custom tools appear here. Monitor Health controls the top Health indicator; "
+                "Launch at Startup controls what FIO starts automatically."
                 + active_text
             )
 
@@ -23456,18 +23597,25 @@ class SettingsTab(QWidget):
                     return
             except Exception:
                 pass
-        started = self.launch_orchestrator.start_manual_sequence(self._radio_scoped_launch_items())
+        startup_items: List[Dict[str, object]] = []
+        for item in self._radio_scoped_launch_items():
+            if not bool(item.get("startup", False)):
+                continue
+            launch_item = dict(item)
+            launch_item["enabled"] = True
+            startup_items.append(launch_item)
+        started = self.launch_orchestrator.start_manual_sequence(startup_items)
         if not started:
             self._publish_launch_control_feedback(
                 status="blocked",
-                summary="Launch blocked: no enabled configured applications.",
-                detail="Enable at least one configured application in Launch Control before launching.",
+                summary="Launch blocked: no startup applications selected.",
+                detail="Check Launch at Startup for at least one configured application before using Start Startup Apps.",
             )
             return
         self._publish_launch_control_feedback(
             status="in_progress",
             summary="Launch sequence started.",
-            detail="FreqInOut is starting the configured applications for the selected radio.",
+            detail="FreqInOut is starting the selected startup applications for the selected radio.",
         )
         self._update_launch_control_buttons()
 
@@ -23772,6 +23920,15 @@ class SettingsTab(QWidget):
             tooltip = str(info.get("tooltip", "Not running"))
             lbl.setStyleSheet(led_style(state, theme))
             lbl.setToolTip(tooltip)
+        if hasattr(self, "launch_control_table"):
+            for row, name in enumerate(getattr(self, "_launch_visible_names", [])):
+                if row >= self.launch_control_table.rowCount():
+                    continue
+                status_key = self._launch_control_status_key(name)
+                status_text = self._launch_control_status_text(snapshot.get(status_key, {}))
+                status_item = self.launch_control_table.item(row, 4)
+                if status_item is not None:
+                    status_item.setText(status_text)
 
         # Keep VarAC path tooltip in sync with runtime status.
         if hasattr(self, "varac_path_edit"):
@@ -27686,6 +27843,24 @@ class SettingsTab(QWidget):
                 self.js8spotter_activity_table.setItem(idx, col, item)
 
     # ---------- JS8 DIRECTED PATH ---------- #
+
+    def _choose_js8_profile_path(self):
+        start = self.js8_profile_edit.text().strip() if hasattr(self, "js8_profile_edit") else ""
+        if not start and hasattr(self, "js8_directed_edit"):
+            directed = self.js8_directed_edit.text().strip()
+            if directed:
+                start = str(Path(directed).expanduser().parent)
+        fn = QFileDialog.getExistingDirectory(
+            self,
+            "Select JS8Call profile folder",
+            start,
+        )
+        if not fn:
+            return
+        self.js8_profile_edit.setText(fn)
+        log.info("JS8Call profile folder staged for selected radio: %s", fn)
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
 
     def _choose_js8_directed_path(self):
         fn, _ = QFileDialog.getOpenFileName(

@@ -347,9 +347,10 @@ class LaunchOrchestrator(QObject):
             name = str(item.get("name", "")).strip()
             if name not in catalog:
                 continue
-            if not bool(item.get("enabled", False)):
-                continue
-            if startup_only and not bool(item.get("startup", False)):
+            if startup_only:
+                if not bool(item.get("startup", False)):
+                    continue
+            elif not bool(item.get("enabled", False)):
                 continue
             has_override = bool(
                 str(item.get("launch_path_override", "") or "").strip()

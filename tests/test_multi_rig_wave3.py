@@ -305,6 +305,23 @@ def test_launch_orchestrator_runtime_launch_override_blocks_sequences(monkeypatc
     assert orchestrator.start_manual_sequence([]) is False
 
 
+def test_launch_orchestrator_startup_uses_startup_flag_not_health_monitor(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    orchestrator = LaunchOrchestrator(settings)
+    queue = orchestrator._build_queue(
+        [
+            {"name": "FLRig", "enabled": False, "startup": True, "launch_path_override": "/apps/flrig"},
+            {"name": "FLDigi", "enabled": True, "startup": False, "launch_path_override": "/apps/fldigi"},
+        ],
+        startup_only=True,
+    )
+
+    assert queue == [{"name": "FLRig", "enabled": False, "startup": True, "launch_path_override": "/apps/flrig"}]
+
+
 def test_launch_orchestrator_resolves_radio_scoped_path_override(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

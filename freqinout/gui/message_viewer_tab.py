@@ -66,9 +66,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 
-MESSAGE_INBOX_BODY_MIN_WIDTH = 1320
-MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 1260
-MESSAGE_INBOX_FOCUS_MIN_WIDTH = 980
+MESSAGE_INBOX_BODY_MIN_WIDTH = 900
+MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 0
+MESSAGE_INBOX_FOCUS_MIN_WIDTH = 680
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -97,6 +97,7 @@ from freqinout.core.message_file_metadata import (
     file_metadata_key,
     form_report_timestamp_from_summary,
     has_stale_message_file_metadata,
+    load_existing_message_file_metadata_records,
     load_message_file_metadata_map,
     remove_file_record_from_groups,
     save_message_file_metadata_from_rows,
@@ -132,6 +133,7 @@ from freqinout.core.message_source_delete import (
     sitrep_message_key as _core_sitrep_message_key,
     soft_delete_varac_source_row as _core_soft_delete_varac_source_row,
 )
+from freqinout.core.observation_store import delete_observations_by_source_refs
 from freqinout.core.message_row_presentation import (
     MessageRowPresentation,
     commstat_message_row_presentation,
@@ -365,7 +367,9 @@ RECEIVED_FILTER_CHOICES = [
     ("Any time", 0),
     ("Last 15 min", 15 * 60),
     ("Last 1 hour", 60 * 60),
+    ("Last 3 hours", 3 * 60 * 60),
     ("Last 6 hours", 6 * 60 * 60),
+    ("Last 12 hours", 12 * 60 * 60),
     ("Last 24 hours", 24 * 60 * 60),
     ("Last 7 days", 7 * 24 * 60 * 60),
     ("Older than 2 weeks", -14 * 24 * 60 * 60),
@@ -1664,7 +1668,7 @@ def unified_file_message_from_candidate(
             candidate.from_call,
             candidate.to_call,
             rcv_display,
-            candidate.search_detail,
+            " ".join(part for part in (candidate.search_detail, " ".join(candidate.topics)) if part),
         ),
         auth_state=auth_state,
         auth_detail=auth_detail,
@@ -1704,7 +1708,7 @@ def unified_message_from_presentation(
             presentation.from_call,
             presentation.to_call,
             rcv_display,
-            presentation.search_detail,
+            " ".join(part for part in (presentation.search_detail, " ".join(presentation.topics)) if part),
         ),
         auth_state=auth_state,
         auth_detail=auth_detail,
@@ -2590,6 +2594,7 @@ class MessageViewerTab(QWidget):
         self._compose_signing_key_error: str = ""
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
+        self._map_context_filter: Dict[str, object] = {}
         self._locally_deleted_row_keys: set[tuple] = set()
         self._filters_initialized = False
         self._has_active_view = False
@@ -3004,6 +3009,46 @@ class MessageViewerTab(QWidget):
         if not db_path or not db_path.exists():
             return {}
         return load_message_file_metadata_map(db_path, records, ensure_scan_cache_table=self._ensure_file_scan_cache_table)
+
+    def _load_existing_cached_message_files(self) -> tuple[Dict[str, List[FileRecord]], Dict[tuple, Dict[str, object]]]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return {}, {}
+        return load_existing_message_file_metadata_records(
+            db_path,
+            ensure_scan_cache_table=self._ensure_file_scan_cache_table,
+        )
+
+    @staticmethod
+    def _merge_file_record_sets(
+        current: Dict[str, List[FileRecord]],
+        cached: Dict[str, List[FileRecord]],
+    ) -> Dict[str, List[FileRecord]]:
+        merged: Dict[str, List[FileRecord]] = {
+            "varac": list((current or {}).get("varac", [])),
+            "flmsg": list((current or {}).get("flmsg", [])),
+            "flamp": list((current or {}).get("flamp", [])),
+            "bbs": list((current or {}).get("bbs", [])),
+        }
+        seen = {
+            file_metadata_key(rec)
+            for recs in merged.values()
+            for rec in recs
+            if isinstance(rec, FileRecord)
+        }
+        for origin, recs in (cached or {}).items():
+            origin_key = str(origin or "").strip().lower()
+            if origin_key not in merged:
+                continue
+            for rec in recs:
+                if not isinstance(rec, FileRecord):
+                    continue
+                key = file_metadata_key(rec)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged[origin_key].append(rec)
+        return merged
 
     def _has_stale_message_file_metadata(self) -> bool:
         db_path_fn = getattr(self, "_db_path", None)
@@ -4232,6 +4277,7 @@ class MessageViewerTab(QWidget):
         self.inbox_actions_heading.setStyleSheet("font-weight: bold;")
         self.inbox_filters_heading = QLabel("Filters")
         self.inbox_filters_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_filters_heading.setVisible(False)
         self.inbox_bbs_heading = QLabel("BBS")
         self.inbox_bbs_heading.setStyleSheet("font-weight: bold;")
 
@@ -4244,6 +4290,7 @@ class MessageViewerTab(QWidget):
         compose_row.addStretch()
 
         self.inbox_received_label = QLabel("Received:")
+        self.inbox_received_label.setVisible(False)
         self.inbox_check_label = QLabel("Check:")
         self.inbox_bbs_label = QLabel("BBS:")
         self.inbox_message_type_label = QLabel("Type:")
@@ -4314,22 +4361,22 @@ class MessageViewerTab(QWidget):
         inbox_root.setSpacing(10)
         self.inbox_controls_panel = inbox_wrap
         self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")
-        self.inbox_controls_panel.setMinimumWidth(220)
-        self.inbox_controls_panel.setMaximumWidth(280)
+        self.inbox_controls_panel.setMinimumWidth(190)
+        self.inbox_controls_panel.setMaximumWidth(250)
         self.inbox_controls_scroll = QScrollArea()
         self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")
         self.inbox_controls_scroll.setWidgetResizable(True)
         self.inbox_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.inbox_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.inbox_controls_scroll.setFrameShape(QFrame.NoFrame)
-        self.inbox_controls_scroll.setMinimumWidth(232)
-        self.inbox_controls_scroll.setMaximumWidth(292)
+        self.inbox_controls_scroll.setMinimumWidth(202)
+        self.inbox_controls_scroll.setMaximumWidth(262)
         self.inbox_controls_scroll.setWidget(self.inbox_controls_panel)
         inbox_root.addWidget(self.inbox_controls_scroll, 0)
         inbox_body = QWidget()
         inbox_body.setObjectName("messagesInboxBody")
         inbox_body.setMinimumWidth(MESSAGE_INBOX_BODY_MIN_WIDTH)
-        inbox_body.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        inbox_body.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         self.inbox_body = inbox_body
         body = QVBoxLayout(inbox_body)
         body.setContentsMargins(0, 0, 0, 0)
@@ -4482,24 +4529,24 @@ class MessageViewerTab(QWidget):
         self.message_age_filter_label = QLabel("Age")
         self.message_age_filter_label.setStyleSheet("font-weight: bold;")
         self.operating_group_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.operating_group_filter.setMinimumWidth(220)
+        self.operating_group_filter.setMinimumWidth(160)
         self.show_all_message_groups_chk.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.show_all_message_groups_chk.setMinimumWidth(112)
+        self.show_all_message_groups_chk.setMinimumWidth(96)
         self.source_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        self.source_filter.setMinimumWidth(220)
+        self.source_filter.setMinimumWidth(160)
         self.received_filter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.received_filter.setFixedWidth(180)
+        self.received_filter.setFixedWidth(150)
         self.clear_filters_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.clear_filters_btn.setFixedWidth(138)
+        self.clear_filters_btn.setFixedWidth(120)
         self.advanced_filters_btn = QPushButton("Advanced Filters")
         self.advanced_filters_btn.setCheckable(True)
         self.advanced_filters_btn.setChecked(bool(self._advanced_filters_visible))
         self.advanced_filters_btn.setToolTip("Show detailed filters for time, type, status, sender, group, and source.")
         self.advanced_filters_btn.clicked.connect(self._toggle_advanced_filters)
         self.advanced_filters_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.advanced_filters_btn.setMinimumWidth(140)
+        self.advanced_filters_btn.setFixedWidth(125)
         self.message_funnel_widget.setMinimumWidth(MESSAGE_INBOX_FUNNEL_MIN_WIDTH)
-        self.message_funnel_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.message_funnel_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         funnel_layout.addWidget(self.message_group_filter_label)
         funnel_layout.addWidget(self.operating_group_filter, 2)
         funnel_layout.addWidget(self.show_all_message_groups_chk)
@@ -4549,7 +4596,7 @@ class MessageViewerTab(QWidget):
             focus_layout.addWidget(btn)
         focus_layout.addStretch()
         self.inbox_focus_widget.setMinimumWidth(MESSAGE_INBOX_FOCUS_MIN_WIDTH)
-        self.inbox_focus_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
         messages_layout.insertWidget(4, self.bulk_selection_bar)
@@ -4694,32 +4741,44 @@ class MessageViewerTab(QWidget):
 
     def _sync_advanced_filter_visibility(self) -> None:
         visible = bool(getattr(self, "_advanced_filters_visible", False))
-        if hasattr(self, "advanced_filters_btn"):
-            self.advanced_filters_btn.blockSignals(True)
-            self.advanced_filters_btn.setChecked(visible)
-            self.advanced_filters_btn.blockSignals(False)
-            self.advanced_filters_btn.setText("Hide Advanced Filters" if visible else "Advanced Filters")
-            self.advanced_filters_btn.setStyleSheet(
-                button_style("secondary" if visible else "muted", resolve_theme(self.settings))
-            )
-        widgets = [
-            getattr(self, "inbox_filters_heading", None),
-            getattr(self, "inbox_received_label", None),
-            getattr(self, "inbox_message_type_label", None),
-            getattr(self, "type_filter", None),
-            getattr(self, "inbox_status_label", None),
-            getattr(self, "status_filter", None),
-            getattr(self, "inbox_from_label", None),
-            getattr(self, "from_filter", None),
-            getattr(self, "inbox_to_label", None),
-            getattr(self, "to_filter", None),
-            getattr(self, "exclude_types_btn", None),
-        ]
-        for widget in widgets:
-            if widget is not None:
-                widget.setVisible(visible)
-        if hasattr(self, "clear_filters_btn"):
-            self.clear_filters_btn.setVisible(True)
+        container = getattr(self, "message_funnel_widget", None)
+        if container is not None:
+            container.setUpdatesEnabled(False)
+        try:
+            if hasattr(self, "advanced_filters_btn"):
+                self.advanced_filters_btn.blockSignals(True)
+                self.advanced_filters_btn.setChecked(visible)
+                self.advanced_filters_btn.blockSignals(False)
+                self.advanced_filters_btn.setText("Advanced Filters")
+                tooltip = (
+                    "Hide detailed filters for time, type, status, sender, group, and source."
+                    if visible
+                    else "Show detailed filters for time, type, status, sender, group, and source."
+                )
+                self.advanced_filters_btn.setToolTip(tooltip)
+                self.advanced_filters_btn.setStyleSheet(
+                    button_style("secondary" if visible else "muted", resolve_theme(self.settings))
+                )
+            widgets = [
+                getattr(self, "inbox_message_type_label", None),
+                getattr(self, "type_filter", None),
+                getattr(self, "inbox_status_label", None),
+                getattr(self, "status_filter", None),
+                getattr(self, "inbox_from_label", None),
+                getattr(self, "from_filter", None),
+                getattr(self, "inbox_to_label", None),
+                getattr(self, "to_filter", None),
+                getattr(self, "exclude_types_btn", None),
+            ]
+            for widget in widgets:
+                if widget is not None:
+                    widget.setVisible(visible)
+            if hasattr(self, "clear_filters_btn"):
+                self.clear_filters_btn.setVisible(True)
+        finally:
+            if container is not None:
+                container.setUpdatesEnabled(True)
+                container.updateGeometry()
 
     def _setup_clock_timer(self) -> None:
         if self._clock_timer is not None:
@@ -5150,6 +5209,34 @@ class MessageViewerTab(QWidget):
         }
         return labels.get(str(key or ""), str(key or "Other Forms"))
 
+    @staticmethod
+    def _spotter_forms_dir_usable(path_text: object) -> str:
+        text = str(path_text or "").strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser()
+        try:
+            if path.exists() and path.is_dir() and any(path.glob("MCF*.txt")):
+                return str(path)
+        except Exception:
+            return ""
+        return ""
+
+    def _compose_spotter_forms_path(self, target: Optional[ComposeRadioTarget] = None) -> str:
+        radio = target or self._selected_compose_radio_target()
+        if radio is not None:
+            configured = self._spotter_forms_dir_usable(
+                self._compose_profile_text(radio.profile, "js8_forms_path")
+                or self._compose_profile_text(radio.profile, "forms_path")
+            )
+            if configured:
+                return configured
+        return self._spotter_forms_dir_usable(self.settings.get("js8_forms_path", self.forms_path))
+
+    def _clear_spotter_form_caches(self) -> None:
+        self._form_cache.clear()
+        self._form_title_cache.clear()
+
     def _compose_family_entries(self) -> List[dict]:
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         entries: List[dict] = []
@@ -5157,7 +5244,7 @@ class MessageViewerTab(QWidget):
             entries.append({"kind": "standard", "key": "STANDARD", "label": "Standard Blank"})
             for family in discover_form_families(self.settings):
                 entries.append({"kind": "family", "key": family.key, "label": family.label, "family": family})
-        spotter_forms = discover_spotter_forms(self.settings.get("js8_forms_path", ""))
+        spotter_forms = discover_spotter_forms(self._compose_spotter_forms_path())
         if mode == "spotter":
             entries.append(
                 {
@@ -5889,8 +5976,11 @@ class MessageViewerTab(QWidget):
             except Exception:
                 pass
         self._compose_message_folder_root_cache = None
+        self._clear_spotter_form_caches()
         self._refresh_compose_message_folder_options(force=True)
         self._refresh_compose_bbs_location_targets()
+        if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter":
+            self._refresh_compose_forms()
         self._update_compose_preview()
 
     def _compose_radio_message_paths(self, target: Optional[ComposeRadioTarget]) -> Dict[str, str]:
@@ -6220,8 +6310,21 @@ class MessageViewerTab(QWidget):
         topic_filter: str = "",
         query_filter: str = "",
         source_family: str = "",
+        age_filter_seconds: object = 0,
+        concern_only: object = False,
     ) -> None:
         self.show_inbox_from_navigation()
+        try:
+            age_seconds = int(age_filter_seconds or 0)
+        except Exception:
+            age_seconds = 0
+        concern_active = str(concern_only or "").strip().lower() in {"1", "true", "yes", "y", "on"} or bool(
+            concern_only is True
+        )
+        self._map_context_filter = {
+            "age_filter_seconds": age_seconds,
+            "concern_only": concern_active,
+        }
         source = str(source_family or "").strip().lower()
         source_values = self._message_context_source_values(source)
         focus = {
@@ -6255,7 +6358,37 @@ class MessageViewerTab(QWidget):
         search = " ".join(search_parts)
         if hasattr(self, "rcv_search"):
             self.rcv_search.setText(search)
+        self._select_context_age_filter(age_seconds)
         self._apply_message_filters()
+
+    def _select_context_age_filter(self, age_seconds: int) -> None:
+        if not hasattr(self, "received_filter"):
+            return
+        seconds = int(age_seconds or 0)
+        if seconds <= 0:
+            return
+        label_map = {
+            15 * 60: "Last 15 min",
+            60 * 60: "Last 1 hour",
+            3 * 60 * 60: "Last 3 hours",
+            6 * 60 * 60: "Last 6 hours",
+            12 * 60 * 60: "Last 12 hours",
+            24 * 60 * 60: "Last 24 hours",
+            7 * 24 * 60 * 60: "Last 7 days",
+        }
+        idx = self.received_filter.findData(seconds)
+        if idx < 0:
+            self.received_filter.addItem(label_map.get(seconds, f"Last {seconds // 3600} hours"), seconds)
+            idx = self.received_filter.findData(seconds)
+        if idx >= 0:
+            try:
+                self.received_filter.blockSignals(True)
+                self.received_filter.setCurrentIndex(idx)
+            finally:
+                try:
+                    self.received_filter.blockSignals(False)
+                except Exception:
+                    pass
 
     @staticmethod
     def _message_context_source_values(source_family: object) -> list[str]:
@@ -9945,14 +10078,19 @@ class MessageViewerTab(QWidget):
                     "detail": ui_detail,
                     "trusted": ui_trusted,
                 }
+        current_files = {k: list(v) for k, v in self.files.items()}
+        file_metadata_map = self._load_message_file_metadata_map(current_files)
+        cached_files, cached_metadata_map = self._load_existing_cached_message_files()
+        files_for_rows = self._merge_file_record_sets(current_files, cached_files)
+        file_metadata_map.update(cached_metadata_map)
         return {
             "js8_messages": list(self.js8_messages),
             "spotter_messages": list(self.spotter_messages),
             "varac_messages": list(self.varac_messages),
             "sitrep_messages": list(self.sitrep_messages),
             "commstat_messages": list(self.commstat_messages),
-            "files": {k: list(v) for k, v in self.files.items()},
-            "file_metadata_map": self._load_message_file_metadata_map(self.files),
+            "files": files_for_rows,
+            "file_metadata_map": file_metadata_map,
             "read_state_map": dict(self._read_state_map),
             "signature_state_map": signature_map,
             "spotter_auth_state_map": self._spotter_msg_auth_state_map(),
@@ -10245,6 +10383,8 @@ class MessageViewerTab(QWidget):
             if not self._row_matches_workspace_filters(row):
                 continue
             if not self._row_matches_inbox_criteria(row, criteria):
+                continue
+            if not self._row_matches_map_context_filter(row):
                 continue
             filtered.append(row)
         self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
@@ -10598,6 +10738,30 @@ class MessageViewerTab(QWidget):
         focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
         return _core_row_matches_inbox_focus(row, focus)
 
+    def _row_matches_map_context_filter(self, row: UnifiedMessage) -> bool:
+        context = getattr(self, "_map_context_filter", {}) or {}
+        if not isinstance(context, dict) or not context.get("concern_only"):
+            return True
+        payload = getattr(row, "payload", None)
+        status_values = [
+            getattr(row, "status", ""),
+            getattr(payload, "status_label", ""),
+            getattr(payload, "alert_color", ""),
+            getattr(payload, "overall_status", ""),
+        ]
+        status_text = " ".join(str(value or "").strip().lower() for value in status_values if str(value or "").strip())
+        if any(term in status_text for term in ("red", "yellow", "orange", "caution", "degraded", "warning", "watch")):
+            return True
+        if any(term in status_text for term in ("green", "normal", "functioning", "all clear")):
+            return False
+        self._ensure_row_search_text(row)
+        haystack = str(row.search_text or "").lower()
+        if any(term in haystack for term in (" red", " yellow", " orange", " caution", "degraded", "warning", "outage", "down")):
+            return True
+        if any(term in haystack for term in (" green", "normal", "functioning", "all clear")):
+            return False
+        return True
+
     def _is_filter_or_sort_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
@@ -10620,6 +10784,8 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != 0:
             return True
         if str(getattr(self, "_inbox_focus", "all") or "all") != "all":
+            return True
+        if getattr(self, "_map_context_filter", {}) or {}:
             return True
         if (
             self._sort_column != self._default_sort_column
@@ -10697,6 +10863,7 @@ class MessageViewerTab(QWidget):
             and self._selected_message_sources() is None
             and self._selected_message_groups() is None
             and str(getattr(self, "_inbox_focus", "all") or "all") == "all"
+            and not (getattr(self, "_map_context_filter", {}) or {})
             and int(self.received_filter.currentData() or 0) == 0
             and not self.rcv_search.text().strip()
         ):
@@ -10711,6 +10878,7 @@ class MessageViewerTab(QWidget):
             self.show_all_message_groups_chk.blockSignals(True)
             self.show_all_message_groups_chk.setChecked(False)
         self._inbox_focus = "all"
+        self._map_context_filter = {}
         self._sync_inbox_focus_buttons()
         self.received_filter.setCurrentIndex(0)
         self.type_filter.setCurrentText("MSG Type...")
@@ -10940,7 +11108,7 @@ class MessageViewerTab(QWidget):
     def _active_message_scope_summary(self) -> str:
         focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
         focus_labels = {key: label for key, label, _tip in self._inbox_focus_options()}
-        return active_inbox_scope_summary(
+        summary = active_inbox_scope_summary(
             focus=focus,
             focus_labels=focus_labels,
             groups=self._selected_message_groups() if self._message_group_filter_active() else None,
@@ -10952,6 +11120,10 @@ class MessageViewerTab(QWidget):
             from_sel=self.from_filter.currentText() if hasattr(self, "from_filter") else "",
             to_sel=self.to_filter.currentText() if hasattr(self, "to_filter") else "",
         )
+        context = getattr(self, "_map_context_filter", {}) or {}
+        if isinstance(context, dict) and context.get("concern_only"):
+            return f"{summary}; Map concern only" if summary else "Map concern only"
+        return summary
 
     @staticmethod
     def _bulk_delete_sample_lines(rows: Sequence[UnifiedMessage], *, limit: int = 8) -> List[str]:
@@ -11821,6 +11993,7 @@ class MessageViewerTab(QWidget):
             or self._selected_message_sources() is not None
             or self._message_group_filter_active()
             or int(self.received_filter.currentData() or 0) != 0
+            or bool(getattr(self, "_map_context_filter", {}) or {})
             or bool(self.rcv_search.text().strip())
         )
 
@@ -12085,11 +12258,20 @@ class MessageViewerTab(QWidget):
                 )
             )
 
-        for origin, recs in self.files.items():
+        files_for_rows = self.files
+        file_metadata_map = dict(getattr(self, "_file_metadata_map", {}) or {})
+        try:
+            cached_files, cached_metadata_map = self._load_existing_cached_message_files()
+            files_for_rows = self._merge_file_record_sets(files_for_rows, cached_files)
+            file_metadata_map.update(cached_metadata_map)
+        except Exception:
+            pass
+
+        for origin, recs in files_for_rows.items():
             for rec in recs:
                 status = self._get_read_state(rec)
                 is_image = self._is_image_file(rec.path)
-                cached_meta = self._file_metadata_map.get(file_metadata_key(rec), {}) if not is_image else {}
+                cached_meta = file_metadata_map.get(file_metadata_key(rec), {}) if not is_image else {}
                 candidate = file_message_row_candidate(
                     rec,
                     origin,
@@ -12130,7 +12312,7 @@ class MessageViewerTab(QWidget):
                         row.rcv_display or "",
                         row.title or "",
                         row.display_type or "",
-                        " ".join(row.topics or ()),
+                        " ".join(row.topics),
                         "actionable" if row.actionable else "",
                     ]
                 ).lower()
@@ -13422,6 +13604,10 @@ class MessageViewerTab(QWidget):
         db_path = self._db_path()
         if db_path and db_path.exists():
             delete_file_cache_entries(db_path, rec)
+            try:
+                delete_observations_by_source_refs(db_path, [f"file:{rec.path}"], source_family=origin)
+            except Exception as exc:
+                log.debug("MessageViewer: failed to delete file observation projection for %s: %s", rec.path, exc)
         if self.current_record and self.current_record.path == rec.path:
             self.current_record = None
             self._clear_message_detail_view("No file selected")
@@ -14437,7 +14623,6 @@ class MessageViewerTab(QWidget):
                     ("From", msg.from_call),
                     ("To", msg.target),
                     ("Group", msg.report_group),
-                    ("Report", msg.report_key),
                     ("Received", f"{label}: {ts_display}"),
                     ("Status", self._pretty_sitrep_value(msg.overall_status)),
                     ("State/Grid", state_grid),
@@ -15076,9 +15261,10 @@ class MessageViewerTab(QWidget):
         return form_part, resp, comment
 
     def _load_form_definition(self, form_id: str) -> List[Dict]:
-        if form_id in self._form_cache:
-            return self._form_cache[form_id]
-        forms_dir = (self.settings.get("js8_forms_path", self.forms_path) or "").strip()
+        forms_dir = self._compose_spotter_forms_path()
+        cache_key = f"{forms_dir}|{form_id}"
+        if cache_key in self._form_cache:
+            return self._form_cache[cache_key]
         if not forms_dir:
             return []
         path = Path(forms_dir) / f"MCF{form_id}.txt"
@@ -15120,14 +15306,15 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to parse form %s: %s", form_id, e)
             questions = []
-        self._form_cache[form_id] = questions
+        self._form_cache[cache_key] = questions
         self._prune_cache(self._form_cache, self._cache_max_form_entries)
         return questions
 
     def _load_form_title(self, form_id: str) -> str:
-        if form_id in self._form_title_cache:
-            return self._form_title_cache[form_id]
-        forms_dir = (self.settings.get("js8_forms_path", self.forms_path) or "").strip()
+        forms_dir = self._compose_spotter_forms_path()
+        cache_key = f"{forms_dir}|{form_id}"
+        if cache_key in self._form_title_cache:
+            return self._form_title_cache[cache_key]
         if not forms_dir:
             return ""
         path = Path(forms_dir) / f"MCF{form_id}.txt"
@@ -15147,7 +15334,7 @@ class MessageViewerTab(QWidget):
                     break
         except Exception:
             title = ""
-        self._form_title_cache[form_id] = title
+        self._form_title_cache[cache_key] = title
         self._prune_cache(self._form_title_cache, self._cache_max_form_title_entries)
         return title
 

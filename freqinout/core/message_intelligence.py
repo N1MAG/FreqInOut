@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from freqinout.core.js8_spotter_decode import parse_spotter_bracket_fields, summarize_spotter_form_text
+from freqinout.core.commstat_sitrep import infer_state_and_geo
+from freqinout.core.message_search_values import searchable_text_values
 
 
 TOPIC_TAXONOMY: tuple[str, ...] = (
@@ -58,7 +60,6 @@ _TOPIC_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "General Intel": ("intel", "s2", "s-2", "sitrep", "statrep", "situation", "awareness", "osint"),
 }
 
-
 @dataclass(frozen=True)
 class MessageIntelligence:
     source_type: str = ""
@@ -83,7 +84,12 @@ class MessageIntelligence:
 
 
 def normalize_topic_terms(text: object) -> tuple[str, ...]:
-    return tuple(_topic_evidence_for_text(text).keys())
+    found: list[str] = []
+    for text_value in searchable_text_values(text):
+        for topic in _topic_evidence_for_text(text_value):
+            if topic not in found:
+                found.append(topic)
+    return tuple(found)
 
 
 def collect_topic_evidence(parts: Mapping[str, object] | Sequence[tuple[str, object]]) -> Mapping[str, tuple[str, ...]]:
@@ -91,12 +97,13 @@ def collect_topic_evidence(parts: Mapping[str, object] | Sequence[tuple[str, obj
     found: dict[str, list[str]] = {}
     for label, value in items:
         label_text = str(label or "text").strip() or "text"
-        for topic, terms in _topic_evidence_for_text(value).items():
-            bucket = found.setdefault(topic, [])
-            for term in terms:
-                evidence = f"{label_text}:{term}"
-                if evidence not in bucket:
-                    bucket.append(evidence)
+        for text_value in searchable_text_values(value):
+            for topic, terms in _topic_evidence_for_text(text_value).items():
+                bucket = found.setdefault(topic, [])
+                for term in terms:
+                    evidence = f"{label_text}:{term}"
+                    if evidence not in bucket:
+                        bucket.append(evidence)
     return {topic: tuple(values) for topic, values in found.items()}
 
 
@@ -331,6 +338,14 @@ def analyze_commstat_fields(
     from_value = _clean_call(from_call)
     state_value = _clean_state(state)
     grid_value = _clean_grid(grid)
+    inferred_state_confidence = ""
+    inferred_geo_confidence = ""
+    if not state_value:
+        inferred_state, inferred_state_confidence, inferred_geo_confidence = infer_state_and_geo(
+            grid_value,
+            _first_nonempty(body_text, remarks),
+        )
+        state_value = _clean_state(inferred_state)
     combined = " ".join(
         part
         for part in (
@@ -394,6 +409,8 @@ def analyze_commstat_fields(
         "transport": str(transport or "").strip(),
         "reach": str(reach or "").strip(),
         "source": str(source_family or "").strip(),
+        "state_confidence": inferred_state_confidence,
+        "geo_confidence": inferred_geo_confidence,
     }
     info = MessageIntelligence(
         source_type="commstat",

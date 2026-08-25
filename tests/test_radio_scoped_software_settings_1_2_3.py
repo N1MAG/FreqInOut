@@ -476,9 +476,12 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert '"Operating Models": "Operating Models"' in task_nav_block
     assert '"Operating Model Assignment": "Assign Model"' in task_nav_block
     assert '"Schedule Assignment": "Assign Schedule"' in task_nav_block
+    assert "columns = 6" in task_nav_block
     assert "def _refresh_settings_task_buttons" in task_nav_block
     assert "def _refresh_settings_mode_visibility" in mode_visibility_block
     assert "self.configured_radios_group.setVisible(radio_mode)" in mode_visibility_block
+    assert "self.settings_global_tasks_widget.setVisible(False)" in mode_visibility_block
+    assert "self.settings_radio_tasks_widget.setVisible(False)" in mode_visibility_block
     assert 'self.settings_task_title_label.setText("Radio Settings" if radio_mode else "Global Settings")' in mode_visibility_block
     assert "eligible_warning" in task_nav_block
     assert "success_muted" in task_nav_block
@@ -514,8 +517,9 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
         app.processEvents()
 
         assert tab.settings_compact_header.isVisible() is True
-        assert tab.settings_task_title_label.isVisible() is True
-        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_task_title_label.isVisible() is False
+        assert tab.settings_task_hint_label.isVisible() is False
+        assert tab.settings_global_tasks_widget.isVisible() is False
         assert tab.settings_radio_tasks_widget.isVisible() is False
         assert tab.configured_radios_group.isVisible() is False
         assert len(tab._settings_section_task_buttons) > 0
@@ -534,8 +538,8 @@ def test_settings_section_navigation_scrolls_without_horizontal_content_scroll(m
 
         assert tab.settings_section_nav_scroll.isVisible() is True
         assert tab.settings_compact_header.isVisible() is True
-        assert tab.settings_global_tasks_widget.width() > 0
-        assert tab.settings_radio_tasks_widget.width() > 0
+        assert tab.settings_global_tasks_widget.isVisible() is False
+        assert tab.settings_radio_tasks_widget.isVisible() is False
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -560,7 +564,7 @@ def test_settings_global_sections_hide_radio_context(monkeypatch, tmp_path) -> N
         app.processEvents()
 
         assert tab.configured_radios_group.isVisible() is False
-        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_global_tasks_widget.isVisible() is False
         assert tab.settings_radio_tasks_widget.isVisible() is False
         assert tab.add_device_profile_btn.isVisible() is False
         assert tab.settings_task_title_label.text() == "Global Settings"
@@ -570,7 +574,7 @@ def test_settings_global_sections_hide_radio_context(monkeypatch, tmp_path) -> N
 
         assert tab.configured_radios_group.isVisible() is True
         assert tab.settings_global_tasks_widget.isVisible() is False
-        assert tab.settings_radio_tasks_widget.isVisible() is True
+        assert tab.settings_radio_tasks_widget.isVisible() is False
         assert tab.add_device_profile_btn.isVisible() is True
         assert tab.settings_task_title_label.text() == "Radio Settings"
     finally:
@@ -596,7 +600,8 @@ def test_settings_context_switch_from_main_to_radio_refreshes_task_header(monkey
         assert tab.show_settings_context("main", health_key="operator_info") is True
         app.processEvents()
         assert tab.settings_task_title_label.text() == "Global Settings"
-        assert tab.settings_global_tasks_widget.isVisible() is True
+        assert tab.settings_task_title_label.isVisible() is False
+        assert tab.settings_global_tasks_widget.isVisible() is False
         assert tab.settings_radio_tasks_widget.isVisible() is False
         assert tab.configured_radios_group.isVisible() is False
 
@@ -604,7 +609,7 @@ def test_settings_context_switch_from_main_to_radio_refreshes_task_header(monkey
         app.processEvents()
         assert tab.settings_task_title_label.text() == "Radio Settings"
         assert tab.settings_global_tasks_widget.isVisible() is False
-        assert tab.settings_radio_tasks_widget.isVisible() is True
+        assert tab.settings_radio_tasks_widget.isVisible() is False
         assert tab.configured_radios_group.isVisible() is True
         assert tab.status_group.isVisible() is False
         assert tab.sections_stack.currentWidget() is tab.radio_profile_section_group
@@ -1544,7 +1549,66 @@ def test_radio_selector_selection_is_not_color_only() -> None:
     assert "Selected radio:" in selector_block
     assert "border: 3px solid" in selector_block
     assert "border: 4px solid" in selector_block
-    assert "btn.setMinimumWidth(190 if selected else 170)" in selector_block
+    assert "btn.setMinimumWidth(150 if selected else 135)" in selector_block
+    assert "btn.setMinimumHeight(34)" in selector_block
+
+
+def test_software_radio_sync_uses_selected_radio_focus_not_table_focus() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    class Combo:
+        def __init__(self) -> None:
+            self.index = 1
+            self.requested = None
+
+        def findData(self, value):
+            return {8: 0, 9: 1}.get(value, -1)
+
+        def currentIndex(self):
+            return self.index
+
+        def setCurrentIndex(self, value):
+            self.requested = value
+            self.index = value
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._settings_radio_focus_id = 8
+    tab._software_radio_combo_loading = False
+    tab.software_radio_combo = Combo()
+    tab._current_device_profile_focus_id = lambda: 9
+    tab._device_profile_by_id = lambda ident: {"id": ident, "name": f"FIO-{ident}", "device_class": "tx_rx"}
+
+    tab._sync_software_radio_to_device_focus()
+
+    assert tab.software_radio_combo.requested == 0
+
+
+def test_selected_radio_focus_rebuilds_launch_control() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._settings_radio_focus_id = 9
+    tab._device_profile_by_id = lambda ident: {"id": ident, "name": f"FIO-{ident}"} if ident in {8, 9} else None
+    calls = []
+    tab._sync_device_profiles_table_to_settings_focus = lambda: calls.append("table")
+    tab._rebuild_device_profile_selector = lambda: calls.append("selector")
+    tab._update_device_profile_action_buttons = lambda: calls.append("actions")
+    tab._update_device_profile_readiness_detail = lambda: calls.append("readiness")
+    tab._sync_software_radio_to_device_focus = lambda: calls.append("software")
+    tab._sync_schedule_views_to_device_focus = lambda: calls.append("schedule")
+    tab._rebuild_status_indicators = lambda: calls.append("status")
+    tab._refresh_radio_specific_section_visibility = lambda: calls.append("sections")
+    tab._refresh_radio_settings_nav_label = lambda: calls.append("nav")
+    tab._refresh_radio_context_labels = lambda: calls.append("labels")
+    tab._refresh_launch_control_table = lambda: calls.append("launch")
+    tab._update_device_profiles_hint = lambda: calls.append("hint")
+    tab._refresh_multi_rig_status_card = lambda: calls.append("runtime")
+
+    tab._set_settings_radio_focus(8)
+
+    assert tab._settings_radio_focus_id == 8
+    assert calls.index("software") < calls.index("launch")
+    assert "launch" in calls
 
 
 def test_radio_selector_ignores_launch_only_external_manual_badge() -> None:
@@ -4095,8 +4159,10 @@ def test_launch_control_chip_visibility_uses_shared_profile_rule() -> None:
     assert "self._radio_profile_has_software_option(profile)" in visibility_block
     assert 'table.setItem(row, 11, QTableWidgetItem("Opt-in" if self._radio_profile_launch_opt_in_enabled(profile) else "Off"))' in source
     assert 'use_launch_control_chk.setChecked(bool((existing or {}).get("use_launch_control", 0)))' in source
-    assert 'launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))' in source
-    assert "Launch with FIO:" in source
+    assert '"launch_enabled": preserved_launch_enabled' in source
+    assert "Startup launch:" in source
+    assert '["App", "Monitor Health", "Launch at Startup", "Start", "Status"]' in source
+    assert 'self.launch_configured_now_btn = QPushButton("Start Startup Apps")' in source
 
 
 def test_launch_control_source_profile_uses_selected_radio_not_station_default() -> None:
@@ -4139,6 +4205,81 @@ def test_radio_scoped_launch_items_include_selected_radio_path_overrides() -> No
     assert items[1]["launch_path_override"] == "/apps/FIO-B/js8call.app"
 
 
+def test_launch_control_includes_commstat_when_selected_radio_has_launch_path_only() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    profile = {
+        "id": 2,
+        "name": "FIO-B",
+        "use_commstat": 0,
+        "commstat_launch_path": "/apps/FIO-B/CommStat.app",
+    }
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._custom_tool_command = lambda _name: ""
+    tab._launch_bundle_source_profile = lambda: profile
+
+    assert tab._launch_item_allowed_for_profile("CommStat", profile) is True
+    assert tab._is_launch_item_configured("CommStat") is True
+
+
+def test_launch_control_source_profile_uses_current_js8_commstat_draft() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._software_radio_current_id = 2
+    tab._software_radio_drafts = {}
+    tab._selected_settings_radio_profile = lambda: {"id": 2, "name": "FIO-B", "use_commstat": 0}
+    tab._capture_radio_software_view_state = lambda: {
+        "_source_profile_id": 2,
+        "path_commstat": "/draft/FIO-B/CommStat.app",
+    }
+
+    profile = tab._launch_bundle_source_profile()
+
+    assert profile["commstat_launch_path"] == "/draft/FIO-B/CommStat.app"
+
+
+def test_launch_control_uses_selected_radio_not_stale_software_radio() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    fio_a = {
+        "id": 8,
+        "name": "FIO-A",
+        "use_commstat": 1,
+        "commstat_launch_path": "/Users/bill/RadioTools/Programs/CommStat/little_gucci.py",
+    }
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._software_radio_current_id = 9
+    tab._software_radio_drafts = {}
+    tab._selected_settings_radio_profile = lambda: fio_a
+    tab._custom_tool_command = lambda _name: ""
+    tab._capture_radio_software_view_state = lambda: {
+        "_source_profile_id": 9,
+        "path_commstat": "",
+    }
+
+    profile = tab._launch_bundle_source_profile()
+
+    assert profile["name"] == "FIO-A"
+    assert tab._is_launch_item_configured("CommStat") is True
+
+
+def test_launch_control_scoped_items_include_configured_custom_tools() -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab.__new__(SettingsTab)
+    tab._launch_items_cache = [
+        {"name": "CommStat", "enabled": True, "startup": False},
+        {"name": "Lab Helper", "enabled": True, "startup": False},
+    ]
+    tab._custom_tool_items_cache = [{"name": "Lab Helper", "command": "/tools/lab-helper"}]
+    tab._launch_bundle_source_profile = lambda: {"id": 2, "name": "FIO-B"}
+
+    items = tab._radio_scoped_launch_items()
+
+    assert [item["name"] for item in items] == ["Lab Helper"]
+
+
 def test_launch_control_defaults_are_explicit_opt_in() -> None:
     settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     readiness_source = Path("freqinout/core/station_readiness.py").read_text(encoding="utf-8")
@@ -4148,7 +4289,7 @@ def test_launch_control_defaults_are_explicit_opt_in() -> None:
     assert '"launch_control_enabled": bool(int(profile.get("launch_enabled", 0) or 0))' in runtime_source
     assert '"use_launch_control": _row_bool(operating.get("use_launch_control", 0), False)' in runtime_source
     assert 'use_launch_control_chk.setChecked(bool((existing or {}).get("use_launch_control", 0)))' in settings_source
-    assert 'launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 0)))' in settings_source
+    assert '"launch_enabled": preserved_launch_enabled' in settings_source
 
 
 def test_radio_profile_advanced_edit_wording_keeps_software_settings_inline() -> None:

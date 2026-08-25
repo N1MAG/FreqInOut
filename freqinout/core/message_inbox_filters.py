@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_search_values import searchable_text_values
 from freqinout.core.sitrep_metadata import parse_filter_subtype_label
 
 
@@ -19,7 +20,6 @@ MESSAGE_SOURCE_LABELS = {
     "sitrep": "SitRep",
     "commstat": "CommStat",
 }
-
 
 class MessageRowLike(Protocol):
     msg_type: str
@@ -497,19 +497,19 @@ def row_matches_status_filter(row: MessageRowLike, status_sel: str) -> bool:
 
 
 def row_search_text(row: MessageRowLike) -> str:
-    hay = str(getattr(row, "search_text", "") or "")
-    if hay:
-        return hay.lower()
-    return " ".join(
-        [
-            str(getattr(row, "msg_type", "") or ""),
-            str(getattr(row, "status", "") or ""),
-            str(getattr(row, "from_call", "") or ""),
-            str(getattr(row, "to_call", "") or ""),
-            str(getattr(row, "rcv_display", "") or ""),
-            str(getattr(row, "title", "") or ""),
-        ]
-    ).lower()
+    values = [
+        str(getattr(row, "search_text", "") or ""),
+        str(getattr(row, "msg_type", "") or ""),
+        str(getattr(row, "status", "") or ""),
+        str(getattr(row, "from_call", "") or ""),
+        str(getattr(row, "to_call", "") or ""),
+        str(getattr(row, "rcv_display", "") or ""),
+        str(getattr(row, "title", "") or ""),
+    ]
+    values.extend(searchable_text_values(getattr(row, "payload", None)))
+    haystack = " ".join(value for value in values if value)
+    aliases = haystack.replace("@", " ").replace(">", " ")
+    return f"{haystack} {aliases}".lower()
 
 
 def row_matches_search_query(row: MessageRowLike, query: str) -> bool:
@@ -519,7 +519,10 @@ def row_matches_search_query(row: MessageRowLike, query: str) -> bool:
     haystack = row_search_text(row)
     if query in haystack:
         return True
-    tokens = [token for token in re.split(r"[\s,;/|]+", query) if token]
+    normalized_query = query.replace("@", " ").replace(">", " ")
+    if normalized_query.strip() and normalized_query in haystack:
+        return True
+    tokens = [token for token in re.split(r"[\s,;/|]+", normalized_query) if token]
     if not tokens:
         return True
     return all(token in haystack for token in tokens)

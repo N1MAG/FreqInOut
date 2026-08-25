@@ -14,7 +14,7 @@ from freqinout.core.message_file_scanner import FileRecord
 
 
 FILE_METADATA_ORIGINS = {"bbs", "flamp", "flmsg", "varac"}
-FILE_METADATA_PARSER_VERSION = 7
+FILE_METADATA_PARSER_VERSION = 8
 
 
 MESSAGE_FILE_METADATA_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -417,6 +417,85 @@ def load_message_file_metadata_map(
         log.debug("MessageFileMetadata: failed to load metadata cache: %s", e)
         return {}
     return out
+
+
+def load_existing_message_file_metadata_records(
+    db_path: str | Path,
+    *,
+    limit: int = 10000,
+    ensure_scan_cache_table=None,
+) -> tuple[Dict[str, List[FileRecord]], Dict[tuple, Dict[str, object]]]:
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {}, {}
+    records: Dict[str, List[FileRecord]] = {origin: [] for origin in sorted(FILE_METADATA_ORIGINS)}
+    metadata: Dict[tuple, Dict[str, object]] = {}
+    try:
+        if callable(ensure_scan_cache_table):
+            ensure_scan_cache_table()
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        ensure_message_file_metadata_table(conn)
+        cur.execute(
+            """
+            SELECT origin, path, mtime, size, source_family, msg_type, display_type, status,
+                   from_call, to_call, title, rcv_display, report_ts, age_ts_source, topics_json, actionable, search_text,
+                   parser_version, source_id, source_label
+            FROM message_file_metadata
+            WHERE parser_version=?
+            ORDER BY COALESCE(report_ts, 0) DESC, mtime DESC, indexed_ts DESC
+            LIMIT ?
+            """,
+            (FILE_METADATA_PARSER_VERSION, max(0, int(limit or 0))),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        log.debug("MessageFileMetadata: failed to load existing metadata records: %s", e)
+        return {}, {}
+    for row in rows:
+        origin = str(row[0] or "").strip().lower()
+        if origin not in FILE_METADATA_ORIGINS:
+            continue
+        path = Path(str(row[1] or ""))
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        row_mtime = float(row[2] or 0.0)
+        row_size = int(row[3] or 0)
+        if int(stat.st_size) != row_size or abs(float(stat.st_mtime) - row_mtime) > 0.001:
+            continue
+        rec = FileRecord(
+            path=path,
+            origin=origin,
+            size=row_size,
+            mtime=row_mtime,
+            source_id=str(row[18] or ""),
+            source_label=str(row[19] or ""),
+        )
+        key = file_metadata_key(rec)
+        metadata[key] = {
+            "source_family": str(row[4] or ""),
+            "msg_type": str(row[5] or ""),
+            "display_type": str(row[6] or ""),
+            "status": str(row[7] or ""),
+            "from_call": str(row[8] or ""),
+            "to_call": str(row[9] or ""),
+            "title": str(row[10] or ""),
+            "rcv_display": str(row[11] or ""),
+            "report_ts": float(row[12] or 0.0),
+            "age_ts_source": str(row[13] or ""),
+            "topics_json": str(row[14] or "[]"),
+            "actionable": int(row[15] or 0),
+            "search_text": str(row[16] or ""),
+            "source_id": str(row[18] or ""),
+            "source_label": str(row[19] or ""),
+        }
+        records.setdefault(origin, []).append(rec)
+    return {origin: recs for origin, recs in records.items() if recs}, metadata
 
 
 def has_stale_message_file_metadata(

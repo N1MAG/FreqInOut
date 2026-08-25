@@ -694,19 +694,6 @@ def build_station_readiness_report(
                     state_key="not_enabled",
                 )
             )
-        if int(profile.get("launch_enabled", 0) or 0) != 1:
-            issues.append(
-                ReadinessIssue(
-                    severity="informational",
-                    section_key="radio_profiles",
-                    scope=scope,
-                    radio_id=radio_id,
-                    message=f"{name}: excluded from startup launch",
-                    resolution_hint="Turn Launch enabled back on if FreqInOut should start this radio's software automatically.",
-                    deep_link_target=_issue_deep_link("radio_profiles", radio_id),
-                    state_key="external_manual",
-                )
-            )
         if active_or_primary and not _text(profile, "radio_model"):
             issues.append(
                 ReadinessIssue(

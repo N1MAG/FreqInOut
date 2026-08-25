@@ -174,7 +174,7 @@ def test_visible_status_programs_hides_global_paths_when_active_radio_explicitly
     assert ("VarAC", "VarAC") not in visible
 
 
-def test_build_station_readiness_report_marks_inactive_and_launch_disabled_radios_as_informational() -> None:
+def test_build_station_readiness_report_marks_inactive_radios_as_informational_without_startup_noise() -> None:
     from freqinout.core.station_readiness import build_station_readiness_report, readiness_summary_badge_text
 
     report = build_station_readiness_report(
@@ -195,11 +195,11 @@ def test_build_station_readiness_report_marks_inactive_and_launch_disabled_radio
 
     messages = {issue.message for issue in report.issues if issue.severity == "informational"}
     assert "Spare HF: configured but inactive" in messages
-    assert "Spare HF: excluded from startup launch" in messages
+    assert "Spare HF: excluded from startup launch" not in messages
     summary = report.summary_for_radio(7)
     assert summary is not None
     assert summary.overall_state == "not_enabled"
-    assert summary.informational_count == 2
+    assert summary.informational_count == 1
     assert readiness_summary_badge_text(summary) == "Not Enabled"
 
 
@@ -313,7 +313,7 @@ def test_build_station_readiness_report_tracks_js8_bundle_even_when_backend_is_f
     assert "TriMode Desk: CommStat launch path missing" in messages
 
 
-def test_build_station_readiness_report_marks_launch_excluded_active_radio_as_external_manual() -> None:
+def test_build_station_readiness_report_ignores_startup_launch_opt_out_for_ready_radio() -> None:
     from freqinout.core.station_readiness import build_station_readiness_report, readiness_summary_badge_text
 
     report = build_station_readiness_report(
@@ -335,8 +335,9 @@ def test_build_station_readiness_report_marks_launch_excluded_active_radio_as_ex
 
     summary = report.summary_for_radio(12)
     assert summary is not None
-    assert summary.overall_state == "external_manual"
-    assert readiness_summary_badge_text(summary) == "External / Manual"
+    assert summary.overall_state == "ready"
+    assert summary.informational_count == 0
+    assert readiness_summary_badge_text(summary) == "Ready"
 
 
 def test_readiness_wording_helpers_use_named_operator_states() -> None:
@@ -463,9 +464,9 @@ def test_settings_source_promotes_radio_readiness_cards() -> None:
     assert "Focused VarAC Cluster Guidance" in source
     assert "Focused VarAC Membership Guidance" in source
     assert "Enable Cluster Mode" in source
-    assert "Selected Radio Launch Bundle" in source
+    assert "Selected Radio Launch Apps" in source
     assert "Selected radio:" in source
-    assert "Only apps configured for this selected radio are shown here" in source
+    assert "Configured apps and shared custom tools appear here" in source
     assert "Primary Rig Control:" in source
     assert 'QCheckBox("JS8Call")' in source
     assert 'QCheckBox("FIO Spotter")' in source
