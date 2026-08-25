@@ -521,6 +521,32 @@ def test_map_selected_paths_html_names_topology_scope() -> None:
     assert "who reported hearing whom" in html
 
 
+def test_map_operator_language_uses_status_not_severity() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert 'detailRowPayload(\'Status\', event.severity)' in source
+    assert "f\"Status: {str(bucket.get('severity')" in source
+    assert 'detailRowPayload(\'Severity\', event.severity)' not in source
+    assert "f\"Severity: {str(bucket.get('severity')" not in source
+
+
+def test_regional_intel_summary_hides_green_rows_by_default() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    assert "function regionalActionableRollupsByScore" in source
+    assert ".filter(rollup => regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green'))" in source
+    assert "const states = regionalActionableRollupsByScore('state', 5);" in source
+    assert "const regions = regionalActionableRollupsByScore('region', 3);" in source
+
+
+def test_station_status_mode_hides_unknown_station_inventory() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+
+    assert "if sitrep_mode:" in render_block
+    assert 'marker.get("spotter_status_key")' in render_block
+    assert '{"red", "yellow", "green"}' in render_block
+
+
 def test_map_current_link_selection_prefers_programmatic_station_focus() -> None:
     tab = _bare_tab()
     tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])
@@ -1410,7 +1436,7 @@ def test_map_view_status_text_names_current_review_context() -> None:
     tab._observation_focus_enabled = False
     tab._observation_focus_mode = ""
     tab._sitrep_status_only_enabled = True
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: SitRep Status"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Station Status"
 
     tab._now_reachable_enabled = True
     assert StationsMapTab._map_view_status_text(tab) == "Map View: Peer Schedule Now"
@@ -1782,7 +1808,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("def _build_ui") : source.index("def _add_collapsible_group")]
 
-    assert 'QPushButton("Map Tools")' in build_block
+    assert 'QPushButton("Advanced Map Tools")' in build_block
     assert "self._map_mode_combo = QComboBox()" in build_block
     assert 'filter_field("View", self._map_mode_combo' in build_block
     assert '"Intelligence Layers"' in build_block

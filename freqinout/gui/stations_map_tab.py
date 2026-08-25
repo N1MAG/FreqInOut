@@ -2373,13 +2373,13 @@ class StationsMapTab(QWidget):
         self._map_clear_filters_button.clicked.connect(self.clear_map_filters)
         self._map_clear_layers_button = QPushButton("Clear Layers")
         self._map_clear_layers_button.setToolTip(
-            "Turn off temporary layers such as paths, RF planning, pins, and SitRep status. Filters stay unchanged."
+            "Turn off temporary layers such as paths, RF planning, pins, and Station Status. Filters stay unchanged."
         )
         self._map_clear_layers_button.clicked.connect(self.clear_map_layers)
         self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
-        self._sitrep_status_button = QPushButton("SitRep Status")
+        self._sitrep_status_button = QPushButton("Station Status")
         self._sitrep_status_button.setCheckable(True)
         self._update_sitrep_status_button_visual(False)
         self.map_stations_chk = QCheckBox("Stations")
@@ -2759,11 +2759,11 @@ class StationsMapTab(QWidget):
         action_grid.setHorizontalSpacing(6)
         action_grid.setVerticalSpacing(6)
         center_btn = QPushButton("Center")
-        paths_btn = QPushButton("Show Paths")
+        paths_btn = QPushButton("Show Paths To")
         group_btn = QPushButton("Group")
         topic_btn = QPushButton("Topic")
         messages_btn = QPushButton("Messages")
-        spotter_btn = QPushButton("Send Spotter")
+        spotter_btn = QPushButton("Compose Message")
         sop_btn = QPushButton("SOP")
         center_btn.clicked.connect(self._center_map_selected_detail)
         paths_btn.clicked.connect(self._show_paths_for_selected_station)
@@ -3577,7 +3577,7 @@ class StationsMapTab(QWidget):
                     report_count = report_count_match.group(1) if report_count_match else ""
                 parts.append(self._map_detail_row_html("Reports", report_count))
                 parts.append(self._map_detail_row_html("Age", rows.get("age")))
-                parts.append(self._map_detail_row_html("Severity", rows.get("severity")))
+                parts.append(self._map_detail_row_html("Status", rows.get("severity")))
                 parts.append("</div>")
 
         if group_chips:
@@ -3659,7 +3659,7 @@ class StationsMapTab(QWidget):
         if theme is None:
             theme = self._theme_snapshot()
         active = self._selected_station_paths_active()
-        btn.setText("Hide Paths" if active else "Show Paths")
+        btn.setText("Hide Paths" if active else "Show Paths To")
         btn.setStyleSheet(button_style("eligible_info" if active else "muted", theme))
 
     def _sync_link_mode_combo_to_off(self) -> None:
@@ -5067,14 +5067,14 @@ class StationsMapTab(QWidget):
             return
         if theme is None:
             theme = self._theme_snapshot()
-        self._sitrep_status_button.setText("SitRep")
+        self._sitrep_status_button.setText("Station Status")
         if enabled:
             self._sitrep_status_button.setStyleSheet(button_style("eligible_info", theme))
-            self._sitrep_status_button.setToolTip("Map View: SitRep Status. Show only Red/Yellow/Green stations.")
+            self._sitrep_status_button.setToolTip("Map View: Station Status. Show only stations with a known latest status.")
         else:
             self._sitrep_status_button.setStyleSheet(button_style("muted", theme))
             self._sitrep_status_button.setToolTip(
-                "Show only stations with known SitRep status (Red/Yellow/Green). This view overrides map filters."
+                "Show only stations with known latest status. This view hides unknown/no-report stations."
             )
 
     def _current_map_mode_key(self) -> str:
@@ -5232,7 +5232,7 @@ class StationsMapTab(QWidget):
         if mode_key == "pins":
             return "Map View: Planning Pins"
         if mode_key == "sitrep":
-            return "Map View: SitRep Status"
+            return "Map View: Station Status"
         return "Map View: All Stations"
 
     def _current_path_scope_label(self) -> str:
@@ -9622,7 +9622,7 @@ class StationsMapTab(QWidget):
             detail_lines = [
                 f"Weather Reports: {count}",
                 f"Newest: {age_label}",
-                f"Severity: {str(bucket.get('severity') or 'unknown').title()}",
+                f"Status: {str(bucket.get('severity') or 'unknown').title()}",
                 f"Groups: {', '.join(groups[:5])}" + ("..." if len(groups) > 5 else "") if groups else "",
                 f"Topics: {', '.join(topics[:5])}" + ("..." if len(topics) > 5 else "") if topics else "",
                 f"Sources: {', '.join(calls[:6])}" + ("..." if len(calls) > 6 else ""),
@@ -9845,7 +9845,7 @@ class StationsMapTab(QWidget):
             detail_lines = [
                 f"{display_label}: {count}",
                 f"Newest: {age_label}",
-                f"Severity: {str(bucket.get('severity') or 'unknown').title()}",
+                f"Status: {str(bucket.get('severity') or 'unknown').title()}",
                 f"Source: {source_label}" if source_label else "",
                 f"Groups: {', '.join(groups[:5])}" + ("..." if len(groups) > 5 else "") if groups else "",
                 f"Topics: {', '.join(topics[:5])}" + ("..." if len(topics) > 5 else "") if topics else "",
@@ -9854,7 +9854,7 @@ class StationsMapTab(QWidget):
             row_items = [
                 {"label": "Reports", "value": str(count)},
                 {"label": "Newest", "value": age_label},
-                {"label": "Severity", "value": str(bucket.get("severity") or "unknown").title()},
+                {"label": "Status", "value": str(bucket.get("severity") or "unknown").title()},
                 {"label": "Source", "value": source_label},
             ]
             if call_label:
@@ -12091,6 +12091,13 @@ class StationsMapTab(QWidget):
                     }
                 )
 
+        if sitrep_mode:
+            markers = [
+                marker
+                for marker in markers
+                if str(marker.get("spotter_status_key") or "").strip().lower() in {"red", "yellow", "green"}
+            ]
+
         if planning_pins_mode:
             weather_events = []
             alert_events = []
@@ -13390,6 +13397,11 @@ function addGridLabels(res, level, bounds, maxLabels) {
         }})
         .slice(0, limit);
     }}
+    function regionalActionableRollupsByScore(kind, limit) {{
+      return regionalRollupsByScore(kind, 500)
+        .filter(rollup => regionalLevelRank(rollup && rollup.level) > regionalLevelRank('green'))
+        .slice(0, limit);
+    }}
     function regionalNationalRollup() {{
       const states = regionalRollupsByScore('state', 500);
       if (!states.length) {{
@@ -13508,8 +13520,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
     }}
     function buildRegionalIntelSummaryHtml() {{
       if (!window.regionalIntelligenceEnabled) return '';
-      const states = regionalRollupsByScore('state', 5);
-      const regions = regionalRollupsByScore('region', 3);
+      const states = regionalActionableRollupsByScore('state', 5);
+      const regions = regionalActionableRollupsByScore('region', 3);
       if (!states.length && !regions.length) {{
         return '<div class="regional-summary-heading"><span>Regional Intel</span><span class="regional-summary-meta">No active evidence</span></div>';
       }}
@@ -13721,7 +13733,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         rows: [
           detailRowPayload('MCF', title),
           detailRowPayload('Reports', event.count),
-          detailRowPayload('Severity', event.severity),
+          detailRowPayload('Status', event.severity),
           detailRowPayload('Age', event.age),
           detailRowPayload('Source', source),
           detailRowPayload('Reporter', callLabel),
@@ -13899,7 +13911,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         legendItem(linkColor(-6), '&#9632;', '-10 to &lt;-5'),
         legendItem(linkColor(-11), '&#9632;', '&lt; -10')
       ]));
-      rows.push(legendRow('SitRep Status:', [
+      rows.push(legendRow('Station Status:', [
         legendItem('#43A047', '&#9679;', 'Functioning'),
         legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
         legendItem('#D32F2F', '&#9679;', 'Not Functioning'),
