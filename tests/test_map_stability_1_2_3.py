@@ -558,6 +558,35 @@ def test_station_status_mode_hides_unknown_station_inventory() -> None:
     assert '{"red", "yellow", "green"}' in render_block
 
 
+def test_advanced_state_filter_uses_reported_for_state_aliases() -> None:
+    tab = _bare_tab()
+    tab._map_state_filter_combo = _FakeCombo([("All States", ""), ("NV", "NV")])
+    tab._map_state_filter_combo.setCurrentIndex(1)
+    tab._map_source_filter_combo = _FakeCombo([("All Sources", "")])
+    tab._map_status_filter_combo = _FakeCombo([("All Statuses", "")])
+    tab._map_trust_filter_combo = _FakeCombo([("All Auth/Trust", "")])
+
+    event = {
+        "state": "IN",
+        "reported_for_state": "NV",
+        "source_family": "commstat",
+        "severity": "caution",
+    }
+    assert StationsMapTab._map_event_matches_advanced_filters(tab, event) is True
+
+    obs = SimpleNamespace(
+        source_family="commstat",
+        state="IN",
+        status="caution",
+        urgency="",
+        auth_state="",
+        trusted_state="",
+        confirmed_state="",
+        provenance={"reported_for_state": "NV"},
+    )
+    assert StationsMapTab._observation_matches_advanced_filters(tab, obs, {}) is True
+
+
 def test_map_current_link_selection_prefers_programmatic_station_focus() -> None:
     tab = _bare_tab()
     tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])

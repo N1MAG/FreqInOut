@@ -9166,6 +9166,31 @@ class StationsMapTab(QWidget):
                 return False
         return True
 
+    @staticmethod
+    def _map_state_filter_values(*sources: object) -> Set[str]:
+        values: Set[str] = set()
+        state_keys = (
+            "state",
+            "reported_for_state",
+            "impacted_state",
+            "report_state",
+            "area_state",
+            "target_state",
+        )
+        for source in sources:
+            if isinstance(source, Mapping):
+                iterable = (source.get(key) for key in state_keys)
+            else:
+                iterable = (getattr(source, key, "") for key in state_keys)
+            for value in iterable:
+                text = str(value or "").strip().upper()
+                if not text:
+                    continue
+                token = re.split(r"[\s/|,]+", text)[0].strip().upper()
+                if len(token) == 2 and token.isalpha():
+                    values.add(token)
+        return values
+
     @classmethod
     def _map_source_family_matches_filter(cls, source_family: str, source_filter: str) -> bool:
         source = cls._canonical_map_source_family(source_family)
@@ -9220,8 +9245,9 @@ class StationsMapTab(QWidget):
         metadata = metadata if isinstance(metadata, Mapping) else {}
         state_filter = self._map_advanced_state_filter()
         if state_filter:
-            state = str(metadata.get("state") or getattr(obs, "state", "") or "").strip().upper()
-            if state != state_filter:
+            provenance = getattr(obs, "provenance", {}) or {}
+            states = self._map_state_filter_values(metadata, provenance, obs)
+            if state_filter not in states:
                 return False
         source_filter = self._map_advanced_source_filter()
         if not self._map_source_family_matches_filter(getattr(obs, "source_family", ""), source_filter):
@@ -9250,8 +9276,8 @@ class StationsMapTab(QWidget):
             return False
         state_filter = self._map_advanced_state_filter()
         if state_filter:
-            state = str(event.get("state") or "").strip().upper()
-            if state != state_filter:
+            states = self._map_state_filter_values(event)
+            if state_filter not in states:
                 return False
         source_filter = self._map_advanced_source_filter()
         source = str(event.get("source_family") or event.get("primary_source_family") or "").strip().lower()
