@@ -793,10 +793,39 @@ def test_regional_intel_summary_hides_green_rows_by_default() -> None:
 
 def test_regional_intel_visible_boundaries_ignore_green_rollups_by_default() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
-    assert "function regionalQuietStateStyle()" in source
+    assert "function regionalGreenStateStyle()" in source
     assert "if (!regionalRollupIsActionable(rollup))" in source
-    assert "return regionalQuietStateStyle();" in source
+    assert "return regionalGreenStateStyle();" in source
     assert "if (regionalRollupIsActionable(rollup))" in source
+    assert "if (!regionalRollupIsActionable(rollup))" in source
+
+
+def test_regional_intel_summary_caps_with_overflow_counts() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "function regionalActionableOverflowCount" in source
+    assert "more states in current filters" in source
+    assert "more FEMA regions in current filters" in source
+    assert "States Needing Review" in source
+    assert "FEMA Regions Needing Review" in source
+
+
+def test_map_filter_bar_does_not_render_redundant_view_status_label() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("def _clear_map_selected_detail")]
+
+    assert 'self._map_view_status_label = None' in build_block
+    assert "filter_grid.addWidget(self._map_view_status_label" not in build_block
+
+
+def test_map_selected_detail_splitter_uses_responsive_helper() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "def _map_selected_panel_target_width" in source
+    assert "def _sync_map_canvas_splitter" in source
+    assert "self._sync_map_canvas_splitter()" in source[source.index("def resizeEvent") : source.index("def _sync_city_pop_enabled")]
+    assert "total < 760" in source
+    assert "panel.setMinimumWidth(260)" in source
 
 
 def test_station_status_mode_hides_unknown_station_inventory() -> None:
@@ -806,6 +835,32 @@ def test_station_status_mode_hides_unknown_station_inventory() -> None:
     assert "if sitrep_mode:" in render_block
     assert 'marker.get("spotter_status_key")' in render_block
     assert '{"red", "yellow", "green"}' in render_block
+
+
+def test_station_status_mode_skips_path_and_presence_loaders() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+    toggle_block = source[source.index("def _on_sitrep_status_toggled") : source.index("def focus_sitrep_status")]
+
+    assert "if self._links_active() and not sitrep_mode:" in render_block
+    assert "if sitrep_mode:\n            varac_stats = {}" in render_block
+    assert "spotter_map_activity = {}" in render_block
+    assert "commstat_reporter_activity = {}" in render_block
+    assert "not sitrep_mode\n            and self._links_active()" in render_block
+    assert "self.show_link_paths = False" in toggle_block
+    assert "self._observation_focus_enabled = False" in toggle_block
+
+
+def test_selected_station_show_paths_converts_to_paths_context() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    detail_block = source[source.index("def _show_map_selected_detail") : source.index("def _map_payload_rows")]
+    paths_block = source[source.index("def _show_paths_for_selected_station") : source.index("def _compose_message_for_selected_station")]
+
+    assert "can_show_paths = bool(kind == \"station\" and callsign and not self._map_selected_station_is_self(callsign))" in detail_block
+    assert "self._map_selected_paths_btn.setVisible(kind == \"station\" and bool(callsign))" in detail_block
+    assert "self._map_selected_paths_btn.setEnabled(can_show_paths)" in detail_block
+    assert 'self._observation_focus_mode = "paths"' in paths_block
+    assert "self._sitrep_status_only_enabled = False" in paths_block
 
 
 def test_station_status_summary_is_compact_and_legend_omits_unknown() -> None:

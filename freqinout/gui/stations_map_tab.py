@@ -2518,8 +2518,7 @@ class StationsMapTab(QWidget):
         self._now_reachable_label = QLabel("")
         self._now_reachable_label.setWordWrap(True)
         self._now_reachable_label.setVisible(False)
-        self._map_view_status_label = QLabel("Map View: All Stations")
-        self._map_view_status_label.setWordWrap(True)
+        self._map_view_status_label = None
         filter_bar = QFrame(map_container)
         self._map_filter_bar = filter_bar
         def filter_field(
@@ -2627,8 +2626,7 @@ class StationsMapTab(QWidget):
         filter_grid.addWidget(filter_field("Search", self._map_search_edit), 1, 0, 1, 7)
         filter_grid.addWidget(self._map_clear_filters_button, 1, 7, alignment=Qt.AlignBottom)
         filter_grid.addWidget(self._map_clear_layers_button, 1, 8, alignment=Qt.AlignBottom)
-        filter_grid.addWidget(self._map_view_status_label, 2, 0, 1, 9, alignment=Qt.AlignLeft)
-        filter_grid.addWidget(self._now_reachable_label, 3, 0, 1, 9, alignment=Qt.AlignLeft)
+        filter_grid.addWidget(self._now_reachable_label, 2, 0, 1, 9, alignment=Qt.AlignLeft)
         filter_grid.setColumnStretch(0, 0)
         filter_grid.setColumnStretch(1, 0)
         filter_grid.setColumnStretch(2, 0)
@@ -2739,7 +2737,7 @@ class StationsMapTab(QWidget):
     def _build_map_selected_detail_panel(self, parent: QWidget) -> None:
         panel = QFrame(parent)
         panel.setFrameShape(QFrame.StyledPanel)
-        panel.setMinimumWidth(340)
+        panel.setMinimumWidth(260)
         panel.setMaximumWidth(460)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -2839,13 +2837,30 @@ class StationsMapTab(QWidget):
         panel = getattr(self, "_map_selected_panel", None)
         if panel is not None:
             panel.setVisible(False)
+        self._sync_map_canvas_splitter()
+
+    def _map_selected_panel_target_width(self, total_width: int) -> int:
+        total = max(1, int(total_width or 0))
+        if total < 760:
+            return max(0, min(300, total // 3))
+        if total < 1050:
+            return min(340, max(300, total // 3))
+        return min(430, max(360, total // 4))
+
+    def _sync_map_canvas_splitter(self) -> None:
         splitter = getattr(self, "_map_canvas_splitter", None)
-        if splitter is not None:
-            try:
-                total = max(1, sum(splitter.sizes()) or splitter.width())
+        if splitter is None:
+            return
+        panel = getattr(self, "_map_selected_panel", None)
+        try:
+            total = max(1, sum(splitter.sizes()) or splitter.width())
+            if panel is None or not panel.isVisible():
                 splitter.setSizes([total, 0])
-            except Exception:
-                pass
+                return
+            side = self._map_selected_panel_target_width(total)
+            splitter.setSizes([max(1, total - side), max(0, side)])
+        except Exception:
+            pass
 
     def _show_map_selected_detail(self, payload: Dict[str, object]) -> None:
         panel = getattr(self, "_map_selected_panel", None)
@@ -2880,14 +2895,21 @@ class StationsMapTab(QWidget):
         kind = str(payload.get("type") or "").strip().lower()
         message_context = self._map_selected_message_context(payload)
         callsign = self._map_selected_station_callsign()
+        can_show_paths = bool(kind == "station" and callsign and not self._map_selected_station_is_self(callsign))
         if self._map_selected_tabs is not None:
             self._map_selected_tabs.setTabEnabled(1, True)
-            self._map_selected_tabs.setTabEnabled(2, kind == "station" and bool(callsign))
+            self._map_selected_tabs.setTabEnabled(2, can_show_paths)
             self._map_selected_tabs.setTabEnabled(3, bool(str(message_context.get("target") or "").strip()))
         if self._map_selected_center_btn is not None:
             self._map_selected_center_btn.setEnabled(bool(lat != 0.0 or lon != 0.0))
         if self._map_selected_paths_btn is not None:
-            self._map_selected_paths_btn.setVisible(kind == "station" and bool(title))
+            self._map_selected_paths_btn.setVisible(kind == "station" and bool(callsign))
+            self._map_selected_paths_btn.setEnabled(can_show_paths)
+            self._map_selected_paths_btn.setToolTip(
+                "Show observed direct or shared-contact paths from my station to the selected station."
+                if can_show_paths
+                else "Paths are not shown for your own station."
+            )
             self._update_selected_paths_button_visual()
         if self._map_selected_group_btn is not None:
             self._map_selected_group_btn.setVisible(bool(group))
@@ -2918,14 +2940,7 @@ class StationsMapTab(QWidget):
             )
 
         panel.setVisible(True)
-        splitter = getattr(self, "_map_canvas_splitter", None)
-        if splitter is not None:
-            try:
-                total = max(1, sum(splitter.sizes()) or splitter.width())
-                side = min(430, max(360, total // 4))
-                splitter.setSizes([max(1, total - side), side])
-            except Exception:
-                pass
+        self._sync_map_canvas_splitter()
 
     @staticmethod
     def _map_payload_rows(payload: Dict[str, object]) -> Dict[str, str]:
@@ -4039,8 +4054,11 @@ class StationsMapTab(QWidget):
                     )
                 if not self._set_selected_station_path_target(callsign):
                     return
+                self._sitrep_status_only_enabled = False
                 self._observation_focus_enabled = True
                 self._observation_focus_mode = "paths"
+                self.show_station_markers = True
+                self.show_link_paths = True
                 tabs = getattr(self, "_map_selected_tabs", None)
                 if tabs is not None:
                     try:
@@ -4547,6 +4565,7 @@ class StationsMapTab(QWidget):
         self._update_drawer_mode()
         self._position_splitter_indicator()
         self._sync_controls_top_alignment()
+        self._sync_map_canvas_splitter()
 
     def _sync_city_pop_enabled(self) -> None:
         enabled = bool(self.show_cities or self.show_states)
@@ -5612,9 +5631,8 @@ class StationsMapTab(QWidget):
 
     def _on_sitrep_status_toggled(self, checked: bool) -> None:
         self._sitrep_status_only_enabled = bool(checked)
-        if not self._sitrep_status_only_enabled:
-            self._observation_focus_enabled = False
-            self._observation_focus_mode = ""
+        self._observation_focus_enabled = False
+        self._observation_focus_mode = ""
         if self._sitrep_status_only_enabled and self._now_reachable_enabled and self._now_reachable_button is not None:
             # Pin modes are mutually exclusive; SitRep takes precedence when enabled.
             self._now_reachable_button.blockSignals(True)
@@ -5627,13 +5645,21 @@ class StationsMapTab(QWidget):
             self._update_now_reachable_summary()
             self._refresh_relay_targets()
         if self._sitrep_status_only_enabled:
-            # Keep links available by default when this mode is enabled.
-            try:
-                mode, _ = self._parse_link_selection(self.link_mode_combo.currentData())
-                if str(mode).lower() == "off":
-                    self.link_mode_combo.setCurrentText("My Station")
-            except Exception:
-                pass
+            self.show_link_paths = False
+            self.link_mode = "off"
+            self.link_value = ""
+            self.relay_target = ""
+            self._paths_focus_station = ""
+            self._paths_previous_observation_focus = None
+            links_chk = getattr(self, "map_links_chk", None)
+            if links_chk is not None:
+                try:
+                    links_chk.blockSignals(True)
+                    links_chk.setChecked(False)
+                    links_chk.blockSignals(False)
+                except Exception:
+                    pass
+            self._sync_link_mode_combo_to_off()
         self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep")
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -12091,7 +12117,7 @@ class StationsMapTab(QWidget):
         links: List[Dict] = []
         relay_target = ""
         reachable_filter = None
-        if self._links_active():
+        if self._links_active() and not sitrep_mode:
             relay_target = (self.relay_target or "").strip().upper()
             reachable_filter = self._now_reachable_callsigns if self._now_reachable_enabled else None
 
@@ -12127,67 +12153,77 @@ class StationsMapTab(QWidget):
             if view_state:
                 self._last_map_view = view_state
 
-        varac_stats = self._cached_map_value(
-            "varac_stats_recent",
-            {"max_age_sec": self.recency_seconds},
-            lambda: _timed_map_call(
-                "map.load_varac_stats_recent",
-                lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
-            ),
-            ttl_sec=8.0,
-        )
-        varac_all = self._cached_map_value(
-            "varac_stats_all",
-            {"max_age_sec": None},
-            lambda: _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None)),
-            ttl_sec=12.0,
-        )
-        activity_lookup = self._cached_map_value(
-            "operator_activity_summary",
-            {"recency_seconds": self.recency_seconds},
-            lambda: _timed_map_call("map.load_operator_activity_summary", self._load_operator_activity_summary),
-            ttl_sec=8.0,
-        )
-        direct_contact_lookup = self._cached_map_value(
-            "js8_direct_contact_summary",
-            {"my_call": my_call},
-            lambda: _timed_map_call(
-                "map.load_js8_direct_contact_summary",
-                lambda: self._load_js8_direct_contact_summary(my_call),
-            ),
-            ttl_sec=8.0,
-        )
-        js8_all = self._cached_map_value(
-            "js8_presence",
-            {"recency_seconds": self.recency_seconds},
-            lambda: _timed_map_call("map.load_js8_presence", self._load_js8_presence),
-            ttl_sec=8.0,
-        )
-        fldigi_calls = self._cached_map_value(
-            "fldigi_presence",
-            {"recency_seconds": self.recency_seconds},
-            lambda: _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence),
-            ttl_sec=8.0,
-        )
+        if sitrep_mode:
+            varac_stats = {}
+            varac_all = {}
+            activity_lookup = {}
+            direct_contact_lookup = {}
+            js8_all = set()
+            fldigi_calls = set()
+            spotter_map_activity = {}
+            commstat_reporter_activity = {}
+        else:
+            varac_stats = self._cached_map_value(
+                "varac_stats_recent",
+                {"max_age_sec": self.recency_seconds},
+                lambda: _timed_map_call(
+                    "map.load_varac_stats_recent",
+                    lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
+                ),
+                ttl_sec=8.0,
+            )
+            varac_all = self._cached_map_value(
+                "varac_stats_all",
+                {"max_age_sec": None},
+                lambda: _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None)),
+                ttl_sec=12.0,
+            )
+            activity_lookup = self._cached_map_value(
+                "operator_activity_summary",
+                {"recency_seconds": self.recency_seconds},
+                lambda: _timed_map_call("map.load_operator_activity_summary", self._load_operator_activity_summary),
+                ttl_sec=8.0,
+            )
+            direct_contact_lookup = self._cached_map_value(
+                "js8_direct_contact_summary",
+                {"my_call": my_call},
+                lambda: _timed_map_call(
+                    "map.load_js8_direct_contact_summary",
+                    lambda: self._load_js8_direct_contact_summary(my_call),
+                ),
+                ttl_sec=8.0,
+            )
+            js8_all = self._cached_map_value(
+                "js8_presence",
+                {"recency_seconds": self.recency_seconds},
+                lambda: _timed_map_call("map.load_js8_presence", self._load_js8_presence),
+                ttl_sec=8.0,
+            )
+            fldigi_calls = self._cached_map_value(
+                "fldigi_presence",
+                {"recency_seconds": self.recency_seconds},
+                lambda: _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence),
+                ttl_sec=8.0,
+            )
+            spotter_map_activity = self._cached_map_value(
+                "spotter_map_activity",
+                {},
+                lambda: _timed_map_call("map.load_spotter_map_activity", self._load_spotter_map_activity),
+                ttl_sec=6.0,
+            )
+            commstat_reporter_activity = self._cached_map_value(
+                "commstat_reporter_activity",
+                {"recency_seconds": self.recency_seconds},
+                lambda: _timed_map_call(
+                    "map.load_commstat_reporter_activity",
+                    lambda: self._load_commstat_reporter_activity(max_age_sec=self.recency_seconds),
+                ),
+                ttl_sec=6.0,
+            )
         spotter_status_lookup = self._cached_map_value(
             "spotter_station_status",
             {"group_filter": str(group_filter or "").strip().upper(), "region_filter": str(region_filter or "").strip().upper()},
             lambda: _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status),
-            ttl_sec=6.0,
-        )
-        spotter_map_activity = self._cached_map_value(
-            "spotter_map_activity",
-            {},
-            lambda: _timed_map_call("map.load_spotter_map_activity", self._load_spotter_map_activity),
-            ttl_sec=6.0,
-        )
-        commstat_reporter_activity = self._cached_map_value(
-            "commstat_reporter_activity",
-            {"recency_seconds": self.recency_seconds},
-            lambda: _timed_map_call(
-                "map.load_commstat_reporter_activity",
-                lambda: self._load_commstat_reporter_activity(max_age_sec=self.recency_seconds),
-            ),
             ttl_sec=6.0,
         )
         sitrep_state_summary: List[Dict[str, object]] = []
@@ -12244,7 +12280,12 @@ class StationsMapTab(QWidget):
             links = []
         loaded_link_count = len(links)
         self._map_last_link_all_time_count = 0
-        finite_path_window = bool(self._links_active() and self.show_link_paths and int(self.recency_seconds or 0) > 0)
+        finite_path_window = bool(
+            not sitrep_mode
+            and self._links_active()
+            and self.show_link_paths
+            and int(self.recency_seconds or 0) > 0
+        )
         if finite_path_window and loaded_link_count == 0:
             source_rows_before = int(getattr(self, "_map_last_link_source_rows", 0) or 0)
             missing_rows_before = int(getattr(self, "_map_last_link_missing_position_rows", 0) or 0)
@@ -12673,8 +12714,8 @@ class StationsMapTab(QWidget):
             display_links = links if self.show_link_paths else []
         link_direction_markers = bool(self._map_link_direction_markers_enabled())
         self._map_link_status_detail = self._map_link_status_text(
-            links_active=bool(self._links_active()),
-            show_link_paths=bool(self.show_link_paths),
+            links_active=bool(self._links_active() and not sitrep_mode),
+            show_link_paths=bool(self.show_link_paths and not sitrep_mode),
             loaded_link_count=loaded_link_count,
             display_link_count=len(display_links),
             link_selection=selection,
@@ -13585,6 +13626,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .regional-summary-area {{ font-weight: 800; white-space: nowrap; }}
     .regional-summary-detail {{ margin-top: 1px; opacity: 0.92; overflow-wrap: anywhere; }}
     .regional-summary-count {{ margin-top: 1px; opacity: 0.78; font-size: 0.93em; }}
+    .regional-summary-overflow {{ margin: 4px 4px 0 19px; color: {legend_text}; opacity: 0.72; font-size: 0.92em; }}
     .legend-rows {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
     .legend-row {{ display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; max-width: 100%; }}
     .legend-label {{ font-weight: 700; white-space: nowrap; }}
@@ -13896,6 +13938,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
     function regionalQuietStateStyle() {{
       return {{color: '{state_border}', weight: 1, opacity: 0.45, fillOpacity: 0}};
     }}
+    function regionalGreenStateStyle() {{
+      const color = regionalLevelColor('green');
+      return {{color: color, weight: 1.1, opacity: 0.75, fillOpacity: regionalFillOpacity('green'), fillColor: color}};
+    }}
     function regionalStateRollup(stateAbbr) {{
       const states = (regionalIntelligence && regionalIntelligence.states) || {{}};
       return states[String(stateAbbr || '').toUpperCase()] || null;
@@ -13903,7 +13949,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     function regionalStateStyle(stateAbbr) {{
       const rollup = regionalStateRollup(stateAbbr);
       if (!regionalRollupIsActionable(rollup)) {{
-        return regionalQuietStateStyle();
+        return regionalGreenStateStyle();
       }}
       const color = regionalLevelColor(rollup.level);
       return {{color: color, weight: 1.6, opacity: 0.95, fillOpacity: regionalFillOpacity(rollup.level), fillColor: color}};
@@ -13966,6 +14012,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
       return regionalRollupsByScore(kind, 500)
         .filter(regionalRollupIsActionable)
         .slice(0, limit);
+    }}
+    function regionalActionableOverflowCount(kind, shownCount) {{
+      const count = regionalRollupsByScore(kind, 500).filter(regionalRollupIsActionable).length;
+      return Math.max(0, count - Number(shownCount || 0));
     }}
     function regionalNationalRollup() {{
       const states = regionalRollupsByScore('state', 500);
@@ -14094,10 +14144,14 @@ function addGridLabels(res, level, bounds, maxLabels) {
       const topic = escapeHtml((regionalIntelligence && regionalIntelligence.topic_filter) || 'All Topics');
       const stateRows = states.map(regionalSummaryRow).join('');
       const regionRows = regions.map(regionalSummaryRow).join('');
+      const stateMore = regionalActionableOverflowCount('state', states.length);
+      const regionMore = regionalActionableOverflowCount('region', regions.length);
+      const stateMoreText = stateMore ? '<div class="regional-summary-overflow">+' + stateMore + ' more states in current filters</div>' : '';
+      const regionMoreText = regionMore ? '<div class="regional-summary-overflow">+' + regionMore + ' more FEMA regions in current filters</div>' : '';
       return '<button class="regional-summary-heading regional-summary-heading-button" type="button" data-area-type="national" data-area-id="National"><span>Regional Intel</span><span class="regional-summary-meta">' + sensitivity + '</span></button>' +
         '<div class="regional-summary-meta">' + topic + '</div>' +
-        (stateRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">States</div>' + stateRows + '</div>' : '') +
-        (regionRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">FEMA Regions</div>' + regionRows + '</div>' : '');
+        (stateRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">States Needing Review</div>' + stateRows + stateMoreText + '</div>' : '') +
+        (regionRows ? '<div class="regional-summary-section"><div class="regional-summary-section-title">FEMA Regions Needing Review</div>' + regionRows + regionMoreText + '</div>' : '');
     }}
     function regionalTooltipHtml(rollup) {{
       const title = escapeHtml((rollup.label || rollup.area_id || 'Area') + ' ' + String(rollup.level || 'gray').toUpperCase());
@@ -14163,14 +14217,16 @@ function addGridLabels(res, level, bounds, maxLabels) {
           layer.off('click', layer._fioRegionalClickHandler);
           layer._fioRegionalClickHandler = null;
         }}
-        if (!rollup) {{
+        if (window.regionalIntelligenceEnabled) {{
+          try {{ layer.setStyle(regionalStateStyle(stateAbbr)); }} catch (e) {{}}
+        }}
+        if (!regionalRollupIsActionable(rollup)) {{
           try {{
             const el = layer.getElement && layer.getElement();
             if (el) el.style.cursor = '';
           }} catch (e) {{}}
           return;
         }}
-        try {{ layer.setStyle(regionalStateStyle(stateAbbr)); }} catch (e) {{}}
         try {{ layer.bindTooltip(regionalTooltipHtml(rollup), {{direction:'top', sticky:true, className:'cs-tooltip regional-rollup-tip'}}); }} catch (e) {{}}
         layer._fioRegionalClickHandler = function(e) {{
           if (e && window.L && L.DomEvent) {{

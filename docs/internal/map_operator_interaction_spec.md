@@ -461,7 +461,13 @@ into the inbox so the operator lands on the evidence that caused the map state.
 
 - Regional Intel summary list excludes green rows by default.
 - Green evidence can still lower concern or support trend internally.
+- Regional Intel map geography paints no-action states green for situational
+  reassurance, while the summary remains an exception list of non-green areas.
+- Regional Intel summary caps visible rows and shows a “more” count when the
+  current filters produce more actionable states or FEMA regions than fit.
 - Station Status mode excludes unknown/no-report stations.
+- Station Status mode does not load or display path/link state; it should feel
+  immediate when switching from another map view.
 - Report detail uses `Status`, not `Severity`.
 - SNR tooltips and labels are rounded.
 - Clicking a station opens details with roster/status/schedule data when known.
@@ -477,11 +483,17 @@ into the inbox so the operator lands on the evidence that caused the map state.
 - CommStat detail distinguishes reported-for and reported-by fields.
 - Regional green/no-action areas do not steal click focus from actionable
   rollups.
-- Paths overlay can be enabled from another view without changing the primary
-  view.
+- Paths overlay can be enabled from a station card in any map view, and that
+  action converts the map into the Paths review context.
 - `Show Paths To` is always scoped to the currently selected station and the
   currently selected age window. Age changes or station changes must refresh
   from helper-owned path state, not stale UI labels.
+- `Show Paths To` is visible on station detail cards except for the operator's
+  own station, where the action is disabled.
+- The compact control bar does not repeat “Map View” text between filters and
+  the map canvas.
+- The map/detail split stays usable on narrow laptop windows by shrinking the
+  selected-detail panel proportionally instead of consuming the map.
 - Selected-station path refresh must be fast enough for normal operator use:
   link queries should be constrained to the operator station and target station
   before Python shared-contact topology is calculated.
