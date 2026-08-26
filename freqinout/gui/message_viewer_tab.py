@@ -681,6 +681,7 @@ class _BbsAutoArchiveWorker(QObject):
         allowed_exts: List[str],
         reason: str,
         archive_context: str = "live",
+        archive_jobs: Optional[List[Dict[str, object]]] = None,
     ):
         super().__init__()
         self._bbs_dir = Path(str(bbs_dir or ""))
@@ -696,13 +697,14 @@ class _BbsAutoArchiveWorker(QObject):
         }
         self._reason = str(reason or "").strip() or "timer"
         self._archive_context = str(archive_context or "live").strip() or "live"
+        self._archive_jobs = [dict(job) for job in (archive_jobs or []) if isinstance(job, dict)]
 
-    def _archive_destination(self, src: Path) -> Path:
+    def _archive_destination(self, src: Path, *, source_root: Path, archive_context: str) -> Path:
         try:
-            rel = src.relative_to(self._bbs_dir)
+            rel = src.relative_to(source_root)
         except Exception:
             rel = Path(src.name)
-        dst = self._archive_dir / self._archive_context / rel
+        dst = self._archive_dir / archive_context / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists():
             return dst
@@ -714,6 +716,34 @@ class _BbsAutoArchiveWorker(QObject):
             attempt += 1
         return dst
 
+    def _normalized_archive_jobs(self) -> List[Dict[str, object]]:
+        if self._archive_jobs:
+            jobs = []
+            for job in self._archive_jobs:
+                root_txt = str(job.get("bbs_dir", "") or "").strip()
+                if not root_txt:
+                    continue
+                try:
+                    days = max(1, int(job.get("days", self._days) or self._days))
+                except Exception:
+                    days = self._days
+                context = str(job.get("archive_context", self._archive_context) or self._archive_context).strip()
+                jobs.append(
+                    {
+                        "bbs_dir": Path(root_txt),
+                        "days": days,
+                        "archive_context": context or self._archive_context,
+                    }
+                )
+            return jobs
+        return [
+            {
+                "bbs_dir": self._bbs_dir,
+                "days": self._days,
+                "archive_context": self._archive_context,
+            }
+        ]
+
     def run(self) -> None:
         started_ts = time.time()
         completed_ts = started_ts
@@ -723,28 +753,34 @@ class _BbsAutoArchiveWorker(QObject):
         error_count = 0
         moved_items: List[tuple[str, str]] = []
         errors: List[str] = []
-        cutoff_ts = started_ts - (float(self._days) * 86400.0)
         try:
-            for src in sorted(self._bbs_dir.rglob("*"), key=lambda item: str(item).lower()):
-                try:
-                    if not src.is_file():
-                        continue
-                    scanned_count += 1
-                    suffix = src.suffix.lower()
-                    if self._allowed_exts and suffix not in self._allowed_exts:
-                        continue
-                    st = src.stat()
-                    if float(st.st_mtime) > cutoff_ts:
-                        continue
-                    dst = self._archive_destination(src)
-                    eligible_count += 1
-                    shutil.move(str(src), str(dst))
-                    moved_count += 1
-                    moved_items.append((str(src), str(dst)))
-                except Exception as e:
-                    error_count += 1
-                    errors.append(str(e))
+            for job in self._normalized_archive_jobs():
+                source_root = job["bbs_dir"]
+                if not isinstance(source_root, Path) or not source_root.exists() or not source_root.is_dir():
                     continue
+                days = max(1, int(job.get("days", self._days) or self._days))
+                archive_context = str(job.get("archive_context", self._archive_context) or self._archive_context).strip()
+                cutoff_ts = started_ts - (float(days) * 86400.0)
+                for src in sorted(source_root.rglob("*"), key=lambda item: str(item).lower()):
+                    try:
+                        if not src.is_file():
+                            continue
+                        scanned_count += 1
+                        suffix = src.suffix.lower()
+                        if self._allowed_exts and suffix not in self._allowed_exts:
+                            continue
+                        st = src.stat()
+                        if float(st.st_mtime) > cutoff_ts:
+                            continue
+                        dst = self._archive_destination(src, source_root=source_root, archive_context=archive_context)
+                        eligible_count += 1
+                        shutil.move(str(src), str(dst))
+                        moved_count += 1
+                        moved_items.append((str(src), str(dst)))
+                    except Exception as e:
+                        error_count += 1
+                        errors.append(str(e))
+                        continue
         except Exception as e:
             completed_ts = time.time()
             self.finished.emit(
@@ -8080,11 +8116,44 @@ class MessageViewerTab(QWidget):
         except Exception:
             days_val = 14
         allowed = sorted(set(ORIGIN_EXTS.get("bbs", set(SUPPORTED_EXT))))
+        archive_jobs: List[Dict[str, object]] = [
+            {
+                "bbs_dir": str(bbs_dir),
+                "days": int(days_val),
+                "archive_context": "live",
+            }
+        ]
+        if self._is_truthy(self.settings.get("varac_bbs_vault_enabled", False), False):
+            for location in load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", [])):
+                if not location.enabled:
+                    continue
+                if location.retention_policy != "Archive this location by age":
+                    continue
+                source_txt = str(location.source_dir or "").strip()
+                if not source_txt:
+                    continue
+                source_path = Path(source_txt)
+                if not source_path.exists() or not source_path.is_dir():
+                    continue
+                try:
+                    if source_path.resolve() == archive_dir.resolve():
+                        continue
+                except Exception:
+                    pass
+                context_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(location.id or location.name or "location")).strip("-")
+                archive_jobs.append(
+                    {
+                        "bbs_dir": str(source_path),
+                        "days": max(1, int(location.retention_days or days_val)),
+                        "archive_context": f"managed/{context_id or 'location'}",
+                    }
+                )
         return {
             "bbs_dir": str(bbs_dir),
             "archive_dir": str(archive_dir),
             "days": int(days_val),
             "allowed_exts": allowed,
+            "archive_jobs": archive_jobs,
         }
 
     def _bbs_auto_archive_last_check_ts(self) -> float:
@@ -8149,6 +8218,7 @@ class MessageViewerTab(QWidget):
             allowed_exts=[str(v) for v in (snapshot.get("allowed_exts", []) or [])],
             reason=str(reason or "timer"),
             archive_context="live",
+            archive_jobs=[dict(v) for v in (snapshot.get("archive_jobs", []) or []) if isinstance(v, dict)],
         )
         self._bbs_auto_archive_worker.moveToThread(self._bbs_auto_archive_thread)
         self._bbs_auto_archive_thread.started.connect(self._bbs_auto_archive_worker.run)

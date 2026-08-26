@@ -159,8 +159,8 @@ Target behavior:
   and message surfacing understandable to a normal operator.
 - Manage file purge/retention by BBS location, not only globally. Each managed
   location should be able to declare its own age policy and archive behavior.
-  Initial implementation captures and previews this policy per location; runtime
-  enforcement remains a follow-on slice.
+  Initial implementation captures, previews, and enforces age-based managed
+  location archival through the BBS auto-archive pass.
 - Treat BBS as a message entity under Messages. Operators should be able to
   browse BBS-relevant content without mentally translating from VarAC internals.
 - Show a preview of the managed BBS structure before writing or publishing it so

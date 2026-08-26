@@ -106,3 +106,45 @@ def test_bbs_auto_archive_mirrors_live_subfolders(tmp_path: Path) -> None:
     assert results[0]["moved_count"] == 1
     assert not src.exists()
     assert (archive_dir / "live" / "forms" / "old.txt").exists()
+
+
+def test_bbs_auto_archive_can_process_managed_location_jobs(tmp_path: Path) -> None:
+    now_ts = time.time()
+    live_dir = tmp_path / "BBS"
+    managed_intel = tmp_path / "managed" / "locations" / "Intel"
+    managed_manual = tmp_path / "managed" / "locations" / "Manual"
+    archive_dir = tmp_path / "Archive"
+    live_dir.mkdir(parents=True)
+    managed_intel.mkdir(parents=True)
+    managed_manual.mkdir(parents=True)
+    archive_dir.mkdir()
+    live_old = live_dir / "old-live.txt"
+    intel_old = managed_intel / "old-intel.txt"
+    manual_old = managed_manual / "old-manual.txt"
+    for path in (live_old, intel_old, manual_old):
+        path.write_text(path.stem, encoding="utf-8")
+        os.utime(path, (now_ts - 8 * 86400, now_ts - 8 * 86400))
+    worker = _BbsAutoArchiveWorker(
+        bbs_dir=str(live_dir),
+        archive_dir=str(archive_dir),
+        days=7,
+        allowed_exts=[".txt"],
+        reason="test",
+        archive_context="live",
+        archive_jobs=[
+            {"bbs_dir": str(live_dir), "days": 7, "archive_context": "live"},
+            {"bbs_dir": str(managed_intel), "days": 7, "archive_context": "managed/intel"},
+        ],
+    )
+    results = []
+    worker.finished.connect(results.append)
+
+    worker.run()
+
+    assert results
+    assert results[0]["moved_count"] == 2
+    assert not live_old.exists()
+    assert not intel_old.exists()
+    assert manual_old.exists()
+    assert (archive_dir / "live" / "old-live.txt").exists()
+    assert (archive_dir / "managed" / "intel" / "old-intel.txt").exists()
