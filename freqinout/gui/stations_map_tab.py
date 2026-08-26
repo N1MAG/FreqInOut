@@ -742,6 +742,8 @@ class StationsMapTab(QWidget):
         self._map_propagation_button: Optional[QPushButton] = None
         self._map_rf_pins_button: Optional[QPushButton] = None
         self._map_mode_combo: Optional[QComboBox] = None
+        self._map_traffic_subtype_combo: Optional[QComboBox] = None
+        self._map_traffic_subtype_field: Optional[QWidget] = None
         self._map_intel_sensitivity_field: Optional[QWidget] = None
         self._map_path_scope_field: Optional[QWidget] = None
         self._map_intelligence_layers_section: Optional[QWidget] = None
@@ -1309,10 +1311,11 @@ class StationsMapTab(QWidget):
 
     def _perform_map_refresh(self, *, level: str, reason: str, preserve_view: object = True) -> None:
         self._emit_map_event("render_started", level=level, reason=reason)
+        loading_detail = self._map_loading_detail_text(level=level, reason=reason)
         if level == "full" or not self._map_initialized:
-            self._set_map_runtime_state("loading", "Refreshing the map surface and rebuilding overlays.")
+            self._set_map_runtime_state("loading", loading_detail or "Refreshing the map surface and rebuilding overlays.")
         elif self._map_runtime_state != "degraded":
-            self._set_map_runtime_state("loading", "Refreshing map data.")
+            self._set_map_runtime_state("loading", loading_detail or "Refreshing map data.")
         try:
             with perf_span("map.render_call", settings=self.settings, meta={"source": reason, "level": level}, min_ms=10.0):
                 self._render_map(preserve_view=preserve_view)
@@ -1333,6 +1336,22 @@ class StationsMapTab(QWidget):
                 detail,
             )
         self._emit_map_event("render_completed", level=level, reason=reason)
+
+    def _map_loading_detail_text(self, *, level: str = "", reason: str = "") -> str:
+        mode = self._current_map_mode_key()
+        label = self._map_view_status_text().replace("Map View: ", "")
+        seconds = int(getattr(self, "recency_seconds", 0) or 0)
+        if seconds <= 0:
+            return f"Building {label} from available history."
+        if seconds >= 7 * 24 * 60 * 60:
+            days = max(1, round(seconds / 86400))
+            return f"Building {days}-day {label} view; aggregating older traffic before drawing details."
+        if seconds > 24 * 60 * 60:
+            hours = max(1, round(seconds / 3600))
+            return f"Building {hours}-hour {label} view; this may take a moment."
+        if mode == "paths":
+            return "Building path view for the selected time window."
+        return f"Refreshing {label}."
 
     def _enter_map_degraded(self, detail: str, *, reason: str = "", exc: Exception | None = None) -> None:
         error_text = str(exc or "").strip()
@@ -2350,14 +2369,14 @@ class StationsMapTab(QWidget):
         self._map_all_stations_button = QPushButton("All Stations")
         self._map_all_stations_button.setToolTip("Return to the normal station map view.")
         self._map_all_stations_button.clicked.connect(self.focus_all_stations)
-        self._map_hf_reports_button = QPushButton("Radio/App Traffic")
-        self._map_hf_reports_button.setToolTip("Show radio and connected-app message intelligence from Spotter, CommStat, JS8Call, FLMsg/FLAmp, VarAC, and condition alerts.")
+        self._map_hf_reports_button = QPushButton("RF/App")
+        self._map_hf_reports_button.setToolTip("Traffic subtype: radio and connected-app message intelligence.")
         self._map_hf_reports_button.clicked.connect(self.focus_hf_reports)
-        self._map_local_reports_button = QPushButton("Local Traffic")
-        self._map_local_reports_button.setToolTip("Show local operator and NCS field reports only.")
+        self._map_local_reports_button = QPushButton("Local")
+        self._map_local_reports_button.setToolTip("Traffic subtype: local operator and NCS field reports only.")
         self._map_local_reports_button.clicked.connect(self.focus_local_reports)
-        self._map_reports_button = QPushButton("All Traffic")
-        self._map_reports_button.setToolTip("Show HF/app traffic and local operator reports together.")
+        self._map_reports_button = QPushButton("Traffic")
+        self._map_reports_button.setToolTip("Show recent report traffic. Use Type for All, RF/App, Local, or CommStat.")
         self._map_reports_button.clicked.connect(self.focus_reports)
         self._map_regional_intel_button = QPushButton("Regional Intel")
         self._map_regional_intel_button.setToolTip(
@@ -2378,26 +2397,34 @@ class StationsMapTab(QWidget):
         self._map_mode_combo = QComboBox()
         for label, data in (
             ("All Stations", "all"),
-            ("Recent Traffic", "reports"),
+            ("Traffic", "reports"),
             ("Regional Intel", "regional"),
-            ("Station Status", "sitrep"),
             ("Paths", "paths"),
             ("RF Planning", "propagation"),
             ("Planning Pins", "pins"),
-            ("Radio/App Traffic", "hf"),
-            ("Local Traffic", "local"),
             ("Peer Sched Now", "peer"),
         ):
             self._map_mode_combo.addItem(label, data)
         self._map_mode_combo.setToolTip("Choose the main map view.")
         self._map_mode_combo.setMinimumWidth(180)
         self._map_mode_combo.setMaximumWidth(240)
+        self._map_traffic_subtype_combo = QComboBox()
+        for label, data in (
+            ("All", "all"),
+            ("RF/App", "rf"),
+            ("Local", "local"),
+            ("CommStat", "commstat"),
+        ):
+            self._map_traffic_subtype_combo.addItem(label, data)
+        self._map_traffic_subtype_combo.setToolTip("Choose which traffic source family the Traffic view should show.")
+        self._map_traffic_subtype_combo.setMinimumWidth(115)
+        self._map_traffic_subtype_combo.setMaximumWidth(155)
         self._map_clear_filters_button = QPushButton("Clear Filters")
         self._map_clear_filters_button.setToolTip("Clear Group, Since, Topic, search, and advanced filters.")
         self._map_clear_filters_button.clicked.connect(self.clear_map_filters)
         self._map_clear_layers_button = QPushButton("Clear Layers")
         self._map_clear_layers_button.setToolTip(
-            "Turn off temporary layers such as paths, RF planning, pins, and Station Status. Filters stay unchanged."
+            "Turn off temporary layers such as paths, RF planning, and pins. Filters stay unchanged."
         )
         self._map_clear_layers_button.clicked.connect(self.clear_map_layers)
         self._now_reachable_button = QPushButton("Peer Sched Now")
@@ -2548,19 +2575,16 @@ class StationsMapTab(QWidget):
         mode_actions_layout.setSpacing(8)
         mode_action_buttons = (
             self._map_all_stations_button,
-            self._map_hf_reports_button,
-            self._map_local_reports_button,
             self._map_reports_button,
             self._map_regional_intel_button,
             self._map_paths_button,
             self._map_propagation_button,
             self._map_rf_pins_button,
-            self._sitrep_status_button,
             self._now_reachable_button,
         )
         for idx, button in enumerate(mode_action_buttons):
-            mode_actions_layout.addWidget(button, idx // 5, idx % 5)
-        for col in range(5):
+            mode_actions_layout.addWidget(button, idx // 4, idx % 4)
+        for col in range(4):
             mode_actions_layout.setColumnStretch(col, 1)
         views_layout = self._add_collapsible_group(controls_layout, "Operator Views", expanded=False)
         views_layout.addWidget(mode_actions_row)
@@ -2612,21 +2636,23 @@ class StationsMapTab(QWidget):
         controls_layout.addStretch()
 
         self._map_intel_sensitivity_field = filter_field("Sensitivity", self._map_intel_sensitivity_combo, 155, 190)
+        self._map_traffic_subtype_field = filter_field("Type", self._map_traffic_subtype_combo, 130, 180)
         self._map_path_scope_field = filter_field("Paths", self._map_path_scope_combo, 150, 220)
         filter_grid = QGridLayout(filter_bar)
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(10)
         filter_grid.setVerticalSpacing(6)
         filter_grid.addWidget(filter_field("View", self._map_mode_combo, 210, 280), 0, 0, 1, 2)
-        filter_grid.addWidget(filter_field("Group", self.group_filter_combo, 180, 240), 0, 2, 1, 2)
-        filter_grid.addWidget(filter_field("Age", self._map_since_button, 118, 150), 0, 4)
-        filter_grid.addWidget(filter_field("Topic", self._map_topic_filter_combo, 200, 280), 0, 5, 1, 2)
-        filter_grid.addWidget(self._map_intel_sensitivity_field, 0, 7)
-        filter_grid.addWidget(self._map_path_scope_field, 0, 8)
-        filter_grid.addWidget(filter_field("Search", self._map_search_edit), 1, 0, 1, 7)
-        filter_grid.addWidget(self._map_clear_filters_button, 1, 7, alignment=Qt.AlignBottom)
-        filter_grid.addWidget(self._map_clear_layers_button, 1, 8, alignment=Qt.AlignBottom)
-        filter_grid.addWidget(self._now_reachable_label, 2, 0, 1, 9, alignment=Qt.AlignLeft)
+        filter_grid.addWidget(self._map_traffic_subtype_field, 0, 2)
+        filter_grid.addWidget(filter_field("Group", self.group_filter_combo, 170, 230), 0, 3, 1, 2)
+        filter_grid.addWidget(filter_field("Age", self._map_since_button, 118, 150), 0, 5)
+        filter_grid.addWidget(filter_field("Topic", self._map_topic_filter_combo, 185, 260), 0, 6, 1, 2)
+        filter_grid.addWidget(self._map_intel_sensitivity_field, 0, 8)
+        filter_grid.addWidget(self._map_path_scope_field, 0, 9)
+        filter_grid.addWidget(filter_field("Search", self._map_search_edit), 1, 0, 1, 8)
+        filter_grid.addWidget(self._map_clear_filters_button, 1, 8, alignment=Qt.AlignBottom)
+        filter_grid.addWidget(self._map_clear_layers_button, 1, 9, alignment=Qt.AlignBottom)
+        filter_grid.addWidget(self._now_reachable_label, 2, 0, 1, 10, alignment=Qt.AlignLeft)
         filter_grid.setColumnStretch(0, 0)
         filter_grid.setColumnStretch(1, 0)
         filter_grid.setColumnStretch(2, 0)
@@ -2636,6 +2662,7 @@ class StationsMapTab(QWidget):
         filter_grid.setColumnStretch(6, 0)
         filter_grid.setColumnStretch(7, 1)
         filter_grid.setColumnStretch(8, 1)
+        filter_grid.setColumnStretch(9, 1)
         map_layout.addWidget(filter_bar)
 
         self._map_canvas_splitter = QSplitter(Qt.Horizontal, map_container)
@@ -2684,6 +2711,7 @@ class StationsMapTab(QWidget):
         self._map_path_scope_combo.currentIndexChanged.connect(self._on_map_path_scope_changed)
         self._map_topic_filter_combo.currentIndexChanged.connect(self._on_map_topic_filter_changed)
         self._map_intel_sensitivity_combo.currentIndexChanged.connect(self._on_map_intel_sensitivity_changed)
+        self._map_traffic_subtype_combo.currentIndexChanged.connect(self._on_map_traffic_subtype_changed)
         self._map_mode_combo.currentIndexChanged.connect(self._on_map_mode_combo_changed)
         self._map_search_edit.textChanged.connect(self._on_map_search_text_changed)
         for combo in (
@@ -5457,9 +5485,18 @@ class StationsMapTab(QWidget):
         sensitivity_field = getattr(self, "_map_intel_sensitivity_field", None)
         if sensitivity_field is not None:
             sensitivity_field.setVisible(key == "regional")
+        traffic_subtype_field = getattr(self, "_map_traffic_subtype_field", None)
+        if traffic_subtype_field is not None:
+            traffic_subtype_field.setVisible(key in {"reports", "hf", "local"})
         path_scope_field = getattr(self, "_map_path_scope_field", None)
         if path_scope_field is not None:
-            path_scope_field.setVisible(True)
+            path_scope_field.setVisible(
+                key in {"paths", "propagation", "peer"}
+                or bool(
+                    getattr(self, "show_link_paths", False)
+                    and str(getattr(self, "link_mode", "") or "").strip().lower() != "off"
+                )
+            )
         intelligence_section = getattr(self, "_map_intelligence_layers_section", None)
         if intelligence_section is not None:
             intelligence_section.setVisible(key not in {"regional"})
@@ -5469,6 +5506,8 @@ class StationsMapTab(QWidget):
         if combo is None:
             return
         key = str(mode_key or "all").strip().lower()
+        if key in {"hf", "local"}:
+            key = "reports"
         try:
             for idx in range(combo.count()):
                 if str(combo.itemData(idx) or "").strip().lower() == key:
@@ -5484,16 +5523,50 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
 
+    def _selected_map_traffic_subtype(self) -> str:
+        combo = getattr(self, "_map_traffic_subtype_combo", None)
+        if combo is None:
+            return "all"
+        try:
+            value = str(combo.currentData() or "").strip().lower()
+        except Exception:
+            value = ""
+        return value if value in {"all", "rf", "local", "commstat"} else "all"
+
+    def _set_map_traffic_subtype(self, subtype: str) -> None:
+        combo = getattr(self, "_map_traffic_subtype_combo", None)
+        if combo is None:
+            return
+        target = str(subtype or "all").strip().lower()
+        try:
+            for idx in range(combo.count()):
+                if str(combo.itemData(idx) or "").strip().lower() == target:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+                    return
+        except Exception:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
     def _map_view_status_text(self) -> str:
         mode_key = self._current_map_mode_key()
         if mode_key == "peer":
             return "Map View: Peer Schedule Now"
-        if mode_key == "hf":
-            return "Map View: Radio/App Traffic"
-        if mode_key == "local":
-            return "Map View: Local Traffic"
-        if mode_key == "reports":
-            return "Map View: Recent Traffic"
+        if mode_key in {"hf", "local", "reports"}:
+            subtype = self._selected_map_traffic_subtype()
+            if mode_key == "hf":
+                subtype = "rf"
+            elif mode_key == "local":
+                subtype = "local"
+            label = {
+                "rf": "RF/App",
+                "local": "Local",
+                "commstat": "CommStat",
+            }.get(subtype, "All")
+            return f"Map View: Traffic | {label}"
         if mode_key == "regional":
             sensitivity = self._selected_map_intel_sensitivity().title()
             topic = self._selected_map_topic_filter()
@@ -5603,8 +5676,6 @@ class StationsMapTab(QWidget):
             self.focus_reports()
         elif key == "regional":
             self.focus_regional_intelligence()
-        elif key == "sitrep":
-            self.focus_sitrep_status()
         elif key == "paths":
             self.focus_paths()
         elif key == "propagation":
@@ -5895,7 +5966,15 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
 
-    def _set_report_focus_mode(self, mode: str, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def _set_report_focus_mode(
+        self,
+        mode: str,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        source_filter: Optional[str] = None,
+        reason: str = "",
+    ) -> None:
         """Open a temporary map focus for HF, local, or combined report review."""
         self._sitrep_status_only_enabled = False
         self._observation_focus_enabled = True
@@ -5939,6 +6018,8 @@ class StationsMapTab(QWidget):
                 self._set_combo_by_text_or_data(self.group_filter_combo, group_filter)
             if getattr(self, "_map_topic_filter_combo", None) is not None:
                 self._set_combo_by_text_or_data(self._map_topic_filter_combo, topic_filter)
+            if source_filter is not None and getattr(self, "_map_source_filter_combo", None) is not None:
+                self._set_combo_by_text_or_data(self._map_source_filter_combo, source_filter)
             if hasattr(self, "band_combo"):
                 self.band_combo.blockSignals(True)
                 self.band_combo.setCurrentIndex(0)
@@ -5948,28 +6029,62 @@ class StationsMapTab(QWidget):
         self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep")
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
-        self._request_map_refresh(level="medium", reason=f"{self._observation_focus_mode}_map_focus")
+        self._request_map_refresh(level="medium", reason=reason or f"{self._observation_focus_mode}_map_focus")
+
+    def _apply_map_traffic_subtype(self, *, group_filter: str = "", topic_filter: str = "", reason: str = "traffic_subtype") -> None:
+        subtype = self._selected_map_traffic_subtype()
+        if subtype == "rf":
+            self._set_report_focus_mode(
+                "hf_reports",
+                group_filter=group_filter,
+                topic_filter=topic_filter,
+                source_filter="",
+                reason=reason,
+            )
+            return
+        if subtype == "local":
+            self._set_report_focus_mode(
+                "local_reports",
+                group_filter=group_filter,
+                topic_filter=topic_filter,
+                source_filter="",
+                reason=reason,
+            )
+            return
+        self._set_report_focus_mode(
+            "all_reports",
+            group_filter=group_filter,
+            topic_filter=topic_filter,
+            source_filter="commstat" if subtype == "commstat" else "",
+            reason=reason,
+        )
+
+    def _on_map_traffic_subtype_changed(self, _idx: int) -> None:
+        self._clear_report_query_caches()
+        self._apply_map_traffic_subtype(reason="traffic_subtype")
 
     def focus_hf_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for HF-derived Spotter/SitRep field reports."""
         if self._current_map_mode_key() == "hf" and not group_filter and not topic_filter:
             self.focus_all_stations()
             return
-        self._set_report_focus_mode("hf_reports", group_filter=group_filter, topic_filter=topic_filter)
+        self._set_map_traffic_subtype("rf")
+        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="hf_reports_map_focus")
 
     def focus_local_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for confirmed local operator and NCS reports."""
         if self._current_map_mode_key() == "local" and not group_filter and not topic_filter:
             self.focus_all_stations()
             return
-        self._set_report_focus_mode("local_reports", group_filter=group_filter, topic_filter=topic_filter)
+        self._set_map_traffic_subtype("local")
+        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="local_reports_map_focus")
 
     def focus_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
         """Open a map focus for HF and confirmed local reports together."""
         if self._current_map_mode_key() == "reports" and not group_filter and not topic_filter:
             self.focus_all_stations()
             return
-        self._set_report_focus_mode("all_reports", group_filter=group_filter, topic_filter=topic_filter)
+        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="traffic_map_focus")
 
     def focus_regional_intelligence(self) -> None:
         """Open the regional situation view for state/FEMA concern rollups."""
@@ -6119,7 +6234,7 @@ class StationsMapTab(QWidget):
         self._request_map_refresh(level="medium", reason="rf_pin_changed")
 
     def _include_legacy_spotter_report_layers(self) -> bool:
-        """Return False when Local Traffic should exclude HF Spotter-only traffic layers."""
+        """Return False when Traffic > Local should exclude HF Spotter-only traffic layers."""
         if not self._effective_map_observation_focus_enabled():
             return True
         focus_mode = self._effective_map_report_focus_mode()
@@ -9460,6 +9575,7 @@ class StationsMapTab(QWidget):
             ("group_filter_combo", ""),
             ("region_filter_combo", ""),
             ("recency_combo", MAP_DEFAULT_RECENCY_LABEL),
+            ("_map_traffic_subtype_combo", "all"),
             ("_map_topic_filter_combo", "All Topics"),
             ("_map_intel_sensitivity_combo", "active"),
             ("_map_scope_filter_combo", "all"),
@@ -9803,6 +9919,8 @@ class StationsMapTab(QWidget):
         source = str(source_family or "").strip().lower()
         if source == "local_report":
             return "local"
+        if source == "commstat":
+            return "commstat"
         if source in {"rf_pin", "pin"}:
             return "pin"
         if source == "mixed":
@@ -10527,7 +10645,7 @@ class StationsMapTab(QWidget):
     ) -> List[Dict[str, object]]:
         """Build the unified operator-facing traffic layer for map report views.
 
-        Radio/App Traffic, Local Traffic, Recent Traffic, and implicit topic/search focus
+        Traffic subtypes and implicit topic/search focus
         should act like one refinement model. Do not make those views depend on
         legacy alert/infrastructure layer toggles.
         """
@@ -13651,6 +13769,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .op-marker {{ width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center; justify-content: center; border: 2px solid #455A64; background: #ECEFF1; box-shadow: 0 2px 6px rgba(0,0,0,0.35); position: relative; box-sizing: border-box; }}
     .op-marker svg {{ width: 21px; height: 21px; display: block; }}
     .op-source-hf {{ border-radius: 7px; outline: 2px solid rgba(0,105,92,0.28); }}
+    .op-source-commstat {{ border-radius: 5px 12px 5px 12px; outline: 2px solid rgba(0,131,143,0.28); }}
     .op-source-local {{ border-radius: 50% 50% 50% 8px; outline: 2px solid rgba(94,53,177,0.32); transform: rotate(-45deg); }}
     .op-source-local svg, .op-source-local .wx-count {{ transform: rotate(45deg); }}
     .op-source-pin {{ border-radius: 5px; outline: 2px solid rgba(245,127,23,0.42); background: #FFF8E1; border-color: #F57F17; }}
@@ -14568,6 +14687,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (mode === 'reports' || mode === 'hf' || mode === 'local' || mode === 'regional') {{
         rows.push(legendRow('Report Source:', [
           legendItem('#00695C', '&#9632;', 'HF'),
+          legendItem('#00838F', '&#9632;', 'CommStat'),
           legendItem('#5E35B1', '&#9670;', 'Local'),
           legendItem('#455A64', '&#9679;', 'Mixed')
         ]));
@@ -14648,7 +14768,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (kind === 'fire') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 22c4-2 6-5 6-8 0-3-2-5-4-7 0 3-2 4-2 4S9 8 10 3c-3 2-5 6-5 10 0 4 3 7 7 9z"/></svg>`;
       if (kind === 'storm') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 16a5 5 0 0 1 1-9 7 7 0 0 1 13 3 4 4 0 0 1-3 6"/><path ${{common}} d="M13 12l-3 5h4l-2 4"/></svg>`;
       if (kind === 'medical') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 5v14M5 12h14"/><circle ${{common}} cx="12" cy="12" r="9"/></svg>`;
-      if (kind === 'comms') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M5 12.5a10 10 0 0 1 14 0"/><path ${{common}} d="M8.5 16a5 5 0 0 1 7 0"/><path ${{common}} d="M12 20h.01"/></svg>`;
+      if (sourceKind === 'commstat' && kind === 'general') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 4h9l3 3v13H6z"/><path ${{common}} d="M15 4v4h4"/><path ${{common}} d="M9 12h6M9 16h4"/></svg>`;
+      if (kind === 'comms') return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect ${{common}} x="6" y="5" width="12" height="14" rx="2"/><path ${{common}} d="M9 9h6M9 13h6M10 17h4"/><path ${{common}} d="M8 3h8"/></svg>`;
       if (kind === 'transport') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 19L10 3h4l4 16"/><path ${{common}} d="M8 11h8M7 15h10"/></svg>`;
       if (kind === 'security') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z"/></svg>`;
       if (kind === 'shelter') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 11l9-7 9 7"/><path ${{common}} d="M5 10v10h14V10"/><path ${{common}} d="M10 20v-6h4v6"/></svg>`;

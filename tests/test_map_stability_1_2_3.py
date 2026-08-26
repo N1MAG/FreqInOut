@@ -2088,13 +2088,13 @@ def test_map_view_status_text_names_current_review_context() -> None:
 
     tab._observation_focus_enabled = True
     tab._observation_focus_mode = "hf_reports"
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Radio/App Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | RF/App"
 
     tab._observation_focus_mode = "local_reports"
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Local Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | Local"
 
     tab._observation_focus_mode = "all_reports"
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Recent Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | All"
 
     tab._observation_focus_mode = "regional_intelligence"
     assert StationsMapTab._map_view_status_text(tab) == "Map View: Regional Intelligence | Active | All Topics"
@@ -2451,7 +2451,7 @@ def test_implicit_map_search_promotes_status_to_all_traffic() -> None:
     tab._selected_map_topic_filter = lambda: ""
     tab._selected_map_search_text = lambda: "wildfire"
 
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Recent Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | All"
 
 
 def test_traffic_focus_uses_traffic_layers_not_default_station_dots() -> None:
@@ -2500,9 +2500,12 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert '"Intelligence Layers"' in build_block
     assert '"Operator Views"' in build_block
     assert 'QPushButton("All Stations")' in build_block
-    assert 'QPushButton("Radio/App Traffic")' in build_block
-    assert 'QPushButton("Local Traffic")' in build_block
-    assert 'QPushButton("All Traffic")' in build_block
+    assert 'QPushButton("Traffic")' in build_block
+    assert "self._map_traffic_subtype_combo = QComboBox()" in build_block
+    assert 'filter_field("Type", self._map_traffic_subtype_combo' in build_block
+    assert '("CommStat", "commstat")' in build_block
+    actions_block = source[source.index("mode_action_buttons = (") : source.index("for idx, button in enumerate(mode_action_buttons):")]
+    assert "self._sitrep_status_button" not in actions_block
     assert 'QPushButton("Paths")' in build_block
     assert 'QPushButton("RF Planning")' in build_block
     assert 'QPushButton("Planning Pins")' in build_block
@@ -2688,7 +2691,7 @@ def test_clear_layers_preserves_report_view_context() -> None:
     assert tab.show_station_markers is False
     assert tab.show_alert_reports is True
     assert tab.show_infrastructure_reports is True
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Radio/App Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | RF/App"
     assert calls == ["clear_map_layers"]
 
 
@@ -4204,7 +4207,7 @@ def test_recent_traffic_status_label_matches_view_selector() -> None:
     tab = _bare_tab()
     tab._current_map_mode_key = lambda: "reports"
 
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Recent Traffic"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: Traffic | All"
 
 
 def test_map_link_direction_markers_are_topology_scoped() -> None:
@@ -4298,14 +4301,41 @@ def test_map_view_mode_controls_use_compact_selector_with_drawer_fallback() -> N
     assert 'filter_field("Paths", self._map_path_scope_combo' in source
     assert "def _on_map_mode_combo_changed" in source
     assert "def _sync_map_mode_combo" in source
+    assert "def _on_map_traffic_subtype_changed" in source
     assert "def _update_map_compact_control_visibility" in source
     assert "sensitivity_field.setVisible(key == \"regional\")" in source
-    assert "path_scope_field.setVisible(True)" in source
+    assert "traffic_subtype_field.setVisible(key in {\"reports\", \"hf\", \"local\"})" in source
+    assert "path_scope_field.setVisible(" in source
     assert "mode_action_buttons = (" in source
     assert "QGridLayout(mode_actions_row)" in source
     assert 'self._add_collapsible_group(controls_layout, "Operator Views", expanded=False)' in source
-    assert "idx // 5, idx % 5" in source
+    assert "idx // 4, idx % 4" in source
     assert "mode_actions_layout.addStretch" not in source
+
+
+def test_traffic_subtype_selector_drives_single_traffic_view() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    build_block = source[source.index("def _build_ui") : source.index("def _build_map_selected_detail_panel")]
+
+    assert '("Traffic", "reports")' in build_block
+    assert '("Radio/App Traffic", "hf")' not in build_block
+    assert '("Local Traffic", "local")' not in build_block
+    assert '("Station Status", "sitrep")' not in build_block
+    assert "def _apply_map_traffic_subtype" in source
+    assert 'source_filter="commstat" if subtype == "commstat" else ""' in source
+    assert '"hf_reports"' in source
+    assert '"local_reports"' in source
+
+
+def test_long_map_age_window_has_explicit_loading_feedback() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 7 * 24 * 60 * 60
+    tab._current_map_mode_key = lambda: "reports"
+
+    text = StationsMapTab._map_loading_detail_text(tab, level="medium", reason="recency_filter")
+
+    assert "7-day" in text
+    assert "aggregating older traffic" in text
 
 
 def test_path_scope_control_adds_links_without_switching_main_view() -> None:
@@ -4337,15 +4367,17 @@ def test_map_mode_combo_syncs_to_active_operator_view() -> None:
     tab._map_mode_combo = _FakeCombo(
         [
             ("All Stations", "all"),
-            ("Recent Traffic", "reports"),
-            ("Station Status", "sitrep"),
+            ("Traffic", "reports"),
             ("Regional Intel", "regional"),
             ("Paths", "paths"),
         ]
     )
 
-    StationsMapTab._sync_map_mode_combo(tab, "sitrep")
-    assert tab._map_mode_combo.currentText() == "Station Status"
+    StationsMapTab._sync_map_mode_combo(tab, "hf")
+    assert tab._map_mode_combo.currentText() == "Traffic"
+
+    StationsMapTab._sync_map_mode_combo(tab, "local")
+    assert tab._map_mode_combo.currentText() == "Traffic"
 
     StationsMapTab._sync_map_mode_combo(tab, "regional")
     assert tab._map_mode_combo.currentText() == "Regional Intel"

@@ -28,8 +28,8 @@ available as advanced tools, but the main workflow should be a small set of
 smart combinations.
 
 - Regional Intel: concern by state and FEMA region.
-- Recent Traffic: last 24 hours of meaningful traffic.
-- Station Status: stations with known latest status.
+- Traffic: recent meaningful traffic with a source subtype selector.
+- Stations: station inventory and latest known station status.
 - Paths: observed radio topology and reachability.
 - RF Planning: path-to-station planning, peer schedule, and propagation.
 - Planning Pins: operator-created planning context.
@@ -180,10 +180,18 @@ recency, number of reports, number of unique stations, and trend. It should not
 aggregate all history indefinitely; stale evidence should decay so resolved
 events do not keep an area hot.
 
-### Recent Traffic
+### Traffic
 
-Recent Traffic is the default live review view. It should use a 24 hour age
-window by default and only show records inside that window.
+Traffic is the default live review view. It should use a 24 hour age window by
+default and only show records inside that window.
+
+Traffic has a separate source subtype selector:
+
+- All: source-neutral operating activity for the selected age.
+- RF/App: radio-side and connected-application traffic, currently JS8/Spotter,
+  FLMsg/FLAmp, VarAC, and condition-alert projections.
+- Local: local operator and NCS reports only.
+- CommStat: CommStat artifacts and internet-fed reports only.
 
 Click behavior:
 
@@ -191,22 +199,21 @@ Click behavior:
 - report popups and the right panel use the same payload.
 - Messages opens the matching reports for the active filters.
 
-Recent Traffic and HF Traffic should not feel redundant:
+Future mesh traffic should enter Traffic > All when source-neutral and a
+dedicated subtype when source-specific review is useful.
 
-- Recent Traffic is source-neutral operating activity for the selected age.
-- HF Traffic is radio-derived traffic, currently JS8/Spotter and later other RF
-  sources.
-- Future mesh traffic should enter Recent Traffic when source-neutral and a
-  dedicated mesh/source view when source-specific.
+### Stations And Status
 
-### Station Status
-
-Station Status is not station inventory. It should only show stations with a
-known latest status. Unknown/no-report stations belong in All Stations.
+Station status is pin meaning, not a separate primary destination. The Stations
+view is the inventory/discovery view. It should show known/heard stations, and
+each station pin should communicate latest known station condition when FIO has
+one.
 
 Default display:
 
-- known green/yellow/red status pins.
+- station pins colored by latest known status.
+- blue/neutral only when the station is known/heard but has no current status
+  report.
 - current status legend shown by default.
 - no large table as the primary experience.
 
@@ -215,9 +222,39 @@ Click behavior:
 - show callsign, name, group, state/grid, latest status, status source, updated
   age, current/next schedule if known, and recent report summary.
 
-All Stations remains the inventory/discovery view and may show unknown stations.
-Station Status is for operational health and should avoid a dense table unless
-the operator explicitly opens a list/details view.
+If a future focused station-health list is needed, it belongs behind station
+details or diagnostics, not in the primary map view selector.
+
+### Icon Semantics
+
+Map icons should answer what the operator is looking at before they reveal how
+the data was collected.
+
+- Station activity uses station pins/circles, colored by latest known status
+  when available.
+- Report evidence uses topic/status icons: fire, power, water, medical,
+  security, shelter, fuel, food, transport, utility, warning, or general info.
+- CommStat report evidence uses a distinct source shape so it does not look
+  like a live RF station.
+- Generic radio/waves icons are fallbacks only. A screen full of identical blue
+  RF-looking icons is considered a UX failure.
+- Clusters should use count badges and dominant topic/status rather than a pile
+  of same-looking icons.
+
+### Performance And Feedback
+
+Changing age, view, subtype, path target, or topic must feel responsive.
+
+- 24 hours is the normal default and should render quickly.
+- Multi-day and all-history windows should aggregate first and draw details
+  progressively.
+- If a render may take more than a moment, the map status strip must say what
+  FIO is building, for example “Building 7-day Traffic view; aggregating older
+  traffic before drawing details.”
+- Expensive path/link work should only run when links are visible or the Paths
+  view needs it.
+- Station inventory/status should not load report/link datasets that are not
+  needed for station pins.
 
 ### Paths
 
@@ -368,8 +405,9 @@ Rules:
 
 The main map controls should be simple and durable:
 
-- View: `Regional Intel`, `Recent Traffic`, `HF Traffic`, `Local Traffic`,
-  `Station Status`, `Paths`, `RF Planning`, `Planning Pins`, `All Stations`.
+- View: `Stations`, `Traffic`, `Regional Intel`, `Paths`, `RF Planning`,
+  `Planning Pins`, and `Peer Schedule`.
+- Type: visible for Traffic, with `All`, `RF/App`, `Local`, and `CommStat`.
 - Group: selected group or all groups.
 - Age: default `24h`; applies consistently to map content, summaries, paths
   where age-scoped, and message handoff.
@@ -416,7 +454,7 @@ into the inbox so the operator lands on the evidence that caused the map state.
 ### Phase 1: Stabilize Current Map Intelligence
 
 1. Clean current UX mismatches: green Regional Intel list noise, report Status
-   terminology, Station Status unknown pins, rounded SNR.
+   terminology, station status pin meaning, rounded SNR.
 2. Stabilize selection actions so right panel, popups, Messages, and Compose use
    the same payload and active filters.
 3. Ensure Regional Intel click handling always selects the clicked state/region
@@ -465,9 +503,16 @@ into the inbox so the operator lands on the evidence that caused the map state.
   reassurance, while the summary remains an exception list of non-green areas.
 - Regional Intel summary caps visible rows and shows a “more” count when the
   current filters produce more actionable states or FEMA regions than fit.
-- Station Status mode excludes unknown/no-report stations.
-- Station Status mode does not load or display path/link state; it should feel
-  immediate when switching from another map view.
+- Station status is represented on station pins; Station Status is not a
+  primary map selector.
+- Stations view may show blue/neutral unknown pins, while known status pins
+  use green/yellow/red.
+- Traffic is one primary view with a subtype selector for All, RF/App, Local,
+  and CommStat.
+- Generic blue RF-looking report icons are avoided when topic/source context can
+  provide a more meaningful icon or source shape.
+- Long-window map renders show an explicit working message in the map status
+  strip.
 - Report detail uses `Status`, not `Severity`.
 - SNR tooltips and labels are rounded.
 - Clicking a station opens details with roster/status/schedule data when known.
