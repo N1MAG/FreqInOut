@@ -4407,3 +4407,16 @@ def test_map_leaflet_template_includes_operator_zoom_presets() -> None:
     assert 'data-zoom-preset="north-america">North America' in source
     assert "markers = payload.markers; renderMarkers(markers);" in source
     assert "links = payload.links; renderLinks(links);" in source
+
+
+def test_city_population_layer_is_optional_and_zoom_aware() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    city_start = source.index("const cityLayer = L.layerGroup();")
+    city_block = source[city_start : source.index("dark_map_filter", city_start)]
+
+    assert "self.show_cities = False" in source
+    assert "const showCities" in city_block
+    assert "const minPop" in city_block
+    assert "Number(pop) >= minPop" in city_block
+    assert "if (map.getZoom() >= 5)" in city_block
+    assert "map.removeLayer(cityLayer)" in city_block

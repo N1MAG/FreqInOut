@@ -486,5 +486,4 @@ into the inbox so the operator lands on the evidence that caused the map state.
 - Continue polishing Advanced Map Tools copy and layout after field testing;
   hidden advanced filters are now surfaced through Clear Filters / Advanced
   Map Tools tooltips.
-- Add zoom-aware city/population layers without cluttering default views.
 - Add source-neutral mesh traffic once integration is available.
