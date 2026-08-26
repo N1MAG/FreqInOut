@@ -133,6 +133,9 @@ Topic memory differs:
   issues retain active memory longer.
 - Routine check-ins and all-clear reports decay quickly.
 - Not Reported has no concern contribution.
+- SitRep red/yellow status older than 7 days is stale for active station or
+  regional status. It remains available in history, but it should not keep an
+  active map area hot without a newer confirming update.
 
 ## Scoring
 

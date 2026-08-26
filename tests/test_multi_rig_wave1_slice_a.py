@@ -557,6 +557,56 @@ def test_multi_rig_guardrail_warnings_surface_duplicate_active_endpoints_and_pat
     assert any("Duplicate FLMSG message path" in warning for warning in warnings)
 
 
+def test_multi_rig_guardrail_warnings_surface_js8_multi_endpoint_and_path_mismatch(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    first = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "runtime_active": 1,
+            "control_backend": "flrig",
+            "use_js8call": 1,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2442,
+            "js8_profile_path": "/tmp/js8/fio-a/save",
+            "js8_directed_path": "/tmp/js8/fio-b/save/DIRECTED.TXT",
+        }
+    )
+    second = store.save_device_profile(
+        {
+            "name": "FIO-B",
+            "runtime_active": 1,
+            "control_backend": "flrig",
+            "use_js8call": 1,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2443,
+            "js8_profile_path": "/tmp/js8/fio-b/save",
+            "js8_directed_path": "/tmp/js8/fio-b/save/DIRECTED.TXT",
+        }
+    )
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE device_profiles SET runtime_active=1 WHERE id IN (?, ?)",
+            (int(first["id"]), int(second["id"])),
+        )
+
+    structured = collect_multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+    warnings = multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+
+    legacy = next(warning for warning in structured if warning.warning_type == "js8_legacy_multi_endpoint")
+    assert legacy.severity == "info"
+    assert set(legacy.affected_radio_names) == {"FIO-A", "FIO-B"}
+    assert "legacy js8net fallback can attach to only one endpoint" in legacy.message
+    mismatch = next(warning for warning in structured if warning.warning_type == "js8_profile_directed_path_mismatch")
+    assert mismatch.affected_radio_names == ("FIO-A",)
+    assert "DIRECTED.TXT is outside this radio's JS8 profile folder" in mismatch.message
+    assert any("legacy js8net fallback can attach to only one endpoint" in warning for warning in warnings)
+    assert any("DIRECTED.TXT is outside this radio's JS8 profile folder" in warning for warning in warnings)
+
+
 def test_migration_key_map_targets_exist_in_schema():
     expected_columns = {
         "device_profiles": {

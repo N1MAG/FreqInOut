@@ -639,6 +639,9 @@ INFRASTRUCTURE_REPORT_MAX_AGE_SEC = 24 * 60 * 60
 WEATHER_CLUSTER_DEGREES = 0.75
 MAP_DEFAULT_RECENCY_LABEL = "24h"
 MAP_DEFAULT_RECENCY_SECONDS = 24 * 60 * 60
+MAP_PATH_MAX_RECENCY_LABEL = "24h"
+MAP_PATH_MAX_RECENCY_SECONDS = 24 * 60 * 60
+SITREP_ACTIVE_STATUS_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 MAP_NETWORK_PATH_DISPLAY_LIMIT = 250
 
 WEATHER_SEVERITY_RANK = {
@@ -1818,6 +1821,48 @@ class StationsMapTab(QWidget):
             ("90d", 90 * 24 * 60 * 60),
         ]
 
+    def _path_recency_options(self) -> List[Tuple[str, Optional[int]]]:
+        return [
+            (label, seconds)
+            for label, seconds in self._map_recency_options()
+            if seconds is not None and int(seconds or 0) <= MAP_PATH_MAX_RECENCY_SECONDS
+        ]
+
+    def _current_recency_options(self) -> List[Tuple[str, Optional[int]]]:
+        if self._current_map_mode_key() == "paths" or (
+            bool(getattr(self, "show_link_paths", False))
+            and str(getattr(self, "link_mode", "") or "").strip().lower() != "off"
+        ):
+            return self._path_recency_options()
+        return self._map_recency_options()
+
+    def _clamp_path_recency_if_needed(self) -> bool:
+        if not (
+            self._current_map_mode_key() == "paths"
+            or (
+                bool(getattr(self, "show_link_paths", False))
+                and str(getattr(self, "link_mode", "") or "").strip().lower() != "off"
+            )
+        ):
+            return False
+        current = getattr(self, "recency_seconds", None)
+        if current is not None and int(current or 0) <= MAP_PATH_MAX_RECENCY_SECONDS:
+            return False
+        self.recency_seconds = MAP_PATH_MAX_RECENCY_SECONDS
+        self._map_recency_label = MAP_PATH_MAX_RECENCY_LABEL
+        combo = getattr(self, "recency_combo", None)
+        if combo is not None:
+            try:
+                idx = combo.findText(MAP_PATH_MAX_RECENCY_LABEL)
+                if idx >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+            except Exception:
+                pass
+        self._update_map_since_button_text(MAP_PATH_MAX_RECENCY_LABEL)
+        return True
+
     def _map_recency_display_label(self, value: str) -> str:
         label = str(value or "").strip() or "Any"
         return "Age: Any" if label == "Any" else f"Age: {label}"
@@ -1868,11 +1913,21 @@ class StationsMapTab(QWidget):
         title.setStyleSheet("font-weight: 700;")
         layout.addWidget(title)
 
-        quick_groups = (
-            ("Recent", ("15m", "30m", "1h", "3h", "6h", "12h", "24h")),
-            ("Days", ("3d", "7d", "14d")),
-            ("Archive", ("30d", "60d", "90d", "Any")),
+        options_by_label = {label: seconds for label, seconds in self._current_recency_options()}
+        path_limited = self._current_map_mode_key() == "paths" or (
+            bool(getattr(self, "show_link_paths", False))
+            and str(getattr(self, "link_mode", "") or "").strip().lower() != "off"
         )
+        quick_groups = [
+            ("Recent", ("15m", "30m", "1h", "3h", "6h", "12h", "24h")),
+        ]
+        if not path_limited:
+            quick_groups.extend(
+                [
+                    ("Days", ("3d", "7d", "14d")),
+                    ("Archive", ("30d", "60d", "90d", "Any")),
+                ]
+            )
         for group_label, labels in quick_groups:
             group_title = QLabel(group_label, popover)
             group_title.setStyleSheet("color: #5f6b76; font-weight: 700;")
@@ -1882,11 +1937,13 @@ class StationsMapTab(QWidget):
             row.setHorizontalSpacing(6)
             row.setVerticalSpacing(6)
             for idx, label in enumerate(labels):
+                if label not in options_by_label:
+                    continue
                 chip = QPushButton(label, popover)
                 chip.setMinimumWidth(58)
-                chip.setToolTip(f"Show mapped stations, traffic, and paths up to {label} old.")
+                chip.setToolTip(f"Show mapped activity up to {label} old.")
                 if label == "Any":
-                    chip.setToolTip("Show all indexed mapped stations, traffic, and paths.")
+                    chip.setToolTip("Show all indexed mapped activity.")
                 chip.clicked.connect(
                     lambda _checked=False, selected=label, dialog=popover: (
                         self._set_map_recency_from_label(selected),
@@ -1896,33 +1953,39 @@ class StationsMapTab(QWidget):
                 row.addWidget(chip, idx // 4, idx % 4)
             layout.addLayout(row)
 
-        custom_row = QHBoxLayout()
-        custom_row.setContentsMargins(0, 2, 0, 0)
-        custom_row.addWidget(QLabel("Custom days", popover))
-        custom_days = QLineEdit(popover)
-        custom_days.setPlaceholderText("days")
-        custom_days.setToolTip("Enter a custom number of days, then choose Set Custom.")
-        custom_days.setMinimumWidth(88)
-        custom_row.addWidget(custom_days)
-        custom_btn = QPushButton("Set Custom", popover)
+        if path_limited:
+            note = QLabel("Paths use the last 24h or less; older contacts are shown as station history.", popover)
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #5f6b76;")
+            layout.addWidget(note)
+        else:
+            custom_row = QHBoxLayout()
+            custom_row.setContentsMargins(0, 2, 0, 0)
+            custom_row.addWidget(QLabel("Custom days", popover))
+            custom_days = QLineEdit(popover)
+            custom_days.setPlaceholderText("days")
+            custom_days.setToolTip("Enter a custom number of days, then choose Set Custom.")
+            custom_days.setMinimumWidth(88)
+            custom_row.addWidget(custom_days)
+            custom_btn = QPushButton("Set Custom", popover)
 
-        def _apply_custom_days() -> None:
-            text = str(custom_days.text() or "").strip()
-            if not text:
-                return
-            try:
-                days = max(1, min(365, int(float(text))))
-            except Exception:
-                custom_days.selectAll()
-                custom_days.setFocus()
-                return
-            self._set_map_recency_from_label(f"{days}d")
-            popover.close()
+            def _apply_custom_days() -> None:
+                text = str(custom_days.text() or "").strip()
+                if not text:
+                    return
+                try:
+                    days = max(1, min(365, int(float(text))))
+                except Exception:
+                    custom_days.selectAll()
+                    custom_days.setFocus()
+                    return
+                self._set_map_recency_from_label(f"{days}d")
+                popover.close()
 
-        custom_btn.clicked.connect(_apply_custom_days)
-        custom_days.returnPressed.connect(_apply_custom_days)
-        custom_row.addWidget(custom_btn)
-        layout.addLayout(custom_row)
+            custom_btn.clicked.connect(_apply_custom_days)
+            custom_days.returnPressed.connect(_apply_custom_days)
+            custom_row.addWidget(custom_btn)
+            layout.addLayout(custom_row)
         self._map_since_popover = popover
         pos = button.mapToGlobal(button.rect().bottomLeft())
         popover.move(pos)
@@ -1945,7 +2008,9 @@ class StationsMapTab(QWidget):
                     pass
                 self._on_recency_changed(idx)
                 return
-        mapping = dict(self._map_recency_options())
+        mapping = dict(self._current_recency_options())
+        if label not in mapping and self._current_map_mode_key() == "paths":
+            label = MAP_PATH_MAX_RECENCY_LABEL
         self.recency_seconds = mapping.get(label)
         if self.recency_seconds is None and str(label or "").strip().lower().endswith("d"):
             try:
@@ -1954,7 +2019,8 @@ class StationsMapTab(QWidget):
             except Exception:
                 self.recency_seconds = None
         self._map_recency_label = label
-        self._update_map_since_button_text(label)
+        self._clamp_path_recency_if_needed()
+        self._update_map_since_button_text(str(getattr(self, "_map_recency_label", "") or label))
         self._clear_report_query_caches()
         self._refresh_selected_paths_panel()
         self._update_clear_filter_buttons_visual()
@@ -5898,6 +5964,7 @@ class StationsMapTab(QWidget):
                 widget.blockSignals(False)
             except Exception:
                 pass
+        self._clamp_path_recency_if_needed()
         try:
             if hasattr(self, "link_mode_combo"):
                 idx = self.link_mode_combo.findText("My Station")
@@ -7347,6 +7414,24 @@ class StationsMapTab(QWidget):
         days, hrs = divmod(hrs, 24)
         return f"{days}d {hrs}h"
 
+    @staticmethod
+    def _active_sitrep_status_key(status_key: str, updated_ts: float, *, now_ts: Optional[float] = None) -> str:
+        key = (status_key or "").strip().lower()
+        if key not in {"red", "yellow", "green", "unknown", "not_reported"}:
+            return "unknown"
+        if key == "not_reported":
+            return "unknown"
+        if key in {"red", "yellow"}:
+            try:
+                ts = float(updated_ts or 0.0)
+            except Exception:
+                ts = 0.0
+            if ts > 0:
+                current = time.time() if now_ts is None else float(now_ts)
+                if current - ts > SITREP_ACTIVE_STATUS_MAX_AGE_SECONDS:
+                    return "unknown"
+        return key
+
     def _load_spotter_station_status(self) -> Dict[str, Dict]:
         unified_enabled = self._settings_bool(self.settings, "sitrep_unified_map_enabled", True)
         cache_key = ("spotter_station_status", unified_enabled)
@@ -7417,9 +7502,8 @@ class StationsMapTab(QWidget):
             if not call:
                 continue
             key = (status_key or "").strip().lower()
-            if key not in {"red", "yellow", "green", "unknown"}:
-                key = "unknown"
             updated_ts = self._safe_float(updated_utc_ts, 0.0)
+            key = self._active_sitrep_status_key(key, updated_ts)
             updated_str = (updated_utc_str or "").strip()
             if not updated_str and updated_ts > 0:
                 try:
@@ -7471,10 +7555,6 @@ class StationsMapTab(QWidget):
             if not call:
                 continue
             key = str(effective_status or "").strip().lower()
-            if key not in {"red", "yellow", "green", "unknown", "not_reported"}:
-                key = "unknown"
-            if key == "not_reported":
-                key = "unknown"
             summary = self._decode_source_summary(source_summary_json)
             if not summary:
                 summary = {"FUSED": key}
@@ -7486,6 +7566,7 @@ class StationsMapTab(QWidget):
             else:
                 source = source_family_label(summary_source)
             updated_ts = self._safe_float(latest_event_ts, 0.0)
+            key = self._active_sitrep_status_key(key, updated_ts)
             updated_str = (latest_event_ts_utc or "").strip()
             if not updated_str and updated_ts > 0:
                 try:
@@ -15204,6 +15285,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             self._paths_focus_station = ""
             self.relay_target = ""
         self.show_link_paths = self.link_mode != "off"
+        self._clamp_path_recency_if_needed()
         links_chk = getattr(self, "map_links_chk", None)
         if links_chk is not None:
             try:
@@ -15238,9 +15320,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     def _on_recency_changed(self, idx: int):
         val = self.recency_combo.itemText(idx)
-        mapping = dict(self._map_recency_options())
+        mapping = dict(self._current_recency_options())
+        if val not in mapping and self._current_map_mode_key() == "paths":
+            val = MAP_PATH_MAX_RECENCY_LABEL
         self.recency_seconds = mapping.get(val, None)
         self._map_recency_label = val
+        self._clamp_path_recency_if_needed()
         self._update_map_since_button_text(val)
         self._clear_report_query_caches()
         self._refresh_selected_paths_panel()

@@ -85,6 +85,84 @@ def _normalized_path_key(path: Any) -> Optional[str]:
     return str(Path(text).expanduser()).rstrip("/\\").lower()
 
 
+def _path_is_within(parent: Any, child: Any) -> bool:
+    parent_text = _coerce_text(parent, "")
+    child_text = _coerce_text(child, "")
+    if not parent_text or not child_text:
+        return True
+    try:
+        parent_path = Path(parent_text).expanduser()
+        child_path = Path(child_text).expanduser()
+        child_path.relative_to(parent_path)
+        return True
+    except Exception:
+        parent_key = _normalized_path_key(parent_text) or ""
+        child_key = _normalized_path_key(child_text) or ""
+        return bool(parent_key and child_key and (child_key == parent_key or child_key.startswith(parent_key + "/")))
+
+
+def _js8_endpoint_guidance(rows: Iterable[Mapping[str, Any]]) -> list[MultiRigGuardrailWarning]:
+    js8_rows = [
+        row
+        for row in rows
+        if _coerce_bool_int(row.get("use_js8call"), False)
+        and _normalized_endpoint_key(row.get("js8_host"), row.get("js8_port"))
+    ]
+    endpoints = {
+        _normalized_endpoint_key(row.get("js8_host"), row.get("js8_port")) or ""
+        for row in js8_rows
+    }
+    if len(endpoints) <= 1:
+        return []
+    sorted_rows = sorted(js8_rows, key=lambda item: (_coerce_text(item.get("name", ""), ""), int(item.get("id", 0) or 0)))
+    names = tuple(_coerce_text(row.get("name"), "") or f"Radio {row.get('id')}" for row in sorted_rows)
+    ids = tuple(int(row.get("id", 0) or 0) for row in sorted_rows)
+    return [
+        MultiRigGuardrailWarning(
+            warning_type="js8_legacy_multi_endpoint",
+            resource_type="JS8Call legacy control fallback",
+            resource_value=", ".join(sorted(endpoint for endpoint in endpoints if endpoint)),
+            affected_radio_ids=ids,
+            affected_radio_names=names,
+            severity="info",
+            message=(
+                "Multiple active JS8Call TCP endpoints are configured. Native FIO JS8 control is endpoint-scoped, "
+                "but the legacy js8net fallback can attach to only one endpoint at a time."
+            ),
+        )
+    ]
+
+
+def _js8_profile_path_warnings(rows: Iterable[Mapping[str, Any]]) -> list[MultiRigGuardrailWarning]:
+    warnings: list[MultiRigGuardrailWarning] = []
+    for row in rows:
+        if not _coerce_bool_int(row.get("use_js8call"), False):
+            continue
+        profile_path = _coerce_text(row.get("js8_profile_path"), "")
+        directed_path = _coerce_text(row.get("js8_directed_path"), "")
+        if not profile_path or not directed_path:
+            continue
+        if _path_is_within(profile_path, directed_path):
+            continue
+        radio_id = int(row.get("id", 0) or 0)
+        radio_name = _coerce_text(row.get("name"), "") or f"Radio {radio_id}"
+        warnings.append(
+            MultiRigGuardrailWarning(
+                warning_type="js8_profile_directed_path_mismatch",
+                resource_type="JS8Call profile/DIRECTED.TXT path",
+                resource_value=directed_path,
+                affected_radio_ids=(radio_id,),
+                affected_radio_names=(radio_name,),
+                severity="warning",
+                message=(
+                    f"{radio_name}: JS8Call DIRECTED.TXT is outside this radio's JS8 profile folder. "
+                    "Review JS8Call Settings so traffic imports stay scoped to the correct radio."
+                ),
+            )
+        )
+    return warnings
+
+
 def _duplicate_value_warnings(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -147,6 +225,8 @@ def collect_multi_rig_guardrail_warnings(conn: sqlite3.Connection) -> tuple[Mult
             else None,
         )
     )
+    warnings.extend(_js8_endpoint_guidance(rows))
+    warnings.extend(_js8_profile_path_warnings(rows))
     warnings.extend(
         _duplicate_value_warnings(
             rows,
@@ -225,4 +305,3 @@ def format_multi_rig_guardrail_warnings(
     warnings: Iterable[MultiRigGuardrailWarning],
 ) -> tuple[str, ...]:
     return tuple(dict.fromkeys(warning.message for warning in warnings))
-

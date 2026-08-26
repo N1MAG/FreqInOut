@@ -736,6 +736,44 @@ def test_map_recency_change_refreshes_selected_path_panel_window() -> None:
     assert refreshes == ["recency_filter"]
 
 
+def test_paths_clamp_age_to_24h_and_hide_archive_choices() -> None:
+    tab = _bare_tab()
+    tab.show_link_paths = True
+    tab.link_mode = "my_station"
+    tab.recency_seconds = 3 * 24 * 60 * 60
+    tab._map_recency_label = "3d"
+    tab.recency_combo = _FakeCombo(
+        [
+            ("15m", "15m"),
+            ("1h", "1h"),
+            ("24h", "24h"),
+            ("3d", "3d"),
+            ("Any", "Any"),
+        ]
+    )
+    tab._map_since_button = _FakeButton()
+
+    changed = StationsMapTab._clamp_path_recency_if_needed(tab)
+
+    assert changed is True
+    assert tab.recency_seconds == 24 * 60 * 60
+    assert tab._map_recency_label == "24h"
+    assert tab._current_recency_options()[-1][0] == "24h"
+    assert all(label not in {"3d", "7d", "Any"} for label, _seconds in tab._current_recency_options())
+
+    tab.recency_combo = None
+    tab.recency_seconds = 7 * 24 * 60 * 60
+    tab._map_recency_label = "7d"
+    tab._clear_report_query_caches = lambda: None
+    tab._refresh_selected_paths_panel = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda: None
+    tab._request_map_refresh = lambda **_kwargs: None
+    StationsMapTab._set_map_recency_from_label(tab, "7d")
+    assert tab.recency_seconds == 24 * 60 * 60
+    assert tab._map_recency_label == "24h"
+    assert tab._map_since_button.text == "Age: 24h"
+
+
 def test_map_age_popover_custom_days_is_blank_and_distinct_from_quick_choices() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     popover_block = source[source.index("def _show_map_since_popover") : source.index("def _set_map_recency_from_label")]
@@ -743,8 +781,20 @@ def test_map_age_popover_custom_days_is_blank_and_distinct_from_quick_choices() 
     assert "custom_days = QLineEdit(popover)" in popover_block
     assert 'custom_days.setPlaceholderText("days")' in popover_block
     assert 'QPushButton("Set Custom", popover)' in popover_block
+    assert "Paths use the last 24h or less" in popover_block
     assert "QSpinBox" not in popover_block
     assert "setValue(30)" not in popover_block
+
+
+def test_sitrep_non_green_status_older_than_week_is_not_active() -> None:
+    now_ts = 1_800_000_000.0
+    stale = now_ts - (8 * 24 * 60 * 60)
+    fresh = now_ts - (6 * 24 * 60 * 60)
+
+    assert StationsMapTab._active_sitrep_status_key("red", stale, now_ts=now_ts) == "unknown"
+    assert StationsMapTab._active_sitrep_status_key("yellow", stale, now_ts=now_ts) == "unknown"
+    assert StationsMapTab._active_sitrep_status_key("red", fresh, now_ts=now_ts) == "red"
+    assert StationsMapTab._active_sitrep_status_key("green", stale, now_ts=now_ts) == "green"
 
 
 def test_selected_path_queries_are_scoped_to_operator_and_target_for_speed() -> None:

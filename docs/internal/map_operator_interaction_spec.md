@@ -36,7 +36,9 @@ smart combinations.
 
 The default age for map traffic views is 24 hours unless a specific view has a
 strong reason to use another window. The selected age control and displayed map
-content must always agree.
+content must always agree. Paths are operational planning data, not archive
+review: the Paths view offers only 24 hours or less. Older link history is shown
+as station context such as `Last seen`, not as route-planning evidence.
 
 ## Workspace And Data Rules
 
@@ -62,6 +64,25 @@ Rules:
 - Treat screenshots as observations, not source of truth.
 - Keep tests narrow to the touched behavior unless the change alters shared map
   or message contracts.
+
+## Configuration Guidance
+
+FIO should surface configuration contradictions in Settings and Station Health,
+not leave them as log-only discoveries.
+
+JS8Call multi-rig guidance:
+
+- duplicate JS8Call TCP endpoints across active radios are warnings because two
+  radios cannot safely claim the same control port.
+- multiple distinct JS8Call endpoints are valid for multi-rig native control,
+  but the legacy `js8net` fallback is process-global and can attach to only one
+  endpoint at a time. FIO should show this as guidance when more than one active
+  JS8Call endpoint exists.
+- JS8 profile/save folder and `DIRECTED.TXT` should belong to the same radio
+  bundle. If a radio's `DIRECTED.TXT` sits outside that radio's JS8 profile
+  folder, FIO should tell the operator to review JS8Call Settings.
+- Guidance should use direct actions such as `Review JS8Call Settings` rather
+  than asking the operator to inspect logs or databases.
 
 ## Data Surfaces
 
@@ -180,6 +201,11 @@ recency, number of reports, number of unique stations, and trend. It should not
 aggregate all history indefinitely; stale evidence should decay so resolved
 events do not keep an area hot.
 
+SitRep and station-status issues older than 7 days are stale for active map
+status. If no update arrives within a week, red/yellow status should stop
+painting a station or regional area as an active problem. The old report remains
+available in history, but it no longer drives active concern.
+
 ### Traffic
 
 Traffic is the default live review view. It should use a 24 hour age window by
@@ -277,6 +303,8 @@ Default display:
 - directional path links when useful.
 - rounded SNR values.
 - legend describing link color and direction.
+- age choices capped at 24h because older heard paths are not reliable routing
+  guidance.
 
 Path To:
 
