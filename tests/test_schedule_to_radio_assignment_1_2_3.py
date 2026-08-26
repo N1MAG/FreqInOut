@@ -41,7 +41,8 @@ def test_settings_source_exposes_radio_first_operating_model_assignment_controls
     assert "self.schedule_assignment_radio_combo = QComboBox()" in source
     assert "def open_schedule_assignment_editor(self, *, plan_id: int = 0, device_profile_id: int = 0) -> bool:" in source
     assert "self._select_settings_section_group(group)" in source
-    assert 'self.schedule_assignments_table = QTableWidget(0, 8)' in source
+    assert 'self.schedule_assignments_table = QTableWidget(0, 7)' in source
+    assert '["Selected", "Active", "Default", "Radio", "Frequency Plan", "State", "Guard Status"]' in source
     assert "def _save_schedule_assignment_editor(self) -> None:" in source
     assert "def _update_schedule_assignment_editor_hint(self) -> None:" in source
     assert "validate_frequency_plan_for_device(device_id, plan)" in source

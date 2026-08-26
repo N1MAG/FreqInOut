@@ -3978,7 +3978,7 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(operating_group, self._summary_operating_profiles)
         operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.operating_profiles_section_group = operating_group
-        self._add_settings_section(operating_group, scope="radio")
+        self._add_settings_section(operating_group, scope="global")
 
         assignments_group = QGroupBox("Operating Model Assignment")
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -4063,7 +4063,7 @@ class SettingsTab(QWidget):
         assignments_actions.addWidget(self.restore_device_operating_profile_btn)
         assignments_layout.addLayout(assignments_actions)
 
-        self.device_assignments_table = QTableWidget(0, 8)
+        self.device_assignments_table = QTableWidget(0, 7)
         self.device_assignments_table.setHorizontalHeaderLabels(
             [
                 "Selected",
@@ -4073,7 +4073,6 @@ class SettingsTab(QWidget):
                 "Operating Model",
                 "State",
                 "FIO Features",
-                "Endpoint",
             ]
         )
         self.device_assignments_table.verticalHeader().setVisible(False)
@@ -4094,8 +4093,7 @@ class SettingsTab(QWidget):
         assignments_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         assignments_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         assignments_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        assignments_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        assignments_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        assignments_header.setSectionResizeMode(6, QHeaderView.Stretch)
         assignments_layout.addWidget(self.device_assignments_table)
 
         assignments_container = QWidget()
@@ -4197,19 +4195,19 @@ class SettingsTab(QWidget):
         self.schedule_assignment_editor_panel.setVisible(False)
         schedule_assignments_layout.addWidget(self.schedule_assignment_editor_panel)
 
-        self.schedule_assignments_table = QTableWidget(0, 8)
+        self.schedule_assignments_table = QTableWidget(0, 7)
         self.schedule_assignments_table.setObjectName("scheduleAssignmentsTable")
         self.schedule_assignments_table.setHorizontalHeaderLabels(
-            ["Selected", "Active", "Default", "Radio", "Frequency Plan", "State", "Guard Status", "Endpoint"]
+            ["Selected", "Active", "Default", "Radio", "Frequency Plan", "State", "Guard Status"]
         )
         self.schedule_assignments_table.verticalHeader().setVisible(False)
         self.schedule_assignments_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.schedule_assignments_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.schedule_assignments_table.setSelectionMode(QTableWidget.SingleSelection)
         schedule_header = self.schedule_assignments_table.horizontalHeader()
-        for idx in range(7):
+        for idx in range(6):
             schedule_header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
-        schedule_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        schedule_header.setSectionResizeMode(6, QHeaderView.Stretch)
         schedule_assignments_layout.addWidget(self.schedule_assignments_table)
         schedule_assignments_group = self._make_collapsible_group(
             "Schedule Assignment",
@@ -7004,11 +7002,11 @@ class SettingsTab(QWidget):
         self.condition_alert_reset_builtin_btn.clicked.connect(self._reset_condition_alert_builtin_template)
         self.condition_alert_delete_btn = QPushButton("Delete Selected")
         self.condition_alert_delete_btn.clicked.connect(self._delete_selected_condition_alert_rules)
-        condition_alert_actions.addStretch()
         condition_alert_actions.addWidget(self.condition_alert_add_btn)
         condition_alert_actions.addWidget(self.condition_alert_save_btn)
         condition_alert_actions.addWidget(self.condition_alert_reset_builtin_btn)
         condition_alert_actions.addWidget(self.condition_alert_delete_btn)
+        condition_alert_actions.addStretch()
         condition_alert_v.addLayout(condition_alert_actions)
 
         self.condition_alert_rules_table = QTableWidget(0, 12)
@@ -7029,6 +7027,9 @@ class SettingsTab(QWidget):
                 "Action",
             ]
         )
+        self.condition_alert_rules_table.setToolTip(
+            "Condition alert rules are shown as a compact list. Select a rule to review sender, auth, target, and pattern details."
+        )
         self.condition_alert_rules_table.verticalHeader().setVisible(False)
         self.condition_alert_rules_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.condition_alert_rules_table.setSelectionMode(QTableWidget.ExtendedSelection)
@@ -7036,17 +7037,19 @@ class SettingsTab(QWidget):
         self.condition_alert_rules_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
         condition_alert_header = self.condition_alert_rules_table.horizontalHeader()
         condition_alert_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        condition_alert_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(1, QHeaderView.Stretch)
         condition_alert_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        condition_alert_header.setSectionResizeMode(4, QHeaderView.Stretch)
-        condition_alert_header.setSectionResizeMode(5, QHeaderView.Stretch)
-        condition_alert_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
-        condition_alert_header.setSectionResizeMode(9, QHeaderView.Stretch)
+        condition_alert_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        for hidden_col in (4, 5, 6, 7, 9):
+            self.condition_alert_rules_table.setColumnHidden(hidden_col, True)
         self.condition_alert_rules_table.setMinimumHeight(170)
         self.condition_alert_rules_table.setMaximumHeight(320)
         self.condition_alert_rules_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -7062,6 +7065,7 @@ class SettingsTab(QWidget):
         condition_alert_detail_layout.setVerticalSpacing(6)
         self.condition_alert_detail_label = QLabel("Select a rule to review how it will be matched.")
         self.condition_alert_detail_label.setWordWrap(True)
+        self.condition_alert_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         condition_alert_detail_layout.addWidget(self.condition_alert_detail_label, 0, 0, 1, 4)
         condition_alert_v.addWidget(condition_alert_detail)
 
@@ -8939,8 +8943,14 @@ class SettingsTab(QWidget):
         state_text = "Enabled" if rule.enabled else "Disabled"
         action_text = self._condition_alert_action_label(rule.action)
         label.setText(
-            f"{state_text}: {rule.name or rule.id} listens to {source_text} for {target_text}. "
-            f"Allowed senders: {sender_text}. Match: {rule.match_mode} {rule.pattern!r}; {level_text}; action {action_text}."
+            f"{state_text}: {rule.name or rule.id}\n"
+            f"Sources: {source_text}\n"
+            f"Targets: {target_text}\n"
+            f"Allowed senders: {sender_text}\n"
+            f"Auth: {rule.required_auth_state or 'none'}\n"
+            f"Match: {rule.match_mode} {rule.pattern!r}\n"
+            f"Level: {level_text}\n"
+            f"Action: {action_text}"
         )
 
     def _add_condition_alert_rule(self) -> None:
@@ -17362,7 +17372,6 @@ class SettingsTab(QWidget):
                 table.setItem(row, 4, QTableWidgetItem(str(row_data.get("operating_profile_name", "") or "Unassigned")))
                 table.setItem(row, 5, QTableWidgetItem(self._assignment_state_label(str(row_data.get("assignment_state", "") or ""))))
                 table.setItem(row, 6, QTableWidgetItem(str(row_data.get("shell_summary", "") or "")))
-                table.setItem(row, 7, QTableWidgetItem(str(row_data.get("endpoint_summary", "") or "")))
         finally:
             self._device_assignments_table_loading = False
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)
@@ -18006,7 +18015,6 @@ class SettingsTab(QWidget):
                 table.setItem(row, 4, QTableWidgetItem(str(row_data.get("frequency_plan_name", "") or "Unassigned")))
                 table.setItem(row, 5, QTableWidgetItem(self._assignment_state_label(str(row_data.get("assignment_state", "") or ""))))
                 table.setItem(row, 6, QTableWidgetItem(str(row_data.get("guard_status", "") or "--")))
-                table.setItem(row, 7, QTableWidgetItem(str(row_data.get("endpoint_summary", "") or "")))
         finally:
             pass
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)

@@ -634,7 +634,7 @@ def test_settings_operating_model_assignment_uses_in_panel_editor_not_popup() ->
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     build_block = source[
         source.index("self.assignment_editor_rows: List[Dict[str, Any]] = []")
-        : source.index("self.device_assignments_table = QTableWidget(0, 8)")
+        : source.index("self.device_assignments_table = QTableWidget(0, 7)")
     ]
     assignment_block = source[
         source.index("def _assignment_editor_selected_profile")

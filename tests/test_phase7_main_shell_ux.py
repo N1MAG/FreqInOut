@@ -4576,23 +4576,45 @@ def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
     assert 'self.radio_settings_toggle_btn.setText("Radio Settings")' in source
     assert "self.global_settings_toggle_btn.setVisible(False)" in source
     assert "self.radio_settings_toggle_btn.setVisible(False)" in source
-    assert 'self._settings_nav_context = "main" if scope == "global" else "radios"' in source
-    assert 'desired_scope = "radio" if context in {"radio", "radios"} else "global"' in source
-    assert 'self.settings_compact_header.setVisible(False)' in source
-    assert "self.settings_section_nav_scroll.setObjectName(\"settingsSectionNavScroll\")" in source
-    assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
-    assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
-    assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" in source
-    assert "def _refresh_settings_nav_scroll_size(self) -> None:" in source
-    assert "panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))" in source
-    assert 'page_title_label = QLabel(title)' in source
-    assert "header_btn.setVisible(False)" in source
-    assert "group.setMaximumHeight(target_height)" in source
-    assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" not in source
-    assert 'self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))' in source
-    assert "self.trusted_hash_table.setMaximumHeight(240)" in source
-    assert "self.gpg_keys_table.setMaximumHeight(300)" in source
-    assert "gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in source
+
+
+def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
+    spec = Path("docs/internal/settings_configuration_assistant_spec.md").read_text(encoding="utf-8")
+    settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert "Condition Alerts" in spec
+    assert "Operating Models" in spec
+    assert "JS8Call, Spotter, And CommStat Setup" in spec
+    assert "Fast Light Profile Creation" in spec
+    assert "Guided FreqPlanner" in spec
+    assert "VarAC BBS" in spec
+    assert "VarAC Cluster node configuration guidance" in spec
+    assert "Manage file purge/retention by BBS location" in spec
+    assert "Treat BBS as a message entity under Messages" in spec
+    assert "preview of the managed BBS structure" in spec
+    assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
+    assert "multiple managed BBS locations" in spec
+    assert "remove\n  FLMsg/FLAmp content from BBS sync" in spec
+    assert "self._add_settings_section(operating_group, scope=\"global\")" in settings_source
+    assert "self.device_assignments_table = QTableWidget(0, 7)" in settings_source
+    assert "self.schedule_assignments_table = QTableWidget(0, 7)" in settings_source
+    assert 'self._settings_nav_context = "main" if scope == "global" else "radios"' in settings_source
+    assert 'desired_scope = "radio" if context in {"radio", "radios"} else "global"' in settings_source
+    assert 'self.settings_compact_header.setVisible(False)' in settings_source
+    assert "self.settings_section_nav_scroll.setObjectName(\"settingsSectionNavScroll\")" in settings_source
+    assert "self.settings_section_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in settings_source
+    assert "self.settings_section_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in settings_source
+    assert "sections_row.addWidget(self.settings_section_nav_scroll, 0)" in settings_source
+    assert "def _refresh_settings_nav_scroll_size(self) -> None:" in settings_source
+    assert "panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))" in settings_source
+    assert 'page_title_label = QLabel(title)' in settings_source
+    assert "header_btn.setVisible(False)" in settings_source
+    assert "group.setMaximumHeight(target_height)" in settings_source
+    assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" not in settings_source
+    assert 'self._refresh_fit_content_section_height(getattr(self, "operating_profiles_section_group", None))' in settings_source
+    assert "self.trusted_hash_table.setMaximumHeight(240)" in settings_source
+    assert "self.gpg_keys_table.setMaximumHeight(300)" in settings_source
+    assert "gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in settings_source
 
 
 def test_phase7_settings_hf_groups_use_compact_detail_panel_and_precise_frequencies() -> None:
