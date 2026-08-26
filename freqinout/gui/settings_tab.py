@@ -1411,6 +1411,17 @@ class SettingsTab(QWidget):
         open_rule = str(row.get("open_rule", "Public") or "Public").strip() or "Public"
         access_code_hash = str(row.get("access_code_hash", "") or "").strip()
         access_code_salt = str(row.get("access_code_salt", "") or "").strip()
+        retention_policy = str(row.get("retention_policy", "Use global BBS archive policy") or "").strip()
+        if retention_policy not in {
+            "Use global BBS archive policy",
+            "Archive this location by age",
+            "Keep until manually removed",
+        }:
+            retention_policy = "Use global BBS archive policy"
+        try:
+            retention_days = max(0, int(row.get("retention_days", 0) or 0))
+        except Exception:
+            retention_days = 0
         try:
             access_code_iterations = int(
                 row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS
@@ -1430,6 +1441,8 @@ class SettingsTab(QWidget):
             "list_in_root_menu": list_in_root_menu,
             "visibility_rule": visibility_rule,
             "open_rule": open_rule,
+            "retention_policy": retention_policy,
+            "retention_days": retention_days,
             "access_code_hash": access_code_hash,
             "access_code_salt": access_code_salt,
             "access_code_iterations": access_code_iterations,
@@ -1564,6 +1577,18 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_open_rule_combo"):
                 idx = self.varac_bbs_vault_open_rule_combo.findText(str(selected.get("open_rule", "Public") or "Public").strip())
                 self.varac_bbs_vault_open_rule_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            if hasattr(self, "varac_bbs_vault_retention_policy_combo"):
+                retention_policy = str(selected.get("retention_policy", "Use global BBS archive policy") or "").strip()
+                idx = self.varac_bbs_vault_retention_policy_combo.findText(
+                    retention_policy or "Use global BBS archive policy"
+                )
+                self.varac_bbs_vault_retention_policy_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            if hasattr(self, "varac_bbs_vault_retention_days_spin"):
+                try:
+                    retention_days = max(1, int(selected.get("retention_days", 0) or 7))
+                except Exception:
+                    retention_days = 7
+                self.varac_bbs_vault_retention_days_spin.setValue(retention_days)
             if hasattr(self, "varac_bbs_vault_inherit_callsigns_chk"):
                 self.varac_bbs_vault_inherit_callsigns_chk.setChecked(
                     bool(selected.get("inherit_global_allowed_callsigns", True))
@@ -1605,6 +1630,10 @@ class SettingsTab(QWidget):
                 self.varac_bbs_vault_visibility_combo.setCurrentIndex(0)
             if hasattr(self, "varac_bbs_vault_open_rule_combo"):
                 self.varac_bbs_vault_open_rule_combo.setCurrentIndex(0)
+            if hasattr(self, "varac_bbs_vault_retention_policy_combo"):
+                self.varac_bbs_vault_retention_policy_combo.setCurrentIndex(0)
+            if hasattr(self, "varac_bbs_vault_retention_days_spin"):
+                self.varac_bbs_vault_retention_days_spin.setValue(7)
             if hasattr(self, "varac_bbs_vault_inherit_callsigns_chk"):
                 self.varac_bbs_vault_inherit_callsigns_chk.setChecked(True)
             if hasattr(self, "varac_bbs_vault_allowed_callsigns_edit"):
@@ -1978,6 +2007,13 @@ class SettingsTab(QWidget):
             self.varac_bbs_vault_reset_btn.setEnabled(enabled and bool(self._varac_bbs_vault_locations_cache))
         if hasattr(self, "varac_bbs_vault_preview_btn"):
             self.varac_bbs_vault_preview_btn.setEnabled(bool(self._varac_bbs_vault_locations_cache))
+        if hasattr(self, "varac_bbs_vault_retention_policy_combo") and hasattr(
+            self, "varac_bbs_vault_retention_days_spin"
+        ):
+            self.varac_bbs_vault_retention_days_spin.setEnabled(
+                self.varac_bbs_vault_retention_policy_combo.currentText().strip()
+                == "Archive this location by age"
+            )
 
     def _varac_bbs_vault_structure_preview_text(self) -> str:
         locations = [
@@ -2047,6 +2083,17 @@ class SettingsTab(QWidget):
             name = str(row.get("name", "") or "").strip() or location_id
             alias = str(row.get("alias", "") or "").strip() or "-"
             source_dir = str(row.get("source_dir", "") or "").strip() or "not set"
+            retention_policy = str(row.get("retention_policy", "Use global BBS archive policy") or "").strip()
+            try:
+                retention_days = max(0, int(row.get("retention_days", 0) or 0))
+            except Exception:
+                retention_days = 0
+            if retention_policy == "Archive this location by age":
+                retention_text = f"Archive files older than {retention_days or 7} days"
+            elif retention_policy == "Keep until manually removed":
+                retention_text = "Keep until manually removed"
+            else:
+                retention_text = "Use global BBS archive policy"
             enabled = "enabled" if bool(row.get("enabled", True)) else "disabled"
             visibility = str(row.get("visibility_rule", "Public") or "Public").strip() or "Public"
             open_rule = str(row.get("open_rule", "Public") or "Public").strip() or "Public"
@@ -2066,6 +2113,7 @@ class SettingsTab(QWidget):
                     f"- {name} [{alias}] ({enabled}, {visibility}, {root_menu})",
                     f"  ID: {location_id}",
                     f"  Access: {'; '.join(access_bits)}",
+                    f"  Retention: {retention_text}",
                     f"  Source: {source_dir}",
                 ]
             )
@@ -2339,6 +2387,16 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_open_rule_combo")
             else "Public"
         )
+        retention_policy = (
+            self.varac_bbs_vault_retention_policy_combo.currentText().strip()
+            if hasattr(self, "varac_bbs_vault_retention_policy_combo")
+            else "Use global BBS archive policy"
+        )
+        retention_days = int(
+            self.varac_bbs_vault_retention_days_spin.value()
+            if hasattr(self, "varac_bbs_vault_retention_days_spin")
+            else 0
+        )
         inherit_callsigns = bool(
             self.varac_bbs_vault_inherit_callsigns_chk.isChecked()
             if hasattr(self, "varac_bbs_vault_inherit_callsigns_chk")
@@ -2411,6 +2469,8 @@ class SettingsTab(QWidget):
                 if hasattr(self, "varac_bbs_vault_open_rule_combo")
                 else "Public"
             ),
+            "retention_policy": retention_policy,
+            "retention_days": retention_days if retention_policy == "Archive this location by age" else 0,
             "inherit_global_allowed_callsigns": inherit_callsigns,
             "allowed_callsigns": location_callsigns,
             "access_code_hash": str(code_payload.get("access_code_hash", "") or "").strip(),
@@ -6812,13 +6872,31 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_open_rule_combo = QComboBox()
         self.varac_bbs_vault_open_rule_combo.addItems(["Public", "Allowed callsigns only", "Allowed callsigns + access code"])
         vault_editor_grid.addWidget(self.varac_bbs_vault_open_rule_combo, 6, 1, 1, 3)
+        vault_editor_grid.addWidget(QLabel("Retention"), 7, 0)
+        self.varac_bbs_vault_retention_policy_combo = QComboBox()
+        self.varac_bbs_vault_retention_policy_combo.addItems(
+            [
+                "Use global BBS archive policy",
+                "Archive this location by age",
+                "Keep until manually removed",
+            ]
+        )
+        vault_editor_grid.addWidget(self.varac_bbs_vault_retention_policy_combo, 7, 1, 1, 2)
+        self.varac_bbs_vault_retention_days_spin = QSpinBox()
+        self.varac_bbs_vault_retention_days_spin.setRange(1, 365)
+        self.varac_bbs_vault_retention_days_spin.setValue(7)
+        self.varac_bbs_vault_retention_days_spin.setSuffix(" days")
+        self.varac_bbs_vault_retention_days_spin.setToolTip(
+            "Used when this location is set to archive files by age. Runtime enforcement will use this per-location policy."
+        )
+        vault_editor_grid.addWidget(self.varac_bbs_vault_retention_days_spin, 7, 3)
         self.varac_bbs_vault_inherit_callsigns_chk = QCheckBox("Inherit Global Allowed Callsigns")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_inherit_callsigns_chk, 7, 0, 1, 4)
-        vault_editor_grid.addWidget(QLabel("Location Allowed Callsigns"), 8, 0)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_inherit_callsigns_chk, 8, 0, 1, 4)
+        vault_editor_grid.addWidget(QLabel("Location Allowed Callsigns"), 9, 0)
         self.varac_bbs_vault_allowed_callsigns_edit = QLineEdit()
         self.varac_bbs_vault_allowed_callsigns_edit.setPlaceholderText("Optional stricter subset, comma-separated")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_allowed_callsigns_edit, 8, 1, 1, 3)
-        vault_editor_grid.addWidget(QLabel("Access Code"), 9, 0)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_allowed_callsigns_edit, 9, 1, 1, 3)
+        vault_editor_grid.addWidget(QLabel("Access Code"), 10, 0)
         self.varac_bbs_vault_access_code_edit = QLineEdit()
         self.varac_bbs_vault_access_code_edit.setEchoMode(QLineEdit.Password)
         self.varac_bbs_vault_access_code_edit.setPlaceholderText("Enter a new access code")
@@ -6826,8 +6904,8 @@ class SettingsTab(QWidget):
             "Stored locally for the operator and hashed for caller verification."
         )
         self._attach_password_toggle_action(self.varac_bbs_vault_access_code_edit)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_edit, 9, 1)
-        vault_editor_grid.addWidget(QLabel("Confirm Code"), 9, 2)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_edit, 10, 1)
+        vault_editor_grid.addWidget(QLabel("Confirm Code"), 10, 2)
         self.varac_bbs_vault_access_code_confirm_edit = QLineEdit()
         self.varac_bbs_vault_access_code_confirm_edit.setEchoMode(QLineEdit.Password)
         self.varac_bbs_vault_access_code_confirm_edit.setPlaceholderText("Confirm only when changing the code")
@@ -6835,7 +6913,7 @@ class SettingsTab(QWidget):
             "Required when setting or changing the code."
         )
         self._attach_password_toggle_action(self.varac_bbs_vault_access_code_confirm_edit)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_confirm_edit, 9, 3)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_confirm_edit, 10, 3)
         vault_locations_layout.addLayout(vault_editor_grid)
         self.varac_bbs_vault_code_status_label = QLabel(
             "No code configured. Enter a code twice to set one for this location."
@@ -6914,6 +6992,11 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_open_rule_combo.currentIndexChanged.connect(
             lambda _idx: self._refresh_varac_bbs_vault_helper_preview()
         )
+        self.varac_bbs_vault_retention_policy_combo.currentIndexChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_retention_policy_combo.currentIndexChanged.connect(
+            lambda _idx: self._refresh_varac_bbs_vault_actions()
+        )
+        self.varac_bbs_vault_retention_days_spin.valueChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_inherit_callsigns_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_allowed_callsigns_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_access_code_edit.textChanged.connect(self._mark_settings_dirty)

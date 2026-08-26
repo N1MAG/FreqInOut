@@ -145,6 +145,37 @@ def test_vault_locations_preserve_local_operator_access_code_text() -> None:
     )
 
 
+def test_vault_locations_preserve_per_location_retention_policy() -> None:
+    locations = load_vault_locations(
+        [
+            {
+                "id": "intel",
+                "name": "Intel",
+                "source_dir": "/tmp/intel",
+                "alias": "INTEL",
+                "retention_policy": "Archive this location by age",
+                "retention_days": "7",
+            },
+            {
+                "id": "ops",
+                "name": "Ops",
+                "source_dir": "/tmp/ops",
+                "alias": "OPS",
+                "retention_policy": "Keep until manually removed",
+                "retention_days": "not-a-number",
+            },
+        ]
+    )
+
+    assert locations[0].retention_policy == "Archive this location by age"
+    assert locations[0].retention_days == 7
+    assert locations[1].retention_policy == "Keep until manually removed"
+    assert locations[1].retention_days == 0
+    data = vault_locations_to_data(locations)
+    assert data[0]["retention_policy"] == "Archive this location by age"
+    assert data[0]["retention_days"] == 7
+
+
 def test_varac_guard_ignores_fio_generated_helper_files(tmp_path: Path) -> None:
     varac_base = tmp_path / "VarAC"
     incoming = tmp_path / "VaraFiles" / "Incoming"
@@ -859,6 +890,8 @@ def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: 
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Use global BBS archive policy",
+                "retention_days": 0,
             },
             {
                 "id": "intel",
@@ -952,6 +985,8 @@ def test_run_varac_bbs_vault_processes_varac_bbs_msg_alias_command(tmp_path: Pat
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Archive this location by age",
+                "retention_days": 7,
             },
             {
                 "id": "intel",
@@ -1054,6 +1089,8 @@ def test_run_varac_bbs_vault_uses_log_alias_when_db_only_saw_refresh(tmp_path: P
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Use global BBS archive policy",
+                "retention_days": 0,
             },
             {
                 "id": "intel",
@@ -1151,6 +1188,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Archive this location by age",
+                "retention_days": 7,
             },
             {
                 "id": "intel",
@@ -1167,6 +1206,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Keep until manually removed",
+                "retention_days": 0,
             },
             {
                 "id": "aib",
@@ -2652,6 +2693,8 @@ def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Keep until manually removed",
+                "retention_days": 0,
             },
         ]
     )
@@ -2683,6 +2726,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     tab = SettingsTab()
     tab.varac_bbs_dir_edit.setText(str(live_bbs))
     tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    default_location_dir = managed_root / "locations" / DEFAULT_LOCATION_NAME
     tab._set_varac_bbs_vault_locations(
         [
             {
@@ -2690,7 +2734,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
                 "name": DEFAULT_LOCATION_NAME,
                 "alias": "ROOT",
                 "description": "Main menu",
-                "source_dir": str(managed_root / "locations" / DEFAULT_LOCATION_NAME),
+                "source_dir": str(default_location_dir),
                 "enabled": True,
                 "list_in_root_menu": False,
                 "visibility_rule": "Public",
@@ -2700,6 +2744,8 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Use global BBS archive policy",
+                "retention_days": 0,
             },
             {
                 "id": "intel",
@@ -2716,6 +2762,8 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Archive this location by age",
+                "retention_days": 7,
             },
             {
                 "id": "hidden",
@@ -2732,6 +2780,8 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": 310000,
+                "retention_policy": "Keep until manually removed",
+                "retention_days": 0,
             },
         ]
     )
@@ -2746,6 +2796,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     assert "HIDE - open Hidden" not in text
     assert "- Intel [INTEL] (enabled, Public, shown in root)" in text
     assert "Access: Allowed callsigns only; location callsigns: N1MAG, K7ETC" in text
+    assert "Retention: Archive files older than 7 days" in text
     assert f"Source: {intel_dir}" in text
 
 

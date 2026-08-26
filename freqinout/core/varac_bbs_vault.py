@@ -96,6 +96,8 @@ class VaultLocation:
     list_in_root_menu: bool = True
     visibility_rule: str = "Public"
     open_rule: str = "Public"
+    retention_policy: str = "Use global BBS archive policy"
+    retention_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -663,6 +665,16 @@ def load_vault_locations(value: object) -> List[VaultLocation]:
     for row in parsed:
         if not isinstance(row, dict):
             continue
+        try:
+            access_code_iterations = int(
+                row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS
+            )
+        except Exception:
+            access_code_iterations = DEFAULT_ACCESS_CODE_ITERATIONS
+        try:
+            retention_days = max(0, int(row.get("retention_days", 0) or 0))
+        except Exception:
+            retention_days = 0
         name = _clean_location_name(row.get("name", ""))
         if not name:
             continue
@@ -678,13 +690,19 @@ def load_vault_locations(value: object) -> List[VaultLocation]:
                 allowed_callsigns=tuple(parse_callsign_list(row.get("allowed_callsigns", []))),
                 access_code_hash=str(row.get("access_code_hash", "") or "").strip(),
                 access_code_salt=str(row.get("access_code_salt", "") or "").strip(),
-                access_code_iterations=int(row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS),
+                access_code_iterations=access_code_iterations,
                 access_code_plaintext=str(row.get("access_code_plaintext", "") or "").strip(),
                 alias=normalize_location_alias(row.get("alias", ""), name),
                 description=str(row.get("description", "") or "").strip(),
                 list_in_root_menu=bool(row.get("list_in_root_menu", True)),
                 visibility_rule=str(row.get("visibility_rule", "Public") or "Public").strip() or "Public",
                 open_rule=str(row.get("open_rule", "Public") or "Public").strip() or "Public",
+                retention_policy=str(
+                    row.get("retention_policy", "Use global BBS archive policy")
+                    or "Use global BBS archive policy"
+                ).strip()
+                or "Use global BBS archive policy",
+                retention_days=retention_days,
             )
         )
     return locations
@@ -710,6 +728,8 @@ def vault_locations_to_data(locations: Sequence[VaultLocation]) -> List[Dict[str
                 "list_in_root_menu": bool(location.list_in_root_menu),
                 "visibility_rule": location.visibility_rule,
                 "open_rule": location.open_rule,
+                "retention_policy": location.retention_policy,
+                "retention_days": int(location.retention_days or 0),
             }
         )
     return out
