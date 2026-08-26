@@ -485,7 +485,5 @@ into the inbox so the operator lands on the evidence that caused the map state.
 
 - Further simplify Advanced Map Tools so it cannot conflict with smart view
   defaults.
-- Add a polished Path To workflow that combines observed links, peer schedule,
-  and propagation recommendation.
 - Add zoom-aware city/population layers without cluttering default views.
 - Add source-neutral mesh traffic once integration is available.

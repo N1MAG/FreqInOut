@@ -3417,6 +3417,74 @@ class StationsMapTab(QWidget):
             note=note,
         )
 
+    def _peer_schedule_hint_for_callsign(self, callsign: str) -> str:
+        callsign = str(callsign or "").strip().upper()
+        if not callsign:
+            return ""
+        try:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            rows = self._load_peer_schedule_presence(now_utc)
+        except Exception:
+            rows = []
+        for row in rows or []:
+            if str(row.get("callsign") or "").strip().upper() != callsign:
+                continue
+            band = str(row.get("band") or "").strip().upper()
+            freq = str(row.get("frequency") or "").strip()
+            mode = str(row.get("mode") or "").strip().upper()
+            try:
+                minutes_to_end = int(row.get("minutes_to_end") or 0)
+            except Exception:
+                minutes_to_end = 0
+            parts = [part for part in (band, freq, mode) if part]
+            if minutes_to_end > 0:
+                parts.append(f"active {minutes_to_end}m")
+            return " ".join(parts)
+        return ""
+
+    def _path_to_propagation_hint(self, callsign: str, payload: Dict[str, object]) -> str:
+        user_ll = self._get_user_latlon()
+        if not user_ll:
+            return ""
+        target_ll = self._map_selected_latlon(payload)
+        if not (target_ll[0] or target_ll[1]) and callsign:
+            target_ll, _state = self._operator_target_point(callsign)
+        if not target_ll:
+            return ""
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        best_band = ""
+        best_score = 0.0
+        distance_km = self._haversine_km(user_ll[0], user_ll[1], target_ll[0], target_ll[1])
+        for band in PROP_BANDS:
+            score = self._modeled_band_score(band, target_ll[0], target_ll[1], now_utc, distance_km)
+            if score > best_score:
+                best_band = band
+                best_score = score
+        if not best_band:
+            return ""
+        return f"{best_band} modeled {self._score_level(best_score)} now"
+
+    def _path_to_planning_rows(self, callsign: str, payload: Dict[str, object], rows: Dict[str, str]) -> List[tuple[str, str]]:
+        schedule = self._map_detail_first_value(
+            self._peer_schedule_hint_for_callsign(callsign),
+            rows.get("schedule"),
+            payload.get("qsy_text"),
+        )
+        if schedule:
+            return [
+                ("Peer Schedule", schedule),
+                ("Planning", "Use the peer schedule first; it is the strongest hint for where this station is expected now."),
+            ]
+        propagation = self._path_to_propagation_hint(callsign, payload)
+        if propagation:
+            return [
+                ("Propagation", propagation),
+                ("Planning", "No peer schedule is known; use RF Planning as the fallback."),
+            ]
+        return [
+            ("Planning", "No peer schedule is known; use RF Planning as the propagation fallback."),
+        ]
+
     def _map_selected_paths_html(self, payload: Dict[str, object]) -> str:
         rows = self._map_payload_rows(payload)
         callsign = self._map_selected_station_callsign()
@@ -3429,25 +3497,19 @@ class StationsMapTab(QWidget):
                 note="Select a station to review observed paths for that station.",
             )
         active = self._selected_station_paths_active(callsign)
-        schedule = self._map_detail_first_value(rows.get("schedule"), payload.get("qsy_text"))
-        planning = (
-            "Use the peer schedule first; it reflects where this station is expected now or next."
-            if schedule
-            else "No peer schedule is known; use RF Planning as the propagation fallback."
-        )
         note = (
             "Paths for this station are displayed on the map. Click Hide Paths to turn that layer off."
             if active
             else "Click Show Paths To to display observed direct or shared-contact paths from my station to this station."
         )
+        planning_rows = self._path_to_planning_rows(callsign, payload, rows)
         return self._map_detail_shell_html(
             "Path Topology",
             [
                 ("Station", callsign),
                 ("Layer", "Showing" if bool(getattr(self, "show_link_paths", False)) else "Hidden"),
                 ("Scope", active_scope if mode != "off" else "Off"),
-                ("Schedule", schedule),
-                ("Planning", planning),
+                *planning_rows,
                 ("Meaning", "Arrows show who reported hearing whom; color shows reported signal quality."),
             ],
             note=note,

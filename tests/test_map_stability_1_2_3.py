@@ -592,6 +592,50 @@ def test_map_selected_paths_html_names_topology_scope() -> None:
     assert "who reported hearing whom" in html
 
 
+def test_map_selected_paths_html_uses_live_peer_schedule_first() -> None:
+    tab = _bare_tab()
+    tab._map_selected_payload = {"type": "station", "title": "K7ETC", "rows": []}
+    tab._load_peer_schedule_presence = lambda _now_utc: [
+        {
+            "callsign": "K7ETC",
+            "band": "20M",
+            "mode": "DATA",
+            "frequency": "14.078",
+            "minutes_to_end": 42,
+        }
+    ]
+    tab.show_link_paths = False
+    tab.link_mode = "off"
+
+    html = StationsMapTab._map_selected_paths_html(tab, tab._map_selected_payload)
+
+    assert "Peer Schedule" in html
+    assert "20M 14.078 DATA active 42m" in html
+    assert "Propagation" not in html
+
+
+def test_map_selected_paths_html_uses_propagation_when_no_peer_schedule() -> None:
+    tab = _bare_tab()
+    tab._map_selected_payload = {
+        "type": "station",
+        "title": "K7ETC",
+        "lat": 38.0,
+        "lon": -112.0,
+        "rows": [],
+    }
+    tab._load_peer_schedule_presence = lambda _now_utc: []
+    tab._get_user_latlon = lambda: (40.0, -105.0)
+    tab._modeled_band_score = lambda band, *_args, **_kwargs: 82.0 if band == "40M" else 12.0
+    tab.show_link_paths = False
+    tab.link_mode = "off"
+
+    html = StationsMapTab._map_selected_paths_html(tab, tab._map_selected_payload)
+
+    assert "Propagation" in html
+    assert "40M modeled high now" in html
+    assert "No peer schedule is known" in html
+
+
 def test_map_selected_messages_html_explains_context_filters() -> None:
     tab = _bare_tab()
     tab.recency_seconds = 24 * 60 * 60
