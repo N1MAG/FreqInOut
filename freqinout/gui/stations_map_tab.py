@@ -940,6 +940,20 @@ class StationsMapTab(QWidget):
         apply_chk(self.map_weather_chk, "show_weather_reports", "map_show_weather_reports", True)
         apply_chk(self.map_alerts_chk, "show_alert_reports", "map_show_alert_reports", True)
         apply_chk(self.map_infrastructure_chk, "show_infrastructure_reports", "map_show_infrastructure_reports", True)
+        if not any(
+            bool(value)
+            for value in (
+                self.show_station_markers,
+                self.show_link_paths,
+                self.show_weather_reports,
+                self.show_alert_reports,
+                self.show_infrastructure_reports,
+            )
+        ):
+            self.show_station_markers = True
+            self.map_stations_chk.blockSignals(True)
+            self.map_stations_chk.setChecked(True)
+            self.map_stations_chk.blockSignals(False)
         # Map propagation overlay defaults OFF on every app launch.
         self.prop_overlay_enabled = False
         if self.prop_overlay_chk is not None:
@@ -5455,6 +5469,7 @@ class StationsMapTab(QWidget):
         self._now_reachable_enabled = False
         self._now_reachable_meta = {}
         self._now_reachable_callsigns = set()
+        self.show_station_markers = True
         self.show_link_paths = False
         self.link_mode = "off"
         self.link_value = ""
@@ -5485,6 +5500,14 @@ class StationsMapTab(QWidget):
                 links_chk.blockSignals(True)
                 links_chk.setChecked(False)
                 links_chk.blockSignals(False)
+            except Exception:
+                pass
+        stations_chk = getattr(self, "map_stations_chk", None)
+        if stations_chk is not None:
+            try:
+                stations_chk.blockSignals(True)
+                stations_chk.setChecked(True)
+                stations_chk.blockSignals(False)
             except Exception:
                 pass
         self._sync_link_mode_combo_to_off()

@@ -178,9 +178,13 @@ class _FakeCombo:
         self.index = 0
         self.blocked = False
         self.edit_text = ""
+        self.enabled = True
 
     def blockSignals(self, value: bool) -> None:
         self.blocked = bool(value)
+
+    def setEnabled(self, value: bool) -> None:
+        self.enabled = bool(value)
 
     def count(self) -> int:
         return len(self.items)
@@ -235,6 +239,14 @@ class _FakeCheck:
 
     def setChecked(self, value: bool) -> None:
         self.checked = bool(value)
+
+
+class _FakeSettings:
+    def __init__(self, values: dict[str, object]) -> None:
+        self.values = dict(values)
+
+    def get(self, key: str, default: object = None) -> object:
+        return self.values.get(key, default)
 
 
 class _FakeButton:
@@ -600,6 +612,48 @@ def test_station_status_summary_is_compact_and_legend_omits_unknown() -> None:
     assert "const stationStatusItems = [" in legend_block
     assert "if (mode !== 'sitrep')" in legend_block
     assert "Unknown / No Report" in legend_block
+
+
+def test_display_preferences_recover_when_all_drawable_layers_were_saved_off() -> None:
+    tab = _bare_tab()
+    tab.settings = _FakeSettings(
+        {
+            "map_show_station_markers": 0,
+            "map_show_link_paths": 0,
+            "map_show_weather_reports": 0,
+            "map_show_alert_reports": 0,
+            "map_show_infrastructure_reports": 0,
+            "map_show_states": 1,
+            "map_show_regions": 1,
+        }
+    )
+    tab.show_calls_chk = _FakeCheck(False)
+    tab.show_regions_chk = _FakeCheck(False)
+    tab.show_states_chk = _FakeCheck(False)
+    tab.show_cities_chk = _FakeCheck(False)
+    tab.show_grid_labels_chk = _FakeCheck(False)
+    tab.map_stations_chk = _FakeCheck(False)
+    tab.map_links_chk = _FakeCheck(False)
+    tab.map_weather_chk = _FakeCheck(False)
+    tab.map_alerts_chk = _FakeCheck(False)
+    tab.map_infrastructure_chk = _FakeCheck(False)
+    tab.prop_overlay_chk = _FakeCheck(True)
+    tab.prop_mode_combo = None
+    tab.prop_window_combo = None
+    tab.prop_target_type_combo = None
+    tab.prop_target_value_combo = None
+    tab.city_pop_combo = _FakeCombo([("100k", 100000)])
+    tab._sync_city_pop_enabled = lambda: None
+    tab._refresh_prop_target_controls = lambda: None
+
+    StationsMapTab._load_display_preferences(tab)
+
+    assert tab.show_station_markers is True
+    assert tab.map_stations_chk.checked is True
+    assert tab.show_link_paths is False
+    assert tab.show_weather_reports is False
+    assert tab.show_alert_reports is False
+    assert tab.show_infrastructure_reports is False
 
 
 def test_advanced_state_filter_uses_reported_for_state_aliases() -> None:
@@ -2245,12 +2299,14 @@ def test_all_stations_focus_clears_path_layer_state() -> None:
     tab._now_reachable_enabled = True
     tab._now_reachable_meta = {"label": "active"}
     tab._now_reachable_callsigns = {"K7ETC"}
+    tab.show_station_markers = False
     tab.show_link_paths = True
     tab.link_mode = "station"
     tab.link_value = "K7ETC"
     tab.relay_target = "K7ETC"
     tab._paths_focus_station = "K7ETC"
     tab._paths_previous_observation_focus = (True, "hf_reports")
+    tab.map_stations_chk = _FakeCheck(False)
     tab.map_links_chk = _FakeCheck(True)
     tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("K7ETC", ("station", "K7ETC"))])
     tab.link_mode_combo.setCurrentIndex(2)
@@ -2277,12 +2333,14 @@ def test_all_stations_focus_clears_path_layer_state() -> None:
     assert tab._now_reachable_enabled is False
     assert tab._now_reachable_meta == {}
     assert tab._now_reachable_callsigns == set()
+    assert tab.show_station_markers is True
     assert tab.show_link_paths is False
     assert tab.link_mode == "off"
     assert tab.link_value == ""
     assert tab.relay_target == ""
     assert tab._paths_focus_station == ""
     assert tab._paths_previous_observation_focus is None
+    assert tab.map_stations_chk.checked is True
     assert tab.map_links_chk.checked is False
     assert tab.link_mode_combo.index == 0
     assert tab._map_path_scope_combo.index == 0
