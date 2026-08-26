@@ -393,9 +393,12 @@ reported it, what topics/status drove the map color, and how to open the
 matching messages.
 
 Paths can be added when useful instead of becoming a separate puzzle. From a
-station card, `Show Paths To` reveals who can hear that station. If a peer
-schedule is known, FIO uses that schedule first; otherwise propagation
-recommendations help suggest likely bands.
+station card, `Show Paths To` means paths from my station to that selected
+station inside the active age window. FIO should show a direct connection when
+one exists, plus plausible shared-contact bridge paths through stations both
+operators have had contact with in that same window. If a peer schedule is
+known, FIO uses that schedule first; otherwise propagation recommendations help
+suggest likely bands.
 
 The map should feel interactive and explanatory: legends appear for the current
 view, filters are visible, and clicking `Messages` carries the exact map context
@@ -455,7 +458,8 @@ into the inbox so the operator lands on the evidence that caused the map state.
 - Report detail uses `Status`, not `Severity`.
 - SNR tooltips and labels are rounded.
 - Clicking a station opens details with roster/status/schedule data when known.
-- Compose Message opens Compose with the selected callsign prefilled.
+- Compose Message opens Compose with the selected callsign prefilled, except
+  for the operator's own station.
 - Messages from Regional Intel are filtered by geography, topic/group, age, and
   non-green evidence.
 - Map side-panel Messages tab explains the handoff context before opening

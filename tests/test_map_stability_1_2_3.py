@@ -207,7 +207,7 @@ class _FakeCombo:
     def currentIndex(self) -> int:
         return self.index
 
-    def findText(self, text: str) -> int:
+    def findText(self, text: str, *_args) -> int:
         for idx, item in enumerate(self.items):
             if item[0] == text:
                 return idx
@@ -790,6 +790,33 @@ def test_links_layer_toggle_on_defaults_to_my_station_scope() -> None:
     assert tab._map_path_scope_combo.currentData() == ("my_station", "")
     assert StationsMapTab._links_active(tab) is True
     assert refreshes == ["toggle_link_paths"]
+
+
+def test_relay_target_selection_uses_paths_to_scope() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab.show_link_paths = False
+    tab.link_mode = "off"
+    tab.link_value = ""
+    tab.relay_target = ""
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", ""))])
+    tab.relay_target_combo = _FakeCombo([("", ""), ("K7ETC | Keith", "K7ETC")])
+    tab._update_selected_paths_button_visual = lambda *_args, **_kwargs: None
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._on_relay_target_changed(tab, "K7ETC | Keith")
+
+    assert tab.show_link_paths is True
+    assert tab.link_mode == "relay_target"
+    assert tab.link_value == "K7ETC"
+    assert tab.relay_target == "K7ETC"
+    assert tab._paths_focus_station == "K7ETC"
+    assert tab._map_path_scope_combo.currentData() == ("relay_target", "K7ETC")
+    assert StationsMapTab._current_link_selection(tab) == ("relay_target", "K7ETC")
+    assert refreshes == ["relay_target"]
 
 
 def test_clear_map_layers_turns_off_path_focus_and_preserves_filters() -> None:
