@@ -2780,7 +2780,7 @@ class StationsMapTab(QWidget):
         spotter_btn = QPushButton("Compose Message")
         sop_btn = QPushButton("SOP")
         center_btn.setToolTip("Center the map on this selected station, report, or area.")
-        paths_btn.setToolTip("Show observed paths to and from the selected station.")
+        paths_btn.setToolTip("Show observed direct or shared-contact paths from my station to the selected station.")
         group_btn.setToolTip("Filter the map to this station or report group.")
         topic_btn.setToolTip("Filter the map to this report topic.")
         messages_btn.setToolTip("Open the related message evidence for this map selection.")
@@ -2888,7 +2888,14 @@ class StationsMapTab(QWidget):
             self._map_selected_messages_btn.setVisible(bool(target))
             self._map_selected_messages_btn.setText("Local Traffic" if target == "local_reports" else "Messages")
         if self._map_selected_spotter_btn is not None:
+            can_message = kind == "station" and bool(title) and not self._map_selected_station_is_self(callsign)
             self._map_selected_spotter_btn.setVisible(kind == "station" and bool(title))
+            self._map_selected_spotter_btn.setEnabled(can_message)
+            self._map_selected_spotter_btn.setToolTip(
+                "Open Compose and prefill the selected station callsign."
+                if can_message
+                else "Compose is disabled for your own station."
+            )
         if self._map_selected_sop_btn is not None:
             sop_context = self._map_selected_sop_context(payload)
             self._map_selected_sop_btn.setVisible(
@@ -3431,7 +3438,7 @@ class StationsMapTab(QWidget):
         note = (
             "Paths for this station are displayed on the map. Click Hide Paths to turn that layer off."
             if active
-            else "Click Show Paths To to display observed directional links involving this station."
+            else "Click Show Paths To to display observed direct or shared-contact paths from my station to this station."
         )
         return self._map_detail_shell_html(
             "Path Topology",
@@ -3708,15 +3715,35 @@ class StationsMapTab(QWidget):
                 return callsign
         return ""
 
+    def _operator_callsign_for_map_actions(self) -> str:
+        try:
+            return str(self.settings.get("operator_callsign", "") or "").strip().upper().lstrip("@")
+        except Exception:
+            return ""
+
+    def _map_selected_station_is_self(self, callsign: str = "") -> bool:
+        selected = str(callsign or self._map_selected_station_callsign() or "").strip().upper().lstrip("@")
+        operator = self._operator_callsign_for_map_actions()
+        if not selected or not operator:
+            return False
+        try:
+            selected = JS8LogLinkIndexer._base_callsign(selected)
+            operator = JS8LogLinkIndexer._base_callsign(operator)
+        except Exception:
+            pass
+        return bool(selected and operator and selected == operator)
+
     def _selected_station_paths_active(self, callsign: str = "") -> bool:
         target = (callsign or self._map_selected_station_callsign() or "").strip().upper()
         if not target:
             return False
-        return bool(
-            getattr(self, "show_link_paths", False)
-            and str(getattr(self, "link_mode", "") or "").strip().lower() == "station"
-            and str(getattr(self, "link_value", "") or "").strip().upper() == target
-        )
+        mode = str(getattr(self, "link_mode", "") or "").strip().lower()
+        value = str(getattr(self, "link_value", "") or "").strip().upper()
+        relay_target = str(getattr(self, "relay_target", "") or "").strip().upper()
+        return bool(getattr(self, "show_link_paths", False) and (
+            (mode == "relay_target" and (relay_target == target or value == target))
+            or (mode == "station" and value == target)
+        ))
 
     def _update_selected_paths_button_visual(self, theme: Optional[Dict[str, str]] = None) -> None:
         btn = getattr(self, "_map_selected_paths_btn", None)
@@ -3756,6 +3783,10 @@ class StationsMapTab(QWidget):
             callsign = str(value or self._paths_focus_station or "").strip().upper()
             label = f"Selected: {callsign}" if callsign else "Selected Station"
             target_data = ("station", callsign)
+        elif mode == "relay_target":
+            callsign = str(value or self.relay_target or self._paths_focus_station or "").strip().upper()
+            label = f"Paths To: {callsign}" if callsign else "Paths To Station"
+            target_data = ("relay_target", callsign)
         elif mode == "all":
             label = "Network"
             target_data = ("all", "")
@@ -3767,7 +3798,7 @@ class StationsMapTab(QWidget):
             target_data = ("off", "")
         try:
             combo.blockSignals(True)
-            if mode == "station":
+            if mode in {"station", "relay_target"}:
                 existing = combo.findData(target_data)
                 if existing < 0:
                     # Keep station-specific path review visible without filling the main dropdown with every callsign.
@@ -3831,7 +3862,7 @@ class StationsMapTab(QWidget):
 
     def _show_paths_for_selected_station(self) -> None:
         callsign = self._map_selected_station_callsign()
-        if not callsign:
+        if not callsign or self._map_selected_station_is_self(callsign):
             return
         try:
             turning_off = self._selected_station_paths_active(callsign)
@@ -3850,10 +3881,10 @@ class StationsMapTab(QWidget):
                         bool(getattr(self, "_observation_focus_enabled", False)),
                         str(getattr(self, "_observation_focus_mode", "") or ""),
                     )
-                self.link_mode = "station"
+                self.link_mode = "relay_target"
                 self.link_value = callsign
                 self._paths_focus_station = callsign
-                self.relay_target = ""
+                self.relay_target = callsign
                 self._observation_focus_enabled = True
                 self._observation_focus_mode = "paths"
                 tabs = getattr(self, "_map_selected_tabs", None)
@@ -3874,6 +3905,8 @@ class StationsMapTab(QWidget):
 
     def _compose_message_for_selected_station(self) -> None:
         callsign = self._map_selected_station_callsign()
+        if not callsign or self._map_selected_station_is_self(callsign):
+            return
         main_window = self.window()
         if main_window is None or not hasattr(main_window, "open_messages_section"):
             return
@@ -5311,6 +5344,9 @@ class StationsMapTab(QWidget):
             return "Off"
         if mode == "station":
             return f"Selected {value}" if value else "Selected Station"
+        if mode == "relay_target":
+            target = value or str(getattr(self, "relay_target", "") or "").strip().upper()
+            return f"Paths To {target}" if target else "Paths To Station"
         if mode == "all":
             return "Network"
         if mode == "my_station":
@@ -10378,6 +10414,8 @@ class StationsMapTab(QWidget):
             return "off", ""
         mode = str(getattr(self, "link_mode", "") or "").strip().lower()
         value = str(getattr(self, "link_value", "") or "").strip().upper()
+        if mode == "relay_target" and not value:
+            value = str(getattr(self, "relay_target", "") or "").strip().upper()
         if mode and mode != "off":
             return mode, value
         return "off", ""
@@ -10427,6 +10465,8 @@ class StationsMapTab(QWidget):
             return "No path links found for my station and current filters."
         if mode == "station" and value:
             return f"No path links found for {value} and current filters."
+        if mode == "relay_target" and value:
+            return f"No path links found from my station to {value} in the selected time window."
         if mode == "group" and value:
             return f"No path links found for group {value}."
         if mode == "region" and value:
@@ -11680,6 +11720,7 @@ class StationsMapTab(QWidget):
             self._map_band_filter_signature(band_filter),
             int(self.recency_seconds or 0),
             str(my_call or "").strip().upper(),
+            str(getattr(self, "relay_target", "") or "").strip().upper(),
             bool(self._now_reachable_enabled),
             bool(self.show_station_markers),
             bool(self.show_link_paths),
@@ -14543,9 +14584,25 @@ function addGridLabels(res, level, bounds, maxLabels) {
             except Exception:
                 pass
         self.link_mode = mode or "off"
-        self.link_value = value if self.link_mode == "station" else ""
-        if self.link_mode != "station":
+        self.link_value = value if self.link_mode in {"station", "relay_target"} else ""
+        if self.link_mode == "relay_target":
+            self.relay_target = value
+            self._paths_focus_station = value
+            relay_combo = getattr(self, "relay_target_combo", None)
+            if relay_combo is not None:
+                try:
+                    relay_idx = relay_combo.findData(value)
+                    relay_combo.blockSignals(True)
+                    if relay_idx >= 0:
+                        relay_combo.setCurrentIndex(relay_idx)
+                    elif value:
+                        relay_combo.setEditText(value)
+                    relay_combo.blockSignals(False)
+                except Exception:
+                    pass
+        elif self.link_mode != "station":
             self._paths_focus_station = ""
+            self.relay_target = ""
         self.show_link_paths = self.link_mode != "off"
         links_chk = getattr(self, "map_links_chk", None)
         if links_chk is not None:
@@ -14612,6 +14669,18 @@ function addGridLabels(res, level, bounds, maxLabels) {
         if normalized == self.relay_target:
             return
         self.relay_target = normalized
+        if normalized:
+            self.show_link_paths = True
+            self.link_mode = "relay_target"
+            self.link_value = normalized
+            self._paths_focus_station = normalized
+            self._sync_path_scope_combo(("relay_target", normalized))
+        elif str(getattr(self, "link_mode", "") or "").strip().lower() == "relay_target":
+            self._set_path_layer_off()
+        self._update_selected_paths_button_visual()
+        self._update_map_mode_buttons()
+        self._update_map_view_status_label()
+        self._update_clear_filter_buttons_visual()
         self._request_map_refresh(level="medium", reason="relay_target")
 
     def _on_prop_overlay_changed(self, state):

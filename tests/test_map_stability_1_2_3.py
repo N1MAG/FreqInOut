@@ -317,12 +317,12 @@ def test_map_selected_station_paths_action_uses_existing_path_controls() -> None
 
     assert tab.show_link_paths is True
     assert tab.map_links_chk.checked is True
-    assert tab.link_mode == "station"
+    assert tab.link_mode == "relay_target"
     assert tab.link_value == "K7ETC"
     assert tab._paths_focus_station == "K7ETC"
-    assert tab.relay_target == ""
-    assert tab._map_path_scope_combo.currentData() == ("station", "K7ETC")
-    assert tab._map_path_scope_combo.currentText() == "Selected: K7ETC"
+    assert tab.relay_target == "K7ETC"
+    assert tab._map_path_scope_combo.currentData() == ("relay_target", "K7ETC")
+    assert tab._map_path_scope_combo.currentText() == "Paths To: K7ETC"
     assert refreshes == ["selected_detail_paths"]
 
     StationsMapTab._show_paths_for_selected_station(tab)
@@ -335,6 +335,26 @@ def test_map_selected_station_paths_action_uses_existing_path_controls() -> None
     assert tab.link_value == ""
     assert tab._paths_focus_station == ""
     assert refreshes == ["selected_detail_paths", "selected_detail_paths_off"]
+
+
+def test_selected_station_actions_ignore_operator_self() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab.settings = {"operator_callsign": "KG5RKW"}
+    tab._map_selected_payload = {"type": "station", "title": "KG5RKW"}
+    tab.map_links_chk = _FakeCheck(False)
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", ""))])
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    assert StationsMapTab._map_selected_station_is_self(tab) is True
+
+    StationsMapTab._show_paths_for_selected_station(tab)
+    StationsMapTab._compose_message_for_selected_station(tab)
+
+    assert tab.show_link_paths is False
+    assert tab.link_mode == "off"
+    assert tab.relay_target == ""
+    assert refreshes == []
 
 
 def test_selected_station_paths_toggle_restores_previous_report_context() -> None:
