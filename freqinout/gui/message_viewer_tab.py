@@ -2563,7 +2563,7 @@ class MessageViewerTab(QWidget):
             cfg.get("excluded_msg_types", [])
         )
         self._inbox_focus: str = str(cfg.get("inbox_focus", "all") or "all").strip().lower()
-        if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "varac"}:
+        if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "varac", "bbs"}:
             self._inbox_focus = "all"
         self._advanced_filters_visible: bool = bool(cfg.get("advanced_filters_visible", False))
         self._available_type_filters: List[str] = []
@@ -4759,6 +4759,7 @@ class MessageViewerTab(QWidget):
             ("commstat", "CommStat", "Show CommStat-derived messages and reports."),
             ("js8call", "JS8Call", "Show raw JS8Call messages that are not Spotter MCF forms."),
             ("varac", "VarAC", "Show VarAC messages."),
+            ("bbs", "BBS", "Show live and archived BBS files as message traffic."),
         ]
 
     def _set_inbox_focus(self, focus: str) -> None:

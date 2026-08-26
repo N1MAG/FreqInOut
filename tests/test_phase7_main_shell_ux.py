@@ -4592,6 +4592,7 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "single-instance VarAC and normal BBS monitoring do not require" in spec
     assert "Manage file purge/retention by BBS location" in spec
     assert "Treat BBS as a message entity under Messages" in spec
+    assert "adds a BBS focus in Messages" in spec
     assert "preview of the managed BBS structure" in spec
     assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
     assert "multiple managed BBS locations" in spec

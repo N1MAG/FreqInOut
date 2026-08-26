@@ -166,6 +166,8 @@ Target behavior:
   location archival through the BBS auto-archive pass.
 - Treat BBS as a message entity under Messages. Operators should be able to
   browse BBS-relevant content without mentally translating from VarAC internals.
+  Initial implementation adds a BBS focus in Messages for live and archived BBS
+  file rows.
 - Show a preview of the managed BBS structure before writing or publishing it so
   the operator can understand what callers will see.
 - Preserve radio awareness where it matters, but avoid implying that shared BBS

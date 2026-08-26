@@ -1533,6 +1533,8 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
     commstat = UnifiedMessage("CommStat SitRep", "INFO", "K7ETC", "MR08", 1.0, "", "Power", "commstat", object())
     js8 = UnifiedMessage("JS8 MSG", "READ", "K7ETC", "MR08", 1.0, "", "Directed message", "js8", object())
     varac = UnifiedMessage("VarAC", "READ", "K7ETC", "MR08", 1.0, "", "VMAIL", "varac", object())
+    bbs = UnifiedMessage("BBS", "READ", "K7ETC", "MR08", 1.0, "", "Bulletin", "bbs", object())
+    bbs_archive = UnifiedMessage("BBS", "READ", "K7ETC", "MR08", 1.0, "", "Old Bulletin", "bbs_archive", object())
 
     assert row_matches_inbox_focus(spotter, "spotter") is True
     assert row_matches_inbox_focus(raw_spotter, "spotter") is True
@@ -1550,6 +1552,10 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
 
     assert row_matches_inbox_focus(varac, "varac") is True
     assert row_matches_inbox_focus(flmsg, "varac") is False
+
+    assert row_matches_inbox_focus(bbs, "bbs") is True
+    assert row_matches_inbox_focus(bbs_archive, "bbs") is True
+    assert row_matches_inbox_focus(varac, "bbs") is False
 
 
 def test_inbox_focus_selects_operator_readable_table_profiles() -> None:

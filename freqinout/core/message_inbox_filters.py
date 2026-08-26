@@ -458,6 +458,8 @@ def row_matches_inbox_focus(row: MessageRowLike, focus: str) -> bool:
         return str(getattr(row, "origin", "") or "").strip().lower() == "varac" or (
             str(getattr(row, "msg_type", "") or "").strip() == "VarAC"
         )
+    if focus == "bbs":
+        return str(getattr(row, "origin", "") or "").strip().lower() in {"bbs", "bbs_archive"}
     return True
 
 
