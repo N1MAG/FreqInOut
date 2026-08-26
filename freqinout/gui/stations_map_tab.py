@@ -6847,6 +6847,7 @@ class StationsMapTab(QWidget):
             return True
 
         relay_best: Dict[tuple[str, str], Dict[str, object]] = {}
+        best: Dict[tuple[str, str], Dict[str, object]] = {}
         my_partners: Set[str] = set()
         target_partners: Set[str] = set()
 

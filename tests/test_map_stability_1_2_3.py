@@ -1264,6 +1264,45 @@ def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_ag
     assert direct[0]["snr"] == -4.4
 
 
+def test_varac_link_loader_empty_my_station_scope_does_not_degrade(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE varac_links (
+              ts REAL,
+              origin TEXT,
+              destination TEXT,
+              snr REAL,
+              band TEXT,
+              freq_hz REAL
+            )
+            """
+        )
+
+    tab = _bare_tab()
+    tab.operator_index = {}
+    tab.stations = [StationPoint("N1MAG", "DM79", name="Me", state="CO", lat=39.0, lon=-105.0)]
+
+    links = StationsMapTab._load_varac_links(
+        tab,
+        band_filter={"type": "all"},
+        my_call="N1MAG",
+        link_selection=("my_station", ""),
+        max_age_sec=24 * 60 * 60,
+    )
+
+    assert links == []
+
+
 def test_commstat_reporter_activity_honors_age_window(monkeypatch, tmp_path: Path) -> None:
     cfg_root = tmp_path / "profile"
     config_dir = cfg_root / "config"
