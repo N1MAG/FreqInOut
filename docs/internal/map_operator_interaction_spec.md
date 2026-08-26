@@ -256,11 +256,16 @@ Changing age, view, subtype, path target, or topic must feel responsive.
   that may be covered by the existing map.
 - Expensive path/link work should only run when links are visible or the Paths
   view needs it.
+- Network paths should summarize aggressively: dedupe repeated observations to
+  best pair-level links, draw only a bounded strongest/recent subset when the
+  network is dense, and tell the operator how many links were omitted.
 - Station inventory/status should not load report/link datasets that are not
   needed for station pins.
 - Traffic and Regional Intel must not pre-load station enrichment datasets
   such as JS8/VarAC/Fldigi presence, direct-contact summaries, or station status
-  unless station pins or paths are visible.
+  unless station pins need those fields for the selected view.
+- Paths should not pre-load full station enrichment; link records already define
+  the topology stations for that view.
 
 ### Paths
 

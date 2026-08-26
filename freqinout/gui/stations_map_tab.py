@@ -639,6 +639,7 @@ INFRASTRUCTURE_REPORT_MAX_AGE_SEC = 24 * 60 * 60
 WEATHER_CLUSTER_DEGREES = 0.75
 MAP_DEFAULT_RECENCY_LABEL = "24h"
 MAP_DEFAULT_RECENCY_SECONDS = 24 * 60 * 60
+MAP_NETWORK_PATH_DISPLAY_LIMIT = 250
 
 WEATHER_SEVERITY_RANK = {
     "unknown": 0,
@@ -825,6 +826,8 @@ class StationsMapTab(QWidget):
         self._map_marker_count: int = 0
         self._map_link_count: int = 0
         self._map_link_status_detail: str = "Links hidden."
+        self._map_link_display_limited_count: int = 0
+        self._map_link_loaded_count: int = 0
         self._app_active: bool = True
         self.prop_overlay_enabled: bool = False
         self.prop_adaptive_enabled: bool = True
@@ -6612,7 +6615,14 @@ class StationsMapTab(QWidget):
                 prev = relay_best.get(key)
                 prev_snr = prev.get("snr") if isinstance(prev, dict) else None
                 if key not in relay_best or (snr_val is not None and (prev_snr is None or snr_val > prev_snr)):
-                    relay_best[key] = {"origin": o, "destination": d, "snr": snr_val, "is_relay": bool(is_relay), "relay_via": relay_via or ""}
+                    relay_best[key] = {
+                        "origin": o,
+                        "destination": d,
+                        "snr": snr_val,
+                        "ts": ts,
+                        "is_relay": bool(is_relay),
+                        "relay_via": relay_via or "",
+                    }
                 if my_call and my_call in {o, d}:
                     other = d if o == my_call else o
                     my_partners.add(other)
@@ -6623,7 +6633,14 @@ class StationsMapTab(QWidget):
                 prev = best.get(key)
                 prev_snr = prev.get("snr") if isinstance(prev, dict) else None
                 if key not in best or (snr_val is not None and (prev_snr is None or snr_val > prev_snr)):
-                    best[key] = {"origin": o, "destination": d, "snr": snr_val, "is_relay": bool(is_relay), "relay_via": relay_via or ""}
+                    best[key] = {
+                        "origin": o,
+                        "destination": d,
+                        "snr": snr_val,
+                        "ts": ts,
+                        "is_relay": bool(is_relay),
+                        "relay_via": relay_via or "",
+                    }
 
         def _add_link(key_map: Dict[tuple[str, str], Dict[str, object]], a: str, b: str):
             k = tuple(sorted((a, b)))
@@ -6645,6 +6662,7 @@ class StationsMapTab(QWidget):
                     "lat2": p2[0],
                     "lon2": p2[1],
                     "snr": data.get("snr"),
+                    "ts": data.get("ts"),
                     "is_relay": bool(data.get("is_relay")),
                     "relay_via": str(data.get("relay_via") or ""),
                 }
@@ -6926,21 +6944,35 @@ class StationsMapTab(QWidget):
                 prev = relay_best.get(key)
                 prev_snr = prev.get("snr") if isinstance(prev, dict) else None
                 if key not in relay_best or (snr_val is not None and (prev_snr is None or snr_val > prev_snr)):
-                    relay_best[key] = {"origin": o, "destination": d, "snr": snr_val}
+                    relay_best[key] = {"origin": o, "destination": d, "snr": snr_val, "ts": ts}
                 if my_call and my_call in {o, d}:
                     my_partners.add(d if o == my_call else o)
                 if relay_target in {o, d}:
                     target_partners.add(d if o == relay_target else o)
                 continue
+            key = tuple(sorted((o, d)))
+            prev = best.get(key)
+            prev_snr = prev.get("snr") if isinstance(prev, dict) else None
+            if key not in best or (snr_val is not None and (prev_snr is None or snr_val > prev_snr)):
+                best[key] = {"origin": o, "destination": d, "snr": snr_val, "ts": ts}
+
+        def _add_link_from_best(data: Dict[str, object], a: str, b: str) -> None:
+            origin = str(data.get("origin") or a or "").strip().upper()
+            destination = str(data.get("destination") or b or "").strip().upper()
+            p1 = pos_map.get(origin)
+            p2 = pos_map.get(destination)
+            if not p1 or not p2:
+                return
             links.append(
                 {
-                    "origin": o,
-                    "destination": d,
+                    "origin": origin,
+                    "destination": destination,
                     "lat1": p1[0],
                     "lon1": p1[1],
                     "lat2": p2[0],
                     "lon2": p2[1],
-                    "snr": snr_val,
+                    "snr": data.get("snr"),
+                    "ts": data.get("ts"),
                 }
             )
 
@@ -6964,6 +6996,7 @@ class StationsMapTab(QWidget):
                     "lat2": p2[0],
                     "lon2": p2[1],
                     "snr": data.get("snr"),
+                    "ts": data.get("ts"),
                 }
             )
 
@@ -6972,6 +7005,9 @@ class StationsMapTab(QWidget):
             for other in sorted(my_partners & target_partners):
                 _add_relay_link(my_call, other)
                 _add_relay_link(relay_target, other)
+        else:
+            for (o, d), data in best.items():
+                _add_link_from_best(data, o, d)
 
         self._query_cache_set(cache_key, [dict(x) for x in links])
         return links
@@ -10936,6 +10972,12 @@ class StationsMapTab(QWidget):
         if not links_active:
             return "Path scope is Off."
         if display_link_count > 0:
+            limited_total = int(getattr(self, "_map_link_display_limited_count", 0) or 0)
+            if limited_total and limited_total > display_link_count:
+                return (
+                    f"Showing strongest {display_link_count} of {limited_total} directional network path link(s) "
+                    "in the selected time window. Narrow by Paths To, group, band, or age for full detail."
+                )
             if int(recency_seconds or 0) > 0:
                 return f"{display_link_count} directional path link(s) shown in the selected time window."
             return f"{display_link_count} directional path link(s) shown."
@@ -10976,9 +11018,31 @@ class StationsMapTab(QWidget):
         return "No path links found."
 
     def _display_links_for_mode(self, links: List[Dict], sitrep_mode: bool) -> List[Dict]:
+        self._map_link_display_limited_count = 0
+        self._map_link_loaded_count = len(links or [])
         if sitrep_mode:
             return []
-        return list(links or [])
+        display = [dict(link) for link in (links or []) if isinstance(link, dict)]
+        mode, _value = self._current_link_selection()
+        if str(mode or "").strip().lower() != "all":
+            return display
+        limit = int(MAP_NETWORK_PATH_DISPLAY_LIMIT)
+        if limit <= 0 or len(display) <= limit:
+            return display
+        self._map_link_display_limited_count = len(display)
+
+        def sort_key(link: Mapping[str, object]) -> tuple[float, float]:
+            try:
+                snr_score = float(link.get("snr"))
+            except Exception:
+                snr_score = -999.0
+            try:
+                ts_score = float(link.get("ts") or link.get("latest_ts") or 0.0)
+            except Exception:
+                ts_score = 0.0
+            return (snr_score, ts_score)
+
+        return sorted(display, key=sort_key, reverse=True)[:limit]
 
     def _load_prop_target_operator_callsigns(self) -> list[str]:
         out: list[str] = []
@@ -12299,12 +12363,13 @@ class StationsMapTab(QWidget):
             if view_state:
                 self._last_map_view = view_state
 
+        path_view_active = bool(self._links_active())
         station_enrichment_needed = bool(
             not regional_intelligence_mode
             and not sitrep_mode
+            and not path_view_active
             and (
                 bool(getattr(self, "show_station_markers", False))
-                or bool(self._links_active())
                 or bool(getattr(self, "_now_reachable_enabled", False))
             )
         )

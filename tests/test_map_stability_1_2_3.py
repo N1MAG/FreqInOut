@@ -15,7 +15,13 @@ from freqinout.core.observation_store import upsert_observation
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.gui.message_viewer_tab import MessageViewerTab
-from freqinout.gui.stations_map_tab import STATE_CENTERS, StationPoint, StationsMapTab, maidenhead_to_latlon
+from freqinout.gui.stations_map_tab import (
+    MAP_NETWORK_PATH_DISPLAY_LIMIT,
+    STATE_CENTERS,
+    StationPoint,
+    StationsMapTab,
+    maidenhead_to_latlon,
+)
 
 
 def _bare_tab() -> StationsMapTab:
@@ -1002,6 +1008,38 @@ def test_hidden_path_layer_is_not_an_active_filter_even_with_saved_scope() -> No
     assert StationsMapTab._links_active(tab) is False
 
 
+def test_network_path_display_is_capped_with_operator_status() -> None:
+    tab = _bare_tab()
+    tab.show_link_paths = True
+    tab.link_mode = "all"
+    tab.link_value = ""
+    links = [
+        {
+            "origin": f"K{i:03d}AA",
+            "destination": f"K{i:03d}BB",
+            "snr": float(i % 40) - 20.0,
+            "ts": float(i),
+        }
+        for i in range(MAP_NETWORK_PATH_DISPLAY_LIMIT + 25)
+    ]
+
+    display = StationsMapTab._display_links_for_mode(tab, links, sitrep_mode=False)
+    text = StationsMapTab._map_link_status_text(
+        tab,
+        links_active=True,
+        show_link_paths=True,
+        loaded_link_count=len(links),
+        display_link_count=len(display),
+        link_selection=("all", ""),
+        recency_seconds=3 * 24 * 60 * 60,
+    )
+
+    assert len(display) == MAP_NETWORK_PATH_DISPLAY_LIMIT
+    assert tab._map_link_display_limited_count == len(links)
+    assert "Showing strongest" in text
+    assert "Narrow by Paths To" in text
+
+
 def test_links_layer_toggle_off_clears_path_scope_and_restores_report_context() -> None:
     tab = _bare_tab()
     refreshes: list[str] = []
@@ -1185,6 +1223,7 @@ def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_ag
         )
         rows = [
             (now - 600, "N1MAG", "K7ETC", -4.4, "40M", 7110000),
+            (now - 500, "N1MAG", "K7ETC", -12.4, "40M", 7110000),
             (now - 700, "N1MAG", "K9ABC", -7.6, "40M", 7110000),
             (now - 800, "K7ETC", "K9ABC", -9.2, "40M", 7110000),
             (now - 900, "K7ETC", "W2OFF", -2.2, "40M", 7110000),
@@ -1220,6 +1259,9 @@ def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_ag
     assert ("K7ETC", "W2OFF") not in pairs
     assert ("N1MAG", "W1OLD") not in pairs
     assert ("K7ETC", "W1OLD") not in pairs
+    direct = [link for link in links if tuple(sorted((link["origin"], link["destination"]))) == ("K7ETC", "N1MAG")]
+    assert len(direct) == 1
+    assert direct[0]["snr"] == -4.4
 
 
 def test_commstat_reporter_activity_honors_age_window(monkeypatch, tmp_path: Path) -> None:
