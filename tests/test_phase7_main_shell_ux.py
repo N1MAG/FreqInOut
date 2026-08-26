@@ -4589,6 +4589,7 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "Guided FreqPlanner" in spec
     assert "VarAC BBS" in spec
     assert "VarAC Cluster node configuration guidance" in spec
+    assert "single-instance VarAC and normal BBS monitoring do not require" in spec
     assert "Manage file purge/retention by BBS location" in spec
     assert "Treat BBS as a message entity under Messages" in spec
     assert "preview of the managed BBS structure" in spec
@@ -4608,6 +4609,8 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "def _refresh_settings_nav_scroll_size(self) -> None:" in settings_source
     assert "panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))" in settings_source
     assert 'page_title_label = QLabel(title)' in settings_source
+    assert "Single-instance VarAC and normal BBS monitoring do not require cluster mode." in settings_source
+    assert "distinct paths, ports, and folders unless sharing is intentional" in settings_source
     assert "header_btn.setVisible(False)" in settings_source
     assert "group.setMaximumHeight(target_height)" in settings_source
     assert "if stacked_mode:\n                    group.setMaximumHeight(16777215)" not in settings_source

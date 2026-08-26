@@ -7135,7 +7135,7 @@ class SettingsTab(QWidget):
         varac_cluster_mode_row.addWidget(varac_cluster_mode_label)
         self.varac_cluster_mode_chk = QCheckBox("Show VarAC cluster configuration")
         self.varac_cluster_mode_chk.setToolTip(
-            "Enable this only when you want multiple radio profiles to participate in coordinated VarAC cluster workflows."
+            "Enable this only when one or more VarAC profiles should participate in a coordinated cluster or BBS relay workflow."
         )
         varac_cluster_mode_row.addWidget(self.varac_cluster_mode_chk)
         varac_cluster_mode_row.addStretch()
@@ -8332,13 +8332,15 @@ class SettingsTab(QWidget):
         if hint_label is not None:
             if enabled:
                 hint_label.setText(
-                    "Cluster mode is enabled. VarAC Clusters and VarAC Memberships are shown below VarAC Settings so coordinated multi-radio VarAC routing can be configured."
+                    "Cluster mode is enabled. VarAC Clusters and VarAC Memberships are shown below VarAC Settings. "
+                    "Use this only when a specific radio/profile owns each VarAC instance and those instances intentionally share routing, BBS, or gateway duties."
                 )
             else:
                 has_saved_clusters = bool(self.varac_clusters or self.varac_cluster_members)
                 preserved_note = " Existing cluster definitions are preserved." if has_saved_clusters else ""
                 hint_label.setText(
-                    "Cluster mode is off. Most operators should leave this off unless they are intentionally coordinating multiple radios or VarAC instances together."
+                    "Cluster mode is off. Most operators should leave this off unless they intentionally coordinate multiple VarAC instances. "
+                    "Single-instance VarAC and normal BBS monitoring do not require cluster mode."
                     + preserved_note
                 )
         selected_profile = self._selected_settings_radio_profile()
@@ -16533,7 +16535,10 @@ class SettingsTab(QWidget):
                 self.varac_clusters_guidance_title_label,
                 self.varac_clusters_guidance_status_label,
                 title="Focused VarAC Cluster Guidance",
-                text="Cluster mode is off. Enable Cluster Mode in VarAC Settings when you want multiple radios or VarAC instances to share coordinated cluster routing.",
+                text=(
+                    "Cluster mode is off. Enable Cluster Mode in VarAC Settings only when multiple radio/profile-owned "
+                    "VarAC instances should share coordinated cluster routing, BBS, or gateway behavior."
+                ),
                 level="info",
             )
             return
@@ -16544,7 +16549,10 @@ class SettingsTab(QWidget):
                 self.varac_clusters_guidance_title_label,
                 self.varac_clusters_guidance_status_label,
                 title="Focused VarAC Cluster Guidance",
-                text="Create a VarAC cluster to define a shared DB identity, refresh cadence, and optional gateway handler for radios that work together.",
+                text=(
+                    "Create a VarAC cluster to define the shared identity, optional shared DB path, refresh cadence, "
+                    "and gateway handler for VarAC instances that are intentionally working together."
+                ),
                 level="info",
             )
             return
@@ -16875,13 +16883,13 @@ class SettingsTab(QWidget):
             return
         if not self._varac_cluster_mode_enabled():
             label.setText(
-                "Cluster mode is off. Enable Cluster Mode in VarAC Settings to reveal shared VarAC cluster definitions for coordinated multi-radio use."
+                "Cluster mode is off. Enable Cluster Mode in VarAC Settings only when multiple VarAC instances should share coordinated routing, BBS, or gateway behavior."
             )
             return
         if not self.varac_clusters:
             label.setText(
-                "Define shared VarAC clusters here. A cluster holds the shared DB identity, optional shared DB path, "
-                "and the designated gateway handler for its enabled members."
+                "Define shared VarAC clusters here. A cluster holds the shared identity, optional shared DB path, "
+                "refresh cadence, and designated gateway handler for enabled members. Keep separate VarAC instances on distinct paths, ports, and folders unless sharing is intentional."
             )
             return
         missing_gateway = [
@@ -16899,7 +16907,7 @@ class SettingsTab(QWidget):
             return
         label.setText(
             "Define shared VarAC clusters here. Edit a cluster to choose its gateway handler from the enabled "
-            "members already assigned to that cluster."
+            "members already assigned to that cluster. Avoid sharing live BBS folders unless the cluster is intentionally operating from a common store."
         )
 
     def _update_varac_memberships_hint(self) -> None:
@@ -16913,7 +16921,8 @@ class SettingsTab(QWidget):
             return
         if not self.varac_cluster_members:
             label.setText(
-                "Assign device profiles to VarAC clusters here. Each device may hold one enabled cluster membership in this phase."
+                "Assign device profiles to VarAC clusters here. Each membership should make clear which FIO radio/profile owns the VarAC instance. "
+                "Use distinct instance numbers and device-local paths for separate running instances."
             )
             return
         missing_node_config = [
@@ -16936,7 +16945,7 @@ class SettingsTab(QWidget):
             return
         label.setText(
             "Assign device profiles to VarAC clusters here. Instance numbers must be unique within each cluster, "
-            "and the gateway handler must be one of that cluster's enabled members."
+            "and the gateway handler must be one of that cluster's enabled members. Shared BBS folders should be deliberate, not accidental."
         )
 
     def _selected_varac_cluster_ids(self) -> List[int]:

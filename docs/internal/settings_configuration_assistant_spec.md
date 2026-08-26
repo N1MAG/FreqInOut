@@ -154,7 +154,10 @@ Target behavior:
   with unrelated JS8/Spotter/CommStat concepts.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
-  VarAC instance.
+  VarAC instance. Initial guidance is now present in Settings and should remain
+  explicit that single-instance VarAC and normal BBS monitoring do not require
+  cluster mode; separate VarAC instances should use distinct paths, ports, and
+  folders unless sharing is intentional.
 - Keep BBS locations, vault handling, access-code state, import/copy behavior,
   and message surfacing understandable to a normal operator.
 - Manage file purge/retention by BBS location, not only globally. Each managed
