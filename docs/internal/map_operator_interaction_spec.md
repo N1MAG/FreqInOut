@@ -483,8 +483,6 @@ into the inbox so the operator lands on the evidence that caused the map state.
 
 ## Known Open Work
 
-- Complete Station Status as a known-status-only visual view rather than a table
-  or station inventory.
 - Further simplify Advanced Map Tools so it cannot conflict with smart view
   defaults.
 - Add a polished Path To workflow that combines observed links, peer schedule,
