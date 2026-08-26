@@ -357,6 +357,38 @@ def test_selected_station_actions_ignore_operator_self() -> None:
     assert refreshes == []
 
 
+def test_compose_message_for_selected_station_prefills_non_self_callsign(monkeypatch) -> None:
+    tab = _bare_tab()
+    opened: list[str] = []
+    preview_calls: list[str] = []
+    selector = SimpleNamespace(count=lambda: 2, selected=None)
+
+    def _set_current_row(row: int) -> None:
+        selector.selected = row
+
+    selector.setCurrentRow = _set_current_row
+    viewer = SimpleNamespace(
+        compose_mode_selector=selector,
+        compose_js8_target_edit=_FakeLineEdit(),
+        _update_compose_preview=lambda: preview_calls.append("preview"),
+    )
+    main_window = SimpleNamespace(
+        message_viewer_tab=viewer,
+        open_messages_section=lambda section, **_kwargs: opened.append(section),
+    )
+    tab.settings = {"operator_callsign": "N1MAG"}
+    tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
+    monkeypatch.setattr(StationsMapTab, "window", lambda _self: main_window)
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.QTimer.singleShot", lambda _ms, callback: callback())
+
+    StationsMapTab._compose_message_for_selected_station(tab)
+
+    assert opened == ["compose"]
+    assert selector.selected == 1
+    assert viewer.compose_js8_target_edit.text() == "K7ETC"
+    assert preview_calls == ["preview"]
+
+
 def test_selected_station_paths_toggle_restores_previous_report_context() -> None:
     tab = _bare_tab()
     tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
