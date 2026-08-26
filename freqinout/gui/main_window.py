@@ -305,13 +305,13 @@ class MainWindow(QMainWindow):
         # Sidebar button order/text requested by user.
         self._nav_specs = [
             ("ControlFreq", "ControlFreq"),
+            ("Map", "Map"),
             ("Control Center", "Station Overview"),
             ("Health Details", "Station Health"),
             ("Plan Manager", "FreqPlanner"),
             ("SOP Builder", "SOP"),
             ("Inbox", "Messages"),
             ("Compose", "Messages"),
-            ("Map", "Map"),
             ("FLDigi / SSB", "NCS-FLDigi/SSB"),
             ("JS8Call", "NCS-JS8"),
             ("VHF/UHF", "NCS-Local"),

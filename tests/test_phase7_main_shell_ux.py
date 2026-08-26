@@ -40,6 +40,8 @@ def test_phase7_main_window_has_global_ledge_clock() -> None:
 def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
+    assert source.index('("ControlFreq", "ControlFreq")') < source.index('("Map", "Map")')
+    assert source.index('("Map", "Map")') < source.index('("Control Center", "Station Overview")')
     assert '("Control Center", "Station Overview")' in source
     assert '("Health Details", "Station Health")' in source
     assert '("Plan Manager", "FreqPlanner")' in source
