@@ -883,7 +883,7 @@ def test_station_status_mode_skips_path_and_presence_loaders() -> None:
     assert "if sitrep_mode or not station_enrichment_needed:\n            varac_stats = {}" in render_block
     assert "spotter_map_activity = {}" in render_block
     assert "commstat_reporter_activity = {}" in render_block
-    assert "not sitrep_mode\n            and self._links_active()" in render_block
+    assert "finite_path_window" not in render_block
     assert "self.show_link_paths = False" in toggle_block
     assert "self._observation_focus_enabled = False" in toggle_block
 
@@ -2983,19 +2983,27 @@ def test_map_link_status_text_explains_common_zero_link_states() -> None:
     ) == "No path links found for group MR08."
 
 
-def test_map_zero_link_window_probes_any_age_links_for_status() -> None:
+def test_map_zero_link_window_does_not_probe_all_history_for_status() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     render_block = source[source.index("# init stats and links") : source.index("# Spread overlapping stations")]
     status_block = source[source.index("def _map_link_status_text") : source.index("def _display_links_for_mode")]
 
     assert "_map_last_link_all_time_count = 0" in source
-    assert "finite_path_window" in render_block
-    assert "loaded_link_count == 0" in render_block
-    assert "max_age_sec=0" in render_block
-    assert "_display_links_for_mode(probe_links, sitrep_mode)" in render_block
-    assert "source_rows_before" in render_block and "_map_last_link_source_rows = source_rows_before" in render_block
+    assert "finite_path_window" not in render_block
+    assert "max_age_sec=0" not in render_block
+    assert "probe_links" not in render_block
     assert "all_time_link_count" in status_block
     assert "Since: Any" in status_block
+
+
+def test_map_active_filter_summary_passes_recency_label_value() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    summary_block = source[
+        source.index("def _map_active_filter_summary") : source.index("def _map_layers_active")
+    ]
+
+    assert "self._map_recency_menu_label()" not in summary_block
+    assert "self._map_recency_menu_label(getattr(self, '_map_recency_label', ''))" in summary_block
 
 
 def test_js8_link_loader_returns_tuple_on_database_path_failures() -> None:

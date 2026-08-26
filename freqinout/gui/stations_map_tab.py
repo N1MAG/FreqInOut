@@ -9529,7 +9529,7 @@ class StationsMapTab(QWidget):
                 band_label = ""
             labels.append(f"Band {band_label or band_data.get('value') or band_data.get('type')}")
         if int(getattr(self, "recency_seconds", 0) or 0) != MAP_DEFAULT_RECENCY_SECONDS:
-            labels.append(f"Age {self._map_recency_menu_label()}")
+            labels.append(f"Age {self._map_recency_menu_label(getattr(self, '_map_recency_label', ''))}")
         topic = self._selected_map_topic_filter()
         if topic:
             labels.append(f"Topic {topic}")
@@ -12505,46 +12505,6 @@ class StationsMapTab(QWidget):
             links = []
         loaded_link_count = len(links)
         self._map_last_link_all_time_count = 0
-        finite_path_window = bool(
-            not sitrep_mode
-            and self._links_active()
-            and self.show_link_paths
-            and int(self.recency_seconds or 0) > 0
-        )
-        if finite_path_window and loaded_link_count == 0:
-            source_rows_before = int(getattr(self, "_map_last_link_source_rows", 0) or 0)
-            missing_rows_before = int(getattr(self, "_map_last_link_missing_position_rows", 0) or 0)
-            probe_links: List[Dict] = []
-            try:
-                probe_links, _probe_stats = self._load_js8_links(
-                    band_filter=band_filter,
-                    my_call=my_call,
-                    link_selection=selection,
-                    relay_target=relay_target or None,
-                    group_filter=group_filter,
-                    region_filter=region_filter,
-                    reachable_callsigns=reachable_filter,
-                    max_age_sec=0,
-                )
-                probe_links.extend(
-                    self._load_varac_links(
-                        band_filter=band_filter,
-                        my_call=my_call,
-                        link_selection=selection,
-                        group_filter=group_filter,
-                        region_filter=region_filter,
-                        reachable_callsigns=reachable_filter,
-                        max_age_sec=0,
-                    )
-                )
-                probe_links = self._display_links_for_mode(probe_links, sitrep_mode)
-                self._map_last_link_all_time_count = len(probe_links)
-            except Exception as e:
-                if log.isEnabledFor(logging.DEBUG):
-                    log.debug("StationsMap: all-time path availability probe failed: %s", e)
-            finally:
-                self._map_last_link_source_rows = source_rows_before
-                self._map_last_link_missing_position_rows = missing_rows_before
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
