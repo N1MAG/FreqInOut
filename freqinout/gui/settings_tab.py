@@ -1976,6 +1976,119 @@ class SettingsTab(QWidget):
                 hasattr(self, "varac_bbs_vault_enabled_chk_main") and self.varac_bbs_vault_enabled_chk_main.isChecked()
             )
             self.varac_bbs_vault_reset_btn.setEnabled(enabled and bool(self._varac_bbs_vault_locations_cache))
+        if hasattr(self, "varac_bbs_vault_preview_btn"):
+            self.varac_bbs_vault_preview_btn.setEnabled(bool(self._varac_bbs_vault_locations_cache))
+
+    def _varac_bbs_vault_structure_preview_text(self) -> str:
+        locations = [
+            self._normalize_varac_bbs_vault_location(row)
+            for row in getattr(self, "_varac_bbs_vault_locations_cache", []) or []
+        ]
+        if not locations:
+            return (
+                "Managed BBS preview\n\n"
+                "No managed BBS locations are configured yet. Initialize the Managed Vault or add a location first."
+            )
+        default_id = DEFAULT_LOCATION_ID
+        if hasattr(self, "varac_bbs_vault_default_location_combo"):
+            default_id = str(self.varac_bbs_vault_default_location_combo.currentData() or "").strip() or DEFAULT_LOCATION_ID
+        global_code_policy = DEFAULT_GLOBAL_CODE_POLICY
+        if hasattr(self, "varac_bbs_vault_global_code_policy_combo"):
+            global_code_policy = self.varac_bbs_vault_global_code_policy_combo.currentText().strip() or DEFAULT_GLOBAL_CODE_POLICY
+        live_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
+        managed_root = self.varac_bbs_vault_root_edit.text().strip() if hasattr(self, "varac_bbs_vault_root_edit") else ""
+        root_locations = [
+            row
+            for row in locations
+            if bool(row.get("enabled", True))
+            and bool(row.get("list_in_root_menu", True))
+            and str(row.get("id", "") or "").strip() != DEFAULT_LOCATION_ID
+            and str(row.get("visibility_rule", "Public") or "Public").strip() != "Hidden"
+        ]
+        lines = [
+            "Managed BBS preview",
+            "",
+            "This preview does not publish files or change VarAC.ini.",
+            f"Live BBS folder: {live_dir or 'not set'}",
+            f"Managed root: {managed_root or 'not set'}",
+            f"Default location: {default_id}",
+            f"Access-code policy: {global_code_policy}",
+            "",
+            "Root menu callers will see:",
+            f"- 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt",
+        ]
+        if root_locations:
+            for index, row in enumerate(root_locations, start=20):
+                location = VaultLocation(
+                    id=str(row.get("id", "") or "").strip(),
+                    name=str(row.get("name", "") or "").strip(),
+                    source_dir=str(row.get("source_dir", "") or "").strip(),
+                    alias=str(row.get("alias", "") or "").strip(),
+                    description=str(row.get("description", "") or "").strip(),
+                    open_rule=str(row.get("open_rule", "Public") or "Public").strip() or "Public",
+                    visibility_rule=str(row.get("visibility_rule", "Public") or "Public").strip() or "Public",
+                    list_in_root_menu=True,
+                    enabled=True,
+                )
+                lines.append(
+                    "- "
+                    + root_location_helper_filename_preview(
+                        location,
+                        default_location_id=default_id,
+                        global_code_policy=global_code_policy,
+                        order=index,
+                    )
+                )
+        else:
+            lines.append("- No enabled non-hidden locations are listed in the root menu.")
+        lines.extend(["", "Locations:"])
+        for row in locations:
+            location_id = str(row.get("id", "") or "").strip() or DEFAULT_LOCATION_ID
+            name = str(row.get("name", "") or "").strip() or location_id
+            alias = str(row.get("alias", "") or "").strip() or "-"
+            source_dir = str(row.get("source_dir", "") or "").strip() or "not set"
+            enabled = "enabled" if bool(row.get("enabled", True)) else "disabled"
+            visibility = str(row.get("visibility_rule", "Public") or "Public").strip() or "Public"
+            open_rule = str(row.get("open_rule", "Public") or "Public").strip() or "Public"
+            root_menu = "shown in root" if bool(row.get("list_in_root_menu", True)) else "not shown in root"
+            callsigns = str(row.get("allowed_callsigns", "") or "").strip()
+            display_callsigns = ", ".join(part.strip() for part in callsigns.split(",") if part.strip())
+            inherited = bool(row.get("inherit_global_allowed_callsigns", True))
+            access_bits = [open_rule]
+            if inherited:
+                access_bits.append("inherits global allowed callsigns")
+            elif callsigns:
+                access_bits.append(f"location callsigns: {display_callsigns}")
+            else:
+                access_bits.append("no inherited callsign list")
+            lines.extend(
+                [
+                    f"- {name} [{alias}] ({enabled}, {visibility}, {root_menu})",
+                    f"  ID: {location_id}",
+                    f"  Access: {'; '.join(access_bits)}",
+                    f"  Source: {source_dir}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _show_varac_bbs_vault_structure_preview(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Managed BBS Preview")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        intro = QLabel("Preview what the managed VarAC BBS root menu and locations will look like.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        preview = QPlainTextEdit()
+        preview.setReadOnly(True)
+        preview.setPlainText(self._varac_bbs_vault_structure_preview_text())
+        preview.setMinimumSize(640, 420)
+        layout.addWidget(preview, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        dlg.exec()
 
     def _new_varac_bbs_vault_location(self) -> None:
         self._varac_bbs_vault_selected_location_id = ""
@@ -6509,6 +6622,12 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_reset_btn = QPushButton("Reset To Default")
         self.varac_bbs_vault_reset_btn.clicked.connect(self._reset_varac_bbs_vault_to_default)
         vault_enabled_top.addWidget(self.varac_bbs_vault_reset_btn)
+        self.varac_bbs_vault_preview_btn = QPushButton("Preview BBS")
+        self.varac_bbs_vault_preview_btn.setToolTip(
+            "Preview the managed BBS menu, visible locations, aliases, access rules, and source folders without publishing files."
+        )
+        self.varac_bbs_vault_preview_btn.clicked.connect(self._show_varac_bbs_vault_structure_preview)
+        vault_enabled_top.addWidget(self.varac_bbs_vault_preview_btn)
         vault_enabled_top.addStretch()
         vault_enabled_inner.addLayout(vault_enabled_top)
         vault_enabled_note = QLabel(

@@ -2665,6 +2665,90 @@ def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -
     )
 
 
+def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "managed"
+    intel_dir = managed_root / "locations" / "Intel"
+    hidden_dir = managed_root / "locations" / "Hidden"
+    intel_dir.mkdir(parents=True)
+    hidden_dir.mkdir(parents=True)
+
+    tab = SettingsTab()
+    tab.varac_bbs_dir_edit.setText(str(live_bbs))
+    tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    tab._set_varac_bbs_vault_locations(
+        [
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(managed_root / "locations" / DEFAULT_LOCATION_NAME),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "intel",
+                "name": "Intel",
+                "alias": "INTEL",
+                "description": "Latest reports",
+                "source_dir": str(intel_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Allowed callsigns only",
+                "inherit_global_allowed_callsigns": False,
+                "allowed_callsigns": ["N1MAG", "K7ETC"],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "hidden",
+                "name": "Hidden",
+                "alias": "HIDE",
+                "description": "Do not list",
+                "source_dir": str(hidden_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Hidden",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+        ]
+    )
+
+    text = tab._varac_bbs_vault_structure_preview_text()
+
+    assert "This preview does not publish files or change VarAC.ini." in text
+    assert f"Live BBS folder: {live_bbs}" in text
+    assert f"Managed root: {managed_root}" in text
+    assert "Root menu callers will see:" in text
+    assert "20 type INTEL - open Intel - Latest reports.txt" in text
+    assert "HIDE - open Hidden" not in text
+    assert "- Intel [INTEL] (enabled, Public, shown in root)" in text
+    assert "Access: Allowed callsigns only; location callsigns: N1MAG, K7ETC" in text
+    assert f"Source: {intel_dir}" in text
+
+
 def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
     from freqinout.core.multi_radio_store import MultiRadioStore
 
