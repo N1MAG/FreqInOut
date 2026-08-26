@@ -251,10 +251,16 @@ Changing age, view, subtype, path target, or topic must feel responsive.
 - If a render may take more than a moment, the map status strip must say what
   FIO is building, for example “Building 7-day Traffic view; aggregating older
   traffic before drawing details.”
+- The busy message must appear in the persistent status strip before the render
+  timer or WebEngine load starts; it cannot depend on a map canvas placeholder
+  that may be covered by the existing map.
 - Expensive path/link work should only run when links are visible or the Paths
   view needs it.
 - Station inventory/status should not load report/link datasets that are not
   needed for station pins.
+- Traffic and Regional Intel must not pre-load station enrichment datasets
+  such as JS8/VarAC/Fldigi presence, direct-contact summaries, or station status
+  unless station pins or paths are visible.
 
 ### Paths
 
@@ -518,6 +524,9 @@ into the inbox so the operator lands on the evidence that caused the map state.
 - Clicking a station opens details with roster/status/schedule data when known.
 - Compose Message opens Compose with the selected callsign prefilled, except
   for the operator's own station.
+- Compose Message visibility is based on the resolved selected station
+  callsign, not the display title, because station detail titles may include
+  roster text, routes, or multiline labels.
 - Messages from Regional Intel are filtered by geography, topic/group, age, and
   non-green evidence.
 - Map side-panel Messages tab explains the handoff context before opening

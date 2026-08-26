@@ -1267,6 +1267,7 @@ class StationsMapTab(QWidget):
         if reason:
             self._pending_refresh_reason = reason
         self._pending_refresh_preserve_view = preserve_view
+        self._show_map_refresh_pending_feedback(level=self._refresh_level_name(requested_rank), reason=reason)
         delay_ms = 90 if requested_rank <= 1 else 180
         if requested_rank >= 3:
             delay_ms = 30
@@ -1277,6 +1278,23 @@ class StationsMapTab(QWidget):
             return
         timer.start(delay_ms)
         self._emit_map_event("render_requested", level=self._refresh_level_name(requested_rank), reason=reason)
+
+    def _show_map_refresh_pending_feedback(self, *, level: str, reason: str = "") -> None:
+        """Make slow map work visible before the coalesced render starts."""
+        if self._map_runtime_state == "degraded":
+            return
+        detail = self._map_loading_detail_text(level=level, reason=reason)
+        self._set_map_runtime_state("loading", detail or "Refreshing map data.")
+        label = getattr(self, "_map_loading_label", None)
+        if label is not None:
+            try:
+                label.setText(detail or "Refreshing map data...")
+            except Exception:
+                pass
+        try:
+            QCoreApplication.processEvents()
+        except Exception:
+            pass
 
     def _flush_requested_map_refresh(self) -> None:
         if self._is_shutting_down:
@@ -1316,6 +1334,16 @@ class StationsMapTab(QWidget):
             self._set_map_runtime_state("loading", loading_detail or "Refreshing the map surface and rebuilding overlays.")
         elif self._map_runtime_state != "degraded":
             self._set_map_runtime_state("loading", loading_detail or "Refreshing map data.")
+        label = getattr(self, "_map_loading_label", None)
+        if label is not None:
+            try:
+                label.setText(loading_detail or "Refreshing map data...")
+            except Exception:
+                pass
+        try:
+            QCoreApplication.processEvents()
+        except Exception:
+            pass
         try:
             with perf_span("map.render_call", settings=self.settings, meta={"source": reason, "level": level}, min_ms=10.0):
                 self._render_map(preserve_view=preserve_view)
@@ -2948,11 +2976,11 @@ class StationsMapTab(QWidget):
             self._map_selected_messages_btn.setVisible(bool(target))
             self._map_selected_messages_btn.setText("Local Traffic" if target == "local_reports" else "Messages")
         if self._map_selected_spotter_btn is not None:
-            can_message = kind == "station" and bool(title) and not self._map_selected_station_is_self(callsign)
-            self._map_selected_spotter_btn.setVisible(kind == "station" and bool(title))
+            can_message = kind == "station" and bool(callsign) and not self._map_selected_station_is_self(callsign)
+            self._map_selected_spotter_btn.setVisible(kind == "station" and bool(callsign))
             self._map_selected_spotter_btn.setEnabled(can_message)
             self._map_selected_spotter_btn.setToolTip(
-                "Open Compose and prefill the selected station callsign."
+                f"Open Compose and prefill {callsign}."
                 if can_message
                 else "Compose is disabled for your own station."
             )
@@ -11880,7 +11908,7 @@ class StationsMapTab(QWidget):
             log.error("StationsMap: failed writing map html: %s", e)
             return None
 
-    def _load_web_map_file(self, path: Path) -> bool:
+    def _load_web_map_file(self, path: Path, *, detail: str = "") -> bool:
         if self.web is None:
             return False
         try:
@@ -11889,7 +11917,7 @@ class StationsMapTab(QWidget):
             url.setQuery(f"v={int(time.time() * 1000)}")
             self._map_page_loading = True
             self._map_load_ok = False
-            self._set_map_runtime_state("loading", "Loading the map surface.")
+            self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
             self._emit_map_event("page_load_started", source="file")
             self.web.setUrl(url)
             return True
@@ -11899,15 +11927,15 @@ class StationsMapTab(QWidget):
             self._enter_map_degraded("Map file load failed before the preview was ready.", reason="file_load", exc=e)
             return False
 
-    def _load_map_html_into_webview(self, html: str, path: Optional[Path] = None) -> bool:
+    def _load_map_html_into_webview(self, html: str, path: Optional[Path] = None, *, detail: str = "") -> bool:
         if self.web is None:
             return False
-        if path is not None and self._load_web_map_file(path):
+        if path is not None and self._load_web_map_file(path, detail=detail):
             return True
         try:
             self._map_page_loading = True
             self._map_load_ok = False
-            self._set_map_runtime_state("loading", "Loading the map surface.")
+            self._set_map_runtime_state("loading", detail or self._map_runtime_detail or "Loading the map surface.")
             self._emit_map_event("page_load_started", source="inline")
             self.web.setHtml(html)
             return True
@@ -12271,7 +12299,16 @@ class StationsMapTab(QWidget):
             if view_state:
                 self._last_map_view = view_state
 
-        if sitrep_mode:
+        station_enrichment_needed = bool(
+            not regional_intelligence_mode
+            and not sitrep_mode
+            and (
+                bool(getattr(self, "show_station_markers", False))
+                or bool(self._links_active())
+                or bool(getattr(self, "_now_reachable_enabled", False))
+            )
+        )
+        if sitrep_mode or not station_enrichment_needed:
             varac_stats = {}
             varac_all = {}
             activity_lookup = {}
@@ -12338,11 +12375,15 @@ class StationsMapTab(QWidget):
                 ),
                 ttl_sec=6.0,
             )
-        spotter_status_lookup = self._cached_map_value(
-            "spotter_station_status",
-            {"group_filter": str(group_filter or "").strip().upper(), "region_filter": str(region_filter or "").strip().upper()},
-            lambda: _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status),
-            ttl_sec=6.0,
+        spotter_status_lookup = (
+            self._cached_map_value(
+                "spotter_station_status",
+                {"group_filter": str(group_filter or "").strip().upper(), "region_filter": str(region_filter or "").strip().upper()},
+                lambda: _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status),
+                ttl_sec=6.0,
+            )
+            if sitrep_mode or station_enrichment_needed
+            else {}
         )
         sitrep_state_summary: List[Dict[str, object]] = []
         sitrep_summary_group = ""

@@ -268,6 +268,9 @@ class _FakeButton:
     def setToolTip(self, value: str) -> None:
         self.tooltip = str(value or "")
 
+    def setText(self, value: str) -> None:
+        self.text = str(value or "")
+
 
 def test_map_auto_ingest_uses_background_controller_before_local_ingest() -> None:
     tab = _bare_tab()
@@ -453,6 +456,34 @@ def test_map_selected_detail_center_button_uses_station_coordinate_fallback() ->
     StationsMapTab._show_map_selected_detail(tab, {"type": "station", "title": "K7ETC"})
 
     assert button.enabled is True
+
+
+def test_station_detail_compose_action_uses_resolved_callsign_not_title() -> None:
+    tab = _bare_tab()
+    compose_btn = _FakeButton()
+    tab.settings = {"operator_callsign": "N1MAG"}
+    tab._map_selected_panel = SimpleNamespace(setVisible=lambda _value: None)
+    tab._map_selected_title = SimpleNamespace(setText=lambda _text: None)
+    tab._map_selected_subtitle = SimpleNamespace(setText=lambda _text: None, setVisible=lambda _value: None)
+    tab._map_selected_body = SimpleNamespace(setHtml=lambda _html: None)
+    tab._map_selected_status_body = SimpleNamespace(setHtml=lambda _html: None)
+    tab._map_selected_paths_body = SimpleNamespace(setHtml=lambda _html: None)
+    tab._map_selected_messages_body = SimpleNamespace(setHtml=lambda _html: None)
+    tab._map_selected_tabs = SimpleNamespace(setTabEnabled=lambda *_args: None)
+    tab._map_selected_center_btn = None
+    tab._map_selected_paths_btn = None
+    tab._map_selected_group_btn = None
+    tab._map_selected_topic_btn = None
+    tab._map_selected_messages_btn = None
+    tab._map_selected_spotter_btn = compose_btn
+    tab._map_selected_sop_btn = None
+    tab._map_canvas_splitter = None
+
+    StationsMapTab._show_map_selected_detail(tab, {"type": "station", "callsign": "K7ETC", "title": ""})
+
+    assert compose_btn.visible is True
+    assert compose_btn.enabled is True
+    assert "K7ETC" in compose_btn.tooltip
 
 
 def test_map_path_scope_combo_controls_link_layer_without_filter_side_effects() -> None:
@@ -843,7 +874,7 @@ def test_station_status_mode_skips_path_and_presence_loaders() -> None:
     toggle_block = source[source.index("def _on_sitrep_status_toggled") : source.index("def focus_sitrep_status")]
 
     assert "if self._links_active() and not sitrep_mode:" in render_block
-    assert "if sitrep_mode:\n            varac_stats = {}" in render_block
+    assert "if sitrep_mode or not station_enrichment_needed:\n            varac_stats = {}" in render_block
     assert "spotter_map_activity = {}" in render_block
     assert "commstat_reporter_activity = {}" in render_block
     assert "not sitrep_mode\n            and self._links_active()" in render_block
@@ -4336,6 +4367,30 @@ def test_long_map_age_window_has_explicit_loading_feedback() -> None:
 
     assert "7-day" in text
     assert "aggregating older traffic" in text
+
+
+def test_map_loading_feedback_is_set_before_heavy_render_and_preserved_for_web_load() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "def _show_map_refresh_pending_feedback" in source
+    request_block = source[source.index("def _request_map_refresh") : source.index("def _flush_requested_map_refresh")]
+    perform_block = source[source.index("def _perform_map_refresh") : source.index("def _map_loading_detail_text")]
+    load_block = source[source.index("def _load_web_map_file") : source.index("def _ensure_web_view")]
+
+    assert "_show_map_refresh_pending_feedback" in request_block
+    assert "QCoreApplication.processEvents()" in perform_block
+    assert "detail or self._map_runtime_detail or \"Loading the map surface.\"" in load_block
+
+
+def test_map_render_skips_station_enrichment_for_traffic_and_regional_views() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+
+    assert "station_enrichment_needed = bool(" in render_block
+    assert "not regional_intelligence_mode" in render_block
+    assert "bool(getattr(self, \"show_station_markers\", False))" in render_block
+    assert "if sitrep_mode or not station_enrichment_needed:" in render_block
+    assert "if sitrep_mode or station_enrichment_needed" in render_block
 
 
 def test_path_scope_control_adds_links_without_switching_main_view() -> None:
