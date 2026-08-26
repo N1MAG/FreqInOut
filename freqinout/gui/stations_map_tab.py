@@ -9102,6 +9102,43 @@ class StationsMapTab(QWidget):
             or advanced != ("all", "", "", "", "")
         )
 
+    def _map_active_filter_summary(self) -> str:
+        labels: List[str] = []
+        group = self._selected_map_group_filter()
+        if group:
+            labels.append(f"Group {group}")
+        region = self._selected_map_region_filter()
+        if region:
+            labels.append(f"Region {region}")
+        band_data = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
+        if isinstance(band_data, dict) and str(band_data.get("type") or "all").lower() != "all":
+            band_label = ""
+            try:
+                band_label = str(self.band_combo.currentText() or "").strip()
+            except Exception:
+                band_label = ""
+            labels.append(f"Band {band_label or band_data.get('value') or band_data.get('type')}")
+        if int(getattr(self, "recency_seconds", 0) or 0) != MAP_DEFAULT_RECENCY_SECONDS:
+            labels.append(f"Age {self._map_recency_menu_label()}")
+        topic = self._selected_map_topic_filter()
+        if topic:
+            labels.append(f"Topic {topic}")
+        search = self._selected_map_search_text()
+        if search:
+            labels.append(f"Search {search}")
+        scope, state, source, status, trust = self._map_advanced_filters_signature()
+        if scope != "all":
+            labels.append(f"Show {scope}")
+        if state:
+            labels.append(f"State {state}")
+        if source:
+            labels.append(f"Source {source}")
+        if status:
+            labels.append(f"Status {status}")
+        if trust:
+            labels.append(f"Trust {trust}")
+        return "; ".join(labels)
+
     def _map_layers_active(self) -> bool:
         overlay_modes = {"paths", "propagation", "pins", "sitrep", "peer"}
         link_mode, _ = self._current_link_selection()
@@ -9123,10 +9160,35 @@ class StationsMapTab(QWidget):
             theme = self._theme_snapshot()
         clear_filters = getattr(self, "_map_clear_filters_button", None)
         if clear_filters is not None:
-            clear_filters.setStyleSheet(button_style("warning" if self._map_filters_active() else "muted", theme))
+            filters_active = self._map_filters_active()
+            clear_filters.setStyleSheet(button_style("warning" if filters_active else "muted", theme))
+            summary = self._map_active_filter_summary()
+            clear_filters.setToolTip(
+                f"Clear active filters: {summary}."
+                if filters_active and summary
+                else "Clear Group, Age, Topic, search, and advanced filters."
+            )
         clear_layers = getattr(self, "_map_clear_layers_button", None)
         if clear_layers is not None:
             clear_layers.setStyleSheet(button_style("warning" if self._map_layers_active() else "muted", theme))
+        controls = getattr(self, "_controls_button", None)
+        if controls is not None:
+            _scope, state, source, status, trust = self._map_advanced_filters_signature()
+            advanced_summary = "; ".join(
+                part
+                for part in (
+                    f"State {state}" if state else "",
+                    f"Source {source}" if source else "",
+                    f"Status {status}" if status else "",
+                    f"Trust {trust}" if trust else "",
+                )
+                if part
+            )
+            controls.setToolTip(
+                f"Advanced Map Tools has active filters: {advanced_summary}. Use Clear Filters to reset them."
+                if advanced_summary
+                else "Show optional layer, path, propagation, city, and planning-pin controls."
+            )
 
     def _on_map_search_text_changed(self, _text: str) -> None:
         timer = getattr(self, "_map_search_timer", None)

@@ -254,6 +254,7 @@ class _FakeButton:
         self.enabled: bool | None = None
         self.visible: bool | None = None
         self.style = ""
+        self.tooltip = ""
 
     def setEnabled(self, value: bool) -> None:
         self.enabled = bool(value)
@@ -263,6 +264,9 @@ class _FakeButton:
 
     def setStyleSheet(self, value: str) -> None:
         self.style = str(value or "")
+
+    def setToolTip(self, value: str) -> None:
+        self.tooltip = str(value or "")
 
 
 def test_map_auto_ingest_uses_background_controller_before_local_ingest() -> None:
@@ -3982,6 +3986,38 @@ def test_map_since_filter_uses_chip_menu_with_extended_windows() -> None:
     assert '("90d", 90 * 24 * 60 * 60)' in source
     assert '("recency_combo", MAP_DEFAULT_RECENCY_LABEL)' in source
     assert "self.recency_seconds = MAP_DEFAULT_RECENCY_SECONDS" in source
+
+
+def test_map_active_advanced_filters_are_visible_in_tooltips() -> None:
+    tab = _bare_tab()
+    tab.group_filter_combo = _FakeCombo([("All", "")])
+    tab.region_filter_combo = _FakeCombo([("All", "")])
+    tab.band_combo = _FakeCombo([("All", {"type": "all"})])
+    tab.recency_seconds = 24 * 60 * 60
+    tab._map_recency_label = "24h"
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", "")])
+    tab._map_search_edit = _FakeLineEdit("")
+    tab._map_scope_filter_combo = _FakeCombo([("Stations + Traffic", "all")])
+    tab._map_state_filter_combo = _FakeCombo([("All States", ""), ("NV", "NV")])
+    tab._map_source_filter_combo = _FakeCombo([("All Sources", ""), ("CommStat", "commstat")])
+    tab._map_status_filter_combo = _FakeCombo([("All Statuses", ""), ("Needs Review", "needs_review")])
+    tab._map_trust_filter_combo = _FakeCombo([("All Auth/Trust", "")])
+    tab._map_state_filter_combo.setCurrentIndex(1)
+    tab._map_source_filter_combo.setCurrentIndex(1)
+    tab._map_status_filter_combo.setCurrentIndex(1)
+    tab._map_clear_filters_button = _FakeButton()
+    tab._map_clear_layers_button = _FakeButton()
+    tab._controls_button = _FakeButton()
+    tab._current_map_mode_key = lambda: "regional"
+    tab._current_link_selection = lambda: ("off", "")
+
+    StationsMapTab._update_clear_filter_buttons_visual(tab)
+
+    assert "State NV" in tab._map_clear_filters_button.tooltip
+    assert "Source commstat" in tab._map_clear_filters_button.tooltip
+    assert "Status needs_review" in tab._map_clear_filters_button.tooltip
+    assert "Advanced Map Tools has active filters" in tab._controls_button.tooltip
+    assert "Use Clear Filters to reset them" in tab._controls_button.tooltip
 
 
 def test_map_view_mode_controls_use_compact_selector_with_drawer_fallback() -> None:
