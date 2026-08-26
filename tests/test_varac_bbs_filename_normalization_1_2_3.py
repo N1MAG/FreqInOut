@@ -45,6 +45,8 @@ def _tab(bbs_dir: Path) -> SimpleNamespace:
         "_is_row_already_in_varac_bbs",
         "_is_row_bbs_copy_action_enabled",
         "_mark_row_copied_to_varac_bbs_session",
+        "_varac_bbs_existing_copy_targets",
+        "_remove_row_from_varac_bbs",
         "_copy_row_to_varac_bbs",
     ):
         setattr(tab, name, MethodType(getattr(MessageViewerTab, name), tab))
@@ -118,6 +120,29 @@ def test_copy_to_varac_bbs_uses_unique_name_when_normalized_name_collides(
     assert tab._is_row_bbs_copy_action_enabled(row) is False
     assert any("Filename cleaned from" in msg and "Report .k2s" in msg for msg in messages)
     assert any("Existing BBS filename avoided" in msg and "Report-2.k2s" in msg for msg in messages)
+
+
+def test_remove_from_varac_bbs_deletes_only_copied_artifact(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    bbs_dir = tmp_path / "bbs"
+    src_dir.mkdir()
+    bbs_dir.mkdir()
+    src = src_dir / "Report .k2s"
+    src.write_text("payload", encoding="utf-8")
+    copied = bbs_dir / "Report.k2s"
+    copied.write_text("payload", encoding="utf-8")
+    os.utime(copied, (src.stat().st_atime, src.stat().st_mtime))
+
+    tab = _tab(bbs_dir)
+    row = _row(src)
+
+    assert tab._is_row_already_in_varac_bbs(row) is True
+    tab._remove_row_from_varac_bbs(row, confirm=False)
+
+    assert src.exists()
+    assert not copied.exists()
+    assert tab._is_row_already_in_varac_bbs(row) is False
+    assert tab._is_row_bbs_copy_action_enabled(row) is True
 
 
 def test_safe_varac_bbs_filename_preserves_signature_pairing_shape() -> None:

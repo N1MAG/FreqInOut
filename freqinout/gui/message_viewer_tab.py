@@ -2178,7 +2178,8 @@ class MessageActionDelegate(QStyledItemDelegate):
         gap_right = del_left - 10
         if bbs_copy_row:
             bbs_text = "+BBS"
-            bbs_width = fm.horizontalAdvance(bbs_text)
+            bbs_alt_text = "-BBS"
+            bbs_width = max(fm.horizontalAdvance(bbs_text), fm.horizontalAdvance(bbs_alt_text))
             bbs_right = del_left - 10
             bbs_left = bbs_right - bbs_width + 1
             bbs_rect = QRect(bbs_left, rect.y(), bbs_width, rect.height())
@@ -2307,12 +2308,15 @@ class MessageActionDelegate(QStyledItemDelegate):
             if bbs_copy_row:
                 if bbs_copy_present:
                     painter.setPen(self._flag_color_green)
+                    bbs_text = "-BBS"
                 elif bbs_copy_enabled:
                     painter.setPen(link_color)
+                    bbs_text = "+BBS"
                 else:
                     painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
+                    bbs_text = "+BBS"
                 painter.setFont(option.font)
-                painter.drawText(bbs_rect, Qt.AlignVCenter | Qt.AlignLeft, "+BBS")
+                painter.drawText(bbs_rect, Qt.AlignVCenter | Qt.AlignLeft, bbs_text)
 
             painter.setPen(self._danger)
             painter.setFont(option.font)
@@ -2381,7 +2385,10 @@ class MessageActionDelegate(QStyledItemDelegate):
                     self.parent()._copy_row_to_flamp_relay(row)
                 return True
             elif bbs_copy_row and bbs_rect.contains(pos):
-                if bbs_copy_enabled:
+                if hasattr(parent_widget, "_is_row_already_in_varac_bbs") and parent_widget._is_row_already_in_varac_bbs(row):
+                    if hasattr(parent_widget, "_remove_row_from_varac_bbs"):
+                        parent_widget._remove_row_from_varac_bbs(row)
+                elif bbs_copy_enabled:
                     self.parent()._copy_row_to_varac_bbs(row)
                 return True
             elif not live_bbs_row and not archived_bbs_row and aux_rect.contains(pos):
@@ -13432,6 +13439,77 @@ class MessageViewerTab(QWidget):
         if marker is None:
             return
         self._bbs_copied_session_keys.add(marker)
+
+    def _varac_bbs_existing_copy_targets(self, row: UnifiedMessage | None) -> List[Dict[str, object]]:
+        if not self._can_copy_row_to_varac_bbs(row):
+            return []
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, FileRecord):
+            return []
+        existing: List[Dict[str, object]] = []
+        for target in self._varac_bbs_copy_targets():
+            if not bool(target.get("valid", False)):
+                continue
+            dst = self._varac_bbs_destination_for_row(row, target=target)
+            if dst is None:
+                continue
+            try:
+                same_source = payload.path.resolve() == dst.resolve()
+            except Exception:
+                same_source = False
+            if same_source:
+                continue
+            if not dst.exists() or not dst.is_file():
+                continue
+            if dst.name == payload.path.name or MessageViewerTab._file_record_matches_path(payload, dst):
+                candidate = dict(target)
+                candidate["copied_path"] = dst
+                existing.append(candidate)
+        return existing
+
+    def _remove_row_from_varac_bbs(self, row: UnifiedMessage | None, *, confirm: bool = True) -> None:
+        existing = self._varac_bbs_existing_copy_targets(row)
+        if not existing:
+            return
+        if confirm:
+            file_list = "\n".join(str(target.get("copied_path", "") or "") for target in existing[:5])
+            more = f"\n...and {len(existing) - 5} more" if len(existing) > 5 else ""
+            resp = QMessageBox.question(
+                self,
+                "Remove From BBS",
+                "Remove copied BBS artifact(s) for this message?\n\n"
+                "The original received file/message will not be deleted.\n\n"
+                f"{file_list}{more}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+        removed = 0
+        errors: List[str] = []
+        for target in existing:
+            copied_path = target.get("copied_path")
+            path = copied_path if isinstance(copied_path, Path) else Path(str(copied_path or ""))
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+                    removed += 1
+            except Exception as e:
+                errors.append(f"{path}: {e}")
+            target_id = str(target.get("id", "") or "live")
+            marker = self._bbs_copy_session_marker(row, target_id)
+            if marker is not None:
+                self._bbs_copied_session_keys.discard(marker)
+        if errors:
+            QMessageBox.warning(self, "Remove From BBS", "Some BBS artifacts could not be removed:\n" + "\n".join(errors[:5]))
+        elif confirm:
+            QMessageBox.information(
+                self,
+                "Remove From BBS",
+                f"Removed {removed} copied BBS artifact(s). The original message/file was left in place.",
+            )
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
 
     def _copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> None:
         if row is None or not self._can_copy_row_to_varac_bbs(row):

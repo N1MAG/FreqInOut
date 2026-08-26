@@ -175,5 +175,6 @@ Target behavior:
   multiple managed BBS locations.
 - In Messages, preserve the existing `+BBS` action and add a clear way to remove
   FLMsg/FLAmp content from BBS sync without deleting the original message or
-  source artifact.
+  source artifact. Initial implementation changes copied rows to a `-BBS`
+  action that removes only the copied BBS artifact.
 - Treat BBS repair and diagnostics as candidates for the future Tools UI.
