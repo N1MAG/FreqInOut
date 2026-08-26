@@ -640,6 +640,65 @@ def test_map_selected_paths_html_uses_propagation_when_no_peer_schedule() -> Non
     assert "No peer schedule is known" in html
 
 
+def test_map_selected_station_callsign_parses_multiline_station_title() -> None:
+    tab = _bare_tab()
+    tab._map_selected_payload = {
+        "type": "station",
+        "title": "KC7WOK\nName: Test Operator\nState: MT",
+    }
+
+    assert StationsMapTab._map_selected_station_callsign(tab) == "KC7WOK"
+
+
+def test_show_paths_to_selected_station_replaces_previous_path_target() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
+    tab.show_link_paths = True
+    tab.link_mode = "relay_target"
+    tab.link_value = "KC7WOK"
+    tab.relay_target = "KC7WOK"
+    tab._paths_focus_station = "KC7WOK"
+    tab.map_links_chk = _FakeCheck(True)
+    tab.relay_target_combo = _FakeCombo([("", ""), ("KC7WOK", "KC7WOK"), ("K7ETC", "K7ETC")])
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("Paths To: KC7WOK", ("relay_target", "KC7WOK"))])
+    tab._map_selected_paths_body = SimpleNamespace(setHtml=lambda _html: None)
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._show_paths_for_selected_station(tab)
+
+    assert tab.show_link_paths is True
+    assert tab.link_mode == "relay_target"
+    assert tab.link_value == "K7ETC"
+    assert tab.relay_target == "K7ETC"
+    assert tab._paths_focus_station == "K7ETC"
+    assert tab.map_links_chk.checked is True
+    assert tab.relay_target_combo.currentData() == "K7ETC"
+    assert tab._map_path_scope_combo.currentData() == ("relay_target", "K7ETC")
+    assert refreshes == ["selected_detail_paths"]
+
+
+def test_map_recency_change_refreshes_selected_path_panel_window() -> None:
+    tab = _bare_tab()
+    rendered: list[str] = []
+    refreshes: list[str] = []
+    tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
+    tab.recency_combo = _FakeCombo([("24h", 24 * 60 * 60), ("3d", 3 * 24 * 60 * 60)])
+    tab.recency_combo.setCurrentIndex(1)
+    tab._map_selected_paths_body = SimpleNamespace(setHtml=lambda html: rendered.append(html))
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._on_recency_changed(tab, 1)
+
+    assert tab.recency_seconds == 3 * 24 * 60 * 60
+    assert rendered and "Age: 3d" in rendered[-1]
+    assert refreshes == ["recency_filter"]
+
+
 def test_map_selected_messages_html_explains_context_filters() -> None:
     tab = _bare_tab()
     tab.recency_seconds = 24 * 60 * 60
@@ -960,6 +1019,70 @@ def test_js8_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_age_
         ("K9ABC", "N1MAG"),
         ("K7ETC", "K9ABC"),
     }
+    assert ("N1MAG", "W1OLD") not in pairs
+    assert ("K7ETC", "W1OLD") not in pairs
+
+
+def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_age_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+    now = 1_786_300_000.0
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.time.time", lambda: now)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE varac_links (
+              ts REAL,
+              origin TEXT,
+              destination TEXT,
+              snr REAL,
+              band TEXT,
+              freq_hz REAL
+            )
+            """
+        )
+        rows = [
+            (now - 600, "N1MAG", "K7ETC", -4.4, "40M", 7110000),
+            (now - 700, "N1MAG", "K9ABC", -7.6, "40M", 7110000),
+            (now - 800, "K7ETC", "K9ABC", -9.2, "40M", 7110000),
+            (now - 900, "K7ETC", "W2OFF", -2.2, "40M", 7110000),
+            (now - 30 * 60 * 60, "N1MAG", "W1OLD", -1.0, "40M", 7110000),
+            (now - 30 * 60 * 60, "K7ETC", "W1OLD", -1.0, "40M", 7110000),
+        ]
+        conn.executemany("INSERT INTO varac_links VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+    tab = _bare_tab()
+    tab.operator_index = {}
+    tab.stations = [
+        StationPoint("N1MAG", "DM79", name="Me", state="CO", lat=39.0, lon=-105.0),
+        StationPoint("K7ETC", "DM38", name="Target", state="UT", lat=39.5, lon=-111.0),
+        StationPoint("K9ABC", "EM18", name="Bridge", state="KS", lat=38.5, lon=-98.0),
+        StationPoint("W1OLD", "FN54", name="Old", state="ME", lat=45.0, lon=-69.0),
+        StationPoint("W2OFF", "FN20", name="Target Only", state="PA", lat=40.0, lon=-75.0),
+    ]
+
+    links = StationsMapTab._load_varac_links(
+        tab,
+        band_filter={"type": "all"},
+        my_call="N1MAG",
+        link_selection=("relay_target", "K7ETC"),
+        max_age_sec=24 * 60 * 60,
+    )
+
+    pairs = {tuple(sorted((link["origin"], link["destination"]))) for link in links}
+    assert pairs == {
+        ("K7ETC", "N1MAG"),
+        ("K9ABC", "N1MAG"),
+        ("K7ETC", "K9ABC"),
+    }
+    assert ("K7ETC", "W2OFF") not in pairs
     assert ("N1MAG", "W1OLD") not in pairs
     assert ("K7ETC", "W1OLD") not in pairs
 

@@ -1897,6 +1897,7 @@ class StationsMapTab(QWidget):
         self._map_recency_label = label
         self._update_map_since_button_text(label)
         self._clear_report_query_caches()
+        self._refresh_selected_paths_panel()
         self._update_clear_filter_buttons_visual()
         self._request_map_refresh(level="medium", reason="recency_filter")
 
@@ -3508,6 +3509,7 @@ class StationsMapTab(QWidget):
             [
                 ("Station", callsign),
                 ("Layer", "Showing" if bool(getattr(self, "show_link_paths", False)) else "Hidden"),
+                ("Window", self._map_message_context_age_label(int(getattr(self, "recency_seconds", 0) or 0))),
                 ("Scope", active_scope if mode != "off" else "Off"),
                 *planning_rows,
                 ("Meaning", "Arrows show who reported hearing whom; color shows reported signal quality."),
@@ -3772,9 +3774,23 @@ class StationsMapTab(QWidget):
             rows.get("from"),
             rows.get("reporter"),
         ):
-            callsign = str(value or "").strip().upper().lstrip("@").rstrip(">")
-            if callsign and re.fullmatch(r"[A-Z0-9]{3,10}", callsign):
+            callsign = self._map_callsign_from_value(value)
+            if callsign:
                 return callsign
+        return ""
+
+    @staticmethod
+    def _map_callsign_from_value(value: object) -> str:
+        text = str(value or "").strip().upper().lstrip("@").rstrip(">")
+        if not text:
+            return ""
+        if re.fullmatch(r"[A-Z0-9]{3,10}", text):
+            return text
+        first_line = text.splitlines()[0].strip().lstrip("@").rstrip(">")
+        for candidate in re.split(r"[\s|,;/()<>]+", first_line):
+            candidate = candidate.strip().upper().lstrip("@").rstrip(">")
+            if candidate and re.fullmatch(r"[A-Z0-9]{3,10}", candidate):
+                return candidate
         return ""
 
     def _operator_callsign_for_map_actions(self) -> str:
@@ -3806,6 +3822,48 @@ class StationsMapTab(QWidget):
             (mode == "relay_target" and (relay_target == target or value == target))
             or (mode == "station" and value == target)
         ))
+
+    def _set_selected_station_path_target(self, callsign: str) -> bool:
+        target = self._map_callsign_from_value(callsign)
+        if not target or self._map_selected_station_is_self(target):
+            return False
+        self.show_link_paths = True
+        self.link_mode = "relay_target"
+        self.link_value = target
+        self.relay_target = target
+        self._paths_focus_station = target
+        links_chk = getattr(self, "map_links_chk", None)
+        if links_chk is not None:
+            try:
+                links_chk.blockSignals(True)
+                links_chk.setChecked(True)
+                links_chk.blockSignals(False)
+            except Exception:
+                pass
+        relay_combo = getattr(self, "relay_target_combo", None)
+        if relay_combo is not None:
+            try:
+                relay_combo.blockSignals(True)
+                relay_idx = relay_combo.findData(target)
+                if relay_idx >= 0:
+                    relay_combo.setCurrentIndex(relay_idx)
+                elif relay_combo.isEditable():
+                    relay_combo.setEditText(target)
+                relay_combo.blockSignals(False)
+            except Exception:
+                try:
+                    relay_combo.blockSignals(False)
+                except Exception:
+                    pass
+        self._sync_path_scope_combo(("relay_target", target))
+        return True
+
+    def _refresh_selected_paths_panel(self) -> None:
+        payload = dict(getattr(self, "_map_selected_payload", {}) or {})
+        body = getattr(self, "_map_selected_paths_body", None)
+        if body is not None:
+            body.setHtml(self._map_selected_paths_html(payload))
+        self._update_selected_paths_button_visual()
 
     def _update_selected_paths_button_visual(self, theme: Optional[Dict[str, str]] = None) -> None:
         btn = getattr(self, "_map_selected_paths_btn", None)
@@ -3929,11 +3987,6 @@ class StationsMapTab(QWidget):
         try:
             turning_off = self._selected_station_paths_active(callsign)
             self.show_link_paths = not turning_off
-            links_chk = getattr(self, "map_links_chk", None)
-            if links_chk is not None:
-                links_chk.blockSignals(True)
-                links_chk.setChecked(not turning_off)
-                links_chk.blockSignals(False)
             if turning_off:
                 self._set_path_layer_off()
                 reason = "selected_detail_paths_off"
@@ -3943,10 +3996,8 @@ class StationsMapTab(QWidget):
                         bool(getattr(self, "_observation_focus_enabled", False)),
                         str(getattr(self, "_observation_focus_mode", "") or ""),
                     )
-                self.link_mode = "relay_target"
-                self.link_value = callsign
-                self._paths_focus_station = callsign
-                self.relay_target = callsign
+                if not self._set_selected_station_path_target(callsign):
+                    return
                 self._observation_focus_enabled = True
                 self._observation_focus_mode = "paths"
                 tabs = getattr(self, "_map_selected_tabs", None)
@@ -3956,8 +4007,7 @@ class StationsMapTab(QWidget):
                     except Exception:
                         pass
                 reason = "selected_detail_paths"
-            self._sync_path_scope_combo((self.link_mode, self.link_value))
-            self._update_selected_paths_button_visual()
+            self._refresh_selected_paths_panel()
             self._update_map_mode_buttons()
             self._update_map_view_status_label()
             self._update_clear_filter_buttons_visual()
@@ -6487,13 +6537,14 @@ class StationsMapTab(QWidget):
         mode = str(mode or "off").strip().lower()
         selection_value = (
             (selection_value or "").strip().upper()
-            if mode in {"region", "group", "station"}
+            if mode in {"region", "group", "station", "relay_target"}
             else (selection_value or "")
         )
+        relay_target = selection_value if mode == "relay_target" else ""
         group_filter = (group_filter or "").strip().upper()
         region_filter = (region_filter or "").strip().upper()
         reachable_calls = {c.strip().upper() for c in (reachable_callsigns or set()) if c}
-        if mode == "off":
+        if mode == "off" and not relay_target:
             return links
 
         try:
@@ -6558,6 +6609,10 @@ class StationsMapTab(QWidget):
                     return False
             return True
 
+        relay_best: Dict[tuple[str, str], Dict[str, object]] = {}
+        my_partners: Set[str] = set()
+        target_partners: Set[str] = set()
+
         for ts, o, d, snr, band, freq_hz in rows:
             o = (o or "").upper()
             d = (d or "").upper()
@@ -6584,6 +6639,8 @@ class StationsMapTab(QWidget):
                 include = bool(my_call) and my_call in {o, d}
             elif mode == "station" and selection_value:
                 include = selection_value in {o, d}
+            elif relay_target:
+                include = bool(my_call) and (my_call in {o, d} or relay_target in {o, d})
             elif mode == "all":
                 include = True
             elif mode == "region" and selection_value:
@@ -6645,6 +6702,17 @@ class StationsMapTab(QWidget):
                 snr_val = float(snr)
             except Exception:
                 snr_val = None
+            if relay_target:
+                key = tuple(sorted((o, d)))
+                prev = relay_best.get(key)
+                prev_snr = prev.get("snr") if isinstance(prev, dict) else None
+                if key not in relay_best or (snr_val is not None and (prev_snr is None or snr_val > prev_snr)):
+                    relay_best[key] = {"origin": o, "destination": d, "snr": snr_val}
+                if my_call and my_call in {o, d}:
+                    my_partners.add(d if o == my_call else o)
+                if relay_target in {o, d}:
+                    target_partners.add(d if o == relay_target else o)
+                continue
             links.append(
                 {
                     "origin": o,
@@ -6656,6 +6724,35 @@ class StationsMapTab(QWidget):
                     "snr": snr_val,
                 }
             )
+
+        def _add_relay_link(a: str, b: str) -> None:
+            key = tuple(sorted((a, b)))
+            data = relay_best.get(key)
+            if not data:
+                return
+            origin = str(data.get("origin") or a or "").strip().upper()
+            destination = str(data.get("destination") or b or "").strip().upper()
+            p1 = pos_map.get(origin)
+            p2 = pos_map.get(destination)
+            if not p1 or not p2:
+                return
+            links.append(
+                {
+                    "origin": origin,
+                    "destination": destination,
+                    "lat1": p1[0],
+                    "lon1": p1[1],
+                    "lat2": p2[0],
+                    "lon2": p2[1],
+                    "snr": data.get("snr"),
+                }
+            )
+
+        if relay_target and my_call:
+            _add_relay_link(my_call, relay_target)
+            for other in sorted(my_partners & target_partners):
+                _add_relay_link(my_call, other)
+                _add_relay_link(relay_target, other)
 
         self._query_cache_set(cache_key, [dict(x) for x in links])
         return links
@@ -14767,6 +14864,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self._map_recency_label = val
         self._update_map_since_button_text(val)
         self._clear_report_query_caches()
+        self._refresh_selected_paths_panel()
         self._update_clear_filter_buttons_visual()
         self._request_map_refresh(level="medium", reason="recency_filter")
 
