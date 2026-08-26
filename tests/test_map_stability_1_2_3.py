@@ -819,6 +819,71 @@ def test_relay_target_selection_uses_paths_to_scope() -> None:
     assert refreshes == ["relay_target"]
 
 
+def test_js8_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_age_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+    now = 1_786_300_000.0
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.time.time", lambda: now)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE js8_links (
+              ts REAL,
+              origin TEXT,
+              destination TEXT,
+              snr REAL,
+              band TEXT,
+              freq_hz REAL,
+              is_spotter INTEGER,
+              is_relay INTEGER,
+              relay_via TEXT
+            )
+            """
+        )
+        rows = [
+            (now - 600, "N1MAG", "K7ETC", -4.4, "40M", 7110000, 1, 0, ""),
+            (now - 700, "N1MAG", "K9ABC", -7.6, "40M", 7110000, 1, 0, ""),
+            (now - 800, "K7ETC", "K9ABC", -9.2, "40M", 7110000, 1, 0, ""),
+            (now - 30 * 60 * 60, "N1MAG", "W1OLD", -1.0, "40M", 7110000, 1, 0, ""),
+            (now - 30 * 60 * 60, "K7ETC", "W1OLD", -1.0, "40M", 7110000, 1, 0, ""),
+        ]
+        conn.executemany("INSERT INTO js8_links VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    tab = _bare_tab()
+    tab.operator_index = {}
+    tab.stations = [
+        StationPoint("N1MAG", "DM79", name="Me", state="CO", lat=39.0, lon=-105.0),
+        StationPoint("K7ETC", "DM38", name="Target", state="UT", lat=39.5, lon=-111.0),
+        StationPoint("K9ABC", "EM18", name="Bridge", state="KS", lat=38.5, lon=-98.0),
+        StationPoint("W1OLD", "FN54", name="Old", state="ME", lat=45.0, lon=-69.0),
+    ]
+
+    links, _stats = StationsMapTab._load_js8_links(
+        tab,
+        band_filter={"type": "all"},
+        my_call="N1MAG",
+        link_selection=("relay_target", "K7ETC"),
+        relay_target="K7ETC",
+        max_age_sec=24 * 60 * 60,
+    )
+
+    pairs = {tuple(sorted((link["origin"], link["destination"]))) for link in links}
+    assert pairs == {
+        ("K7ETC", "N1MAG"),
+        ("K9ABC", "N1MAG"),
+        ("K7ETC", "K9ABC"),
+    }
+    assert ("N1MAG", "W1OLD") not in pairs
+    assert ("K7ETC", "W1OLD") not in pairs
+
+
 def test_clear_map_layers_turns_off_path_focus_and_preserves_filters() -> None:
     tab = _bare_tab()
     refreshes: list[str] = []
