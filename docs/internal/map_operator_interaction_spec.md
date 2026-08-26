@@ -479,6 +479,18 @@ into the inbox so the operator lands on the evidence that caused the map state.
   rollups.
 - Paths overlay can be enabled from another view without changing the primary
   view.
+- `Show Paths To` is always scoped to the currently selected station and the
+  currently selected age window. Age changes or station changes must refresh
+  from helper-owned path state, not stale UI labels.
+- Selected-station path refresh must be fast enough for normal operator use:
+  link queries should be constrained to the operator station and target station
+  before Python shared-contact topology is calculated.
+- Map age quick choices apply immediately. Custom days is a blank, explicit
+  custom input so operators do not think an Apply action is needed for every
+  age choice.
+- Station detail shows detected capabilities from traffic and artifacts:
+  JS8Call, FLDigi, VarAC, plus application evidence for Spotter and CommStat
+  when that station has current-window usage evidence.
 - Advanced filters can be cleared and do not permanently corrupt view state.
 
 ## Known Open Work

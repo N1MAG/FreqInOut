@@ -699,6 +699,55 @@ def test_map_recency_change_refreshes_selected_path_panel_window() -> None:
     assert refreshes == ["recency_filter"]
 
 
+def test_map_age_popover_custom_days_is_blank_and_distinct_from_quick_choices() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    popover_block = source[source.index("def _show_map_since_popover") : source.index("def _set_map_recency_from_label")]
+
+    assert "custom_days = QLineEdit(popover)" in popover_block
+    assert 'custom_days.setPlaceholderText("days")' in popover_block
+    assert 'QPushButton("Set Custom", popover)' in popover_block
+    assert "QSpinBox" not in popover_block
+    assert "setValue(30)" not in popover_block
+
+
+def test_selected_path_queries_are_scoped_to_operator_and_target_for_speed() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    js8_block = source[source.index("def _load_js8_links") : source.index("def _load_varac_links")]
+    varac_block = source[source.index("def _load_varac_links") : source.index("def _load_varac_stats")]
+
+    assert "(origin IN (?, ?) OR destination IN (?, ?))" in js8_block
+    assert "params.extend([my_call, relay_target, my_call, relay_target])" in js8_block
+    assert "(origin IN (?, ?) OR destination IN (?, ?))" in varac_block
+    assert "params.extend([my_call, relay_target, my_call, relay_target])" in varac_block
+
+
+def test_station_detected_capability_text_groups_traffic_and_apps() -> None:
+    text = StationsMapTab._station_detected_capability_text(
+        ["JS8Call", "FLDigi", "JS8Call"],
+        ["Spotter", "CommStat", "Spotter"],
+    )
+
+    assert text == "Traffic: JS8Call, FLDigi; Uses: Spotter, CommStat"
+
+
+def test_station_detail_html_shows_detected_capabilities() -> None:
+    tab = _bare_tab()
+    html = StationsMapTab._map_selected_detail_html(
+        tab,
+        {
+            "type": "station",
+            "title": "KC7WOK",
+            "rows": [
+                {"label": "Detected", "value": "Traffic: JS8Call, FLDigi; Uses: Spotter, CommStat"},
+                {"label": "Modes", "value": "JS8Call, FLDigi"},
+            ],
+        },
+    )
+
+    assert "Detected" in html
+    assert "Traffic: JS8Call, FLDigi; Uses: Spotter, CommStat" in html
+
+
 def test_map_selected_messages_html_explains_context_filters() -> None:
     tab = _bare_tab()
     tab.recency_seconds = 24 * 60 * 60
@@ -1085,6 +1134,49 @@ def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_ag
     assert ("K7ETC", "W2OFF") not in pairs
     assert ("N1MAG", "W1OLD") not in pairs
     assert ("K7ETC", "W1OLD") not in pairs
+
+
+def test_commstat_reporter_activity_honors_age_window(monkeypatch, tmp_path: Path) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+    now = 1_786_300_000.0
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.time.time", lambda: now)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE commstat_artifacts (
+              id INTEGER PRIMARY KEY,
+              from_call TEXT,
+              report_group TEXT,
+              transport_mode TEXT,
+              reach_mode TEXT,
+              event_ts_utc REAL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO commstat_artifacts (
+              from_call, report_group, transport_mode, reach_mode, event_ts_utc
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                ("KC7WOK", "MAGNET", "TEXT", "REGIONAL", now - 600),
+                ("W1OLD", "MAGNET", "TEXT", "REGIONAL", now - 30 * 60 * 60),
+            ],
+        )
+
+    tab = _bare_tab()
+    activity = StationsMapTab._load_commstat_reporter_activity(tab, max_age_sec=24 * 60 * 60)
+
+    assert "KC7WOK" in activity
+    assert activity["KC7WOK"]["report_group"] == "MAGNET"
+    assert "W1OLD" not in activity
 
 
 def test_clear_map_layers_turns_off_path_focus_and_preserves_filters() -> None:

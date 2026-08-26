@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextBrowser,
     QTabWidget,
-    QSpinBox,
 )
 from freqinout.core.config_paths import get_config_dir
 
@@ -77,6 +76,7 @@ from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.operator_activity import (
     load_js8_direct_contact_summary,
     load_operator_activity_summary,
+    parse_utc_timestamp,
 )
 from freqinout.core.observation_queries import ObservationQuery, map_observation_rows, matching_observation_callsigns
 from freqinout.core.regional_intelligence import (
@@ -1849,20 +1849,29 @@ class StationsMapTab(QWidget):
         custom_row = QHBoxLayout()
         custom_row.setContentsMargins(0, 2, 0, 0)
         custom_row.addWidget(QLabel("Custom days", popover))
-        custom_spin = QSpinBox(popover)
-        custom_spin.setRange(1, 365)
-        custom_spin.setValue(30)
-        custom_spin.setSuffix(" d")
-        custom_spin.setMinimumWidth(88)
-        custom_row.addWidget(custom_spin)
-        apply_btn = QPushButton("Apply", popover)
-        apply_btn.clicked.connect(
-            lambda _checked=False, spin=custom_spin, dialog=popover: (
-                self._set_map_recency_from_label(f"{int(spin.value())}d"),
-                dialog.close(),
-            )
-        )
-        custom_row.addWidget(apply_btn)
+        custom_days = QLineEdit(popover)
+        custom_days.setPlaceholderText("days")
+        custom_days.setToolTip("Enter a custom number of days, then choose Set Custom.")
+        custom_days.setMinimumWidth(88)
+        custom_row.addWidget(custom_days)
+        custom_btn = QPushButton("Set Custom", popover)
+
+        def _apply_custom_days() -> None:
+            text = str(custom_days.text() or "").strip()
+            if not text:
+                return
+            try:
+                days = max(1, min(365, int(float(text))))
+            except Exception:
+                custom_days.selectAll()
+                custom_days.setFocus()
+                return
+            self._set_map_recency_from_label(f"{days}d")
+            popover.close()
+
+        custom_btn.clicked.connect(_apply_custom_days)
+        custom_days.returnPressed.connect(_apply_custom_days)
+        custom_row.addWidget(custom_btn)
         layout.addLayout(custom_row)
         self._map_since_popover = popover
         pos = button.mapToGlobal(button.rect().bottomLeft())
@@ -3198,6 +3207,37 @@ class StationsMapTab(QWidget):
         return "<br/>".join(html.escape(line) for line in clean_lines)
 
     @staticmethod
+    def _station_detected_capability_text(radio_modes: object, app_uses: object) -> str:
+        def _clean_items(values: object) -> List[str]:
+            if isinstance(values, str):
+                raw_values = [part.strip() for part in values.split(",")]
+            elif isinstance(values, (list, tuple, set)):
+                raw_values = list(values)
+            else:
+                raw_values = []
+            out: List[str] = []
+            seen: Set[str] = set()
+            for value in raw_values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                key = text.upper()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(text)
+            return out
+
+        modes = _clean_items(radio_modes)
+        uses = _clean_items(app_uses)
+        parts: List[str] = []
+        if modes:
+            parts.append(f"Traffic: {', '.join(modes)}")
+        if uses:
+            parts.append(f"Uses: {', '.join(uses)}")
+        return "; ".join(parts)
+
+    @staticmethod
     def _map_detail_callsigns_from_text(value: object) -> List[str]:
         text = StationsMapTab._map_detail_clean_text(value).upper()
         if not text:
@@ -3647,6 +3687,7 @@ class StationsMapTab(QWidget):
             parts.append(self._map_detail_row_html("Area", rows.get("area")))
             parts.append(self._map_detail_row_html("FEMA Region", rows.get("fema region")))
             parts.append(self._map_detail_row_html("Groups", rows.get("groups")))
+            parts.append(self._map_detail_row_html("Detected", rows.get("detected")))
             parts.append(self._map_detail_row_html("Modes", rows.get("modes")))
             parts.append(self._map_detail_row_html("Activity", rows.get("activity")))
             parts.append(self._map_detail_row_html("Status", self._map_detail_first_value(rows.get("sitrep"), rows.get("status"), rows.get("severity"))))
@@ -6192,17 +6233,20 @@ class StationsMapTab(QWidget):
             except Exception:
                 cols = set()
             relay_select = ", is_relay, relay_via" if {"is_relay", "relay_via"}.issubset(cols) else ", 0, ''"
+            where_parts: List[str] = []
+            params: List[object] = []
             if ts_cut:
-                cur.execute(
-                    "SELECT ts, origin, destination, snr, band, freq_hz, is_spotter"
-                    f"{relay_select} FROM js8_links WHERE ts >= ?",
-                    (ts_cut,),
-                )
-            else:
-                cur.execute(
-                    "SELECT ts, origin, destination, snr, band, freq_hz, is_spotter"
-                    f"{relay_select} FROM js8_links"
-                )
+                where_parts.append("ts >= ?")
+                params.append(ts_cut)
+            if relay_target and my_call:
+                where_parts.append("(origin IN (?, ?) OR destination IN (?, ?))")
+                params.extend([my_call, relay_target, my_call, relay_target])
+            where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            cur.execute(
+                "SELECT ts, origin, destination, snr, band, freq_hz, is_spotter"
+                f"{relay_select} FROM js8_links{where_sql}",
+                tuple(params),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -6562,13 +6606,19 @@ class StationsMapTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
+            where_parts: List[str] = []
+            params: List[object] = []
             if ts_cut:
-                cur.execute(
-                    "SELECT ts, origin, destination, snr, band, freq_hz FROM varac_links WHERE ts >= ?",
-                    (ts_cut,),
-                )
-            else:
-                cur.execute("SELECT ts, origin, destination, snr, band, freq_hz FROM varac_links")
+                where_parts.append("ts >= ?")
+                params.append(ts_cut)
+            if relay_target and my_call:
+                where_parts.append("(origin IN (?, ?) OR destination IN (?, ?))")
+                params.extend([my_call, relay_target, my_call, relay_target])
+            where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            cur.execute(
+                f"SELECT ts, origin, destination, snr, band, freq_hz FROM varac_links{where_sql}",
+                tuple(params),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception:
@@ -6919,6 +6969,63 @@ class StationsMapTab(QWidget):
             return calls
         out = {c for c in (checkins | senders) if c}
         self._query_cache_set(cache_key, set(out))
+        return out
+
+    def _load_commstat_reporter_activity(self, max_age_sec: Optional[int] = None) -> Dict[str, Dict[str, object]]:
+        cache_key = ("commstat_reporter_activity", int(max_age_sec or 0), self._nets_db_fingerprint())
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, dict):
+            return {str(k): dict(v) if isinstance(v, dict) else {} for k, v in cached.items()}
+        out: Dict[str, Dict[str, object]] = {}
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        cutoff = time.time() - int(max_age_sec or 0) if int(max_age_sec or 0) > 0 else 0.0
+        try:
+            with sqlite3.connect(db_path) as conn:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='commstat_artifacts'"
+                ).fetchone()
+                if not exists:
+                    self._query_cache_set(cache_key, out)
+                    return out
+                cols = {
+                    str(row[1] or "").strip()
+                    for row in conn.execute("PRAGMA table_info(commstat_artifacts)").fetchall()
+                    if len(row) > 1 and str(row[1] or "").strip()
+                }
+                event_ts_expr = "event_ts_utc" if "event_ts_utc" in cols else "event_ts" if "event_ts" in cols else "0"
+                rows = conn.execute(
+                    f"""
+                    SELECT from_call, report_group, transport_mode, reach_mode, {event_ts_expr}
+                    FROM commstat_artifacts
+                    WHERE COALESCE(from_call, '') != ''
+                    """
+                ).fetchall()
+        except Exception as exc:
+            log.debug("StationsMap: failed to load CommStat reporter activity: %s", exc)
+            self._query_cache_set(cache_key, out)
+            return out
+        for from_call, report_group, transport_mode, reach_mode, event_ts in rows:
+            call = str(from_call or "").strip().upper()
+            if not call:
+                continue
+            parsed_ts = parse_utc_timestamp(event_ts)
+            ts_val = float(parsed_ts or self._safe_float(event_ts, 0.0))
+            if cutoff and (ts_val <= 0.0 or ts_val < cutoff):
+                continue
+            current = out.get(call, {})
+            if ts_val >= self._safe_float(current.get("last_seen_ts"), 0.0):
+                out[call] = {
+                    "last_seen_ts": ts_val,
+                    "report_group": str(report_group or "").strip(),
+                    "transport_mode": str(transport_mode or "").strip(),
+                    "reach_mode": str(reach_mode or "").strip(),
+                }
+        self._query_cache_set(cache_key, dict(out))
         return out
 
     @staticmethod
@@ -12074,6 +12181,15 @@ class StationsMapTab(QWidget):
             lambda: _timed_map_call("map.load_spotter_map_activity", self._load_spotter_map_activity),
             ttl_sec=6.0,
         )
+        commstat_reporter_activity = self._cached_map_value(
+            "commstat_reporter_activity",
+            {"recency_seconds": self.recency_seconds},
+            lambda: _timed_map_call(
+                "map.load_commstat_reporter_activity",
+                lambda: self._load_commstat_reporter_activity(max_age_sec=self.recency_seconds),
+            ),
+            ttl_sec=6.0,
+        )
         sitrep_state_summary: List[Dict[str, object]] = []
         sitrep_summary_group = ""
         regional_intelligence_payload: Dict[str, object] = {
@@ -12414,20 +12530,11 @@ class StationsMapTab(QWidget):
                 direct_contact = direct_contact_lookup.get(cs_upper, {})
                 modes: List[str] = []
                 if cs_upper in js8_all:
-                    modes.append("JS8")
+                    modes.append("JS8Call")
                 if cs_upper in varac_all:
                     modes.append("VarAC")
                 if cs_upper in fldigi_calls:
                     modes.append("FLDigi")
-
-                detail_lines = [
-                    f"{pt.callsign}",
-                    f"Name: {pt.name}" if pt.name else "",
-                    f"State: {pt.state}" if pt.state else "",
-                    f"Grid: {pt.grid}" if pt.grid else "",
-                    f"Group: {pt.group}" if pt.group else "",
-                    f"Modes: {', '.join(modes)}" if modes else "",
-                ]
                 reach_meta = self._now_reachable_meta.get(cs_upper, {}) if self._now_reachable_enabled else {}
                 qsy_text = (reach_meta.get("qsy_text") or "").strip() if isinstance(reach_meta, dict) else ""
                 qsy_soon = bool(reach_meta.get("qsy_soon")) if isinstance(reach_meta, dict) else False
@@ -12452,6 +12559,26 @@ class StationsMapTab(QWidget):
                 spotter_map_form = str(spotter_map_data.get("form_id") or "").strip()
                 spotter_map_ts = _fmt_ts(spotter_map_data.get("utc_ts", 0))
                 spotter_map_summary = str(spotter_map_data.get("summary") or "").strip()
+                commstat_data = commstat_reporter_activity.get(cs_upper, {})
+                uses: List[str] = []
+                if (
+                    spotter_map_form
+                    or self._safe_float(activity.get("spotter_last_seen_ts"), 0.0) > 0.0
+                    or "spotter" in str(spotter_status_source or spotter_status_source_chips).lower()
+                ):
+                    uses.append("Spotter")
+                if commstat_data:
+                    uses.append("CommStat")
+                detected_capabilities = self._station_detected_capability_text(modes, uses)
+
+                detail_lines = [
+                    f"{pt.callsign}",
+                    f"Name: {pt.name}" if pt.name else "",
+                    f"State: {pt.state}" if pt.state else "",
+                    f"Grid: {pt.grid}" if pt.grid else "",
+                    f"Group: {pt.group}" if pt.group else "",
+                    f"Detected: {detected_capabilities}" if detected_capabilities else "",
+                ]
                 if qsy_text:
                     detail_lines.append(f"Schedule: {qsy_text}")
                 if spotter_map_form:
@@ -12476,6 +12603,8 @@ class StationsMapTab(QWidget):
                         "trusted": bool(pt.trusted),
                         "fema_region": STATE_TO_FEMA_REGION.get(str(pt.state or "").strip().upper(), ""),
                         "modes": modes,
+                        "app_uses": uses,
+                        "detected": detected_capabilities,
                         "spotter_map_form": spotter_map_form,
                         "spotter_map_summary": spotter_map_summary,
                         "spotter_map_ts": spotter_map_ts,
@@ -14086,8 +14215,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
       const groups = Array.isArray(m.groups) ? m.groups.filter(Boolean) : (group ? [group] : []);
       const area = [m.state, m.grid].filter(Boolean).join(' / ');
       const modeText = Array.isArray(m.modes) ? m.modes.join(', ') : (m.modes || '');
+      const useText = Array.isArray(m.app_uses) ? m.app_uses.join(', ') : (m.app_uses || '');
+      const detectedText = m.detected || [
+        modeText ? ('Traffic: ' + modeText) : '',
+        useText ? ('Uses: ' + useText) : ''
+      ].filter(Boolean).join('; ');
       const activityBits = [
-        m.last_band ? ('JS8 ' + m.last_band) : '',
+        m.last_band ? ('JS8Call ' + m.last_band) : '',
         m.varac_last_band ? ('VarAC ' + m.varac_last_band) : '',
         m.last_contact_band ? ('Contact ' + m.last_contact_band) : ''
       ].filter(Boolean).join(' | ');
@@ -14132,6 +14266,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
           detailRowPayload('Area', area),
           detailRowPayload('FEMA Region', m.fema_region),
           detailRowPayload('Groups', groups.join(', ')),
+          detailRowPayload('Detected', detectedText),
           detailRowPayload('Modes', modeText),
           detailRowPayload('Activity', activityBits),
           detailRowPayload('SitRep', m.spotter_status_label),
