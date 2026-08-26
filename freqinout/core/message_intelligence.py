@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from freqinout.core.js8_spotter_decode import parse_spotter_bracket_fields, summarize_spotter_form_text
-from freqinout.core.commstat_sitrep import infer_state_and_geo
+from freqinout.core.commstat_sitrep import resolve_commstat_reported_for_state
 from freqinout.core.message_search_values import searchable_text_values
 
 
@@ -340,12 +340,13 @@ def analyze_commstat_fields(
     grid_value = _clean_grid(grid)
     inferred_state_confidence = ""
     inferred_geo_confidence = ""
-    if not state_value:
-        inferred_state, inferred_state_confidence, inferred_geo_confidence = infer_state_and_geo(
-            grid_value,
-            _first_nonempty(body_text, remarks),
-        )
-        state_value = _clean_state(inferred_state)
+    resolved_state, inferred_state_confidence, inferred_geo_confidence = resolve_commstat_reported_for_state(
+        state_code=state_value,
+        grid=grid_value,
+        scope=scope,
+        remarks=_first_nonempty(body_text, remarks, title_text),
+    )
+    state_value = _clean_state(resolved_state)
     combined = " ".join(
         part
         for part in (

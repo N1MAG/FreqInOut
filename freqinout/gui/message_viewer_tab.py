@@ -75,6 +75,7 @@ from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.regional_intelligence import STATE_TO_FEMA_REGION, US_STATE_ABBR_FROM_NAME
 from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, table_exists
 from freqinout.core.sqlite_fingerprint import sqlite_identifier, sqlite_table_fingerprint
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
@@ -6318,6 +6319,8 @@ class MessageViewerTab(QWidget):
         source_family: str = "",
         age_filter_seconds: object = 0,
         concern_only: object = False,
+        state_filter: str = "",
+        fema_region_filter: str = "",
     ) -> None:
         self.show_inbox_from_navigation()
         try:
@@ -6330,6 +6333,8 @@ class MessageViewerTab(QWidget):
         self._map_context_filter = {
             "age_filter_seconds": age_seconds,
             "concern_only": concern_active,
+            "state_filter": str(state_filter or "").strip().upper(),
+            "fema_region_filter": str(fema_region_filter or "").strip().upper(),
         }
         source = str(source_family or "").strip().lower()
         source_values = self._message_context_source_values(source)
@@ -10749,7 +10754,17 @@ class MessageViewerTab(QWidget):
 
     def _row_matches_map_context_filter(self, row: UnifiedMessage) -> bool:
         context = getattr(self, "_map_context_filter", {}) or {}
-        if not isinstance(context, dict) or not context.get("concern_only"):
+        if not isinstance(context, dict):
+            return True
+        state_filter = str(context.get("state_filter") or "").strip().upper()
+        fema_region_filter = str(context.get("fema_region_filter") or "").strip().upper()
+        if state_filter or fema_region_filter:
+            row_state = self._map_context_row_state(row)
+            if state_filter and row_state != state_filter:
+                return False
+            if fema_region_filter and STATE_TO_FEMA_REGION.get(row_state, "") != fema_region_filter:
+                return False
+        if not context.get("concern_only"):
             return True
         payload = getattr(row, "payload", None)
         status_values = [
@@ -10770,6 +10785,44 @@ class MessageViewerTab(QWidget):
         if any(term in haystack for term in (" green", "normal", "functioning", "all clear")):
             return False
         return True
+
+    @staticmethod
+    def _map_context_row_state(row: UnifiedMessage) -> str:
+        payload = getattr(row, "payload", None)
+        candidates = [
+            getattr(payload, "state_code", ""),
+            getattr(payload, "state", ""),
+            getattr(payload, "reported_for_state", ""),
+        ]
+        if isinstance(payload, dict):
+            candidates.extend(
+                [
+                    payload.get("state_code", ""),
+                    payload.get("state", ""),
+                    payload.get("reported_for_state", ""),
+                ]
+            )
+        for value in candidates:
+            text = str(value or "").strip().upper()
+            if not text:
+                continue
+            token = re.split(r"[\s/|,]+", text)[0].strip().upper()
+            if token in STATE_TO_FEMA_REGION:
+                return token
+            if token in US_STATE_ABBR_FROM_NAME:
+                return US_STATE_ABBR_FROM_NAME[token]
+        search_text = str(getattr(row, "search_text", "") or "")
+        if not search_text:
+            search_text = _core_row_search_text(row)
+            row.search_text = search_text
+        haystack = search_text.upper()
+        for state in STATE_TO_FEMA_REGION:
+            state_pat = re.escape(state)
+            if re.search(rf"\b(?:AREA|STATE/GRID|REPORTED FOR|LOCATION)\s*:\s*{state_pat}\b", haystack):
+                return state
+            if re.search(rf"\b{state_pat}\s*/\s*[A-R]{{2}}\d{{2}}", haystack):
+                return state
+        return ""
 
     def _is_filter_or_sort_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
@@ -11131,7 +11184,15 @@ class MessageViewerTab(QWidget):
         )
         context = getattr(self, "_map_context_filter", {}) or {}
         if isinstance(context, dict) and context.get("concern_only"):
-            map_summary = "Map non-green/status evidence only"
+            geo_parts = []
+            state_filter = str(context.get("state_filter") or "").strip().upper()
+            fema_region_filter = str(context.get("fema_region_filter") or "").strip().upper()
+            if state_filter:
+                geo_parts.append(f"Map State {state_filter}")
+            if fema_region_filter:
+                geo_parts.append(f"Map FEMA Region {fema_region_filter}")
+            geo_parts.append("non-green/status evidence only")
+            map_summary = " ".join(geo_parts)
             return f"{summary}; {map_summary}" if summary else map_summary
         return summary
 

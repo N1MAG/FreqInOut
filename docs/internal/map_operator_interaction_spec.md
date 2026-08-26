@@ -1,7 +1,7 @@
 # Map Operator Interaction Spec
 
-Status: working implementation spec for the multi-rig 1.2.3 map intelligence
-workstream.
+Status: implemented for the multi-rig 2.0.0 operator-map workstream, with
+source-expansion and configuration-guidance items tracked as follow-on work.
 
 ## Goal
 
@@ -81,6 +81,9 @@ JS8Call multi-rig guidance:
 - JS8 profile/save folder and `DIRECTED.TXT` should belong to the same radio
   bundle. If a radio's `DIRECTED.TXT` sits outside that radio's JS8 profile
   folder, FIO should tell the operator to review JS8Call Settings.
+- Production-parity JS8 path testing requires the matched `DIRECTED.TXT`,
+  `ALL.TXT`, and `inbox.db3` from the same JS8Call profile. `DIRECTED.TXT`
+  supplies directed message evidence; `ALL.TXT` supplies local profile activity.
 - Guidance should use direct actions such as `Review JS8Call Settings` rather
   than asking the operator to inspect logs or databases.
 
@@ -484,6 +487,17 @@ operators have had contact with in that same window. If a peer schedule is
 known, FIO uses that schedule first; otherwise propagation recommendations help
 suggest likely bands.
 
+When no direct or one-hop shared-contact path exists, FIO may show a short
+bounded relay chain inside the same age/band filters, such as
+`me -> N7CWR -> KC7WOK -> KL5OP`. This must be presented as observed path
+topology, not as proof that my station directly heard the target.
+
+For JS8Call, path topology must avoid overclaiming "heard by my station" from
+ambiguous directed-log activity alone. `DIRECTED.TXT` may prove a directed
+message or station-to-station exchange, while `ALL.TXT` from the same profile is
+the safer source for local profile activity. If FIO later models passive decode
+evidence directly, the UI must label that provenance separately from a path edge.
+
 The map should feel interactive and explanatory: legends appear for the current
 view, filters are visible, and clicking `Messages` carries the exact map context
 into the inbox so the operator lands on the evidence that caused the map state.
@@ -542,6 +556,8 @@ into the inbox so the operator lands on the evidence that caused the map state.
   reassurance, while the summary remains an exception list of non-green areas.
 - Regional Intel summary caps visible rows and shows a “more” count when the
   current filters produce more actionable states or FEMA regions than fit.
+- Regional Intel summary is collapsed by default and can be shown/hidden without
+  changing the active map view, filters, selected detail, or map geography.
 - Station status is represented on station pins; Station Status is not a
   primary map selector.
 - Stations view may show blue/neutral unknown pins, while known status pins
@@ -562,6 +578,9 @@ into the inbox so the operator lands on the evidence that caused the map state.
   roster text, routes, or multiline labels.
 - Messages from Regional Intel are filtered by geography, topic/group, age, and
   non-green evidence.
+- FEMA-region message routing uses structured region scope plus the current
+  Regional Intel topic/group/age/sensitivity context, not a loose text search
+  for the FEMA region label.
 - Map side-panel Messages tab explains the handoff context before opening
   Messages.
 - Messages tab displays a visible map filter banner after map handoff.
@@ -594,7 +613,54 @@ into the inbox so the operator lands on the evidence that caused the map state.
 
 ## Known Open Work
 
-- Continue polishing Advanced Map Tools copy and layout after field testing;
-  hidden advanced filters are now surfaced through Clear Filters / Advanced
-  Map Tools tooltips.
+- Continue field-testing Advanced Map Tools copy and layout with live operator
+  workflows. Hidden advanced filters are surfaced through Clear Filters /
+  Advanced Map Tools tooltips, and the drawer remains secondary by default.
+- Configuration guidance hooks for JS8 endpoint/profile conflicts are future
+  Settings work unless a map workflow directly depends on them.
 - Add source-neutral mesh traffic once integration is available.
+- Add deeper lazy evidence retrieval only if live payloads become too large;
+  current Regional Intel payloads are capped and summarized for the browser.
+
+## Completion Notes
+
+This workstream now covers the requested operator-map baseline:
+
+- smart primary views with a compact top control model.
+- 24 hour default age and path planning capped to operationally useful windows.
+- Regional Intel heat-map behavior with no-action green geography, non-green
+  summary rows, collapsed overview, national/state/FEMA detail, and map-to-
+  Messages handoff.
+- station action cards with status, source mix, detected capabilities, Compose
+  Message, Show Paths To, Messages, Center, Group, and SOP actions.
+- path rendering scoped to selected station/age, including short observed relay
+  chains when no direct/shared-contact path exists.
+- reported-for/reported-by CommStat handling using structured data before text
+  inference.
+- view-aware legends, rounded SNR labels, focused auto-fit, and responsive map
+  split behavior.
+
+## Map Detail Panel V2
+
+The selected-item panel is an operator action surface, not just a passive
+tooltip. It must identify the selected object type clearly and expose useful
+next actions without making the map render path heavier.
+
+- Station selections show station identity, latest known status, area, groups,
+  last seen time, last seen integration, detected traffic modes, and detected
+  tools.
+- Report selections keep the report identity primary, but expose the reporter
+  as an action callsign when one is known. A report by `W5TTA` should allow
+  Compose Message and Show Paths To `W5TTA`; the report title itself must not be
+  parsed as a fake callsign.
+- Compose Message is available for any non-self action callsign and is never
+  available for the operator's own callsign.
+- The Paths tab summarizes direct path, best relay chain, and shared contacts
+  for the current age window, then the Show Paths To action renders those paths
+  on the map.
+- The Messages tab summarizes matching traffic counts, unread counts, source
+  mix, newest item, and topics before sending the operator to the filtered
+  Messages view.
+- Side-panel enrichment is lazy, cached briefly by callsign and age, and
+  bounded. Traffic, Regional Intel, and Paths rendering must not wait for these
+  station detail queries.

@@ -108,6 +108,17 @@ Use channel shortcut:
 bash install_FreqInOut_linux.sh --channel beta
 ```
 
+Install a private multi-rig WIP build for isolated testing:
+
+```bash
+bash install_FreqInOut_linux.sh \
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
+```
+
+Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.
+
 Offline mode:
 
 ```bash

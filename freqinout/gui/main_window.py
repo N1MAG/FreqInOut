@@ -3337,6 +3337,8 @@ class MainWindow(QMainWindow):
         source_family: str = "",
         age_filter_seconds: object = 0,
         concern_only: object = False,
+        state_filter: str = "",
+        fema_region_filter: str = "",
     ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
         if idx < 0:
@@ -3350,6 +3352,8 @@ class MainWindow(QMainWindow):
             "source_family": str(source_family or ""),
             "age_filter_seconds": age_filter_seconds,
             "concern_only": concern_only,
+            "state_filter": str(state_filter or ""),
+            "fema_region_filter": str(fema_region_filter or ""),
         }
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)

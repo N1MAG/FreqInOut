@@ -169,6 +169,7 @@ _NON_LOCATION_PRECEDERS = {
     "SHOWING",
     "SHOWN",
     "STARTED",
+    "STILL",
     "UPDATED",
 }
 
@@ -285,6 +286,31 @@ def infer_state_and_geo(grid: object, remarks: object) -> Tuple[str, str, str]:
     if state_code:
         return state_code, state_confidence, "state_only"
     return "", "unknown", "unknown"
+
+
+def commstat_scope_is_report_location(scope: object) -> bool:
+    scope_key = re.sub(r"[^a-z0-9]+", " ", str(scope or "").lower()).strip()
+    return scope_key not in {"", "my qth", "my location", "1"}
+
+
+def resolve_commstat_reported_for_state(
+    *,
+    state_code: object = "",
+    grid: object = "",
+    scope: object = "",
+    remarks: object = "",
+) -> Tuple[str, str, str]:
+    """Return the best reported-for state for a CommStat artifact.
+
+    CommStat can report for wider or other-location scopes. In those cases the
+    typed state can be stale or inconsistent with the grid/report text, so use
+    the inferred report location when it is available.
+    """
+    state = str(state_code or "").strip().upper()
+    inferred_state, state_confidence, geo_confidence = infer_state_and_geo(grid, remarks)
+    if inferred_state and (not state or commstat_scope_is_report_location(scope)):
+        return inferred_state, state_confidence, geo_confidence
+    return state, state_confidence, geo_confidence
 
 
 def decode_brevity_summary(code: object, asset_dir: Optional[Path]) -> str:
@@ -500,6 +526,7 @@ def _state_code_from_remarks(remarks: object) -> Tuple[str, str]:
         r"^\s*([A-Z]{2})\s*[:;-]",
         r"\b([A-Z]{2})\s*/\s*[A-R]{2}\d{2}(?:[A-X]{2})?\b",
         r"\b(?:STATE|ST|LOC|LOCATION|AREA)\s*[:=]?\s*([A-Z]{2})\b",
+        r"\b(?:NORTH|SOUTH|EAST|WEST|NORTHERN|SOUTHERN|EASTERN|WESTERN|CENTRAL|NORTHEAST|NORTHWEST|SOUTHEAST|SOUTHWEST)(?:\s*&\s*(?:NORTH|SOUTH|EAST|WEST|NORTHERN|SOUTHERN|EASTERN|WESTERN|CENTRAL|NORTHEAST|NORTHWEST|SOUTHEAST|SOUTHWEST))*\s+([A-Z]{2})\b",
         r"\b[A-Z][A-Z .'-]{2,40}\s+([A-Z]{2})\s+\d{5}(?:-\d{4})?\b",
         r"\b[A-Z][A-Z .'-]{2,40}\s+([A-Z]{2})\b",
     )

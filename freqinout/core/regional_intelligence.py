@@ -11,7 +11,7 @@ from freqinout.core.message_intelligence import normalize_topic_terms
 from freqinout.core.message_search_values import is_no_report_placeholder, searchable_text_values
 from freqinout.core.observation_projection import Observation
 from freqinout.core.observation_queries import ObservationQuery, query_observations
-from freqinout.core.commstat_sitrep import infer_state_and_geo
+from freqinout.core.commstat_sitrep import infer_state_and_geo, resolve_commstat_reported_for_state
 
 
 FEMA_REGIONS = {
@@ -311,19 +311,20 @@ def _enrich_commstat_observations_from_artifacts(
         provenance.update({key: value for key, value in artifact.items() if key not in {"from_call", "to_target", "grid", "state", "status", "urgency"} and value})
         state = str(artifact.get("state") or obs.state or "").strip().upper()
         grid = str(artifact.get("grid") or obs.grid or "").strip().upper()
-        if not state or _commstat_scope_text_is_report_location(artifact.get("scope")):
-            inferred_state, state_confidence, geo_confidence = infer_state_and_geo(
-                grid,
-                " ".join(
-                    str(artifact.get(key) or "")
-                    for key in ("body_text", "remarks_text", "title")
-                    if str(artifact.get(key) or "").strip()
-                ),
-            )
-            if inferred_state:
-                state = inferred_state
-                provenance.setdefault("state_confidence", state_confidence)
-                provenance.setdefault("geo_confidence", geo_confidence)
+        resolved_state, state_confidence, geo_confidence = resolve_commstat_reported_for_state(
+            state_code=state,
+            grid=grid,
+            scope=artifact.get("scope"),
+            remarks=" ".join(
+                str(artifact.get(key) or "")
+                for key in ("body_text", "remarks_text", "title")
+                if str(artifact.get(key) or "").strip()
+            ),
+        )
+        if resolved_state:
+            state = resolved_state
+            provenance.setdefault("state_confidence", state_confidence)
+            provenance.setdefault("geo_confidence", geo_confidence)
         enriched.append(
             replace(
                 obs,

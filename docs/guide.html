@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.8</p>
+  <p><strong>Current version</strong>: 2.0.0</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
@@ -533,6 +533,7 @@
   <ul class="section-list">
     <li><strong>Paths</strong>: controls whether path overlays are hidden, limited to your station, or shown for all available recent links.</li>
     <li><strong>Paths To</strong>: narrows the decision-support view from your station to a selected target callsign, showing direct visibility and likely shared-contact intermediates inside the selected age window.</li>
+    <li><strong>JS8 traffic files</strong>: for production-like testing, copy the matching <code>DIRECTED.TXT</code>, <code>ALL.TXT</code>, and <code>inbox.db3</code> from the same JS8Call profile. <code>DIRECTED.TXT</code> contributes directed message evidence; <code>ALL.TXT</code> contributes local profile activity.</li>
     <li><strong>Peer Sched Now</strong>: overlays stations that are expected to be on-air now according to peer schedules. This is schedule guidance, not proof of current RF reachability.</li>
     <li><strong>Decision-support note</strong>: FreqInOut map paths are designed for operator awareness and quick relay context. They do not replace deeper routing-analysis tools.</li>
   </ul>

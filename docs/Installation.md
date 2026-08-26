@@ -16,12 +16,12 @@ cd FreqInOut
 
 ## 3) Create a virtual environment
 ```
-python -m venv venv
+python -m venv .venv
 ```
 
 ## 4) Activate the virtual environment (PowerShell)
 ```
-.\venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 ## 5) Install dependencies

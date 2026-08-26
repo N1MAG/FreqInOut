@@ -805,6 +805,29 @@ def test_js8_link_indexer_ignores_group_targets_but_keeps_station_relays(tmp_pat
     assert rows == [("KC7WOK", "N1MAG")]
 
 
+def test_js8_link_indexer_does_not_infer_local_heard_edges_from_directed_sender(tmp_path: Path) -> None:
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-26 00:57:43\t7.115000\t2430\t+01\tKC7WOK: N7CWR NO\n"
+        "2026-08-26 04:42:18\t7.115000\t2430\t+00\tN7CWR: W7MOE ACK\n",
+        encoding="utf-8",
+    )
+    settings = DictSettings({"operating_groups": [], "operator_callsign": "N1MAG"})
+    indexer = JS8LogLinkIndexer(settings, tmp_path / "fio.db")  # type: ignore[arg-type]
+
+    inserted = indexer.update_from_directed_path(directed, force_rebuild=True)
+
+    assert inserted == 2
+    conn = sqlite3.connect(tmp_path / "fio.db")
+    try:
+        rows = conn.execute(
+            "SELECT origin, destination FROM js8_links ORDER BY origin, destination"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("KC7WOK", "N7CWR"), ("N7CWR", "W7MOE")]
+
+
 def test_js8_inbox_ingest_keeps_same_native_id_from_two_sources(monkeypatch, tmp_path: Path) -> None:
     profile_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(profile_root))

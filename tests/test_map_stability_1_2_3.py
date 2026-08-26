@@ -40,6 +40,7 @@ def _bare_tab() -> StationsMapTab:
     tab._deferred_initial_ingest_pending = False
     tab._pending_map_payload = None
     tab._last_map_payload_sig = None
+    tab._last_map_auto_fit_sig = None
     tab._last_js8_load_ts = 0.0
     tab._last_exit_ts = 0.0
     tab._js8_rx_hub = None
@@ -350,6 +351,38 @@ def test_map_selected_station_paths_action_uses_existing_path_controls() -> None
     assert refreshes == ["selected_detail_paths", "selected_detail_paths_off"]
 
 
+def test_paths_view_callsign_search_becomes_implicit_path_target() -> None:
+    tab = _bare_tab()
+    tab._map_mode_combo = _FakeCombo([("Paths", "paths")])
+    tab._map_mode_combo.setCurrentIndex(0)
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "paths"
+    tab.show_link_paths = True
+    tab.link_mode = "all"
+    tab.link_value = ""
+    tab.relay_target = ""
+    tab.settings = {"operator_callsign": "N1MAG"}
+
+    assert StationsMapTab._path_target_from_search_text(tab, "KC7WOK") == "KC7WOK"
+    assert StationsMapTab._path_target_from_search_text(tab, "@KC7WOK") == "KC7WOK"
+    assert StationsMapTab._path_target_from_search_text(tab, "KC7WOK fire") == ""
+    assert StationsMapTab._path_target_from_search_text(tab, "N1MAG") == ""
+
+    tab.link_mode = "relay_target"
+    tab.link_value = "K7ETC"
+    tab.relay_target = "K7ETC"
+
+    assert StationsMapTab._path_target_from_search_text(tab, "KC7WOK") == ""
+
+
+def test_paths_view_implicit_search_target_flows_to_all_link_loaders() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "path_search_target = self._path_target_from_search_text(search_text)" in source
+    assert "effective_link_selection = (" in source
+    assert "link_selection=effective_link_selection" in source
+
+
 def test_selected_station_actions_ignore_operator_self() -> None:
     tab = _bare_tab()
     refreshes: list[str] = []
@@ -400,6 +433,109 @@ def test_compose_message_for_selected_station_prefills_non_self_callsign(monkeyp
     assert selector.selected == 1
     assert viewer.compose_js8_target_edit.text() == "K7ETC"
     assert preview_calls == ["preview"]
+
+
+def test_report_action_callsign_uses_reporter_not_report_title() -> None:
+    tab = _bare_tab()
+    payload = {
+        "type": "report",
+        "title": "QRT for station rearranging",
+        "rows": [{"label": "Reported By", "value": "W5TTA"}],
+    }
+    tab._map_selected_payload = payload
+
+    assert StationsMapTab._map_selected_station_callsign(tab) == ""
+    assert StationsMapTab._map_selected_action_callsign(tab, payload) == "W5TTA"
+
+
+def test_compose_message_for_report_prefills_reporter_callsign(monkeypatch) -> None:
+    tab = _bare_tab()
+    opened: list[str] = []
+    selector = SimpleNamespace(count=lambda: 2, selected=None)
+    selector.setCurrentRow = lambda row: setattr(selector, "selected", row)
+    viewer = SimpleNamespace(
+        compose_mode_selector=selector,
+        compose_js8_target_edit=_FakeLineEdit(),
+        _update_compose_preview=lambda: None,
+    )
+    main_window = SimpleNamespace(
+        message_viewer_tab=viewer,
+        open_messages_section=lambda section, **_kwargs: opened.append(section),
+    )
+    tab.settings = {"operator_callsign": "N1MAG"}
+    tab._map_selected_payload = {
+        "type": "report",
+        "title": "QRT for station rearranging",
+        "rows": [{"label": "Reported By", "value": "W5TTA"}],
+    }
+    monkeypatch.setattr(StationsMapTab, "window", lambda _self: main_window)
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.QTimer.singleShot", lambda _ms, callback: callback())
+
+    StationsMapTab._compose_message_for_selected_station(tab)
+
+    assert opened == ["compose"]
+    assert viewer.compose_js8_target_edit.text() == "W5TTA"
+
+
+def test_selected_detail_paths_tab_summarizes_direct_relay_and_shared_contacts() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 24 * 60 * 60
+    tab._map_selected_payload = {
+        "type": "report",
+        "title": "QRT for station rearranging",
+        "rows": [{"label": "Reported By", "value": "W5TTA"}],
+    }
+    tab._current_path_scope_label = lambda: "Off"
+    tab._path_to_planning_rows = lambda callsign, payload, rows: [("Planning", "Use RF Planning.")]
+    tab._map_path_snapshot = lambda callsign: {
+        "direct": "N1MAG -> W5TTA | SNR -3.2 | 40M | JS8Call",
+        "relay": "N1MAG -> K7ETC -> W5TTA",
+        "relay_edges": ["N1MAG -> K7ETC | SNR 2.0", "K7ETC -> W5TTA | SNR -4.0"],
+        "shared": ["K7ETC", "N7CWR"],
+    }
+
+    html = StationsMapTab._map_selected_paths_html(tab, tab._map_selected_payload)
+
+    assert "Station:</span> <span class='fio-detail-value'>W5TTA" in html
+    assert "Direct Path" in html
+    assert "N1MAG -&gt; W5TTA" in html
+    assert "Best Relay" in html
+    assert "N1MAG -&gt; K7ETC -&gt; W5TTA" in html
+    assert "Shared Contacts" in html
+    assert "K7ETC, N7CWR" in html
+
+
+def test_selected_detail_messages_tab_summarizes_matching_traffic() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 24 * 60 * 60
+    tab._map_selected_payload = {
+        "type": "report",
+        "title": "QRT for station rearranging",
+        "rows": [{"label": "Reported By", "value": "W5TTA"}],
+    }
+    tab._map_selected_message_context = lambda payload: {
+        "target": "messages",
+        "age_filter_seconds": 24 * 60 * 60,
+        "group_filter": "MAGNET",
+        "topic_filter": "Comms",
+        "query_filter": "W5TTA",
+    }
+    tab._map_message_snapshot = lambda callsign, context: {
+        "count": 7,
+        "unread": 2,
+        "newest_ts": 0,
+        "source_mix": {"JS8Call": 3, "CommStat": 4},
+        "topics": ["Comms", "General Intel"],
+    }
+
+    html = StationsMapTab._map_selected_messages_html(tab, tab._map_selected_payload)
+
+    assert "Matching Traffic" in html
+    assert ">7<" in html
+    assert "Unread" in html
+    assert ">2<" in html
+    assert "JS8Call 3, CommStat 4" in html
+    assert "Comms, General Intel" in html
 
 
 def test_selected_station_paths_toggle_restores_previous_report_context() -> None:
@@ -797,15 +933,19 @@ def test_sitrep_non_green_status_older_than_week_is_not_active() -> None:
     assert StationsMapTab._active_sitrep_status_key("green", stale, now_ts=now_ts) == "green"
 
 
-def test_selected_path_queries_are_scoped_to_operator_and_target_for_speed() -> None:
+def test_selected_path_queries_are_bounded_by_age_and_cached_by_target_for_speed() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     js8_block = source[source.index("def _load_js8_links") : source.index("def _load_varac_links")]
     varac_block = source[source.index("def _load_varac_links") : source.index("def _load_varac_stats")]
 
-    assert "(origin IN (?, ?) OR destination IN (?, ?))" in js8_block
-    assert "params.extend([my_call, relay_target, my_call, relay_target])" in js8_block
-    assert "(origin IN (?, ?) OR destination IN (?, ?))" in varac_block
-    assert "params.extend([my_call, relay_target, my_call, relay_target])" in varac_block
+    assert "if ts_cut:" in js8_block
+    assert 'where_parts.append("ts >= ?")' in js8_block
+    assert "relay_target," in js8_block
+    assert "_query_cache_get(cache_key, ttl_sec=2.0)" in js8_block
+    assert "if ts_cut:" in varac_block
+    assert 'where_parts.append("ts >= ?")' in varac_block
+    assert "relay_target," in varac_block
+    assert "_query_cache_get(cache_key, ttl_sec=2.0)" in varac_block
 
 
 def test_station_detected_capability_text_groups_traffic_and_apps() -> None:
@@ -943,8 +1083,9 @@ def test_selected_station_show_paths_converts_to_paths_context() -> None:
     detail_block = source[source.index("def _show_map_selected_detail") : source.index("def _map_payload_rows")]
     paths_block = source[source.index("def _show_paths_for_selected_station") : source.index("def _compose_message_for_selected_station")]
 
-    assert "can_show_paths = bool(kind == \"station\" and callsign and not self._map_selected_station_is_self(callsign))" in detail_block
-    assert "self._map_selected_paths_btn.setVisible(kind == \"station\" and bool(callsign))" in detail_block
+    assert "action_callsign = self._map_selected_action_callsign(payload)" in detail_block
+    assert "can_show_paths = bool(action_callsign and not self._map_selected_station_is_self(action_callsign))" in detail_block
+    assert "self._map_selected_paths_btn.setVisible(bool(action_callsign))" in detail_block
     assert "self._map_selected_paths_btn.setEnabled(can_show_paths)" in detail_block
     assert 'self._observation_focus_mode = "paths"' in paths_block
     assert "self._sitrep_status_only_enabled = False" in paths_block
@@ -1244,6 +1385,69 @@ def test_js8_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_age_
     }
     assert ("N1MAG", "W1OLD") not in pairs
     assert ("K7ETC", "W1OLD") not in pairs
+
+
+def test_js8_link_loader_paths_to_target_uses_short_relay_chain_in_age_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.get_config_dir", lambda: cfg_root)
+    now = 1_786_300_000.0
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.time.time", lambda: now)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE js8_links (
+              ts REAL,
+              origin TEXT,
+              destination TEXT,
+              snr REAL,
+              band TEXT,
+              freq_hz REAL,
+              is_spotter INTEGER,
+              is_relay INTEGER,
+              relay_via TEXT
+            )
+            """
+        )
+        rows = [
+            (now - 600, "N1MAG", "N7CWR", -8.2, "40M", 7115000, 1, 0, ""),
+            (now - 700, "KC7WOK", "N7CWR", 0.2, "40M", 7115000, 1, 0, ""),
+            (now - 800, "KC7WOK", "KL5OP", 4.0, "40M", 7115000, 1, 0, ""),
+            (now - 30 * 60 * 60, "N1MAG", "KL5OP", -14.5, "40M", 7115000, 1, 0, ""),
+        ]
+        conn.executemany("INSERT INTO js8_links VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    tab = _bare_tab()
+    tab.operator_index = {}
+    tab.stations = [
+        StationPoint("N1MAG", "DM79", name="Me", state="CO", lat=39.0, lon=-105.0),
+        StationPoint("N7CWR", "CN96", name="Bridge", state="WA", lat=46.7, lon=-121.0),
+        StationPoint("KC7WOK", "DN28", name="Bridge", state="MT", lat=48.0, lon=-114.0),
+        StationPoint("KL5OP", "BP51", name="Target", state="AK", lat=61.2, lon=-149.9),
+    ]
+
+    links, _stats = StationsMapTab._load_js8_links(
+        tab,
+        band_filter={"type": "all"},
+        my_call="N1MAG",
+        link_selection=("relay_target", "KL5OP"),
+        relay_target="KL5OP",
+        max_age_sec=24 * 60 * 60,
+    )
+
+    pairs = {tuple(sorted((link["origin"], link["destination"]))) for link in links}
+    assert pairs == {
+        ("N1MAG", "N7CWR"),
+        ("KC7WOK", "N7CWR"),
+        ("KC7WOK", "KL5OP"),
+    }
+    assert ("KL5OP", "N1MAG") not in pairs
 
 
 def test_varac_link_loader_paths_to_target_uses_direct_and_shared_contacts_in_age_window(
@@ -2315,6 +2519,8 @@ def test_regional_intelligence_map_selection_routes_to_messages_by_state_and_top
         "source_family": "",
         "age_filter_seconds": 24 * 60 * 60,
         "concern_only": True,
+        "state_filter": "CA",
+        "fema_region_filter": "",
     }
 
 
@@ -2340,7 +2546,9 @@ def test_regional_intelligence_region_detail_has_region_scope() -> None:
 
     assert "R05 / IL, IN, MI, MN, OH, WI" in detail
     assert context["topic_filter"] == "Comms"
-    assert context["query_filter"] == "R05"
+    assert context["query_filter"] == ""
+    assert context["state_filter"] == ""
+    assert context["fema_region_filter"] == "R05"
 
 
 def test_regional_intelligence_national_detail_does_not_search_literal_national() -> None:
@@ -2364,6 +2572,64 @@ def test_regional_intelligence_national_detail_does_not_search_literal_national(
 
     assert context["topic_filter"] == "Comms"
     assert context["query_filter"] == ""
+    assert context["state_filter"] == ""
+    assert context["fema_region_filter"] == ""
+
+
+def test_regional_intelligence_national_detail_card_summarizes_evidence() -> None:
+    tab = _bare_tab()
+    payload = {
+        "type": "regional_intelligence",
+        "area_type": "national",
+        "title": "National Regional Intelligence",
+        "level": "ORANGE",
+        "trend": "increasing",
+        "topic": "Comms",
+        "topics": ["Comms", "Fire"],
+        "source_mix": {"CommStat": 2, "RF Reports": 1},
+        "evidence": [
+            {
+                "source_family": "commstat",
+                "evidence_type": "status",
+                "topic": "Comms",
+                "reporter_callsign": "K6NLX",
+                "age_hours": 1.2,
+                "summary": "Regional comms degraded",
+            }
+        ],
+        "rows": [
+            {"label": "Status", "value": "ORANGE / increasing"},
+            {"label": "Area", "value": "National"},
+            {"label": "Evidence", "value": "18 reports from 8 stations"},
+            {"label": "Topics", "value": "Comms, Fire"},
+        ],
+    }
+
+    html = StationsMapTab._map_selected_detail_html(tab, payload)
+
+    assert "Regional Intelligence" in html
+    assert "National" in html
+    assert "18 reports from 8 stations" in html
+    assert "CommStat 2" in html
+    assert "Regional comms degraded" in html
+
+
+def test_regional_intelligence_summary_panel_defaults_collapsed_with_toggle() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+
+    assert "self._regional_summary_collapsed: bool = True" in source
+    assert "window.regionalSummaryCollapsed" in source
+    assert "data-regional-summary-toggle" in source
+    assert "regional-summary-panel.collapsed .regional-summary-body" in source
+
+
+def test_regional_intelligence_summary_collapsed_action_updates_python_state() -> None:
+    tab = _bare_tab()
+    tab._regional_summary_collapsed = True
+
+    StationsMapTab._handle_map_detail_action(tab, {"action": "regional_summary_collapsed", "collapsed": False})
+
+    assert tab._regional_summary_collapsed is False
 
 
 def test_regional_intelligence_density_events_skip_normal_evidence() -> None:
@@ -2919,6 +3185,41 @@ def test_paths_chip_toggles_off_without_clearing_report_filters() -> None:
     assert calls == ["paths_map_focus", "paths_map_focus_off"]
 
 
+def test_paths_view_selection_does_not_bounce_when_path_layer_already_visible() -> None:
+    tab = _bare_tab()
+    tab._observation_focus_enabled = True
+    tab._observation_focus_mode = "regional_intelligence"
+    tab.show_link_paths = True
+    tab.link_mode = "my_station"
+    tab.link_value = ""
+    tab.relay_target = ""
+    tab._now_reachable_enabled = False
+    tab._sitrep_status_only_enabled = False
+    tab.map_links_chk = _FakeCheck(True)
+    tab.map_stations_chk = _FakeCheck(True)
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("Network", ("all", ""))])
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("My Station", ("my_station", "")), ("Network", ("all", ""))])
+    calls: list[str] = []
+    tab._clamp_path_recency_if_needed = lambda: None
+    tab._update_sitrep_status_button_visual = lambda *_args, **_kwargs: None
+    tab._update_now_reachable_button_visual = lambda *_args, **_kwargs: None
+    tab._update_selected_paths_button_visual = lambda *_args, **_kwargs: None
+    tab._update_map_mode_buttons = lambda *_args, **_kwargs: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_now_reachable_summary = lambda: None
+    tab._refresh_relay_targets = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda *_args, **_kwargs: None
+    tab._request_map_refresh = lambda **kwargs: calls.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab.focus_paths(tab)
+
+    assert tab._observation_focus_enabled is True
+    assert tab._observation_focus_mode == "paths"
+    assert tab.show_link_paths is True
+    assert tab.link_mode == "my_station"
+    assert calls == ["paths_map_focus"]
+
+
 def test_all_stations_focus_clears_path_layer_state() -> None:
     tab = _bare_tab()
     tab._observation_focus_enabled = True
@@ -3031,6 +3332,15 @@ def test_map_link_status_text_explains_common_zero_link_states() -> None:
         display_link_count=0,
         link_selection=("group", "MR08"),
     ) == "No path links found for group MR08."
+    assert StationsMapTab._map_link_status_text(
+        tab,
+        links_active=True,
+        show_link_paths=True,
+        loaded_link_count=0,
+        display_link_count=0,
+        link_selection=("relay_target", "KC7WOK"),
+        recency_seconds=24 * 60 * 60,
+    ) == "No direct or shared path found from my station to KC7WOK in the selected time window."
 
 
 def test_map_zero_link_window_does_not_probe_all_history_for_status() -> None:
@@ -3233,6 +3543,7 @@ def test_map_selected_detail_html_distinguishes_commstat_report_location_from_re
             "source_family": "commstat",
             "title": "CommStat StatRep | COUNTY | YELLOW",
             "route": "COMMSTAT | General Intel | from KD9DSS",
+            "topics": ["General Intel", "Fire"],
             "scope": "COUNTY",
             "state_confidence": "remarks",
             "geo_confidence": "grid6",
@@ -3257,7 +3568,69 @@ def test_map_selected_detail_html_distinguishes_commstat_report_location_from_re
     assert "Report Scope" in html
     assert "Location Note" in html
     assert "report location may differ from the reporting station" in html
+    assert "General Intel" in html
+    assert "Fire" in html
     assert "<div class='fio-detail-heading'>Location</div>" not in html
+
+
+def test_commstat_artifact_metadata_lookup_resolves_regional_state_from_body(tmp_path: Path) -> None:
+    db_path = tmp_path / "nets.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE commstat_artifacts (
+                id INTEGER PRIMARY KEY,
+                from_call TEXT,
+                target TEXT,
+                report_group TEXT,
+                grid TEXT,
+                state_code TEXT,
+                scope TEXT,
+                status_label TEXT,
+                alert_color TEXT,
+                title TEXT,
+                body_text TEXT,
+                remarks_text TEXT,
+                transport_mode TEXT,
+                reach_mode TEXT,
+                event_ts_utc TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO commstat_artifacts (
+                id, from_call, target, report_group, grid, state_code, scope,
+                status_label, alert_color, title, body_text, remarks_text,
+                transport_mode, reach_mode, event_ts_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                599,
+                "K6NLX",
+                "@MAGNET",
+                "MAGNET",
+                "DM43FJ",
+                "IN",
+                "REGION",
+                "YELLOW",
+                "",
+                "CommStat StatRep | REGION | YELLOW",
+                "Extreme Heat Warning for most of southern & central AZ still in place until August 29 by NWS Phoenix AZ",
+                "Extreme Heat Warning for most of southern & central AZ still in place until August 29 by NWS Phoenix AZ",
+                "internet",
+                "internet",
+                "2026-08-26T16:00:00+00:00",
+            ),
+        )
+    tab = _bare_tab()
+
+    lookup = StationsMapTab._commstat_artifact_metadata_lookup(tab, db_path)
+
+    assert lookup["commstat_artifacts:599"]["state"] == "AZ"
+    assert lookup["commstat_artifacts:599"]["grid"] == "DM43FJ"
+    assert lookup["commstat_artifacts:599"]["state_confidence"] == "remarks"
 
 
 def test_map_advanced_state_filter_uses_enriched_commstat_state() -> None:
@@ -3345,11 +3718,58 @@ def test_push_map_payload_queues_while_page_loading() -> None:
     tab._map_page_loading = True
     tab._map_initialized = False
 
-    tab._push_map_payload([{"callsign": "N0CALL"}], [{"origin": "A", "destination": "B"}])
+    tab._push_map_payload([{"callsign": "N0CALL"}], [{"origin": "A", "destination": "B"}], auto_fit=True)
 
     assert tab._pending_map_payload is not None
     assert tab._pending_map_payload["markers"][0]["callsign"] == "N0CALL"
     assert tab._pending_map_payload["links"][0]["origin"] == "A"
+    assert tab._pending_map_payload["auto_fit"] is True
+
+
+def test_map_auto_fit_only_triggers_for_changed_focused_results() -> None:
+    tab = _bare_tab()
+    tab.show_link_paths = True
+    tab.link_mode = "my_station"
+    tab.link_value = ""
+    tab.recency_seconds = 86400
+
+    first = tab._map_auto_fit_requested(
+        ("paths", "24h"),
+        map_mode="paths",
+        markers=[],
+        links=[{"origin": "N1MAG", "destination": "KC7WOK"}],
+    )
+    repeat = tab._map_auto_fit_requested(
+        ("paths", "24h"),
+        map_mode="paths",
+        markers=[],
+        links=[{"origin": "N1MAG", "destination": "KC7WOK"}],
+    )
+    changed_target = tab._map_auto_fit_requested(
+        ("paths", "24h", "KL5OP"),
+        map_mode="paths",
+        markers=[],
+        links=[{"origin": "N1MAG", "destination": "N7CWR"}],
+    )
+
+    assert first is True
+    assert repeat is False
+    assert changed_target is True
+
+
+def test_map_auto_fit_does_not_trigger_for_unfiltered_all_stations() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 86400
+
+    assert (
+        tab._map_auto_fit_requested(
+            ("all", "24h"),
+            map_mode="all",
+            markers=[{"callsign": "N0CALL", "lat": 40, "lon": -105}],
+            links=[],
+        )
+        is False
+    )
 
 
 def test_js8_log_indexer_repeated_scan_does_not_duplicate_map_or_activity_rows(
@@ -4888,7 +5308,9 @@ def test_map_to_messages_context_uses_real_filters_before_search_fallback() -> N
     assert "def _update_map_context_filter_label" in source
     assert "Map filter active:" in source
     assert "Use Clear Filters to return to the normal inbox." in source
-    assert "Map non-green/status evidence only" in source
+    assert "Map State" in source
+    assert "Map FEMA Region" in source
+    assert "non-green/status evidence only" in source
 
 
 def test_map_leaflet_template_includes_operator_zoom_presets() -> None:
@@ -4903,6 +5325,8 @@ def test_map_leaflet_template_includes_operator_zoom_presets() -> None:
     assert 'data-zoom-preset="north-america">North America' in source
     assert "markers = payload.markers; renderMarkers(markers);" in source
     assert "links = payload.links; renderLinks(links);" in source
+    assert "if (payload.auto_fit)" in source
+    assert "window.fitMapResults();" in source
 
 
 def test_city_population_layer_is_optional_and_zoom_aware() -> None:

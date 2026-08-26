@@ -4,7 +4,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from freqinout.core.commstat_sitrep import infer_state_and_geo, parse_commstat_message
+from freqinout.core.commstat_sitrep import (
+    infer_state_and_geo,
+    parse_commstat_message,
+    resolve_commstat_reported_for_state,
+)
 from freqinout.core.sitrep_fusion import _build_report_key
 from freqinout.core.sitrep_ingest import _ensure_local_tables, _ingest_commstat3
 
@@ -382,6 +386,39 @@ def test_commstat_state_inference_does_not_treat_in_or_as_casual_words() -> None
     assert infer_state_and_geo("", "Power restored OR pending")[0] == ""
     assert infer_state_and_geo("", "Reno NV evacuation center")[0] == "NV"
     assert infer_state_and_geo("", "OR NTR")[0] == "OR"
+    assert (
+        infer_state_and_geo(
+            "DM43FJ",
+            "Extreme Heat Warning for most of southern & central AZ still in place until August 29",
+        )[0]
+        == "AZ"
+    )
+
+
+def test_commstat_reported_for_state_prefers_inferred_location_for_regional_scope() -> None:
+    state, state_confidence, geo_confidence = resolve_commstat_reported_for_state(
+        state_code="IN",
+        grid="DM43FJ",
+        scope="REGION",
+        remarks="Extreme Heat Warning for most of southern & central AZ still in place until August 29 by NWS Phoenix AZ",
+    )
+
+    assert state == "AZ"
+    assert state_confidence == "remarks"
+    assert geo_confidence == "grid6"
+
+
+def test_commstat_reported_for_state_preserves_my_qth_state() -> None:
+    state, state_confidence, geo_confidence = resolve_commstat_reported_for_state(
+        state_code="IN",
+        grid="DM43FJ",
+        scope="MY QTH",
+        remarks="Extreme Heat Warning for most of southern & central AZ still in place until August 29 by NWS Phoenix AZ",
+    )
+
+    assert state == "IN"
+    assert state_confidence == "remarks"
+    assert geo_confidence == "grid6"
 
 
 def test_commstat_standard_message_parser_preserves_other_location_state() -> None:

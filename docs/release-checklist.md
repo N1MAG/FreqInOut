@@ -24,6 +24,7 @@ Use this checklist before pushing a release commit, tagging, or building install
 
 - Linux: run installer in at least one fresh scenario and one update scenario.
 - Linux: verify desktop launcher/icon behavior and logs.
+- Linux multi-rig WIP: install into a separate test directory before any in-place production upgrade test.
 - Windows: run `python build_executable.py`.
 - Windows: update `installer.iss` and compile with Inno Setup.
 
@@ -76,3 +77,10 @@ python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|oper
 5. Commit release changes.
 6. Tag release.
 7. Publish release notes from `CHANGELOG.md`.
+
+## 8) Multi-rig Test Readiness
+
+- Confirm the active runtime profile before inspecting data. For Bill's local multi-rig lab, use `/Users/bill/RadioCode/runtime/multi-rig/config/freqinout.db` and `/Users/bill/RadioCode/runtime/multi-rig/config/freqinout_nets.db`.
+- Verify FIO-A/FIO-B selected-radio settings panes, launch control, health monitoring, JS8 profile folders, Fast Light paths, VarAC paths, and CommStat connector paths all follow the selected radio.
+- Run the map operator workflow with real JS8 `inbox.db`, `ALL.TXT`, `DIRECTED.TXT`, and CommStat traffic so path, regional intelligence, and message handoff behavior are exercised together.
+- Capture one fresh-install bundle and one production-upgrade bundle with `tools/multirig_capture_test_session.py`.

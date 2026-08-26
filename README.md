@@ -39,6 +39,14 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v2.0.0
+
+- Multi-rig testing release with radio-profile-specific runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling.
+- Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
+- Messages and map topic filtering were tightened so status labels such as `Not Reported` do not create false topic matches while real reported issues still surface.
+- Launch Control now treats configured supported apps and custom tools as one operator-facing software surface with Monitor Health, Launch at Startup, Start/Stop, and Status behavior.
+- Station Health and readiness guidance were refined for multi-radio operating environments, including clearer distinction between monitored apps and manually managed tools.
+
 ## What's New in v1.2.8
 
 - Station Health now shows one latest scheduler success plus an issue log, so routine already-applied schedule checks do not crowd out useful information.
@@ -113,8 +121,8 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 ```bash
 git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
 cd FreqInOut
-python -m venv venv
-.\venv\Scripts\Activate.ps1
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m freqinout.main
 ```
@@ -127,8 +135,8 @@ This path runs FreqInOut from a source checkout.
 sudo apt-get install python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0
 git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
 cd FreqInOut
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python -m freqinout.main
 ```
@@ -154,7 +162,7 @@ curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqIn
 This installer:
 - Checks Python version (supported: 3.9 through 3.13; 3.11 recommended)
 - Offers to install missing system dependencies automatically
-- Creates venv, installs requirements, and creates launcher + desktop icon
+- Creates a virtual environment, installs requirements, and creates launcher + desktop icon
 - If already installed, asks for existing app location and lets you choose:
   update app, install icon/launcher, or both
 - Backs up detected user/config data before updates

@@ -1314,6 +1314,25 @@ def test_commstat_field_intelligence_infers_other_location_state_from_body() -> 
     assert info.metadata["state_confidence"] == "remarks"
 
 
+def test_commstat_field_intelligence_resolves_regional_state_from_body_over_stale_state() -> None:
+    info = analyze_commstat_fields(
+        artifact_kind="STATREP",
+        title="CommStat StatRep | REGION | YELLOW",
+        body="Extreme Heat Warning for most of southern & central AZ still in place until August 29 by NWS Phoenix AZ",
+        from_call="K6NLX",
+        target="@MAGNET",
+        state="IN",
+        grid="DM43FJ",
+        scope="REGION",
+        status="YELLOW",
+    )
+
+    assert info.state == "AZ"
+    assert info.grid == "DM43FJ"
+    assert "Weather" in info.topics
+    assert info.metadata["state_confidence"] == "remarks"
+
+
 def test_form_metadata_parser_is_core_and_handles_missing_templates(tmp_path) -> None:
     path = tmp_path / "K7ETC-20260731-000127Z-54.k2s"
     raw = (
@@ -2187,6 +2206,31 @@ def test_map_concern_context_filters_green_messages_but_keeps_caution() -> None:
 
     assert MessageViewerTab._row_matches_map_context_filter(tab, yellow) is True
     assert MessageViewerTab._row_matches_map_context_filter(tab, green) is False
+
+
+def test_map_context_filters_messages_by_structured_state_and_fema_region() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._map_context_filter = {
+        "concern_only": True,
+        "state_filter": "",
+        "fema_region_filter": "R05",
+    }
+    in_region_payload = _commstat_artifact(state_code="IN", status_label="RED", alert_color="red")
+    out_region_payload = _commstat_artifact(state_code="NV", status_label="RED", alert_color="red")
+    in_region = UnifiedMessage("CommStat", "INFO", "KD9DSS", "MAGNET", 1.0, "", "IN RED", "commstat", in_region_payload)
+    out_region = UnifiedMessage("CommStat", "INFO", "KG6MTM", "MAGNET", 1.0, "", "NV RED", "commstat", out_region_payload)
+
+    assert MessageViewerTab._row_matches_map_context_filter(tab, in_region) is True
+    assert MessageViewerTab._row_matches_map_context_filter(tab, out_region) is False
+
+    tab._map_context_filter = {
+        "concern_only": True,
+        "state_filter": "NV",
+        "fema_region_filter": "",
+    }
+
+    assert MessageViewerTab._row_matches_map_context_filter(tab, in_region) is False
+    assert MessageViewerTab._row_matches_map_context_filter(tab, out_region) is True
 
 
 def test_inbox_filter_criteria_combines_common_row_filters() -> None:

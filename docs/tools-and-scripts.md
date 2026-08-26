@@ -13,26 +13,27 @@ Windows PowerShell:
 
 ```powershell
 cd C:\path\to\FreqInOut
-.\venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 Linux/macOS:
 
 ```bash
 cd ~/path/to/FreqInOut
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
 ## Script index (all delivered scripts)
 
 ### Top-level helper scripts (repo root)
 
-- `install_freqinout.py`: creates `venv` (if missing) and installs `requirements.txt`.
+- `install_freqinout.py`: creates `.venv` (if missing) and installs `requirements.txt`.
 - `view_logs.py`: prints full current log file to terminal.
 - `build_executable.py`: Windows PyInstaller build helper.
 - `release_builder.py`: release preflight + optional EXE build helper.
 - `install_FreqInOut_linux.sh`: Linux installer (guided, repair, dry-run, update flows).
 - `uninstall_FreqInOut_linux.sh`: Linux uninstaller.
+- `start-multi-rig.sh`: local multi-rig launcher that uses the configured multi-rig runtime profile.
 
 Safe starter commands:
 
@@ -42,12 +43,14 @@ python build_executable.py
 python release_builder.py
 bash install_FreqInOut_linux.sh --help
 bash uninstall_FreqInOut_linux.sh --help
+./start-multi-rig.sh
 ```
 
 Notes:
 
 - `view_logs.py` prints the entire log; use only when you intentionally want full output.
 - `install_freqinout.py` does not have `-h`; running it executes installation immediately.
+- Older local checkouts may still have a `venv` directory. New helper scripts prefer `.venv` and fall back to `venv` when needed.
 
 ### DB wrappers (recommended for beginners)
 
@@ -203,6 +206,29 @@ Notes:
 - `CommStatOne` defaults include `commstat` and `littlegucci` aliases; edit `tools/linux_fio_bench_process_patterns.tsv` if your command line differs.
 - Use UTC event notes in the generated `operator_notes.txt` for better correlation with logs.
 
+### Multi-rig lab and field-test helpers
+
+- `tools/multirig_test_lab.py`: prepares repeatable multi-rig runtime profiles, upgrade checks, and fixture-driven lab runs.
+- `tools/multirig_upgrade_lab.sh`: small shell wrapper for common upgrade-lab commands.
+- `tools/start_multirig_gui_lab.sh`: starts/stops/checks the local three-profile GUI lab for FLRig, FLDigi, JS8Call, and companion app testing.
+- `tools/multirig_capture_test_session.py`: creates a portable evidence bundle from a multi-rig field-test session.
+
+Safe starter commands:
+
+```bash
+.venv/bin/python tools/multirig_test_lab.py prepare all --reset
+.venv/bin/python tools/multirig_test_lab.py check upgrade
+tools/multirig_upgrade_lab.sh status
+tools/start_multirig_gui_lab.sh status
+.venv/bin/python tools/multirig_capture_test_session.py --help
+```
+
+Notes:
+
+- Use [docs/multirig-test-lab.md](multirig-test-lab.md) for the full repeatable lab workflow.
+- Multi-rig runtime data may live outside `~/.freqinout/config`; confirm the active `FREQINOUT_CONFIG_DIR` before inspecting or modifying databases.
+- For Bill's current multi-rig lab, the usual active databases are under `/Users/bill/RadioCode/runtime/multi-rig/config`.
+
 ## Common workflows
 
 ### Check DB health without modifying data
@@ -230,7 +256,7 @@ python release_builder.py --build-exe
 
 ## Troubleshooting
 
-- `Python not found`: activate venv or install a supported Python version (3.9 through 3.13).
+- `Python not found`: activate `.venv` or install a supported Python version (3.9 through 3.13).
 - `Permission denied` on PowerShell wrapper: run with `-ExecutionPolicy Bypass` as shown above.
 - `PyInstaller build failed`: install PyInstaller in the active environment.
 - `DB not found`: confirm config/database path and that FreqInOut has run at least once.

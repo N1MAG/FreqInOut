@@ -80,6 +80,12 @@ bash install_FreqInOut_linux.sh</code></pre>
   <pre><code>bash install_FreqInOut_linux.sh --branch "main"</code></pre>
   <p>Use channel shortcut:</p>
   <pre><code>bash install_FreqInOut_linux.sh --channel beta</code></pre>
+  <p>Install a private multi-rig WIP build for isolated testing:</p>
+  <pre><code>bash install_FreqInOut_linux.sh \
+  --dir "$HOME/FreqInOut-multi-rig-test" \
+  --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git" \
+  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"</code></pre>
+  <p>Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.</p>
   <p>Offline mode:</p>
   <pre><code>bash install_FreqInOut_linux.sh --offline</code></pre>
   <p>Set an explicit log file:</p>

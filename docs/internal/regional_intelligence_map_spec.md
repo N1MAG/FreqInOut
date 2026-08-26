@@ -262,16 +262,27 @@ Implemented:
   in Map Tools.
 - Ready-state map diagnostics card now hides repair/debug buttons until the map
   is warming, loading, or degraded.
+- Regional Intel overview is collapsed by default and can be expanded from the
+  map without changing filters or selection.
+- Regional Intel message routing carries structured state/FEMA-region scope plus
+  the active topic/group/age context.
 
-Remaining UI/UX work:
+Implemented in the operator-map completion pass:
 
-- Move most raw layer/filter controls fully into an Advanced drawer and make the
-  default top bar even smaller.
-- Add a national Regional Intel summary state for the right panel, not only
-  state/FEMA-region detail.
-- Add direct FEMA-region message routing instead of relying on text search for
-  region identifiers.
-- Add visual refinement for the regional overview so high-priority areas are
-  easier to scan when there are many states.
-- Add lazy detail loading if evidence lists grow beyond the compact browser
-  payload.
+- Raw layer/filter controls are secondary in Advanced Map Tools; the main map
+  bar carries the normal operator controls.
+- National Regional Intel can be selected from the summary and opens a right
+  panel summary instead of using a literal `National` inbox search.
+- FEMA-region message routing carries structured region scope plus current
+  topic/group/age context.
+- Regional overview is collapsed by default, hides green rows from the summary,
+  caps visible rows, and shows overflow counts for busy filters.
+- Browser payloads carry compact evidence lists. Deeper lazy evidence retrieval
+  is deferred until live payload size shows a need.
+
+Follow-on work:
+
+- Continue field-testing direct FEMA-region message routing against live
+  CommStat and Spotter data.
+- Add mesh traffic as another normalized evidence source once that integration
+  exists.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0]
+- Added: Multi-rig testing release with profile-scoped radio runtime configuration, launch control, health monitoring, and JS8/Fast Light path handling.
+- Added: Map intelligence now includes Regional Intel heat-map behavior, focused path rendering, station/report action panels, CommStat reported-for/reported-by handling, and map-to-Messages handoff.
+- Fixed: Message and map topic filtering no longer treats status labels such as `Power: Not Reported` as real topic evidence while preserving real reports such as outages or contaminated water.
+- Changed: Launch Control now presents configured supported apps and custom tools through one operator-facing software surface with Monitor Health, Launch at Startup, Start/Stop, and Status behavior.
+- Changed: Station Health and readiness guidance now better reflect multi-radio operating environments and the difference between monitored apps and manually managed tools.
+
 ## [1.2.8]
 - Changed: Station Health now shows one latest scheduler success plus an issue log instead of repeating routine already-applied scheduler checks.
 - Changed: Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer count as active station responsiveness issues.
