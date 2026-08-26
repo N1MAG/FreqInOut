@@ -105,6 +105,32 @@ TOPIC_SEVERITY = {
 SIGNAL_SOURCES = {"js8call", "js8", "varac"}
 PATH_SOURCES = {"propagation", "peer_schedule", "path"}
 PLANNING_SOURCES = {"rf_pin", "planning_pin"}
+AMBIGUOUS_STATE_WORDS = {"IN", "OR"}
+NON_LOCATION_PRECEDERS = {
+    "BACK",
+    "BEEN",
+    "CHECK",
+    "CONFIRMED",
+    "DOWN",
+    "FOUND",
+    "HEARD",
+    "ISSUE",
+    "ISSUES",
+    "LOST",
+    "NEEDED",
+    "OPEN",
+    "OUT",
+    "PENDING",
+    "REPORTED",
+    "REPORTS",
+    "RESTORED",
+    "RUNNING",
+    "SEEN",
+    "SHOWING",
+    "SHOWN",
+    "STARTED",
+    "UPDATED",
+}
 
 
 @dataclass(frozen=True)
@@ -638,9 +664,21 @@ def _state_from_observation_text(obs: Observation) -> str:
     for pattern in patterns:
         for match in re.finditer(pattern, upper):
             abbr = match.group(1).strip().upper()
-            if abbr in state_values:
+            if abbr in state_values and _state_abbr_context_is_location(upper, match):
                 return abbr
     return ""
+
+
+def _state_abbr_context_is_location(text: str, match: re.Match[str]) -> bool:
+    abbr = str(match.group(1) or "").strip().upper()
+    if abbr not in AMBIGUOUS_STATE_WORDS:
+        return True
+    prefix = text[: match.start(1)]
+    words = re.findall(r"[A-Z]+", prefix)
+    prev = words[-1] if words else ""
+    if prev in NON_LOCATION_PRECEDERS:
+        return False
+    return True
 
 
 def _confidence_for_observation(obs: Observation) -> float:

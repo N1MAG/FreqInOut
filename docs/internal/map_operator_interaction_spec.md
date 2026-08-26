@@ -111,8 +111,15 @@ must prefer the structured reported-for location when present. The side panel
 must show `Reported For` and `Reported By` so a report submitted by an operator
 in one state about an issue in another state is not misread as a placement bug.
 
-When direct source fields are available, use them. Text parsing is a fallback,
-not the preferred source for CommStat geography.
+For CommStat 4.7 structured `statrep` rows, `statrep.grid` is the mapped report
+location used by CommStat itself and `statrep.from_callsign` is the reporter.
+FIO should project these as `commstat_artifacts.grid` and
+`commstat_artifacts.from_call`, then present them as `Reported For` and
+`Reported By`. When direct source fields are available, use them. Text parsing
+is a fallback, not the preferred source for CommStat geography. Free text may
+infer a state when the grid is missing or coarse, but it must not turn ordinary
+words such as `in` or `or` into Indiana/Oregon or override structured
+reported-for geography.
 
 ## Topic And Status Filtering
 
@@ -476,8 +483,6 @@ into the inbox so the operator lands on the evidence that caused the map state.
 
 ## Known Open Work
 
-- Confirm CommStat structured field names across installed versions and prefer
-  direct reported-for values over parsing wherever present.
 - Complete Station Status as a known-status-only visual view rather than a table
   or station inventory.
 - Further simplify Advanced Map Tools so it cannot conflict with smart view

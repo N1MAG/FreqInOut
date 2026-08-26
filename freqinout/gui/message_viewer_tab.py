@@ -14717,18 +14717,20 @@ class MessageViewerTab(QWidget):
                 status=msg.status_label or msg.alert_color or "INFO",
                 source=msg.source_family_label or "CommStat",
             )
+            reported_for = " / ".join(
+                part for part in (str(msg.state_code or "").strip().upper(), str(msg.grid or "").strip().upper()) if part
+            )
             self._append_detail_section(
                 lines,
                 "Key Fields",
                 (
-                    ("From", msg.from_call),
+                    ("Reported By", msg.from_call),
                     ("To", msg.target),
                     ("Group", msg.report_group),
                     ("Status", msg.status_label),
                     ("Alert", msg.alert_color),
-                    ("State", msg.state_code),
-                    ("Grid", msg.grid),
-                    ("Scope", msg.scope),
+                    ("Reported For", reported_for or msg.scope),
+                    ("Report Scope", msg.scope),
                     ("Subtype", msg.subtype),
                     ("Receipt", msg.transport_label),
                     ("Reach", msg.reach_label),

@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
@@ -6195,3 +6196,14 @@ def test_message_map_context_falls_back_to_single_group_filter() -> None:
         "group_filter": "MAGNET",
         "topic_filter": "",
     }
+
+
+def test_commstat_message_detail_uses_reported_for_and_reported_by_labels() -> None:
+    source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+    block = source[source.index("def _load_commstat_content") : source.index("def _mark_varac_read")]
+
+    assert '("Reported By", msg.from_call)' in block
+    assert '("Reported For", reported_for or msg.scope)' in block
+    assert '("Report Scope", msg.scope)' in block
+    assert '("State", msg.state_code)' not in block
+    assert '("Grid", msg.grid)' not in block

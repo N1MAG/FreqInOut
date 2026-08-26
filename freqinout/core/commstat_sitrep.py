@@ -145,6 +145,33 @@ _STANDARD_MARKERS = (
     ("{^%3}", "{^%}"),
 )
 
+_AMBIGUOUS_STATE_WORDS = {"IN", "OR"}
+_NON_LOCATION_PRECEDERS = {
+    "BACK",
+    "BEEN",
+    "CHECK",
+    "CONFIRMED",
+    "DOWN",
+    "FOUND",
+    "HEARD",
+    "ISSUE",
+    "ISSUES",
+    "LOST",
+    "NEEDED",
+    "OPEN",
+    "OUT",
+    "PENDING",
+    "REPORTED",
+    "REPORTS",
+    "RESTORED",
+    "RUNNING",
+    "SEEN",
+    "SHOWING",
+    "SHOWN",
+    "STARTED",
+    "UPDATED",
+}
+
 
 def normalize_commstat_text(text: object) -> str:
     out = str(text or "").strip()
@@ -479,9 +506,21 @@ def _state_code_from_remarks(remarks: object) -> Tuple[str, str]:
     for pattern in patterns:
         for match in re.finditer(pattern, text):
             abbr = str(match.group(1) or "").strip().upper()
-            if abbr in VALID_STATE_CODES:
+            if abbr in VALID_STATE_CODES and _state_abbr_context_is_location(text, match):
                 return abbr, "remarks"
     return "", "unknown"
+
+
+def _state_abbr_context_is_location(text: str, match: re.Match[str]) -> bool:
+    abbr = str(match.group(1) or "").strip().upper()
+    if abbr not in _AMBIGUOUS_STATE_WORDS:
+        return True
+    prefix = text[: match.start(1)]
+    words = re.findall(r"[A-Z]+", prefix)
+    prev = words[-1] if words else ""
+    if prev in _NON_LOCATION_PRECEDERS:
+        return False
+    return True
 
 
 def _lookup_named_code(section: object, code: str) -> str:

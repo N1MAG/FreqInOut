@@ -376,6 +376,14 @@ def test_commstat_other_location_remarks_infer_impacted_state_without_street_fal
     assert geo_confidence == "grid6"
 
 
+def test_commstat_state_inference_does_not_treat_in_or_as_casual_words() -> None:
+    assert infer_state_and_geo("", "Power is out in")[0] == ""
+    assert infer_state_and_geo("", "Road closures reported in")[0] == ""
+    assert infer_state_and_geo("", "Power restored OR pending")[0] == ""
+    assert infer_state_and_geo("", "Reno NV evacuation center")[0] == "NV"
+    assert infer_state_and_geo("", "OR NTR")[0] == "OR"
+
+
 def test_commstat_standard_message_parser_preserves_other_location_state() -> None:
     parsed = parse_commstat_message(
         "KD9DSS: @COMMSTAT ,DM09CL,2,R123,211111111111,Reno-Sparks NV Evacuation Center,{&%3}",
