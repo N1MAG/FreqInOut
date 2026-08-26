@@ -509,7 +509,11 @@ def test_map_selected_station_detail_suppresses_raw_question_prompt() -> None:
 
 def test_map_selected_paths_html_names_topology_scope() -> None:
     tab = _bare_tab()
-    tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
+    tab._map_selected_payload = {
+        "type": "station",
+        "title": "K7ETC",
+        "rows": [{"label": "Schedule", "value": "Stable on 40M now"}],
+    }
     tab.show_link_paths = True
     tab.link_mode = "station"
     tab.link_value = "K7ETC"
@@ -519,6 +523,8 @@ def test_map_selected_paths_html_names_topology_scope() -> None:
     assert "Path Topology" in html
     assert "K7ETC" in html
     assert "Selected K7ETC" in html
+    assert "Stable on 40M now" in html
+    assert "Use the peer schedule first" in html
     assert "who reported hearing whom" in html
 
 
@@ -580,6 +586,20 @@ def test_station_status_mode_hides_unknown_station_inventory() -> None:
     assert "if sitrep_mode:" in render_block
     assert 'marker.get("spotter_status_key")' in render_block
     assert '{"red", "yellow", "green"}' in render_block
+
+
+def test_station_status_summary_is_compact_and_legend_omits_unknown() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    summary_block = source[source.index("function buildSitrepSummaryHtml") : source.index("const sitrepSummaryPanel")]
+    legend_block = source[source.index("function buildLegendHtml") : source.index("function updateLegend")]
+
+    assert "SitRep State Summary" not in summary_block
+    assert "<b>Station Status</b>" in summary_block
+    assert "stations with known status" in summary_block
+    assert "No current state rollups" not in summary_block
+    assert "const stationStatusItems = [" in legend_block
+    assert "if (mode !== 'sitrep')" in legend_block
+    assert "Unknown / No Report" in legend_block
 
 
 def test_advanced_state_filter_uses_reported_for_state_aliases() -> None:
@@ -1194,12 +1214,94 @@ def test_report_focus_event_builder_deduplicates_same_source_report() -> None:
     assert events[0]["source_ref"] == "file:/tmp/MCF701C-HYG0.txt"
 
 
+def test_report_focus_event_builder_deduplicates_file_source_and_metadata_path() -> None:
+    tab = _bare_tab()
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", "")])
+    station_lookup = {"KI6QDB": StationPoint(callsign="KI6QDB", grid="DM12MR", state="CA", lat=33.0, lon=-117.0)}
+    base = {
+        "callsign": "KI6QDB",
+        "from_call": "KI6QDB",
+        "to_target": "MR09",
+        "grid": "DM12MR",
+        "state": "CA",
+        "topics": ["Fire"],
+        "source_family": "spotter",
+        "summary": "CA DM12MR - MCF701C (#HYG0)",
+        "utc_ts": 1_800_000_000.0,
+    }
+    observed = dict(base, source_ref="file:/tmp/MCF701C-HYG0.txt")
+    indexed = dict(base, metadata_path="/tmp/MCF701C-HYG0.txt")
+
+    events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        station_lookup,
+        layer_name="report_focus",
+        display_label="Traffic Reports",
+        reports_loader=lambda: [observed, indexed],
+    )
+
+    assert len(events) == 1
+    assert events[0]["count"] == 1
+
+
+def test_report_focus_event_builder_carries_commstat_reported_for_fields() -> None:
+    tab = _bare_tab()
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", "")])
+    station_lookup: dict[str, StationPoint] = {}
+    report = {
+        "callsign": "KD9DSS",
+        "from_call": "KD9DSS",
+        "reported_by": "KD9DSS",
+        "reported_for_state": "NV",
+        "reported_for_grid": "DM09CL",
+        "grid": "DM09CL",
+        "state": "NV",
+        "topics": ["General Intel"],
+        "source_family": "commstat",
+        "source_ref": "commstat_artifacts:6",
+        "summary": "CommStat StatRep | EVENT | 6",
+        "utc_ts": 1_800_000_000.0,
+    }
+
+    events = StationsMapTab._build_spotter_operational_events(
+        tab,
+        station_lookup,
+        layer_name="report_focus",
+        display_label="Traffic Reports",
+        reports_loader=lambda: [report],
+    )
+
+    assert len(events) == 1
+    assert events[0]["reported_for_state"] == "NV"
+    assert events[0]["reported_for_grid"] == "DM09CL"
+    assert events[0]["reported_by"] == "KD9DSS"
+    assert {"label": "Reported For", "value": "NV / DM09CL"} in events[0]["rows"]
+    assert {"label": "Reported By", "value": "KD9DSS"} in events[0]["rows"]
+
+
 def test_report_position_prefers_report_grid_over_reporter_station_location() -> None:
     station_lookup = {"N0ASH": StationPoint(callsign="N0ASH", grid="DM09", state="NV", lat=39.0, lon=-117.0)}
     report = {"callsign": "N0ASH", "grid": "DM43", "state": "AZ"}
 
     lat, lon = StationsMapTab._report_position(report, station_lookup)
     expected_lat, expected_lon = maidenhead_to_latlon("DM43")
+
+    assert round(lat, 3) == round(expected_lat, 3)
+    assert round(lon, 3) == round(expected_lon, 3)
+
+
+def test_report_position_prefers_reported_for_location_aliases() -> None:
+    station_lookup = {"KD9DSS": StationPoint(callsign="KD9DSS", grid="EN61", state="IL", lat=41.8, lon=-87.6)}
+    report = {
+        "callsign": "KD9DSS",
+        "state": "IL",
+        "grid": "EN61",
+        "reported_for_state": "NV",
+        "reported_for_grid": "DM09CL",
+    }
+
+    lat, lon = StationsMapTab._report_position(report, station_lookup)
+    expected_lat, expected_lon = maidenhead_to_latlon("DM09CL")
 
     assert round(lat, 3) == round(expected_lat, 3)
     assert round(lon, 3) == round(expected_lon, 3)
@@ -1784,8 +1886,8 @@ def test_rf_planning_preserves_time_and_topic_filters() -> None:
     assert tab.recency_combo.currentText() == "7d"
     assert tab._map_topic_filter_combo.currentText() == "Fire"
     assert tab.show_link_paths is True
-    assert tab.show_rf_pins is True
-    assert tab.prop_overlay_enabled is True
+    assert tab.show_rf_pins is False
+    assert tab.prop_overlay_enabled is False
 
 
 def test_active_map_layer_toggle_uses_single_refresh() -> None:

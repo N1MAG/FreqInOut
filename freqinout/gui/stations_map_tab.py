@@ -3397,6 +3397,7 @@ class StationsMapTab(QWidget):
         )
 
     def _map_selected_paths_html(self, payload: Dict[str, object]) -> str:
+        rows = self._map_payload_rows(payload)
         callsign = self._map_selected_station_callsign()
         mode = str(getattr(self, "link_mode", "") or "").strip().lower()
         active_scope = self._current_path_scope_label()
@@ -3407,10 +3408,16 @@ class StationsMapTab(QWidget):
                 note="Select a station to review observed paths for that station.",
             )
         active = self._selected_station_paths_active(callsign)
+        schedule = self._map_detail_first_value(rows.get("schedule"), payload.get("qsy_text"))
+        planning = (
+            "Use the peer schedule first; it reflects where this station is expected now or next."
+            if schedule
+            else "No peer schedule is known; use RF Planning as the propagation fallback."
+        )
         note = (
             "Paths for this station are displayed on the map. Click Hide Paths to turn that layer off."
             if active
-            else "Click Show Paths to display observed directional links involving this station."
+            else "Click Show Paths To to display observed directional links involving this station."
         )
         return self._map_detail_shell_html(
             "Path Topology",
@@ -3418,6 +3425,8 @@ class StationsMapTab(QWidget):
                 ("Station", callsign),
                 ("Layer", "Showing" if bool(getattr(self, "show_link_paths", False)) else "Hidden"),
                 ("Scope", active_scope if mode != "off" else "Off"),
+                ("Schedule", schedule),
+                ("Planning", planning),
                 ("Meaning", "Arrows show who reported hearing whom; color shows reported signal quality."),
             ],
             note=note,
@@ -5585,8 +5594,8 @@ class StationsMapTab(QWidget):
         self.show_weather_reports = False
         self.show_alert_reports = False
         self.show_infrastructure_reports = False
-        self.show_rf_pins = True
-        self.prop_overlay_enabled = True
+        self.show_rf_pins = False
+        self.prop_overlay_enabled = False
         for widget, value in (
             (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
@@ -5595,7 +5604,7 @@ class StationsMapTab(QWidget):
             (getattr(self, "map_weather_chk", None), False),
             (getattr(self, "map_alerts_chk", None), False),
             (getattr(self, "map_infrastructure_chk", None), False),
-            (getattr(self, "prop_overlay_chk", None), True),
+            (getattr(self, "prop_overlay_chk", None), False),
         ):
             if widget is None:
                 continue
@@ -7613,6 +7622,9 @@ class StationsMapTab(QWidget):
                     "source_ref": str(getattr(obs, "source_ref", "") or "").strip(),
                     "metadata_path": self._observation_file_path(obs),
                     "to_target": str(metadata.get("to_call") or obs.to_target or "").strip(),
+                    "reported_by": str(metadata.get("from_call") or obs.from_call or "").strip().upper(),
+                    "reported_for_state": effective_state,
+                    "reported_for_grid": effective_grid,
                     "groups": group_values,
                     "topics": sorted(topics),
                     "state": effective_state,
@@ -8019,6 +8031,7 @@ class StationsMapTab(QWidget):
             event = {
                 "callsign": str(meta.get("from_call") or "").strip().upper(),
                 "from_call": str(meta.get("from_call") or "").strip().upper(),
+                "reported_by": str(meta.get("from_call") or "").strip().upper(),
                 "to_target": str(meta.get("to_call") or "").strip().lstrip("@").rstrip(">"),
                 "form_id": str(meta.get("display_type") or meta.get("msg_type") or "").strip(),
                 "utc_ts": report_ts,
@@ -8028,6 +8041,8 @@ class StationsMapTab(QWidget):
                 "severity": severity,
                 "grid": str(meta.get("grid") or "").strip().upper(),
                 "state": str(meta.get("state") or "").strip().upper(),
+                "reported_for_grid": str(meta.get("grid") or "").strip().upper(),
+                "reported_for_state": str(meta.get("state") or "").strip().upper(),
                 "source_family": self._canonical_map_source_family(source_family),
                 "source_label": str(meta.get("source_label") or "").strip()
                 or self._map_report_source_label(source_family, ""),
@@ -9459,6 +9474,14 @@ class StationsMapTab(QWidget):
 
     @staticmethod
     def _map_report_unique_key(report: Dict[str, object]) -> str:
+        metadata_path = str(report.get("metadata_path") or "").strip()
+        source_ref = str(report.get("source_ref") or "").strip()
+        if source_ref.startswith("file:"):
+            source_ref_path = source_ref[5:].strip()
+            if source_ref_path:
+                return f"file:{source_ref_path}"
+        if metadata_path:
+            return f"file:{metadata_path}"
         for key in ("source_ref", "metadata_path", "raw_reference"):
             value = str(report.get(key) or "").strip()
             if value:
@@ -9533,18 +9556,25 @@ class StationsMapTab(QWidget):
         report: Dict[str, object],
         station_lookup: Dict[str, StationPoint],
     ) -> tuple[Optional[float], Optional[float]]:
-        conflict_state_center = StationsMapTab._report_state_center_if_grid_conflicts(report)
+        report_for_state = str(report.get("reported_for_state") or "").strip().upper()
+        report_for_grid = str(report.get("reported_for_grid") or "").strip().upper()
+        position_report = report
+        if report_for_state or report_for_grid:
+            position_report = dict(report)
+            position_report["state"] = report_for_state or str(report.get("state") or "").strip().upper()
+            position_report["grid"] = report_for_grid or str(report.get("grid") or "").strip().upper()
+        conflict_state_center = StationsMapTab._report_state_center_if_grid_conflicts(position_report)
         if conflict_state_center:
             return conflict_state_center
-        lat = report.get("lat")
-        lon = report.get("lon")
+        lat = position_report.get("lat")
+        lon = position_report.get("lon")
         try:
             if lat is not None and lon is not None:
                 return float(lat), float(lon)
         except Exception:
             pass
-        state = str(report.get("state") or "").strip().upper()
-        grid = str(report.get("grid") or "").strip().upper()
+        state = str(position_report.get("state") or "").strip().upper()
+        grid = str(position_report.get("grid") or "").strip().upper()
         if StationsMapTab._map_grid_looks_usable(grid):
             ll = maidenhead_to_latlon(grid)
             if ll:
@@ -9784,6 +9814,9 @@ class StationsMapTab(QWidget):
                     "topics": set(),
                     "states": set(),
                     "grids": set(),
+                    "reported_for_states": set(),
+                    "reported_for_grids": set(),
+                    "reported_by": set(),
                     "scopes": set(),
                     "state_confidences": set(),
                     "geo_confidences": set(),
@@ -9806,10 +9839,19 @@ class StationsMapTab(QWidget):
             bucket["topics"].update(self._map_report_topic_values(report))
             state = str(report.get("state") or "").strip().upper()
             grid = str(report.get("grid") or "").strip().upper()
+            reported_for_state = str(report.get("reported_for_state") or state).strip().upper()
+            reported_for_grid = str(report.get("reported_for_grid") or grid).strip().upper()
+            reported_by = str(report.get("reported_by") or report.get("from_call") or call).strip().upper()
             if state:
                 bucket["states"].add(state)
             if grid:
                 bucket["grids"].add(grid)
+            if reported_for_state:
+                bucket["reported_for_states"].add(reported_for_state)
+            if reported_for_grid:
+                bucket["reported_for_grids"].add(reported_for_grid)
+            if reported_by:
+                bucket["reported_by"].add(reported_by)
             scope = str(report.get("scope") or "").strip()
             if scope:
                 bucket["scopes"].add(scope)
@@ -9842,6 +9884,9 @@ class StationsMapTab(QWidget):
                         report.get("to_target"),
                         report.get("state"),
                         report.get("grid"),
+                        report.get("reported_for_state"),
+                        report.get("reported_for_grid"),
+                        report.get("reported_by"),
                         " ".join(self._map_report_group_values(report)),
                         " ".join(self._map_report_topic_values(report)),
                     )
@@ -9872,6 +9917,9 @@ class StationsMapTab(QWidget):
             topics = sorted(str(t) for t in bucket.get("topics", set()) if str(t))
             states = sorted(str(s) for s in bucket.get("states", set()) if str(s))
             grids = sorted(str(g) for g in bucket.get("grids", set()) if str(g))
+            reported_for_states = sorted(str(s) for s in bucket.get("reported_for_states", set()) if str(s))
+            reported_for_grids = sorted(str(g) for g in bucket.get("reported_for_grids", set()) if str(g))
+            reported_by_values = sorted(str(c) for c in bucket.get("reported_by", set()) if str(c))
             scopes = sorted(str(s) for s in bucket.get("scopes", set()) if str(s))
             state_confidences = sorted(str(s) for s in bucket.get("state_confidences", set()) if str(s))
             geo_confidences = sorted(str(s) for s in bucket.get("geo_confidences", set()) if str(s))
@@ -9963,7 +10011,19 @@ class StationsMapTab(QWidget):
                 area_text = " / ".join(area_parts)
                 row_items.append({"label": "Area", "value": area_text})
                 if primary_source_family == "commstat":
-                    row_items.append({"label": "Reported For", "value": area_text})
+                    reported_for_parts = []
+                    if reported_for_states:
+                        reported_for_parts.append(", ".join(reported_for_states[:3]) + ("..." if len(reported_for_states) > 3 else ""))
+                    if reported_for_grids:
+                        reported_for_parts.append(", ".join(reported_for_grids[:3]) + ("..." if len(reported_for_grids) > 3 else ""))
+                    row_items.append({"label": "Reported For", "value": " / ".join(reported_for_parts) or area_text})
+                    if reported_by_values:
+                        row_items.append(
+                            {
+                                "label": "Reported By",
+                                "value": ", ".join(reported_by_values[:6]) + ("..." if len(reported_by_values) > 6 else ""),
+                            }
+                        )
             summary_lines: List[str] = []
             for idx, report in enumerate(reports_sorted[:4]):
                 if idx:
@@ -10023,6 +10083,9 @@ class StationsMapTab(QWidget):
                     "source_refs": source_refs,
                     "state": ", ".join(states[:3]) + ("..." if len(states) > 3 else ""),
                     "grid": ", ".join(grids[:3]) + ("..." if len(grids) > 3 else ""),
+                    "reported_for_state": ", ".join(reported_for_states[:3]) + ("..." if len(reported_for_states) > 3 else ""),
+                    "reported_for_grid": ", ".join(reported_for_grids[:3]) + ("..." if len(reported_for_grids) > 3 else ""),
+                    "reported_by": ", ".join(reported_by_values[:6]) + ("..." if len(reported_by_values) > 6 else ""),
                     "scope": ", ".join(scopes[:3]) + ("..." if len(scopes) > 3 else ""),
                     "state_confidence": ", ".join(state_confidences[:3]) + ("..." if len(state_confidences) > 3 else ""),
                     "geo_confidence": ", ".join(geo_confidences[:3]) + ("..." if len(geo_confidences) > 3 else ""),
@@ -13091,6 +13154,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .summary-row + .summary-row {{ margin-top: 3px; }}
     .summary-state {{ font-weight: 700; }}
     .summary-counts {{ color: {legend_text}; opacity: 0.9; text-align: right; }}
+    .summary-muted {{ color: {legend_text}; opacity: 0.78; }}
     .regional-rollup-tip {{ min-width: 190px; }}
     .regional-rollup-title {{ font-weight: 800; margin-bottom: 3px; }}
     .regional-rollup-meta {{ opacity: 0.9; }}
@@ -13814,6 +13878,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
       const topic = event.primary_topic || (Array.isArray(event.topics) && event.topics.length ? event.topics[0] : '');
       const calls = Array.isArray(event.callsigns) ? event.callsigns.filter(Boolean) : [];
       const callLabel = event.call_label || (calls.length === 1 ? calls[0] : (calls.length ? (calls[0] + ' +' + (calls.length - 1)) : ''));
+      const reportedBy = event.reported_by || callLabel;
+      const reportedFor = [event.reported_for_state || event.state, event.reported_for_grid || event.grid].filter(Boolean).join(' / ');
+      const area = [event.state, event.grid].filter(Boolean).join(' / ');
       const route = event.route || [group, topic, callLabel ? ('from ' + callLabel) : ''].filter(Boolean).join(' | ');
       return {{
         action: 'select_detail',
@@ -13829,6 +13896,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
         topics: event.topics || [],
         state: event.state || '',
         grid: event.grid || '',
+        reported_for_state: event.reported_for_state || '',
+        reported_for_grid: event.reported_for_grid || '',
+        reported_by: reportedBy,
         scope: event.scope || '',
         state_confidence: event.state_confidence || '',
         geo_confidence: event.geo_confidence || '',
@@ -13846,80 +13916,58 @@ function addGridLabels(res, level, bounds, maxLabels) {
           detailRowPayload('Status', event.severity),
           detailRowPayload('Age', event.age),
           detailRowPayload('Source', source),
-          detailRowPayload('Reporter', callLabel),
-          detailRowPayload('Status', event.severity),
+          detailRowPayload('Reporter', reportedBy),
           detailRowPayload('Groups', Array.isArray(event.groups) ? event.groups.join(', ') : ''),
           detailRowPayload('Topics', Array.isArray(event.topics) ? event.topics.join(', ') : ''),
           detailRowPayload('From', calls.join(', ')),
           detailRowPayload('Report Scope', event.scope || ''),
-          detailRowPayload('Reported For', [event.state, event.grid].filter(Boolean).join(' / ')),
-          detailRowPayload('Area', [event.state, event.grid].filter(Boolean).join(' / ')),
-          detailRowPayload('Location', [event.state, event.grid].filter(Boolean).join(' / '))
+          detailRowPayload('Reported For', reportedFor),
+          detailRowPayload('Area', area),
+          detailRowPayload('Location', area)
         ].filter(Boolean)
       }};
     }}
 
     function buildSitrepSummaryHtml(rows, groupName) {{
       if (!rows || !rows.length) {{
-        return '<b>SitRep State Summary</b><br/>No current state rollups.';
+        return '';
       }}
-      const header = '<b>SitRep State Summary</b><br/>' + (groupName ? ('Group: ' + groupName + '<br/>') : 'All Groups<br/>');
-      const regionBuckets = new Map();
-      (rows || []).forEach(r => {{
-        const stateCode = String(r.state_code || '').toUpperCase();
-        const regionCode = window.FEMA_LOOKUP[stateCode] ? ('R' + window.FEMA_LOOKUP[stateCode]) : 'OTHER';
-        if (!regionBuckets.has(regionCode)) {{
-          regionBuckets.set(regionCode, []);
-        }}
-        regionBuckets.get(regionCode).push(r);
-      }});
-      const orderedRegions = Array.from(regionBuckets.keys()).sort((a, b) => {{
-        if (a === 'OTHER') return 1;
-        if (b === 'OTHER') return -1;
-        return a.localeCompare(b);
-      }});
-      const body = orderedRegions.map(regionCode => {{
-        const label = regionCode === 'OTHER' ? 'Other / Non-FEMA' : ('Region ' + regionCode.replace(/^R/, ''));
-        const totals = (regionBuckets.get(regionCode) || []).reduce((acc, r) => {{
-          acc.callsign_count += (r.callsign_count || 0);
-          acc.red_count += (r.red_count || 0);
-          acc.yellow_count += (r.yellow_count || 0);
-          acc.green_count += (r.green_count || 0);
-          acc.unknown_count += (r.unknown_count || 0);
-          acc.js8_count += (r.js8_count || 0);
-          acc.internet_count += (r.internet_count || 0);
-          acc.mixed_transport_count += (r.mixed_transport_count || 0);
-          return acc;
-        }}, {{
-          callsign_count: 0,
-          red_count: 0,
-          yellow_count: 0,
-          green_count: 0,
-          unknown_count: 0,
-          js8_count: 0,
-          internet_count: 0,
-          mixed_transport_count: 0
-        }});
-        const counts = [
-          'R' + totals.red_count,
-          'Y' + totals.yellow_count,
-          'G' + totals.green_count,
-          'U' + totals.unknown_count
-        ].join(' ');
-        const receipt = [
-          totals.js8_count ? ('JS8 ' + totals.js8_count) : '',
-          totals.internet_count ? ('Net ' + totals.internet_count) : '',
-          totals.mixed_transport_count ? ('Mix ' + totals.mixed_transport_count) : ''
-        ].filter(Boolean).join(' | ');
-        return '<div class="summary-region">' +
-          '<div class="summary-region-header">' + label + '</div>' +
-          '<div class="summary-row">' +
-          '<span class="summary-state">' + totals.callsign_count + ' reporting</span>' +
-          '<span class="summary-counts">' + counts + (receipt ? ('<br/>' + receipt) : '') + '</span>' +
-          '</div>' +
-          '</div>';
-      }}).join('');
-      return header + body;
+      const totals = (rows || []).reduce((acc, r) => {{
+        acc.callsign_count += (r.callsign_count || 0);
+        acc.red_count += (r.red_count || 0);
+        acc.yellow_count += (r.yellow_count || 0);
+        acc.green_count += (r.green_count || 0);
+        return acc;
+      }}, {{callsign_count: 0, red_count: 0, yellow_count: 0, green_count: 0}});
+      const topIssues = (rows || [])
+        .filter(r => (Number(r.red_count || 0) + Number(r.yellow_count || 0)) > 0)
+        .sort((a, b) => {{
+          const aScore = Number(a.red_count || 0) * 3 + Number(a.yellow_count || 0);
+          const bScore = Number(b.red_count || 0) * 3 + Number(b.yellow_count || 0);
+          return bScore - aScore;
+        }})
+        .slice(0, 4)
+        .map(r => {{
+          const stateCode = escapeHtml(String(r.state_code || '').toUpperCase());
+          const counts = [
+            r.red_count ? ('R' + Number(r.red_count || 0)) : '',
+            r.yellow_count ? ('Y' + Number(r.yellow_count || 0)) : '',
+            r.green_count ? ('G' + Number(r.green_count || 0)) : ''
+          ].filter(Boolean).join(' ');
+          return '<div class="summary-row"><span class="summary-state">' + stateCode + '</span><span class="summary-counts">' + escapeHtml(counts) + '</span></div>';
+        }})
+        .join('');
+      const scope = groupName ? ('Group: ' + escapeHtml(groupName)) : 'All Groups';
+      const totalsLine = [
+        totals.red_count ? ('Red ' + totals.red_count) : '',
+        totals.yellow_count ? ('Yellow ' + totals.yellow_count) : '',
+        totals.green_count ? ('Green ' + totals.green_count) : ''
+      ].filter(Boolean).join(' | ') || 'No known status reports';
+      return '<b>Station Status</b><br/>' +
+        '<span class="summary-muted">' + scope + '</span><br/>' +
+        escapeHtml(totals.callsign_count + ' stations with known status') + '<br/>' +
+        '<span class="summary-muted">' + escapeHtml(totalsLine) + '</span>' +
+        (topIssues ? '<div class="summary-region">' + topIssues + '</div>' : '');
     }}
 
     const sitrepSummaryPanel = L.control({{position: 'bottomleft'}});
@@ -14024,12 +14072,15 @@ function addGridLabels(res, level, bounds, maxLabels) {
         ]));
       }}
       if (mode === 'sitrep' || mode === 'all' || mode === 'peer') {{
-        rows.push(legendRow('Station Status:', [
-        legendItem('#43A047', '&#9679;', 'Functioning'),
-        legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
-        legendItem('#D32F2F', '&#9679;', 'Not Functioning'),
-        legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report')
-        ]));
+        const stationStatusItems = [
+          legendItem('#43A047', '&#9679;', 'Functioning'),
+          legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
+          legendItem('#D32F2F', '&#9679;', 'Not Functioning')
+        ];
+        if (mode !== 'sitrep') {{
+          stationStatusItems.push(legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report'));
+        }}
+        rows.push(legendRow('Station Status:', stationStatusItems));
       }}
       if (showPeerSchedNow) {{
         rows.push(legendRow('Peer Sched Now:', [
