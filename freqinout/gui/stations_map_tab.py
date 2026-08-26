@@ -736,7 +736,6 @@ class StationsMapTab(QWidget):
         self._sitrep_status_only_enabled: bool = False
         self._observation_focus_enabled: bool = False
         self._observation_focus_mode: str = ""
-        self._sitrep_status_button: Optional[QPushButton] = None
         self._map_view_status_label: Optional[QLabel] = None
         self._map_all_stations_button: Optional[QPushButton] = None
         self._map_hf_reports_button: Optional[QPushButton] = None
@@ -2152,20 +2151,21 @@ class StationsMapTab(QWidget):
         if self._map_manage_rf_pins_button is not None:
             self._map_manage_rf_pins_button.setStyleSheet(button_style("secondary", theme))
         self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
-        self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep", theme=theme)
         self._update_map_mode_buttons(theme=theme)
         self._update_map_view_status_label(theme=theme)
         self._sync_map_control_button_widths()
         self._update_splitter_indicator_state(theme=theme)
         try:
-            target_ctx = self._prop_target_context()
-            target_label = str(target_ctx.get("label") or "National")
             if self.prop_overlay_enabled:
-                region_scores = self._compute_region_scores("")
-                state_scores = self._compute_state_scores()
-                best_band, best_score = self._best_band_for_target(target_ctx, region_scores, state_scores)
-                self._update_prop_badge(target_label, best_band, best_score, theme=theme)
+                target_label, best_band, best_score = getattr(
+                    self,
+                    "_last_prop_badge_values",
+                    ("National", "", 0.0),
+                )
+                self._update_prop_badge(str(target_label), str(best_band), float(best_score or 0.0), theme=theme)
             else:
+                target_ctx = self._prop_target_context()
+                target_label = str(target_ctx.get("label") or "National")
                 self._update_prop_badge(target_label, "", 0.0, theme=theme)
         except Exception:
             # Keep theme updates resilient if propagation data is unavailable.
@@ -2184,7 +2184,6 @@ class StationsMapTab(QWidget):
         for button in (
             self._refresh_links_button,
             self._now_reachable_button,
-            self._sitrep_status_button,
             getattr(self, "_map_propagation_button", None),
             getattr(self, "_paths_help_button", None),
         ):
@@ -2530,9 +2529,6 @@ class StationsMapTab(QWidget):
         self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
-        self._sitrep_status_button = QPushButton("Station Status")
-        self._sitrep_status_button.setCheckable(True)
-        self._update_sitrep_status_button_visual(False)
         self.map_stations_chk = QCheckBox("Stations")
         self.map_links_chk = QCheckBox("Links")
         self.map_weather_chk = QCheckBox("Weather")
@@ -2633,7 +2629,6 @@ class StationsMapTab(QWidget):
             self._map_clear_filters_button,
             self._map_clear_layers_button,
             self._now_reachable_button,
-            self._sitrep_status_button,
             self._paths_help_button,
             self._map_add_rf_pin_button,
             self._map_manage_rf_pins_button,
@@ -2845,8 +2840,6 @@ class StationsMapTab(QWidget):
             pass
         if self._now_reachable_button is not None:
             self._now_reachable_button.toggled.connect(self._on_now_reachable_toggled)
-        if self._sitrep_status_button is not None:
-            self._sitrep_status_button.toggled.connect(self._on_sitrep_status_toggled)
         self.prop_overlay_chk.stateChanged.connect(self._on_prop_overlay_changed)
         self.prop_mode_combo.currentIndexChanged.connect(self._on_prop_mode_changed)
         self.prop_window_combo.currentIndexChanged.connect(self._on_prop_window_changed)
@@ -5907,21 +5900,6 @@ class StationsMapTab(QWidget):
                 "Show peers whose peer schedule currently matches your active schedule frequency."
             )
 
-    def _update_sitrep_status_button_visual(self, enabled: bool, theme: Optional[Dict[str, str]] = None) -> None:
-        if self._sitrep_status_button is None:
-            return
-        if theme is None:
-            theme = self._theme_snapshot()
-        self._sitrep_status_button.setText("Station Status")
-        if enabled:
-            self._sitrep_status_button.setStyleSheet(button_style("eligible_info", theme))
-            self._sitrep_status_button.setToolTip("Map View: Station Status. Show only stations with a known latest status.")
-        else:
-            self._sitrep_status_button.setStyleSheet(button_style("muted", theme))
-            self._sitrep_status_button.setToolTip(
-                "Show only stations with known latest status. This view hides unknown/no-report stations."
-            )
-
     def _current_map_mode_key(self) -> str:
         if bool(getattr(self, "_now_reachable_enabled", False)):
             return "peer"
@@ -5942,7 +5920,7 @@ class StationsMapTab(QWidget):
             if focus_mode == "rf_pins":
                 return "pins"
         if bool(getattr(self, "_sitrep_status_only_enabled", False)):
-            return "sitrep"
+            self._sitrep_status_only_enabled = False
         return "all"
 
     def _implicit_map_observation_focus_enabled(self) -> bool:
@@ -6005,7 +5983,6 @@ class StationsMapTab(QWidget):
             (getattr(self, "_map_paths_button", None), "paths"),
             (getattr(self, "_map_propagation_button", None), "propagation"),
             (getattr(self, "_map_rf_pins_button", None), "pins"),
-            (getattr(self, "_sitrep_status_button", None), "sitrep"),
             (getattr(self, "_now_reachable_button", None), "peer"),
         )
         for button, key in buttons:
@@ -6121,8 +6098,6 @@ class StationsMapTab(QWidget):
             return "Map View: RF Planning"
         if mode_key == "pins":
             return "Map View: Planning Pins"
-        if mode_key == "sitrep":
-            return "Map View: Station Status"
         return "Map View: All Stations"
 
     def _current_path_scope_label(self) -> str:
@@ -6172,15 +6147,10 @@ class StationsMapTab(QWidget):
 
     def _on_now_reachable_toggled(self, checked: bool) -> None:
         self._now_reachable_enabled = bool(checked)
-        if self._now_reachable_enabled and self._sitrep_status_only_enabled and self._sitrep_status_button is not None:
-            # Pin modes are mutually exclusive; Peer Sched Now takes precedence when enabled.
-            self._sitrep_status_button.blockSignals(True)
-            self._sitrep_status_button.setChecked(False)
-            self._sitrep_status_button.blockSignals(False)
+        if self._now_reachable_enabled and self._sitrep_status_only_enabled:
             self._sitrep_status_only_enabled = False
             self._observation_focus_enabled = False
             self._observation_focus_mode = ""
-            self._update_sitrep_status_button_visual(False)
             self._update_map_mode_buttons()
         if self._now_reachable_enabled:
             snapshot = self._compute_now_reachable_snapshot()
@@ -6243,53 +6213,6 @@ class StationsMapTab(QWidget):
                 pass
         self._on_now_reachable_toggled(True)
 
-    def _on_sitrep_status_toggled(self, checked: bool) -> None:
-        self._sitrep_status_only_enabled = bool(checked)
-        self._observation_focus_enabled = False
-        self._observation_focus_mode = ""
-        if self._sitrep_status_only_enabled and self._now_reachable_enabled and self._now_reachable_button is not None:
-            # Pin modes are mutually exclusive; SitRep takes precedence when enabled.
-            self._now_reachable_button.blockSignals(True)
-            self._now_reachable_button.setChecked(False)
-            self._now_reachable_button.blockSignals(False)
-            self._now_reachable_enabled = False
-            self._now_reachable_meta = {}
-            self._now_reachable_callsigns = set()
-            self._update_now_reachable_button_visual(False)
-            self._update_now_reachable_summary()
-            self._refresh_relay_targets()
-        if self._sitrep_status_only_enabled:
-            self.show_link_paths = False
-            self.link_mode = "off"
-            self.link_value = ""
-            self.relay_target = ""
-            self._paths_focus_station = ""
-            self._paths_previous_observation_focus = None
-            links_chk = getattr(self, "map_links_chk", None)
-            if links_chk is not None:
-                try:
-                    links_chk.blockSignals(True)
-                    links_chk.setChecked(False)
-                    links_chk.blockSignals(False)
-                except Exception:
-                    pass
-            self._sync_link_mode_combo_to_off()
-        self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep")
-        self._update_map_mode_buttons()
-        self._update_map_view_status_label()
-        self._request_map_refresh(level="medium", reason="sitrep_toggle")
-
-    def focus_sitrep_status(self) -> None:
-        button = getattr(self, "_sitrep_status_button", None)
-        if button is not None:
-            try:
-                if not button.isChecked():
-                    button.setChecked(True)
-                    return
-            except Exception:
-                pass
-        self._on_sitrep_status_toggled(True)
-
     def focus_all_stations(self) -> None:
         """Return to the normal station map view."""
         self._sitrep_status_only_enabled = False
@@ -6306,7 +6229,7 @@ class StationsMapTab(QWidget):
         self._paths_focus_station = ""
         self._paths_previous_observation_focus = None
         self.prop_overlay_enabled = False
-        for button in (getattr(self, "_sitrep_status_button", None), getattr(self, "_now_reachable_button", None)):
+        for button in (getattr(self, "_now_reachable_button", None),):
             if button is None:
                 continue
             try:
@@ -6342,7 +6265,6 @@ class StationsMapTab(QWidget):
         self._sync_link_mode_combo_to_off()
         self._sync_path_scope_combo(("off", ""))
         self._update_selected_paths_button_visual()
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -6393,7 +6315,6 @@ class StationsMapTab(QWidget):
         self.show_rf_pins = False
         self.prop_overlay_enabled = False
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
             (getattr(self, "map_stations_chk", None), True),
             (getattr(self, "map_links_chk", None), True),
@@ -6423,7 +6344,6 @@ class StationsMapTab(QWidget):
                     self._sync_path_scope_combo(("my_station", ""))
         except Exception:
             pass
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -6450,7 +6370,6 @@ class StationsMapTab(QWidget):
         self.show_rf_pins = False
         self.prop_overlay_enabled = False
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
             (getattr(self, "map_stations_chk", None), True),
             (getattr(self, "map_links_chk", None), True),
@@ -6481,7 +6400,6 @@ class StationsMapTab(QWidget):
             # time and topic filters so toggling the layer does not change the question.
         except Exception:
             pass
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -6541,7 +6459,6 @@ class StationsMapTab(QWidget):
             self._update_now_reachable_summary()
             self._refresh_relay_targets()
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), self._observation_focus_mode == "sitrep"),
             (getattr(self, "map_stations_chk", None), False),
             (getattr(self, "map_links_chk", None), False),
             (getattr(self, "map_weather_chk", None), False),
@@ -6570,7 +6487,6 @@ class StationsMapTab(QWidget):
                 self.band_combo.blockSignals(False)
         except Exception:
             pass
-        self._update_sitrep_status_button_visual(self._current_map_mode_key() == "sitrep")
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
         self._request_map_refresh(level="medium", reason=reason or f"{self._observation_focus_mode}_map_focus")
@@ -6651,7 +6567,6 @@ class StationsMapTab(QWidget):
         self.show_regions = True
         self.prop_overlay_enabled = False
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
             (getattr(self, "show_states_chk", None), True),
             (getattr(self, "show_regions_chk", None), True),
@@ -6672,7 +6587,6 @@ class StationsMapTab(QWidget):
                 pass
         self._sync_link_mode_combo_to_off()
         self._sync_path_scope_combo(("off", ""))
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -6699,7 +6613,6 @@ class StationsMapTab(QWidget):
         self.show_rf_pins = True
         self.prop_overlay_enabled = False
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
             (getattr(self, "map_stations_chk", None), False),
             (getattr(self, "map_links_chk", None), False),
@@ -6716,7 +6629,6 @@ class StationsMapTab(QWidget):
                 widget.blockSignals(False)
             except Exception:
                 pass
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_map_mode_buttons()
         self._update_map_view_status_label()
@@ -10173,7 +10085,7 @@ class StationsMapTab(QWidget):
         return "; ".join(labels)
 
     def _map_layers_active(self) -> bool:
-        overlay_modes = {"paths", "propagation", "pins", "sitrep", "peer"}
+        overlay_modes = {"paths", "propagation", "pins", "peer"}
         link_mode, _ = self._current_link_selection()
         return bool(
             self._current_map_mode_key() in overlay_modes
@@ -10322,7 +10234,6 @@ class StationsMapTab(QWidget):
         self._paths_focus_station = ""
         self._paths_previous_observation_focus = None
         for widget, value in (
-            (getattr(self, "_sitrep_status_button", None), False),
             (getattr(self, "_now_reachable_button", None), False),
             (getattr(self, "map_stations_chk", None), not preserve_focus),
             (getattr(self, "map_links_chk", None), False),
@@ -10352,7 +10263,6 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
         self._clear_report_query_caches()
-        self._update_sitrep_status_button_visual(False)
         self._update_now_reachable_button_visual(False)
         self._update_selected_paths_button_visual()
         self._update_map_mode_buttons()
@@ -12565,6 +12475,7 @@ class StationsMapTab(QWidget):
             return
         if theme is None:
             theme = self._theme_snapshot()
+        self._last_prop_badge_values = (target_label, best_band, best_score)
         scheduled = self._freq_to_band(current_scheduler_freq(self.window()))
         level = self._score_level(best_score)
         display_label = (target_label or "National").strip()
@@ -12893,7 +12804,8 @@ class StationsMapTab(QWidget):
             self._update_prop_badge(target_label, "", 0.0)
             target_sig = f"{target_ctx.get('type','')}:{target_ctx.get('value','')}"
         self._last_prop_region_filter = target_sig
-        sitrep_mode = bool(self._sitrep_status_only_enabled)
+        self._sitrep_status_only_enabled = False
+        sitrep_mode = False
         band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
         my_call = ""
         try:
@@ -13802,7 +13714,7 @@ class StationsMapTab(QWidget):
         )
         if point_count <= 0:
             return False
-        focused_modes = {"paths", "peer", "hf", "local", "reports", "regional", "propagation", "pins", "sitrep"}
+        focused_modes = {"paths", "peer", "hf", "local", "reports", "regional", "propagation", "pins"}
         focused = mode in focused_modes or bool(self._map_filters_active())
         if not focused:
             return False

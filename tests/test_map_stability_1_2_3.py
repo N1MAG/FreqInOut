@@ -1055,27 +1055,28 @@ def test_map_selected_detail_splitter_uses_responsive_helper() -> None:
     assert "panel.setMinimumWidth(260)" in source
 
 
-def test_station_status_mode_hides_unknown_station_inventory() -> None:
+def test_station_status_is_not_a_standalone_map_mode() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
 
-    assert "if sitrep_mode:" in render_block
-    assert 'marker.get("spotter_status_key")' in render_block
-    assert '{"red", "yellow", "green"}' in render_block
+    assert '("Station Status", "sitrep")' not in source
+    assert 'QPushButton("Station Status")' not in source
+    assert "def _on_sitrep_status_toggled" not in source
+    assert "def focus_sitrep_status" not in source
+    assert "sitrep_mode = False" in render_block
 
 
-def test_station_status_mode_skips_path_and_presence_loaders() -> None:
+def test_station_status_no_longer_has_toggle_plumbing() -> None:
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
     render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
-    toggle_block = source[source.index("def _on_sitrep_status_toggled") : source.index("def focus_sitrep_status")]
 
     assert "if self._links_active() and not sitrep_mode:" in render_block
     assert "if sitrep_mode or not station_enrichment_needed:\n            varac_stats = {}" in render_block
     assert "spotter_map_activity = {}" in render_block
     assert "commstat_reporter_activity = {}" in render_block
     assert "finite_path_window" not in render_block
-    assert "self.show_link_paths = False" in toggle_block
-    assert "self._observation_focus_enabled = False" in toggle_block
+    assert "_on_sitrep_status_toggled" not in source
+    assert "focus_sitrep_status" not in source
 
 
 def test_selected_station_show_paths_converts_to_paths_context() -> None:
@@ -1101,7 +1102,7 @@ def test_station_status_summary_is_compact_and_legend_omits_unknown() -> None:
     assert "stations with known status" in summary_block
     assert "No current state rollups" not in summary_block
     assert "const stationStatusItems = [" in legend_block
-    assert "if (mode !== 'sitrep')" in legend_block
+    assert "Station Status:" in legend_block
     assert "Unknown / No Report" in legend_block
 
 
@@ -2484,7 +2485,7 @@ def test_map_view_status_text_names_current_review_context() -> None:
     tab._observation_focus_enabled = False
     tab._observation_focus_mode = ""
     tab._sitrep_status_only_enabled = True
-    assert StationsMapTab._map_view_status_text(tab) == "Map View: Station Status"
+    assert StationsMapTab._map_view_status_text(tab) == "Map View: All Stations"
 
     tab._now_reachable_enabled = True
     assert StationsMapTab._map_view_status_text(tab) == "Map View: Peer Schedule Now"
