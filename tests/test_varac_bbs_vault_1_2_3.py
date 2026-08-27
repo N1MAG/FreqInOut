@@ -2851,6 +2851,50 @@ def test_settings_tab_bbs_sweeper_rules_have_readable_summary() -> None:
     assert "1 rule(s). 1 enabled, 1 ready to apply. Targets: intel, ops." in tab.varac_bbs_sweeper_status_label.text()
 
 
+def test_settings_tab_bbs_sweeper_rule_form_updates_json_source() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab()
+    tab.varac_bbs_sweeper_rule_name_edit.setText("Inbox Weather")
+    tab.varac_bbs_sweeper_rule_enabled_chk.setChecked(True)
+    tab.varac_bbs_sweeper_source_varac_chk.setChecked(True)
+    tab.varac_bbs_sweeper_source_flmsg_chk.setChecked(False)
+    tab.varac_bbs_sweeper_source_flamp_chk.setChecked(True)
+    tab.varac_bbs_sweeper_from_calls_edit.setText("k7abc, @bad")
+    tab.varac_bbs_sweeper_subject_contains_edit.setText("weather, storm")
+    tab.varac_bbs_sweeper_targets_edit.setText("intel, ops")
+    tab.varac_bbs_sweeper_copy_mode_combo.setCurrentIndex(tab.varac_bbs_sweeper_copy_mode_combo.findData("copy_once"))
+
+    tab._save_varac_bbs_sweeper_rule_from_form()
+
+    data = tab._varac_bbs_sweeper_rules_from_editor()
+    assert data == [
+        {
+            "id": "inbox-weather",
+            "name": "Inbox Weather",
+            "enabled": True,
+            "source_families": ["varac_bbs", "flamp"],
+            "from_calls": ["K7ABC", "BAD"],
+            "subject_contains": ["weather", "storm"],
+            "target_location_ids": ["intel", "ops"],
+            "copy_mode": "copy_once",
+        }
+    ]
+
+    tab.varac_bbs_sweeper_rules_table.selectRow(0)
+    tab.varac_bbs_sweeper_subject_contains_edit.setText("heat")
+    tab._save_varac_bbs_sweeper_rule_from_form()
+
+    updated = tab._varac_bbs_sweeper_rules_from_editor()
+    assert len(updated) == 1
+    assert updated[0]["id"] == "inbox-weather"
+    assert updated[0]["subject_contains"] == ["heat"]
+
+
 def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
     from freqinout.core.multi_radio_store import MultiRadioStore
     from freqinout.core.varac_bbs_sweeper import load_bbs_sweeper_rules

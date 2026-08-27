@@ -736,6 +736,7 @@ class SettingsTab(QWidget):
         self._varac_bbs_allowed_group_sources: List[Dict[str, object]] = []
         self._varac_bbs_vault_locations_cache: List[Dict[str, object]] = []
         self._varac_bbs_sweeper_rules_cache: List[Dict[str, object]] = []
+        self._varac_bbs_sweeper_selected_rule_id = ""
         self._varac_bbs_vault_selected_location_id = ""
         self._varac_bbs_vault_runtime_state_cache: Dict[str, object] = {}
         self._varac_bbs_vault_last_summary_cache = ""
@@ -2316,6 +2317,8 @@ class SettingsTab(QWidget):
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                if col_idx == 0:
+                    item.setData(Qt.UserRole, rule.id)
                 if not rule.ready_to_apply:
                     item.setToolTip("Rule is saved but not ready: enable it, add a match condition, and choose at least one target.")
                 table.setItem(row_idx, col_idx, item)
@@ -2334,6 +2337,153 @@ class SettingsTab(QWidget):
             self._refresh_varac_bbs_sweeper_rules_table(rules_data)
         self.varac_bbs_sweeper_status_label.setText(text)
         self.varac_bbs_sweeper_status_label.setToolTip(text)
+
+    def _set_varac_bbs_sweeper_rules_from_form(self, rules_data: Sequence[Mapping[str, object]]) -> None:
+        self._set_varac_bbs_sweeper_rules(list(rules_data))
+        self._mark_settings_dirty()
+
+    def _selected_varac_bbs_sweeper_rule_id(self) -> str:
+        table = getattr(self, "varac_bbs_sweeper_rules_table", None)
+        if not isinstance(table, QTableWidget) or table.selectionModel() is None:
+            return ""
+        selected = table.selectionModel().selectedRows()
+        if not selected:
+            return ""
+        item = table.item(selected[0].row(), 0)
+        return str(item.data(Qt.UserRole) if item is not None else "" or "").strip()
+
+    def _refresh_varac_bbs_sweeper_rule_editor_actions(self) -> None:
+        selected_id = str(getattr(self, "_varac_bbs_sweeper_selected_rule_id", "") or "").strip()
+        if hasattr(self, "varac_bbs_sweeper_delete_rule_btn"):
+            self.varac_bbs_sweeper_delete_rule_btn.setEnabled(bool(selected_id))
+        if hasattr(self, "varac_bbs_sweeper_save_rule_btn"):
+            self.varac_bbs_sweeper_save_rule_btn.setText("Update Rule" if selected_id else "Add Rule")
+
+    def _clear_varac_bbs_sweeper_rule_editor(self) -> None:
+        self._varac_bbs_sweeper_selected_rule_id = ""
+        if hasattr(self, "varac_bbs_sweeper_rule_name_edit"):
+            self.varac_bbs_sweeper_rule_name_edit.clear()
+        if hasattr(self, "varac_bbs_sweeper_rule_enabled_chk"):
+            self.varac_bbs_sweeper_rule_enabled_chk.setChecked(False)
+        for name in (
+            "varac_bbs_sweeper_source_varac_chk",
+            "varac_bbs_sweeper_source_flmsg_chk",
+            "varac_bbs_sweeper_source_flamp_chk",
+        ):
+            widget = getattr(self, name, None)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(True)
+        if hasattr(self, "varac_bbs_sweeper_from_calls_edit"):
+            self.varac_bbs_sweeper_from_calls_edit.clear()
+        if hasattr(self, "varac_bbs_sweeper_subject_contains_edit"):
+            self.varac_bbs_sweeper_subject_contains_edit.clear()
+        if hasattr(self, "varac_bbs_sweeper_targets_edit"):
+            self.varac_bbs_sweeper_targets_edit.clear()
+        if hasattr(self, "varac_bbs_sweeper_copy_mode_combo"):
+            self.varac_bbs_sweeper_copy_mode_combo.setCurrentIndex(0)
+        self._refresh_varac_bbs_sweeper_rule_editor_actions()
+
+    def _load_selected_varac_bbs_sweeper_rule_editor(self) -> None:
+        rule_id = self._selected_varac_bbs_sweeper_rule_id()
+        self._varac_bbs_sweeper_selected_rule_id = rule_id
+        try:
+            rules = load_bbs_sweeper_rules(self._varac_bbs_sweeper_rules_from_editor())
+        except Exception:
+            self._clear_varac_bbs_sweeper_rule_editor()
+            return
+        selected = next((rule for rule in rules if rule.id == rule_id), None)
+        if selected is None:
+            self._refresh_varac_bbs_sweeper_rule_editor_actions()
+            return
+        self.varac_bbs_sweeper_rule_name_edit.setText(selected.name)
+        self.varac_bbs_sweeper_rule_enabled_chk.setChecked(selected.enabled)
+        self.varac_bbs_sweeper_source_varac_chk.setChecked("varac_bbs" in selected.source_families)
+        self.varac_bbs_sweeper_source_flmsg_chk.setChecked("flmsg" in selected.source_families)
+        self.varac_bbs_sweeper_source_flamp_chk.setChecked("flamp" in selected.source_families)
+        self.varac_bbs_sweeper_from_calls_edit.setText(", ".join(selected.from_calls))
+        self.varac_bbs_sweeper_subject_contains_edit.setText(", ".join(selected.subject_contains))
+        self.varac_bbs_sweeper_targets_edit.setText(", ".join(selected.target_location_ids))
+        idx = self.varac_bbs_sweeper_copy_mode_combo.findData(selected.copy_mode)
+        self.varac_bbs_sweeper_copy_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._refresh_varac_bbs_sweeper_rule_editor_actions()
+
+    def _new_varac_bbs_sweeper_rule(self) -> None:
+        table = getattr(self, "varac_bbs_sweeper_rules_table", None)
+        if isinstance(table, QTableWidget):
+            table.clearSelection()
+        self._clear_varac_bbs_sweeper_rule_editor()
+        if hasattr(self, "varac_bbs_sweeper_rule_name_edit"):
+            self.varac_bbs_sweeper_rule_name_edit.setFocus()
+
+    def _varac_bbs_sweeper_rule_from_form(self) -> Dict[str, object]:
+        name = self.varac_bbs_sweeper_rule_name_edit.text().strip()
+        if not name:
+            raise ValueError("Set a rule name before saving.")
+        selected_id = str(getattr(self, "_varac_bbs_sweeper_selected_rule_id", "") or "").strip()
+        rule_id = selected_id or re.sub(r"[^A-Za-z0-9_.:-]+", "-", name).strip("-").lower() or "bbs-sweeper-rule"
+        sources: List[str] = []
+        if self.varac_bbs_sweeper_source_varac_chk.isChecked():
+            sources.append("varac_bbs")
+        if self.varac_bbs_sweeper_source_flmsg_chk.isChecked():
+            sources.append("flmsg")
+        if self.varac_bbs_sweeper_source_flamp_chk.isChecked():
+            sources.append("flamp")
+        if not sources:
+            raise ValueError("Choose at least one source.")
+        return {
+            "id": rule_id,
+            "name": name,
+            "enabled": self.varac_bbs_sweeper_rule_enabled_chk.isChecked(),
+            "source_families": sources,
+            "from_calls": self.varac_bbs_sweeper_from_calls_edit.text().strip(),
+            "subject_contains": self.varac_bbs_sweeper_subject_contains_edit.text().strip(),
+            "target_location_ids": self.varac_bbs_sweeper_targets_edit.text().strip(),
+            "copy_mode": str(self.varac_bbs_sweeper_copy_mode_combo.currentData() or "copy"),
+        }
+
+    def _save_varac_bbs_sweeper_rule_from_form(self) -> None:
+        try:
+            new_rule = self._varac_bbs_sweeper_rule_from_form()
+            rules_data = self._varac_bbs_sweeper_rules_from_editor()
+        except Exception as exc:
+            QMessageBox.warning(self, "BBS Sweeper Rule", str(exc))
+            return
+        target_id = str(new_rule.get("id", "") or "").strip()
+        existing_ids = {str(row.get("id", "") or "").strip() for row in rules_data}
+        if target_id in existing_ids:
+            updated = [dict(new_rule) if str(row.get("id", "") or "").strip() == target_id else dict(row) for row in rules_data]
+        else:
+            updated = [dict(row) for row in rules_data]
+            base_id = target_id
+            suffix = 2
+            while target_id in existing_ids:
+                target_id = f"{base_id}-{suffix}"
+                suffix += 1
+            new_rule["id"] = target_id
+            updated.append(new_rule)
+        self._varac_bbs_sweeper_selected_rule_id = target_id
+        self._set_varac_bbs_sweeper_rules_from_form(updated)
+        table = getattr(self, "varac_bbs_sweeper_rules_table", None)
+        if isinstance(table, QTableWidget):
+            for row_idx in range(table.rowCount()):
+                item = table.item(row_idx, 0)
+                if item is not None and str(item.data(Qt.UserRole) or "").strip() == target_id:
+                    table.selectRow(row_idx)
+                    break
+
+    def _delete_selected_varac_bbs_sweeper_rule(self) -> None:
+        target_id = str(getattr(self, "_varac_bbs_sweeper_selected_rule_id", "") or self._selected_varac_bbs_sweeper_rule_id()).strip()
+        if not target_id:
+            self._refresh_varac_bbs_sweeper_rule_editor_actions()
+            return
+        try:
+            rules_data = self._varac_bbs_sweeper_rules_from_editor()
+        except Exception as exc:
+            QMessageBox.warning(self, "BBS Sweeper Rule", str(exc))
+            return
+        updated = [dict(row) for row in rules_data if str(row.get("id", "") or "").strip() != target_id]
+        self._set_varac_bbs_sweeper_rules_from_form(updated)
+        self._clear_varac_bbs_sweeper_rule_editor()
 
     def _review_varac_bbs_sweeper_rules(self) -> None:
         try:
@@ -7252,7 +7402,70 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_rules_table.setColumnWidth(2, 170)
         self.varac_bbs_sweeper_rules_table.setColumnWidth(3, 280)
         self.varac_bbs_sweeper_rules_table.setColumnWidth(4, 170)
+        self.varac_bbs_sweeper_rules_table.itemSelectionChanged.connect(
+            self._load_selected_varac_bbs_sweeper_rule_editor
+        )
         sweeper_v.addWidget(self.varac_bbs_sweeper_rules_table)
+        sweeper_editor_title = QLabel("Rule Editor")
+        sweeper_editor_title.setStyleSheet("font-weight: 700;")
+        sweeper_v.addWidget(sweeper_editor_title)
+        sweeper_editor_grid = QGridLayout()
+        sweeper_editor_grid.setContentsMargins(0, 0, 0, 0)
+        sweeper_editor_grid.setHorizontalSpacing(8)
+        sweeper_editor_grid.setVerticalSpacing(6)
+        self.varac_bbs_sweeper_rule_enabled_chk = QCheckBox("Use rule")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_rule_enabled_chk, 0, 0)
+        self.varac_bbs_sweeper_rule_name_edit = QLineEdit()
+        self.varac_bbs_sweeper_rule_name_edit.setPlaceholderText("Rule name")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_rule_name_edit, 0, 1, 1, 3)
+        sweeper_editor_grid.addWidget(QLabel("Sources"), 1, 0)
+        sources_row = QHBoxLayout()
+        sources_row.setContentsMargins(0, 0, 0, 0)
+        sources_row.setSpacing(10)
+        self.varac_bbs_sweeper_source_varac_chk = QCheckBox("VarAC BBS")
+        self.varac_bbs_sweeper_source_flmsg_chk = QCheckBox("FLMsg")
+        self.varac_bbs_sweeper_source_flamp_chk = QCheckBox("FLAmp")
+        for checkbox in (
+            self.varac_bbs_sweeper_source_varac_chk,
+            self.varac_bbs_sweeper_source_flmsg_chk,
+            self.varac_bbs_sweeper_source_flamp_chk,
+        ):
+            checkbox.setChecked(True)
+            sources_row.addWidget(checkbox)
+        sources_row.addStretch()
+        sweeper_editor_grid.addLayout(sources_row, 1, 1, 1, 3)
+        sweeper_editor_grid.addWidget(QLabel("From"), 2, 0)
+        self.varac_bbs_sweeper_from_calls_edit = QLineEdit()
+        self.varac_bbs_sweeper_from_calls_edit.setPlaceholderText("Optional callsigns, comma-separated")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_from_calls_edit, 2, 1, 1, 3)
+        sweeper_editor_grid.addWidget(QLabel("Subject Contains"), 3, 0)
+        self.varac_bbs_sweeper_subject_contains_edit = QLineEdit()
+        self.varac_bbs_sweeper_subject_contains_edit.setPlaceholderText("Optional subject/body terms, comma-separated")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_subject_contains_edit, 3, 1, 1, 3)
+        sweeper_editor_grid.addWidget(QLabel("Copy To"), 4, 0)
+        self.varac_bbs_sweeper_targets_edit = QLineEdit()
+        self.varac_bbs_sweeper_targets_edit.setPlaceholderText("Managed BBS location IDs, comma-separated")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_targets_edit, 4, 1, 1, 2)
+        self.varac_bbs_sweeper_copy_mode_combo = QComboBox()
+        self.varac_bbs_sweeper_copy_mode_combo.addItem("Copy", "copy")
+        self.varac_bbs_sweeper_copy_mode_combo.addItem("Copy Once", "copy_once")
+        sweeper_editor_grid.addWidget(self.varac_bbs_sweeper_copy_mode_combo, 4, 3)
+        sweeper_v.addLayout(sweeper_editor_grid)
+        sweeper_form_actions = QHBoxLayout()
+        sweeper_form_actions.setContentsMargins(0, 0, 0, 0)
+        sweeper_form_actions.setSpacing(8)
+        self.varac_bbs_sweeper_new_rule_btn = QPushButton("New Rule")
+        self.varac_bbs_sweeper_new_rule_btn.clicked.connect(self._new_varac_bbs_sweeper_rule)
+        sweeper_form_actions.addWidget(self.varac_bbs_sweeper_new_rule_btn)
+        self.varac_bbs_sweeper_save_rule_btn = QPushButton("Add Rule")
+        self.varac_bbs_sweeper_save_rule_btn.clicked.connect(self._save_varac_bbs_sweeper_rule_from_form)
+        sweeper_form_actions.addWidget(self.varac_bbs_sweeper_save_rule_btn)
+        self.varac_bbs_sweeper_delete_rule_btn = QPushButton("Delete Rule")
+        self.varac_bbs_sweeper_delete_rule_btn.clicked.connect(self._delete_selected_varac_bbs_sweeper_rule)
+        sweeper_form_actions.addWidget(self.varac_bbs_sweeper_delete_rule_btn)
+        sweeper_form_actions.addStretch()
+        sweeper_v.addLayout(sweeper_form_actions)
+        sweeper_v.addWidget(QLabel("Advanced JSON"))
         self.varac_bbs_sweeper_rules_edit = QPlainTextEdit()
         self.varac_bbs_sweeper_rules_edit.setPlaceholderText(
             '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'
@@ -7350,6 +7563,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_access_code_confirm_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_sweeper_rules_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_sweeper_rules_edit.textChanged.connect(self._refresh_varac_bbs_sweeper_status_label)
+        self._clear_varac_bbs_sweeper_rule_editor()
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
         vguard_v.addWidget(QLabel("VGuard File Protection"))
