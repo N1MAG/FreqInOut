@@ -3678,24 +3678,30 @@ class SettingsTab(QWidget):
         software_chips_title.setFont(software_chips_font)
         radio_profile_software_layout.addWidget(software_chips_title)
         self.radio_profile_software_flags_widget = QWidget()
+        self.radio_profile_software_flags_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         software_flags_layout = QGridLayout(self.radio_profile_software_flags_widget)
         software_flags_layout.setContentsMargins(0, 0, 0, 0)
         software_flags_layout.setHorizontalSpacing(10)
         software_flags_layout.setVerticalSpacing(4)
         for index, (key, label) in enumerate(self._radio_profile_software_flag_defs()):
             chk = QCheckBox(label)
+            chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             chk.setToolTip(f"Enable {label} for the selected radio.")
             chk.setAccessibleName(f"Enable {label} for the selected radio")
             chk.stateChanged.connect(lambda _state, k=key: self._on_radio_profile_software_flag_changed(k))
             self._radio_profile_software_flag_checks[key] = chk
             software_flags_layout.addWidget(chk, index // 4, index % 4)
+        for col in range(4):
+            software_flags_layout.setColumnStretch(col, 1)
         radio_profile_software_layout.addWidget(self.radio_profile_software_flags_widget)
         self.radio_profile_software_chips_widget = QWidget()
+        self.radio_profile_software_chips_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.radio_profile_software_chips_layout = QGridLayout(self.radio_profile_software_chips_widget)
         self.radio_profile_software_chips_layout.setContentsMargins(0, 0, 0, 0)
         self.radio_profile_software_chips_layout.setHorizontalSpacing(8)
         self.radio_profile_software_chips_layout.setVerticalSpacing(6)
-        self.radio_profile_software_chips_layout.setColumnStretch(4, 1)
+        for col in range(4):
+            self.radio_profile_software_chips_layout.setColumnStretch(col, 1)
         radio_profile_software_layout.addWidget(self.radio_profile_software_chips_widget)
         self.radio_profile_software_stack_section = _make_radio_profile_dashboard_section(
             "Software Stack",
@@ -7987,6 +7993,8 @@ class SettingsTab(QWidget):
             return
         self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
         self._select_radio_profile_guided_task("apps")
+        QTimer.singleShot(0, self._refresh_radio_profile_software_chips)
+        QTimer.singleShot(0, self._sync_current_section_scroll_size)
 
     def _radio_profile_guided_task_role(
         self,
@@ -14241,7 +14249,7 @@ class SettingsTab(QWidget):
             btn = QPushButton(label)
             btn.setText(f"{label}: {status_label}")
             btn.setMinimumWidth(0)
-            btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setStyleSheet(button_style(role, theme))
             btn.setToolTip(f"Open {label} settings for the selected radio. Status: {status_label}.")
             if isinstance(target_group, QGroupBox):
@@ -14260,14 +14268,17 @@ class SettingsTab(QWidget):
             layout.addWidget(empty, 0, 0, 1, columns)
         for col in range(5):
             layout.setColumnStretch(col, 0)
-        layout.setColumnStretch(columns, 1)
+        for col in range(columns):
+            layout.setColumnStretch(col, 1)
+        if hasattr(self, "radio_profile_software_chips_widget"):
+            self.radio_profile_software_chips_widget.updateGeometry()
 
     @staticmethod
     def _radio_profile_software_chip_columns(width: int) -> int:
         panel_width = max(0, int(width or 0))
-        if panel_width < 380:
+        if panel_width < 480:
             return 1
-        if panel_width < 620:
+        if panel_width < 820:
             return 2
         return 4
 

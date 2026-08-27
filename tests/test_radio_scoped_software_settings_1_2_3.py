@@ -3587,7 +3587,8 @@ def test_radio_profile_software_chips_include_readiness_status_and_roles() -> No
     assert "def _software_readiness_chip_from_issues" in source
     assert "def _software_family_readiness_chip" in source
     assert "self.radio_profile_software_chips_layout = QGridLayout" in profile_block
-    assert "self.radio_profile_software_chips_layout.setColumnStretch(4, 1)" in profile_block
+    assert "self.radio_profile_software_chips_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in profile_block
+    assert "self.radio_profile_software_chips_layout.setColumnStretch(col, 1)" in profile_block
     assert "def _radio_profile_software_chip_columns" in source
     assert '"external_manual": ("Manual", "info")' in source
     assert '"not_enabled": ("Not Enabled", "muted")' in source
@@ -3602,7 +3603,8 @@ def test_radio_profile_software_chips_include_readiness_status_and_roles() -> No
     assert '("VarAC", "varac",' in refresh_block
     assert "columns = self._radio_profile_software_chip_columns(" in refresh_block
     assert "layout.addWidget(btn, added // columns, added % columns)" in refresh_block
-    assert "btn.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)" in refresh_block
+    assert "btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in refresh_block
+    assert "self.radio_profile_software_chips_widget.updateGeometry()" in refresh_block
     assert "self._refresh_radio_profile_software_chips(readiness_report)" in readiness_block
     assert "self._station_readiness_report_for_software_chips()" in refresh_block
 
@@ -3611,10 +3613,10 @@ def test_radio_profile_software_chip_columns_wrap_for_narrow_panes() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 
     assert SettingsTab._radio_profile_software_chip_columns(0) == 1
-    assert SettingsTab._radio_profile_software_chip_columns(379) == 1
-    assert SettingsTab._radio_profile_software_chip_columns(380) == 2
-    assert SettingsTab._radio_profile_software_chip_columns(619) == 2
-    assert SettingsTab._radio_profile_software_chip_columns(620) == 4
+    assert SettingsTab._radio_profile_software_chip_columns(479) == 1
+    assert SettingsTab._radio_profile_software_chip_columns(480) == 2
+    assert SettingsTab._radio_profile_software_chip_columns(819) == 2
+    assert SettingsTab._radio_profile_software_chip_columns(820) == 4
 
 
 def test_radio_profile_software_chips_visual_geometry_wraps_long_status_labels() -> None:
@@ -3692,8 +3694,9 @@ def test_radio_profile_software_chips_visual_geometry_wraps_long_status_labels()
 
         assert button_position("JS8Call: Ready") == (0, 0, 1, 1)
         assert button_position("Fast Light: Needs Setup") == (0, 1, 1, 1)
-        assert button_position("VarAC: Ready") == (0, 2, 1, 1)
-        assert layout.columnStretch(4) == 1
+        assert button_position("VarAC: Ready") == (1, 0, 1, 1)
+        assert layout.columnStretch(0) == 1
+        assert layout.columnStretch(1) == 1
     finally:
         widget.deleteLater()
         app.processEvents()
@@ -4453,6 +4456,8 @@ def test_selected_radio_apps_editor_is_visible_for_existing_radios() -> None:
     assert "self.profile_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)" in source
     assert "def _open_selected_radio_apps_task" in source
     assert 'self._select_radio_profile_guided_task("apps")' in source
+    assert "QTimer.singleShot(0, self._refresh_radio_profile_software_chips)" in source
+    assert "QTimer.singleShot(0, self._sync_current_section_scroll_size)" in source
     assert 'software_chips_title = QLabel("Software Used By This Radio")' in source
     assert "App-specific settings tabs appear after the app is enabled." in source
 
