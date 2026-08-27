@@ -2082,6 +2082,43 @@ class SettingsTab(QWidget):
                 )
         else:
             lines.append("- No enabled non-hidden locations are listed in the root menu.")
+        lines.extend(["", "Root view visitor files:"])
+        lines.append(f"- 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt")
+        lines.append("- 01 COMMANDS - type one command below.txt")
+        if root_locations:
+            for index, row in enumerate(root_locations, start=20):
+                location = VaultLocation(
+                    id=str(row.get("id", "") or "").strip(),
+                    name=str(row.get("name", "") or "").strip(),
+                    source_dir=str(row.get("source_dir", "") or "").strip(),
+                    alias=str(row.get("alias", "") or "").strip(),
+                    description=str(row.get("description", "") or "").strip(),
+                    open_rule=str(row.get("open_rule", "Public") or "Public").strip() or "Public",
+                    visibility_rule=str(row.get("visibility_rule", "Public") or "Public").strip() or "Public",
+                    list_in_root_menu=True,
+                    enabled=True,
+                )
+                lines.append(
+                    "- "
+                    + root_location_helper_filename_preview(
+                        location,
+                        default_location_id=default_id,
+                        global_code_policy=global_code_policy,
+                        order=index,
+                    )
+                )
+        default_location = next(
+            (row for row in locations if str(row.get("id", "") or "").strip() == default_id),
+            None,
+        )
+        if default_location:
+            lines.extend(
+                self._varac_bbs_vault_source_file_preview_lines(
+                    default_location,
+                    prefix="  ",
+                    empty_text="No default-location files are present.",
+                )
+            )
         lines.extend(["", "Locations:"])
         for row in locations:
             location_id = str(row.get("id", "") or "").strip() or DEFAULT_LOCATION_ID
@@ -2122,7 +2159,70 @@ class SettingsTab(QWidget):
                     f"  Source: {source_dir}",
                 ]
             )
+            if bool(row.get("enabled", True)) and visibility != "Hidden":
+                lines.append("  Visitor files:")
+                lines.append(f"  - 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt")
+                lines.append("  - 01 COMMANDS - type one command below.txt")
+                if location_id != DEFAULT_LOCATION_ID:
+                    lines.append("  - 10 type ROOT - return to main menu.txt")
+                lines.extend(
+                    self._varac_bbs_vault_source_file_preview_lines(
+                        row,
+                        prefix="  ",
+                        empty_text="No files are present in this location source folder.",
+                    )
+                )
+            elif not bool(row.get("enabled", True)):
+                lines.append("  Visitor files: location disabled")
+            else:
+                lines.append("  Visitor files: hidden from root menu")
         return "\n".join(lines)
+
+    def _varac_bbs_vault_source_file_preview_lines(
+        self,
+        row: Mapping[str, object],
+        *,
+        prefix: str = "",
+        empty_text: str = "No files are present.",
+        max_files: int = 12,
+    ) -> List[str]:
+        source_txt = str(row.get("source_dir", "") or "").strip()
+        if not source_txt:
+            return [f"{prefix}- {empty_text}"]
+        source_dir = Path(source_txt).expanduser()
+        if not source_dir.exists():
+            return [f"{prefix}- Source folder does not exist yet: {source_dir}"]
+        if not source_dir.is_dir():
+            return [f"{prefix}- Source path is not a folder: {source_dir}"]
+        files: List[Path] = []
+        ignored_dirs = 0
+        try:
+            for child in sorted(source_dir.iterdir(), key=lambda item: item.name.lower()):
+                if child.name.startswith("."):
+                    continue
+                if child.is_dir():
+                    ignored_dirs += 1
+                    continue
+                if child.is_file():
+                    files.append(child)
+        except Exception as exc:
+            return [f"{prefix}- Unable to read source folder: {exc}"]
+        if not files:
+            suffix = f" ({ignored_dirs} subfolder(s) ignored)" if ignored_dirs else ""
+            return [f"{prefix}- {empty_text}{suffix}"]
+        lines: List[str] = []
+        for child in files[: max(1, int(max_files))]:
+            try:
+                size = int(child.stat().st_size)
+            except Exception:
+                size = 0
+            lines.append(f"{prefix}- {child.name} ({size} bytes)")
+        remaining = len(files) - len(lines)
+        if remaining > 0:
+            lines.append(f"{prefix}- +{remaining} more file(s)")
+        if ignored_dirs:
+            lines.append(f"{prefix}- {ignored_dirs} subfolder(s) ignored")
+        return lines
 
     def _varac_bbs_sweeper_rules_from_editor(self) -> List[Dict[str, object]]:
         if not hasattr(self, "varac_bbs_sweeper_rules_edit"):

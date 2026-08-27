@@ -173,7 +173,9 @@ Target behavior:
   Initial implementation adds a BBS focus in Messages for live and archived BBS
   file rows.
 - Show a preview of the managed BBS structure before writing or publishing it so
-  the operator can understand what callers will see.
+  the operator can understand what callers will see. Initial implementation
+  previews root helper files, visible location helper files, source files under
+  each location, and hidden/disabled location behavior without publishing.
 - Preserve radio awareness where it matters, but avoid implying that shared BBS
   artifacts are duplicated per radio unless they truly are.
 - Ensure Compose, Messages, Map, and health/status surfaces describe VarAC BBS

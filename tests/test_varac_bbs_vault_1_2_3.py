@@ -2720,13 +2720,18 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     managed_root = tmp_path / "managed"
     intel_dir = managed_root / "locations" / "Intel"
     hidden_dir = managed_root / "locations" / "Hidden"
+    default_location_dir = managed_root / "locations" / DEFAULT_LOCATION_NAME
     intel_dir.mkdir(parents=True)
     hidden_dir.mkdir(parents=True)
+    default_location_dir.mkdir(parents=True)
+    (default_location_dir / "Welcome.txt").write_text("welcome", encoding="utf-8")
+    (intel_dir / "Storm Update.k2s").write_text("storm", encoding="utf-8")
+    (intel_dir / "nested").mkdir()
+    (hidden_dir / "Private.txt").write_text("private", encoding="utf-8")
 
     tab = SettingsTab()
     tab.varac_bbs_dir_edit.setText(str(live_bbs))
     tab.varac_bbs_vault_root_edit.setText(str(managed_root))
-    default_location_dir = managed_root / "locations" / DEFAULT_LOCATION_NAME
     tab._set_varac_bbs_vault_locations(
         [
             {
@@ -2792,12 +2797,20 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     assert f"Live BBS folder: {live_bbs}" in text
     assert f"Managed root: {managed_root}" in text
     assert "Root menu callers will see:" in text
+    assert "Root view visitor files:" in text
     assert "20 type INTEL - open Intel - Latest reports.txt" in text
+    assert "Welcome.txt (7 bytes)" in text
     assert "HIDE - open Hidden" not in text
     assert "- Intel [INTEL] (enabled, Public, shown in root)" in text
     assert "Access: Allowed callsigns only; location callsigns: N1MAG, K7ETC" in text
     assert "Retention: Archive files older than 7 days" in text
     assert f"Source: {intel_dir}" in text
+    assert "Visitor files:" in text
+    assert "10 type ROOT - return to main menu.txt" in text
+    assert "Storm Update.k2s (5 bytes)" in text
+    assert "1 subfolder(s) ignored" in text
+    assert "Private.txt" not in text
+    assert "Visitor files: hidden from root menu" in text
 
 
 def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
