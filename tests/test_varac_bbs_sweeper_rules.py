@@ -1,5 +1,7 @@
 from freqinout.core.varac_bbs_sweeper import (
     BbsSweeperRule,
+    BbsSweeperCopyPlan,
+    apply_bbs_sweeper_copy_plan,
     bbs_sweeper_rule_matches,
     bbs_sweeper_rules_to_data,
     load_bbs_sweeper_rules,
@@ -199,3 +201,61 @@ def test_bbs_sweeper_copy_plan_skips_unusable_candidates() -> None:
         )
         == []
     )
+
+
+def test_apply_bbs_sweeper_copy_plan_copies_to_multiple_locations_without_overwrite(tmp_path) -> None:
+    src_dir = tmp_path / "src"
+    weather_dir = tmp_path / "weather"
+    ops_dir = tmp_path / "ops"
+    src_dir.mkdir()
+    weather_dir.mkdir()
+    ops_dir.mkdir()
+    src = src_dir / "Storm report .k2s"
+    src.write_text("payload", encoding="utf-8")
+    existing = weather_dir / "Storm report.k2s"
+    existing.write_text("existing", encoding="utf-8")
+
+    results = apply_bbs_sweeper_copy_plan(
+        [
+            BbsSweeperCopyPlan(
+                source_path=str(src),
+                source_family="flmsg",
+                target_location_ids=("weather", "ops"),
+                matched_rule_ids=("weather-rule",),
+            )
+        ],
+        {"weather": weather_dir, "ops": ops_dir},
+    )
+
+    assert [result.copied for result in results] == [True, True]
+    assert (weather_dir / "Storm report-2.k2s").read_text(encoding="utf-8") == "payload"
+    assert existing.read_text(encoding="utf-8") == "existing"
+    assert (ops_dir / "Storm report.k2s").read_text(encoding="utf-8") == "payload"
+    assert all(result.matched_rule_ids == ("weather-rule",) for result in results)
+
+
+def test_apply_bbs_sweeper_copy_plan_reports_missing_targets_and_dry_run(tmp_path) -> None:
+    src = tmp_path / "Bulletin.k2s"
+    target = tmp_path / "target"
+    target.mkdir()
+    src.write_text("payload", encoding="utf-8")
+
+    results = apply_bbs_sweeper_copy_plan(
+        [
+            BbsSweeperCopyPlan(
+                source_path=str(src),
+                source_family="varac_bbs",
+                target_location_ids=("target", "missing"),
+                matched_rule_ids=("rule-1",),
+            )
+        ],
+        {"target": target},
+        dry_run=True,
+    )
+
+    assert results[0].copied is False
+    assert results[0].skipped_reason == "dry_run"
+    assert results[0].target_path.endswith("Bulletin.k2s")
+    assert not (target / "Bulletin.k2s").exists()
+    assert results[1].copied is False
+    assert results[1].skipped_reason == "target_missing"

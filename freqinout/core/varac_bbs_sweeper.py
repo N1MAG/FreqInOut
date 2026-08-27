@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
+
+from freqinout.core.nbems_compose import safe_varac_bbs_filename, unique_destination
 
 
 VALID_SOURCE_FAMILIES = frozenset({"varac_bbs", "flmsg", "flamp"})
@@ -75,6 +79,16 @@ class BbsSweeperCopyPlan:
     source_family: str
     target_location_ids: tuple[str, ...]
     matched_rule_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BbsSweeperCopyResult:
+    source_path: str
+    target_location_id: str
+    target_path: str
+    copied: bool
+    matched_rule_ids: tuple[str, ...] = ()
+    skipped_reason: str = ""
 
 
 def load_bbs_sweeper_rules(value: object) -> list[BbsSweeperRule]:
@@ -241,3 +255,101 @@ def plan_bbs_sweeper_copies(
                 )
             )
     return plans
+
+
+def apply_bbs_sweeper_copy_plan(
+    plans: Sequence[BbsSweeperCopyPlan],
+    target_dirs_by_location_id: Mapping[str, object],
+    *,
+    dry_run: bool = False,
+) -> list[BbsSweeperCopyResult]:
+    normalized_targets = {
+        location_id: Path(str(path)).expanduser()
+        for location_id, path in (
+            (_normalize_location_id(key), value) for key, value in target_dirs_by_location_id.items()
+        )
+        if location_id and str(path or "").strip()
+    }
+    results: list[BbsSweeperCopyResult] = []
+    for plan in plans:
+        src = Path(plan.source_path).expanduser()
+        if not src.exists() or not src.is_file():
+            for target_id in plan.target_location_ids:
+                results.append(
+                    BbsSweeperCopyResult(
+                        source_path=str(src),
+                        target_location_id=target_id,
+                        target_path="",
+                        copied=False,
+                        matched_rule_ids=plan.matched_rule_ids,
+                        skipped_reason="source_missing",
+                    )
+                )
+            continue
+        safe_name = safe_varac_bbs_filename(src.name)
+        for target_id in plan.target_location_ids:
+            target_dir = normalized_targets.get(_normalize_location_id(target_id))
+            if target_dir is None or not target_dir.exists() or not target_dir.is_dir():
+                results.append(
+                    BbsSweeperCopyResult(
+                        source_path=str(src),
+                        target_location_id=target_id,
+                        target_path=str(target_dir or ""),
+                        copied=False,
+                        matched_rule_ids=plan.matched_rule_ids,
+                        skipped_reason="target_missing",
+                    )
+                )
+                continue
+            base_dst = target_dir / safe_name
+            try:
+                if src.resolve() == base_dst.resolve():
+                    results.append(
+                        BbsSweeperCopyResult(
+                            source_path=str(src),
+                            target_location_id=target_id,
+                            target_path=str(base_dst),
+                            copied=False,
+                            matched_rule_ids=plan.matched_rule_ids,
+                            skipped_reason="source_is_target",
+                        )
+                    )
+                    continue
+            except Exception:
+                pass
+            dst = unique_destination(base_dst)
+            if dst is None:
+                results.append(
+                    BbsSweeperCopyResult(
+                        source_path=str(src),
+                        target_location_id=target_id,
+                        target_path=str(base_dst),
+                        copied=False,
+                        matched_rule_ids=plan.matched_rule_ids,
+                        skipped_reason="no_unique_destination",
+                    )
+                )
+                continue
+            if dry_run:
+                results.append(
+                    BbsSweeperCopyResult(
+                        source_path=str(src),
+                        target_location_id=target_id,
+                        target_path=str(dst),
+                        copied=False,
+                        matched_rule_ids=plan.matched_rule_ids,
+                        skipped_reason="dry_run",
+                    )
+                )
+                continue
+            shutil.copy2(str(src), str(dst))
+            results.append(
+                BbsSweeperCopyResult(
+                    source_path=str(src),
+                    target_location_id=target_id,
+                    target_path=str(dst),
+                    copied=True,
+                    matched_rule_ids=plan.matched_rule_ids,
+                )
+            )
+    return results
