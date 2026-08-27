@@ -7319,16 +7319,16 @@ class SettingsTab(QWidget):
         self.condition_alert_rules_table.setHorizontalHeaderLabels(
             [
                 "Use",
-                "Name",
+                "Rule",
                 "Group",
                 "Sources",
                 "Targets",
-                "Sender Mode",
+                "Sender",
                 "Senders",
                 "Auth",
                 "Match",
                 "Pattern",
-                "Level",
+                "SOP",
                 "Action",
             ]
         )
@@ -7344,7 +7344,7 @@ class SettingsTab(QWidget):
         condition_alert_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(1, QHeaderView.Stretch)
         condition_alert_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        condition_alert_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        condition_alert_header.setSectionResizeMode(3, QHeaderView.Stretch)
         condition_alert_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
@@ -7353,10 +7353,10 @@ class SettingsTab(QWidget):
         condition_alert_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
         condition_alert_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
-        for hidden_col in (4, 5, 6, 7, 9):
+        for hidden_col in (4, 5, 6, 7, 8, 9):
             self.condition_alert_rules_table.setColumnHidden(hidden_col, True)
-        self.condition_alert_rules_table.setMinimumHeight(170)
-        self.condition_alert_rules_table.setMaximumHeight(320)
+        self.condition_alert_rules_table.setMinimumHeight(132)
+        self.condition_alert_rules_table.setMaximumHeight(240)
         self.condition_alert_rules_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.condition_alert_rules_table.itemChanged.connect(self._on_condition_alert_table_item_changed)
         self.condition_alert_rules_table.itemSelectionChanged.connect(self._refresh_condition_alert_detail)

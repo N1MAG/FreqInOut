@@ -355,6 +355,9 @@ def test_condition_alert_settings_ui_wires_rule_editor_to_settings_key() -> None
     assert 'QGroupBox("Condition Alerts")' in source
     assert '"conditionAlertRulesTable"' in source
     assert "setColumnHidden(hidden_col, True)" in source
+    assert "for hidden_col in (4, 5, 6, 7, 8, 9)" in source
+    assert '"Rule"' in source
+    assert '"SOP"' in source
     assert "Select a rule to review sender, auth, target, and pattern details." in source
     assert "Sources: {source_text}" in source
     assert "Allowed senders: {sender_text}" in source
