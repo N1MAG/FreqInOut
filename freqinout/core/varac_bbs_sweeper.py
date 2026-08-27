@@ -69,6 +69,14 @@ class BbsSweeperRule:
         return bool(self.enabled and self.target_location_ids and (self.from_calls or self.subject_contains))
 
 
+@dataclass(frozen=True)
+class BbsSweeperCopyPlan:
+    source_path: str
+    source_family: str
+    target_location_ids: tuple[str, ...]
+    matched_rule_ids: tuple[str, ...]
+
+
 def load_bbs_sweeper_rules(value: object) -> list[BbsSweeperRule]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -165,3 +173,71 @@ def matching_bbs_sweeper_targets(
                 targets.append(target)
                 seen.add(target)
     return tuple(targets)
+
+
+def plan_bbs_sweeper_copies(
+    rules: Sequence[BbsSweeperRule],
+    candidates: Sequence[Mapping[str, object]],
+    *,
+    available_location_ids: Iterable[object] = (),
+) -> list[BbsSweeperCopyPlan]:
+    available_locations = {
+        location_id
+        for location_id in (_normalize_location_id(value) for value in available_location_ids)
+        if location_id
+    }
+    plans: list[BbsSweeperCopyPlan] = []
+    for candidate in candidates:
+        source_path = _clean_token(candidate.get("source_path") or candidate.get("path"))
+        if not source_path:
+            continue
+        source_family = _normalize_source_family(candidate.get("source_family") or candidate.get("source"))
+        if source_family not in VALID_SOURCE_FAMILIES:
+            continue
+        from_call = (
+            candidate.get("from_call")
+            or candidate.get("from")
+            or candidate.get("sender")
+            or candidate.get("callsign")
+            or ""
+        )
+        subject = (
+            candidate.get("subject")
+            or candidate.get("title")
+            or candidate.get("name")
+            or candidate.get("filename")
+            or ""
+        )
+        body = candidate.get("body") or candidate.get("message") or candidate.get("summary") or candidate.get("remarks") or ""
+        targets: list[str] = []
+        target_seen: set[str] = set()
+        matched_rule_ids: list[str] = []
+        rule_seen: set[str] = set()
+        for rule in rules:
+            if not bbs_sweeper_rule_matches(
+                rule,
+                source_family=source_family,
+                from_call=from_call,
+                subject=subject,
+                body=body,
+            ):
+                continue
+            if rule.id not in rule_seen:
+                matched_rule_ids.append(rule.id)
+                rule_seen.add(rule.id)
+            for target in rule.target_location_ids:
+                if available_locations and target not in available_locations:
+                    continue
+                if target and target not in target_seen:
+                    targets.append(target)
+                    target_seen.add(target)
+        if targets:
+            plans.append(
+                BbsSweeperCopyPlan(
+                    source_path=source_path,
+                    source_family=source_family,
+                    target_location_ids=tuple(targets),
+                    matched_rule_ids=tuple(matched_rule_ids),
+                )
+            )
+    return plans
