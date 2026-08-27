@@ -298,6 +298,7 @@ from freqinout.core.varac_bbs_vault import (
     vault_runtime_state_to_data,
 )
 from freqinout.core.varac_bbs_sweeper import (
+    BbsSweeperRule,
     bbs_sweeper_rules_to_data,
     load_bbs_sweeper_rules,
 )
@@ -2277,6 +2278,49 @@ class SettingsTab(QWidget):
             target_text += f", +{len(target_ids) - 4} more"
         return f"{len(rules)} rule(s). {enabled} enabled, {ready} ready to apply. Targets: {target_text}."
 
+    def _format_varac_bbs_sweeper_rule_match(self, rule: BbsSweeperRule) -> str:
+        parts: List[str] = []
+        if rule.from_calls:
+            sample = ", ".join(rule.from_calls[:3])
+            if len(rule.from_calls) > 3:
+                sample += f", +{len(rule.from_calls) - 3}"
+            parts.append(f"from {sample}")
+        if rule.subject_contains:
+            sample = ", ".join(rule.subject_contains[:3])
+            if len(rule.subject_contains) > 3:
+                sample += f", +{len(rule.subject_contains) - 3}"
+            parts.append(f"subject/body has {sample}")
+        return "; ".join(parts) if parts else "sender or subject not limited"
+
+    def _refresh_varac_bbs_sweeper_rules_table(self, rules_data: Sequence[Mapping[str, object]]) -> None:
+        table = getattr(self, "varac_bbs_sweeper_rules_table", None)
+        if not isinstance(table, QTableWidget):
+            return
+        rules = load_bbs_sweeper_rules(rules_data)
+        table.setRowCount(len(rules))
+        if not rules:
+            return
+        source_labels = {
+            "varac_bbs": "VarAC BBS",
+            "flmsg": "FLMsg",
+            "flamp": "FLAmp",
+        }
+        for row_idx, rule in enumerate(rules):
+            values = [
+                "Yes" if rule.enabled else "No",
+                rule.name,
+                ", ".join(source_labels.get(source, source) for source in rule.source_families),
+                self._format_varac_bbs_sweeper_rule_match(rule),
+                ", ".join(rule.target_location_ids) if rule.target_location_ids else "no target",
+                "copy once" if rule.copy_mode == "copy_once" else "copy",
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if not rule.ready_to_apply:
+                    item.setToolTip("Rule is saved but not ready: enable it, add a match condition, and choose at least one target.")
+                table.setItem(row_idx, col_idx, item)
+        table.resizeRowsToContents()
+
     def _refresh_varac_bbs_sweeper_status_label(self) -> None:
         if not hasattr(self, "varac_bbs_sweeper_status_label"):
             return
@@ -2284,7 +2328,10 @@ class SettingsTab(QWidget):
             rules_data = self._varac_bbs_sweeper_rules_from_editor()
             text = self._varac_bbs_sweeper_status_text(rules_data)
         except Exception as exc:
+            self._refresh_varac_bbs_sweeper_rules_table([])
             text = f"Rule JSON needs review: {exc}"
+        else:
+            self._refresh_varac_bbs_sweeper_rules_table(rules_data)
         self.varac_bbs_sweeper_status_label.setText(text)
         self.varac_bbs_sweeper_status_label.setToolTip(text)
 
@@ -7186,6 +7233,26 @@ class SettingsTab(QWidget):
         )
         sweeper_note.setWordWrap(True)
         sweeper_v.addWidget(sweeper_note)
+        self.varac_bbs_sweeper_rules_table = QTableWidget(0, 6)
+        self.varac_bbs_sweeper_rules_table.setHorizontalHeaderLabels(
+            ["Use", "Rule", "Sources", "Match", "Copy To", "Mode"]
+        )
+        self.varac_bbs_sweeper_rules_table.verticalHeader().setVisible(False)
+        self.varac_bbs_sweeper_rules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.varac_bbs_sweeper_rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.varac_bbs_sweeper_rules_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.varac_bbs_sweeper_rules_table.setMaximumHeight(150)
+        self.varac_bbs_sweeper_rules_table.setToolTip(
+            "Read-only summary of the BBS sweeper JSON below. Review Rules validates and normalizes the saved rule list."
+        )
+        self.varac_bbs_sweeper_rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.varac_bbs_sweeper_rules_table.horizontalHeader().setStretchLastSection(True)
+        self.varac_bbs_sweeper_rules_table.setColumnWidth(0, 56)
+        self.varac_bbs_sweeper_rules_table.setColumnWidth(1, 180)
+        self.varac_bbs_sweeper_rules_table.setColumnWidth(2, 170)
+        self.varac_bbs_sweeper_rules_table.setColumnWidth(3, 280)
+        self.varac_bbs_sweeper_rules_table.setColumnWidth(4, 170)
+        sweeper_v.addWidget(self.varac_bbs_sweeper_rules_table)
         self.varac_bbs_sweeper_rules_edit = QPlainTextEdit()
         self.varac_bbs_sweeper_rules_edit.setPlaceholderText(
             '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'

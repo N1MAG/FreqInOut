@@ -2813,6 +2813,44 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     assert "Visitor files: hidden from root menu" in text
 
 
+def test_settings_tab_bbs_sweeper_rules_have_readable_summary() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab()
+    tab._set_varac_bbs_sweeper_rules(
+        [
+            {
+                "name": "Weather to Intel",
+                "enabled": True,
+                "sources": ["VarAC BBS Inbox", "FLMsg"],
+                "from_calls": ["K7ABC"],
+                "subject_contains": ["weather"],
+                "target_location_ids": ["intel", "ops"],
+                "copy_mode": "copy_once",
+            }
+        ]
+    )
+
+    assert tab.varac_bbs_sweeper_rules_table.rowCount() == 1
+    row_values = [
+        tab.varac_bbs_sweeper_rules_table.item(0, col).text()
+        for col in range(tab.varac_bbs_sweeper_rules_table.columnCount())
+    ]
+    assert row_values == [
+        "Yes",
+        "Weather to Intel",
+        "VarAC BBS, FLMsg",
+        "from K7ABC; subject/body has weather",
+        "intel, ops",
+        "copy once",
+    ]
+    assert "1 rule(s). 1 enabled, 1 ready to apply. Targets: intel, ops." in tab.varac_bbs_sweeper_status_label.text()
+
+
 def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
     from freqinout.core.multi_radio_store import MultiRadioStore
     from freqinout.core.varac_bbs_sweeper import load_bbs_sweeper_rules
