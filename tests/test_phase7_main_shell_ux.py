@@ -4597,6 +4597,11 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
     assert "multiple managed BBS locations" in spec
     assert "radio-scoped Settings review surface" in spec
+    assert "varacBbsSettingsTabs" in settings_source
+    assert 'bbs_tabs.addTab(bbs_settings_tab, "Live BBS")' in settings_source
+    assert 'bbs_tabs.addTab(vault_tab, "Managed BBS")' in settings_source
+    assert 'bbs_tabs.addTab(sweeper_tab, "Sweeper")' in settings_source
+    assert 'bbs_tabs.addTab(vguard_tab, "VGuard")' in settings_source
     assert "BBS Sweeper Rules" in settings_source
     assert "varac_bbs_sweeper_rules_v1" in settings_source
     assert "remove\n  FLMsg/FLAmp content from BBS sync" in spec

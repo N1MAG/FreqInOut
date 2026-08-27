@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QSpinBox,
+    QTabWidget,
 )
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
@@ -6560,17 +6561,34 @@ class SettingsTab(QWidget):
             "Configure the selected radio's VarAC application location, launch behavior, and file exchange folders.",
             checked=True,
         )
-        bbs_settings_v = _make_varac_subgroup(
-            "BBS Settings",
-            "These settings control the selected radio's live VarAC BBS folder, access policy, archive behavior, and allowed callsigns.",
-            checked=False,
+        bbs_tabs = QTabWidget()
+        bbs_tabs.setObjectName("varacBbsSettingsTabs")
+        bbs_tabs.setDocumentMode(True)
+        bbs_tabs.setUsesScrollButtons(True)
+        bbs_tabs.setToolTip(
+            "Configure live VarAC BBS access, managed BBS visitor views, sweeper rules, and VGuard file protection."
         )
-        vault_guard_v = _make_varac_subgroup(
-            "Vault / VGuard Settings",
-            "Managed BBS Vault publishes one controlled view into the live VarAC BBS while keeping source folders in a managed root. "
-            "VGuard is separate and watches inbound transfers for unauthorized senders or unsafe handling paths.",
-            checked=False,
-        )
+        bbs_settings_tab = QWidget()
+        bbs_settings_v = QVBoxLayout(bbs_settings_tab)
+        bbs_settings_v.setContentsMargins(8, 8, 8, 8)
+        bbs_settings_v.setSpacing(8)
+        vault_tab = QWidget()
+        vault_guard_v = QVBoxLayout(vault_tab)
+        vault_guard_v.setContentsMargins(8, 8, 8, 8)
+        vault_guard_v.setSpacing(8)
+        sweeper_tab = QWidget()
+        sweeper_v = QVBoxLayout(sweeper_tab)
+        sweeper_v.setContentsMargins(8, 8, 8, 8)
+        sweeper_v.setSpacing(8)
+        vguard_tab = QWidget()
+        vguard_v = QVBoxLayout(vguard_tab)
+        vguard_v.setContentsMargins(8, 8, 8, 8)
+        vguard_v.setSpacing(8)
+        bbs_tabs.addTab(bbs_settings_tab, "Live BBS")
+        bbs_tabs.addTab(vault_tab, "Managed BBS")
+        bbs_tabs.addTab(sweeper_tab, "Sweeper")
+        bbs_tabs.addTab(vguard_tab, "VGuard")
+        varac_v.addWidget(bbs_tabs)
 
         varac_row = QHBoxLayout()
         varac_row.setContentsMargins(0, 0, 0, 0)
@@ -7102,13 +7120,13 @@ class SettingsTab(QWidget):
         vault_locations_row.addWidget(vault_locations_wrap, 1)
         vault_guard_v.addLayout(vault_locations_row)
 
-        vault_guard_v.addWidget(QLabel("BBS Sweeper Rules"))
+        sweeper_v.addWidget(QLabel("BBS Sweeper Rules"))
         sweeper_note = QLabel(
             "Optional rules can match VarAC BBS, FLMsg, and FLAmp traffic by sender and subject text, then copy matching "
             "items to one or more managed BBS locations. Review validates the rules; automatic copying is not enabled in this build."
         )
         sweeper_note.setWordWrap(True)
-        vault_guard_v.addWidget(sweeper_note)
+        sweeper_v.addWidget(sweeper_note)
         self.varac_bbs_sweeper_rules_edit = QPlainTextEdit()
         self.varac_bbs_sweeper_rules_edit.setPlaceholderText(
             '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'
@@ -7118,7 +7136,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_rules_edit.setToolTip(
             "Paste or edit a JSON list of BBS sweeper rules. Rules are saved with the selected radio profile."
         )
-        vault_guard_v.addWidget(self.varac_bbs_sweeper_rules_edit)
+        sweeper_v.addWidget(self.varac_bbs_sweeper_rules_edit)
         sweeper_actions = QHBoxLayout()
         sweeper_actions.setContentsMargins(0, 0, 0, 0)
         sweeper_actions.setSpacing(8)
@@ -7128,7 +7146,8 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_status_label = QLabel("No BBS sweeper rules configured.")
         self.varac_bbs_sweeper_status_label.setWordWrap(True)
         sweeper_actions.addWidget(self.varac_bbs_sweeper_status_label, 1)
-        vault_guard_v.addLayout(sweeper_actions)
+        sweeper_v.addLayout(sweeper_actions)
+        sweeper_v.addStretch(1)
 
         vault_status_row = QHBoxLayout()
         vault_status_row.setContentsMargins(0, 0, 0, 0)
@@ -7206,7 +7225,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_rules_edit.textChanged.connect(self._refresh_varac_bbs_sweeper_status_label)
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
-        vault_guard_v.addWidget(QLabel("VGuard File Protection"))
+        vguard_v.addWidget(QLabel("VGuard File Protection"))
         guard_row = QHBoxLayout()
         guard_row.setContentsMargins(0, 0, 0, 0)
         guard_row.setSpacing(8)
@@ -7219,7 +7238,7 @@ class SettingsTab(QWidget):
         self.varac_guard_mode_combo.setMinimumWidth(230)
         guard_row.addWidget(self.varac_guard_mode_combo)
         guard_row.addStretch()
-        vault_guard_v.addLayout(guard_row)
+        vguard_v.addLayout(guard_row)
 
         guard_trust_row = QHBoxLayout()
         guard_trust_row.setContentsMargins(0, 0, 0, 0)
@@ -7233,7 +7252,7 @@ class SettingsTab(QWidget):
         guard_trust_row.addWidget(self.varac_guard_allow_bbs_chk)
         guard_trust_row.addWidget(self.varac_guard_allow_trusted_chk)
         guard_trust_row.addStretch()
-        vault_guard_v.addLayout(guard_trust_row)
+        vguard_v.addLayout(guard_trust_row)
 
         guard_dir_row = QHBoxLayout()
         guard_dir_row.setContentsMargins(0, 0, 0, 0)
@@ -7255,7 +7274,7 @@ class SettingsTab(QWidget):
         guard_dir_row.addWidget(self.varac_guard_retry_combo)
         guard_dir_row.addWidget(QLabel("sec"))
         guard_dir_row.addStretch()
-        vault_guard_v.addLayout(guard_dir_row)
+        vguard_v.addLayout(guard_dir_row)
 
         guard_note_row = QHBoxLayout()
         guard_note_row.setContentsMargins(0, 0, 0, 0)
@@ -7264,14 +7283,15 @@ class SettingsTab(QWidget):
         )
         self.varac_guard_note_label.setWordWrap(True)
         guard_note_row.addWidget(self.varac_guard_note_label, 1)
-        vault_guard_v.addLayout(guard_note_row)
+        vguard_v.addLayout(guard_note_row)
 
         guard_status_row = QHBoxLayout()
         guard_status_row.setContentsMargins(0, 0, 0, 0)
         self.varac_guard_status_label = QLabel("No VGuard scan yet.")
         self.varac_guard_status_label.setWordWrap(True)
         guard_status_row.addWidget(self.varac_guard_status_label, 1)
-        vault_guard_v.addLayout(guard_status_row)
+        vguard_v.addLayout(guard_status_row)
+        vguard_v.addStretch(1)
 
         self.varac_guard_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_guard_allow_bbs_chk.stateChanged.connect(self._mark_settings_dirty)

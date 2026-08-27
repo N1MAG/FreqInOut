@@ -155,7 +155,9 @@ settings.
 Target behavior:
 
 - Make VarAC BBS configuration and status clear in Settings without mixing it
-  with unrelated JS8/Spotter/CommStat concepts.
+  with unrelated JS8/Spotter/CommStat concepts. Initial implementation splits
+  VarAC BBS administration into Live BBS, Managed BBS, Sweeper, and VGuard tabs
+  inside the VarAC settings area.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
   VarAC instance. Initial guidance is now present in Settings and should remain
