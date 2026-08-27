@@ -3252,6 +3252,12 @@ class SettingsTab(QWidget):
         self.selector_set_default_device_profile_btn.setToolTip("Make the selected radio the station default command radio.")
         self.selector_set_default_device_profile_btn.setAccessibleName("Make selected radio default")
         self.selector_set_default_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
+        self.selector_edit_apps_btn = QPushButton("Edit Apps")
+        self.selector_edit_apps_btn.setToolTip(
+            "Choose or change the software used by the selected radio, including JS8Call, Fast Light, CommStat, and VarAC."
+        )
+        self.selector_edit_apps_btn.setAccessibleName("Edit selected radio apps")
+        self.selector_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)
         self.selector_remove_device_profile_btn = QPushButton("Remove Radio")
         self.selector_remove_device_profile_btn.setToolTip(
             "Remove the selected inactive radio profile from FIO. External app profiles and files are not deleted."
@@ -3266,6 +3272,7 @@ class SettingsTab(QWidget):
         radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_set_default_device_profile_btn)
+        radio_selector_actions.addWidget(self.selector_edit_apps_btn)
         radio_selector_actions.addWidget(self.selector_remove_device_profile_btn)
         radio_selector_actions.addStretch(1)
         configured_radios_layout.addLayout(radio_selector_actions)
@@ -3599,8 +3606,15 @@ class SettingsTab(QWidget):
         self.profile_deactivate_device_profile_btn.setToolTip("Stop using the selected radio without deleting its configuration.")
         self.profile_deactivate_device_profile_btn.setAccessibleName("Stop using selected radio from profile")
         self.profile_deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)
+        self.profile_edit_apps_btn = QPushButton("Edit Apps")
+        self.profile_edit_apps_btn.setToolTip(
+            "Open the selected radio's app choices so software can be added or removed."
+        )
+        self.profile_edit_apps_btn.setAccessibleName("Edit selected radio apps from profile")
+        self.profile_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)
         detail_actions.addWidget(self.profile_activate_device_profile_btn)
         detail_actions.addWidget(self.profile_deactivate_device_profile_btn)
+        detail_actions.addWidget(self.profile_edit_apps_btn)
         detail_actions.addStretch(1)
         detail_layout.addLayout(detail_actions)
 
@@ -3655,7 +3669,10 @@ class SettingsTab(QWidget):
         radio_profile_software_layout = QVBoxLayout(radio_profile_software_content)
         radio_profile_software_layout.setContentsMargins(0, 0, 0, 0)
         radio_profile_software_layout.setSpacing(6)
-        software_chips_title = QLabel("Software Enabled For This Radio")
+        software_chips_title = QLabel("Software Used By This Radio")
+        software_chips_title.setToolTip(
+            "Add or remove apps from this selected radio. App-specific settings tabs appear after the app is enabled."
+        )
         software_chips_font = software_chips_title.font()
         software_chips_font.setBold(True)
         software_chips_title.setFont(software_chips_font)
@@ -7963,6 +7980,13 @@ class SettingsTab(QWidget):
                 self._select_radio_profile_guided_task(task_key)
                 return
         self._select_settings_section_group(target_group)
+
+    def _open_selected_radio_apps_task(self) -> None:
+        if not self._selected_settings_radio_profile():
+            QMessageBox.information(self, "Radio Apps", "Select one radio before editing its app stack.")
+            return
+        self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
+        self._select_radio_profile_guided_task("apps")
 
     def _radio_profile_guided_task_role(
         self,
@@ -14062,10 +14086,19 @@ class SettingsTab(QWidget):
             locked_field = self._radio_profile_software_flag_field(locked_key)
             if locked_field:
                 payload[locked_field] = True
-        self._persist_device_profile(payload, existing=profile)
+        if self._persist_device_profile(payload, existing=profile) is False:
+            self._refresh_radio_profile_software_flag_controls(profile)
+            return
+        saved_profile = getattr(self, "_last_persisted_device_profile", None)
+        if isinstance(saved_profile, dict) and int(saved_profile.get("id", 0) or 0) > 0:
+            self._settings_radio_focus_id = int(saved_profile.get("id", 0) or 0)
         self._refresh_radio_specific_section_visibility()
         self._update_device_profile_readiness_detail()
-        self._publish_radio_profile_software_flag_feedback(key, bool(payload.get(field)), profile)
+        self._publish_radio_profile_software_flag_feedback(
+            key,
+            bool(payload.get(field)),
+            saved_profile if isinstance(saved_profile, dict) else profile,
+        )
 
     def _publish_radio_profile_software_flag_feedback(
         self,
@@ -16933,6 +16966,13 @@ class SettingsTab(QWidget):
             self.copy_readiness_summary_btn.setStyleSheet(button_style("secondary", theme))
         self.edit_device_profile_btn.setEnabled(can_edit)
         self.edit_device_profile_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        if hasattr(self, "selector_edit_apps_btn"):
+            self.selector_edit_apps_btn.setEnabled(can_edit)
+            self.selector_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        if hasattr(self, "profile_edit_apps_btn"):
+            self.profile_edit_apps_btn.setEnabled(can_edit)
+            self.profile_edit_apps_btn.setVisible(count == 1)
+            self.profile_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         self.activate_device_profile_btn.setEnabled(can_activate)
         self.activate_device_profile_btn.setStyleSheet(button_style("info" if can_activate else "muted", theme))
         if hasattr(self, "selector_activate_device_profile_btn"):

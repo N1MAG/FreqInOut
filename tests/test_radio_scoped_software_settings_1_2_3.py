@@ -4444,6 +4444,19 @@ def test_radio_profile_inline_software_flag_controls_are_wired() -> None:
     assert "self._refresh_radio_profile_software_flag_controls(profile)" in readiness_block
 
 
+def test_selected_radio_apps_editor_is_visible_for_existing_radios() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.selector_edit_apps_btn = QPushButton("Edit Apps")' in source
+    assert "self.selector_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)" in source
+    assert 'self.profile_edit_apps_btn = QPushButton("Edit Apps")' in source
+    assert "self.profile_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)" in source
+    assert "def _open_selected_radio_apps_task" in source
+    assert 'self._select_radio_profile_guided_task("apps")' in source
+    assert 'software_chips_title = QLabel("Software Used By This Radio")' in source
+    assert "App-specific settings tabs appear after the app is enabled." in source
+
+
 def test_radio_profile_dashboard_sections_wrap_existing_profile_widgets() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     profile_block = source[
