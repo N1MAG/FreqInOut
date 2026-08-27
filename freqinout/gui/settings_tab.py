@@ -1478,6 +1478,7 @@ class SettingsTab(QWidget):
             )
         self._refresh_varac_bbs_vault_location_list()
         self._refresh_varac_bbs_vault_status_label()
+        self._refresh_varac_bbs_vault_inline_preview()
 
     def _refresh_varac_bbs_vault_location_list(self) -> None:
         if not hasattr(self, "varac_bbs_vault_locations_list"):
@@ -1526,6 +1527,7 @@ class SettingsTab(QWidget):
         self._refresh_varac_bbs_vault_default_location_combo()
         self._load_varac_bbs_vault_editor_from_selection()
         self._refresh_varac_bbs_vault_actions()
+        self._refresh_varac_bbs_vault_inline_preview()
 
     def _refresh_varac_bbs_vault_default_location_combo(self) -> None:
         if not hasattr(self, "varac_bbs_vault_default_location_combo"):
@@ -2020,6 +2022,14 @@ class SettingsTab(QWidget):
                 self.varac_bbs_vault_retention_policy_combo.currentText().strip()
                 == "Archive this location by age"
             )
+
+    def _refresh_varac_bbs_vault_inline_preview(self) -> None:
+        preview = getattr(self, "varac_bbs_vault_structure_preview_edit", None)
+        if not isinstance(preview, QPlainTextEdit):
+            return
+        previous_scroll = preview.verticalScrollBar().value()
+        preview.setPlainText(self._varac_bbs_vault_structure_preview_text())
+        preview.verticalScrollBar().setValue(min(previous_scroll, preview.verticalScrollBar().maximum()))
 
     def _varac_bbs_vault_structure_preview_text(self) -> str:
         locations = [
@@ -2729,6 +2739,7 @@ class SettingsTab(QWidget):
             summary = "Managed Vault is not enabled for this radio profile."
         self.varac_bbs_vault_status_label.setText(summary)
         self.varac_bbs_vault_status_label.setToolTip(summary)
+        self._refresh_varac_bbs_vault_inline_preview()
 
     def _initialize_varac_bbs_vault(self) -> None:
         live_bbs_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
@@ -6599,6 +6610,10 @@ class SettingsTab(QWidget):
         vault_guard_v = QVBoxLayout(vault_tab)
         vault_guard_v.setContentsMargins(8, 8, 8, 8)
         vault_guard_v.setSpacing(8)
+        preview_tab = QWidget()
+        preview_v = QVBoxLayout(preview_tab)
+        preview_v.setContentsMargins(8, 8, 8, 8)
+        preview_v.setSpacing(8)
         sweeper_tab = QWidget()
         sweeper_v = QVBoxLayout(sweeper_tab)
         sweeper_v.setContentsMargins(8, 8, 8, 8)
@@ -6609,6 +6624,7 @@ class SettingsTab(QWidget):
         vguard_v.setSpacing(8)
         bbs_tabs.addTab(bbs_settings_tab, "Live BBS")
         bbs_tabs.addTab(vault_tab, "Managed BBS")
+        bbs_tabs.addTab(preview_tab, "Preview")
         bbs_tabs.addTab(sweeper_tab, "Sweeper")
         bbs_tabs.addTab(vguard_tab, "VGuard")
         varac_v.addWidget(bbs_tabs)
@@ -7095,13 +7111,16 @@ class SettingsTab(QWidget):
                 "Keep until manually removed",
             ]
         )
+        self.varac_bbs_vault_retention_policy_combo.setToolTip(
+            "Per-location file cleanup. Choose an age here when this BBS location should age out differently than the global live BBS archive."
+        )
         vault_editor_grid.addWidget(self.varac_bbs_vault_retention_policy_combo, 7, 1, 1, 2)
         self.varac_bbs_vault_retention_days_spin = QSpinBox()
         self.varac_bbs_vault_retention_days_spin.setRange(1, 365)
         self.varac_bbs_vault_retention_days_spin.setValue(7)
         self.varac_bbs_vault_retention_days_spin.setSuffix(" days")
         self.varac_bbs_vault_retention_days_spin.setToolTip(
-            "Used when this location is set to archive files by age. Runtime enforcement will use this per-location policy."
+            "Used only for Archive this location by age. This policy belongs to the selected managed BBS location."
         )
         vault_editor_grid.addWidget(self.varac_bbs_vault_retention_days_spin, 7, 3)
         self.varac_bbs_vault_inherit_callsigns_chk = QCheckBox("Inherit Global Allowed Callsigns")
@@ -7142,6 +7161,23 @@ class SettingsTab(QWidget):
         vault_locations_layout.addWidget(vault_locations_hint)
         vault_locations_row.addWidget(vault_locations_wrap, 1)
         vault_guard_v.addLayout(vault_locations_row)
+
+        preview_title = QLabel("BBS Visitor Preview")
+        preview_title.setStyleSheet("font-weight: 700;")
+        preview_v.addWidget(preview_title)
+        preview_note = QLabel(
+            "Review the root helper files, visible locations, and files callers will browse after FIO publishes the managed BBS view. "
+            "This preview does not publish files or change VarAC.ini."
+        )
+        preview_note.setWordWrap(True)
+        preview_v.addWidget(preview_note)
+        self.varac_bbs_vault_structure_preview_edit = QPlainTextEdit()
+        self.varac_bbs_vault_structure_preview_edit.setReadOnly(True)
+        self.varac_bbs_vault_structure_preview_edit.setMinimumHeight(260)
+        self.varac_bbs_vault_structure_preview_edit.setToolTip(
+            "Operator preview of the managed VarAC BBS root menu, helper files, locations, and visible source files."
+        )
+        preview_v.addWidget(self.varac_bbs_vault_structure_preview_edit, 1)
 
         sweeper_v.addWidget(QLabel("BBS Sweeper Rules"))
         sweeper_note = QLabel(
@@ -7184,6 +7220,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_enabled_chk_main.stateChanged.connect(self._refresh_varac_bbs_vault_status_label)
         self.varac_bbs_vault_enabled_chk_main.stateChanged.connect(self._refresh_varac_bbs_vault_actions)
         self.varac_bbs_dir_edit.textChanged.connect(self._sync_varac_bbs_vault_root_from_bbs_dir)
+        self.varac_bbs_dir_edit.textChanged.connect(lambda _text: self._refresh_varac_bbs_vault_inline_preview())
         self.varac_bbs_vault_root_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_root_edit.textChanged.connect(self._refresh_varac_bbs_vault_status_label)
         self.varac_bbs_vault_root_edit.textChanged.connect(self._on_varac_bbs_vault_root_changed)
