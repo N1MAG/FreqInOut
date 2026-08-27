@@ -4324,6 +4324,12 @@ class MessageViewerTab(QWidget):
         self.inbox_filters_heading.setVisible(False)
         self.inbox_bbs_heading = QLabel("BBS")
         self.inbox_bbs_heading.setStyleSheet("font-weight: bold;")
+        self.inbox_bbs_summary_label = QLabel("BBS files: not checked")
+        self.inbox_bbs_summary_label.setWordWrap(True)
+        self.inbox_bbs_summary_label.setStyleSheet("color: #566573;")
+        self.inbox_bbs_summary_label.setToolTip(
+            "Shows live BBS files, managed BBS locations, and archive readiness from the current runtime settings."
+        )
 
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
@@ -4702,6 +4708,7 @@ class MessageViewerTab(QWidget):
             self.more_actions_btn,
             self.bbs_status_btn,
             self.bbs_manage_btn,
+            self.inbox_bbs_summary_label,
             self.time_toggle_btn,
             self.message_check_combo,
             self.type_filter,
@@ -4734,7 +4741,8 @@ class MessageViewerTab(QWidget):
             (self.inbox_bbs_heading, 10, 0, 1, 2),
             (self.bbs_status_btn, 11, 0, 1, 2),
             (self.bbs_manage_btn, 12, 0, 1, 2),
-            (self.message_check_status_label, 13, 0, 1, 2),
+            (self.inbox_bbs_summary_label, 13, 0, 1, 2),
+            (self.message_check_status_label, 14, 0, 1, 2),
         ]
         for item in placements:
             widget, row, col, *span = item
@@ -6568,6 +6576,8 @@ class MessageViewerTab(QWidget):
             self._refresh_varac_bbs_status_label()
         if hasattr(self, "bbs_manage_btn"):
             self.bbs_manage_btn.setVisible(not compose_active)
+        if hasattr(self, "inbox_bbs_summary_label"):
+            self.inbox_bbs_summary_label.setVisible(not compose_active)
         self._sync_message_check_timer()
         self._update_compose_preview()
 
@@ -6886,6 +6896,21 @@ class MessageViewerTab(QWidget):
             self.bbs_status_btn.setText(label)
             self.bbs_status_btn.setToolTip(full_text)
             self.bbs_status_btn.setStyleSheet(button_style(role, resolve_theme(self.settings)))
+        if hasattr(self, "inbox_bbs_summary_label"):
+            if not inventory.bbs_enabled:
+                summary_text = "BBS files: disabled"
+            else:
+                managed_text = "managed locations off"
+                if inventory.vault_enabled:
+                    managed_text = (
+                        f"{inventory.enabled_location_count}/{inventory.total_location_count} managed locations, "
+                        f"{inventory.managed_file_count} managed files"
+                    )
+                archive_text = f"archive after {inventory.archive_days}d" if inventory.archive_enabled else "archive off"
+                live_text = f"{inventory.live_file_count} live files" if inventory.live_exists else "live directory missing"
+                summary_text = f"BBS files: {live_text}; {managed_text}; {archive_text}."
+            self.inbox_bbs_summary_label.setText(summary_text)
+            self.inbox_bbs_summary_label.setToolTip(full_text)
 
     def _show_varac_bbs_status_details(self) -> None:
         self._refresh_varac_bbs_status_label()

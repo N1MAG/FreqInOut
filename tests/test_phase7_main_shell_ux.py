@@ -2260,6 +2260,7 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert compact_layout.itemAtPosition(1, 1).widget() is tab.message_check_combo
         assert compact_layout.itemAtPosition(4, 1).widget() is tab.type_filter
         assert compact_layout.itemAtPosition(10, 0).widget() is tab.inbox_bbs_heading
+        assert compact_layout.itemAtPosition(13, 0).widget() is tab.inbox_bbs_summary_label
         assert tab.mark_all_read_btn.parentWidget() is None
         assert tab.advanced_filters_btn.parentWidget() is tab.message_funnel_widget
         assert tab.operating_group_filter.parentWidget() is tab.message_funnel_widget
@@ -2307,6 +2308,7 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert wide_layout.itemAtPosition(1, 1).widget() is tab.message_check_combo
         assert wide_layout.itemAtPosition(4, 1).widget() is tab.type_filter
         assert wide_layout.itemAtPosition(10, 0).widget() is tab.inbox_bbs_heading
+        assert wide_layout.itemAtPosition(13, 0).widget() is tab.inbox_bbs_summary_label
         tab._set_message_table_display_profile("form_message")
         assert header.sectionResizeMode(1) == QHeaderView.Stretch
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
