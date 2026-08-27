@@ -17,6 +17,7 @@ from freqinout.core.varac_bbs_sources import (
     remove_group_source_indexes,
     roster_refresh_plan,
 )
+from freqinout.core.message_file_scanner import FileRecord
 from freqinout.core.varac_bbs_config import (
     get_varac_ini_sync_state,
     load_varac_bbs_config,
@@ -26,6 +27,18 @@ from freqinout.core.varac_bbs_config import (
     write_varac_bbs_config,
 )
 from freqinout.gui.settings_tab import SettingsTab
+from freqinout.gui.message_viewer_tab import MessageViewerTab
+
+
+class _DictSettings:
+    def __init__(self, data: dict):
+        self._data = dict(data)
+
+    def get(self, key: str, default=None):
+        return self._data.get(key, default)
+
+    def reload(self) -> None:
+        return None
 
 
 def _app():
@@ -128,6 +141,63 @@ def test_messages_bbs_status_text_is_runtime_projected_context(tmp_path: Path) -
 
     assert "runtime-projected default context" in text
     assert "VarAC BBS (runtime-projected default context):" in text
+
+
+def test_messages_bbs_sweeper_applies_live_bbs_file_to_managed_location(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    managed = tmp_path / "managed" / "intel"
+    live_bbs.mkdir()
+    managed.mkdir(parents=True)
+    src = live_bbs / "weather alert.txt"
+    src.write_text("Regional weather alert", encoding="utf-8")
+    stat = src.stat()
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = _DictSettings(
+        {
+            "varac_bbs_vault_enabled": True,
+            "varac_bbs_archive_dir": str(tmp_path / "archive"),
+            "varac_bbs_sweeper_rules_v1": [
+                {
+                    "id": "weather",
+                    "name": "Weather",
+                    "enabled": True,
+                    "source_families": ["varac_bbs"],
+                    "subject_contains": ["weather"],
+                    "target_location_ids": ["intel"],
+                    "copy_mode": "copy_once",
+                }
+            ],
+            "varac_bbs_vault_locations_v1": [
+                {
+                    "id": "intel",
+                    "name": "Intel",
+                    "source_dir": str(managed),
+                    "enabled": True,
+                }
+            ],
+        }
+    )
+
+    MessageViewerTab._apply_bbs_sweeper_rules_after_file_scan(
+        tab,
+        {
+            "bbs": [
+                FileRecord(
+                    path=src,
+                    origin="bbs",
+                    size=stat.st_size,
+                    mtime=stat.st_mtime,
+                )
+            ],
+            "flmsg": [],
+            "flamp": [],
+        },
+    )
+
+    copied = managed / src.name
+    assert copied.exists()
+    assert copied.read_text(encoding="utf-8") == "Regional weather alert"
 
 
 def test_settings_bbs_add_group_family_callsigns_dedupes_allowed_list() -> None:

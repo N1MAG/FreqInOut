@@ -266,6 +266,11 @@ from freqinout.core.commstat_sitrep import commstat_reach_label
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_bbs_config import bbs_summary_text
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory
+from freqinout.core.varac_bbs_sweeper import (
+    apply_bbs_sweeper_copy_plan,
+    load_bbs_sweeper_rules,
+    plan_bbs_sweeper_copies,
+)
 from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, FlampRelayStore, load_vault_locations
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
@@ -8619,6 +8624,7 @@ class MessageViewerTab(QWidget):
                     self._read_state_map = self._load_read_state_map()
                     self._save_file_scan_cache(records, dir_mtimes=dir_mtimes)
                     self._scan_cache_loaded = True
+                    self._apply_bbs_sweeper_rules_after_file_scan(records)
                     self._project_message_files_to_observations(records)
                     self._refresh_varac_messages(force=force, rebuild=False)
                     self._populate_messages_table(force=force)
@@ -8663,6 +8669,79 @@ class MessageViewerTab(QWidget):
                 log.debug("MessageViewer: projected %s message file observations", projected)
         except Exception as exc:
             log.debug("MessageViewer: message file observation projection failed: %s", exc)
+
+    def _bbs_sweeper_target_dirs(self) -> Dict[str, str]:
+        if not self._is_truthy(self.settings.get("varac_bbs_vault_enabled", False), False):
+            return {}
+        targets: Dict[str, str] = {}
+        for location in load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", [])):
+            if not location.enabled:
+                continue
+            location_id = str(location.id or "").strip()
+            source_dir = str(location.source_dir or "").strip()
+            if not location_id or not source_dir:
+                continue
+            try:
+                path = Path(source_dir).expanduser()
+                if path.exists() and path.is_dir():
+                    targets[location_id] = str(path)
+            except Exception:
+                continue
+        return targets
+
+    def _bbs_sweeper_candidate_for_record(self, rec: FileRecord, source_family: str) -> Dict[str, object]:
+        text = _read_text_head(rec.path, 32768)
+        sender = ""
+        if source_family in {"flmsg", "flamp"}:
+            sender = self._extract_sender_from_file(rec)
+        return {
+            "path": str(rec.path),
+            "source": source_family,
+            "sender": sender,
+            "subject": rec.path.name,
+            "body": text,
+        }
+
+    def _apply_bbs_sweeper_rules_after_file_scan(self, records: Dict[str, List[FileRecord]]) -> None:
+        try:
+            rules = load_bbs_sweeper_rules(self.settings.get("varac_bbs_sweeper_rules_v1", []))
+        except Exception as exc:
+            log.debug("MessageViewer: BBS sweeper rules could not be loaded: %s", exc)
+            return
+        if not any(rule.ready_to_apply for rule in rules):
+            return
+        target_dirs = self._bbs_sweeper_target_dirs()
+        if not target_dirs:
+            return
+        archive_roots = self._bbs_archive_roots()
+        candidates: List[Dict[str, object]] = []
+        for origin, source_family in (("bbs", "varac_bbs"), ("flmsg", "flmsg"), ("flamp", "flamp")):
+            for rec in records.get(origin, []) or []:
+                if not isinstance(rec, FileRecord):
+                    continue
+                if source_family == "varac_bbs" and self._is_bbs_archive_record(rec, archive_roots=archive_roots):
+                    continue
+                candidates.append(self._bbs_sweeper_candidate_for_record(rec, source_family))
+        if not candidates:
+            return
+        try:
+            plans = plan_bbs_sweeper_copies(
+                rules,
+                candidates,
+                available_location_ids=target_dirs.keys(),
+            )
+            if not plans:
+                return
+            results = apply_bbs_sweeper_copy_plan(plans, target_dirs)
+        except Exception as exc:
+            log.warning("MessageViewer: BBS sweeper failed: %s", exc)
+            return
+        copied = sum(1 for result in results if result.copied)
+        skipped = len(results) - copied
+        if copied or skipped:
+            log.info("MessageViewer: BBS sweeper copied=%s skipped=%s plans=%s", copied, skipped, len(plans))
+        if copied and hasattr(self, "inbox_bbs_summary_label"):
+            self._refresh_varac_bbs_status_label()
 
     def _project_commstat_alerts_to_observations(self) -> None:
         db_path = self._db_path()

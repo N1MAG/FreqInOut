@@ -172,9 +172,47 @@ def test_bbs_sweeper_copy_plan_filters_locations_and_dedupes_targets() -> None:
     assert plans[0].source_family == "flmsg"
     assert plans[0].target_location_ids == ("weather", "ops")
     assert plans[0].matched_rule_ids == ("weather", "missing-target")
+    assert plans[0].copy_once_location_ids == ()
     assert plans[1].source_family == "flamp"
     assert plans[1].target_location_ids == ("ops",)
     assert plans[1].matched_rule_ids == ("ops",)
+
+
+def test_bbs_sweeper_copy_once_skips_existing_target(tmp_path) -> None:
+    src = tmp_path / "inbox" / "Weather Update.txt"
+    target = tmp_path / "managed" / "intel"
+    src.parent.mkdir()
+    target.mkdir(parents=True)
+    src.write_text("weather update", encoding="utf-8")
+    existing = target / src.name
+    existing.write_text("older copy", encoding="utf-8")
+
+    rules = load_bbs_sweeper_rules(
+        [
+            {
+                "id": "weather",
+                "name": "Weather",
+                "enabled": True,
+                "source_families": ["flmsg"],
+                "subject_contains": ["weather"],
+                "target_location_ids": ["intel"],
+                "copy_mode": "copy_once",
+            }
+        ]
+    )
+
+    plans = plan_bbs_sweeper_copies(
+        rules,
+        [{"path": str(src), "source": "flmsg", "subject": "Weather Update"}],
+        available_location_ids=["intel"],
+    )
+    results = apply_bbs_sweeper_copy_plan(plans, {"intel": target})
+
+    assert plans[0].copy_once_location_ids == ("intel",)
+    assert len(results) == 1
+    assert results[0].copied is False
+    assert results[0].skipped_reason == "copy_once_exists"
+    assert existing.read_text(encoding="utf-8") == "older copy"
 
 
 def test_bbs_sweeper_copy_plan_skips_unusable_candidates() -> None:

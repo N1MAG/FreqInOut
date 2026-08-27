@@ -79,6 +79,7 @@ class BbsSweeperCopyPlan:
     source_family: str
     target_location_ids: tuple[str, ...]
     matched_rule_ids: tuple[str, ...]
+    copy_once_location_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,8 @@ def plan_bbs_sweeper_copies(
         body = candidate.get("body") or candidate.get("message") or candidate.get("summary") or candidate.get("remarks") or ""
         targets: list[str] = []
         target_seen: set[str] = set()
+        copy_once_targets: set[str] = set()
+        repeat_copy_targets: set[str] = set()
         matched_rule_ids: list[str] = []
         rule_seen: set[str] = set()
         for rule in rules:
@@ -245,13 +248,20 @@ def plan_bbs_sweeper_copies(
                 if target and target not in target_seen:
                     targets.append(target)
                     target_seen.add(target)
+                if target:
+                    if rule.copy_mode == "copy_once":
+                        copy_once_targets.add(target)
+                    else:
+                        repeat_copy_targets.add(target)
         if targets:
+            effective_copy_once = tuple(target for target in targets if target in copy_once_targets and target not in repeat_copy_targets)
             plans.append(
                 BbsSweeperCopyPlan(
                     source_path=source_path,
                     source_family=source_family,
                     target_location_ids=tuple(targets),
                     matched_rule_ids=tuple(matched_rule_ids),
+                    copy_once_location_ids=effective_copy_once,
                 )
             )
     return plans
@@ -302,6 +312,20 @@ def apply_bbs_sweeper_copy_plan(
                 )
                 continue
             base_dst = target_dir / safe_name
+            if _normalize_location_id(target_id) in {
+                _normalize_location_id(value) for value in plan.copy_once_location_ids
+            } and base_dst.exists():
+                results.append(
+                    BbsSweeperCopyResult(
+                        source_path=str(src),
+                        target_location_id=target_id,
+                        target_path=str(base_dst),
+                        copied=False,
+                        matched_rule_ids=plan.matched_rule_ids,
+                        skipped_reason="copy_once_exists",
+                    )
+                )
+                continue
             try:
                 if src.resolve() == base_dst.resolve():
                     results.append(
