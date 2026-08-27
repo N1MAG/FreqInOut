@@ -65,6 +65,10 @@ Target behavior:
 - Keep RF Guard status visible.
 - Move endpoint/path concerns to readiness, health, and configuration guidance.
 
+Initial implementation: Schedule Assignment now uses a compact 7-column table
+with radio, plan, state, and RF Guard status visible. Endpoint details are not
+shown in the normal assignment table.
+
 ## Phase 2: JS8Call, Spotter, And CommStat Setup
 
 JS8Call is one of the most important digital tools in the FIO workflow. The
