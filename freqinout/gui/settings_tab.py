@@ -3893,13 +3893,14 @@ class SettingsTab(QWidget):
         software_flags_layout.setVerticalSpacing(4)
         for index, (key, label) in enumerate(self._radio_profile_software_flag_defs()):
             chk = QCheckBox(label)
-            chk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            chk.setMinimumWidth(132)
+            chk.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
             chk.setToolTip(f"Enable {label} for the selected radio.")
             chk.setAccessibleName(f"Enable {label} for the selected radio")
             chk.stateChanged.connect(lambda _state, k=key: self._on_radio_profile_software_flag_changed(k))
             self._radio_profile_software_flag_checks[key] = chk
-            software_flags_layout.addWidget(chk, index // 4, index % 4)
-        for col in range(4):
+            software_flags_layout.addWidget(chk, index // 3, index % 3)
+        for col in range(3):
             software_flags_layout.setColumnStretch(col, 1)
         radio_profile_software_layout.addWidget(self.radio_profile_software_flags_widget)
         self.radio_profile_software_chips_widget = QWidget()
@@ -14566,7 +14567,7 @@ class SettingsTab(QWidget):
             status_label, role = self._software_family_readiness_chip(family, radio_id, readiness_report)
             btn = QPushButton(label)
             btn.setText(f"{label}: {status_label}")
-            btn.setMinimumWidth(0)
+            btn.setMinimumWidth(150)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setStyleSheet(button_style(role, theme))
             btn.setToolTip(f"Open {label} settings for the selected radio. Status: {status_label}.")
@@ -14598,7 +14599,7 @@ class SettingsTab(QWidget):
             return 1
         if panel_width < 820:
             return 2
-        return 4
+        return 3
 
     @staticmethod
     def _stack_guidance_issue_target(issue: Any) -> Tuple[str, str]:

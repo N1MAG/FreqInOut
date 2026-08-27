@@ -3616,7 +3616,7 @@ def test_radio_profile_software_chip_columns_wrap_for_narrow_panes() -> None:
     assert SettingsTab._radio_profile_software_chip_columns(479) == 1
     assert SettingsTab._radio_profile_software_chip_columns(480) == 2
     assert SettingsTab._radio_profile_software_chip_columns(819) == 2
-    assert SettingsTab._radio_profile_software_chip_columns(820) == 4
+    assert SettingsTab._radio_profile_software_chip_columns(820) == 3
 
 
 def test_radio_profile_software_chips_visual_geometry_wraps_long_status_labels() -> None:
