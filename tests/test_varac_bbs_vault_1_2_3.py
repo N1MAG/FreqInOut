@@ -2802,6 +2802,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
 
 def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
     from freqinout.core.multi_radio_store import MultiRadioStore
+    from freqinout.core.varac_bbs_sweeper import load_bbs_sweeper_rules
 
     store = MultiRadioStore(tmp_path / "freqinout.db")
     saved = store.save_device_profile(
@@ -2827,6 +2828,16 @@ def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> 
                     "open_rule": "Public",
                 }
             ],
+            "varac_bbs_sweeper_rules_v1": [
+                {
+                    "name": "Weather to Intel",
+                    "enabled": True,
+                    "sources": ["VarAC BBS Inbox", "FLMsg"],
+                    "from_calls": ["K7ABC"],
+                    "subject_contains": ["weather"],
+                    "target_location_ids": ["intel"],
+                }
+            ],
         }
     )
 
@@ -2837,6 +2848,10 @@ def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> 
     assert loaded["varac_bbs_vault_flamp_relay_dir"] == str(tmp_path / "flamp" / "relay")
     assert loaded["varac_bbs_vault_flamp_listing_max_age_days"] == 7
     assert load_vault_locations(loaded["varac_bbs_vault_locations_v1"])[0].alias == "INTEL"
+    sweeper_rules = load_bbs_sweeper_rules(loaded["varac_bbs_sweeper_rules_v1"])
+    assert sweeper_rules[0].name == "Weather to Intel"
+    assert sweeper_rules[0].source_families == ("varac_bbs", "flmsg")
+    assert sweeper_rules[0].target_location_ids == ("intel",)
 
 
 def test_settings_tab_autofills_flamp_relay_dir_but_allows_override(tmp_path: Path) -> None:

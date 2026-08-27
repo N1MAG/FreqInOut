@@ -126,6 +126,7 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_bbs_vault_flamp_relay_dir",
         "varac_bbs_vault_flamp_listing_max_age_days",
         "varac_bbs_vault_locations_v1",
+        "varac_bbs_sweeper_rules_v1",
         "varac_bbs_vault_runtime_state_v1",
         "varac_bbs_vault_last_summary",
         "message_paths",
@@ -249,6 +250,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_vault_flamp_relay_dir TEXT,
             varac_bbs_vault_flamp_listing_max_age_days INTEGER NOT NULL DEFAULT 14,
             varac_bbs_vault_locations_v1 TEXT,
+            varac_bbs_sweeper_rules_v1 TEXT,
             varac_bbs_vault_runtime_state_v1 TEXT,
             varac_bbs_vault_last_summary TEXT,
             varac_cluster_member_enabled INTEGER DEFAULT 0,
@@ -350,6 +352,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_vault_flamp_relay_dir": "TEXT",
             "varac_bbs_vault_flamp_listing_max_age_days": "INTEGER NOT NULL DEFAULT 14",
             "varac_bbs_vault_locations_v1": "TEXT",
+            "varac_bbs_sweeper_rules_v1": "TEXT",
             "varac_bbs_vault_runtime_state_v1": "TEXT",
             "varac_bbs_vault_last_summary": "TEXT",
             "varac_cluster_member_enabled": "INTEGER DEFAULT 0",
@@ -3508,6 +3511,12 @@ def _resolve_device_profile_links_conn(conn: sqlite3.Connection, profile: Mappin
             if not _coerce_text(data.get("varac_incoming_path", ""), ""):
                 data["varac_incoming_path"] = _coerce_text(varac_row.get("incoming_path", ""), "")
 
+    data["varac_bbs_vault_locations_v1"] = _parse_json_list(data.get("varac_bbs_vault_locations_v1", "[]"))
+    data["varac_bbs_sweeper_rules_v1"] = _parse_json_list(data.get("varac_bbs_sweeper_rules_v1", "[]"))
+    data["varac_bbs_vault_runtime_state_v1"] = _parse_json_object(
+        data.get("varac_bbs_vault_runtime_state_v1", "{}")
+    )
+
     assignment = _effective_assignment_for_device(conn, _coerce_int(data.get("id"), 0))
     if assignment:
         operating = _record_by_id(conn, "operating_profiles", int(assignment["operating_profile_id"]))
@@ -3659,6 +3668,9 @@ def _legacy_settings_projection_from_device(
         if use_varac
         else 14,
         "varac_bbs_vault_locations_v1": _parse_json_list(device_profile.get("varac_bbs_vault_locations_v1", "[]"))
+        if use_varac
+        else [],
+        "varac_bbs_sweeper_rules_v1": _parse_json_list(device_profile.get("varac_bbs_sweeper_rules_v1", "[]"))
         if use_varac
         else [],
         "varac_bbs_vault_runtime_state_v1": _parse_json_object(
@@ -4007,6 +4019,9 @@ def _seed_device_defaults(
         ),
         "varac_bbs_vault_locations_v1": _coerce_json_list_text(
             settings_values.get("varac_bbs_vault_locations_v1", [])
+        ),
+        "varac_bbs_sweeper_rules_v1": _coerce_json_list_text(
+            settings_values.get("varac_bbs_sweeper_rules_v1", [])
         ),
         "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
@@ -4473,6 +4488,9 @@ def mirror_legacy_settings_into_runtime_active_device(
         ),
         "varac_bbs_vault_locations_v1": _coerce_json_list_text(
             settings_values.get("varac_bbs_vault_locations_v1", [])
+        ),
+        "varac_bbs_sweeper_rules_v1": _coerce_json_list_text(
+            settings_values.get("varac_bbs_sweeper_rules_v1", [])
         ),
         "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
@@ -4951,6 +4969,12 @@ class MultiRadioStore:
                 payload.get(
                     "varac_bbs_vault_locations_v1",
                     (existing or {}).get("varac_bbs_vault_locations_v1", "[]"),
+                )
+            ),
+            "varac_bbs_sweeper_rules_v1": _coerce_json_list_text(
+                payload.get(
+                    "varac_bbs_sweeper_rules_v1",
+                    (existing or {}).get("varac_bbs_sweeper_rules_v1", "[]"),
                 )
             ),
             "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(

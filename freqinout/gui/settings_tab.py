@@ -296,6 +296,10 @@ from freqinout.core.varac_bbs_vault import (
     vault_locations_to_data,
     vault_runtime_state_to_data,
 )
+from freqinout.core.varac_bbs_sweeper import (
+    bbs_sweeper_rules_to_data,
+    load_bbs_sweeper_rules,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
@@ -729,6 +733,7 @@ class SettingsTab(QWidget):
         self._varac_bbs_lookup_by_callsign: Dict[str, Dict[str, str]] = {}
         self._varac_bbs_allowed_group_sources: List[Dict[str, object]] = []
         self._varac_bbs_vault_locations_cache: List[Dict[str, object]] = []
+        self._varac_bbs_sweeper_rules_cache: List[Dict[str, object]] = []
         self._varac_bbs_vault_selected_location_id = ""
         self._varac_bbs_vault_runtime_state_cache: Dict[str, object] = {}
         self._varac_bbs_vault_last_summary_cache = ""
@@ -2118,6 +2123,74 @@ class SettingsTab(QWidget):
                 ]
             )
         return "\n".join(lines)
+
+    def _varac_bbs_sweeper_rules_from_editor(self) -> List[Dict[str, object]]:
+        if not hasattr(self, "varac_bbs_sweeper_rules_edit"):
+            return [dict(row) for row in self._varac_bbs_sweeper_rules_cache]
+        text = self.varac_bbs_sweeper_rules_edit.toPlainText().strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception as exc:
+            raise ValueError(f"BBS sweeper rules must be valid JSON: {exc}") from exc
+        if not isinstance(payload, list):
+            raise ValueError("BBS sweeper rules must be a JSON list.")
+        return bbs_sweeper_rules_to_data(load_bbs_sweeper_rules(payload))
+
+    def _set_varac_bbs_sweeper_rules(self, value: object) -> None:
+        try:
+            normalized = bbs_sweeper_rules_to_data(load_bbs_sweeper_rules(value if isinstance(value, list) else []))
+        except Exception:
+            normalized = []
+        self._varac_bbs_sweeper_rules_cache = [dict(row) for row in normalized]
+        if hasattr(self, "varac_bbs_sweeper_rules_edit"):
+            blocker = QSignalBlocker(self.varac_bbs_sweeper_rules_edit)
+            try:
+                self.varac_bbs_sweeper_rules_edit.setPlainText(
+                    json.dumps(normalized, indent=2, sort_keys=True) if normalized else ""
+                )
+            finally:
+                del blocker
+        self._refresh_varac_bbs_sweeper_status_label()
+
+    def _varac_bbs_sweeper_status_text(self, rules_data: Sequence[Mapping[str, object]]) -> str:
+        if not rules_data:
+            return "No BBS sweeper rules configured."
+        rules = load_bbs_sweeper_rules(rules_data)
+        enabled = sum(1 for rule in rules if rule.enabled)
+        ready = sum(1 for rule in rules if rule.ready_to_apply)
+        target_ids = sorted({target for rule in rules for target in rule.target_location_ids})
+        target_text = ", ".join(target_ids[:4]) if target_ids else "no targets"
+        if len(target_ids) > 4:
+            target_text += f", +{len(target_ids) - 4} more"
+        return f"{len(rules)} rule(s). {enabled} enabled, {ready} ready to apply. Targets: {target_text}."
+
+    def _refresh_varac_bbs_sweeper_status_label(self) -> None:
+        if not hasattr(self, "varac_bbs_sweeper_status_label"):
+            return
+        try:
+            rules_data = self._varac_bbs_sweeper_rules_from_editor()
+            text = self._varac_bbs_sweeper_status_text(rules_data)
+        except Exception as exc:
+            text = f"Rule JSON needs review: {exc}"
+        self.varac_bbs_sweeper_status_label.setText(text)
+        self.varac_bbs_sweeper_status_label.setToolTip(text)
+
+    def _review_varac_bbs_sweeper_rules(self) -> None:
+        try:
+            normalized = self._varac_bbs_sweeper_rules_from_editor()
+        except Exception as exc:
+            QMessageBox.warning(self, "BBS Sweeper Rules", str(exc))
+            self._refresh_varac_bbs_sweeper_status_label()
+            return
+        self._set_varac_bbs_sweeper_rules(normalized)
+        text = self._varac_bbs_sweeper_status_text(normalized)
+        QMessageBox.information(
+            self,
+            "BBS Sweeper Rules",
+            f"{text}\n\nAutomatic copy application is intentionally not enabled in this build.",
+        )
 
     def _show_varac_bbs_vault_structure_preview(self) -> None:
         dlg = QDialog(self)
@@ -6929,6 +7002,34 @@ class SettingsTab(QWidget):
         vault_locations_row.addWidget(vault_locations_wrap, 1)
         vault_guard_v.addLayout(vault_locations_row)
 
+        vault_guard_v.addWidget(QLabel("BBS Sweeper Rules"))
+        sweeper_note = QLabel(
+            "Optional rules can match VarAC BBS, FLMsg, and FLAmp traffic by sender and subject text, then copy matching "
+            "items to one or more managed BBS locations. Review validates the rules; automatic copying is not enabled in this build."
+        )
+        sweeper_note.setWordWrap(True)
+        vault_guard_v.addWidget(sweeper_note)
+        self.varac_bbs_sweeper_rules_edit = QPlainTextEdit()
+        self.varac_bbs_sweeper_rules_edit.setPlaceholderText(
+            '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'
+            '"from_calls":["K7ABC"],"subject_contains":["weather"],"target_location_ids":["intel"]}]'
+        )
+        self.varac_bbs_sweeper_rules_edit.setMaximumHeight(104)
+        self.varac_bbs_sweeper_rules_edit.setToolTip(
+            "Paste or edit a JSON list of BBS sweeper rules. Rules are saved with the selected radio profile."
+        )
+        vault_guard_v.addWidget(self.varac_bbs_sweeper_rules_edit)
+        sweeper_actions = QHBoxLayout()
+        sweeper_actions.setContentsMargins(0, 0, 0, 0)
+        sweeper_actions.setSpacing(8)
+        self.varac_bbs_sweeper_review_btn = QPushButton("Review Rules")
+        self.varac_bbs_sweeper_review_btn.clicked.connect(self._review_varac_bbs_sweeper_rules)
+        sweeper_actions.addWidget(self.varac_bbs_sweeper_review_btn)
+        self.varac_bbs_sweeper_status_label = QLabel("No BBS sweeper rules configured.")
+        self.varac_bbs_sweeper_status_label.setWordWrap(True)
+        sweeper_actions.addWidget(self.varac_bbs_sweeper_status_label, 1)
+        vault_guard_v.addLayout(sweeper_actions)
+
         vault_status_row = QHBoxLayout()
         vault_status_row.setContentsMargins(0, 0, 0, 0)
         self.varac_bbs_vault_status_label = QLabel("Managed Vault is not enabled for this radio profile.")
@@ -7001,6 +7102,8 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_allowed_callsigns_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_access_code_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_access_code_confirm_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_sweeper_rules_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_sweeper_rules_edit.textChanged.connect(self._refresh_varac_bbs_sweeper_status_label)
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
         vault_guard_v.addWidget(QLabel("VGuard File Protection"))
@@ -9373,6 +9476,11 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_flamp_listing_age_combo")
             and self.varac_bbs_vault_flamp_listing_age_combo.currentData() is not None
             else DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
+        )
+        data["varac_bbs_sweeper_rules_v1"] = (
+            self._varac_bbs_sweeper_rules_from_editor()
+            if hasattr(self, "varac_bbs_sweeper_rules_edit")
+            else [dict(row) for row in self._varac_bbs_sweeper_rules_cache]
         )
         if hasattr(self, "msg_paths_edits"):
             for origin, edit in self.msg_paths_edits.items():
@@ -14745,6 +14853,7 @@ class SettingsTab(QWidget):
                 or DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
             ),
             "varac_bbs_vault_locations_v1": profile.get("varac_bbs_vault_locations_v1", []) or [],
+            "varac_bbs_sweeper_rules_v1": profile.get("varac_bbs_sweeper_rules_v1", []) or [],
             "varac_bbs_vault_runtime_state_v1": _coerce_json_mapping(
                 profile.get("varac_bbs_vault_runtime_state_v1", {})
             ),
@@ -14835,6 +14944,7 @@ class SettingsTab(QWidget):
                 else DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
             ),
             "varac_bbs_vault_locations_v1": list(self._varac_bbs_vault_locations_cache),
+            "varac_bbs_sweeper_rules_v1": self._varac_bbs_sweeper_rules_from_editor(),
             "varac_bbs_vault_runtime_state_v1": dict(self._varac_bbs_vault_runtime_state_cache),
             "varac_bbs_vault_last_summary": str(self._varac_bbs_vault_last_summary_cache or "").strip(),
         }
@@ -14933,6 +15043,7 @@ class SettingsTab(QWidget):
                     self.varac_bbs_vault_flamp_listing_age_combo.setCurrentIndex(idx)
             self._maybe_autofill_varac_bbs_vault_flamp_relay_dir()
             self._set_varac_bbs_vault_locations(state.get("varac_bbs_vault_locations_v1", []))
+            self._set_varac_bbs_sweeper_rules(state.get("varac_bbs_sweeper_rules_v1", []))
             default_id = str(state.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip()
             idx = self.varac_bbs_vault_default_location_combo.findData(default_id)
             if idx < 0 and self.varac_bbs_vault_default_location_combo.count() > 0:
@@ -15270,6 +15381,7 @@ class SettingsTab(QWidget):
                     DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS,
                 ),
                 "varac_bbs_vault_locations_v1": state.get("varac_bbs_vault_locations_v1", []) or [],
+                "varac_bbs_sweeper_rules_v1": state.get("varac_bbs_sweeper_rules_v1", []) or [],
                 "varac_bbs_vault_runtime_state_v1": state.get("varac_bbs_vault_runtime_state_v1", {}) or {},
                 "varac_bbs_vault_last_summary": _txt("varac_bbs_vault_last_summary"),
                 "launch_cmd": _txt("varac_launch_cmd"),

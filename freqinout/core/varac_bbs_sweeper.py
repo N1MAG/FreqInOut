@@ -77,9 +77,10 @@ def load_bbs_sweeper_rules(value: object) -> list[BbsSweeperRule]:
         if not isinstance(item, Mapping):
             continue
         rule_id = _normalize_location_id(item.get("id")) or f"rule-{idx + 1}"
+        source_value = item.get("source_families", item.get("sources"))
         source_families = tuple(
             family
-            for family in _as_tuple(item.get("source_families"), normalizer=_normalize_source_family)
+            for family in _as_tuple(source_value, normalizer=_normalize_source_family)
             if family in VALID_SOURCE_FAMILIES
         )
         if not source_families:

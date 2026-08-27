@@ -178,8 +178,9 @@ Target behavior:
   the Managed BBS. The matching model should support sender/from filters plus
   subject-contains filters and should allow one source rule to copy into
   multiple managed BBS locations. Initial implementation adds the pure sweeper
-  rule model and matcher for VarAC BBS, FLMsg, and FLAmp sources; UI editing and
-  background copy application remain future slices.
+  rule model and matcher for VarAC BBS, FLMsg, and FLAmp sources plus a
+  radio-scoped Settings review surface; background copy application remains a
+  future slice.
 - In Messages, preserve the existing `+BBS` action and add a clear way to remove
   FLMsg/FLAmp content from BBS sync without deleting the original message or
   source artifact. Initial implementation changes copied rows to a `-BBS`

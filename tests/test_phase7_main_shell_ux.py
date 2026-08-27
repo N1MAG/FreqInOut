@@ -4596,6 +4596,9 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "preview of the managed BBS structure" in spec
     assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
     assert "multiple managed BBS locations" in spec
+    assert "radio-scoped Settings review surface" in spec
+    assert "BBS Sweeper Rules" in settings_source
+    assert "varac_bbs_sweeper_rules_v1" in settings_source
     assert "remove\n  FLMsg/FLAmp content from BBS sync" in spec
     assert "self._add_settings_section(operating_group, scope=\"global\")" in settings_source
     assert "self.device_assignments_table = QTableWidget(0, 7)" in settings_source
