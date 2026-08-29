@@ -25,6 +25,9 @@ but this document owns the Compose user experience and acceptance criteria.
   be forced through one cramped grid.
 - Embedded Compose may be compact, but must never clip fields. If space is
   constrained, offer the full workbench and keep all controls reachable.
+- Compose must comply with the global Large-text accessibility rule in
+  `docs/internal/ui_layout_standards.md`; controls should grow from font
+  metrics or scroll rather than clipping text for operators using Large text.
 - The left compose/setup panel must scroll independently when the embedded view
   cannot show every setup control. It must not clip the bottom half of routing,
   signing, BBS destination, or folder controls.

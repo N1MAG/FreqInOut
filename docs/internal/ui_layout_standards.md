@@ -40,6 +40,48 @@ Acceptance check for future UI slices:
 - Add focused regression coverage for scroll areas or compact layout behavior
   when the changed screen contains dense controls.
 
+## Text Size Accessibility
+
+FIO must remain usable when `Settings > Main > Text Size` is set to `Large`.
+This is a design rule, not a cosmetic preference. Operators with poor vision
+must not be forced to choose between readable text and usable controls.
+
+Required behavior:
+
+- Large text must not clip inside buttons, chips, combo boxes, line edits,
+  labels, tab selectors, radio cards, setup rows, or status banners.
+- Widgets must grow from font metrics before they wrap, scroll, or elide. Do
+  not hard-code a small height such as `24`, `30`, `32`, `36`, or `40` for a
+  text-bearing control unless it is computed from the active font.
+- Fixed heights are allowed only for non-text graphics or for controls whose
+  height is derived from `QFontMetrics` plus padding.
+- Fixed-width labels and buttons must be reviewed at Large text. Prefer
+  content-aware widths, wrapping labels, elided summaries with tooltips, or a
+  scrollable/stacked layout.
+- Do not shrink the user's selected font to make text fit. Preserve readable
+  text, then adapt layout with height, width, wrapping, elision, or scrolling.
+- Dense operator workspaces may keep compact layouts, but every action remains
+  reachable and readable. If a panel cannot fit at Large text, add local
+  scrolling or promote the full workbench/detail surface.
+- New UI code must use shared theme/layout helpers for text-bearing control
+  sizing. Local one-off accessibility guards are temporary exceptions and
+  should be moved into the shared helper layer when touched.
+
+Implementation guardrails:
+
+- Start with conservative global helpers that only increase undersized controls
+  or remove unsafe maximum heights. Do not redesign every tab in the same slice.
+- Provide an opt-out property for intentionally fixed non-text widgets.
+- Keep full descriptions in tooltips/details when visible labels must remain
+  short. This is especially important for radio profile names, file paths, and
+  status explanations.
+- Validate Large text on the high-use screens first: Station command bar,
+  Messages Inbox, Compose, Settings, Map controls, SOP Builder, and net-control
+  tabs.
+
+See `docs/internal/ui_text_size_accessibility_assessment.md` for the current
+assessment and rollout plan.
+
 ## Station Command Bar
 
 The station command bar is the primary always-visible radio control surface. It
