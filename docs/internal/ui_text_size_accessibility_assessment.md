@@ -1,6 +1,7 @@
 # UI Text Size Accessibility Assessment
 
-Status: planned after multi-rig compose recovery point `9d0e3d3`.
+Status: first implementation slice in progress after multi-rig compose recovery
+point `9d0e3d3`.
 
 ## Goal
 
@@ -104,7 +105,8 @@ The global guard should be conservative:
 ### Step 1: Baseline Inventory
 
 - Add a small developer script or test helper that lists fixed/capped
-  text-bearing controls by file and line.
+  text-bearing controls by file and line. Current helper:
+  `tools/audit_ui_text_size_heights.py`.
 - Capture before/after screenshots at Normal and Large text for the high-use
   screens.
 - Use the existing source scan as the first target list:
@@ -231,3 +233,46 @@ This should not be a single huge visual refactor. The safest rollout is:
 
 That sequence protects users with poor vision while reducing the amount of
 tedious tab-by-tab review needed for every future UI change.
+
+## Implementation Progress
+
+Recovery points:
+
+- `9d0e3d3`: current multi-rig compose build pushed before accessibility work.
+- `a846784`: Large-text accessibility design rule and rollout assessment.
+
+First implementation slice:
+
+- Added shared font-metric height helpers and a conservative
+  `apply_text_size_accessibility_guards(...)` helper in `theme.py`.
+- Wired the app-level theme path to run the guard with `include_widths=False`
+  so the global pass raises undersized text-control heights without widening
+  every button in the app.
+- Added local guard calls on high-use screens that rebuild or restyle controls
+  after startup: Messages/Compose, Settings, SOP Builder, and ControlFreq.
+- Converted Compose mode selector, setup rows, guidance/context labels, hidden
+  routing combos, and radio/routing chips from fixed small pixel heights to
+  font-derived heights.
+- Converted Settings radio selector strip and guided setup step frames from
+  fixed small pixel heights to font-derived heights.
+- Converted the main station command summary strip from a fixed 42 px height to
+  a font-derived height.
+- Converted the remaining audited text-control height constants in ControlFreq,
+  FLDigi net control, and Settings to font-derived heights. The first inventory
+  run now reports zero suspicious small text-control height calls at the 48 px
+  threshold.
+
+QA focus for this slice:
+
+- Main window station command bar.
+- Messages Inbox and all Compose modes, including full workbench open/close.
+- Settings radio/profile/setup sections, especially configured-radio selector
+  chips and guided setup cards.
+- SOP Builder action rows.
+- ControlFreq dashboard controls.
+
+Known caution:
+
+- The first pass intentionally avoids global width expansion. Width changes can
+  reflow dense operator screens too aggressively, so those remain local and
+  deliberate for now.

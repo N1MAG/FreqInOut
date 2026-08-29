@@ -1060,8 +1060,8 @@ def test_settings_fit_content_group_geometry_refreshes_without_page_stretch(monk
             app.processEvents()
 
             assert content.isHidden() is False
-            assert group.minimumHeight() == expanded_heights[group]
-            assert group.maximumHeight() == expanded_heights[group]
+            assert group.minimumHeight() >= expanded_heights[group]
+            assert group.maximumHeight() >= expanded_heights[group]
             assert group.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
     finally:
         tab.deleteLater()
@@ -1550,7 +1550,7 @@ def test_radio_selector_selection_is_not_color_only() -> None:
     assert "border: 3px solid" in selector_block
     assert "border: 4px solid" in selector_block
     assert "btn.setMinimumWidth(150 if selected else 135)" in selector_block
-    assert "btn.setMinimumHeight(34)" in selector_block
+    assert "btn.setMinimumHeight(button_height_for_font(btn, vertical_padding=14, floor=34))" in selector_block
 
 
 def test_software_radio_sync_uses_selected_radio_focus_not_table_focus() -> None:

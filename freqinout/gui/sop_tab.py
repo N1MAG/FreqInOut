@@ -61,7 +61,7 @@ from freqinout.core.sop_manager import SOPManager
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import apply_text_size_accessibility_guards, resolve_theme, button_style
 from freqinout.utils.timezones import get_timezone
 
 
@@ -690,6 +690,7 @@ class _LegacySOPTab(QWidget):
                 btn.setMinimumWidth(target)
             except Exception:
                 pass
+        apply_text_size_accessibility_guards(self, include_widths=False)
 
     def _refresh_reference_data(self) -> None:
         data = self.settings.all()
@@ -5994,6 +5995,7 @@ class SOPTab(_LegacySOPTab):
                 btn.setMinimumWidth(max(100, min(360, needed)))
             except Exception:
                 pass
+        apply_text_size_accessibility_guards(self, include_widths=False)
 
     def _schedule_layer_sync_refresh(self) -> None:
         return

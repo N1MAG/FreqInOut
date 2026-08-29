@@ -2031,7 +2031,7 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "def _message_source_options" in source
     assert "def _message_group_options" in source
     assert "def _update_messages_responsive_layout(self) -> None:" in source
-    assert "self.compose_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)" in source
+    assert "self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)" in source
 
 
 def test_phase7_ui_layout_standard_requires_minimized_scrollable_controls() -> None:
@@ -2319,7 +2319,8 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert header.sectionResizeMode(1) == QHeaderView.Stretch
         assert tab.messages_table.columnWidth(1) >= 180
         assert tab.messages_table.columnWidth(5) <= 120
-        assert tab.compose_splitter.orientation() == Qt.Horizontal
+        assert tab.compose_splitter.orientation() == Qt.Vertical
+        assert tab.compose_body_splitter.orientation() == Qt.Horizontal
     finally:
         tab.deleteLater()
         app.processEvents()

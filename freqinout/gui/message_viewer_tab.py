@@ -350,7 +350,16 @@ from freqinout.core.nbems_compose import (
     unique_destination,
 )
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
+from freqinout.gui.theme import (
+    apply_text_size_accessibility_guards,
+    button_height_for_font,
+    button_style,
+    control_height_for_font,
+    fit_child_combo_boxes,
+    fit_combo_box_to_contents,
+    resolve_theme,
+    single_line_label_height,
+)
 from freqinout.gui.qsy_helper import perform_qsy, suspend_active, scheduler_enabled
 from freqinout.gui.dropdown_checklist import DropdownChecklist
 
@@ -4969,8 +4978,9 @@ class MessageViewerTab(QWidget):
         self.compose_mode_selector.setResizeMode(QListWidget.Adjust)
         self.compose_mode_selector.setMovement(QListWidget.Static)
         self.compose_mode_selector.setUniformItemSizes(False)
-        self.compose_mode_selector.setMinimumHeight(34)
-        self.compose_mode_selector.setMaximumHeight(40)
+        mode_selector_h = button_height_for_font(self.compose_mode_selector, vertical_padding=12, floor=40)
+        self.compose_mode_selector.setMinimumHeight(mode_selector_h)
+        self.compose_mode_selector.setMaximumHeight(mode_selector_h)
         self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -4997,7 +5007,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_radio_row_widget = QWidget()
         self.compose_radio_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_radio_row_widget.setMaximumHeight(36)
+        self.compose_radio_row_widget.setMaximumHeight(control_height_for_font(self.compose_radio_row_widget, vertical_padding=14, floor=40))
         radio_row = QHBoxLayout(self.compose_radio_row_widget)
         radio_row.setContentsMargins(0, 0, 0, 0)
         radio_row.setSpacing(8)
@@ -5025,14 +5035,14 @@ class MessageViewerTab(QWidget):
 
         self.compose_guidance_row_widget = QWidget()
         self.compose_guidance_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_guidance_row_widget.setMaximumHeight(42)
+        self.compose_guidance_row_widget.setMaximumHeight(control_height_for_font(self.compose_guidance_row_widget, vertical_padding=16, floor=44))
         guidance_row = QHBoxLayout(self.compose_guidance_row_widget)
         guidance_row.setContentsMargins(0, 0, 0, 0)
         guidance_row.setSpacing(8)
         self.compose_guidance_label = QLabel("")
         self.compose_guidance_label.setWordWrap(False)
         self.compose_guidance_label.setMinimumWidth(0)
-        self.compose_guidance_label.setMaximumHeight(24)
+        self.compose_guidance_label.setMaximumHeight(single_line_label_height(self.compose_guidance_label))
         self.compose_guidance_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.compose_guidance_label.setStyleSheet("color: #566573; font-weight: 600;")
         guidance_row.addWidget(self.compose_guidance_label, 1)
@@ -5046,13 +5056,13 @@ class MessageViewerTab(QWidget):
 
         self.compose_context_row_widget = QWidget()
         self.compose_context_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_context_row_widget.setMaximumHeight(42)
+        self.compose_context_row_widget.setMaximumHeight(control_height_for_font(self.compose_context_row_widget, vertical_padding=16, floor=44))
         context_row = QHBoxLayout(self.compose_context_row_widget)
         context_row.setContentsMargins(0, 0, 0, 0)
         context_row.setSpacing(8)
         self.compose_context_label = QLabel("")
         self.compose_context_label.setWordWrap(False)
-        self.compose_context_label.setMaximumHeight(32)
+        self.compose_context_label.setMaximumHeight(single_line_label_height(self.compose_context_label, vertical_padding=8, floor=28))
         self.compose_context_label.setStyleSheet("color: #0078A8; font-weight: 700;")
         context_row.addWidget(self.compose_context_label, 1)
         self.compose_clear_context_btn = QPushButton("Clear Map Context")
@@ -5063,7 +5073,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_js8_target_row_widget = QWidget()
         self.compose_js8_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_js8_target_row_widget.setMaximumHeight(36)
+        self.compose_js8_target_row_widget.setMaximumHeight(control_height_for_font(self.compose_js8_target_row_widget, vertical_padding=14, floor=40))
         js8_target_row = QHBoxLayout(self.compose_js8_target_row_widget)
         js8_target_row.setContentsMargins(0, 0, 0, 0)
         js8_target_row.setSpacing(8)
@@ -5098,7 +5108,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_js8_auth_row_widget = QWidget()
         self.compose_js8_auth_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_js8_auth_row_widget.setMaximumHeight(36)
+        self.compose_js8_auth_row_widget.setMaximumHeight(control_height_for_font(self.compose_js8_auth_row_widget, vertical_padding=14, floor=40))
         js8_auth_row = QHBoxLayout(self.compose_js8_auth_row_widget)
         js8_auth_row.setContentsMargins(0, 0, 0, 0)
         js8_auth_row.setSpacing(8)
@@ -5297,7 +5307,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_expect_row_widget = QWidget()
         self.compose_expect_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_expect_row_widget.setMaximumHeight(48)
+        self.compose_expect_row_widget.setMaximumHeight(control_height_for_font(self.compose_expect_row_widget, vertical_padding=20, floor=52))
         expect_row = QHBoxLayout(self.compose_expect_row_widget)
         expect_row.setContentsMargins(0, 0, 0, 0)
         expect_row.setSpacing(8)
@@ -5383,7 +5393,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_operator_row_widget = QWidget()
         self.compose_operator_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_operator_row_widget.setMaximumHeight(36)
+        self.compose_operator_row_widget.setMaximumHeight(control_height_for_font(self.compose_operator_row_widget, vertical_padding=14, floor=40))
         row3 = QHBoxLayout(self.compose_operator_row_widget)
         row3.setContentsMargins(0, 0, 0, 0)
         row3.setSpacing(8)
@@ -5409,7 +5419,7 @@ class MessageViewerTab(QWidget):
         self.compose_send_target_combo.addItems(["FLMsg", "FLAmp", "Both"])
         self._configure_compose_combo_width(self.compose_send_target_combo, floor=118)
         self.compose_send_target_combo.setMinimumWidth(220)
-        self.compose_send_target_combo.setMinimumHeight(32)
+        self.compose_send_target_combo.setMinimumHeight(control_height_for_font(self.compose_send_target_combo))
         self.compose_send_target_combo.setMaximumWidth(16777215)
         self.compose_send_target_combo.currentIndexChanged.connect(self._update_compose_preview)
         self.compose_send_target_chip_container = QWidget()
@@ -5427,7 +5437,7 @@ class MessageViewerTab(QWidget):
         self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])
         self._configure_compose_combo_width(self.compose_varac_target_combo, floor=118)
         self.compose_varac_target_combo.setMinimumWidth(220)
-        self.compose_varac_target_combo.setMinimumHeight(32)
+        self.compose_varac_target_combo.setMinimumHeight(control_height_for_font(self.compose_varac_target_combo))
         self.compose_varac_target_combo.setMaximumWidth(16777215)
         self.compose_varac_target_combo.currentIndexChanged.connect(self._update_compose_preview)
         self.compose_varac_target_chip_container = QWidget()
@@ -7038,8 +7048,9 @@ class MessageViewerTab(QWidget):
         chip = QPushButton(text)
         chip.setCheckable(True)
         chip.setChecked(selected)
-        chip.setMinimumHeight(28)
-        chip.setMaximumHeight(30)
+        chip_h = button_height_for_font(chip)
+        chip.setMinimumHeight(chip_h)
+        chip.setMaximumHeight(chip_h)
         chip.setMaximumWidth(150)
         chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         if tooltip:
@@ -7152,8 +7163,9 @@ class MessageViewerTab(QWidget):
             label = self._compose_radio_short_label(target.profile) or target.label
             chip = QPushButton(label)
             chip.setCheckable(True)
-            chip.setMinimumHeight(28)
-            chip.setMaximumHeight(30)
+            chip_h = button_height_for_font(chip)
+            chip.setMinimumHeight(chip_h)
+            chip.setMaximumHeight(chip_h)
             chip.setMaximumWidth(110)
             chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             chip.setToolTip(target.label)
@@ -14334,6 +14346,7 @@ class MessageViewerTab(QWidget):
             self._sync_header_widths()
         except Exception:
             pass
+        apply_text_size_accessibility_guards(self, include_widths=False)
 
     @staticmethod
     def _make_header_spacer() -> QWidget:

@@ -3,7 +3,16 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractButton,
+    QComboBox,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+    QWidget,
+)
 
 
 THEMES: Dict[str, Dict[str, str]] = {
@@ -64,6 +73,7 @@ UI_TEXT_SIZE_SCALES: Dict[str, float] = {
 }
 
 _APP_BASE_FONT: QFont | None = None
+MAX_QT_HEIGHT = 16777215
 
 BAND_COLORS_LIGHT: Dict[str, str] = {
     "160m": "#7F7F7F",
@@ -430,6 +440,124 @@ def fit_child_combo_boxes(container) -> None:
         return
 
 
+def mark_text_size_guard_opt_out(widget: QWidget | None) -> None:
+    if widget is None:
+        return
+    try:
+        widget.setProperty("fio_text_size_guard_opt_out", True)
+    except Exception:
+        return
+
+
+def control_height_for_font(widget: QWidget | None, *, vertical_padding: int = 10, floor: int = 28) -> int:
+    if widget is None:
+        return floor
+    try:
+        line_h = int(widget.fontMetrics().lineSpacing())
+    except Exception:
+        line_h = 0
+    return max(int(floor), line_h + int(vertical_padding))
+
+
+def button_height_for_font(widget: QWidget | None, *, vertical_padding: int = 12, floor: int = 30) -> int:
+    return control_height_for_font(widget, vertical_padding=vertical_padding, floor=floor)
+
+
+def single_line_label_height(widget: QWidget | None, *, vertical_padding: int = 6, floor: int = 24) -> int:
+    return control_height_for_font(widget, vertical_padding=vertical_padding, floor=floor)
+
+
+def _iter_text_size_guard_widgets(root) -> list[QWidget]:
+    if root is None:
+        return []
+    try:
+        if isinstance(root, QApplication):
+            return [widget for widget in root.allWidgets() if isinstance(widget, QWidget)]
+    except Exception:
+        pass
+    widgets: list[QWidget] = []
+    if isinstance(root, QWidget):
+        widgets.append(root)
+        try:
+            widgets.extend([widget for widget in root.findChildren(QWidget) if isinstance(widget, QWidget)])
+        except Exception:
+            pass
+    return widgets
+
+
+def _has_text_size_guard_opt_out(widget: QWidget) -> bool:
+    try:
+        return bool(widget.property("fio_text_size_guard_opt_out"))
+    except Exception:
+        return False
+
+
+def _raise_widget_height_to_font(widget: QWidget, target_h: int) -> None:
+    target_h = max(0, int(target_h or 0))
+    if target_h <= 0:
+        return
+    try:
+        current_min = int(widget.minimumHeight())
+    except Exception:
+        current_min = 0
+    try:
+        current_max = int(widget.maximumHeight())
+    except Exception:
+        current_max = MAX_QT_HEIGHT
+    try:
+        if current_min < target_h:
+            widget.setMinimumHeight(target_h)
+        if current_max < MAX_QT_HEIGHT and current_max < target_h:
+            widget.setMaximumHeight(target_h)
+    except Exception:
+        return
+
+
+def _widget_has_visible_text(widget: QWidget) -> bool:
+    try:
+        if isinstance(widget, QComboBox):
+            return bool(widget.currentText() or widget.count())
+        if isinstance(widget, QLineEdit):
+            return bool(widget.text() or widget.placeholderText())
+        if isinstance(widget, QLabel):
+            return bool(str(widget.text() or "").strip())
+        if isinstance(widget, QAbstractButton):
+            return bool(str(widget.text() or "").strip())
+        if isinstance(widget, (QPlainTextEdit, QTextEdit)):
+            return bool(widget.placeholderText() or widget.toPlainText())
+    except Exception:
+        return False
+    return False
+
+
+def apply_text_size_accessibility_guards(root, *, include_widths: bool = True) -> None:
+    """Raise undersized text controls so the active app font does not clip."""
+    for widget in _iter_text_size_guard_widgets(root):
+        if _has_text_size_guard_opt_out(widget):
+            continue
+        if not _widget_has_visible_text(widget):
+            continue
+        if isinstance(widget, (QPlainTextEdit, QTextEdit)):
+            _raise_widget_height_to_font(widget, control_height_for_font(widget, vertical_padding=16, floor=48))
+        elif isinstance(widget, QAbstractButton):
+            _raise_widget_height_to_font(widget, button_height_for_font(widget))
+        elif isinstance(widget, (QComboBox, QLineEdit)):
+            _raise_widget_height_to_font(widget, control_height_for_font(widget))
+        elif isinstance(widget, QLabel) and not widget.wordWrap():
+            _raise_widget_height_to_font(widget, single_line_label_height(widget))
+        if not include_widths:
+            continue
+        try:
+            if isinstance(widget, QAbstractButton):
+                text = str(widget.text() or "").replace("&", "").strip()
+                if text:
+                    needed = int(widget.fontMetrics().horizontalAdvance(text) + 30)
+                    if needed > int(widget.minimumWidth() or 0):
+                        widget.setMinimumWidth(min(420, needed))
+        except Exception:
+            pass
+
+
 def app_stylesheet(theme: Dict[str, str]) -> str:
     return (
         "QWidget {"
@@ -570,3 +698,4 @@ def apply_app_theme(app, theme: Dict[str, str], *, ui_text_scale: float = 1.00) 
     app.setPalette(pal)
     app.setStyleSheet(app_stylesheet(theme))
     fit_existing_combo_boxes(app)
+    apply_text_size_accessibility_guards(app, include_widths=False)

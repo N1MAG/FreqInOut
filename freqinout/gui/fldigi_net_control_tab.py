@@ -79,7 +79,7 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import button_height_for_font, resolve_theme, button_style
 
 CURRENT_CHECKIN_FILE_NAMES = {
     "TFC": "CheckIns_TFC.txt",
@@ -337,7 +337,7 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_details_btn.setCheckable(True)
         self.macro_profile_details_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.macro_profile_details_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.macro_profile_details_btn.setMinimumHeight(28)
+        self.macro_profile_details_btn.setMinimumHeight(button_height_for_font(self.macro_profile_details_btn))
         setup_layout.addWidget(self.macro_profile_details_btn)
 
         self.setup_details_frame = QFrame()

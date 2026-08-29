@@ -310,6 +310,9 @@ from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sourc
 from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import (
+    apply_text_size_accessibility_guards,
+    button_height_for_font,
+    control_height_for_font,
     resolve_theme,
     normalize_ui_text_size,
     led_style,
@@ -3454,8 +3457,9 @@ class SettingsTab(QWidget):
         self.device_profile_selector_scroll.setFrameShape(QFrame.NoFrame)
         self.device_profile_selector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.device_profile_selector_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.device_profile_selector_scroll.setMinimumHeight(38)
-        self.device_profile_selector_scroll.setMaximumHeight(46)
+        device_selector_h = control_height_for_font(self.device_profile_selector_scroll, vertical_padding=18, floor=46)
+        self.device_profile_selector_scroll.setMinimumHeight(device_selector_h)
+        self.device_profile_selector_scroll.setMaximumHeight(device_selector_h)
         self.device_profile_selector_scroll.setWidget(self.device_profile_selector_widget)
         configured_radios_layout.addWidget(self.device_profile_selector_scroll)
         radio_selector_actions = QHBoxLayout()
@@ -3575,7 +3579,7 @@ class SettingsTab(QWidget):
         self.global_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.global_settings_toggle_btn.setArrowType(Qt.DownArrow)
         self.global_settings_toggle_btn.setText("Main Settings")
-        self.global_settings_toggle_btn.setMinimumHeight(28)
+        self.global_settings_toggle_btn.setMinimumHeight(button_height_for_font(self.global_settings_toggle_btn))
         self.global_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.global_settings_toggle_btn.setAccessibleName("Settings navigation group: Main Settings")
         self.global_settings_toggle_btn.clicked.connect(self._on_global_settings_toggle)
@@ -3593,7 +3597,7 @@ class SettingsTab(QWidget):
         self.radio_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.radio_settings_toggle_btn.setArrowType(Qt.RightArrow)
         self.radio_settings_toggle_btn.setText("Radio Settings")
-        self.radio_settings_toggle_btn.setMinimumHeight(28)
+        self.radio_settings_toggle_btn.setMinimumHeight(button_height_for_font(self.radio_settings_toggle_btn))
         self.radio_settings_toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.radio_settings_toggle_btn.setAccessibleName("Settings navigation group: Radio Settings")
         self.radio_settings_toggle_btn.clicked.connect(self._on_radio_settings_toggle)
@@ -6286,7 +6290,7 @@ class SettingsTab(QWidget):
             header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
             header_btn.setText(title)
             header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            header_btn.setMinimumHeight(26)
+            header_btn.setMinimumHeight(button_height_for_font(header_btn))
             header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
             content.setVisible(checked)
 
@@ -6782,7 +6786,7 @@ class SettingsTab(QWidget):
             header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
             header_btn.setText(title)
             header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            header_btn.setMinimumHeight(26)
+            header_btn.setMinimumHeight(button_height_for_font(header_btn))
             header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
             section_layout.addWidget(header_btn)
 
@@ -8162,7 +8166,7 @@ class SettingsTab(QWidget):
         header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         header_btn.setText(title)
         header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        header_btn.setMinimumHeight(28)
+        header_btn.setMinimumHeight(button_height_for_font(header_btn))
         header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
         page_title_label = QLabel(title)
         page_title_label.setObjectName("settingsSectionPageTitle")
@@ -8228,7 +8232,7 @@ class SettingsTab(QWidget):
         btn.setObjectName("settingsSectionNavButton")
         btn.setProperty("settings_scope", normalized_scope)
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn.setMinimumHeight(30)
+        btn.setMinimumHeight(button_height_for_font(btn))
         btn.setAccessibleName(f"Settings navigation: {title}")
         btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
         target_layout = (
@@ -8295,7 +8299,7 @@ class SettingsTab(QWidget):
         btn = QPushButton(label)
         btn.setAccessibleName(f"Radio setup task: {label}")
         btn.setToolTip(detail)
-        btn.setMinimumHeight(30)
+        btn.setMinimumHeight(button_height_for_font(btn))
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn.clicked.connect(lambda _checked=False, task_key=normalized: self._select_radio_profile_guided_task(task_key))
         self.radio_profile_guided_task_buttons[normalized] = btn
@@ -8596,7 +8600,7 @@ class SettingsTab(QWidget):
         btn.setAccessibleName(f"Settings task: {title}")
         btn.setToolTip(title)
         btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        btn.setMinimumHeight(28)
+        btn.setMinimumHeight(button_height_for_font(btn))
         btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
         self._settings_section_task_buttons[group] = btn
         count = layout.count()
@@ -12197,6 +12201,7 @@ class SettingsTab(QWidget):
                 combo.view().setMinimumWidth(target)
             except Exception:
                 pass
+        apply_text_size_accessibility_guards(self, include_widths=False)
 
     def _on_enforcement_changed(self):
         self._update_enforcement_visibility()
@@ -13309,7 +13314,7 @@ class SettingsTab(QWidget):
             btn.setCheckable(True)
             btn.setChecked(selected)
             btn.setMinimumWidth(150 if selected else 135)
-            btn.setMinimumHeight(34)
+            btn.setMinimumHeight(button_height_for_font(btn, vertical_padding=14, floor=34))
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setAccessibleName(
                 f"Selected radio: {self._profile_display_name(profile)}"
@@ -20183,8 +20188,9 @@ class SettingsTab(QWidget):
             step_frame_layout.setContentsMargins(6, 3, 6, 3)
             step_frame_layout.setHorizontalSpacing(4)
             step_frame_layout.setVerticalSpacing(0)
-            step_frame.setMinimumHeight(26)
-            step_frame.setMaximumHeight(32)
+            step_frame_h = control_height_for_font(step_frame, vertical_padding=12, floor=32)
+            step_frame.setMinimumHeight(step_frame_h)
+            step_frame.setMaximumHeight(step_frame_h)
             step_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             status_label = QLabel()
             status_label.setObjectName(f"guidedSetupStepStatus_{step_id}")

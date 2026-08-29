@@ -95,7 +95,15 @@ from freqinout.gui.stations_map_tab import (
 )
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
-from freqinout.gui.theme import resolve_theme, button_style, led_style
+from freqinout.gui.theme import (
+    apply_text_size_accessibility_guards,
+    button_height_for_font,
+    button_style,
+    control_height_for_font,
+    led_style,
+    resolve_theme,
+    single_line_label_height,
+)
 from freqinout.version import __version__
 
 
@@ -495,14 +503,16 @@ class ControlFreqTab(QWidget):
         self.freq_state_badge = QLabel("Unknown")
         self.freq_state_badge.setAlignment(Qt.AlignCenter)
         self.freq_state_badge.setMinimumWidth(132)
-        self.freq_state_badge.setMinimumHeight(26)
-        self.freq_state_badge.setMaximumHeight(26)
+        freq_badge_h = single_line_label_height(self.freq_state_badge, vertical_padding=8, floor=26)
+        self.freq_state_badge.setMinimumHeight(freq_badge_h)
+        self.freq_state_badge.setMaximumHeight(freq_badge_h)
         self.freq_state_badge.setStyleSheet(
             "font-size: 12px; font-weight: 600; border-radius: 6px; padding: 0 8px;"
         )
         self.freq_combo = QComboBox()
-        self.freq_combo.setMinimumHeight(40)
-        self.freq_combo.setMaximumHeight(40)
+        freq_combo_h = control_height_for_font(self.freq_combo, vertical_padding=14, floor=40)
+        self.freq_combo.setMinimumHeight(freq_combo_h)
+        self.freq_combo.setMaximumHeight(freq_combo_h)
         self.freq_combo.setMinimumWidth(220)
         self.freq_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.freq_combo.currentIndexChanged.connect(self._on_freq_selection_changed)
@@ -538,7 +548,7 @@ class ControlFreqTab(QWidget):
         btn_row.addWidget(self.hold_duration_combo)
         self.freq_action_btn = QPushButton("QSY + Hold")
         self.freq_action_btn.clicked.connect(self._on_primary_freq_action_clicked)
-        self.freq_action_btn.setMinimumHeight(26)
+        self.freq_action_btn.setMinimumHeight(button_height_for_font(self.freq_action_btn, floor=30))
         self.freq_action_btn.setMinimumWidth(132)
         self.freq_action_btn.setMaximumWidth(170)
         btn_row.addWidget(self.freq_action_btn)
@@ -1273,6 +1283,7 @@ class ControlFreqTab(QWidget):
             pass
         self._apply_frequency_display_style()
         self._set_message_summary_visible_rows(6)
+        apply_text_size_accessibility_guards(self, include_widths=False)
         self._lock_frequency_control_height()
         self._update_time_toggle_text()
         self._refresh_clock_display()

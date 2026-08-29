@@ -119,7 +119,7 @@ def test_compose_guidance_rail_uses_short_visible_text_and_tooltip_detail() -> N
     source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
 
     assert "self.compose_guidance_label.setWordWrap(False)" in source
-    assert "self.compose_guidance_label.setMaximumHeight(24)" in source
+    assert "self.compose_guidance_label.setMaximumHeight(single_line_label_height(self.compose_guidance_label))" in source
     assert "def _compose_send_guidance_summary" in source
     assert 'return f"Using {radio_label}"' in source
     assert 'return f"Use {radio_label}: last heard on {band}"' in source

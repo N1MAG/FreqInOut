@@ -132,7 +132,15 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style, fit_child_combo_boxes, led_style
+from freqinout.gui.theme import (
+    apply_app_theme,
+    button_style,
+    control_height_for_font,
+    fit_child_combo_boxes,
+    led_style,
+    resolve_theme,
+    resolve_ui_text_scale,
+)
 
 
 class ElidedLabel(QLabel):
@@ -705,7 +713,9 @@ class MainWindow(QMainWindow):
         self.station_command_radio_summary_scroll = QWidget(self.station_command_bar)
         self.station_command_radio_summary_scroll.setObjectName("stationCommandRadioSummaryScroll")
         self.station_command_radio_summary_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.station_command_radio_summary_scroll.setFixedHeight(42)
+        summary_h = control_height_for_font(self.station_command_radio_summary_scroll, vertical_padding=18, floor=42)
+        self.station_command_radio_summary_scroll.setMinimumHeight(summary_h)
+        self.station_command_radio_summary_scroll.setMaximumHeight(summary_h)
         self.station_command_radio_summary_widget = self.station_command_radio_summary_scroll
         self.station_command_radio_summary_widget.setObjectName("stationCommandRadioSummary")
         self.station_command_radio_summary_widget.setMinimumWidth(0)
