@@ -141,6 +141,10 @@ def test_messages_bbs_status_text_is_runtime_projected_context(tmp_path: Path) -
 
     assert "runtime-projected default context" in text
     assert "VarAC BBS (runtime-projected default context):" in text
+    assert "BBS File Area" in text
+    assert "VarAC incoming file" in text
+    assert "VarAC outgoing file" in text
+    assert "Managed BBS Library location" in text
 
 
 def test_messages_bbs_sweeper_applies_live_bbs_file_to_managed_location(tmp_path: Path) -> None:
@@ -404,6 +408,7 @@ def test_multi_rig_varac_bbs_write_back_preserves_other_sections_and_tracks_sync
     assert "Value=KeepMe" in rewritten
     assert "EnableBBS=ON" in rewritten
     assert r"BBSDirectory=C:\new\bbs" in rewritten
+    assert "LimitAccessToCallsignsList=K7RIE,KG5RKW" in rewritten
 
 
 def test_write_varac_bbs_config_updates_existing_case_variant_section(tmp_path: Path) -> None:

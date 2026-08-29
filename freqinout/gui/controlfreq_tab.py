@@ -5210,7 +5210,7 @@ class ControlFreqTab(QWidget):
             if aging_total:
                 detail_parts.append(f"{aging_total} aging soon")
             if inventory.vault_enabled:
-                detail_parts.append("Managed Vault active")
+                detail_parts.append("Managed BBS Library active")
             detail = " | ".join(detail_parts)
         row = ["VarAC BBS Files", count, detail or "-"]
         haystack_parts = [row[0], "VarAC BBS", row[1], row[2], inventory.live_dir]

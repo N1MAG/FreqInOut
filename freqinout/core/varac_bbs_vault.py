@@ -43,7 +43,7 @@ DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
 VAULT_ALIAS_HEALTH_KEY = "varac-bbs-vault-aliases"
-VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Vault"
+VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Library"
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
 EVENT_TS_SCAN_RE = re.compile(r"(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+")
@@ -141,6 +141,15 @@ class VaultPublishResult:
     unmanaged_live_files: Tuple[str, ...]
     manifest_path: str
     ignored_directories: int = 0
+
+
+@dataclass(frozen=True)
+class BbsFileActionResult:
+    success: bool
+    action: str
+    source_path: str
+    target_path: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -914,6 +923,130 @@ def import_live_bbs_to_default_location(live_bbs_dir: object, default_location_d
         shutil.copy2(child, dst)
         imported += 1
     return imported
+
+
+def _safe_relative_file_path(src: Path, source_root: Optional[Path]) -> Path:
+    if source_root is None:
+        return Path(src.name)
+    try:
+        rel = src.relative_to(source_root)
+    except Exception:
+        rel = Path(src.name)
+    if any(part in {"", ".", ".."} for part in rel.parts):
+        return Path(src.name)
+    return rel
+
+
+def unique_bbs_archive_destination(
+    src: object,
+    *,
+    archive_dir: object,
+    source_root: object = None,
+    archive_context: object = "live",
+) -> Path:
+    src_path = _resolve_path(src)
+    archive_root = _resolve_path(archive_dir)
+    if src_path is None:
+        raise ValueError("Source file is required")
+    if archive_root is None:
+        raise ValueError("Archive directory is required")
+    context = re.sub(r"[^A-Za-z0-9_.:/+\-]+", "_", str(archive_context or "live").strip()) or "live"
+    root_path = _resolve_path(source_root) if source_root is not None else None
+    rel = _safe_relative_file_path(src_path, root_path)
+    dst = archive_root / context / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not dst.exists():
+        return dst
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    dst = dst.parent / f"{src_path.stem}_{stamp}{src_path.suffix}"
+    attempt = 2
+    while dst.exists():
+        dst = dst.parent / f"{src_path.stem}_{stamp}_{attempt}{src_path.suffix}"
+        attempt += 1
+    return dst
+
+
+def archive_bbs_file(
+    file_path: object,
+    *,
+    archive_dir: object,
+    source_root: object = None,
+    archive_context: object = "live",
+) -> BbsFileActionResult:
+    src = _resolve_path(file_path)
+    if src is None:
+        return BbsFileActionResult(False, "archive", "", detail="Source file is required")
+    if not src.exists():
+        return BbsFileActionResult(False, "archive", str(src), detail="Source file does not exist")
+    if not src.is_file():
+        return BbsFileActionResult(False, "archive", str(src), detail="Source path is not a file")
+    try:
+        dst = unique_bbs_archive_destination(
+            src,
+            archive_dir=archive_dir,
+            source_root=source_root,
+            archive_context=archive_context,
+        )
+        shutil.move(str(src), str(dst))
+        return BbsFileActionResult(True, "archive", str(src), str(dst), "Archived BBS file")
+    except Exception as exc:
+        return BbsFileActionResult(False, "archive", str(src), detail=str(exc))
+
+
+def delete_bbs_file(file_path: object) -> BbsFileActionResult:
+    src = _resolve_path(file_path)
+    if src is None:
+        return BbsFileActionResult(False, "delete", "", detail="Source file is required")
+    if not src.exists():
+        return BbsFileActionResult(False, "delete", str(src), detail="Source file does not exist")
+    if not src.is_file():
+        return BbsFileActionResult(False, "delete", str(src), detail="Source path is not a file")
+    try:
+        src.unlink()
+        return BbsFileActionResult(True, "delete", str(src), detail="Deleted BBS file")
+    except Exception as exc:
+        return BbsFileActionResult(False, "delete", str(src), detail=str(exc))
+
+
+def bbs_file_management_roots(settings) -> List[Dict[str, str]]:
+    if settings is None:
+        return []
+    rows: List[Dict[str, str]] = []
+
+    def _setting(key: str, default: object = "") -> object:
+        try:
+            return settings.get(key, default)
+        except Exception:
+            return default
+
+    def _add(kind: str, label: str, path_value: object, archive_context: str) -> None:
+        path_txt = str(path_value or "").strip()
+        if not path_txt:
+            return
+        rows.append(
+            {
+                "kind": kind,
+                "label": label,
+                "path": path_txt,
+                "archive_context": archive_context,
+            }
+        )
+
+    message_paths = _setting("message_paths", {})
+    if not isinstance(message_paths, Mapping):
+        message_paths = {}
+    _add("incoming", "VarAC Incoming", message_paths.get("varac", ""), "incoming")
+    _add("outgoing", "VarAC Outgoing", _setting("varac_outbox_dir", ""), "outgoing")
+    _add("live_bbs", "Live BBS", _setting("varac_bbs_dir", ""), "live")
+    for location in load_vault_locations(_setting("varac_bbs_vault_locations_v1", [])):
+        if not location.enabled:
+            continue
+        if not str(location.source_dir or "").strip():
+            continue
+        context_id = re.sub(r"[^A-Za-z0-9_.:/+\-]+", "_", str(location.id or location.name or "location"))
+        _add("managed_location", f"Managed Location: {location.name}", location.source_dir, f"locations/{context_id}")
+    _add("archive", "BBS Archive", _setting("varac_bbs_archive_dir", ""), "archive")
+    return rows
 
 
 def _manifest_path_for(managed_root: object) -> Path:
@@ -1694,7 +1827,7 @@ def publish_root_view(
 ) -> VaultPublishResult:
     default_location = _location_by_id(locations, default_location_id)
     if default_location is None:
-        raise ValueError("Managed Vault default location is missing")
+        raise ValueError("Managed BBS Library default location is missing")
     virtual_files = _root_virtual_files(
         sender=sender,
         locations=locations,
@@ -2438,7 +2571,7 @@ def _publish_root_action(
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
     )
-    summary = f"Managed Vault published root menu for {sender or 'public'}."
+    summary = f"Managed BBS Library published root menu for {sender or 'public'}."
     next_state = _update_state(
         runtime_state,
         current_location_id=default_location_id,
@@ -2517,7 +2650,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = "FLAMP commands"
-            action_text = f"Managed Vault refreshed FLAMP command help for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP command help for {sender or 'public'}."
         elif mode in {"flamp-list", "flamp-queue"}:
             publish_result = publish_flamp_queue_list_view(
                 store,
@@ -2527,7 +2660,7 @@ def _publish_flamp_refresh_action(
                 max_age_days=flamp_listing_max_age_days,
             )
             label = "FLAMP queue"
-            action_text = f"Managed Vault refreshed FLAMP queue list for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP queue list for {sender or 'public'}."
         elif mode in {"flamp-block-list", "flamp-blocks"}:
             queue_id = _flamp_queue_from_view_label(state.current_view_label)
             if not queue_id:
@@ -2540,7 +2673,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = f"FLAMP {queue_id} blocks"
-            action_text = f"Managed Vault refreshed FLAMP block list {queue_id} for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP block list {queue_id} for {sender or 'public'}."
         elif mode == "flamp-block-overlay":
             queue_id, block_numbers = _flamp_overlay_request_from_state(state)
             if not queue_id or not block_numbers:
@@ -2553,7 +2686,7 @@ def _publish_flamp_refresh_action(
                 managed_root=managed_root,
             )
             label = f"FLAMP {queue_id}"
-            action_text = f"Managed Vault refreshed FLAMP overlay {overlay_file} for {sender or 'public'}."
+            action_text = f"Managed BBS Library refreshed FLAMP overlay {overlay_file} for {sender or 'public'}."
         else:
             return None
     except Exception as exc:
@@ -2571,7 +2704,7 @@ def _publish_flamp_refresh_action(
             current_view_label="FLAMP notice",
             last_publish_manifest_path=notice_result.manifest_path,
             last_publish_ts=now_ts,
-            last_action=f"Managed Vault refreshed FLAMP notice for {sender or 'public'}: {exc}",
+            last_action=f"Managed BBS Library refreshed FLAMP notice for {sender or 'public'}: {exc}",
             last_request_ts=now_ts,
             last_error=str(exc),
             unmanaged_live_files=list(notice_result.unmanaged_live_files),
@@ -2666,7 +2799,7 @@ def _publish_refresh_action(
             managed_root=managed_root,
             reason=prompt_reason,
         )
-        summary = f"Managed Vault refreshed access prompt for {current_location.name}."
+        summary = f"Managed BBS Library refreshed access prompt for {current_location.name}."
         next_state = _update_state(
             state,
             current_location_id=current_location.id,
@@ -2694,7 +2827,7 @@ def _publish_refresh_action(
         )
         return VaultActionResult("refresh_access_prompt", True, summary, next_state, publish_result=publish_result)
     publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
-    summary = f"Managed Vault refreshed {current_location.name} for {sender_norm or 'public'}."
+    summary = f"Managed BBS Library refreshed {current_location.name} for {sender_norm or 'public'}."
     next_state = _update_state(
         state,
         current_location_id=current_location.id,
@@ -2841,11 +2974,11 @@ def _apply_open_request(
     code_text = _normalize_access_code_text(code_text)
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
     if not sender:
-        summary = "Managed Vault ignored request with no identifiable callsign."
+        summary = "Managed BBS Library ignored request with no identifiable callsign."
         return VaultActionResult("ignored_no_sender", False, summary, state)
 
     if state.current_session_qso_guid and qso_guid and state.current_session_qso_guid != qso_guid and state.current_session_callsign:
-        summary = f"Managed Vault session is locked to {state.current_session_callsign}."
+        summary = f"Managed BBS Library session is locked to {state.current_session_callsign}."
         return VaultActionResult("session_locked", False, summary, _update_state(state, last_action=summary, last_error="session_locked"))
 
     cooldowns = {str(key): dict(value) for key, value in state.cooldowns.items()}
@@ -2853,7 +2986,7 @@ def _apply_open_request(
     until_ts = float(current_cooldown.get("until_ts", 0.0) or 0.0)
     if until_ts > now_ts:
         remaining = int(max(1.0, until_ts - now_ts))
-        summary = f"Managed Vault cooldown active for {sender} ({remaining}s remaining)."
+        summary = f"Managed BBS Library cooldown active for {sender} ({remaining}s remaining)."
         if requested_location is not None:
             return _access_prompt_result(
                 state=state,
@@ -2901,14 +3034,14 @@ def _apply_open_request(
         sender_attempts.append(now_ts)
         failed_attempts[sender] = sender_attempts
         action = "invalid_code"
-        summary = f"Managed Vault rejected access request from {sender}."
+        summary = f"Managed BBS Library rejected access request from {sender}."
         if len(sender_attempts) >= max(1, int(failed_attempt_limit)):
             cooldowns[sender] = {
                 "until_ts": now_ts + max(1, int(cooldown_seconds)),
                 "reason": "failed_attempt_limit",
             }
             action = "cooldown_applied"
-            summary = f"Managed Vault rejected access request from {sender}; cooldown applied."
+            summary = f"Managed BBS Library rejected access request from {sender}; cooldown applied."
         next_state = _update_state(
             state,
             cooldowns=cooldowns,
@@ -2934,7 +3067,7 @@ def _apply_open_request(
         global_allowed_callsigns=global_allowed_callsigns,
         limit_access_enabled=limit_access_enabled,
     ):
-        summary = f"Managed Vault rejected {sender}; callsign is not allowed for {matched_location.name}."
+        summary = f"Managed BBS Library rejected {sender}; callsign is not allowed for {matched_location.name}."
         return _access_prompt_result(
             state=state,
             location=matched_location,
@@ -2963,7 +3096,7 @@ def _apply_open_request(
         ):
             sender_attempts.append(now_ts)
             failed_attempts[sender] = sender_attempts
-            summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}."
+            summary = f"Managed BBS Library rejected access code for {matched_location.name} from {sender}."
             action = "invalid_code" if code_text else "missing_code"
             if len(sender_attempts) >= max(1, int(failed_attempt_limit)):
                 cooldowns[sender] = {
@@ -2971,7 +3104,7 @@ def _apply_open_request(
                     "reason": "failed_attempt_limit",
                 }
                 action = "cooldown_applied"
-                summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}; cooldown applied."
+                summary = f"Managed BBS Library rejected access code for {matched_location.name} from {sender}; cooldown applied."
             return _access_prompt_result(
                 state=state,
                 location=matched_location,
@@ -2995,7 +3128,7 @@ def _apply_open_request(
     publish_result = publish_location_view(matched_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
     failed_attempts.pop(sender, None)
     cooldowns.pop(sender, None)
-    summary = f"Managed Vault published {matched_location.name} for {sender}."
+    summary = f"Managed BBS Library published {matched_location.name} for {sender}."
     next_state = _update_state(
         state,
         current_location_id=matched_location.id,
@@ -3055,7 +3188,7 @@ def reset_to_default_location(
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
     )
-    summary = f"Managed Vault returned to {DEFAULT_LOCATION_NAME}."
+    summary = f"Managed BBS Library returned to {DEFAULT_LOCATION_NAME}."
     next_state = _update_state(
         state,
         current_location_id=default_location_id,
@@ -3115,7 +3248,7 @@ def _restore_previous_view(
                 now_ts=now_ts,
             )
         publish_result = publish_location_view(location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
-        summary = f"Managed Vault restored {location.name} after FLAMP overlay."
+        summary = f"Managed BBS Library restored {location.name} after FLAMP overlay."
         next_state = _update_state(
             runtime_state,
             current_location_id=location.id,
@@ -3211,14 +3344,14 @@ def _reconcile_current_location(
                             current_overlay_file=refreshed_overlay,
                             last_publish_manifest_path=publish_result.manifest_path,
                             last_publish_ts=time.time(),
-                            last_action=f"Managed Vault restored FLAMP overlay {refreshed_overlay}.",
+                            last_action=f"Managed BBS Library restored FLAMP overlay {refreshed_overlay}.",
                             last_error="",
                             unmanaged_live_files=list(publish_result.unmanaged_live_files),
                         )
                         return next_state, bool(publish_result.changed)
                     next_state = _update_state(
                         runtime_state,
-                        last_action=f"Managed Vault is keeping FLAMP overlay {overlay_name} active, but it could not be recreated.",
+                        last_action=f"Managed BBS Library is keeping FLAMP overlay {overlay_name} active, but it could not be recreated.",
                         last_error="FLAMP overlay source unavailable",
                     )
                     return next_state, False
@@ -3239,7 +3372,7 @@ def _reconcile_current_location(
                 include_enabled_fallback=True,
             )
     except Exception as exc:
-        summary = f"Managed Vault degraded: {exc}"
+        summary = f"Managed BBS Library degraded: {exc}"
         next_state = _update_state(runtime_state, last_action=summary, last_error=str(exc))
         return next_state, False
     next_state = _update_state(
@@ -3252,7 +3385,7 @@ def _reconcile_current_location(
 
 
 def _summary_text(runtime_state: VaultRuntimeState) -> str:
-    summary = f"Managed Vault {runtime_state.current_view_label or DEFAULT_LOCATION_NAME}"
+    summary = f"Managed BBS Library {runtime_state.current_view_label or DEFAULT_LOCATION_NAME}"
     if runtime_state.current_session_callsign:
         summary += f" | Session {runtime_state.current_session_callsign}"
     if runtime_state.current_view_mode == "flamp-block-overlay":
@@ -3271,7 +3404,7 @@ def _summary_text(runtime_state: VaultRuntimeState) -> str:
 def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     enabled = bool(settings.get("varac_bbs_vault_enabled", False) if settings is not None else False)
     if not enabled:
-        return VaracBbsVaultRunResult(False, 0, 0, False, DEFAULT_LOCATION_ID, "", "Managed Vault disabled")
+        return VaracBbsVaultRunResult(False, 0, 0, False, DEFAULT_LOCATION_ID, "", "Managed BBS Library disabled")
 
     live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
     managed_root = compute_default_managed_root(live_bbs_dir)
@@ -3296,14 +3429,14 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
 
     if not live_bbs_dir or not managed_root or not locations:
-        summary = "Managed Vault needs setup before it can run."
+        summary = "Managed BBS Library needs setup before it can run."
         _persist_runtime_state(settings, runtime_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, runtime_state.current_location_id, runtime_state.current_session_callsign, summary)
 
     try:
         initialize_managed_root(managed_root)
     except Exception as exc:
-        summary = f"Managed Vault initialization failed: {exc}"
+        summary = f"Managed BBS Library initialization failed: {exc}"
         error_state = _update_state(runtime_state, last_action=summary, last_error=str(exc))
         _persist_runtime_state(settings, error_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, error_state.current_location_id, error_state.current_session_callsign, summary)
@@ -3312,7 +3445,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     _record_alias_health(alias_collisions)
     if alias_collisions:
         collision_text = ", ".join(sorted(set(alias_collisions)))
-        summary = f"Managed Vault alias collision ignored for: {collision_text}"
+        summary = f"Managed BBS Library alias collision ignored for: {collision_text}"
         log.warning("varac_bbs_vault: %s", summary)
         runtime_state = _update_state(runtime_state, last_action=summary, last_error="alias_collision")
     varac_db_path = _resolve_varac_db_path(settings)
@@ -3383,7 +3516,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         runtime_state,
                         current_session_callsign="",
                         current_session_qso_guid="",
-                        last_action="Managed Vault session disconnected.",
+                        last_action="Managed BBS Library session disconnected.",
                     )
                 processed += 1
             continue
@@ -3521,7 +3654,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_view_label="FLAMP commands",
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP command help for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP command help for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3549,7 +3682,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_view_label=f"FLAMP {DEFAULT_LOCATION_NAME}",
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP queue list for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP queue list for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3578,7 +3711,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label=f"FLAMP {event.queue_id}",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP block list {event.queue_id} for {event.remote_callsign}.",
+                        last_action=f"Managed BBS Library published FLAMP block list {event.queue_id} for {event.remote_callsign}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3658,7 +3791,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     current_overlay_file=overlay_name,
                     last_publish_manifest_path=publish_result.manifest_path,
                     last_publish_ts=event.timestamp_utc or now_ts,
-                    last_action=f"Managed Vault published FLAMP overlay {overlay_name} for {event.remote_callsign}.",
+                    last_action=f"Managed BBS Library published FLAMP overlay {overlay_name} for {event.remote_callsign}.",
                     last_request_ts=event.timestamp_utc or now_ts,
                     last_error="",
                     unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3800,7 +3933,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label="FLAMP commands",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP command help for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP command help for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3829,7 +3962,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label="FLAMP queue",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP queue list for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP queue list for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3858,7 +3991,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_view_label=f"FLAMP {event.queue_id} blocks",
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP block list {event.queue_id} for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP block list {event.queue_id} for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),
@@ -3937,7 +4070,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         current_overlay_file=overlay_name,
                         last_publish_manifest_path=publish_result.manifest_path,
                         last_publish_ts=event.timestamp_utc or now_ts,
-                        last_action=f"Managed Vault published FLAMP overlay {overlay_name} for {event.sender}.",
+                        last_action=f"Managed BBS Library published FLAMP overlay {overlay_name} for {event.sender}.",
                         last_request_ts=event.timestamp_utc or now_ts,
                         last_error="",
                         unmanaged_live_files=list(publish_result.unmanaged_live_files),

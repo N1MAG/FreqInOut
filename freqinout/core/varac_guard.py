@@ -640,11 +640,11 @@ def evaluate_varac_guard_event(
 
 def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGuardRunResult:
     if not bool(settings.get("varac_guard_enabled", False) if settings is not None else False):
-        return VaracGuardRunResult(0, 0, 0, 0, 0, 0, 0, 0, "VGuard disabled")
+        return VaracGuardRunResult(0, 0, 0, 0, 0, 0, 0, 0, "BBS Access Guard disabled")
 
     log_paths = resolve_varac_traffic_log_paths(settings)
     if not log_paths:
-        summary = "VGuard enabled, but no VarAC traffic log was found"
+        summary = "BBS Access Guard enabled, but no VarAC traffic log was found"
         try:
             settings.set("varac_guard_last_summary", summary)
         except Exception:
@@ -760,7 +760,7 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
     _save_guard_state(settings, state)
 
     summary = (
-        f"VGuard {str(settings.get('varac_guard_mode', 'Log only') or 'Log only')} | "
+        f"BBS Access Guard {str(settings.get('varac_guard_mode', 'Log only') or 'Log only')} | "
         f"scanned {scanned}, processed {processed}, allowed {allowed}, unauthorized {unauthorized}, "
         f"deleted {deleted}, quarantined {quarantined}, pending {pending}, skipped {skipped}"
     )

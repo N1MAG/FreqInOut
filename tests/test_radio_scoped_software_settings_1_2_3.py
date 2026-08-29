@@ -473,7 +473,7 @@ def test_settings_nav_buttons_are_left_aligned_and_consistent() -> None:
     assert "self._add_settings_task_button(group, normalized_scope)" in add_section_block
     assert 'self.settings_section_combo.addItem(self._settings_section_combo_label(group), stack_index)' in add_section_block
     assert "def _settings_section_short_label" in task_nav_block
-    assert '"Operating Models": "Operating Models"' in task_nav_block
+    assert '"Operating Models": "Models"' in task_nav_block
     assert '"Operating Model Assignment": "Assign Model"' in task_nav_block
     assert '"Schedule Assignment": "Assign Schedule"' in task_nav_block
     assert "columns = 6" in task_nav_block

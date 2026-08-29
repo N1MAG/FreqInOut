@@ -56,7 +56,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="messages.compose",
         anchor="messages-compose",
         title="Messages Compose Help",
-        summary="Compose and stage outbound traffic for FLMsg, FLAmp, and VarAC destinations; review JS8Spotter MCForms drafts before guarded JS8Call send is enabled.",
+        summary="Compose FLMsg/FLAmp files, JS8Call directed or traffic messages, JS8Spotter MCForms, and short CommStat RF traffic. Map-launched compose uses peer schedule, path, and last-heard hints to recommend the send radio and tune action.",
     ),
     "messages.bbs": HelpContext(
         key="messages.bbs",
@@ -68,7 +68,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="messages.compose-setup",
         anchor="messages-compose",
         title="Compose Setup Help",
-        summary="Form family selection, priority, send targets, VarAC copy behavior, and FLAmp signing choices.",
+        summary="Form family selection, Fast Light filename rules, JS8 target handling, CommStat RF fields, VarAC copy behavior, and FLAmp signing choices.",
     ),
     "tab.map": HelpContext(
         key="tab.map",
@@ -176,7 +176,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.varac",
         anchor="settings-varac-details",
         title="VarAC Settings Help",
-        summary="VarAC paths, incoming/outbox folders, BBS management, Managed BBS Services, relay, and VGuard.",
+        summary="VarAC paths, incoming/outbox folders, BBS management, Managed BBS Library, relay, and BBS Access Guard.",
     ),
     "settings.message-auth": HelpContext(
         key="settings.message-auth",

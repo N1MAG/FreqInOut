@@ -123,7 +123,7 @@ def _dependency_label(key: str, owner: str = "") -> str:
         "FLDIGI": "FLDigi XML-RPC",
         "COMMSTAT": "CommStat data",
         "VARAC": "VarAC data",
-        "VARAC_BBS_VAULT_ALIASES": "Managed BBS Vault aliases",
+        "VARAC_BBS_VAULT_ALIASES": "Managed BBS Library aliases",
         "RIGCTLD": "rigctld",
         "OBSERVER": "Observer SDR",
         "BACKGROUND_INGEST": "Background ingest",

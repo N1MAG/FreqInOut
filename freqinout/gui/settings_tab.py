@@ -108,6 +108,7 @@ from freqinout.core.js8_msg_auth_store import (
     save_msg_auth_key,
 )
 from freqinout.core.known_operating_groups import WEFAX_STATIONS, load_known_operating_group_catalog
+from freqinout.core.nbems_compose import discover_form_families
 from freqinout.core.launch_orchestrator import (
     DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
     LAUNCH_APP_ORDER,
@@ -1915,11 +1916,11 @@ class SettingsTab(QWidget):
         default_root = self._computed_varac_bbs_vault_default_root()
         if default_root:
             hint = (
-                f"Automatic vault location in the VarAC BBS area: {default_root}. New vault locations and files live here, "
+                f"Automatic library location in the VarAC BBS area: {default_root}. New library locations and files live here, "
                 "alongside the live BBS folder, not inside the live published file list and not under the FreqInOut app folder."
             )
         else:
-            hint = "Set the VarAC BBS directory first to see the default vault location."
+            hint = "Set the VarAC BBS directory first to see the default library location."
         self.varac_bbs_vault_root_hint_label.setText(hint)
         self.varac_bbs_vault_root_hint_label.setToolTip(hint)
 
@@ -2041,7 +2042,7 @@ class SettingsTab(QWidget):
         if not locations:
             return (
                 "Managed BBS preview\n\n"
-                "No managed BBS locations are configured yet. Initialize the Managed Vault or add a location first."
+                "No managed BBS locations are configured yet. Initialize the Managed BBS Library or add a location first."
             )
         default_id = DEFAULT_LOCATION_ID
         if hasattr(self, "varac_bbs_vault_default_location_combo"):
@@ -2050,6 +2051,13 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_bbs_vault_global_code_policy_combo"):
             global_code_policy = self.varac_bbs_vault_global_code_policy_combo.currentText().strip() or DEFAULT_GLOBAL_CODE_POLICY
         live_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
+        incoming_dir = ""
+        if hasattr(self, "msg_paths_edits") and isinstance(self.msg_paths_edits, dict):
+            incoming_edit = self.msg_paths_edits.get("varac")
+            if isinstance(incoming_edit, QLineEdit):
+                incoming_dir = incoming_edit.text().strip()
+        outbox_dir = self.varac_outbox_dir_edit.text().strip() if hasattr(self, "varac_outbox_dir_edit") else ""
+        archive_dir = self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
         managed_root = self.varac_bbs_vault_root_edit.text().strip() if hasattr(self, "varac_bbs_vault_root_edit") else ""
         root_locations = [
             row
@@ -2063,7 +2071,12 @@ class SettingsTab(QWidget):
             "Managed BBS preview",
             "",
             "This preview does not publish files or change VarAC.ini.",
+            "",
+            "Selected radio VarAC folders:",
+            f"- Incoming: {incoming_dir or 'not set'}",
+            f"- Outgoing: {outbox_dir or 'not set'}",
             f"Live BBS folder: {live_dir or 'not set'}",
+            f"- BBS Archive: {archive_dir or 'not set'}",
             f"Managed root: {managed_root or 'not set'}",
             f"Default location: {default_id}",
             f"Access-code policy: {global_code_policy}",
@@ -2543,9 +2556,9 @@ class SettingsTab(QWidget):
         self._refresh_varac_bbs_vault_root_hint()
         QMessageBox.information(
             self,
-            "Managed BBS Vault",
+            "Managed BBS Library",
             "Managed Root is automatic in this release.\n\n"
-            "FreqInOut always creates the vault in the VarAC BBS area, next to the live BBS directory.",
+            "FreqInOut always creates the library root in the VarAC BBS area, next to the live BBS directory.",
         )
 
     def _choose_varac_bbs_vault_location_source(self) -> None:
@@ -2708,10 +2721,10 @@ class SettingsTab(QWidget):
             else ""
         )
         if not name:
-            QMessageBox.warning(self, "Managed BBS Vault", "Set a location name before saving.")
+            QMessageBox.warning(self, "Managed BBS Library", "Set a location name before saving.")
             return False
         if not source_dir:
-            QMessageBox.warning(self, "Managed BBS Vault", "Set a source folder before saving.")
+            QMessageBox.warning(self, "Managed BBS Library", "Set a source folder before saving.")
             return False
         source_path = Path(source_dir).expanduser()
         is_new_location = not str(self._varac_bbs_vault_selected_location_id or "").strip()
@@ -2720,7 +2733,7 @@ class SettingsTab(QWidget):
         if not source_path.exists():
             response = QMessageBox.question(
                 self,
-                "Managed BBS Vault",
+                "Managed BBS Library",
                 f"Create this source folder?\n\n{source_path}",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
@@ -2732,7 +2745,7 @@ class SettingsTab(QWidget):
             if not self._confirm_readd_varac_bbs_vault_location_folder(source_path):
                 return False
         if not source_path.is_dir():
-            QMessageBox.warning(self, "Managed BBS Vault", "Location source must be a directory.")
+            QMessageBox.warning(self, "Managed BBS Library", "Location source must be a directory.")
             return False
         access_code = (
             self.varac_bbs_vault_access_code_edit.text().strip()
@@ -2748,7 +2761,7 @@ class SettingsTab(QWidget):
             existing_id = str(existing.get("id", "") or "").strip()
             existing_alias = normalize_location_alias(existing.get("alias", ""), existing.get("name", ""))
             if existing_alias and existing_alias == alias and existing_id != location_id:
-                QMessageBox.warning(self, "Managed BBS Vault", f"Alias {alias} is already in use.")
+                QMessageBox.warning(self, "Managed BBS Library", f"Alias {alias} is already in use.")
                 return False
         if not location_id:
             existing_ids = [str(row.get("id", "") or "").strip() for row in self._varac_bbs_vault_locations_cache]
@@ -2791,7 +2804,7 @@ class SettingsTab(QWidget):
         if open_rule in {"Allowed callsigns only", "Allowed callsigns + access code"} and not inherit_callsigns and not location_callsigns:
             QMessageBox.warning(
                 self,
-                "Managed BBS Vault",
+                "Managed BBS Library",
                 "Enter Location Allowed Callsigns or turn on Inherit Global Allowed Callsigns.",
             )
             return False
@@ -2806,7 +2819,7 @@ class SettingsTab(QWidget):
         if requires_code and not (selected.get("access_code_hash") or access_code):
             QMessageBox.warning(
                 self,
-                "Managed BBS Vault",
+                "Managed BBS Library",
                 "This location needs an access code under the current policy before it can be saved.",
             )
             return False
@@ -2814,7 +2827,7 @@ class SettingsTab(QWidget):
         code_changed = bool(access_code or confirm_code) and access_code != saved_plaintext
         if code_changed:
             if access_code != confirm_code:
-                QMessageBox.warning(self, "Managed BBS Vault", "Access code confirmation does not match.")
+                QMessageBox.warning(self, "Managed BBS Library", "Access code confirmation does not match.")
                 return False
             code_payload = hash_access_code(access_code)
             access_code_plaintext = access_code
@@ -2891,7 +2904,7 @@ class SettingsTab(QWidget):
             return
         location_id = str(selected.get("id", "") or "").strip()
         if location_id == DEFAULT_LOCATION_ID:
-            QMessageBox.warning(self, "Managed BBS Vault", "The Default location cannot be removed.")
+            QMessageBox.warning(self, "Managed BBS Library", "The Default location cannot be removed.")
             return
         self._varac_bbs_vault_locations_cache = [
             row for row in self._varac_bbs_vault_locations_cache if str(row.get("id", "") or "").strip() != location_id
@@ -2929,11 +2942,11 @@ class SettingsTab(QWidget):
                     if str(row.get("id", "") or "").strip() == default_id:
                         current_name = str(row.get("name", "") or "").strip()
                         break
-            summary = cached_summary or f"Managed Vault ready for {current_name or DEFAULT_LOCATION_NAME}."
+            summary = cached_summary or f"Managed BBS Library ready for {current_name or DEFAULT_LOCATION_NAME}."
             if root_txt:
                 summary += f" Root: {root_txt}"
         else:
-            summary = "Managed Vault is not enabled for this radio profile."
+            summary = "Managed BBS Library is not enabled for this radio profile."
         self.varac_bbs_vault_status_label.setText(summary)
         self.varac_bbs_vault_status_label.setToolTip(summary)
         self._refresh_varac_bbs_vault_inline_preview()
@@ -2941,21 +2954,21 @@ class SettingsTab(QWidget):
     def _initialize_varac_bbs_vault(self) -> None:
         live_bbs_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
         if not live_bbs_dir:
-            QMessageBox.warning(self, "Managed BBS Vault", "Set the VarAC BBS directory before initializing the vault.")
+            QMessageBox.warning(self, "Managed BBS Library", "Set the VarAC BBS directory before initializing the library.")
             return
         live_dir = Path(live_bbs_dir).expanduser()
         if not live_dir.exists() or not live_dir.is_dir():
-            QMessageBox.warning(self, "Managed BBS Vault", "The VarAC BBS directory must exist before initialization.")
+            QMessageBox.warning(self, "Managed BBS Library", "The VarAC BBS directory must exist before initialization.")
             return
         default_root_txt = compute_default_managed_root(live_dir)
         root_txt = default_root_txt
         if hasattr(self, "varac_bbs_vault_root_edit"):
             self._set_varac_bbs_vault_root_text(root_txt)
-        create_note = "Existing vault root will be reused." if Path(root_txt).expanduser().exists() else "This vault root will be created."
+        create_note = "Existing library root will be reused." if Path(root_txt).expanduser().exists() else "This library root will be created."
         response = QMessageBox.question(
             self,
-            "Managed BBS Vault",
-            "Initialize Managed Vault at this location?\n\n"
+            "Managed BBS Library",
+            "Initialize Managed BBS Library at this location?\n\n"
             f"Live BBS Directory:\n{live_dir}\n\n"
             f"Managed Root:\n{root_txt}\n\n"
             f"{create_note}",
@@ -2971,7 +2984,7 @@ class SettingsTab(QWidget):
         if live_files:
             response = QMessageBox.question(
                 self,
-                "Managed BBS Vault",
+                "Managed BBS Library",
                 "Import current live BBS files into the Default location?\n\n"
                 "Yes: import and preserve the current published set.\n"
                 "No: start the Default location empty and leave current live files unmanaged until the first publish.\n"
@@ -3049,7 +3062,7 @@ class SettingsTab(QWidget):
             failed_attempts={},
             last_publish_manifest_path=publish_result.manifest_path,
             last_publish_ts=time.time(),
-            last_action=f"Managed Vault initialized. Imported {imported} file(s) into Default.",
+            last_action=f"Managed BBS Library initialized. Imported {imported} file(s) into Default.",
             last_request_ts=0.0,
             last_error="",
             unmanaged_live_files=publish_result.unmanaged_live_files,
@@ -3083,7 +3096,7 @@ class SettingsTab(QWidget):
                 reason="manual_reset",
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Managed BBS Vault", f"Could not reset to default:\n{exc}")
+            QMessageBox.warning(self, "Managed BBS Library", f"Could not reset to default:\n{exc}")
             return
         self._varac_bbs_vault_runtime_state_cache = vault_runtime_state_to_data(result.runtime_state)
         self._varac_bbs_vault_last_summary_cache = result.summary
@@ -3414,15 +3427,15 @@ class SettingsTab(QWidget):
         configured_radios_group = QGroupBox("Configured Radios")
         configured_radios_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         configured_radios_layout = QVBoxLayout(configured_radios_group)
-        configured_radios_layout.setContentsMargins(8, 6, 8, 8)
-        configured_radios_layout.setSpacing(4)
+        configured_radios_layout.setContentsMargins(8, 4, 8, 6)
+        configured_radios_layout.setSpacing(3)
         self.add_device_profile_btn = QPushButton("Add Radio")
         self.add_device_profile_btn.setToolTip(
             "Start guided setup for a new radio or SDR: identity, software used, connection, and readiness."
         )
         self.add_device_profile_btn.setAccessibleName("Guided Add Radio")
         self.add_device_profile_btn.clicked.connect(self._add_device_profile)
-        self.device_profile_selector_title_label = QLabel("Select Radio To Edit")
+        self.device_profile_selector_title_label = QLabel("Radios")
         selector_title_font = self.device_profile_selector_title_label.font()
         selector_title_font.setBold(True)
         self.device_profile_selector_title_label.setFont(selector_title_font)
@@ -3441,8 +3454,8 @@ class SettingsTab(QWidget):
         self.device_profile_selector_scroll.setFrameShape(QFrame.NoFrame)
         self.device_profile_selector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.device_profile_selector_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.device_profile_selector_scroll.setMinimumHeight(44)
-        self.device_profile_selector_scroll.setMaximumHeight(54)
+        self.device_profile_selector_scroll.setMinimumHeight(38)
+        self.device_profile_selector_scroll.setMaximumHeight(46)
         self.device_profile_selector_scroll.setWidget(self.device_profile_selector_widget)
         configured_radios_layout.addWidget(self.device_profile_selector_scroll)
         radio_selector_actions = QHBoxLayout()
@@ -3475,7 +3488,7 @@ class SettingsTab(QWidget):
         radio_selector_actions.addWidget(QLabel("Selected:"))
         self.selector_selected_device_profile_label = QLabel("--")
         self.selector_selected_device_profile_label.setAccessibleName("Selected radio name")
-        self.selector_selected_device_profile_label.setMinimumWidth(90)
+        self.selector_selected_device_profile_label.setMinimumWidth(70)
         radio_selector_actions.addWidget(self.selector_selected_device_profile_label)
         radio_selector_actions.addWidget(self.selector_activate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
@@ -3524,8 +3537,8 @@ class SettingsTab(QWidget):
         self.settings_task_title_label.setToolTip("Use these tasks to review the selected radio and global station settings.")
         self.settings_task_hint_label = QLabel("Highlighted tasks need review. Select a task, then edit the workspace below.")
         self.settings_task_hint_label.setWordWrap(True)
-        self.settings_global_tasks_label = QLabel("Global")
-        self.settings_radio_tasks_label = QLabel("Selected Radio")
+        self.settings_global_tasks_label = QLabel("Main Settings")
+        self.settings_radio_tasks_label = QLabel("Radio Settings")
         self.settings_global_tasks_widget = QWidget()
         self.settings_global_tasks_layout = QGridLayout(self.settings_global_tasks_widget)
         self.settings_global_tasks_layout.setContentsMargins(0, 0, 0, 0)
@@ -5149,6 +5162,9 @@ class SettingsTab(QWidget):
         self.op_group_fastlight_unsigned_combo.addItem("Group Default", "group_default")
         self.op_group_fastlight_unsigned_combo.addItem(".k2s", "k2s")
         self.op_group_fastlight_unsigned_combo.addItem(".b2s", "b2s")
+        self.op_group_fastlight_form_family_combo = QComboBox()
+        self.op_group_fastlight_form_family_combo.addItem("No preferred form family", "group_default")
+        self._refresh_op_group_fastlight_form_family_options()
         self.op_group_add_config_btn = QPushButton("Add Configuration")
         self.op_group_add_config_btn.clicked.connect(self._add_operating_group_inline)
         self.op_group_save_btn = QPushButton("Save Changes")
@@ -5178,11 +5194,13 @@ class SettingsTab(QWidget):
         op_group_detail_layout.addWidget(self.op_group_fastlight_custom_delim_edit, 6, 1)
         op_group_detail_layout.addWidget(QLabel("Unsigned"), 6, 2)
         op_group_detail_layout.addWidget(self.op_group_fastlight_unsigned_combo, 6, 3)
+        op_group_detail_layout.addWidget(QLabel("Preferred Forms"), 7, 0)
+        op_group_detail_layout.addWidget(self.op_group_fastlight_form_family_combo, 7, 1, 1, 3)
         editor_actions = QHBoxLayout()
         editor_actions.addStretch()
         editor_actions.addWidget(self.op_group_add_config_btn)
         editor_actions.addWidget(self.op_group_save_btn)
-        op_group_detail_layout.addLayout(editor_actions, 7, 0, 1, 4)
+        op_group_detail_layout.addLayout(editor_actions, 8, 0, 1, 4)
         op_group_detail_layout.setColumnStretch(1, 1)
         op_group_detail_layout.setColumnStretch(3, 1)
         op_configs_layout.addWidget(self.op_group_detail_card)
@@ -5211,6 +5229,7 @@ class SettingsTab(QWidget):
         local_layout = QVBoxLayout()
         local_layout.setSpacing(6)
         local_group.setLayout(local_layout)
+
         local_hint = QLabel(
             "Used by SOP local-net reminders only. A Group can contain multiple Resources and Modes. "
             "Not used by scheduler automation."
@@ -6788,26 +6807,47 @@ class SettingsTab(QWidget):
             varac_v.addWidget(section)
             return layout
 
-        varac_paths_v = _make_varac_subgroup(
-            "VarAC Paths and Launch",
-            "Configure the selected radio's VarAC application location, launch behavior, and file exchange folders.",
-            checked=True,
+        varac_model_note = QLabel(
+            "VarAC BBS uses a shared Managed BBS Library as the source of truth, then publishes a separate live BBS folder "
+            "for each configured VarAC radio instance."
         )
+        varac_model_note.setWordWrap(True)
+        varac_v.addWidget(varac_model_note)
+
         bbs_tabs = QTabWidget()
         bbs_tabs.setObjectName("varacBbsSettingsTabs")
         bbs_tabs.setDocumentMode(True)
         bbs_tabs.setUsesScrollButtons(True)
         bbs_tabs.setToolTip(
-            "Configure live VarAC BBS access, managed BBS visitor views, sweeper rules, and VGuard file protection."
+            "Configure VarAC runtime paths, live BBS publishing, the shared Managed BBS Library, sweeper rules, and BBS Access Guard."
         )
+        paths_tab = QWidget()
+        varac_paths_v = QVBoxLayout(paths_tab)
+        varac_paths_v.setContentsMargins(8, 8, 8, 8)
+        varac_paths_v.setSpacing(8)
+        paths_scope_note = QLabel(
+            "Radio-specific runtime setup. These paths, launch values, and cluster controls apply to the selected radio's VarAC instance."
+        )
+        paths_scope_note.setWordWrap(True)
+        varac_paths_v.addWidget(paths_scope_note)
         bbs_settings_tab = QWidget()
         bbs_settings_v = QVBoxLayout(bbs_settings_tab)
         bbs_settings_v.setContentsMargins(8, 8, 8, 8)
         bbs_settings_v.setSpacing(8)
+        live_bbs_scope_note = QLabel(
+            "Radio-specific live BBS folder. VarAC serves this folder on the selected radio; FIO can publish managed content into it."
+        )
+        live_bbs_scope_note.setWordWrap(True)
+        bbs_settings_v.addWidget(live_bbs_scope_note)
         vault_tab = QWidget()
         vault_guard_v = QVBoxLayout(vault_tab)
         vault_guard_v.setContentsMargins(8, 8, 8, 8)
         vault_guard_v.setSpacing(8)
+        library_scope_note = QLabel(
+            "Shared Managed BBS Library. Organize reusable locations here, then assign or publish them into each radio's live BBS folder."
+        )
+        library_scope_note.setWordWrap(True)
+        vault_guard_v.addWidget(library_scope_note)
         preview_tab = QWidget()
         preview_v = QVBoxLayout(preview_tab)
         preview_v.setContentsMargins(8, 8, 8, 8)
@@ -6820,11 +6860,17 @@ class SettingsTab(QWidget):
         vguard_v = QVBoxLayout(vguard_tab)
         vguard_v.setContentsMargins(8, 8, 8, 8)
         vguard_v.setSpacing(8)
-        bbs_tabs.addTab(bbs_settings_tab, "Live BBS")
-        bbs_tabs.addTab(vault_tab, "Managed BBS")
-        bbs_tabs.addTab(preview_tab, "Preview")
-        bbs_tabs.addTab(sweeper_tab, "Sweeper")
-        bbs_tabs.addTab(vguard_tab, "VGuard")
+        guard_scope_note = QLabel(
+            "BBS Access Guard protects inbound VarAC files by sender trust. It is separate from the Managed BBS Library and from message signatures."
+        )
+        guard_scope_note.setWordWrap(True)
+        vguard_v.addWidget(guard_scope_note)
+        bbs_tabs.addTab(paths_tab, "Radio Paths")
+        bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")
+        bbs_tabs.addTab(vault_tab, "Shared Library")
+        bbs_tabs.addTab(preview_tab, "Visitor Preview")
+        bbs_tabs.addTab(sweeper_tab, "Shared Sweeper")
+        bbs_tabs.addTab(vguard_tab, "Access Guard")
         varac_v.addWidget(bbs_tabs)
 
         varac_row = QHBoxLayout()
@@ -7089,10 +7135,16 @@ class SettingsTab(QWidget):
         self.varac_bbs_sync_note_label.setWordWrap(True)
         varac_sync_note_row.addWidget(self.varac_bbs_sync_note_label, 1)
         bbs_settings_v.addLayout(varac_sync_note_row)
+        bbs_file_management_note = QLabel(
+            "BBS file management lives in Messages -> BBS. Operators can review, archive, or delete live BBS files, "
+            "incoming files, outgoing files, and managed-location copies from FIO without editing VarAC folders by hand."
+        )
+        bbs_file_management_note.setWordWrap(True)
+        bbs_settings_v.addWidget(bbs_file_management_note)
 
         self._varac_bbs_ini_sync_state = ""
 
-        vault_guard_v.addWidget(QLabel("Managed BBS Services"))
+        vault_guard_v.addWidget(QLabel("Managed BBS Library"))
         vault_enabled_row = QHBoxLayout()
         vault_enabled_row.setContentsMargins(0, 0, 0, 0)
         vault_enabled_row.setSpacing(8)
@@ -7102,9 +7154,9 @@ class SettingsTab(QWidget):
         vault_enabled_top = QHBoxLayout()
         vault_enabled_top.setContentsMargins(0, 0, 0, 0)
         vault_enabled_top.setSpacing(10)
-        self.varac_bbs_vault_enabled_chk_main = QCheckBox("Enable Managed BBS Vault")
+        self.varac_bbs_vault_enabled_chk_main = QCheckBox("Enable Managed BBS Library")
         vault_enabled_top.addWidget(self.varac_bbs_vault_enabled_chk_main)
-        self.varac_bbs_vault_initialize_btn = QPushButton("Initialize Managed Vault")
+        self.varac_bbs_vault_initialize_btn = QPushButton("Initialize Library")
         self.varac_bbs_vault_initialize_btn.clicked.connect(self._initialize_varac_bbs_vault)
         vault_enabled_top.addWidget(self.varac_bbs_vault_initialize_btn)
         self.varac_bbs_vault_reset_btn = QPushButton("Reset To Default")
@@ -7119,7 +7171,7 @@ class SettingsTab(QWidget):
         vault_enabled_top.addStretch()
         vault_enabled_inner.addLayout(vault_enabled_top)
         vault_enabled_note = QLabel(
-            "Managed Vault publishes a selected named location into the live VarAC BBS folder for the selected radio profile. "
+            "The library is shared FIO-managed storage. FIO publishes selected library locations into each radio's separate live VarAC BBS folder. "
             "Access codes are operational controls, not strong secrets."
         )
         vault_enabled_note.setWordWrap(True)
@@ -7144,12 +7196,12 @@ class SettingsTab(QWidget):
         vault_root_row.addWidget(vault_root_browse)
         vault_guard_v.addLayout(vault_root_row)
         self.varac_bbs_vault_root_hint_label = QLabel(
-            "Set the VarAC BBS directory first to see the default vault location."
+            "Set the VarAC BBS directory first to see the default library location."
         )
         self.varac_bbs_vault_root_hint_label.setWordWrap(True)
         vault_guard_v.addWidget(self.varac_bbs_vault_root_hint_label)
 
-        vault_guard_v.addWidget(QLabel("Vault Policy"))
+        vault_guard_v.addWidget(QLabel("Library Policy"))
         vault_policy_row = QHBoxLayout()
         vault_policy_row.setContentsMargins(0, 0, 0, 0)
         vault_policy_row.setSpacing(8)
@@ -7284,7 +7336,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_source_dir_browse_btn.clicked.connect(self._choose_varac_bbs_vault_location_source)
         vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_browse_btn, 3, 3)
         self.varac_bbs_vault_source_hint_label = QLabel(
-            "Typical pattern in the VarAC BBS area: Managed Root / locations / <Location Name>. Save Location can create that folder."
+            "Typical pattern: Managed Root / locations / <Location Name>. Save Location can create that shared library folder."
         )
         self.varac_bbs_vault_source_hint_label.setWordWrap(True)
         vault_editor_grid.addWidget(self.varac_bbs_vault_source_hint_label, 4, 0, 1, 4)
@@ -7351,9 +7403,8 @@ class SettingsTab(QWidget):
         )
         vault_locations_layout.addWidget(self.varac_bbs_vault_code_status_label)
         vault_locations_hint = QLabel(
-            "Vault projects one location into the live BBS at a time. By default, source folders live in the VarAC BBS area "
-            "under Managed Root / locations, not under the FreqInOut app folder. Saved access codes are hashed, and nested "
-            "source subfolders are still ignored in this release."
+            "FIO keeps location content in the shared library, then publishes a clean copy into the selected radio's live BBS folder. "
+            "Saved access codes are hashed, and nested source subfolders are still ignored in this release."
         )
         vault_locations_hint.setWordWrap(True)
         vault_locations_layout.addWidget(vault_locations_hint)
@@ -7491,7 +7542,7 @@ class SettingsTab(QWidget):
 
         vault_status_row = QHBoxLayout()
         vault_status_row.setContentsMargins(0, 0, 0, 0)
-        self.varac_bbs_vault_status_label = QLabel("Managed Vault is not enabled for this radio profile.")
+        self.varac_bbs_vault_status_label = QLabel("Managed BBS Library is not enabled for this radio profile.")
         self.varac_bbs_vault_status_label.setWordWrap(True)
         vault_status_row.addWidget(self.varac_bbs_vault_status_label, 1)
         vault_guard_v.addLayout(vault_status_row)
@@ -7567,11 +7618,11 @@ class SettingsTab(QWidget):
         self._clear_varac_bbs_sweeper_rule_editor()
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
-        vguard_v.addWidget(QLabel("VGuard File Protection"))
+        vguard_v.addWidget(QLabel("BBS Access Guard"))
         guard_row = QHBoxLayout()
         guard_row.setContentsMargins(0, 0, 0, 0)
         guard_row.setSpacing(8)
-        self.varac_guard_enabled_chk = QCheckBox("Enable VGuard File Protection")
+        self.varac_guard_enabled_chk = QCheckBox("Enable BBS Access Guard")
         guard_row.addWidget(self.varac_guard_enabled_chk)
         self.varac_guard_mode_combo = QComboBox()
         self.varac_guard_mode_combo.addItems(
@@ -7587,7 +7638,7 @@ class SettingsTab(QWidget):
         guard_trust_row.setSpacing(16)
         self.varac_guard_allow_bbs_chk = QCheckBox("Allow BBS allowed callsigns")
         self.varac_guard_allow_bbs_chk.setChecked(True)
-        self.varac_guard_allow_bbs_chk.setToolTip("Allow files from callsigns in BBS Management -> Allowed Callsigns.")
+        self.varac_guard_allow_bbs_chk.setToolTip("Allow files from callsigns in Live BBS -> Allowed Callsigns.")
         self.varac_guard_allow_trusted_chk = QCheckBox("Allow Operator History TRUSTED")
         self.varac_guard_allow_trusted_chk.setChecked(True)
         self.varac_guard_allow_trusted_chk.setToolTip("Allow files from callsigns marked TRUSTED in Operator History.")
@@ -7621,7 +7672,7 @@ class SettingsTab(QWidget):
         guard_note_row = QHBoxLayout()
         guard_note_row.setContentsMargins(0, 0, 0, 0)
         self.varac_guard_note_label = QLabel(
-            "VGuard watches VarAC incoming files and uses the allowed BBS callsigns list. It is separate from BBS access control."
+            "BBS Access Guard watches inbound VarAC files and checks sender trust. It does not decide what the Managed BBS Library publishes."
         )
         self.varac_guard_note_label.setWordWrap(True)
         guard_note_row.addWidget(self.varac_guard_note_label, 1)
@@ -7629,7 +7680,7 @@ class SettingsTab(QWidget):
 
         guard_status_row = QHBoxLayout()
         guard_status_row.setContentsMargins(0, 0, 0, 0)
-        self.varac_guard_status_label = QLabel("No VGuard scan yet.")
+        self.varac_guard_status_label = QLabel("No BBS Access Guard scan yet.")
         self.varac_guard_status_label.setWordWrap(True)
         guard_status_row.addWidget(self.varac_guard_status_label, 1)
         vguard_v.addLayout(guard_status_row)
@@ -7688,23 +7739,23 @@ class SettingsTab(QWidget):
         )
         self._autofill_dismiss_buttons["varac"] = self.varac_autofill_dismiss_btn
         varac_autofill_actions_row.addWidget(self.varac_autofill_dismiss_btn)
-        varac_v.addLayout(varac_autofill_status_row)
-        varac_v.addWidget(varac_autofill_actions_widget)
-        varac_v.addWidget(self._make_autofill_review_table("varac"))
+        varac_paths_v.addLayout(varac_autofill_status_row)
+        varac_paths_v.addWidget(varac_autofill_actions_widget)
+        varac_paths_v.addWidget(self._make_autofill_review_table("varac"))
 
         varac_cluster_mode_row = QHBoxLayout()
         varac_cluster_mode_row.setContentsMargins(0, 0, 0, 0)
         varac_cluster_mode_row.setSpacing(8)
-        varac_cluster_mode_label = QLabel("Enable Cluster Mode")
+        varac_cluster_mode_label = QLabel("VarAC Multi-Instance Cluster")
         varac_cluster_mode_label.setFixedWidth(msg_label_width)
         varac_cluster_mode_row.addWidget(varac_cluster_mode_label)
-        self.varac_cluster_mode_chk = QCheckBox("Show VarAC cluster configuration")
+        self.varac_cluster_mode_chk = QCheckBox("Show cluster setup")
         self.varac_cluster_mode_chk.setToolTip(
-            "Enable this only when one or more VarAC profiles should participate in a coordinated cluster or BBS relay workflow."
+            "Enable this only when one or more radio-owned VarAC instances should participate in coordinated cluster or BBS relay behavior."
         )
         varac_cluster_mode_row.addWidget(self.varac_cluster_mode_chk)
         varac_cluster_mode_row.addStretch()
-        varac_v.addLayout(varac_cluster_mode_row)
+        varac_paths_v.addLayout(varac_cluster_mode_row)
 
         varac_cluster_mode_hint_row = QHBoxLayout()
         varac_cluster_mode_hint_row.setContentsMargins(0, 0, 0, 0)
@@ -7713,7 +7764,8 @@ class SettingsTab(QWidget):
         self.varac_cluster_mode_hint_label = QLabel()
         self.varac_cluster_mode_hint_label.setWordWrap(True)
         varac_cluster_mode_hint_row.addWidget(self.varac_cluster_mode_hint_label, 1)
-        varac_v.addLayout(varac_cluster_mode_hint_row)
+        varac_paths_v.addLayout(varac_cluster_mode_hint_row)
+        varac_paths_v.addStretch(1)
 
         varac_container = QWidget()
         varac_container.setLayout(varac_v)
@@ -7776,6 +7828,13 @@ class SettingsTab(QWidget):
         condition_alert_actions.addStretch()
         condition_alert_v.addLayout(condition_alert_actions)
 
+        condition_alert_list_hint = QLabel(
+            "Rules below show the operator-facing essentials. Select a rule to review sender, auth, target, "
+            "and pattern details before saving changes."
+        )
+        condition_alert_list_hint.setWordWrap(True)
+        condition_alert_v.addWidget(condition_alert_list_hint)
+
         self.condition_alert_rules_table = QTableWidget(0, 12)
         self.condition_alert_rules_table.setObjectName("conditionAlertRulesTable")
         self.condition_alert_rules_table.setHorizontalHeaderLabels(
@@ -7824,13 +7883,13 @@ class SettingsTab(QWidget):
         self.condition_alert_rules_table.itemSelectionChanged.connect(self._refresh_condition_alert_detail)
         condition_alert_v.addWidget(self.condition_alert_rules_table)
 
-        condition_alert_detail = QGroupBox("Selected Rule")
+        condition_alert_detail = QGroupBox("Selected Rule Details")
         condition_alert_detail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         condition_alert_detail_layout = QGridLayout(condition_alert_detail)
         condition_alert_detail_layout.setContentsMargins(8, 8, 8, 8)
         condition_alert_detail_layout.setHorizontalSpacing(8)
         condition_alert_detail_layout.setVerticalSpacing(6)
-        self.condition_alert_detail_label = QLabel("Select a rule to review how it will be matched.")
+        self.condition_alert_detail_label = QLabel("Select a rule to review how FIO will match it.")
         self.condition_alert_detail_label.setWordWrap(True)
         self.condition_alert_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         condition_alert_detail_layout.addWidget(self.condition_alert_detail_label, 0, 0, 1, 4)
@@ -8504,7 +8563,7 @@ class SettingsTab(QWidget):
             "Preferences": "Preferences",
             "Radio Profile": "Profile",
             "Software Stack": "Software",
-            "Operating Models": "Operating Models",
+            "Operating Models": "Models",
             "Operating Model Assignment": "Assign Model",
             "Schedule Assignment": "Assign Schedule",
             "HF Operating Groups": "HF Groups",
@@ -8583,9 +8642,9 @@ class SettingsTab(QWidget):
         if label is not None:
             profile = self._selected_settings_radio_profile()
             if isinstance(profile, dict):
-                label.setText(self._profile_display_name(profile))
+                label.setText(f"Radio: {self._profile_display_name(profile)}")
             else:
-                label.setText("Selected Radio")
+                label.setText("Radio Settings")
 
     def _settings_section_combo_label(self, group: QGroupBox) -> str:
         meta = self._section_meta.get(group, {})
@@ -8906,14 +8965,14 @@ class SettingsTab(QWidget):
         if hint_label is not None:
             if enabled:
                 hint_label.setText(
-                    "Cluster mode is enabled. VarAC Clusters and VarAC Memberships are shown below VarAC Settings. "
-                    "Use this only when a specific radio/profile owns each VarAC instance and those instances intentionally share routing, BBS, or gateway duties."
+                    "VarAC multi-instance cluster setup is enabled. Cluster and Membership settings are shown below VarAC Settings. "
+                    "Use this only when each radio owns a distinct VarAC instance, with separate paths and live BBS folders, and those instances intentionally share routing, BBS, or gateway duties."
                 )
             else:
                 has_saved_clusters = bool(self.varac_clusters or self.varac_cluster_members)
                 preserved_note = " Existing cluster definitions are preserved." if has_saved_clusters else ""
                 hint_label.setText(
-                    "Cluster mode is off. Most operators should leave this off unless they intentionally coordinate multiple VarAC instances. "
+                    "VarAC multi-instance cluster setup is off. Most operators should leave this off unless they intentionally coordinate multiple VarAC instances. "
                     "Single-instance VarAC and normal BBS monitoring do not require cluster mode."
                     + preserved_note
                 )
@@ -9355,9 +9414,9 @@ class SettingsTab(QWidget):
             else ""
         )
         if varac_guard_enabled and not varac_incoming:
-            varac_issues.append("VGuard file protection has no VarAC incoming files path")
+            varac_issues.append("BBS Access Guard has no VarAC incoming files path")
         if varac_guard_enabled and varac_guard_mode == "Quarantine unauthorized files" and not varac_guard_quarantine:
-            varac_issues.append("VGuard quarantine folder missing")
+            varac_issues.append("BBS Access Guard quarantine folder missing")
         varac_vault_enabled = bool(
             hasattr(self, "varac_bbs_vault_enabled_chk_main") and self.varac_bbs_vault_enabled_chk_main.isChecked()
         )
@@ -9367,11 +9426,11 @@ class SettingsTab(QWidget):
             else ""
         )
         if varac_vault_enabled and not varac_bbs_dir:
-            varac_issues.append("Managed BBS Vault has no live BBS directory")
+            varac_issues.append("Managed BBS Library has no live BBS directory")
         if varac_vault_enabled and not varac_vault_root:
-            varac_issues.append("Managed BBS Vault root missing")
+            varac_issues.append("Managed BBS Library root missing")
         if varac_vault_enabled and not self._varac_bbs_vault_locations_cache:
-            varac_issues.append("Managed BBS Vault has no locations")
+            varac_issues.append("Managed BBS Library has no locations")
         varac_engaged = any(
             [
                 varac_engaged,
@@ -9707,11 +9766,11 @@ class SettingsTab(QWidget):
             return
         row = table.currentRow()
         if row < 0:
-            label.setText("Select a rule to review how it will be matched.")
+            label.setText("Select a rule to review how FIO will match it.")
             return
         rules = self._table_to_condition_alert_rules()
         if row >= len(rules):
-            label.setText("Select a rule to review how it will be matched.")
+            label.setText("Select a rule to review how FIO will match it.")
             return
         rule = rules[row]
         source_text = self._condition_alert_join(rule.source_families) or "all sources"
@@ -9721,14 +9780,12 @@ class SettingsTab(QWidget):
         state_text = "Enabled" if rule.enabled else "Disabled"
         action_text = self._condition_alert_action_label(rule.action)
         label.setText(
-            f"{state_text}: {rule.name or rule.id}\n"
+            f"Rule: {rule.name or rule.id} ({state_text})\n"
+            f"Applies To: {rule.operating_group or 'all groups'}; targets {target_text}\n"
             f"Sources: {source_text}\n"
-            f"Targets: {target_text}\n"
-            f"Allowed senders: {sender_text}\n"
-            f"Auth: {rule.required_auth_state or 'none'}\n"
+            f"Sender Policy: {sender_text}; auth {rule.required_auth_state or 'none'}\n"
             f"Match: {rule.match_mode} {rule.pattern!r}\n"
-            f"Level: {level_text}\n"
-            f"Action: {action_text}"
+            f"Result: SOP {level_text}; {action_text}"
         )
 
     def _add_condition_alert_rule(self) -> None:
@@ -10968,7 +11025,7 @@ class SettingsTab(QWidget):
             self.varac_guard_retry_combo.setCurrentText(retry_txt)
         if hasattr(self, "varac_guard_status_label"):
             guard_summary = str(data.get("varac_guard_last_summary", "") or "").strip()
-            self.varac_guard_status_label.setText(guard_summary or "No VGuard scan yet.")
+            self.varac_guard_status_label.setText(guard_summary or "No BBS Access Guard scan yet.")
         if hasattr(self, "varac_cluster_mode_chk"):
             self.varac_cluster_mode_chk.setChecked(bool(data.get("varac_cluster_mode_enabled", False)))
         try:
@@ -11044,6 +11101,7 @@ class SettingsTab(QWidget):
                             "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
                             "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
                             "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
+                            "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
                         }
                     )
         except Exception:
@@ -11450,23 +11508,23 @@ class SettingsTab(QWidget):
             if not data["varac_bbs_dir"]:
                 QMessageBox.warning(
                     self,
-                    "Managed BBS Vault",
-                    "Set the VarAC BBS directory before enabling Managed BBS Vault.",
+                    "Managed BBS Library",
+                    "Set the VarAC BBS directory before enabling Managed BBS Library.",
                 )
                 return
             if not root_txt:
                 QMessageBox.warning(
                     self,
-                    "Managed BBS Vault",
-                    "Set the Managed Root before enabling Managed BBS Vault.",
+                    "Managed BBS Library",
+                    "Set the Managed Root before enabling Managed BBS Library.",
                 )
                 return
             locations = load_vault_locations(self._varac_bbs_vault_locations_cache)
             if not locations:
                 QMessageBox.warning(
                     self,
-                    "Managed BBS Vault",
-                    "Initialize the Managed BBS Vault or add at least one location before saving.",
+                    "Managed BBS Library",
+                    "Initialize the Managed BBS Library or add at least one location before saving.",
                 )
                 return
             default_location_id = (
@@ -11476,7 +11534,7 @@ class SettingsTab(QWidget):
             if default_location is None:
                 QMessageBox.warning(
                     self,
-                    "Managed BBS Vault",
+                    "Managed BBS Library",
                     "Choose a valid Default location before saving.",
                 )
                 return
@@ -11488,7 +11546,7 @@ class SettingsTab(QWidget):
             if missing_sources:
                 QMessageBox.warning(
                     self,
-                    "Managed BBS Vault",
+                    "Managed BBS Library",
                     "Every enabled location must point to an existing directory.\n\n"
                     + "\n".join(missing_sources[:5]),
                 )
@@ -11506,7 +11564,7 @@ class SettingsTab(QWidget):
                 if missing_codes:
                     QMessageBox.warning(
                         self,
-                        "Managed BBS Vault",
+                        "Managed BBS Library",
                         "Current code policy requires access codes for these enabled locations:\n\n"
                         + "\n".join(missing_codes[:8]),
                     )
@@ -11516,7 +11574,7 @@ class SettingsTab(QWidget):
                 if not relay_dir or not Path(relay_dir).expanduser().is_dir():
                     QMessageBox.warning(
                         self,
-                        "Managed BBS Vault",
+                        "Managed BBS Library",
                         "Set a valid FLAMP relay folder before enabling FLAMP relay service.",
                     )
                     return
@@ -25164,6 +25222,7 @@ class SettingsTab(QWidget):
         fastlight_custom_delimiter: str | None = None,
         fastlight_signed_suffix: str | None = None,
         fastlight_unsigned_suffix: str | None = None,
+        fastlight_form_family: str | None = None,
     ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
@@ -25197,6 +25256,8 @@ class SettingsTab(QWidget):
                     g["fastlight_signed_suffix"] = str(fastlight_signed_suffix or "group_default").strip()
                 if fastlight_unsigned_suffix is not None:
                     g["fastlight_unsigned_suffix"] = str(fastlight_unsigned_suffix or "group_default").strip()
+                if fastlight_form_family is not None:
+                    g["fastlight_form_family"] = str(fastlight_form_family or "group_default").strip().upper()
                 if cond_level is not None:
                     g["condition_level"] = cond_level
                 elif "condition_level" not in g:
@@ -25220,6 +25281,7 @@ class SettingsTab(QWidget):
                     "fastlight_custom_delimiter": str(fastlight_custom_delimiter or "").strip(),
                     "fastlight_signed_suffix": str(fastlight_signed_suffix or "group_default").strip(),
                     "fastlight_unsigned_suffix": str(fastlight_unsigned_suffix or "group_default").strip(),
+                    "fastlight_form_family": str(fastlight_form_family or "group_default").strip().upper(),
                 }
             )
         # Condition-level participation is group-scoped (not per band/mode row).
@@ -25234,6 +25296,8 @@ class SettingsTab(QWidget):
                     g["fastlight_signed_suffix"] = str(fastlight_signed_suffix or "group_default").strip()
                 if fastlight_unsigned_suffix is not None:
                     g["fastlight_unsigned_suffix"] = str(fastlight_unsigned_suffix or "group_default").strip()
+                if fastlight_form_family is not None:
+                    g["fastlight_form_family"] = str(fastlight_form_family or "group_default").strip().upper()
         self._refresh_operating_groups_table()
         # Persist immediately so additions survive app restarts without requiring an explicit Save click.
         try:
@@ -25560,6 +25624,7 @@ class SettingsTab(QWidget):
         fastlight_custom_delimiter: str | None = None,
         fastlight_signed_suffix: str | None = None,
         fastlight_unsigned_suffix: str | None = None,
+        fastlight_form_family: str | None = None,
     ) -> None:
         name = str(name or "").strip().upper()
         band = str(band or "").strip().upper()
@@ -25597,6 +25662,11 @@ class SettingsTab(QWidget):
                     if fastlight_unsigned_suffix is None
                     else str(fastlight_unsigned_suffix or "group_default").strip()
                 )
+                next_fastlight_form_family = (
+                    str(g.get("fastlight_form_family") or "group_default").strip().upper()
+                    if fastlight_form_family is None
+                    else str(fastlight_form_family or "group_default").strip().upper()
+                )
                 g.update(
                     {
                         "frequency": freq_display,
@@ -25610,6 +25680,7 @@ class SettingsTab(QWidget):
                         "fastlight_custom_delimiter": next_fastlight_custom_delimiter,
                         "fastlight_signed_suffix": next_fastlight_signed_suffix,
                         "fastlight_unsigned_suffix": next_fastlight_unsigned_suffix,
+                        "fastlight_form_family": next_fastlight_form_family,
                     }
                 )
                 return
@@ -25629,6 +25700,7 @@ class SettingsTab(QWidget):
                 "fastlight_custom_delimiter": str(fastlight_custom_delimiter or "").strip(),
                 "fastlight_signed_suffix": str(fastlight_signed_suffix or "group_default").strip(),
                 "fastlight_unsigned_suffix": str(fastlight_unsigned_suffix or "group_default").strip(),
+                "fastlight_form_family": str(fastlight_form_family or "group_default").strip().upper(),
             }
         )
 
@@ -25675,6 +25747,7 @@ class SettingsTab(QWidget):
                     "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
                     "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
                     "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
+                    "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
                 }
                 for g in self.operating_groups
             ],
@@ -25838,6 +25911,29 @@ class SettingsTab(QWidget):
             "}"
         )
 
+    def _refresh_op_group_fastlight_form_family_options(self) -> None:
+        combo = getattr(self, "op_group_fastlight_form_family_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        current = str(combo.currentData() or "group_default").strip()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("No preferred form family", "group_default")
+            try:
+                families = discover_form_families(self.settings)
+            except Exception:
+                families = []
+            for family in families:
+                key = str(getattr(family, "key", "") or "").strip().upper()
+                label = str(getattr(family, "label", "") or "").strip() or key
+                if not key:
+                    continue
+                combo.addItem(label, key)
+            self._set_combo_data_if_present(combo, current, fallback="group_default")
+        finally:
+            combo.blockSignals(False)
+
     def _set_combo_text_if_present(self, combo: QComboBox, value: str) -> None:
         text = str(value or "").strip()
         index = combo.findText(text)
@@ -25872,12 +25968,14 @@ class SettingsTab(QWidget):
                 "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
                 "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
                 "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
+                "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
             }
         return {
             "fastlight_filename_delimiter": "group_default",
             "fastlight_custom_delimiter": "",
             "fastlight_signed_suffix": "group_default",
             "fastlight_unsigned_suffix": "group_default",
+            "fastlight_form_family": "group_default",
         }
 
     def _refresh_op_group_detail_panel(self) -> None:
@@ -25955,6 +26053,7 @@ class SettingsTab(QWidget):
             auto_enabled = False
             cond_enabled = False
             policy = self._operating_group_policy_for(group)
+            preferred_family = str(policy.get("fastlight_form_family", "group_default") or "group_default").strip().upper()
             original_key = None
         else:
             def _item_text(column: int, fallback: str = "") -> str:
@@ -25973,7 +26072,16 @@ class SettingsTab(QWidget):
             cond_widget = table.cellWidget(row, 9)
             cond_enabled = bool(cond_widget.findChild(QCheckBox).isChecked()) if isinstance(cond_widget, QWidget) and cond_widget.findChild(QCheckBox) else False
             policy = self._operating_group_policy_for(group)
+            preferred_family = str(policy.get("fastlight_form_family", "group_default") or "group_default").strip().upper()
             original_key = (group.strip().upper(), mode, band.strip().upper())
+        if preferred_family and preferred_family != "GROUP_DEFAULT":
+            self.op_group_detail_summary_label.setToolTip(
+                f"Compose will prefer the {preferred_family} custom form family for this operating group."
+            )
+        else:
+            self.op_group_detail_summary_label.setToolTip(
+                "Compose will use Standard Blank unless the operator chooses a custom form family."
+            )
 
         self._op_group_editor_original_key = original_key
         self.op_group_name_edit.setText(group)
@@ -25989,6 +26097,8 @@ class SettingsTab(QWidget):
         self.op_group_fastlight_custom_delim_edit.setText(policy.get("fastlight_custom_delimiter", ""))
         self._set_combo_data_if_present(self.op_group_fastlight_signed_combo, policy.get("fastlight_signed_suffix", "group_default"))
         self._set_combo_data_if_present(self.op_group_fastlight_unsigned_combo, policy.get("fastlight_unsigned_suffix", "group_default"))
+        self._refresh_op_group_fastlight_form_family_options()
+        self._set_combo_data_if_present(self.op_group_fastlight_form_family_combo, policy.get("fastlight_form_family", "group_default"))
 
     def _focus_operating_group_editor(self) -> None:
         self._refresh_op_group_detail_panel()
@@ -26054,6 +26164,7 @@ class SettingsTab(QWidget):
             fastlight_custom_delimiter=self.op_group_fastlight_custom_delim_edit.text().strip(),
             fastlight_signed_suffix=self._combo_data_text(self.op_group_fastlight_signed_combo),
             fastlight_unsigned_suffix=self._combo_data_text(self.op_group_fastlight_unsigned_combo),
+            fastlight_form_family=self._combo_data_text(self.op_group_fastlight_form_family_combo),
         )
 
     def _update_op_group_action_buttons(self):
@@ -26152,6 +26263,7 @@ class SettingsTab(QWidget):
                     "fastlight_custom_delimiter": str(g.get("fastlight_custom_delimiter", "") or "").strip(),
                     "fastlight_signed_suffix": str(g.get("fastlight_signed_suffix", "group_default") or "group_default").strip(),
                     "fastlight_unsigned_suffix": str(g.get("fastlight_unsigned_suffix", "group_default") or "group_default").strip(),
+                    "fastlight_form_family": str(g.get("fastlight_form_family", "group_default") or "group_default").strip().upper(),
                 }
             )
         return result
@@ -28833,7 +28945,7 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_guard_quarantine_dir_edit")
             else ""
         )
-        fn = QFileDialog.getExistingDirectory(self, "Select VGuard quarantine directory", start)
+        fn = QFileDialog.getExistingDirectory(self, "Select BBS Access Guard quarantine directory", start)
         if not fn:
             return
         self.varac_guard_quarantine_dir_edit.setText(fn)

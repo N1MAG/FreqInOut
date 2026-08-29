@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import string
+import datetime as _dt
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -144,6 +146,41 @@ _STANDARD_MARKERS = (
     ("{%%3}", "{%%}"),
     ("{^%3}", "{^%}"),
 )
+COMMSTAT_STATUS_LABELS = ("Green", "Yellow", "Red", "Unknown")
+COMMSTAT_STATUS_CODE_BY_LABEL = {
+    "GREEN": "1",
+    "YELLOW": "2",
+    "RED": "3",
+    "UNKNOWN": "4",
+}
+COMMSTAT_STATUS_FIELD_KEYS = (
+    "overall",
+    "power",
+    "water",
+    "medical",
+    "communications",
+    "travel",
+    "internet",
+    "fuel",
+    "food",
+    "crime",
+    "civil_unrest",
+    "political",
+)
+COMMSTAT_STATUS_FIELD_LABELS = (
+    "Overall",
+    "Power",
+    "Water",
+    "Medical",
+    "Communications",
+    "Travel",
+    "Internet",
+    "Fuel",
+    "Food",
+    "Crime",
+    "Civil Unrest",
+    "Political",
+)
 
 _AMBIGUOUS_STATE_WORDS = {"IN", "OR"}
 _NON_LOCATION_PRECEDERS = {
@@ -179,6 +216,108 @@ def normalize_commstat_text(text: object) -> str:
     for src, dest in _STANDARD_MARKERS:
         out = out.replace(src, dest)
     return out
+
+
+def sanitize_commstat_comment(comment: object, *, max_len: int = 64) -> str:
+    text = re.sub(r"[^A-Za-z0-9*\-\s|.?!'/:()#@+=&]+", " ", str(comment or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if max_len > 0:
+        text = text[:max_len].rstrip()
+    return text
+
+
+def generate_commstat_report_id(now: Optional[_dt.datetime] = None) -> str:
+    """Return the compact CommStat-style report id used by JS8SuperSpotter.
+
+    CommStat-style ids are intentionally short for RF. The hour letter skips O,
+    then the UTC minute is appended, for example A03 or Y59.
+    """
+    now_utc = now or _dt.datetime.now(_dt.timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=_dt.timezone.utc)
+    now_utc = now_utc.astimezone(_dt.timezone.utc)
+    letters = [ch for ch in string.ascii_uppercase[:25] if ch != "O"]
+    hour = max(0, min(23, int(now_utc.hour)))
+    return f"{letters[hour]}{int(now_utc.minute):02d}"
+
+
+def commstat_status_code(status: object) -> str:
+    if isinstance(status, int):
+        return str(status) if 1 <= status <= 4 else "4"
+    text = str(status or "").strip().upper()
+    if text in {"1", "2", "3", "4"}:
+        return text
+    return COMMSTAT_STATUS_CODE_BY_LABEL.get(text, "4")
+
+
+def build_commstat_status_string(statuses: object = None, *, default: object = "Green") -> str:
+    if isinstance(statuses, str) and re.fullmatch(r"[1-4]{12}|\+", statuses.strip()):
+        return "+" if statuses.strip() == "111111111111" else statuses.strip()
+    default_code = commstat_status_code(default)
+    codes = [default_code] * 12
+    if isinstance(statuses, dict):
+        for idx, key in enumerate(COMMSTAT_STATUS_FIELD_KEYS):
+            if key in statuses:
+                codes[idx] = commstat_status_code(statuses.get(key))
+    elif isinstance(statuses, (list, tuple)):
+        for idx, value in enumerate(statuses[:12]):
+            codes[idx] = commstat_status_code(value)
+    status_text = "".join(codes)
+    return "+" if status_text == "111111111111" else status_text
+
+
+def build_commstat_statrep_rf_text(
+    *,
+    callsign: object,
+    group: object,
+    grid: object,
+    scope: object = "1",
+    report_id: object = "",
+    statuses: object = None,
+    comment: object = "",
+    now: Optional[_dt.datetime] = None,
+) -> str:
+    """Build the RF-short CommStat StatRep text compatible with JS8SuperSpotter.
+
+    Format:
+      CALLSIGN: GROUP ,GRID,SCOPE,ID,STATUSES,COMMENT,{&%}
+    """
+    call = str(callsign or "").strip().upper()
+    group_text = normalize_group_name(str(group or "").strip().upper()).lstrip("@")
+    grid_text = str(grid or "").strip().upper()
+    scope_text = str(scope or "1").strip()[:1] or "1"
+    id_text = str(report_id or "").strip().upper() or generate_commstat_report_id(now)
+    if not call:
+        raise ValueError("callsign is required")
+    if not group_text:
+        raise ValueError("group is required")
+    if not grid_text:
+        raise ValueError("grid is required")
+    if scope_text not in COMMSTAT_SCOPE_MAP:
+        raise ValueError("scope must be 1 through 5")
+    status_text = build_commstat_status_string(statuses)
+    comment_text = sanitize_commstat_comment(comment)
+    return f"{call}: {group_text} ,{grid_text},{scope_text},{id_text},{status_text},{comment_text},{{&%}}"
+
+
+def build_commstat_brevity_rf_text(
+    *,
+    destination: object,
+    brevity_code: object,
+    comment: object = "",
+) -> str:
+    """Build a short CommStat brevity RF message for JS8Call."""
+    target = str(destination or "").strip().upper().lstrip("@")
+    code = str(brevity_code or "").strip().upper().lstrip("#")
+    if not target:
+        raise ValueError("destination is required")
+    if not re.fullmatch(r"[1-5][A-Z]{5}", code):
+        raise ValueError("brevity_code must be a six-character CommStat brevity code")
+    comment_text = sanitize_commstat_comment(comment, max_len=48)
+    payload = f"#{code}"
+    if comment_text:
+        payload = f"{payload} {comment_text}"
+    return f"{target} {payload}".strip()
 
 
 def _positive_int(value: object) -> int:

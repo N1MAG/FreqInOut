@@ -4636,14 +4636,31 @@ class StationsMapTab(QWidget):
             if tab is None:
                 return
             try:
-                selector = getattr(tab, "compose_mode_selector", None)
-                if selector is not None and selector.count() > 1:
-                    selector.setCurrentRow(1)
-                if callsign and hasattr(tab, "compose_js8_target_edit"):
-                    tab.compose_js8_target_edit.setText(callsign)
-                update = getattr(tab, "_update_compose_preview", None)
-                if callable(update):
-                    update()
+                payload = dict(getattr(self, "_map_selected_payload", {}) or {})
+                rows = self._map_payload_rows(payload)
+                intent = {
+                    "source": "map",
+                    "transport": "js8",
+                    "recipient_callsign": callsign,
+                    "title": str(payload.get("title") or callsign),
+                    "group": str(payload.get("group") or rows.get("groups") or rows.get("group") or ""),
+                    "last_heard_band": str(payload.get("last_band") or payload.get("last_contact_band") or ""),
+                    "last_heard_source": str(payload.get("source_family") or payload.get("source") or rows.get("source") or ""),
+                    "last_heard_age_label": str(rows.get("js8 heard") or rows.get("updated") or ""),
+                    "age_filter_seconds": int(getattr(self, "recency_seconds", 0) or 0),
+                }
+                prefill = getattr(tab, "prefill_compose_intent", None)
+                if callable(prefill):
+                    prefill(intent)
+                else:
+                    selector = getattr(tab, "compose_mode_selector", None)
+                    if selector is not None and selector.count() > 1:
+                        selector.setCurrentRow(1)
+                    if callsign and hasattr(tab, "compose_js8_target_edit"):
+                        tab.compose_js8_target_edit.setText(callsign)
+                    update = getattr(tab, "_update_compose_preview", None)
+                    if callable(update):
+                        update()
             except Exception as exc:
                 log.debug("StationsMap: failed prefilling Spotter compose target %s: %s", callsign, exc)
 

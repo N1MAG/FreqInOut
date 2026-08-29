@@ -1116,6 +1116,30 @@ def test_file_scanner_preserves_source_metadata_for_nested_full_scan(tmp_path: P
     assert records["flmsg"][0].source_label == "FIO-A FLMSG"
 
 
+def test_file_scanner_includes_nested_bbs_management_files(tmp_path: Path) -> None:
+    bbs_root = tmp_path / "Archive"
+    nested_file = bbs_root / "incoming" / "K7ABC" / "weather.txt"
+    nested_file.parent.mkdir(parents=True)
+    nested_file.write_text("weather update", encoding="utf-8")
+    helper_file = bbs_root / "incoming" / "BBS MSG - helper.txt"
+    helper_file.write_text("helper", encoding="utf-8")
+    watch = [
+        {
+            "origin": "bbs",
+            "path": str(bbs_root),
+            "source_id": "source-bbs-archive",
+            "source_label": "BBS Archive",
+        }
+    ]
+
+    records, _mtimes, mode = MessageFileScanner(watch, force=True).scan()
+
+    assert mode == "full"
+    assert [rec.path for rec in records["bbs"]] == [nested_file]
+    assert records["bbs"][0].source_id == "source-bbs-archive"
+    assert records["bbs"][0].source_label == "BBS Archive"
+
+
 def test_varac_watermarks_can_be_scoped_by_source(tmp_path: Path) -> None:
     conn = sqlite3.connect(tmp_path / "fio.db")
     try:

@@ -156,12 +156,12 @@ def test_background_ingest_varac_policy_job_runs_vault_even_when_guard_is_disabl
             published=True,
             active_location_id="default",
             current_session_callsign="W8UFO",
-            summary="Managed Vault Default | Session W8UFO",
+            summary="Managed BBS Library Default | Session W8UFO",
         )
 
     class GuardResult:
         scanned_events = 0
-        summary = "VGuard disabled"
+        summary = "BBS Access Guard disabled"
 
     def fake_guard(worker_settings):
         calls.append(("guard", id(worker_settings)))

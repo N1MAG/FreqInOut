@@ -1550,7 +1550,7 @@ class BackgroundIngestController(QObject):
                     live_key = self._normalized_bbs_dir(profile.get("varac_bbs_dir", ""))
                     if live_key in duplicate_dirs:
                         profile["varac_bbs_vault_last_summary"] = (
-                            "Managed Vault skipped: duplicate live BBS directory is configured on more than one active radio."
+                            "Managed BBS Library skipped: duplicate live BBS directory is configured on more than one active radio."
                         )
                         try:
                             profile_id = int(profile.get("id", 0) or 0)

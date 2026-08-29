@@ -358,9 +358,11 @@ def test_condition_alert_settings_ui_wires_rule_editor_to_settings_key() -> None
     assert "for hidden_col in (4, 5, 6, 7, 8, 9)" in source
     assert '"Rule"' in source
     assert '"SOP"' in source
+    assert "Rules below show the operator-facing essentials." in source
+    assert 'QGroupBox("Selected Rule Details")' in source
     assert "Select a rule to review sender, auth, target, and pattern details." in source
-    assert "Sources: {source_text}" in source
-    assert "Allowed senders: {sender_text}" in source
+    assert "Applies To: {rule.operating_group or 'all groups'}; targets {target_text}" in source
+    assert "Sender Policy: {sender_text}; auth {rule.required_auth_state or 'none'}" in source
     assert "CONDITION_ALERT_RULES_SETTING_KEY" in source
     assert "condition_alert_rules_from_settings" in source
     assert "condition_alert_rules_to_settings" in source

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
+import time
 
 from freqinout.radio_interface.js8_api_client import (
     JS8ApiClient,
@@ -187,6 +188,28 @@ def preflight_js8_send(
     )
 
 
+def normalize_js8_target(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def set_js8_selected_target(client: JS8ApiClient, target: object = "", *, settle_s: float = 0.12) -> None:
+    """Best-effort set or clear JS8Call's selected call/group.
+
+    Several JS8Call builds have used different API command names. Unknown
+    commands are ignored, so sending the compatibility set is safer than
+    assuming one API variant.
+    """
+    value = normalize_js8_target(target)
+    params = {"CALL": value, "SELECTED_CALL": value, "TARGET": value}
+    for command in ("RX.SET_SELECTED_CALL", "TX.SET_SELECTED_CALL", "STATION.SET_SELECTED_CALL"):
+        try:
+            client.send(command, value=value, params=params)
+        except Exception:
+            pass
+    if settle_s > 0:
+        time.sleep(settle_s)
+
+
 def send_js8_message_guarded(
     client: JS8ApiClient,
     message: str,
@@ -195,8 +218,17 @@ def send_js8_message_guarded(
     allow_dirty_tx_text: bool = False,
     allow_selected_target: bool = False,
     allow_uncertain_target_state: bool = False,
+    clear_selected_target: bool = False,
+    set_selected_target: object = None,
 ) -> JS8SendResult:
     message_text = str(message or "").strip()
+    try:
+        if not client.is_running:
+            client.start()
+        if client.is_connected and (clear_selected_target or set_selected_target is not None):
+            set_js8_selected_target(client, "" if clear_selected_target else set_selected_target)
+    except Exception:
+        pass
     preflight = preflight_js8_send(
         client,
         message_text,

@@ -33,6 +33,7 @@ VARAC_BBS_SAFE_SUFFIXES: Tuple[str, ...] = (
 FASTLIGHT_FILENAME_DELIMITER_OPTIONS = {"group_default", "underscore", "hyphen", "custom"}
 FASTLIGHT_SIGNED_SUFFIX_OPTIONS = {"group_default", "dot_sig", "dash_sig"}
 FASTLIGHT_UNSIGNED_SUFFIX_OPTIONS = {"group_default", "k2s", "b2s"}
+FASTLIGHT_FORM_FAMILY_DEFAULT = "group_default"
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,27 @@ def resolve_fastlight_filename_policy(
                 matched = row
                 break
     return normalize_fastlight_filename_policy(matched, group_name=target_group)
+
+
+def resolve_fastlight_form_family(
+    operating_groups: Iterable[Mapping[str, object]] | None,
+    target_group: object = "",
+) -> str:
+    """Resolve the preferred custom form family for a target operating group."""
+    target_norm = _normalize_fastlight_group_name(target_group)
+    if not target_norm or operating_groups is None:
+        return ""
+    for row in operating_groups:
+        if not isinstance(row, Mapping):
+            continue
+        row_group = row.get("group") or row.get("group_name") or row.get("name") or ""
+        if _normalize_fastlight_group_name(row_group) != target_norm:
+            continue
+        value = str(row.get("fastlight_form_family", "") or "").strip().upper()
+        if not value or value == FASTLIGHT_FORM_FAMILY_DEFAULT.upper():
+            return ""
+        return value
+    return ""
 
 
 def resolve_flamp_transmit_dir(path_text: str) -> str:

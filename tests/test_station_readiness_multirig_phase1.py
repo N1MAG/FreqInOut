@@ -116,8 +116,8 @@ def test_build_station_readiness_report_tracks_managed_vault_setup_gaps() -> Non
     )
 
     messages = {issue.message for issue in report.issues}
-    assert "Managed BBS Vault has no live BBS directory" in messages
-    assert "Managed BBS Vault has no locations" in messages
+    assert "Managed BBS Library has no live BBS directory" in messages
+    assert "Managed BBS Library has no locations" in messages
 
 
 def test_visible_status_programs_prefers_active_radio_software_flags() -> None:
@@ -399,13 +399,13 @@ def test_multirig_controlfreq_and_sop_sources_include_readiness_copy_and_activat
     ).read_text(encoding="utf-8")
 
     assert "Copy Summary" in controlfreq_source
-    assert "Managed Vault" in controlfreq_source
+    assert "Managed BBS Library" in controlfreq_source
     assert "def set_tab_active(self, active: bool) -> None:" in sop_source
     assert "_request_map_refresh" in map_source
     assert "_map_support_card" in map_source
     assert "Copy Diagnostics" in map_source
     assert "messages_copy_summary_btn" in messages_source
-    assert "Manage VarAC BBS & Vault" in messages_source
+    assert "Manage VarAC BBS" in messages_source
     assert "build_support_summary" in support_source
     assert "fetch_all" in sqlite_source
 

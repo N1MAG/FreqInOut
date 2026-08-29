@@ -25,7 +25,7 @@ def _write_log(base: Path, text: str) -> Path:
 
 
 def _event_stamp() -> tuple[str, float]:
-    when = dt.datetime.now(dt.timezone.utc)
+    when = dt.datetime.now().astimezone()
     return when.strftime("%m/%d/%Y %H:%M:%S"), when.timestamp()
 
 
@@ -92,7 +92,7 @@ def test_varac_guard_deletes_unauthorized_file_and_persists_state(tmp_path: Path
     assert not file_path.exists()
     state = settings.get("varac_guard_state_v1", {})
     assert state.get("processed_event_keys")
-    assert settings.get("varac_guard_last_summary", "").startswith("VGuard Delete unauthorized files")
+    assert settings.get("varac_guard_last_summary", "").startswith("BBS Access Guard Delete unauthorized files")
 
 
 def test_varac_guard_leaves_event_pending_when_file_has_not_arrived_yet(tmp_path: Path) -> None:

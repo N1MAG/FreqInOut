@@ -4594,17 +4594,22 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "single-instance VarAC and normal BBS monitoring do not require" in spec
     assert "Manage file purge/retention by BBS location" in spec
     assert "Treat BBS as a message entity under Messages" in spec
+    assert "Treat BBS file management as FIO-owned" in spec
     assert "adds a BBS focus in Messages" in spec
     assert "preview of the managed BBS structure" in spec
     assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
     assert "multiple managed BBS locations" in spec
     assert "radio-scoped Settings review surface" in spec
     assert "varacBbsSettingsTabs" in settings_source
-    assert 'bbs_tabs.addTab(bbs_settings_tab, "Live BBS")' in settings_source
-    assert 'bbs_tabs.addTab(vault_tab, "Managed BBS")' in settings_source
-    assert 'bbs_tabs.addTab(preview_tab, "Preview")' in settings_source
-    assert 'bbs_tabs.addTab(sweeper_tab, "Sweeper")' in settings_source
-    assert 'bbs_tabs.addTab(vguard_tab, "VGuard")' in settings_source
+    assert 'bbs_tabs.addTab(paths_tab, "Radio Paths")' in settings_source
+    assert 'bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")' in settings_source
+    assert 'bbs_tabs.addTab(vault_tab, "Shared Library")' in settings_source
+    assert 'bbs_tabs.addTab(preview_tab, "Visitor Preview")' in settings_source
+    assert 'bbs_tabs.addTab(sweeper_tab, "Shared Sweeper")' in settings_source
+    assert 'bbs_tabs.addTab(vguard_tab, "Access Guard")' in settings_source
+    assert "shared Managed BBS Library as the source of truth" in settings_source
+    assert "Radio-specific live BBS folder" in settings_source
+    assert "BBS file management lives in Messages -> BBS" in settings_source
     assert "BBS Visitor Preview" in settings_source
     assert "BBS Sweeper Rules" in settings_source
     assert "varac_bbs_sweeper_rules_v1" in settings_source

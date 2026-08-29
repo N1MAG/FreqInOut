@@ -25,7 +25,7 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Net resources catalog workflow via SitRepNet.com or custom JSON: import JSON into managed Net Resources and promote selected entries into active Net Schedule
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
 - Messages center for JS8, JS8Spotter, CommStat, FLMSG, FLAMP, and VarAC traffic, with visible-tab refresh controls, BBS status, archive/delete actions, and GPG/PGP or hash verification
-- Managed VarAC BBS support for publishing a clean live BBS folder, organizing BBS file sets behind simple menu names, auto-archiving old BBS files, and protecting inbound VarAC files with VGuard-style sender checks
+- Managed VarAC BBS support for publishing a clean per-radio live BBS folder from a shared Managed BBS Library, organizing BBS file sets behind simple menu names, auto-archiving old BBS files, and protecting inbound VarAC files with BBS Access Guard sender checks
 - Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, SitRep chip updates, and VarAC callsign-tag sync
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
@@ -53,7 +53,7 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer appear as active station responsiveness issues.
 - FIO now shares companion-app process/status checks across consumers, reducing repeated Linux `/proc` reads and idle CPU activity.
 - JS8Call scheduler and status checks share one process-global JS8Net connection, preventing RX/TX/heartbeat thread counts from climbing over time.
-- VarAC Managed BBS Vault reconciliation now adapts its cadence during idle periods while still waking promptly when files, logs, or settings change.
+- VarAC Managed BBS Library reconciliation now adapts its cadence during idle periods while still waking promptly when files, logs, or settings change.
 - ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with the other message-summary rows.
 
 ## What's New in v1.2.6
@@ -221,9 +221,9 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
 - When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. Configure the FIO Spotter forms folder when using built-in Spotter compose/decode workflows. The external JS8Spotter app path is optional and is only needed when FIO should track or launch the separate JS8Spotter application.
 - When `VarAC Install Folder` is set, also configure `Incoming Files`.
-- When `Managed BBS Vault` is enabled under `Settings -> VarAC Settings`, also configure a live `BBS Directory`, initialize the vault, and keep at least one valid `Default Location` in the selected Station Default radio bundle. Access codes are operational controls, not strong secrets.
-- In the current release, the vault root is automatic: if your live VarAC BBS is `/path/to/VarAC_files/BBS`, FreqInOut creates the managed vault next to it as `/path/to/VarAC_files/FIO_BBS_Vault`.
-- New vault location content belongs under `FIO_BBS_Vault/locations/<Location Name>` for the selected radio bundle. That is where you place files from your computer when you want a vault location to publish them into the live BBS.
+- When `Managed BBS Library` is enabled under `Settings -> VarAC Settings`, also configure a per-radio live `BBS Directory`, initialize the library, and keep at least one valid `Default Location` in the selected Station Default radio bundle. Access codes are operational controls, not strong secrets.
+- In the current release, the library root is automatic: if your live VarAC BBS is `/path/to/VarAC_files/BBS`, FreqInOut creates the managed library next to it as `/path/to/VarAC_files/FIO_BBS_Vault`.
+- New library location content belongs under `FIO_BBS_Vault/locations/<Location Name>` for the selected radio bundle. That is where you place files from your computer when you want a library location to publish into the live BBS.
 - Remote Vault workflow is: caller refreshes the BBS root, reads the helper entry, sends the location alias like `TEST_A` or `TEST_A <code>`, then refreshes again to see that location's files. `ROOT`, `BACK`, `EXIT`, or `LOCK` returns to the main menu.
 - Populate Operator History before expecting the Map tab to show full results.
 - JS8 live ingest is used when available; log parsing is used as a fallback.

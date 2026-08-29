@@ -40,7 +40,7 @@ def test_runtime_state_persistence_skips_unchanged_values():
     from freqinout.core.varac_bbs_vault import VaultRuntimeState, _persist_runtime_state, vault_runtime_state_to_data
 
     state = VaultRuntimeState()
-    summary = "Managed Vault Default"
+    summary = "Managed BBS Library Default"
     settings = _Settings(
         {
             "varac_bbs_vault_runtime_state_v1": vault_runtime_state_to_data(state),

@@ -17,7 +17,7 @@ import tempfile
 import xml.dom.minidom
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Sequence, Set, Mapping
 
@@ -54,9 +54,11 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QScrollArea,
     QCheckBox,
+    QButtonGroup,
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QTabWidget,
@@ -91,6 +93,14 @@ from freqinout.core.commstat_delete import (
     delete_commstat_artifact,
 )
 from freqinout.core.commstat_config import load_commstat_group_state
+from freqinout.core.compose_guidance import (
+    ComposeLastHeard,
+    ComposePathEvidence,
+    ComposePeerSchedule,
+    ComposeRadioOption,
+    ComposeSendRecommendation,
+    recommend_compose_send_path,
+)
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.message_file_metadata import (
     delete_file_cache_entries,
@@ -262,7 +272,16 @@ from freqinout.core.sitrep_metadata import (
     subtype_label,
     transport_label,
 )
-from freqinout.core.commstat_sitrep import commstat_reach_label
+from freqinout.core.commstat_sitrep import (
+    COMMSTAT_SCOPE_MAP,
+    COMMSTAT_STATUS_FIELD_LABELS,
+    COMMSTAT_STATUS_FIELD_KEYS,
+    COMMSTAT_STATUS_LABELS,
+    build_commstat_brevity_rf_text,
+    build_commstat_statrep_rf_text,
+    commstat_reach_label,
+    generate_commstat_report_id,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_bbs_config import bbs_summary_text
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory
@@ -271,7 +290,14 @@ from freqinout.core.varac_bbs_sweeper import (
     load_bbs_sweeper_rules,
     plan_bbs_sweeper_copies,
 )
-from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, FlampRelayStore, load_vault_locations
+from freqinout.core.varac_bbs_vault import (
+    DEFAULT_LOCATION_ID,
+    FlampRelayStore,
+    archive_bbs_file,
+    bbs_file_management_roots,
+    delete_bbs_file,
+    load_vault_locations,
+)
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
@@ -311,6 +337,7 @@ from freqinout.core.nbems_compose import (
     format_compose_zulu,
     parse_compose_template_fields,
     plan_compose_destinations,
+    resolve_fastlight_form_family,
     resolve_fastlight_filename_policy,
     resolve_compose_message_folder,
     resolve_flamp_transmit_dir,
@@ -324,7 +351,7 @@ from freqinout.core.nbems_compose import (
 )
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
-from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
+from freqinout.gui.qsy_helper import perform_qsy, suspend_active, scheduler_enabled
 from freqinout.gui.dropdown_checklist import DropdownChecklist
 
 
@@ -2219,7 +2246,11 @@ class MessageActionDelegate(QStyledItemDelegate):
         painter.setPen(link_color)
         fm = option.fontMetrics
         parent_widget = self.parent()
-        live_bbs_row = self._is_live_bbs_file_row(row)
+        live_bbs_row = bool(
+            isinstance(row.payload, FileRecord)
+            and hasattr(parent_widget, "_is_bbs_manageable_file_row")
+            and parent_widget._is_bbs_manageable_file_row(row)
+        )
         archived_bbs_row = self._is_archived_bbs_file_row(row)
         bbs_copy_row = bool(
             (not archived_bbs_row)
@@ -2345,7 +2376,11 @@ class MessageActionDelegate(QStyledItemDelegate):
             pos = event.pos()
         fm = option.fontMetrics
         parent_widget = self.parent()
-        live_bbs_row = self._is_live_bbs_file_row(row)
+        live_bbs_row = bool(
+            isinstance(row.payload, FileRecord)
+            and hasattr(parent_widget, "_is_bbs_manageable_file_row")
+            and parent_widget._is_bbs_manageable_file_row(row)
+        )
         archived_bbs_row = self._is_archived_bbs_file_row(row)
         bbs_copy_row = bool(
             (not archived_bbs_row)
@@ -2628,6 +2663,7 @@ class MessageViewerTab(QWidget):
         self._compose_template_title: str = ""
         self._compose_template_menu_item: str = ""
         self._compose_active_form_key: str = ""
+        self._compose_form_draft_values: Dict[str, Dict[str, str]] = {}
         self._compose_mode: str = "nbems"
         self._compose_last_stage_paths: List[Path] = []
         self._compose_last_source_dir: Optional[Path] = None
@@ -2637,10 +2673,18 @@ class MessageViewerTab(QWidget):
         self._compose_status_role: str = "info"
         self._compose_radio_targets: List[ComposeRadioTarget] = []
         self._compose_radio_targets_loaded: bool = False
+        self._compose_js8_auth_key_count: int = 0
+        self._compose_intent: Dict[str, object] = {}
+        self._compose_send_recommendation: ComposeSendRecommendation = ComposeSendRecommendation()
         self._compose_signing_keys_loaded: bool = False
         self._compose_signing_keys_loading: bool = False
         self._compose_signing_key_count: int = 0
         self._compose_signing_key_error: str = ""
+        self._compose_commstat_brevity_options_cache_key: tuple[str, ...] = ()
+        self._compose_commstat_brevity_options_cache: List[str] = []
+        self._compose_commstat_brevity_catalogs_cache_key: tuple[str, ...] = ()
+        self._compose_commstat_brevity_catalogs_cache: List[Tuple[str, str, Dict[str, object]]] = []
+        self._compose_layout_signature: tuple[object, ...] | None = None
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._map_context_filter: Dict[str, object] = {}
@@ -4195,9 +4239,9 @@ class MessageViewerTab(QWidget):
         self.messages_bbs_help_btn.setToolTip("Open focused help for VarAC BBS copy and archive behavior.")
         self.messages_bbs_help_btn.clicked.connect(lambda: self._open_context_help("messages.bbs"))
         self.messages_bbs_help_btn.setVisible(False)
-        self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS & Vault")
+        self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS")
         self.messages_manage_bbs_btn.setToolTip(
-            "Open VarAC Settings to review BBS access, Managed BBS Vault, and folder configuration."
+            "Open VarAC Settings to review BBS access, Managed BBS Library, and folder configuration."
         )
         self.messages_manage_bbs_btn.clicked.connect(self._open_varac_bbs_manager)
         self.messages_manage_bbs_btn.setVisible(False)
@@ -4293,7 +4337,7 @@ class MessageViewerTab(QWidget):
 
         self.bbs_manage_btn = QPushButton("Manage")
         self.bbs_manage_menu = QMenu(self.bbs_manage_btn)
-        self.bbs_manage_vault_action = self.bbs_manage_menu.addAction("Manage VarAC BBS & Vault")
+        self.bbs_manage_vault_action = self.bbs_manage_menu.addAction("Manage VarAC BBS")
         self.bbs_manage_vault_action.triggered.connect(self._open_varac_bbs_manager)
         self.bbs_help_action = self.bbs_manage_menu.addAction("BBS Help")
         self.bbs_help_action.triggered.connect(lambda: self._open_context_help("messages.bbs"))
@@ -4691,12 +4735,24 @@ class MessageViewerTab(QWidget):
             return
         mode = self._messages_responsive_mode_for_width(int(self.width() or 0))
         if mode == self._responsive_layout_mode and layout.count() > 0:
+            if hasattr(self, "compose_splitter"):
+                compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+                compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and mode != "compact"
+                if hasattr(self, "compose_body_splitter"):
+                    self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)
+                self.compose_splitter.setOrientation(Qt.Vertical if (mode == "compact" or compose_sidebar) else Qt.Horizontal)
+                self._refresh_compose_layout_geometry_if_needed(force=True)
             return
         self._responsive_layout_mode = mode
         compact = mode == "compact"
         self._arrange_inbox_action_controls(compact=compact)
         if hasattr(self, "compose_splitter"):
-            self.compose_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+            compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+            compose_sidebar = compose_mode in {"nbems", "spotter", "commstat_rf"} and not compact
+            if hasattr(self, "compose_body_splitter"):
+                self.compose_body_splitter.setOrientation(Qt.Horizontal if compose_sidebar else Qt.Vertical)
+            self.compose_splitter.setOrientation(Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal)
+            self._refresh_compose_layout_geometry_if_needed(force=True)
 
     def _arrange_inbox_action_controls(self, *, compact: bool) -> None:
         layout = getattr(self, "_inbox_actions_layout", None)
@@ -4768,11 +4824,11 @@ class MessageViewerTab(QWidget):
             ("all", "All", "Show all message traffic."),
             ("new", "New", "Show unread or alerting traffic."),
             ("forms", "FLMSG/FLAMP", "Show Fast Light forms and FLAmp files."),
-            ("spotter", "Spotter", "Show JS8Spotter MCF forms."),
+            ("spotter", "Spotter", "Show FIOSpotter MCF forms."),
             ("commstat", "CommStat", "Show CommStat-derived messages and reports."),
             ("js8call", "JS8Call", "Show raw JS8Call messages that are not Spotter MCF forms."),
             ("varac", "VarAC", "Show VarAC messages."),
-            ("bbs", "BBS", "Show live and archived BBS files as message traffic."),
+            ("bbs", "BBS", "Manage live BBS, managed library, incoming, outgoing, and archived BBS files."),
         ]
 
     def _set_inbox_focus(self, focus: str) -> None:
@@ -4876,6 +4932,7 @@ class MessageViewerTab(QWidget):
     def _build_compose_page(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
+        self.compose_root_layout = root
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
         summary_row = QHBoxLayout()
@@ -4883,11 +4940,16 @@ class MessageViewerTab(QWidget):
         summary_row.setSpacing(8)
         self.compose_summary_label = QLabel()
         self.compose_summary_label.setWordWrap(False)
-        self.compose_summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_summary_label.setMinimumWidth(0)
+        self.compose_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.compose_summary_label.setToolTip(
             "FreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
         )
         summary_row.addWidget(self.compose_summary_label, 1)
+        self.compose_workbench_btn = QPushButton("Open Full Compose Workbench")
+        self.compose_workbench_btn.setToolTip("Open Compose in a larger window with more room for forms, previews, and RF send options.")
+        self.compose_workbench_btn.clicked.connect(self._open_compose_workbench_dialog)
+        summary_row.addWidget(self.compose_workbench_btn)
         self.compose_setup_help_btn = QPushButton("Compose Setup Help")
         self.compose_setup_help_btn.setToolTip("Open help for compose setup, VarAC copy targets, and FLAmp signing.")
         self.compose_setup_help_btn.clicked.connect(lambda: self._open_context_help("messages.compose-setup"))
@@ -4895,8 +4957,9 @@ class MessageViewerTab(QWidget):
         root.addLayout(summary_row)
 
         compose_type_box = QGroupBox("Compose Type")
+        self.compose_type_box = compose_type_box
         compose_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        compose_type_box.setMaximumHeight(96)
+        compose_type_box.setMaximumHeight(72)
         compose_type_layout = QVBoxLayout(compose_type_box)
         compose_type_layout.setContentsMargins(8, 8, 8, 6)
         self.compose_mode_selector = QListWidget()
@@ -4906,12 +4969,12 @@ class MessageViewerTab(QWidget):
         self.compose_mode_selector.setResizeMode(QListWidget.Adjust)
         self.compose_mode_selector.setMovement(QListWidget.Static)
         self.compose_mode_selector.setUniformItemSizes(False)
-        self.compose_mode_selector.setMinimumHeight(42)
-        self.compose_mode_selector.setMaximumHeight(54)
+        self.compose_mode_selector.setMinimumHeight(34)
+        self.compose_mode_selector.setMaximumHeight(40)
         self.compose_mode_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.compose_mode_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.compose_mode_selector.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label in ("FLMsg / FLAmp", "JS8Spotter"):
+        for label in ("FLMsg / FLAmp", "JS8Call", "FIOSpotter", "CommStat RF"):
             item = QListWidgetItem(label)
             item.setTextAlignment(Qt.AlignCenter)
             self.compose_mode_selector.addItem(item)
@@ -4924,115 +4987,403 @@ class MessageViewerTab(QWidget):
         root.addWidget(compose_type_box)
 
         setup_box = QGroupBox("Compose")
+        self.compose_setup_box = setup_box
+        setup_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         setup_layout = QVBoxLayout(setup_box)
         setup_layout.setContentsMargins(8, 8, 8, 8)
         setup_layout.setSpacing(6)
+        setup_layout.setSizeConstraint(QLayout.SetDefaultConstraint)
+        setup_layout.setAlignment(Qt.AlignTop)
 
         self.compose_radio_row_widget = QWidget()
+        self.compose_radio_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_radio_row_widget.setMaximumHeight(36)
         radio_row = QHBoxLayout(self.compose_radio_row_widget)
         radio_row.setContentsMargins(0, 0, 0, 0)
         radio_row.setSpacing(8)
         # Source-test compatibility: radio_row.addWidget(QLabel("Compose For"))
-        self.compose_radio_label = QLabel("Compose For")
+        self.compose_radio_label = QLabel("Radio")
         radio_row.addWidget(self.compose_radio_label)
+        self.compose_radio_chip_container = QWidget()
+        self.compose_radio_chip_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.compose_radio_chip_layout = QHBoxLayout(self.compose_radio_chip_container)
+        self.compose_radio_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.compose_radio_chip_layout.setSpacing(6)
+        self.compose_radio_chip_group = QButtonGroup(self)
+        self.compose_radio_chip_group.setExclusive(True)
+        radio_row.addWidget(self.compose_radio_chip_container)
         self.compose_radio_combo = QComboBox()
+        self.compose_radio_combo.setToolTip("Choose the radio profile that will stage or send this compose item.")
+        self._set_compose_fixed_width(self.compose_radio_combo, floor=160, ceiling=260)
         self.compose_radio_combo.currentIndexChanged.connect(self._on_compose_radio_changed)
-        radio_row.addWidget(self.compose_radio_combo, 1)
-        self.compose_refresh_radios_btn = QPushButton("Refresh Radios")
+        radio_row.addWidget(self.compose_radio_combo)
+        self.compose_refresh_radios_btn = QPushButton("Refresh")
         self.compose_refresh_radios_btn.clicked.connect(self._refresh_compose_radios_clicked)
+        radio_row.addStretch(1)
         radio_row.addWidget(self.compose_refresh_radios_btn)
         setup_layout.addWidget(self.compose_radio_row_widget)
 
+        self.compose_guidance_row_widget = QWidget()
+        self.compose_guidance_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_guidance_row_widget.setMaximumHeight(42)
+        guidance_row = QHBoxLayout(self.compose_guidance_row_widget)
+        guidance_row.setContentsMargins(0, 0, 0, 0)
+        guidance_row.setSpacing(8)
+        self.compose_guidance_label = QLabel("")
+        self.compose_guidance_label.setWordWrap(False)
+        self.compose_guidance_label.setMinimumWidth(0)
+        self.compose_guidance_label.setMaximumHeight(24)
+        self.compose_guidance_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.compose_guidance_label.setStyleSheet("color: #566573; font-weight: 600;")
+        guidance_row.addWidget(self.compose_guidance_label, 1)
+        self.compose_tune_recommended_btn = QPushButton("Tune Recommended")
+        self.compose_tune_recommended_btn.setToolTip("Tune the recommended radio through the existing ControlFreq and RF Guard path.")
+        self.compose_tune_recommended_btn.clicked.connect(self._compose_tune_recommended_radio)
+        self.compose_tune_recommended_btn.setVisible(False)
+        guidance_row.addWidget(self.compose_tune_recommended_btn)
+        self.compose_guidance_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_guidance_row_widget)
+
+        self.compose_context_row_widget = QWidget()
+        self.compose_context_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_context_row_widget.setMaximumHeight(42)
+        context_row = QHBoxLayout(self.compose_context_row_widget)
+        context_row.setContentsMargins(0, 0, 0, 0)
+        context_row.setSpacing(8)
+        self.compose_context_label = QLabel("")
+        self.compose_context_label.setWordWrap(False)
+        self.compose_context_label.setMaximumHeight(32)
+        self.compose_context_label.setStyleSheet("color: #0078A8; font-weight: 700;")
+        context_row.addWidget(self.compose_context_label, 1)
+        self.compose_clear_context_btn = QPushButton("Clear Map Context")
+        self.compose_clear_context_btn.clicked.connect(self._clear_compose_intent)
+        context_row.addWidget(self.compose_clear_context_btn)
+        self.compose_context_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_context_row_widget)
+
         self.compose_js8_target_row_widget = QWidget()
+        self.compose_js8_target_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_js8_target_row_widget.setMaximumHeight(36)
         js8_target_row = QHBoxLayout(self.compose_js8_target_row_widget)
         js8_target_row.setContentsMargins(0, 0, 0, 0)
         js8_target_row.setSpacing(8)
-        js8_target_row.addWidget(QLabel("JS8 Target"))
+        self.compose_js8_target_label = QLabel("JS8 Target")
+        js8_target_row.addWidget(self.compose_js8_target_label)
         self.compose_js8_target_edit = QLineEdit()
-        self.compose_js8_target_edit.setPlaceholderText("@GROUP or CALLSIGN")
-        self.compose_js8_target_edit.setToolTip("Destination typed into the JS8Spotter command, for example @MAGNET or a callsign.")
+        self.compose_js8_target_edit.setMinimumWidth(220)
+        self.compose_js8_target_edit.setPlaceholderText("GROUP or CALLSIGN")
+        self.compose_js8_target_edit.setToolTip("Destination typed into the JS8 command, for example MAGNET or a callsign. FIO strips @ before transmit.")
         self.compose_js8_target_edit.textChanged.connect(self._update_compose_preview)
         js8_target_row.addWidget(self.compose_js8_target_edit, 1)
         self.compose_js8_sign_chk = QCheckBox("Sign MsgAuth")
         self.compose_js8_sign_chk.setToolTip("Append a KF7MIX MsgAuth checksum using a key scoped to this JS8 target and your callsign.")
         self.compose_js8_sign_chk.stateChanged.connect(self._update_compose_preview)
-        js8_target_row.addWidget(self.compose_js8_sign_chk)
         self.compose_js8_auth_key_label = QLabel("Key")
-        js8_target_row.addWidget(self.compose_js8_auth_key_label)
         self.compose_js8_auth_key_combo = QComboBox()
+        self.compose_js8_auth_key_combo.setMinimumWidth(220)
+        self.compose_js8_auth_key_combo.setMaximumWidth(420)
         self.compose_js8_auth_key_combo.setToolTip("Enabled MsgAuth keys matching the JS8 target group and operator callsign.")
         self.compose_js8_auth_key_combo.currentIndexChanged.connect(self._update_compose_preview)
-        js8_target_row.addWidget(self.compose_js8_auth_key_combo, 1)
         self.compose_js8_auth_datecode_chk = QCheckBox("Date Code")
         self.compose_js8_auth_datecode_chk.setToolTip("Include the compact KF7MIX date code in the signed text.")
         self.compose_js8_auth_datecode_chk.stateChanged.connect(self._update_compose_preview)
-        js8_target_row.addWidget(self.compose_js8_auth_datecode_chk)
         self.compose_js8_auth_refresh_btn = QPushButton("Keys")
         self.compose_js8_auth_refresh_btn.setToolTip("Refresh JS8 MsgAuth keys.")
         self.compose_js8_auth_refresh_btn.clicked.connect(lambda: self._refresh_compose_js8_auth_keys(force=True))
-        js8_target_row.addWidget(self.compose_js8_auth_refresh_btn)
+        self.compose_js8_target_spacer = QWidget()
+        self.compose_js8_target_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        js8_target_row.addWidget(self.compose_js8_target_spacer, 1)
         self.compose_js8_target_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_js8_target_row_widget)
 
+        self.compose_js8_auth_row_widget = QWidget()
+        self.compose_js8_auth_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_js8_auth_row_widget.setMaximumHeight(36)
+        js8_auth_row = QHBoxLayout(self.compose_js8_auth_row_widget)
+        js8_auth_row.setContentsMargins(0, 0, 0, 0)
+        js8_auth_row.setSpacing(8)
+        js8_auth_row.addWidget(self.compose_js8_sign_chk)
+        js8_auth_row.addWidget(self.compose_js8_auth_key_label)
+        js8_auth_row.addWidget(self.compose_js8_auth_key_combo, 1)
+        js8_auth_row.addWidget(self.compose_js8_auth_datecode_chk)
+        js8_auth_row.addWidget(self.compose_js8_auth_refresh_btn)
+        js8_auth_row.addStretch(1)
+        self.compose_js8_auth_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_js8_auth_row_widget)
+
+        self.compose_js8_plain_row_widget = QWidget()
+        self.compose_js8_plain_row_widget.setMinimumHeight(170)
+        self.compose_js8_plain_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        js8_plain_layout = QGridLayout(self.compose_js8_plain_row_widget)
+        js8_plain_layout.setContentsMargins(0, 0, 0, 0)
+        js8_plain_layout.setHorizontalSpacing(8)
+        js8_plain_layout.setVerticalSpacing(6)
+        self.compose_js8_plain_kind_label = QLabel("JS8 Send")
+        self.compose_js8_plain_kind_combo = QComboBox()
+        self.compose_js8_plain_kind_combo.addItems(["Directed Message", "Traffic"])
+        self.compose_js8_plain_kind_combo.setToolTip(
+            "Directed Message requires a callsign or group. Traffic can be sent as short JS8 text with or without a target."
+        )
+        self.compose_js8_plain_kind_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_js8_plain_kind_chip_container = QWidget()
+        self.compose_js8_plain_kind_chip_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.compose_js8_plain_kind_chip_layout = QHBoxLayout(self.compose_js8_plain_kind_chip_container)
+        self.compose_js8_plain_kind_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.compose_js8_plain_kind_chip_layout.setSpacing(6)
+        self.compose_js8_plain_kind_chip_group = QButtonGroup(self)
+        self.compose_js8_plain_kind_chip_group.setExclusive(True)
+        self.compose_js8_plain_text_label = QLabel("Text")
+        self.compose_js8_plain_text_edit = QTextEdit()
+        self.compose_js8_plain_text_edit.setAcceptRichText(False)
+        self.compose_js8_plain_text_edit.setMinimumHeight(132)
+        self.compose_js8_plain_text_edit.setMaximumHeight(420)
+        self.compose_js8_plain_text_edit.setPlaceholderText("Short JS8 text")
+        self.compose_js8_plain_text_edit.setToolTip("Keep RF traffic short. FIO will prepend the target when a target is set.")
+        self.compose_js8_plain_text_edit.textChanged.connect(self._update_compose_preview)
+        js8_plain_layout.addWidget(self.compose_js8_plain_kind_label, 0, 0)
+        js8_plain_layout.addWidget(self.compose_js8_plain_kind_chip_container, 0, 1)
+        js8_plain_layout.addWidget(self.compose_js8_plain_kind_combo, 0, 2)
+        self.compose_js8_plain_kind_combo.setVisible(False)
+        js8_plain_layout.addWidget(self.compose_js8_plain_text_label, 1, 0)
+        js8_plain_layout.addWidget(self.compose_js8_plain_text_edit, 1, 1)
+        js8_plain_layout.setColumnStretch(1, 1)
+        self.compose_js8_plain_row_widget.setVisible(False)
+        self.compose_js8_plain_scroll = QScrollArea()
+        self.compose_js8_plain_scroll.setWidgetResizable(True)
+        self.compose_js8_plain_scroll.setFrameShape(QFrame.NoFrame)
+        self.compose_js8_plain_scroll.setWidget(self.compose_js8_plain_row_widget)
+
+        self.compose_commstat_row_widget = QWidget()
+        self.compose_commstat_row_widget.setMinimumHeight(240)
+        self.compose_commstat_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        commstat_layout = QGridLayout(self.compose_commstat_row_widget)
+        commstat_layout.setContentsMargins(0, 0, 0, 0)
+        commstat_layout.setHorizontalSpacing(8)
+        commstat_layout.setVerticalSpacing(6)
+        self.compose_commstat_kind_combo = QComboBox()
+        self.compose_commstat_kind_combo.addItems(["StatRep"])
+        self._set_compose_fixed_width(self.compose_commstat_kind_combo, floor=130, ceiling=180)
+        self.compose_commstat_kind_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_commstat_target_edit = QLineEdit()
+        self.compose_commstat_target_edit.setMinimumWidth(220)
+        self.compose_commstat_target_edit.setPlaceholderText("GROUP or CALLSIGN")
+        self.compose_commstat_target_edit.setToolTip("CommStat RF destination, for example MAGNET or a callsign. FIO strips @ before transmit.")
+        self.compose_commstat_target_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_commstat_grid_edit = QLineEdit()
+        self.compose_commstat_grid_edit.setPlaceholderText("Grid")
+        self._set_compose_fixed_width(self.compose_commstat_grid_edit, floor=110, ceiling=160)
+        self.compose_commstat_grid_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_commstat_scope_combo = QComboBox()
+        for code, label in COMMSTAT_SCOPE_MAP.items():
+            self.compose_commstat_scope_combo.addItem(f"{code}: {label}", code)
+        self.compose_commstat_scope_combo.setMinimumWidth(170)
+        self.compose_commstat_scope_combo.setMaximumWidth(240)
+        self.compose_commstat_scope_combo.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_commstat_report_id_edit = QLineEdit()
+        self.compose_commstat_report_id_edit.setPlaceholderText("ID")
+        self._set_compose_fixed_width(self.compose_commstat_report_id_edit, floor=90, ceiling=130)
+        self.compose_commstat_report_id_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_commstat_brevity_chk = QCheckBox("Add Brevity")
+        self.compose_commstat_brevity_chk.setToolTip("Attach a CommStat brevity code to this StatRep comment.")
+        self.compose_commstat_brevity_chk.stateChanged.connect(self._on_compose_commstat_brevity_enabled_changed)
+        self.compose_commstat_brevity_edit = QComboBox()
+        self.compose_commstat_brevity_edit.setEditable(True)
+        self.compose_commstat_brevity_edit.setInsertPolicy(QComboBox.NoInsert)
+        self.compose_commstat_brevity_edit.setMinimumWidth(160)
+        self.compose_commstat_brevity_edit.setMaximumWidth(260)
+        self.compose_commstat_brevity_edit.setToolTip("CommStat brevity code, such as 4BBGUB. Check Add Brevity to attach it to the StatRep comment.")
+        self._populate_compose_commstat_brevity_options()
+        self.compose_commstat_brevity_edit.currentIndexChanged.connect(self._update_compose_preview)
+        self.compose_commstat_brevity_edit.editTextChanged.connect(self._update_compose_preview)
+        self.compose_commstat_comment_edit = QLineEdit()
+        self.compose_commstat_comment_edit.setPlaceholderText("Short RF comment")
+        self.compose_commstat_comment_edit.setMinimumWidth(220)
+        self.compose_commstat_comment_edit.textChanged.connect(self._update_compose_preview)
+        self.compose_commstat_type_label = QLabel("CommStat Type")
+        self.compose_commstat_target_label = QLabel("Send To")
+        self.compose_commstat_grid_label = QLabel("Reported Grid")
+        self.compose_commstat_scope_label = QLabel("Scope")
+        self.compose_commstat_report_id_label = QLabel("Report ID")
+        self.compose_commstat_brevity_label = QLabel("Brevity Code")
+        self.compose_commstat_comment_label = QLabel("Comment")
+        commstat_layout.addWidget(self.compose_commstat_type_label, 0, 0)
+        commstat_layout.addWidget(self.compose_commstat_kind_combo, 0, 1)
+        commstat_layout.addWidget(self.compose_commstat_target_label, 0, 2)
+        commstat_layout.addWidget(self.compose_commstat_target_edit, 0, 3)
+        commstat_layout.addWidget(self.compose_commstat_scope_label, 1, 0)
+        commstat_layout.addWidget(self.compose_commstat_scope_combo, 1, 1)
+        commstat_layout.addWidget(self.compose_commstat_grid_label, 1, 2)
+        commstat_layout.addWidget(self.compose_commstat_grid_edit, 1, 3)
+        commstat_layout.addWidget(self.compose_commstat_report_id_label, 2, 0)
+        commstat_layout.addWidget(self.compose_commstat_report_id_edit, 2, 1)
+        commstat_layout.addWidget(self.compose_commstat_comment_label, 2, 2)
+        commstat_layout.addWidget(self.compose_commstat_comment_edit, 2, 3)
+        commstat_layout.addWidget(self.compose_commstat_brevity_chk, 3, 0)
+        commstat_layout.addWidget(self.compose_commstat_brevity_label, 3, 1)
+        commstat_layout.addWidget(self.compose_commstat_brevity_edit, 3, 2, 1, 2)
+        self.compose_commstat_brevity_builder_widget = QWidget()
+        brevity_builder_layout = QGridLayout(self.compose_commstat_brevity_builder_widget)
+        brevity_builder_layout.setContentsMargins(0, 4, 0, 4)
+        brevity_builder_layout.setHorizontalSpacing(8)
+        brevity_builder_layout.setVerticalSpacing(4)
+        self.compose_commstat_brevity_list_combo = QComboBox()
+        self.compose_commstat_brevity_event_combo = QComboBox()
+        self.compose_commstat_brevity_status_combo = QComboBox()
+        self.compose_commstat_brevity_impact_combo = QComboBox()
+        self.compose_commstat_brevity_public_combo = QComboBox()
+        self.compose_commstat_brevity_station_combo = QComboBox()
+        for combo in (
+            self.compose_commstat_brevity_list_combo,
+            self.compose_commstat_brevity_event_combo,
+            self.compose_commstat_brevity_status_combo,
+            self.compose_commstat_brevity_impact_combo,
+            self.compose_commstat_brevity_public_combo,
+            self.compose_commstat_brevity_station_combo,
+        ):
+            combo.setMinimumWidth(180)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_commstat_brevity_list_combo.currentIndexChanged.connect(self._on_compose_commstat_brevity_list_changed)
+        for combo in (
+            self.compose_commstat_brevity_event_combo,
+            self.compose_commstat_brevity_status_combo,
+            self.compose_commstat_brevity_impact_combo,
+            self.compose_commstat_brevity_public_combo,
+            self.compose_commstat_brevity_station_combo,
+        ):
+            combo.currentIndexChanged.connect(self._on_compose_commstat_brevity_builder_changed)
+        brevity_builder_layout.addWidget(QLabel("Event List"), 0, 0)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_list_combo, 0, 1)
+        brevity_builder_layout.addWidget(QLabel("Event Type"), 0, 2)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_event_combo, 0, 3)
+        brevity_builder_layout.addWidget(QLabel("Status/Target"), 1, 0)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_status_combo, 1, 1)
+        brevity_builder_layout.addWidget(QLabel("Impact"), 1, 2)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_impact_combo, 1, 3)
+        brevity_builder_layout.addWidget(QLabel("Public Response"), 2, 0)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_public_combo, 2, 1)
+        brevity_builder_layout.addWidget(QLabel("Station Response"), 2, 2)
+        brevity_builder_layout.addWidget(self.compose_commstat_brevity_station_combo, 2, 3)
+        for col in (1, 3):
+            brevity_builder_layout.setColumnStretch(col, 1)
+        self.compose_commstat_brevity_builder_widget.setVisible(False)
+        commstat_layout.addWidget(self.compose_commstat_brevity_builder_widget, 4, 0, 1, 4)
+        for col in (1, 3):
+            commstat_layout.setColumnStretch(col, 1)
+        commstat_layout.setRowStretch(6, 1)
+        self.compose_commstat_status_widgets: Dict[str, QComboBox] = {}
+        self.compose_commstat_status_labels: Dict[str, QLabel] = {}
+        status_grid = QGridLayout()
+        status_grid.setContentsMargins(0, 4, 0, 0)
+        status_grid.setHorizontalSpacing(8)
+        status_grid.setVerticalSpacing(4)
+        for idx, (key, label) in enumerate(zip(COMMSTAT_STATUS_FIELD_KEYS, COMMSTAT_STATUS_FIELD_LABELS)):
+            combo = QComboBox()
+            combo.addItems(list(COMMSTAT_STATUS_LABELS))
+            combo.currentIndexChanged.connect(self._update_compose_preview)
+            self.compose_commstat_status_widgets[key] = combo
+            row = idx // 2
+            col = (idx % 2) * 2
+            label_widget = QLabel(label)
+            self.compose_commstat_status_labels[key] = label_widget
+            status_grid.addWidget(label_widget, row, col)
+            status_grid.addWidget(combo, row, col + 1)
+        commstat_layout.addLayout(status_grid, 5, 0, 1, 4)
+        self.compose_commstat_row_widget.setVisible(False)
+        self._populate_compose_commstat_brevity_builder()
+        self.compose_commstat_scroll = QScrollArea()
+        self.compose_commstat_scroll.setWidgetResizable(True)
+        self.compose_commstat_scroll.setFrameShape(QFrame.NoFrame)
+        self.compose_commstat_scroll.setWidget(self.compose_commstat_row_widget)
+
         self.compose_expect_row_widget = QWidget()
+        self.compose_expect_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_expect_row_widget.setMaximumHeight(48)
         expect_row = QHBoxLayout(self.compose_expect_row_widget)
         expect_row.setContentsMargins(0, 0, 0, 0)
         expect_row.setSpacing(8)
         self.compose_save_expect_btn = QPushButton("Save to Expect")
-        self.compose_save_expect_btn.setToolTip("Save this JS8Spotter draft as a disabled Expect entry for later policy review before automation is enabled.")
+        self.compose_save_expect_btn.setToolTip("Save this FIOSpotter draft as a disabled Expect entry for later policy review before automation is enabled.")
         self.compose_save_expect_btn.clicked.connect(self._save_compose_js8_expect)
         expect_row.addWidget(self.compose_save_expect_btn)
-        self.compose_expect_hint_label = QLabel("Optional: store this draft as an Expect response for later policy review.")
+        self.compose_expect_hint_label = QLabel("Optional: store this draft for Expect review.")
         self.compose_expect_hint_label.setWordWrap(True)
         expect_row.addWidget(self.compose_expect_hint_label, 1)
         self.compose_expect_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_expect_row_widget)
 
-        row1 = QHBoxLayout()
+        self.compose_form_row_widget = QWidget()
+        self.compose_form_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_form_row_widget.setMaximumHeight(96)
+        row1 = QGridLayout(self.compose_form_row_widget)
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setHorizontalSpacing(8)
+        row1.setVerticalSpacing(6)
+        self.compose_operating_group_label = QLabel("Group")
+        row1.addWidget(self.compose_operating_group_label, 0, 0)
+        self.compose_operating_group_combo = QComboBox()
+        self._set_compose_fixed_width(self.compose_operating_group_combo, floor=130, ceiling=210)
+        self.compose_operating_group_combo.setToolTip("Choose the operating group before selecting a form so mapped form defaults apply.")
+        self.compose_operating_group_combo.currentIndexChanged.connect(self._on_compose_operating_group_changed)
+        row1.addWidget(self.compose_operating_group_combo, 0, 1)
         self.compose_spotter_category_label = QLabel("Form Category")
-        row1.addWidget(self.compose_spotter_category_label)
+        row1.addWidget(self.compose_spotter_category_label, 0, 0)
         self.compose_spotter_category_combo = QComboBox()
+        self.compose_spotter_category_combo.setMinimumWidth(180)
+        self.compose_spotter_category_combo.setMaximumWidth(300)
         self.compose_spotter_category_combo.currentIndexChanged.connect(self._on_compose_spotter_category_changed)
-        row1.addWidget(self.compose_spotter_category_combo, 1)
+        row1.addWidget(self.compose_spotter_category_combo, 0, 1)
         self.compose_family_label = QLabel("Form Family")
-        row1.addWidget(self.compose_family_label)
+        row1.addWidget(self.compose_family_label, 1, 0)
         self.compose_family_combo = QComboBox()
+        self.compose_family_combo.setMinimumWidth(170)
+        self.compose_family_combo.setMaximumWidth(420)
         self.compose_family_combo.currentIndexChanged.connect(self._on_compose_family_changed)
-        row1.addWidget(self.compose_family_combo, 1)
+        row1.addWidget(self.compose_family_combo, 1, 1)
         self.compose_form_label = QLabel("Form")
-        row1.addWidget(self.compose_form_label)
+        row1.addWidget(self.compose_form_label, 2, 0)
         self.compose_form_combo = QComboBox()
+        self.compose_form_combo.setMinimumWidth(240)
+        self.compose_form_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.compose_form_combo.currentIndexChanged.connect(self._on_compose_form_changed)
-        row1.addWidget(self.compose_form_combo, 2)
-        self.compose_save_expect_inline_btn = self.compose_save_expect_btn
-        row1.addWidget(self.compose_save_expect_inline_btn)
-        setup_layout.addLayout(row1)
+        row1.addWidget(self.compose_form_combo, 2, 1)
+        row1.setColumnStretch(1, 1)
+        setup_layout.addWidget(self.compose_form_row_widget)
 
-        row2 = QHBoxLayout()
+        self.compose_header_row_widget = QWidget()
+        self.compose_header_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_header_row_widget.setMaximumHeight(88)
+        row2 = QGridLayout(self.compose_header_row_widget)
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setHorizontalSpacing(8)
+        row2.setVerticalSpacing(6)
         self.compose_priority_label = QLabel("Priority")
-        row2.addWidget(self.compose_priority_label)
+        row2.addWidget(self.compose_priority_label, 1, 0)
         self.compose_priority_combo = QComboBox()
         self.compose_priority_combo.addItems(["RR", "PP"])
         self._configure_compose_combo_width(self.compose_priority_combo, floor=96)
         self.compose_priority_combo.currentIndexChanged.connect(self._on_compose_priority_changed)
-        row2.addWidget(self.compose_priority_combo)
+        row2.addWidget(self.compose_priority_combo, 1, 1)
         # Source-test compatibility: row2.addWidget(QLabel("Report Title"))
         self.compose_report_title_label = QLabel("Report Title")
-        row2.addWidget(self.compose_report_title_label)
+        row2.addWidget(self.compose_report_title_label, 0, 0)
         self.compose_report_title_edit = QLineEdit()
         self.compose_report_title_edit.setPlaceholderText("Report")
+        self.compose_report_title_edit.setMinimumWidth(240)
         self.compose_report_title_edit.textChanged.connect(self._on_compose_report_title_changed)
-        row2.addWidget(self.compose_report_title_edit, 1)
+        row2.addWidget(self.compose_report_title_edit, 0, 1, 1, 3)
         self.compose_zulu_label = QLabel("Zulu")
-        row2.addWidget(self.compose_zulu_label)
+        row2.addWidget(self.compose_zulu_label, 2, 0)
         self.compose_zulu_value = QLabel()
-        row2.addWidget(self.compose_zulu_value)
+        row2.addWidget(self.compose_zulu_value, 2, 1)
         self.compose_refresh_time_btn = QPushButton("Refresh Time")
         self.compose_refresh_time_btn.clicked.connect(self._refresh_compose_timestamp)
-        row2.addWidget(self.compose_refresh_time_btn)
-        setup_layout.addLayout(row2)
+        row2.addWidget(self.compose_refresh_time_btn, 2, 2)
+        row2.setColumnStretch(1, 1)
+        setup_layout.addWidget(self.compose_header_row_widget)
 
         self.compose_operator_row_widget = QWidget()
+        self.compose_operator_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_operator_row_widget.setMaximumHeight(36)
         row3 = QHBoxLayout(self.compose_operator_row_widget)
         row3.setContentsMargins(0, 0, 0, 0)
         row3.setSpacing(8)
@@ -5050,38 +5401,73 @@ class MessageViewerTab(QWidget):
         row3.addStretch()
         setup_layout.addWidget(self.compose_operator_row_widget)
 
-        row4 = QHBoxLayout()
-        row4.addWidget(QLabel("Send Target"))
+        row4 = QGridLayout()
+        row4.setHorizontalSpacing(8)
+        row4.setVerticalSpacing(8)
+        row4.addWidget(QLabel("Send Target"), 0, 0)
         self.compose_send_target_combo = QComboBox()
         self.compose_send_target_combo.addItems(["FLMsg", "FLAmp", "Both"])
         self._configure_compose_combo_width(self.compose_send_target_combo, floor=118)
+        self.compose_send_target_combo.setMinimumWidth(220)
+        self.compose_send_target_combo.setMinimumHeight(32)
+        self.compose_send_target_combo.setMaximumWidth(16777215)
         self.compose_send_target_combo.currentIndexChanged.connect(self._update_compose_preview)
-        row4.addWidget(self.compose_send_target_combo)
-        row4.addWidget(QLabel("VarAC Copy"))
+        self.compose_send_target_chip_container = QWidget()
+        self.compose_send_target_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_send_target_chip_layout = QHBoxLayout(self.compose_send_target_chip_container)
+        self.compose_send_target_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.compose_send_target_chip_layout.setSpacing(6)
+        self.compose_send_target_chip_group = QButtonGroup(self)
+        self.compose_send_target_chip_group.setExclusive(True)
+        row4.addWidget(self.compose_send_target_chip_container, 0, 1)
+        row4.addWidget(self.compose_send_target_combo, 0, 2)
+        self.compose_send_target_combo.setVisible(False)
+        row4.addWidget(QLabel("VarAC Copy"), 1, 0)
         self.compose_varac_target_combo = QComboBox()
         self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])
         self._configure_compose_combo_width(self.compose_varac_target_combo, floor=118)
+        self.compose_varac_target_combo.setMinimumWidth(220)
+        self.compose_varac_target_combo.setMinimumHeight(32)
+        self.compose_varac_target_combo.setMaximumWidth(16777215)
         self.compose_varac_target_combo.currentIndexChanged.connect(self._update_compose_preview)
-        row4.addWidget(self.compose_varac_target_combo)
+        self.compose_varac_target_chip_container = QWidget()
+        self.compose_varac_target_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_varac_target_chip_layout = QHBoxLayout(self.compose_varac_target_chip_container)
+        self.compose_varac_target_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.compose_varac_target_chip_layout.setSpacing(6)
+        self.compose_varac_target_chip_group = QButtonGroup(self)
+        self.compose_varac_target_chip_group.setExclusive(True)
+        row4.addWidget(self.compose_varac_target_chip_container, 1, 1)
+        row4.addWidget(self.compose_varac_target_combo, 1, 2)
+        self.compose_varac_target_combo.setVisible(False)
         self.compose_sign_flamp_chk = QCheckBox("Sign FLAmp Copy")
         self.compose_sign_flamp_chk.setToolTip("Create a signed FLAmp copy. When FLMsg is selected, this also selects Both.")
         self.compose_sign_flamp_chk.stateChanged.connect(self._update_compose_preview)
-        row4.addWidget(self.compose_sign_flamp_chk)
-        row4.addStretch()
+        row4.addWidget(self.compose_sign_flamp_chk, 2, 1)
+        row4.setColumnStretch(1, 1)
         self.compose_nbems_dest_row_widget = QWidget()
+        self.compose_nbems_dest_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_nbems_dest_row_widget.setMinimumHeight(92)
+        self.compose_nbems_dest_row_widget.setMaximumHeight(16777215)
         self.compose_nbems_dest_row_widget.setLayout(row4)
         setup_layout.addWidget(self.compose_nbems_dest_row_widget)
+        self._refresh_compose_static_choice_chips()
 
-        folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("Save Under"))
+        folder_row = QGridLayout()
+        folder_row.setHorizontalSpacing(8)
+        folder_row.setVerticalSpacing(6)
+        self.compose_message_folder_label = QLabel("Message Folder")
+        folder_row.addWidget(self.compose_message_folder_label, 0, 0)
         self.compose_message_folder_combo = QComboBox()
         self.compose_message_folder_combo.setToolTip("Choose the selected radio's ICS/Messages folder or a subfolder up to two levels deep.")
+        self.compose_message_folder_combo.setMinimumWidth(140)
+        self.compose_message_folder_combo.setMaximumWidth(260)
         self.compose_message_folder_combo.currentIndexChanged.connect(self._on_compose_message_folder_changed)
-        folder_row.addWidget(self.compose_message_folder_combo, 1)
+        folder_row.addWidget(self.compose_message_folder_combo, 0, 1)
         self.compose_choose_message_folder_btn = QPushButton("Choose")
         self.compose_choose_message_folder_btn.setToolTip("Choose an existing folder under the selected radio's ICS/Messages root.")
         self.compose_choose_message_folder_btn.clicked.connect(self._choose_compose_message_folder)
-        folder_row.addWidget(self.compose_choose_message_folder_btn)
+        folder_row.addWidget(self.compose_choose_message_folder_btn, 0, 2)
 
         self.compose_signing_row_widget = QWidget()
         signing_row = QHBoxLayout(self.compose_signing_row_widget)
@@ -5097,43 +5483,74 @@ class MessageViewerTab(QWidget):
         self.compose_refresh_signing_keys_btn.clicked.connect(lambda: self._refresh_compose_signing_keys(force=True))
         signing_row.addWidget(self.compose_refresh_signing_keys_btn)
         self.compose_signing_row_widget.setVisible(False)
-        folder_row.addWidget(self.compose_signing_row_widget, 1)
+        folder_row.addWidget(self.compose_signing_row_widget, 1, 0, 1, 3)
+        folder_row.setColumnStretch(1, 1)
         self.compose_nbems_folder_row_widget = QWidget()
+        self.compose_nbems_folder_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_nbems_folder_row_widget.setMaximumHeight(16777215)
         self.compose_nbems_folder_row_widget.setLayout(folder_row)
         setup_layout.addWidget(self.compose_nbems_folder_row_widget)
 
         self.compose_bbs_location_row_widget = QWidget()
+        self.compose_bbs_location_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_bbs_location_row_widget.setMaximumHeight(16777215)
         bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
         bbs_location_row.setContentsMargins(0, 0, 0, 0)
-        bbs_location_row.addWidget(QLabel("BBS Location"))
+        bbs_location_row.addWidget(QLabel("BBS Destination"))
         self.compose_bbs_location_combo = QComboBox()
         self.compose_bbs_location_combo.currentIndexChanged.connect(self._on_compose_bbs_location_changed)
         bbs_location_row.addWidget(self.compose_bbs_location_combo, 1)
         self.compose_bbs_location_row_widget.setVisible(False)
         setup_layout.addWidget(self.compose_bbs_location_row_widget)
 
-        root.addWidget(setup_box)
-
+        body_splitter = QSplitter(Qt.Vertical)
+        self.compose_body_splitter = body_splitter
+        self.compose_setup_scroll = QScrollArea()
+        self.compose_setup_scroll.setWidgetResizable(True)
+        self.compose_setup_scroll.setFrameShape(QFrame.NoFrame)
+        self.compose_setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.compose_setup_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.compose_setup_scroll.setWidget(setup_box)
+        body_splitter.addWidget(self.compose_setup_scroll)
         splitter = QSplitter(Qt.Horizontal)
         self.compose_splitter = splitter
         field_box = QGroupBox("Form Fields")
+        self.compose_field_box = field_box
+        field_box.setMinimumHeight(160)
+        field_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         field_layout = QVBoxLayout(field_box)
         self.compose_field_scroll = QScrollArea()
         self.compose_field_scroll.setWidgetResizable(True)
+        self.compose_field_scroll.setFrameShape(QFrame.NoFrame)
+        self.compose_field_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         field_layout.addWidget(self.compose_field_scroll)
+        self.compose_rf_fields_stack = QStackedWidget()
+        self.compose_rf_fields_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.compose_rf_fields_stack.addWidget(self.compose_js8_plain_scroll)
+        self.compose_rf_fields_stack.addWidget(self.compose_commstat_scroll)
+        self.compose_rf_fields_stack.setVisible(False)
+        field_layout.addWidget(self.compose_rf_fields_stack)
         splitter.addWidget(field_box)
 
         preview_box = QGroupBox("Preview")
+        preview_box.setMinimumHeight(160)
+        preview_box.setMinimumWidth(280)
+        self.compose_preview_box = preview_box
         preview_layout = QVBoxLayout(preview_box)
         self.compose_preview = QTextEdit()
         self.compose_preview.setReadOnly(True)
         preview_layout.addWidget(self.compose_preview)
         splitter.addWidget(preview_box)
-        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
-        root.addWidget(splitter, 1)
+        body_splitter.addWidget(splitter)
+        body_splitter.setStretchFactor(0, 0)
+        body_splitter.setStretchFactor(1, 1)
+        root.addWidget(body_splitter, 1)
 
         self.compose_output_box = QGroupBox("Staging Output")
+        self.compose_output_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.compose_output_box.setMaximumHeight(140)
         output_layout = QVBoxLayout(self.compose_output_box)
         self.compose_destinations_label = QLabel()
         self.compose_destinations_label.setWordWrap(True)
@@ -5149,7 +5566,7 @@ class MessageViewerTab(QWidget):
         self.compose_stage_btn.clicked.connect(self._stage_compose_files)
         action_row.addWidget(self.compose_stage_btn)
         self.compose_send_js8_btn = QPushButton("Send via JS8Call")
-        self.compose_send_js8_btn.setToolTip("Send the selected JS8Spotter form now through JS8Call after safety preflight.")
+        self.compose_send_js8_btn.setToolTip("Send the selected FIOSpotter form now through JS8Call after safety preflight.")
         self.compose_send_js8_btn.clicked.connect(self._send_compose_js8_spotter)
         self.compose_send_js8_btn.setVisible(False)
         action_row.addWidget(self.compose_send_js8_btn)
@@ -5218,7 +5635,264 @@ class MessageViewerTab(QWidget):
         combo.setMinimumContentsLength(6)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._fit_filter_combo_popup(combo)
+
+    def _set_compose_fixed_width(self, widget: QWidget, *, floor: int, ceiling: int) -> None:
+        try:
+            widget.setMinimumWidth(int(floor))
+            widget.setMaximumWidth(int(ceiling))
+            widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        except Exception:
+            pass
+
+    def _refresh_compose_layout_geometry(self) -> None:
+        splitter = getattr(self, "compose_splitter", None)
+        body_splitter = getattr(self, "compose_body_splitter", None)
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        in_workbench = bool(getattr(self, "_compose_in_workbench", False))
+        compact = False if in_workbench else self._messages_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact
+        if isinstance(body_splitter, QSplitter):
+            desired_body = Qt.Horizontal if compose_sidebar else Qt.Vertical
+            if body_splitter.orientation() != desired_body:
+                body_splitter.setOrientation(desired_body)
+        if isinstance(splitter, QSplitter):
+            desired = Qt.Vertical if (compact or compose_sidebar) else Qt.Horizontal
+            if splitter.orientation() != desired:
+                splitter.setOrientation(desired)
+        setup_box = getattr(self, "compose_setup_box", None)
+        setup_scroll = getattr(self, "compose_setup_scroll", None)
+        if setup_box is not None:
+            try:
+                if compose_sidebar:
+                    if mode == "spotter":
+                        sidebar_w = 360 if in_workbench else 320
+                    elif mode == "commstat_rf":
+                        sidebar_w = 280 if in_workbench else 260
+                    else:
+                        sidebar_w = 440 if in_workbench else 400
+                    setup_box.setMinimumWidth(sidebar_w)
+                    setup_box.setMaximumWidth(16777215)
+                    setup_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+                    if setup_scroll is not None:
+                        setup_scroll.setMinimumWidth(sidebar_w)
+                        setup_scroll.setMaximumWidth(sidebar_w)
+                        setup_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+                else:
+                    setup_box.setMinimumWidth(0)
+                    setup_box.setMaximumWidth(16777215)
+                    setup_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                    if setup_scroll is not None:
+                        setup_scroll.setMinimumWidth(0)
+                        setup_scroll.setMaximumWidth(16777215)
+                        setup_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                layout = setup_box.layout()
+                visible_heights: List[int] = []
+                if layout is not None:
+                    for idx in range(layout.count()):
+                        item = layout.itemAt(idx)
+                        widget = item.widget() if item is not None else None
+                        if widget is not None and widget.isVisible():
+                            visible_heights.append(max(int(widget.minimumSizeHint().height()), int(widget.sizeHint().height())))
+                    margins = layout.contentsMargins() if layout is not None else None
+                    spacing = max(0, int(layout.spacing() if layout is not None else 0))
+                    margin_h = int((margins.top() + margins.bottom()) if margins is not None else 16)
+                else:
+                    spacing = 6
+                    margin_h = 16
+                row_gaps = spacing * max(0, len(visible_heights) - 1)
+                group_label_h = max(24, int(setup_box.fontMetrics().height() + 10))
+                target_h = margin_h + row_gaps + sum(visible_heights) + group_label_h
+                if in_workbench:
+                    cap_h = 360 if mode == "nbems" else 300 if mode == "spotter" else 220
+                elif mode == "nbems":
+                    cap_h = 240
+                elif mode == "spotter":
+                    cap_h = 260
+                elif mode == "commstat_rf":
+                    cap_h = 170
+                else:
+                    cap_h = 150
+                target_h = max(86, target_h)
+                if target_h > cap_h:
+                    # Visibility wins over compactness. Earlier versions capped
+                    # this group below its visible rows, which clipped required
+                    # compose controls on laptop screens.
+                    cap_h = target_h
+                if compose_sidebar:
+                    setup_box.setMinimumHeight(target_h)
+                    setup_box.setMaximumHeight(16777215)
+                    if setup_scroll is not None:
+                        setup_scroll.setMinimumHeight(86)
+                        setup_scroll.setMaximumHeight(16777215)
+                else:
+                    setup_box.setMinimumHeight(target_h)
+                    setup_box.setMaximumHeight(16777215)
+                    if setup_scroll is not None:
+                        setup_scroll.setMinimumHeight(min(target_h, cap_h))
+                        setup_scroll.setMaximumHeight(cap_h)
+            except Exception:
+                pass
+        for widget_name in (
+            "compose_form_row_widget",
+            "compose_header_row_widget",
+            "compose_js8_target_row_widget",
+            "compose_js8_plain_row_widget",
+            "compose_js8_plain_scroll",
+            "compose_commstat_row_widget",
+            "compose_commstat_scroll",
+            "compose_rf_fields_stack",
+            "compose_field_box",
+            "compose_preview_box",
+            "compose_output_box",
+            "compose_body_splitter",
+            "compose_setup_scroll",
+            "compose_page",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                try:
+                    widget.updateGeometry()
+                except Exception:
+                    pass
+        if isinstance(splitter, QSplitter) and splitter.orientation() == Qt.Horizontal:
+            try:
+                splitter.setSizes([max(640, int(self.width() * 0.68)), max(300, int(self.width() * 0.22))])
+            except Exception:
+                pass
+        elif isinstance(splitter, QSplitter):
+            try:
+                mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+                if mode == "spotter":
+                    splitter.setSizes([max(560, int(self.height() * 0.66)), max(220, int(self.height() * 0.24))])
+                elif mode == "commstat_rf":
+                    splitter.setSizes([max(500, int(self.height() * 0.58)), max(220, int(self.height() * 0.26))])
+                elif mode == "js8":
+                    splitter.setSizes([max(360, int(self.height() * 0.44)), max(150, int(self.height() * 0.18))])
+            except Exception:
+                pass
+        if isinstance(body_splitter, QSplitter):
+            try:
+                if body_splitter.orientation() == Qt.Horizontal:
+                    if mode == "spotter":
+                        sidebar_w = 360 if in_workbench else 320
+                    elif mode == "commstat_rf":
+                        sidebar_w = 280 if in_workbench else 260
+                    else:
+                        sidebar_w = 440 if in_workbench else 400
+                    body_splitter.setSizes([sidebar_w, max(700, int(self.width() or 900) - sidebar_w)])
+                else:
+                    setup_h = int(setup_scroll.height() if setup_scroll is not None else setup_box.height() if setup_box is not None else 160)
+                    body_splitter.setSizes([max(120, setup_h), max(480, int(self.height() * 0.65))])
+            except Exception:
+                pass
+
+    def _compose_embedded_needs_workbench(self) -> bool:
+        if bool(getattr(self, "_compose_in_workbench", False)):
+            return False
+        try:
+            width = int(self.width() or 0)
+            height = int(self.height() or 0)
+        except Exception:
+            width = 0
+            height = 0
+        return width < 1180 or height < 720 or self._messages_responsive_mode_for_width(width) == "compact"
+
+    def _refresh_compose_workbench_button_style(self) -> None:
+        btn = getattr(self, "compose_workbench_btn", None)
+        if not isinstance(btn, QPushButton):
+            return
+        theme = resolve_theme(self.settings)
+        needs_workbench = self._compose_embedded_needs_workbench()
+        btn.setText("Use Full Compose Workbench" if needs_workbench else "Open Full Compose Workbench")
+        btn.setStyleSheet(button_style("primary" if needs_workbench else "secondary", theme))
+        btn.setToolTip(
+            "This screen is cramped; open the full workbench for a usable compose layout."
+            if needs_workbench
+            else "Open Compose in a larger window with more room for forms, previews, and RF send options."
+        )
+
+    def _refresh_compose_layout_geometry_if_needed(self, *, force: bool = False) -> None:
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        compact = False if bool(getattr(self, "_compose_in_workbench", False)) else self._messages_responsive_mode_for_width(int(self.width() or 0)) == "compact"
+        signature = (
+            mode,
+            bool(getattr(self, "_compose_in_workbench", False)),
+            compact,
+            int(self.width() or 0) // 120,
+            int(self.height() or 0) // 120,
+            bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)()),
+            bool(getattr(getattr(self, "compose_sign_flamp_chk", None), "isChecked", lambda: False)()),
+            bool(
+                hasattr(self, "compose_varac_target_combo")
+                and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
+            ),
+        )
+        if force or signature != getattr(self, "_compose_layout_signature", None):
+            self._compose_layout_signature = signature
+            self._refresh_compose_layout_geometry()
+        self._refresh_compose_workbench_button_style()
+
+    def _open_compose_workbench_dialog(self) -> None:
+        existing = getattr(self, "_compose_workbench_dialog", None)
+        if isinstance(existing, QDialog):
+            try:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+            except Exception:
+                pass
+            return
+
+        dialog = QDialog(self)
+        self._compose_workbench_dialog = dialog
+        self._compose_in_workbench = True
+        dialog.setWindowTitle("Compose Workbench")
+        dialog.setModal(False)
+        dialog.setMinimumSize(1180, 780)
+        try:
+            dialog.resize(max(1280, int(self.width() * 0.9)), max(820, int(self.height() * 0.9)))
+        except Exception:
+            dialog.resize(1280, 820)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        for widget_name in ("compose_type_box", "compose_body_splitter", "compose_output_box"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                layout.addWidget(widget, 1 if widget_name == "compose_body_splitter" else 0)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close Workbench")
+        close_btn.clicked.connect(dialog.close)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+        def restore_compose_widgets() -> None:
+            self._compose_in_workbench = False
+            root = getattr(self, "compose_root_layout", None)
+            if root is not None:
+                for widget_name in ("compose_type_box", "compose_body_splitter", "compose_output_box"):
+                    widget = getattr(self, widget_name, None)
+                    if widget is not None:
+                        root.addWidget(widget, 1 if widget_name == "compose_body_splitter" else 0)
+                try:
+                    root.invalidate()
+                except Exception:
+                    pass
+            self._compose_workbench_dialog = None
+            self._compose_layout_signature = None
+            self._refresh_compose_layout_geometry_if_needed(force=True)
+            if hasattr(self, "compose_page"):
+                self.compose_page.updateGeometry()
+                self.compose_page.update()
+            QTimer.singleShot(0, lambda: self._refresh_compose_layout_geometry_if_needed(force=True))
+            QTimer.singleShot(0, self._update_messages_responsive_layout)
+
+        dialog.finished.connect(lambda _result: restore_compose_widgets())
+        self._refresh_compose_layout_geometry_if_needed(force=True)
+        dialog.show()
 
     def _compose_operator_callsign(self) -> str:
         return str(
@@ -5233,6 +5907,326 @@ class MessageViewerTab(QWidget):
 
     def _compose_zulu_text(self) -> str:
         return format_compose_zulu(self._compose_timestamp_utc)
+
+    def _compose_commstat_brevity_catalog_dirs(self) -> List[Path]:
+        paths: List[Path] = []
+        for raw in (
+            self.settings.get("commstat_path", ""),
+            self.settings.get("commstat_app_path", ""),
+            self.settings.get("commstat_config_path", ""),
+            "/Users/bill/RadioTools/Programs/commstat-4.7",
+            "/Users/bill/RadioTools/Programs/CommStat",
+        ):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            path = Path(text).expanduser()
+            if path.is_file():
+                path = path.parent
+            if path not in paths:
+                paths.append(path)
+        return paths
+
+    def _compose_commstat_brevity_options(self) -> List[str]:
+        cache_key = tuple(str(path) for path in self._compose_commstat_brevity_catalog_dirs())
+        if (
+            cache_key == getattr(self, "_compose_commstat_brevity_options_cache_key", ())
+            and getattr(self, "_compose_commstat_brevity_options_cache", [])
+        ):
+            return list(self._compose_commstat_brevity_options_cache)
+        options: List[str] = []
+        seen: set[str] = set()
+        for folder in self._compose_commstat_brevity_catalog_dirs():
+            try:
+                files = sorted(folder.glob("[0-9]-*.json"))
+            except Exception:
+                files = []
+            for file_path in files:
+                try:
+                    with file_path.open("r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except Exception:
+                    continue
+                prefix = file_path.name[:1].upper()
+                if not prefix.isdigit():
+                    continue
+                sections = (
+                    data.get("emergency_type"),
+                    data.get("shared_impacts"),
+                    data.get("public_reaction"),
+                    data.get("station_response"),
+                    data.get("status_codes"),
+                )
+                letters: List[List[str]] = []
+                for section in sections:
+                    available: set[str] = set()
+                    if isinstance(section, dict):
+                        for key, value in section.items():
+                            key_text = str(key or "").strip().upper()
+                            if len(key_text) == 1 and key_text.isalpha():
+                                available.add(key_text)
+                            if isinstance(value, dict):
+                                for item in value.get("items", []) or []:
+                                    item_text = str(item or "").strip().upper()
+                                    if len(item_text) == 1 and item_text.isalpha():
+                                        available.add(item_text)
+                    letters.append(sorted(available))
+                if len(letters) != 5 or any(not values for values in letters):
+                    continue
+                sample = "".join([prefix] + [values[0] for values in letters])
+                label = f"{sample} - {file_path.name}"
+                key = label.upper()
+                if key not in seen:
+                    options.append(label)
+                    seen.add(key)
+        if not options:
+            options = ["4BBGUB"]
+        self._compose_commstat_brevity_options_cache_key = cache_key
+        self._compose_commstat_brevity_options_cache = list(options)
+        return options
+
+    def _populate_compose_commstat_brevity_options(self) -> None:
+        combo = getattr(self, "compose_commstat_brevity_edit", None)
+        if not isinstance(combo, QComboBox):
+            return
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("")
+            for label in self._compose_commstat_brevity_options():
+                combo.addItem(label)
+            combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(False)
+
+    def _compose_commstat_brevity_catalogs(self) -> List[Tuple[str, str, Dict[str, object]]]:
+        cache_key = tuple(str(path) for path in self._compose_commstat_brevity_catalog_dirs())
+        if cache_key == getattr(self, "_compose_commstat_brevity_catalogs_cache_key", ()):
+            return list(getattr(self, "_compose_commstat_brevity_catalogs_cache", []))
+        catalogs: List[Tuple[str, str, Dict[str, object]]] = []
+        seen: set[str] = set()
+        for folder in self._compose_commstat_brevity_catalog_dirs():
+            try:
+                files = sorted(folder.glob("[0-9]-*.json"))
+            except Exception:
+                files = []
+            for file_path in files:
+                prefix = file_path.name[:1].upper()
+                if not prefix.isdigit():
+                    continue
+                key = str(file_path.resolve()) if file_path.exists() else str(file_path)
+                if key in seen:
+                    continue
+                try:
+                    with file_path.open("r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    catalogs.append((prefix, file_path.name, data))
+                    seen.add(key)
+        self._compose_commstat_brevity_catalogs_cache_key = cache_key
+        self._compose_commstat_brevity_catalogs_cache = list(catalogs)
+        return catalogs
+
+    @staticmethod
+    def _commstat_brevity_code_items(section: object) -> List[Tuple[str, str]]:
+        out: Dict[str, str] = {}
+
+        def collect(node: object) -> None:
+            if not isinstance(node, dict):
+                return
+            for raw_key, raw_value in node.items():
+                key = str(raw_key or "").strip().upper()
+                if len(key) == 1 and key.isalpha():
+                    name = ""
+                    if isinstance(raw_value, dict):
+                        name = str(raw_value.get("name", "") or "").strip()
+                    out.setdefault(key, name or key)
+                if isinstance(raw_value, dict):
+                    collect(raw_value)
+
+        collect(section)
+        return [(code, out[code]) for code in sorted(out)]
+
+    def _populate_commstat_brevity_combo(self, combo: QComboBox, section: object, placeholder: str) -> None:
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(placeholder, "")
+            for code, name in self._commstat_brevity_code_items(section):
+                combo.addItem(f"{code} - {name}", code)
+        finally:
+            combo.blockSignals(False)
+
+    def _populate_compose_commstat_brevity_builder(self) -> None:
+        list_combo = getattr(self, "compose_commstat_brevity_list_combo", None)
+        if not isinstance(list_combo, QComboBox):
+            return
+        catalogs = self._compose_commstat_brevity_catalogs()
+        self._compose_commstat_brevity_catalog_cache = catalogs
+        list_combo.blockSignals(True)
+        try:
+            list_combo.clear()
+            list_combo.addItem("Select event list", None)
+            for idx, (prefix, name, _data) in enumerate(catalogs):
+                list_combo.addItem(f"{prefix} - {name}", idx)
+        finally:
+            list_combo.blockSignals(False)
+        if catalogs:
+            list_combo.setCurrentIndex(1)
+            self._on_compose_commstat_brevity_list_changed(refresh_preview=False)
+        else:
+            for combo_name in (
+                "compose_commstat_brevity_event_combo",
+                "compose_commstat_brevity_status_combo",
+                "compose_commstat_brevity_impact_combo",
+                "compose_commstat_brevity_public_combo",
+                "compose_commstat_brevity_station_combo",
+            ):
+                combo = getattr(self, combo_name, None)
+                if isinstance(combo, QComboBox):
+                    self._populate_commstat_brevity_combo(combo, {}, "No catalog")
+
+    def _on_compose_commstat_brevity_list_changed(self, *_args, refresh_preview: bool = True) -> None:
+        list_combo = getattr(self, "compose_commstat_brevity_list_combo", None)
+        if not isinstance(list_combo, QComboBox):
+            return
+        idx = list_combo.currentData()
+        catalogs = getattr(self, "_compose_commstat_brevity_catalog_cache", []) or []
+        data: Dict[str, object] = {}
+        if isinstance(idx, int) and 0 <= idx < len(catalogs):
+            _prefix, _name, raw_data = catalogs[idx]
+            data = raw_data if isinstance(raw_data, dict) else {}
+        mapping = (
+            ("compose_commstat_brevity_event_combo", "emergency_type", "Select event type"),
+            ("compose_commstat_brevity_status_combo", "status_codes", "Select status/target"),
+            ("compose_commstat_brevity_impact_combo", "shared_impacts", "Select impact"),
+            ("compose_commstat_brevity_public_combo", "public_reaction", "Select public response"),
+            ("compose_commstat_brevity_station_combo", "station_response", "Select station response"),
+        )
+        for combo_name, section_key, placeholder in mapping:
+            combo = getattr(self, combo_name, None)
+            if isinstance(combo, QComboBox):
+                self._populate_commstat_brevity_combo(combo, data.get(section_key, {}), placeholder)
+        self._on_compose_commstat_brevity_builder_changed(refresh_preview=refresh_preview)
+
+    def _compose_commstat_brevity_builder_code(self) -> str:
+        list_combo = getattr(self, "compose_commstat_brevity_list_combo", None)
+        if not isinstance(list_combo, QComboBox):
+            return ""
+        idx = list_combo.currentData()
+        catalogs = getattr(self, "_compose_commstat_brevity_catalog_cache", []) or []
+        if not isinstance(idx, int) or idx < 0 or idx >= len(catalogs):
+            return ""
+        prefix = str(catalogs[idx][0] or "").strip().upper()
+        parts = [prefix]
+        for combo_name in (
+            "compose_commstat_brevity_event_combo",
+            "compose_commstat_brevity_status_combo",
+            "compose_commstat_brevity_impact_combo",
+            "compose_commstat_brevity_public_combo",
+            "compose_commstat_brevity_station_combo",
+        ):
+            combo = getattr(self, combo_name, None)
+            raw_code = combo.currentData() if isinstance(combo, QComboBox) else ""
+            code = str(raw_code or "").strip().upper()
+            if len(code) != 1 or not code.isalpha():
+                return ""
+            parts.append(code)
+        return "".join(parts)
+
+    def _on_compose_commstat_brevity_builder_changed(self, *_args, refresh_preview: bool = True) -> None:
+        code = self._compose_commstat_brevity_builder_code()
+        combo = getattr(self, "compose_commstat_brevity_edit", None)
+        if isinstance(combo, QComboBox) and code:
+            combo.blockSignals(True)
+            try:
+                combo.setEditText(code)
+            finally:
+                combo.blockSignals(False)
+        if refresh_preview:
+            self._update_compose_preview()
+
+    def _compose_commstat_brevity_code(self) -> str:
+        combo = getattr(self, "compose_commstat_brevity_edit", None)
+        if isinstance(combo, QComboBox):
+            text = combo.currentText()
+        elif combo is not None and hasattr(combo, "text"):
+            text = combo.text()
+        else:
+            text = ""
+        match = re.search(r"#?\b([0-9][A-Z]{5})\b", str(text or "").upper())
+        return match.group(1) if match else ""
+
+    def _on_compose_commstat_brevity_enabled_changed(self) -> None:
+        if bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)()):
+            list_combo = getattr(self, "compose_commstat_brevity_list_combo", None)
+            if isinstance(list_combo, QComboBox) and list_combo.count() <= 1:
+                self._populate_compose_commstat_brevity_builder()
+        self._update_compose_preview()
+
+    def _compose_rf_target_text(self, value: object) -> str:
+        return str(value or "").strip().upper().lstrip("@")
+
+    def _compose_target_completion_values(self) -> List[str]:
+        values: set[str] = set()
+        known_groups: set[str] = set()
+
+        def add_group(value: object) -> None:
+            text = str(value or "").strip().upper().lstrip("@")
+            if re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{1,15}", text):
+                values.add(text)
+                known_groups.add(text)
+
+        def add_call(value: object) -> None:
+            raw = str(value or "").strip().upper()
+            if raw.startswith("@"):
+                add_group(raw)
+                return
+            text = self._compose_base_callsign(raw)
+            if text in known_groups:
+                return
+            if text and text != self._compose_base_callsign(self._compose_operator_callsign()):
+                values.add(text)
+
+        configured_groups = self._configured_message_group_names()
+        for group in configured_groups:
+            add_group(group)
+        try:
+            group_state = load_commstat_group_state(self.settings)
+            for group in [*group_state.active_groups, *group_state.configured_groups]:
+                add_group(group)
+        except Exception:
+            pass
+        for collection_name in ("js8_messages", "spotter_messages", "varac_messages", "sitrep_messages", "commstat_messages"):
+            for msg in list(getattr(self, collection_name, []) or []):
+                for attr in ("from_call", "to_call", "target", "report_group"):
+                    value = getattr(msg, attr, "")
+                    if attr in {"target", "report_group"} and self._is_message_group_candidate(value, configured_groups=configured_groups):
+                        add_group(value)
+                    else:
+                        add_call(value)
+        return sorted(values)
+
+    def _install_compose_target_completers(self) -> None:
+        values = self._compose_target_completion_values()
+        signature = tuple(values)
+        if getattr(self, "_compose_target_completer_signature", ()) == signature:
+            return
+        self._compose_target_completer_signature = signature
+        for widget_name in ("compose_js8_target_edit", "compose_commstat_target_edit"):
+            widget = getattr(self, widget_name, None)
+            if not isinstance(widget, QLineEdit):
+                continue
+            completer = QCompleter(values, widget)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            try:
+                completer.setFilterMode(Qt.MatchContains)
+            except Exception:
+                pass
+            widget.setCompleter(completer)
 
     def _compose_blank_field_rows(self) -> List[ComposeFieldDefinition]:
         return standard_blank_field_definitions()
@@ -5314,7 +6308,7 @@ class MessageViewerTab(QWidget):
                 {
                     "kind": "spotter",
                     "key": "JS8SPOTTER",
-                    "label": "JS8Spotter Forms",
+                    "label": "FIOSpotter Forms",
                     "forms": spotter_forms,
                 }
             )
@@ -5395,16 +6389,95 @@ class MessageViewerTab(QWidget):
         self._on_compose_form_changed()
 
     def _on_compose_mode_tab_changed(self, index: int) -> None:
-        self._compose_mode = "spotter" if int(index or 0) == 1 else "nbems"
+        self._store_compose_form_draft()
+        idx = int(index or 0)
+        self._compose_mode = "js8" if idx == 1 else "spotter" if idx == 2 else "commstat_rf" if idx == 3 else "nbems"
         self._compose_active_form_key = ""
         self._compose_last_stage_paths = []
         self._compose_radio_targets_loaded = False
+        if self._compose_mode == "commstat_rf":
+            self._refresh_compose_commstat_defaults()
         self._refresh_compose_forms()
         self._update_compose_preview()
+
+    def _refresh_compose_commstat_defaults(self) -> None:
+        if hasattr(self, "compose_commstat_grid_edit") and not self.compose_commstat_grid_edit.text().strip():
+            self.compose_commstat_grid_edit.setText(self._compose_operator_grid())
+        if hasattr(self, "compose_commstat_report_id_edit") and not self.compose_commstat_report_id_edit.text().strip():
+            self.compose_commstat_report_id_edit.setText(generate_commstat_report_id(self._compose_timestamp_utc))
+        if hasattr(self, "compose_commstat_target_edit") and not self.compose_commstat_target_edit.text().strip():
+            try:
+                group_state = load_commstat_group_state(self.settings)
+                default_group = next(iter(sorted(group_state.active_groups or group_state.configured_groups)), "")
+            except Exception:
+                default_group = ""
+            if default_group:
+                self.compose_commstat_target_edit.setText(default_group)
+
+    def _compose_commstat_kind(self) -> str:
+        if not hasattr(self, "compose_commstat_kind_combo"):
+            return "StatRep"
+        return self.compose_commstat_kind_combo.currentText().strip() or "StatRep"
+
+    def _compose_commstat_status_values(self) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        widgets = getattr(self, "compose_commstat_status_widgets", {}) or {}
+        for key, combo in widgets.items():
+            if isinstance(combo, QComboBox):
+                out[str(key)] = combo.currentText().strip() or "Unknown"
+        return out
+
+    def _compose_commstat_target(self) -> str:
+        if not hasattr(self, "compose_commstat_target_edit"):
+            return ""
+        return self._compose_rf_target_text(self.compose_commstat_target_edit.text())
+
+    def _compose_commstat_rf_text(self) -> str:
+        target = self._compose_commstat_target()
+        comment = self.compose_commstat_comment_edit.text() if hasattr(self, "compose_commstat_comment_edit") else ""
+        if bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)()):
+            brevity_code = self._compose_commstat_brevity_code()
+            if not brevity_code:
+                raise ValueError("Choose or enter a valid CommStat brevity code.")
+            comment = " ".join(part for part in (f"#{brevity_code}", comment.strip()) if part)
+        return build_commstat_statrep_rf_text(
+            callsign=self._compose_operator_callsign(),
+            group=target,
+            grid=self.compose_commstat_grid_edit.text() if hasattr(self, "compose_commstat_grid_edit") else "",
+            scope=self.compose_commstat_scope_combo.currentData() if hasattr(self, "compose_commstat_scope_combo") else "1",
+            report_id=self.compose_commstat_report_id_edit.text() if hasattr(self, "compose_commstat_report_id_edit") else "",
+            statuses=self._compose_commstat_status_values(),
+            comment=comment,
+            now=self._compose_timestamp_utc,
+        )
+
+    def _compose_plain_js8_kind(self) -> str:
+        if not hasattr(self, "compose_js8_plain_kind_combo"):
+            return "Directed Message"
+        return self.compose_js8_plain_kind_combo.currentText().strip() or "Directed Message"
+
+    def _compose_plain_js8_text(self) -> str:
+        if not hasattr(self, "compose_js8_plain_text_edit"):
+            return ""
+        return self.compose_js8_plain_text_edit.toPlainText().strip()
+
+    def _compose_plain_js8_command(self) -> str:
+        target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
+        text = re.sub(r"\s+", " ", self._compose_plain_js8_text()).strip()
+        if not text:
+            return ""
+        if self._compose_plain_js8_kind() == "Directed Message" and not target:
+            return ""
+        if target:
+            if text.upper().startswith(f"{target} "):
+                return text
+            return f"{target} {text}".strip()
+        return text
 
     def _refresh_compose_forms(self) -> None:
         if not hasattr(self, "compose_family_combo"):
             return
+        self._refresh_compose_operating_group_options()
         previous_key = ""
         if self.compose_family_combo.count():
             previous = self.compose_family_combo.currentData()
@@ -5423,9 +6496,63 @@ class MessageViewerTab(QWidget):
                 selected_index = idx
         if not previous_key and fallback_custom_index >= 0:
             selected_index = fallback_custom_index
+        if not previous_key:
+            preferred_family = self._compose_fastlight_preferred_form_family()
+            if preferred_family:
+                for idx in range(self.compose_family_combo.count()):
+                    entry = self.compose_family_combo.itemData(idx)
+                    if isinstance(entry, dict) and str(entry.get("key", "") or "").strip().upper() == preferred_family:
+                        selected_index = idx
+                        break
         self.compose_family_combo.setCurrentIndex(max(0, selected_index))
         self.compose_family_combo.blockSignals(False)
         self._on_compose_family_changed()
+
+    def _refresh_compose_operating_group_options(self) -> None:
+        combo = getattr(self, "compose_operating_group_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        previous = str(combo.currentData() or combo.currentText() or "").strip().upper().lstrip("@")
+        values: List[str] = []
+        seen: set[str] = set()
+
+        def add_group(value: object) -> None:
+            text = str(value or "").strip().upper().lstrip("@")
+            if not text or text in seen:
+                return
+            values.append(text)
+            seen.add(text)
+
+        for group in self._configured_message_group_names():
+            add_group(group)
+        try:
+            group_state = load_commstat_group_state(self.settings)
+            for group in [*group_state.active_groups, *group_state.configured_groups]:
+                add_group(group)
+        except Exception:
+            pass
+        radio_target = self._selected_compose_radio_target()
+        profile = radio_target.profile if radio_target is not None else {}
+        if isinstance(profile, dict):
+            for key in ("operating_group", "group", "group_name", "schedule_group"):
+                add_group(profile.get(key))
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("Auto", "")
+            for group in sorted(values):
+                combo.addItem(group, group)
+            if previous:
+                idx = combo.findData(previous)
+                if idx < 0:
+                    idx = combo.findText(previous)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_compose_operating_group_changed(self, *_args) -> None:
+        self._refresh_compose_forms()
 
     def _on_compose_family_changed(self) -> None:
         if not hasattr(self, "compose_form_combo"):
@@ -5463,9 +6590,14 @@ class MessageViewerTab(QWidget):
     def _on_compose_form_changed(self) -> None:
         if not hasattr(self, "compose_form_combo"):
             return
+        self._store_compose_form_draft()
         data = self.compose_form_combo.currentData()
         form_identity = self._compose_form_identity(data)
-        current_values = self._compose_field_values() if form_identity == self._compose_active_form_key else {}
+        current_values = (
+            self._compose_field_values()
+            if form_identity == self._compose_active_form_key
+            else dict(self._compose_form_draft_values.get(form_identity, {}))
+        )
         rows: List[ComposeFieldDefinition] = []
         defaults: Dict[str, str] = {}
         smart_defaults: Dict[str, str] = {}
@@ -5538,6 +6670,12 @@ class MessageViewerTab(QWidget):
             if kind == "spotter_form":
                 return f"spotter:{data.get('path', '') or data.get('code', '')}"
         return ""
+
+    def _store_compose_form_draft(self) -> None:
+        form_key = str(getattr(self, "_compose_active_form_key", "") or "")
+        if not form_key or not getattr(self, "_compose_field_widgets", None):
+            return
+        self._compose_form_draft_values[form_key] = self._compose_field_values()
 
     def _compose_smart_defaults(self, rows: Sequence[ComposeFieldDefinition]) -> Dict[str, str]:
         defaults: Dict[str, str] = {}
@@ -5629,20 +6767,35 @@ class MessageViewerTab(QWidget):
     def _rebuild_compose_field_editor(self, rows: List[ComposeFieldDefinition], values: Dict[str, str]) -> None:
         self._compose_field_rows = list(rows)
         self._compose_field_widgets = {}
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        spotter_mode = mode == "spotter"
         container = QWidget()
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout = QVBoxLayout(container)
+        layout = QGridLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(10)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
         long_labels = {"MESSAGE", "NARRATIVE", "REMARK", "REMARKS", "SUMMARY", "BODY", "DETAILS", "COMMENTS"}
+        grid_row = 0
+        grid_col = 0
         for field in rows:
             initial = str(values.get(field.key, "") or "")
             upper_label = f"{field.label} {field.description}".upper()
+            is_long_field = (
+                field.field_type == "textarea"
+                or field.key == "MESSAGE"
+                or any(token in upper_label for token in long_labels)
+            )
             field_wrap = QWidget()
+            field_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding if is_long_field else QSizePolicy.Fixed)
             field_layout = QVBoxLayout(field_wrap)
             field_layout.setContentsMargins(0, 0, 0, 0)
             field_layout.setSpacing(4)
+            field_layout.setAlignment(Qt.AlignTop)
             label_widget = QLabel(field.label or field.key)
+            label_widget.setWordWrap(True)
             field_layout.addWidget(label_widget)
             if field.description:
                 desc_widget = QLabel(field.description)
@@ -5657,14 +6810,21 @@ class MessageViewerTab(QWidget):
                     widget.addItem(option.label or option.value, option.value)
                 if field.placeholder and widget.isEditable() and widget.lineEdit() is not None:
                     widget.lineEdit().setPlaceholderText(field.placeholder)
-                self._configure_compose_combo_width(widget, floor=160)
+                if spotter_mode:
+                    widget.setMinimumWidth(140)
+                    widget.setMinimumContentsLength(8)
+                    widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                    widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                else:
+                    self._configure_compose_combo_width(widget, floor=160)
                 widget.currentIndexChanged.connect(self._update_compose_preview)
                 if widget.isEditable():
                     widget.editTextChanged.connect(self._update_compose_preview)
-            elif field.field_type == "textarea" or field.key == "MESSAGE" or any(token in upper_label for token in long_labels):
+            elif is_long_field:
                 widget = QTextEdit()
-                widget.setFixedHeight(max(140, int(field.rows or 0) * 18))
-                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                widget.setMinimumHeight(max(190 if field.key == "MESSAGE" else 150, int(field.rows or 0) * 18))
+                widget.setMaximumHeight(520)
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
                 widget.setPlaceholderText(field.placeholder)
                 widget.setPlainText(initial)
                 widget.textChanged.connect(self._update_compose_preview)
@@ -5680,8 +6840,21 @@ class MessageViewerTab(QWidget):
                 field_layout.addWidget(widget)
             self._compose_field_widgets[field.key] = widget
             self._compose_set_widget_value(field.key, initial)
-            layout.addWidget(field_wrap)
-        layout.addStretch()
+            if is_long_field or spotter_mode:
+                if grid_col:
+                    grid_row += 1
+                    grid_col = 0
+                layout.addWidget(field_wrap, grid_row, 0, 1, 2)
+                if is_long_field:
+                    layout.setRowStretch(grid_row, 0)
+                grid_row += 1
+            else:
+                layout.addWidget(field_wrap, grid_row, grid_col)
+                grid_col += 1
+                if grid_col >= 2:
+                    grid_row += 1
+                    grid_col = 0
+        layout.setRowStretch(grid_row + 1, 1)
         self.compose_field_scroll.setWidget(container)
 
     def _compose_field_values(self) -> Dict[str, str]:
@@ -5709,6 +6882,11 @@ class MessageViewerTab(QWidget):
         return ".b2s" if self._compose_template_kind == "blank" else ".k2s"
 
     def _compose_fastlight_target_group(self) -> str:
+        group_combo = getattr(self, "compose_operating_group_combo", None)
+        if isinstance(group_combo, QComboBox):
+            selected_group = str(group_combo.currentData() or group_combo.currentText() or "").strip().upper().lstrip("@")
+            if selected_group and selected_group != "AUTO":
+                return selected_group
         values = self._compose_field_values()
         raw = (
             values.get("TO")
@@ -5735,6 +6913,33 @@ class MessageViewerTab(QWidget):
         except Exception:
             groups = []
         return resolve_fastlight_filename_policy(groups if isinstance(groups, list) else [], self._compose_fastlight_target_group())
+
+    def _compose_fastlight_preferred_form_family(self) -> str:
+        try:
+            groups = self.settings.get("operating_groups", []) or []
+        except Exception:
+            groups = []
+        return resolve_fastlight_form_family(groups if isinstance(groups, list) else [], self._compose_fastlight_target_group())
+
+    def _compose_fastlight_delimiter_guidance(self) -> str:
+        target_group = self._compose_fastlight_target_group()
+        policy = self._compose_fastlight_filename_policy()
+        delimiter_label = "underscore" if policy.delimiter == "_" else "hyphen" if policy.delimiter == "-" else policy.delimiter
+        if self._compose_template_kind == "blank":
+            return (
+                f"Standard blank form uses .b2s. Filename delimiter is {delimiter_label}"
+                f" from {policy.source_label}."
+            )
+        unsigned_ext = policy.unsigned_extension or self._compose_output_extension()
+        group_text = f" for {target_group}" if target_group else ""
+        family_text = ""
+        preferred_family = self._compose_fastlight_preferred_form_family()
+        if preferred_family:
+            family_text = f" Preferred form family for this group is {preferred_family}."
+        return (
+            f"Selected form stages as {unsigned_ext}{group_text}. Filename delimiter is "
+            f"{delimiter_label} from {policy.source_label}.{family_text}"
+        )
 
     def _compose_base_filename(self) -> str:
         target_group = self._compose_fastlight_target_group()
@@ -5795,6 +7000,7 @@ class MessageViewerTab(QWidget):
             previous_key = str(current.get("key", "") or "")
         self.compose_js8_auth_key_combo.blockSignals(True)
         self.compose_js8_auth_key_combo.clear()
+        self._compose_js8_auth_key_count = 0
         if not group or not callsign:
             self.compose_js8_auth_key_combo.addItem("Set JS8 target and operator callsign", None)
         else:
@@ -5809,12 +7015,175 @@ class MessageViewerTab(QWidget):
                     label = str(key_row.label or "").strip() or f"{group} / {callsign}"
                     data = {"label": label, "key": str(key_row.key or "")}
                     self.compose_js8_auth_key_combo.addItem(label, data)
+                    self._compose_js8_auth_key_count += 1
                     if previous_key and data["key"] == previous_key:
                         selected_index = idx
                 self.compose_js8_auth_key_combo.setCurrentIndex(selected_index)
             else:
                 self.compose_js8_auth_key_combo.addItem(f"No key for {group} / {callsign}", None)
         self.compose_js8_auth_key_combo.blockSignals(False)
+
+    def _clear_compose_chip_layout(self, layout: QHBoxLayout, group: QButtonGroup) -> None:
+        for button in list(group.buttons()):
+            group.removeButton(button)
+            button.deleteLater()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _compose_chip_button(self, text: str, *, tooltip: str = "", selected: bool = False) -> QPushButton:
+        theme = resolve_theme(self.settings)
+        chip = QPushButton(text)
+        chip.setCheckable(True)
+        chip.setChecked(selected)
+        chip.setMinimumHeight(28)
+        chip.setMaximumHeight(30)
+        chip.setMaximumWidth(150)
+        chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        if tooltip:
+            chip.setToolTip(tooltip)
+        chip.setStyleSheet(button_style("primary" if selected else "muted", theme))
+        return chip
+
+    def _build_compose_combo_chips(
+        self,
+        combo: QComboBox,
+        layout: QHBoxLayout,
+        group: QButtonGroup,
+        *,
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self._clear_compose_chip_layout(layout, group)
+        current = combo.currentText()
+        for idx in range(combo.count()):
+            value = combo.itemText(idx)
+            text = str((labels or {}).get(value, value)).strip() or value
+            chip = self._compose_chip_button(text, tooltip=value, selected=value == current)
+            chip.clicked.connect(lambda _checked=False, index=idx: combo.setCurrentIndex(index))
+            group.addButton(chip)
+            layout.addWidget(chip)
+        layout.addStretch(1)
+
+    def _refresh_compose_static_choice_chips(self) -> None:
+        if all(
+            hasattr(self, name)
+            for name in (
+                "compose_send_target_combo",
+                "compose_send_target_chip_layout",
+                "compose_send_target_chip_group",
+            )
+        ):
+            self._build_compose_combo_chips(
+                self.compose_send_target_combo,
+                self.compose_send_target_chip_layout,
+                self.compose_send_target_chip_group,
+            )
+        if all(
+            hasattr(self, name)
+            for name in (
+                "compose_varac_target_combo",
+                "compose_varac_target_chip_layout",
+                "compose_varac_target_chip_group",
+            )
+        ):
+            self._build_compose_combo_chips(
+                self.compose_varac_target_combo,
+                self.compose_varac_target_chip_layout,
+                self.compose_varac_target_chip_group,
+            )
+        if all(
+            hasattr(self, name)
+            for name in (
+                "compose_js8_plain_kind_combo",
+                "compose_js8_plain_kind_chip_layout",
+                "compose_js8_plain_kind_chip_group",
+            )
+        ):
+            self._build_compose_combo_chips(
+                self.compose_js8_plain_kind_combo,
+                self.compose_js8_plain_kind_chip_layout,
+                self.compose_js8_plain_kind_chip_group,
+                labels={"Directed Message": "Directed"},
+            )
+
+    def _sync_compose_combo_chips(self, combo: QComboBox, group: QButtonGroup) -> None:
+        theme = resolve_theme(self.settings)
+        current = combo.currentText()
+        for button in group.buttons():
+            selected = button.toolTip() == current
+            button.setChecked(selected)
+            button.setStyleSheet(button_style("primary" if selected else "muted", theme))
+
+    def _sync_compose_static_choice_chips(self) -> None:
+        if hasattr(self, "compose_send_target_combo") and hasattr(self, "compose_send_target_chip_group"):
+            self._sync_compose_combo_chips(self.compose_send_target_combo, self.compose_send_target_chip_group)
+        if hasattr(self, "compose_varac_target_combo") and hasattr(self, "compose_varac_target_chip_group"):
+            self._sync_compose_combo_chips(self.compose_varac_target_combo, self.compose_varac_target_chip_group)
+        if hasattr(self, "compose_js8_plain_kind_combo") and hasattr(self, "compose_js8_plain_kind_chip_group"):
+            self._sync_compose_combo_chips(self.compose_js8_plain_kind_combo, self.compose_js8_plain_kind_chip_group)
+
+    def _clear_compose_radio_chips(self) -> None:
+        if not hasattr(self, "compose_radio_chip_layout"):
+            return
+        group = getattr(self, "compose_radio_chip_group", None)
+        if isinstance(group, QButtonGroup):
+            for button in list(group.buttons()):
+                group.removeButton(button)
+                button.deleteLater()
+        while self.compose_radio_chip_layout.count():
+            item = self.compose_radio_chip_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _refresh_compose_radio_chips(self) -> None:
+        if not hasattr(self, "compose_radio_chip_layout") or not hasattr(self, "compose_radio_combo"):
+            return
+        self._clear_compose_radio_chips()
+        theme = resolve_theme(self.settings)
+        selected_id = 0
+        try:
+            selected_id = int(self.compose_radio_combo.currentData() or 0)
+        except Exception:
+            selected_id = 0
+        for target in self._compose_radio_targets:
+            label = self._compose_radio_short_label(target.profile) or target.label
+            chip = QPushButton(label)
+            chip.setCheckable(True)
+            chip.setMinimumHeight(28)
+            chip.setMaximumHeight(30)
+            chip.setMaximumWidth(110)
+            chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            chip.setToolTip(target.label)
+            chip.setProperty("compose_radio_id", int(target.radio_id))
+            chip.clicked.connect(lambda _checked=False, radio_id=target.radio_id: self._select_compose_radio_id(radio_id))
+            chip.setStyleSheet(button_style("primary" if target.radio_id == selected_id else "muted", theme))
+            if target.radio_id == selected_id:
+                chip.setChecked(True)
+            self.compose_radio_chip_group.addButton(chip)
+            self.compose_radio_chip_layout.addWidget(chip)
+        self.compose_radio_chip_layout.addStretch(1)
+        if hasattr(self, "compose_radio_chip_container"):
+            self.compose_radio_chip_container.setVisible(bool(self._compose_radio_targets))
+
+    def _sync_compose_radio_chips(self) -> None:
+        if not hasattr(self, "compose_radio_chip_group") or not hasattr(self, "compose_radio_combo"):
+            return
+        theme = resolve_theme(self.settings)
+        try:
+            selected_id = int(self.compose_radio_combo.currentData() or 0)
+        except Exception:
+            selected_id = 0
+        for button in self.compose_radio_chip_group.buttons():
+            try:
+                radio_id = int(button.property("compose_radio_id") or 0)
+            except Exception:
+                radio_id = 0
+            selected = radio_id == selected_id
+            button.setChecked(selected)
+            button.setStyleSheet(button_style("primary" if selected else "muted", theme))
 
     def _selected_compose_js8_msg_auth_key(self) -> Dict[str, str]:
         if not hasattr(self, "compose_js8_auth_key_combo"):
@@ -5828,14 +7197,14 @@ class MessageViewerTab(QWidget):
 
     def _compose_spotter_command(self) -> str:
         message_text = self._compose_spotter_message_text(sign_for_target=True)
-        target = self.compose_js8_target_edit.text().strip().upper() if hasattr(self, "compose_js8_target_edit") else ""
+        target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
         return " ".join(part for part in (target, message_text) if part).strip()
 
     def _compose_spotter_message_text(self, *, sign_for_target: bool = False) -> str:
         form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
         if not isinstance(form_data, dict) or form_data.get("kind") != "spotter_form":
             return ""
-        target = self.compose_js8_target_edit.text().strip().upper() if hasattr(self, "compose_js8_target_edit") else ""
+        target = self._compose_rf_target_text(self.compose_js8_target_edit.text()) if hasattr(self, "compose_js8_target_edit") else ""
         code = str(form_data.get("code", "") or "").strip().upper()
         values = self._compose_field_values()
         responses = [str(values.get(field.key, "") or "").strip() for field in self._compose_field_rows]
@@ -5931,6 +7300,11 @@ class MessageViewerTab(QWidget):
     def _compose_radio_short_label(self, profile: Dict[str, Any]) -> str:
         return self._compose_profile_text(profile, "name") or f"Radio {profile.get('id', '')}".strip()
 
+    def _compose_radio_target_short_label(self, target: Optional[ComposeRadioTarget]) -> str:
+        if target is None:
+            return ""
+        return self._compose_radio_short_label(target.profile) or target.label
+
     def _load_compose_radio_targets(self) -> List[ComposeRadioTarget]:
         try:
             profiles = list(self._multi_radio_store.list_device_profiles())
@@ -5989,10 +7363,12 @@ class MessageViewerTab(QWidget):
             current_id = 0
         preferred_id = current_id or saved_id or self._runtime_primary_radio_id()
         targets = self._load_compose_radio_targets()
+        js8_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "js8"
         spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+        commstat_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf"
         display_targets = (
             [target for target in targets if "JS8Call" in tuple(target.capabilities)]
-            if spotter_mode
+            if js8_mode or spotter_mode or commstat_mode
             else list(targets)
         )
         if not display_targets:
@@ -6002,7 +7378,7 @@ class MessageViewerTab(QWidget):
             self.compose_radio_combo.clear()
             selected_index = 0
             for target in display_targets:
-                label = self._compose_radio_short_label(target.profile) if spotter_mode else target.label
+                label = self._compose_radio_target_short_label(target)
                 self.compose_radio_combo.addItem(label, target.radio_id)
                 if preferred_id and target.radio_id == preferred_id:
                     selected_index = self.compose_radio_combo.count() - 1
@@ -6012,11 +7388,30 @@ class MessageViewerTab(QWidget):
             self.compose_radio_combo.blockSignals(False)
         self._compose_radio_targets = display_targets
         self._compose_radio_targets_loaded = True
+        self._refresh_compose_radio_chips()
         self._refresh_compose_bbs_location_targets()
 
     def _refresh_compose_radios_clicked(self) -> None:
         self._refresh_compose_radio_targets(force=True)
         self._update_compose_preview()
+
+    def _select_compose_radio_id(self, radio_id: object) -> bool:
+        if not hasattr(self, "compose_radio_combo"):
+            return False
+        try:
+            target_id = int(radio_id or 0)
+        except Exception:
+            target_id = 0
+        if target_id <= 0:
+            return False
+        for idx in range(self.compose_radio_combo.count()):
+            try:
+                if int(self.compose_radio_combo.itemData(idx) or 0) == target_id:
+                    self.compose_radio_combo.setCurrentIndex(idx)
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _selected_compose_radio_target(self) -> Optional[ComposeRadioTarget]:
         if not self._compose_radio_targets_loaded:
@@ -6041,10 +7436,442 @@ class MessageViewerTab(QWidget):
                 pass
         self._compose_message_folder_root_cache = None
         self._clear_spotter_form_caches()
+        self._sync_compose_radio_chips()
         self._refresh_compose_message_folder_options(force=True)
         self._refresh_compose_bbs_location_targets()
         if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter":
             self._refresh_compose_forms()
+        self._update_compose_preview()
+
+    @staticmethod
+    def _compose_parse_hhmm_minutes(value: object) -> Optional[int]:
+        text = str(value or "").strip()
+        match = re.match(r"^(\d{1,2}):(\d{2})", text)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if hour > 23 or minute > 59:
+            return None
+        return hour * 60 + minute
+
+    @staticmethod
+    def _compose_schedule_minutes_to_end(day_utc: object, now_utc: datetime.datetime, start_min: int, end_min: int) -> Optional[int]:
+        day = str(day_utc or "ALL").strip().upper()
+        weekday = now_utc.strftime("%a").upper()[:3]
+        day_aliases = {
+            "MONDAY": "MON",
+            "TUESDAY": "TUE",
+            "WEDNESDAY": "WED",
+            "THURSDAY": "THU",
+            "FRIDAY": "FRI",
+            "SATURDAY": "SAT",
+            "SUNDAY": "SUN",
+        }
+        day = day_aliases.get(day, day[:3] if len(day) > 3 else day)
+        if day not in {"", "ALL", "ANY", "*", weekday}:
+            return None
+        now_min = now_utc.hour * 60 + now_utc.minute
+        if end_min <= start_min:
+            active = now_min >= start_min or now_min < end_min
+            if not active:
+                return None
+            return (end_min - now_min) % (24 * 60) or 24 * 60
+        if start_min <= now_min < end_min:
+            return end_min - now_min
+        return None
+
+    def _compose_peer_schedule_for_callsign(self, callsign: object) -> Optional[ComposePeerSchedule]:
+        target = str(callsign or "").strip().upper()
+        if not target:
+            return None
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return None
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            has_effective_view = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+            ).fetchone()
+            table_name = "peer_hf_schedule_effective" if has_effective_view else "peer_hf_schedule"
+            cur.execute(
+                f"""
+                SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
+                FROM {table_name}
+                WHERE UPPER(owner_callsign) = ?
+                """,
+                (target,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            log.debug("MessageViewer: failed loading peer schedule for %s: %s", target, exc)
+            return None
+        best: Optional[ComposePeerSchedule] = None
+        for cs, day_utc, start_utc, end_utc, band, mode, freq in rows:
+            start_min = self._compose_parse_hhmm_minutes(start_utc)
+            end_min = self._compose_parse_hhmm_minutes(end_utc)
+            if start_min is None or end_min is None:
+                continue
+            minutes_to_end = self._compose_schedule_minutes_to_end(day_utc, now_utc, start_min, end_min)
+            if minutes_to_end is None:
+                continue
+            try:
+                frequency = float(str(freq or "").strip())
+            except Exception:
+                frequency = None
+            if frequency is not None and frequency > 1000:
+                frequency = frequency / 1_000_000.0
+            candidate = ComposePeerSchedule(
+                callsign=str(cs or target).strip().upper(),
+                band=str(band or "").strip().upper(),
+                frequency_mhz=frequency,
+                mode=str(mode or "").strip().upper(),
+                minutes_to_end=int(minutes_to_end),
+            )
+            if best is None or candidate.minutes_to_end < best.minutes_to_end:
+                best = candidate
+        return best
+
+    def _compose_intent_target(self) -> str:
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        if mode == "commstat_rf" and hasattr(self, "compose_commstat_target_edit"):
+            return self._compose_rf_target_text(self.compose_commstat_target_edit.text())
+        if mode in {"js8", "spotter"} and hasattr(self, "compose_js8_target_edit"):
+            return self._compose_rf_target_text(self.compose_js8_target_edit.text())
+        return str((getattr(self, "_compose_intent", {}) or {}).get("recipient_callsign") or "").strip().upper()
+
+    def _compose_last_heard_from_intent(self) -> Optional[ComposeLastHeard]:
+        intent = dict(getattr(self, "_compose_intent", {}) or {})
+        try:
+            radio_id = int(intent.get("last_heard_radio_id") or intent.get("radio_id") or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return None
+        return ComposeLastHeard(
+            radio_id=radio_id,
+            radio_label=str(intent.get("last_heard_radio_label") or intent.get("radio_label") or "").strip(),
+            band=str(intent.get("last_heard_band") or intent.get("band") or "").strip().upper(),
+            source=str(intent.get("last_heard_source") or intent.get("source_label") or intent.get("source") or "").strip(),
+            age_label=str(intent.get("last_heard_age_label") or intent.get("age_label") or "").strip(),
+        )
+
+    @staticmethod
+    def _compose_base_callsign(value: object) -> str:
+        raw = str(value or "").strip().upper().lstrip("@")
+        if not raw:
+            return ""
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw)
+
+    @staticmethod
+    def _compose_age_label(ts_value: object) -> str:
+        try:
+            age = max(0.0, time.time() - float(ts_value or 0.0))
+        except Exception:
+            return ""
+        if age < 90:
+            return "just now"
+        if age < 3600:
+            return f"{int(age // 60)}m ago"
+        if age < 86400:
+            return f"{age / 3600.0:.1f}h ago"
+        return f"{age / 86400.0:.1f}d ago"
+
+    def _compose_map_age_seconds(self) -> int:
+        intent = dict(getattr(self, "_compose_intent", {}) or {})
+        for key in ("age_filter_seconds", "recency_seconds"):
+            try:
+                value = int(intent.get(key) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return value
+        return 24 * 60 * 60
+
+    def _compose_path_evidence_for_target(self, target: object) -> Optional[ComposePathEvidence]:
+        target_call = self._compose_base_callsign(target)
+        my_call = self._compose_base_callsign(self._compose_operator_callsign())
+        if not target_call or not my_call or target_call == my_call:
+            return None
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return None
+        cutoff = time.time() - self._compose_map_age_seconds()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT ts, snr, band, source_radio_id
+                  FROM js8_links
+                 WHERE ts >= ?
+                   AND ((UPPER(origin)=? AND UPPER(destination)=?)
+                    OR  (UPPER(origin)=? AND UPPER(destination)=?))
+                 ORDER BY ts DESC
+                 LIMIT 1
+                """,
+                (cutoff, my_call, target_call, target_call, my_call),
+            )
+            direct = cur.fetchone()
+            if direct:
+                ts, snr, band, radio_id = direct
+                conn.close()
+                try:
+                    radio_id_int = int(radio_id or 0)
+                except Exception:
+                    radio_id_int = 0
+                return ComposePathEvidence(
+                    kind="direct",
+                    radio_id=radio_id_int,
+                    band=str(band or "").strip().upper(),
+                    source="JS8Call",
+                    age_label=self._compose_age_label(ts),
+                    snr=float(snr) if snr is not None else None,
+                )
+            cur.execute(
+                """
+                WITH recent AS (
+                    SELECT ts, origin, destination, snr, band
+                      FROM js8_links
+                     WHERE ts >= ?
+                       AND origin IS NOT NULL
+                       AND destination IS NOT NULL
+                ),
+                mine AS (
+                    SELECT CASE WHEN UPPER(origin)=? THEN UPPER(destination) ELSE UPPER(origin) END AS relay,
+                           MAX(ts) AS ts,
+                           band
+                      FROM recent
+                     WHERE UPPER(origin)=? OR UPPER(destination)=?
+                     GROUP BY relay
+                ),
+                theirs AS (
+                    SELECT CASE WHEN UPPER(origin)=? THEN UPPER(destination) ELSE UPPER(origin) END AS relay,
+                           MAX(ts) AS ts,
+                           band
+                      FROM recent
+                     WHERE UPPER(origin)=? OR UPPER(destination)=?
+                     GROUP BY relay
+                )
+                SELECT mine.relay,
+                       MAX(mine.ts, theirs.ts) AS last_ts,
+                       COALESCE(theirs.band, mine.band, '') AS band
+                  FROM mine
+                  JOIN theirs ON theirs.relay = mine.relay
+                 WHERE mine.relay NOT IN (?, ?)
+                 ORDER BY last_ts DESC
+                 LIMIT 1
+                """,
+                (cutoff, my_call, my_call, my_call, target_call, target_call, target_call, my_call, target_call),
+            )
+            relay = cur.fetchone()
+            conn.close()
+            if relay:
+                relay_call, ts, band = relay
+                return ComposePathEvidence(
+                    kind="relay",
+                    band=str(band or "").strip().upper(),
+                    source="JS8Call",
+                    relay=str(relay_call or "").strip().upper(),
+                    age_label=self._compose_age_label(ts),
+                )
+        except Exception as exc:
+            log.debug("MessageViewer: failed loading compose path evidence for %s: %s", target_call, exc)
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return None
+
+    def _refresh_compose_context_label(self) -> None:
+        intent = dict(getattr(self, "_compose_intent", {}) or {})
+        visible = bool(intent.get("source") == "map" and (intent.get("recipient_callsign") or intent.get("title")))
+        if not visible:
+            if hasattr(self, "compose_context_row_widget"):
+                self.compose_context_row_widget.setVisible(False)
+            return
+        target = str(intent.get("recipient_callsign") or intent.get("target") or "").strip().upper()
+        source = str(intent.get("source_label") or intent.get("last_heard_source") or "").strip()
+        bits = [f"Opened from map: {target}" if target else "Opened from map"]
+        if source:
+            bits.append(source)
+        age = str(intent.get("last_heard_age_label") or "").strip()
+        if age:
+            bits.append(age)
+        if hasattr(self, "compose_context_label"):
+            self.compose_context_label.setText(" | ".join(bits))
+        if hasattr(self, "compose_context_row_widget"):
+            self.compose_context_row_widget.setVisible(True)
+
+    def _clear_compose_intent(self) -> None:
+        self._compose_intent = {}
+        self._update_compose_preview()
+
+    def _compose_send_guidance_summary(
+        self, recommendation: ComposeSendRecommendation, *, target: str = ""
+    ) -> str:
+        radio_label = str(recommendation.radio_label or "").strip()
+        if not radio_label:
+            return "No JS8 radio configured"
+        band = str(recommendation.band or "").strip()
+        if recommendation.frequency_mhz:
+            band_suffix = f" {band}" if band else ""
+            return f"Tune {radio_label}: {recommendation.frequency_mhz:.3f} MHz{band_suffix}"
+        if recommendation.path_kind:
+            if band:
+                return f"Use {radio_label}: path on {band}"
+            return f"Use {radio_label}: path found"
+        if band:
+            return f"Use {radio_label}: last heard on {band}"
+        if target:
+            return f"Use {radio_label} for {target}"
+        return f"Using {radio_label}"
+
+    def _compose_send_guidance_tooltip(
+        self, recommendation: ComposeSendRecommendation, *, target: str = ""
+    ) -> str:
+        parts: List[str] = []
+        if target:
+            parts.append(f"To {target}")
+        if recommendation.radio_label:
+            parts.append(f"Send from {recommendation.radio_label}")
+        if recommendation.frequency_mhz:
+            freq = f"{recommendation.frequency_mhz:.3f} MHz"
+            band = f" {recommendation.band}" if recommendation.band else ""
+            parts.append(f"Peer schedule now: {freq}{band}".strip())
+        elif recommendation.band:
+            parts.append(f"Band: {recommendation.band}")
+        if recommendation.reason:
+            parts.append(recommendation.reason)
+        return "\n".join(parts) if parts else "Choose a JS8Call radio before sending."
+
+    def _compose_refresh_send_guidance(self) -> ComposeSendRecommendation:
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        if mode not in {"js8", "spotter", "commstat_rf"}:
+            if hasattr(self, "compose_guidance_row_widget"):
+                self.compose_guidance_row_widget.setVisible(False)
+            self._compose_send_recommendation = ComposeSendRecommendation()
+            return self._compose_send_recommendation
+        radio_target = self._selected_compose_radio_target()
+        selected_radio_id = radio_target.radio_id if radio_target is not None else 0
+        target = self._compose_intent_target()
+        if self._is_message_group_candidate(target, configured_groups=self._configured_message_group_names()):
+            peer_schedule = None
+        else:
+            peer_schedule = self._compose_peer_schedule_for_callsign(target)
+        options = [
+            ComposeRadioOption(radio_id=target.radio_id, label=self._compose_radio_short_label(target.profile))
+            for target in self._compose_radio_targets
+            if "JS8Call" in tuple(target.capabilities)
+        ]
+        recommendation = recommend_compose_send_path(
+            options,
+            peer_schedule=peer_schedule,
+            path_evidence=None if peer_schedule else self._compose_path_evidence_for_target(target),
+            last_heard=self._compose_last_heard_from_intent(),
+            selected_radio_id=selected_radio_id,
+        )
+        self._compose_send_recommendation = recommendation
+        if recommendation.radio_id and recommendation.radio_id != selected_radio_id:
+            self._select_compose_radio_id(recommendation.radio_id)
+        text = self._compose_send_guidance_summary(recommendation, target=target)
+        tooltip = self._compose_send_guidance_tooltip(recommendation, target=target)
+        if hasattr(self, "compose_guidance_label"):
+            self.compose_guidance_label.setText(text)
+            self.compose_guidance_label.setToolTip(tooltip)
+        if hasattr(self, "compose_guidance_row_widget"):
+            self.compose_guidance_row_widget.setToolTip(tooltip)
+            self.compose_guidance_row_widget.setVisible(True)
+        if hasattr(self, "compose_tune_recommended_btn"):
+            self.compose_tune_recommended_btn.setVisible(bool(recommendation.tune_available and recommendation.frequency_mhz))
+            self.compose_tune_recommended_btn.setEnabled(bool(recommendation.radio_id and recommendation.frequency_mhz))
+            self.compose_tune_recommended_btn.setStyleSheet(button_style("warning", resolve_theme(self.settings)))
+        return recommendation
+
+    def _compose_tune_recommended_radio(self) -> None:
+        recommendation = getattr(self, "_compose_send_recommendation", ComposeSendRecommendation())
+        if not recommendation.frequency_mhz:
+            self._set_compose_status("No recommended frequency is available for this recipient.", role="warning")
+            return
+        meta = {
+            "freq": recommendation.frequency_mhz,
+            "band": recommendation.band,
+            "mode": recommendation.mode,
+            "auto_tune": True,
+            "target_device_profile_id": recommendation.radio_id,
+        }
+        ok = perform_qsy(self.window(), meta)
+        if ok:
+            self._set_compose_status(
+                f"Tune requested for {recommendation.radio_label or 'selected radio'} at {recommendation.frequency_mhz:.3f} MHz.",
+                role="success",
+            )
+        else:
+            self._set_compose_status("Tune request was blocked or could not be applied.", role="warning")
+
+    def _compose_confirm_peer_schedule_before_send(self) -> bool:
+        recommendation = self._compose_refresh_send_guidance()
+        if not recommendation.tune_available or not recommendation.frequency_mhz:
+            return True
+        radio_label = recommendation.radio_label or "the selected radio"
+        band = f" {recommendation.band}" if recommendation.band else ""
+        prompt = (
+            f"Peer schedule guidance says {radio_label} should be on "
+            f"{recommendation.frequency_mhz:.3f} MHz{band} before sending.\n\n"
+            "Tune the radio now before sending?"
+        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Tune Before Send")
+        msg.setText(prompt)
+        tune_btn = msg.addButton("Tune Now", QMessageBox.AcceptRole)
+        send_btn = msg.addButton("Send Anyway", QMessageBox.DestructiveRole)
+        msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == tune_btn:
+            self._compose_tune_recommended_radio()
+            return False
+        if clicked == send_btn:
+            self._set_compose_status(
+                "Sending without tuning to the active peer schedule frequency.",
+                role="warning",
+            )
+            return True
+        self._set_compose_status("Send cancelled before radio tune.", role="info")
+        return False
+
+    def prefill_compose_intent(self, intent: Mapping[str, object]) -> None:
+        data = dict(intent or {})
+        self._compose_intent = data
+        mode = str(data.get("transport") or data.get("mode") or "js8").strip().lower()
+        if hasattr(self, "compose_mode_selector"):
+            row = (
+                3
+                if mode in {"commstat", "commstat_rf"}
+                else 2
+                if mode in {"spotter", "js8spotter"}
+                else 1
+                if mode in {"js8", "js8call", "message", "traffic"}
+                else 0
+            )
+            if self.compose_mode_selector.count() > row:
+                self.compose_mode_selector.setCurrentRow(row)
+        target = str(data.get("recipient_callsign") or data.get("target") or "").strip().upper()
+        if target:
+            if hasattr(self, "compose_js8_target_edit"):
+                self.compose_js8_target_edit.setText(target)
+            if hasattr(self, "compose_commstat_target_edit"):
+                self.compose_commstat_target_edit.setText(target)
+        body = str(data.get("body") or data.get("message") or "").strip()
+        if body and hasattr(self, "compose_js8_plain_text_edit"):
+            self.compose_js8_plain_text_edit.setPlainText(body)
+        self._refresh_compose_radio_targets(force=True)
+        last_heard = self._compose_last_heard_from_intent()
+        if last_heard is not None:
+            self._select_compose_radio_id(last_heard.radio_id)
         self._update_compose_preview()
 
     def _compose_radio_message_paths(self, target: Optional[ComposeRadioTarget]) -> Dict[str, str]:
@@ -6951,6 +8778,7 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_report_title_edit"):
             self.compose_report_title_edit.clear()
         self._compose_last_stage_paths = []
+        self._compose_form_draft_values.clear()
         self._compose_active_form_key = ""
         self._on_compose_form_changed()
         self._set_compose_status(status_text, role="info")
@@ -6981,7 +8809,7 @@ class MessageViewerTab(QWidget):
 
     def _launch_compose_app(self, app_name: str) -> None:
         target = self._selected_compose_radio_target()
-        label = target.label if target is not None else "the selected radio"
+        label = self._compose_radio_target_short_label(target) if target is not None else "the selected radio"
         try:
             if self._compose_software_status.program_is_running(app_name):
                 self._set_compose_status(f"{app_name} is already running for {label}. No second instance was opened.", role="info")
@@ -7132,8 +8960,17 @@ class MessageViewerTab(QWidget):
     def _update_compose_preview(self) -> None:
         if not hasattr(self, "compose_summary_label"):
             return
+        for required_widget in (
+            "compose_zulu_value",
+            "compose_callsign_value",
+            "compose_state_value",
+            "compose_grid_value",
+        ):
+            if not hasattr(self, required_widget):
+                return
         self._refresh_compose_radio_targets()
         self._refresh_compose_message_folder_options()
+        self._install_compose_target_completers()
         flamp_selected = self._ensure_compose_flamp_target_for_signing()
         if hasattr(self, "compose_sign_flamp_chk"):
             self.compose_sign_flamp_chk.setEnabled(True)
@@ -7148,10 +8985,17 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "compose_signing_key_combo"):
             self.compose_signing_key_combo.setMinimumWidth(180)
             self.compose_signing_key_combo.setMaximumWidth(360)
+        self._sync_compose_static_choice_chips()
         if sign_flamp_selected and not self._compose_signing_keys_loaded and not self._compose_signing_keys_loading:
             self._refresh_compose_signing_keys()
+        current_compose_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        early_js8_mode = current_compose_mode == "js8"
+        early_spotter_mode = current_compose_mode == "spotter"
+        early_commstat_mode = current_compose_mode == "commstat_rf"
+        early_nbems_mode = not (early_js8_mode or early_spotter_mode or early_commstat_mode)
         bbs_selected = (
-            hasattr(self, "compose_varac_target_combo")
+            early_nbems_mode
+            and hasattr(self, "compose_varac_target_combo")
             and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
         )
         if hasattr(self, "compose_bbs_location_row_widget"):
@@ -7166,14 +9010,15 @@ class MessageViewerTab(QWidget):
         radio_target = self._selected_compose_radio_target()
         profile = radio_target.profile if radio_target is not None else {}
         radio_label = radio_target.label if radio_target is not None else "No compose-capable radio"
+        radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_label
         folder_label = (
             self.compose_message_folder_combo.currentText()
             if hasattr(self, "compose_message_folder_combo") and self.compose_message_folder_combo.count()
             else "Messages"
         )
-        self.compose_summary_label.setText(f"Radio: {radio_label}  |  File: {filename}  |  Save under: {folder_label}")
+        self.compose_summary_label.setText(f"Radio: {radio_short_label}  |  File: {filename}  |  Folder: {folder_label}")
         self.compose_summary_label.setToolTip(
-            "FreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
+            f"{radio_label}\nFreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
         )
         plans = self._compose_destination_plans()
         destination_lines: List[str] = []
@@ -7185,7 +9030,7 @@ class MessageViewerTab(QWidget):
                     detail = plan.note or plan.path
                     destination_lines.append(f"{plan.label}: {detail}")
                 else:
-                    destination_lines.append(f"{plan.label}: {radio_label} - {plan.note}")
+                    destination_lines.append(f"{plan.label}: {radio_short_label} - {plan.note}")
         if not destination_lines:
             destination_lines.append("No stage destinations selected yet.")
         self.compose_destinations_label.setText("\n".join(destination_lines))
@@ -7198,75 +9043,208 @@ class MessageViewerTab(QWidget):
             preview_rows = list(self._compose_field_rows)
             title = self._compose_template_title or self.compose_form_combo.currentText()
         preview_html = self._render_custom_form_fields(field_values, preview_rows, title=title)
-        spotter_selected = self._compose_template_kind == "spotter"
+        js8_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "js8"
         spotter_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "spotter"
+        commstat_mode = str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf"
+        spotter_selected = spotter_mode and self._compose_template_kind == "spotter"
+        js8_plain_command = self._compose_plain_js8_command() if js8_mode else ""
+        commstat_command = ""
+        commstat_issue = ""
+        if js8_mode:
+            source_label = radio_short_label
+            self.compose_summary_label.setText(f"Send From: {source_label}  |  JS8Call  |  {self._compose_plain_js8_kind()}")
+            self.compose_summary_label.setToolTip(
+                "JS8Call compose sends short directed or group traffic through the selected JS8Call radio."
+            )
+        if commstat_mode:
+            try:
+                commstat_command = self._compose_commstat_rf_text()
+            except Exception as exc:
+                commstat_issue = str(exc)
+            source_label = radio_short_label
+            self.compose_summary_label.setText(f"Send From: {source_label}  |  CommStat RF  |  StatRep")
+            self.compose_summary_label.setToolTip(
+                "CommStat RF builds a short StatRep. Optional brevity codes are included as part of the StatRep comment."
+            )
         if spotter_mode:
             form_label = self.compose_form_combo.currentText() if hasattr(self, "compose_form_combo") else "No form selected"
-            source_label = self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label
+            source_label = radio_short_label
             source_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
             source_part = f"Send From: {source_label}  |  " if source_count > 1 else ""
-            self.compose_summary_label.setText(f"{source_part}JS8Spotter draft  |  Form: {form_label}")
+            self.compose_summary_label.setText(f"{source_part}FIOSpotter draft  |  Form: {form_label}")
             self.compose_summary_label.setToolTip(
-                "JS8Spotter compose drafts an MCForm command for JS8Call. FIO sends only after JS8Call target-state preflight passes."
+                "FIOSpotter compose drafts an MCForm command for JS8Call. FIO sends only after JS8Call target-state preflight passes."
             )
         if hasattr(self, "compose_radio_label"):
-            self.compose_radio_label.setText("Send From" if spotter_mode else "Compose For")
+            self.compose_radio_label.setText("Send From" if (js8_mode or spotter_mode or commstat_mode) else "Compose For")
+        if hasattr(self, "compose_radio_combo"):
+            self.compose_radio_combo.setMaximumWidth(420 if bool(getattr(self, "_compose_in_workbench", False)) else 260)
+            self.compose_radio_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.compose_radio_combo.setVisible(False)
+        if hasattr(self, "compose_radio_chip_container"):
+            self.compose_radio_chip_container.setVisible(bool(self._compose_radio_targets))
         if hasattr(self, "compose_radio_row_widget"):
-            js8_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
-            self.compose_radio_row_widget.setVisible((not spotter_mode) or js8_count > 1)
+            self.compose_radio_row_widget.setVisible(bool(self._compose_radio_targets))
+        self._refresh_compose_context_label()
         if hasattr(self, "compose_refresh_radios_btn"):
-            self.compose_refresh_radios_btn.setVisible(not spotter_mode)
+            self.compose_refresh_radios_btn.setVisible(bool(getattr(self, "_compose_in_workbench", False)))
+        nbems_mode = not (js8_mode or spotter_mode or commstat_mode)
+        if hasattr(self, "compose_form_row_widget"):
+            self.compose_form_row_widget.setVisible(nbems_mode or spotter_mode)
+        if hasattr(self, "compose_header_row_widget"):
+            self.compose_header_row_widget.setVisible(nbems_mode)
         if hasattr(self, "compose_family_label"):
-            self.compose_family_label.setVisible(not spotter_mode)
+            self.compose_family_label.setVisible(nbems_mode)
         if hasattr(self, "compose_family_combo"):
-            self.compose_family_combo.setVisible(not spotter_mode)
+            self.compose_family_combo.setVisible(nbems_mode)
+        if hasattr(self, "compose_operating_group_label"):
+            self.compose_operating_group_label.setVisible(nbems_mode)
+        if hasattr(self, "compose_operating_group_combo"):
+            self.compose_operating_group_combo.setVisible(nbems_mode)
         if hasattr(self, "compose_spotter_category_label"):
             self.compose_spotter_category_label.setVisible(spotter_mode)
         if hasattr(self, "compose_spotter_category_combo"):
             self.compose_spotter_category_combo.setVisible(spotter_mode)
         if hasattr(self, "compose_form_label"):
             self.compose_form_label.setText("Spotter Form" if spotter_mode else "Form")
+            self.compose_form_label.setVisible(not (js8_mode or commstat_mode))
+        if hasattr(self, "compose_form_combo"):
+            self.compose_form_combo.setVisible(not (js8_mode or commstat_mode))
+        brevity_enabled = bool(getattr(getattr(self, "compose_commstat_brevity_chk", None), "isChecked", lambda: False)())
+        if hasattr(self, "compose_js8_plain_row_widget"):
+            self.compose_js8_plain_row_widget.setVisible(js8_mode)
+        if hasattr(self, "compose_js8_plain_scroll"):
+            self.compose_js8_plain_scroll.setVisible(js8_mode)
+            self.compose_js8_plain_scroll.setMinimumHeight(220)
+        if hasattr(self, "compose_commstat_row_widget"):
+            self.compose_commstat_row_widget.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_scroll"):
+            self.compose_commstat_scroll.setVisible(commstat_mode)
+            self.compose_commstat_scroll.setMinimumHeight(420 if brevity_enabled else 300)
+        if hasattr(self, "compose_commstat_grid_edit"):
+            self.compose_commstat_grid_edit.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_grid_label"):
+            self.compose_commstat_grid_label.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_scope_combo"):
+            self.compose_commstat_scope_combo.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_scope_label"):
+            self.compose_commstat_scope_label.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_report_id_edit"):
+            self.compose_commstat_report_id_edit.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_report_id_label"):
+            self.compose_commstat_report_id_label.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_brevity_chk"):
+            self.compose_commstat_brevity_chk.setVisible(commstat_mode)
+        if hasattr(self, "compose_commstat_brevity_edit"):
+            self.compose_commstat_brevity_edit.setVisible(commstat_mode)
+            self.compose_commstat_brevity_edit.setEnabled(brevity_enabled)
+        if hasattr(self, "compose_commstat_brevity_label"):
+            self.compose_commstat_brevity_label.setVisible(commstat_mode)
+            self.compose_commstat_brevity_label.setEnabled(brevity_enabled)
+        if hasattr(self, "compose_commstat_brevity_builder_widget"):
+            self.compose_commstat_brevity_builder_widget.setVisible(commstat_mode and brevity_enabled)
+            self.compose_commstat_brevity_builder_widget.setEnabled(brevity_enabled)
+        for label_widget in (getattr(self, "compose_commstat_status_labels", {}) or {}).values():
+            if isinstance(label_widget, QLabel):
+                label_widget.setVisible(commstat_mode)
+        for combo in (getattr(self, "compose_commstat_status_widgets", {}) or {}).values():
+            if isinstance(combo, QComboBox):
+                combo.setVisible(commstat_mode)
         if hasattr(self, "compose_priority_label"):
             self.compose_priority_label.setText("Priority")
-            self.compose_priority_label.setVisible(not spotter_mode)
+            self.compose_priority_label.setVisible(nbems_mode)
         if hasattr(self, "compose_priority_combo"):
-            self.compose_priority_combo.setVisible(not spotter_mode)
+            self.compose_priority_combo.setVisible(nbems_mode)
         if hasattr(self, "compose_report_title_label"):
-            self.compose_report_title_label.setVisible(not spotter_mode)
+            self.compose_report_title_label.setVisible(nbems_mode)
         if hasattr(self, "compose_report_title_edit"):
-            self.compose_report_title_edit.setVisible(not spotter_mode)
+            self.compose_report_title_edit.setVisible(nbems_mode)
         if hasattr(self, "compose_zulu_label"):
-            self.compose_zulu_label.setVisible(not spotter_mode)
+            self.compose_zulu_label.setVisible(nbems_mode)
         if hasattr(self, "compose_zulu_value"):
-            self.compose_zulu_value.setVisible(not spotter_mode)
+            self.compose_zulu_value.setVisible(nbems_mode)
         if hasattr(self, "compose_refresh_time_btn"):
-            self.compose_refresh_time_btn.setVisible(not spotter_mode)
+            self.compose_refresh_time_btn.setVisible(nbems_mode and bool(getattr(self, "_compose_in_workbench", False)))
         if hasattr(self, "compose_operator_row_widget"):
-            self.compose_operator_row_widget.setVisible(not spotter_mode)
+            self.compose_operator_row_widget.setVisible(nbems_mode and bool(getattr(self, "_compose_in_workbench", False)))
         if hasattr(self, "compose_output_box"):
-            self.compose_output_box.setTitle("JS8 Send" if spotter_mode else "Staging Output")
+            self.compose_output_box.setTitle("RF Send" if commstat_mode else "JS8 Send" if (js8_mode or spotter_mode) else "Staging Output")
+            self.compose_output_box.setMaximumHeight(190 if (js8_mode or spotter_mode or commstat_mode) else 140)
+        if hasattr(self, "compose_field_box"):
+            self.compose_field_box.setVisible(True)
+            if js8_mode:
+                self.compose_field_box.setTitle("JS8 Message")
+                self.compose_field_box.setMinimumHeight(260)
+            elif commstat_mode:
+                self.compose_field_box.setTitle("CommStat StatRep")
+                self.compose_field_box.setMinimumHeight(460 if brevity_enabled else 340)
+            else:
+                self.compose_field_box.setTitle("FIOSpotter Form Fields" if spotter_mode else "Form Fields")
+                self.compose_field_box.setMinimumHeight(440 if spotter_mode else 300)
+        if hasattr(self, "compose_field_scroll"):
+            self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))
+            self.compose_field_scroll.setMinimumHeight(420 if spotter_mode else 260)
+        if hasattr(self, "compose_rf_fields_stack"):
+            self.compose_rf_fields_stack.setVisible(js8_mode or commstat_mode)
+            if js8_mode and hasattr(self, "compose_js8_plain_scroll"):
+                self.compose_rf_fields_stack.setCurrentWidget(self.compose_js8_plain_scroll)
+            elif commstat_mode and hasattr(self, "compose_commstat_scroll"):
+                self.compose_rf_fields_stack.setCurrentWidget(self.compose_commstat_scroll)
+        if hasattr(self, "compose_preview_box"):
+            self.compose_preview_box.setMinimumHeight(120 if (js8_mode or spotter_mode or commstat_mode) else 160)
         if hasattr(self, "compose_nbems_dest_row_widget"):
-            self.compose_nbems_dest_row_widget.setVisible(not spotter_mode)
+            self.compose_nbems_dest_row_widget.setVisible(nbems_mode)
         if hasattr(self, "compose_nbems_folder_row_widget"):
-            self.compose_nbems_folder_row_widget.setVisible(not spotter_mode)
+            self.compose_nbems_folder_row_widget.setVisible(nbems_mode)
         if hasattr(self, "compose_js8_auth_row_widget"):
-            self.compose_js8_auth_row_widget.setVisible(spotter_mode)
+            if spotter_selected:
+                self._refresh_compose_js8_auth_keys()
+            auth_available = bool(spotter_mode and self._compose_js8_auth_key_count > 0)
+            self.compose_js8_auth_row_widget.setVisible(auth_available)
+            if not auth_available and hasattr(self, "compose_js8_sign_chk") and self.compose_js8_sign_chk.isChecked():
+                previous_blocked = self.compose_js8_sign_chk.blockSignals(True)
+                try:
+                    self.compose_js8_sign_chk.setChecked(False)
+                finally:
+                    self.compose_js8_sign_chk.blockSignals(previous_blocked)
         if hasattr(self, "compose_expect_row_widget"):
-            self.compose_expect_row_widget.setVisible(False)
-        if spotter_selected:
-            self._refresh_compose_js8_auth_keys()
+            self.compose_expect_row_widget.setVisible(spotter_mode)
+        if hasattr(self, "compose_save_expect_inline_btn"):
+            self.compose_save_expect_inline_btn.setVisible(False)
         spotter_command = self._compose_spotter_command() if spotter_selected else ""
         if hasattr(self, "compose_js8_target_row_widget"):
-            self.compose_js8_target_row_widget.setVisible(spotter_mode)
+            self.compose_js8_target_row_widget.setVisible(js8_mode or spotter_mode)
+        if hasattr(self, "compose_js8_target_label"):
+            self.compose_js8_target_label.setText("Send To" if js8_mode else "JS8 Target")
+        for widget in (
+            getattr(self, "compose_js8_sign_chk", None),
+            getattr(self, "compose_js8_auth_key_label", None),
+            getattr(self, "compose_js8_auth_key_combo", None),
+            getattr(self, "compose_js8_auth_datecode_chk", None),
+            getattr(self, "compose_js8_auth_refresh_btn", None),
+        ):
+            if widget is not None:
+                widget.setVisible(bool(spotter_mode and self._compose_js8_auth_key_count > 0))
+        recommendation = self._compose_refresh_send_guidance()
         metadata = []
-        if not spotter_mode:
+        if not (js8_mode or spotter_mode or commstat_mode):
             metadata.append(f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>")
             metadata.extend(
                 [
                     f"<div><b>Filename:</b> {html.escape(filename)}</div>",
-                    f"<div><b>Save Under:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
+                    f"<div><b>Fast Light Format:</b> {html.escape(self._compose_fastlight_delimiter_guidance())}</div>",
+                    f"<div><b>Message Folder:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
                     f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
                     f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
+                ]
+            )
+        if js8_mode:
+            metadata.extend(
+                [
+                    f"<div><b>JS8Call:</b> {html.escape(self._compose_plain_js8_kind())}</div>",
+                    f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
+                    f"<div><b>Send To:</b> {html.escape(self._compose_intent_target() or 'Set a callsign or group for directed traffic')}</div>",
+                    f"<div><b>RF Payload:</b> {html.escape(js8_plain_command or 'Enter short JS8 text to build the payload.')}</div>",
                 ]
             )
         if spotter_selected:
@@ -7285,10 +9263,21 @@ class MessageViewerTab(QWidget):
                     f"<div><b>MsgAuth:</b> {html.escape(auth_label)}</div>",
                 ]
             )
+        if commstat_mode:
+            metadata.extend(
+                [
+                    f"<div><b>CommStat RF:</b> StatRep</div>",
+                    f"<div><b>Send From:</b> {html.escape(self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label)}</div>",
+                    f"<div><b>Send To:</b> {html.escape(self._compose_commstat_target() or 'Set a group or callsign')}</div>",
+                    f"<div><b>RF Payload:</b> {html.escape(commstat_command or commstat_issue or 'Complete required fields to build payload.')}</div>",
+                ]
+            )
+        if (js8_mode or spotter_mode or commstat_mode) and recommendation.reason:
+            metadata.append(f"<div><b>Send Guidance:</b> {html.escape(recommendation.reason)}</div>")
         if bbs_selected:
             bbs_target = self._selected_compose_bbs_target()
             metadata.append(
-                f"<div><b>BBS Location:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
+                f"<div><b>BBS Destination:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
             )
         if sign_flamp_selected:
             metadata.append(
@@ -7305,9 +9294,22 @@ class MessageViewerTab(QWidget):
                 metadata.append("<div><b>Signing Key:</b> No private signing keys found.</div>")
             else:
                 metadata.append("<div><b>Signing Key:</b> Select a private signing key.</div>")
-        self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_html)
+        if js8_mode:
+            preview_body_html = (
+                "<div><b>RF Payload Preview</b></div>"
+                f"<pre style='white-space: pre-wrap; margin-top: 6px;'>{html.escape(js8_plain_command or 'Enter short JS8 text to build the payload.')}</pre>"
+            )
+        elif commstat_mode:
+            preview_body_html = (
+                "<div><b>RF Payload Preview</b></div>"
+                f"<pre style='white-space: pre-wrap; margin-top: 6px;'>{html.escape(commstat_command or commstat_issue or 'Complete required fields to build payload.')}</pre>"
+            )
+        else:
+            preview_body_html = preview_html
+        self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_body_html)
+        self._refresh_compose_layout_geometry_if_needed()
 
-        if spotter_mode and hasattr(self, "compose_destinations_label"):
+        if (js8_mode or spotter_mode or commstat_mode) and hasattr(self, "compose_destinations_label"):
             self.compose_destinations_label.setText("")
         ready_plans = [plan for plan in plans if plan.ready]
         signing_ready = (not sign_flamp_selected) or bool(self._selected_compose_signing_fingerprint())
@@ -7316,25 +9318,30 @@ class MessageViewerTab(QWidget):
             and self._compose_has_valid_form_selection()
             and signing_ready
             and radio_target is not None
-            and not spotter_mode
+            and not (js8_mode or spotter_mode or commstat_mode)
         )
         self.compose_stage_btn.setEnabled(can_stage)
         theme = resolve_theme(self.settings)
-        self.compose_stage_btn.setVisible(not spotter_mode)
+        self.compose_stage_btn.setVisible(not (js8_mode or spotter_mode or commstat_mode))
         self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
         can_send_js8 = bool(
-            spotter_selected
-            and spotter_command
+            ((js8_mode and js8_plain_command) or (spotter_selected and spotter_command) or (commstat_mode and commstat_command))
             and radio_target is not None
             and "JS8Call" in tuple(radio_target.capabilities)
-            and ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key()))
+            and (js8_mode or commstat_mode or ((not self._compose_js8_msg_auth_selected()) or bool(self._selected_compose_js8_msg_auth_key())))
         )
         if hasattr(self, "compose_send_js8_btn"):
-            self.compose_send_js8_btn.setVisible(spotter_mode)
+            self.compose_send_js8_btn.setVisible(js8_mode or spotter_mode or commstat_mode)
             self.compose_send_js8_btn.setEnabled(can_send_js8)
             source_label = self._compose_radio_short_label(profile) if isinstance(profile, dict) else radio_label
             js8_count = len([target for target in self._compose_radio_targets if "JS8Call" in tuple(target.capabilities)])
             self.compose_send_js8_btn.setText(f"Send Now: {source_label}" if js8_count > 1 and source_label else "Send Now")
+            if js8_mode:
+                self.compose_send_js8_btn.setToolTip("Send short JS8Call traffic after target-state and radio guidance preflight.")
+            elif commstat_mode:
+                self.compose_send_js8_btn.setToolTip("Send short CommStat RF traffic through the selected JS8Call radio.")
+            else:
+                self.compose_send_js8_btn.setToolTip("Send the selected FIOSpotter form now through JS8Call after safety preflight.")
             self.compose_send_js8_btn.setStyleSheet(button_style("primary" if can_send_js8 else "muted", theme))
         if hasattr(self, "compose_save_expect_btn"):
             self.compose_save_expect_btn.setEnabled(bool(
@@ -7379,29 +9386,53 @@ class MessageViewerTab(QWidget):
             self.compose_open_folder_btn,
             self.compose_copy_paths_btn,
         ):
-            btn.setVisible(not spotter_mode)
+            btn.setVisible(not (js8_mode or spotter_mode or commstat_mode))
 
     def _send_compose_js8_spotter(self) -> None:
-        if self._compose_template_kind != "spotter":
-            self._set_compose_status("Select a JS8Spotter form before sending via JS8Call.", role="warning")
+        mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
+        js8_mode = mode == "js8"
+        commstat_mode = mode == "commstat_rf"
+        if not (js8_mode or commstat_mode) and self._compose_template_kind != "spotter":
+            self._set_compose_status("Select a FIOSpotter form before sending via JS8Call.", role="warning")
             return
-        command = self._compose_spotter_command()
+        try:
+            command = (
+                self._compose_plain_js8_command()
+                if js8_mode
+                else self._compose_commstat_rf_text()
+                if commstat_mode
+                else self._compose_spotter_command()
+            )
+        except Exception as exc:
+            label = "CommStat RF" if commstat_mode else "JS8Call"
+            self._set_compose_status(f"Complete {label} fields before sending: {exc}", role="warning")
+            return
         if not command:
-            self._set_compose_status("Enter a JS8 target and complete the Spotter form before sending.", role="warning")
+            if js8_mode and self._compose_plain_js8_kind() == "Directed Message":
+                self._set_compose_status("Enter a JS8 target and short message text before sending.", role="warning")
+            else:
+                self._set_compose_status("Enter a JS8 target and complete the RF payload before sending.", role="warning")
             return
-        if self._compose_js8_msg_auth_selected() and not self._selected_compose_js8_msg_auth_key():
-            self._set_compose_status("Select a matching MsgAuth key before sending a signed JS8Spotter message.", role="warning")
+        typed_target = self._compose_intent_target()
+        if typed_target and not typed_target.startswith("@") and self._compose_base_callsign(typed_target) == self._compose_base_callsign(self._compose_operator_callsign()):
+            self._set_compose_status("Choose another station before sending. FIO will not send a message to your own callsign.", role="warning")
+            return
+        if not (js8_mode or commstat_mode) and self._compose_js8_msg_auth_selected() and not self._selected_compose_js8_msg_auth_key():
+            self._set_compose_status("Select a matching MsgAuth key before sending a signed FIOSpotter message.", role="warning")
             return
         radio_target = self._selected_compose_radio_target()
         if radio_target is None:
             self._set_compose_status("Select a JS8Call-capable radio before sending.", role="warning")
             return
         if "JS8Call" not in tuple(radio_target.capabilities):
-            self._set_compose_status(f"{radio_target.label} is not configured for JS8Call send.", role="warning")
+            radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
+            self._set_compose_status(f"{radio_short_label} is not configured for JS8Call send.", role="warning")
+            return
+        if not self._compose_confirm_peer_schedule_before_send():
             return
         endpoint = js8_endpoint_from_radio_profile(radio_target.profile, fallback_settings=self.settings)
         client = JS8ApiClientRegistry.get(endpoint, timeout_s=1.0, auto_reconnect=True)
-        result = send_js8_message_guarded(client, command, timeout_s=0.6)
+        result = send_js8_message_guarded(client, command, timeout_s=0.6, clear_selected_target=True)
         if not result.sent:
             issue_codes = [issue.code for issue in result.preflight.issues]
             if issue_codes == ["target_state_unknown"]:
@@ -7419,14 +9450,17 @@ class MessageViewerTab(QWidget):
                         command,
                         timeout_s=0.6,
                         allow_uncertain_target_state=True,
+                        clear_selected_target=True,
                     )
             if not result.sent:
                 self._set_compose_status(result.detail, role="warning")
                 return
-        self._set_compose_status(f"Sent JS8Spotter message via {radio_target.label}: {command}", role="success")
+        label = "JS8Call" if js8_mode else "CommStat RF" if commstat_mode else "FIOSpotter"
+        radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
+        self._set_compose_status(f"Sent {label} message via {radio_short_label}: {command}", role="success")
     def _save_compose_js8_expect(self) -> None:
         if self._compose_template_kind != "spotter":
-            self._set_compose_status("Select a JS8Spotter form before saving to Expect.", role="warning")
+            self._set_compose_status("Select a FIOSpotter form before saving to Expect.", role="warning")
             return
         message_text = self._compose_spotter_message_text(sign_for_target=False)
         form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
@@ -7454,8 +9488,12 @@ class MessageViewerTab(QWidget):
                     "msg_auth_sign_callsign": self._compose_operator_callsign(),
                     "msg_auth_include_datecode": include_datecode,
                     "msg_auth_datecode": stored_datecode,
-                    "allowed_groups": [self.compose_js8_target_edit.text().strip().upper()]
-                    if hasattr(self, "compose_js8_target_edit") and self.compose_js8_target_edit.text().strip().startswith("@")
+                    "allowed_groups": [self._compose_rf_target_text(self.compose_js8_target_edit.text())]
+                    if hasattr(self, "compose_js8_target_edit")
+                    and self._is_message_group_candidate(
+                        self.compose_js8_target_edit.text(),
+                        configured_groups=self._configured_message_group_names(),
+                    )
                     else [],
                     "enabled": False,
                     "auto_reply_enabled": False,
@@ -7550,7 +9588,8 @@ class MessageViewerTab(QWidget):
         self._compose_last_stage_paths = outputs
         lines: List[str] = []
         if outputs:
-            lines.append(f"Staged {len(outputs)} compose file(s) for {radio_target.label}.")
+            radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
+            lines.append(f"Staged {len(outputs)} compose file(s) for {radio_short_label}.")
             for path in outputs:
                 lines.append(str(path))
         else:
@@ -8394,34 +10433,27 @@ class MessageViewerTab(QWidget):
                 )
             out.append(row)
             seen.add(key)
-        bbs_dir = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if bbs_dir:
-            key = ("bbs", bbs_dir)
-            if key not in seen:
-                row = {"origin": "bbs", "path": bbs_dir}
-                if include_source_metadata:
-                    row.update(
-                        {
-                            "source_id": stable_source_id("bbs", bbs_dir, prefix="ingest"),
-                            "source_label": "BBS",
-                        }
-                    )
-                out.append(row)
-                seen.add(key)
-        archive_dir = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
-        if archive_dir:
-            key = ("bbs", archive_dir)
-            if key not in seen:
-                row = {"origin": "bbs", "path": archive_dir}
-                if include_source_metadata:
-                    row.update(
-                        {
-                            "source_id": stable_source_id("bbs-archive", archive_dir, prefix="ingest"),
-                            "source_label": "BBS Archive",
-                        }
-                    )
-                out.append(row)
-                seen.add(key)
+        for root in bbs_file_management_roots(self.settings):
+            kind = str(root.get("kind", "") or "").strip().lower()
+            path = str(root.get("path", "") or "").strip()
+            if not path:
+                continue
+            origin = "varac" if kind in {"incoming", "outgoing"} else "bbs"
+            key = (origin, path)
+            if key in seen:
+                continue
+            row = {"origin": origin, "path": path}
+            if include_source_metadata:
+                source_label = str(root.get("label", "") or "").strip() or "BBS"
+                source_key = f"bbs-{kind or 'file'}"
+                row.update(
+                    {
+                        "source_id": stable_source_id(source_key, path, prefix="ingest"),
+                        "source_label": source_label,
+                    }
+                )
+            out.append(row)
+            seen.add(key)
         return out
 
     @staticmethod
@@ -8482,6 +10514,40 @@ class MessageViewerTab(QWidget):
                 return True
         return False
 
+    def _bbs_file_management_context_for_record(self, rec: FileRecord | None) -> Dict[str, str]:
+        if not isinstance(rec, FileRecord):
+            return {}
+        path_norm = self._norm_scan_path(rec.path)
+        best: Dict[str, str] = {}
+        best_len = -1
+        for root in bbs_file_management_roots(self.settings):
+            root_path = str(root.get("path", "") or "").strip()
+            if not root_path:
+                continue
+            root_norm = self._norm_scan_path(root_path)
+            if not (path_norm == root_norm or path_norm.startswith(root_norm + os.sep)):
+                continue
+            if len(root_norm) <= best_len:
+                continue
+            best = {
+                "kind": str(root.get("kind", "") or ""),
+                "label": str(root.get("label", "") or ""),
+                "path": root_path,
+                "archive_context": str(root.get("archive_context", "") or "live"),
+            }
+            best_len = len(root_norm)
+        return best
+
+    def _is_bbs_manageable_file_record(self, rec: FileRecord | None) -> bool:
+        context = self._bbs_file_management_context_for_record(rec)
+        if not context:
+            return False
+        return str(context.get("kind", "") or "").strip().lower() != "archive"
+
+    def _is_bbs_manageable_file_row(self, row: UnifiedMessage | None) -> bool:
+        payload = getattr(row, "payload", None) if row is not None else None
+        return isinstance(payload, FileRecord) and self._is_bbs_manageable_file_record(payload)
+
     def _retag_bbs_archive_rows(self, rows: List[UnifiedMessage]) -> None:
         archive_roots = self._bbs_archive_roots()
         if not rows:
@@ -8512,7 +10578,58 @@ class MessageViewerTab(QWidget):
     def _file_origin_label(self, rec: FileRecord) -> str:
         if self._is_bbs_archive_record(rec):
             return "BBS ARCHIVE"
+        bbs_context = self._bbs_file_management_context_for_record(rec)
+        if bbs_context:
+            label = str(bbs_context.get("label", "") or "").strip()
+            if label:
+                return label.upper()
         return str(rec.origin or "").strip().upper()
+
+    def _bbs_file_area_display_rows(self, rec: FileRecord) -> Tuple[Tuple[str, str], ...]:
+        bbs_context = self._bbs_file_management_context_for_record(rec)
+        if not bbs_context:
+            return ()
+        kind = str(bbs_context.get("kind", "") or "").strip().lower()
+        label = str(bbs_context.get("label", "") or "").strip() or self._file_origin_label(rec)
+        folder = str(bbs_context.get("path", "") or "").strip()
+        if kind == "archive":
+            role = "Archived BBS file"
+        elif kind == "incoming":
+            role = "VarAC incoming file"
+        elif kind == "outgoing":
+            role = "VarAC outgoing file"
+        elif kind == "managed_location":
+            role = "Managed BBS Library location"
+        else:
+            role = "Live VarAC BBS file"
+        rows: List[Tuple[str, str]] = [("BBS File Area", label), ("Role", role)]
+        if folder:
+            rows.append(("Folder", folder))
+        return tuple(rows)
+
+    def _bbs_file_area_text(self, rec: FileRecord) -> str:
+        rows = self._bbs_file_area_display_rows(rec)
+        if not rows:
+            return ""
+        lines = ["BBS File Area"]
+        lines.extend(f"{label}: {value}" for label, value in rows)
+        return "\n".join(lines)
+
+    def _bbs_file_area_html(self, rec: FileRecord) -> str:
+        rows = self._bbs_file_area_display_rows(rec)
+        if not rows:
+            return ""
+        out = [
+            "<div style='font-family: sans-serif; margin: 0 0 10px 0; padding: 8px; "
+            "border: 1px solid #c8d2dc; background: #f5f8fb;'>",
+            "<div><b>BBS File Area</b></div>",
+        ]
+        for label, value in rows:
+            out.append(
+                f"<div><b>{html.escape(label)}:</b> {html.escape(str(value or ''))}</div>"
+            )
+        out.append("</div>")
+        return "".join(out)
 
     def _refresh_files(self, force: bool = False):
         if self._is_shutting_down or self._refresh_files_inflight or self._bbs_auto_archive_inflight:
@@ -10565,6 +12682,11 @@ class MessageViewerTab(QWidget):
     def _row_matches_inbox_criteria(self, row: UnifiedMessage, criteria: InboxFilterCriteria) -> bool:
         if criteria.search_query:
             self._ensure_row_search_text(row)
+        if criteria.focus == "bbs":
+            payload = getattr(row, "payload", None)
+            if not isinstance(payload, FileRecord) or not self._bbs_file_management_context_for_record(payload):
+                return False
+            criteria = replace(criteria, focus="all")
         return _core_row_matches_inbox_criteria(row, criteria)
 
     def _apply_message_filters(self) -> None:
@@ -10932,6 +13054,10 @@ class MessageViewerTab(QWidget):
 
     def _row_matches_inbox_focus(self, row: UnifiedMessage) -> bool:
         focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
+        if focus == "bbs":
+            payload = getattr(row, "payload", None)
+            if isinstance(payload, FileRecord) and self._bbs_file_management_context_for_record(payload):
+                return True
         return _core_row_matches_inbox_focus(row, focus)
 
     def _row_matches_map_context_filter(self, row: UnifiedMessage) -> bool:
@@ -13166,6 +15292,27 @@ class MessageViewerTab(QWidget):
         if not rec or not rec.path.exists():
             return
         audit_row = self._delete_audit_row_for_payload(rec)
+        bbs_context = self._bbs_file_management_context_for_record(rec)
+        if bbs_context:
+            title = "Delete BBS File"
+            label = str(bbs_context.get("label", "") or "FIO-managed BBS area").strip()
+            prompt = (
+                f"Delete this file from {label}?\n\n"
+                f"{rec.path}\n\n"
+                "Use Archive instead when the file may be needed later."
+            )
+            if not self._confirm_single_delete(audit_row, prompt):
+                return
+            result = delete_bbs_file(rec.path)
+            if not result.success:
+                self._record_message_delete_audit(audit_row, result="failed", detail=result.detail, batch_id="single")
+                QMessageBox.warning(self, title, f"Failed to delete file:\n{result.detail}")
+                return
+            self._record_message_delete_audit(audit_row, result="deleted", detail=result.detail, batch_id="single")
+            self._remember_locally_deleted_row(audit_row)
+            self._unfreeze_table()
+            self._populate_messages_table(force=True)
+            return
         title = "Delete File"
         if not self._confirm_single_delete(audit_row, "Delete this file-backed message?"):
             return
@@ -13181,7 +15328,10 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
 
     def _archive_file_record(self, rec: FileRecord) -> None:
-        if not rec or (rec.origin or "").strip().lower() != "bbs":
+        if not rec:
+            return
+        bbs_context = self._bbs_file_management_context_for_record(rec)
+        if not bbs_context:
             return
         if self._is_bbs_archive_record(rec):
             QMessageBox.information(self, "Archive BBS File", "This file is already in the BBS Archive.")
@@ -13205,29 +15355,29 @@ class MessageViewerTab(QWidget):
                 "Configured BBS Archive is not a valid directory.",
             )
             return
-        archive_target_dir = archive_dir / "live"
+        source_label = str(bbs_context.get("label", "") or "BBS file area").strip()
+        source_root = str(bbs_context.get("path", "") or "").strip()
+        archive_context = str(bbs_context.get("archive_context", "") or "live").strip() or "live"
+        archive_target_dir = archive_dir / archive_context
         details = (
             f"Archive this BBS file?\n\n"
             f"{rec.path}\n"
+            f"Source: {source_label}\n"
             f"Destination: {archive_target_dir}"
         )
         resp = QMessageBox.question(self, "Archive BBS File", details, QMessageBox.Yes | QMessageBox.No)
         if resp != QMessageBox.Yes:
             return
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        archive_target_dir.mkdir(parents=True, exist_ok=True)
-        dst = archive_target_dir / rec.path.name
-        if dst.exists():
-            dst = archive_target_dir / f"{rec.path.stem}_{stamp}{rec.path.suffix}"
-            attempt = 2
-            while dst.exists():
-                dst = archive_target_dir / f"{rec.path.stem}_{stamp}_{attempt}{rec.path.suffix}"
-                attempt += 1
-        try:
-            shutil.move(str(rec.path), str(dst))
-        except Exception as e:
-            QMessageBox.warning(self, "Archive BBS File", f"Failed to archive file:\n{e}")
+        result = archive_bbs_file(
+            rec.path,
+            archive_dir=archive_dir,
+            source_root=source_root,
+            archive_context=archive_context,
+        )
+        if not result.success:
+            QMessageBox.warning(self, "Archive BBS File", f"Failed to archive file:\n{result.detail}")
             return
+        dst = Path(result.target_path)
         old_key = self._read_state_key(rec.origin, rec)
         prior_state = self._read_state_map.get(old_key)
         try:
@@ -13369,15 +15519,17 @@ class MessageViewerTab(QWidget):
                     except Exception:
                         pass
                 label = str(bbs_target.get("label", "") or "BBS")
+                radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
                 targets.append(
                     {
                         "id": str(bbs_target.get("id", "") or ""),
                         "kind": "location" if bbs_target.get("kind") == "managed" else "live",
-                        "label": f"{radio_target.label}: {label}",
+                        "label": f"{radio_short_label}: {label}",
                         "radio_id": str(radio_target.radio_id),
-                        "radio_label": radio_target.label,
+                        "radio_label": radio_short_label,
                         "bbs_label": label,
-                        "detail": f"Radio: {radio_target.label}",
+                        "detail": f"Radio: {radio_short_label}",
+                        "full_radio_label": radio_target.label,
                         "path": path,
                         "valid": path is not None and path.exists() and path.is_dir(),
                         "file_count": 0,
@@ -14348,6 +16500,9 @@ class MessageViewerTab(QWidget):
                         "<div style='font-family: sans-serif;'>",
                         f"<div><b>File:</b> {html.escape(rec.path.name)}</div>",
                     ]
+                    bbs_area_html = self._bbs_file_area_html(rec)
+                    if bbs_area_html:
+                        html_out.append(bbs_area_html)
                     if uri:
                         html_out.append(
                             f"<div style='margin-top:8px;'><img src='{uri}' "
@@ -14363,8 +16518,10 @@ class MessageViewerTab(QWidget):
                     self._prune_cache(self._file_view_cache, self._cache_max_view_entries)
                 else:
                     self.viewer.setAcceptRichText(False)
+                    bbs_area_text = self._bbs_file_area_text(rec)
+                    prefix = f"{bbs_area_text}\n\n" if bbs_area_text else ""
                     rendered = (
-                        f"Image file: {rec.path.name}\n\nPreview is not available for {ext}.\n"
+                        f"{prefix}Image file: {rec.path.name}\n\nPreview is not available for {ext}.\n"
                         "Use 'Open Image' to view it in an external application."
                     )
                     self.viewer.setPlainText(rendered)
@@ -14482,6 +16639,9 @@ class MessageViewerTab(QWidget):
                     "Verification",
                     (("Signature / Hash", sig_detail),),
                 )
+                bbs_area_rows = self._bbs_file_area_display_rows(rec)
+                if bbs_area_rows:
+                    self._append_detail_section(detail_lines, "BBS File Area", bbs_area_rows)
                 if is_html:
                     detail_html = self._detail_lines_to_html(detail_lines)
                     content = detail_html + "<hr>" + str(content)
@@ -14489,6 +16649,13 @@ class MessageViewerTab(QWidget):
                     self._append_text_body(detail_lines, "Decoded Message", content)
                     content = "\n".join(detail_lines)
                 info = intelligence.summary or info
+            else:
+                bbs_area_text = self._bbs_file_area_text(rec)
+                if bbs_area_text:
+                    if is_html:
+                        content = self._bbs_file_area_html(rec) + str(content)
+                    else:
+                        content = f"{bbs_area_text}\n\n{content}"
             if self._is_transport_form_ext(ext):
                 self.info_label.setText(info)
             else:

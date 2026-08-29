@@ -151,6 +151,43 @@ def test_guarded_send_clears_tx_text_then_sends_message() -> None:
         server.stop()
 
 
+def test_guarded_send_clears_selected_js8_target_before_preflight() -> None:
+    selected = {"value": "@OLD"}
+
+    def selected_response(req: Mapping[str, Any]) -> Dict[str, Any]:
+        return _response("RX.CALL_SELECTED", req, value=selected["value"])
+
+    def set_selected(req: Mapping[str, Any]) -> None:
+        selected["value"] = str(req.get("value") or "")
+        return _response("RX.CALL_SELECTED", req, value=selected["value"])
+
+    server = _safe_server(
+        **{
+            "RX.GET_CALL_SELECTED": selected_response,
+            "RX.SET_SELECTED_CALL": set_selected,
+            "TX.SET_SELECTED_CALL": set_selected,
+            "STATION.SET_SELECTED_CALL": set_selected,
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        result = send_js8_message_guarded(client, "@MAGNET F!103 ABC", timeout_s=0.4, clear_selected_target=True)
+
+        deadline = time.time() + 1.0
+        while "TX.SEND_MESSAGE" not in [row["type"] for row in server.received] and time.time() < deadline:
+            time.sleep(0.02)
+
+        assert result.sent is True
+        assert selected["value"] == ""
+        request_types = [row["type"] for row in server.received]
+        assert "RX.SET_SELECTED_CALL" in request_types
+        assert "TX.SEND_MESSAGE" in request_types
+        assert request_types.index("RX.SET_SELECTED_CALL") < request_types.index("TX.SEND_MESSAGE")
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_guarded_send_does_not_transmit_when_queue_not_empty() -> None:
     server = _safe_server(
         **{"TX.GET_QUEUE_DEPTH": lambda req: _response("TX.QUEUE_DEPTH", req, {"DEPTH": 2})}

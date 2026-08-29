@@ -11,6 +11,7 @@ from freqinout.core.nbems_compose import (
     discover_compose_message_folders,
     parse_compose_template_fields,
     plan_compose_destinations,
+    resolve_fastlight_form_family,
     resolve_fastlight_filename_policy,
     resolve_compose_message_folder,
     resolve_flamp_transmit_dir,
@@ -93,6 +94,18 @@ def test_fastlight_filename_policy_uses_amrron_hyphen_defaults() -> None:
     assert build_signed_filename(name, filename_policy=policy, operating_group="AMRRON") == (
         "W8UFO-TN-RR-20260423-1325z-WeeklySnapshot-sig.b2s"
     )
+
+
+def test_fastlight_form_family_resolves_from_operating_group() -> None:
+    groups = [
+        {"group": "MAGNET", "fastlight_form_family": "ICS"},
+        {"group": "AMRRON", "fastlight_form_family": "group_default"},
+    ]
+
+    assert resolve_fastlight_form_family(groups, "MAGNET") == "ICS"
+    assert resolve_fastlight_form_family(groups, "@MAGNET") == "ICS"
+    assert resolve_fastlight_form_family(groups, "AMRRON") == ""
+    assert resolve_fastlight_form_family(groups, "UNKNOWN") == ""
 
 
 def test_fastlight_filename_policy_uses_saved_group_overrides_for_destinations(tmp_path: Path) -> None:
@@ -409,7 +422,7 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert "field_layout = QVBoxLayout(field_wrap)" in text
     assert "self._refresh_compose_smart_defaults()" in text
     assert "self._compose_active_form_key = form_identity" in text
-    assert "current_values = self._compose_field_values() if form_identity == self._compose_active_form_key else {}" in text
+    assert "dict(self._compose_form_draft_values.get(form_identity, {}))" in text
     assert 'parse_compose_template_fields(template_text)' in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in text

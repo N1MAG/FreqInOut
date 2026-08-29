@@ -341,18 +341,15 @@ class MessageFileScanner:
             base = Path(path)
             if not base.exists():
                 continue
-            if origin == "bbs":
-                self._full_scan_bbs(base, records_map, dir_mtimes, source_id=source_id, source_label=source_label)
-            else:
-                self._full_scan_recursive(
-                    base,
-                    origin,
-                    ORIGIN_EXTS.get(origin),
-                    records_map,
-                    dir_mtimes,
-                    source_id=source_id,
-                    source_label=source_label,
-                )
+            self._full_scan_recursive(
+                base,
+                origin,
+                ORIGIN_EXTS.get(origin),
+                records_map,
+                dir_mtimes,
+                source_id=source_id,
+                source_label=source_label,
+            )
         return self._finalize_maps(records_map), dir_mtimes
 
     def _run_incremental(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
@@ -392,30 +389,18 @@ class MessageFileScanner:
             if not base.exists():
                 missing_roots[origin].add(base_norm)
                 continue
-            if origin == "bbs":
-                self._scan_changed_bbs(
-                    base,
-                    records_map,
-                    dir_mtimes,
-                    seen_files,
-                    changed_dirs,
-                    reused_dirs,
-                    source_id=source_id,
-                    source_label=source_label,
-                )
-            else:
-                self._scan_changed_recursive(
-                    base,
-                    origin,
-                    ORIGIN_EXTS.get(origin),
-                    records_map,
-                    dir_mtimes,
-                    seen_files,
-                    changed_dirs,
-                    reused_dirs,
-                    source_id=source_id,
-                    source_label=source_label,
-                )
+            self._scan_changed_recursive(
+                base,
+                origin,
+                ORIGIN_EXTS.get(origin),
+                records_map,
+                dir_mtimes,
+                seen_files,
+                changed_dirs,
+                reused_dirs,
+                source_id=source_id,
+                source_label=source_label,
+            )
 
         for origin, path_map in records_map.items():
             roots = set(self._roots_by_origin.get(origin, []))

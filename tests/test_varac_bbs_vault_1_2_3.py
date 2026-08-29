@@ -14,7 +14,10 @@ from freqinout.core.varac_bbs_vault import (
     FlampRelayStore,
     VaultLocation,
     VaultRuntimeState,
+    archive_bbs_file,
+    bbs_file_management_roots,
     compute_default_managed_root,
+    delete_bbs_file,
     hash_access_code,
     import_live_bbs_to_default_location,
     initialize_managed_root,
@@ -395,6 +398,94 @@ def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
     assert copied == 1
     assert (Path(created["default"]) / "Report.k2s").exists()
     assert compute_default_managed_root(live_bbs).endswith("FIO_BBS_Vault")
+
+
+def test_archive_bbs_file_preserves_context_and_avoids_collisions(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "radio-a" / "BBS"
+    archive_root = tmp_path / "Archive"
+    live_bbs.mkdir(parents=True)
+    src = live_bbs / "weather.txt"
+    src.write_text("new", encoding="utf-8")
+    existing = archive_root / "live" / "weather.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("old", encoding="utf-8")
+
+    result = archive_bbs_file(src, archive_dir=archive_root, source_root=live_bbs, archive_context="live")
+
+    assert result.success is True
+    assert not src.exists()
+    assert result.target_path != str(existing)
+    assert Path(result.target_path).parent == existing.parent
+    assert Path(result.target_path).read_text(encoding="utf-8") == "new"
+    assert existing.read_text(encoding="utf-8") == "old"
+
+
+def test_archive_bbs_file_preserves_relative_path_for_incoming_or_outgoing_folder(tmp_path: Path) -> None:
+    incoming = tmp_path / "VarAC" / "Incoming"
+    archive_root = tmp_path / "Archive"
+    nested = incoming / "K7ABC"
+    nested.mkdir(parents=True)
+    src = nested / "msg.txt"
+    src.write_text("payload", encoding="utf-8")
+
+    result = archive_bbs_file(src, archive_dir=archive_root, source_root=incoming, archive_context="incoming")
+
+    assert result.success is True
+    assert Path(result.target_path) == archive_root / "incoming" / "K7ABC" / "msg.txt"
+    assert Path(result.target_path).read_text(encoding="utf-8") == "payload"
+
+
+def test_delete_bbs_file_deletes_only_files(tmp_path: Path) -> None:
+    file_path = tmp_path / "BBS" / "old.txt"
+    file_path.parent.mkdir()
+    file_path.write_text("old", encoding="utf-8")
+
+    folder_result = delete_bbs_file(file_path.parent)
+
+    assert folder_result.success is False
+    assert file_path.exists()
+
+    file_result = delete_bbs_file(file_path)
+
+    assert file_result.success is True
+    assert not file_path.exists()
+
+
+def test_bbs_file_management_roots_include_radio_and_library_folders(tmp_path: Path) -> None:
+    settings = _Settings(
+        message_paths={"varac": str(tmp_path / "Incoming")},
+        varac_outbox_dir=str(tmp_path / "Outgoing"),
+        varac_bbs_dir=str(tmp_path / "BBS"),
+        varac_bbs_archive_dir=str(tmp_path / "Archive"),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": "intel",
+                "name": "Intel",
+                "source_dir": str(tmp_path / "Library" / "Intel"),
+                "enabled": True,
+            },
+            {
+                "id": "hidden",
+                "name": "Hidden",
+                "source_dir": str(tmp_path / "Library" / "Hidden"),
+                "enabled": False,
+            },
+        ],
+    )
+
+    rows = bbs_file_management_roots(settings)
+
+    assert [row["kind"] for row in rows] == [
+        "incoming",
+        "outgoing",
+        "live_bbs",
+        "managed_location",
+        "archive",
+    ]
+    assert rows[0]["archive_context"] == "incoming"
+    assert rows[1]["archive_context"] == "outgoing"
+    assert rows[2]["archive_context"] == "live"
+    assert rows[3]["archive_context"] == "locations/intel"
 
 
 def test_publish_root_view_respects_callsign_visibility(tmp_path: Path) -> None:
@@ -2794,7 +2885,11 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     text = tab._varac_bbs_vault_structure_preview_text()
 
     assert "This preview does not publish files or change VarAC.ini." in text
+    assert "Selected radio VarAC folders:" in text
+    assert "- Incoming: not set" in text
+    assert "- Outgoing: not set" in text
     assert f"Live BBS folder: {live_bbs}" in text
+    assert "- BBS Archive: not set" in text
     assert f"Managed root: {managed_root}" in text
     assert "Root menu callers will see:" in text
     assert "Root view visitor files:" in text
@@ -3016,7 +3111,7 @@ def test_settings_tab_forces_managed_root_into_bbs_area(tmp_path: Path) -> None:
     expected_default = str(second_bbs.parent / "FIO_BBS_Vault")
     assert tab.varac_bbs_vault_root_edit.text() == expected_default
     assert expected_default in tab.varac_bbs_vault_root_hint_label.text()
-    assert "Automatic vault location" in tab.varac_bbs_vault_root_hint_label.text()
+    assert "Automatic library location" in tab.varac_bbs_vault_root_hint_label.text()
 
 
 def test_run_varac_bbs_vault_ignores_stale_managed_root_setting(tmp_path: Path) -> None:
