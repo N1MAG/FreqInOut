@@ -730,7 +730,7 @@ class MainWindow(QMainWindow):
         self.station_command_radio_summary_widget.setObjectName("stationCommandRadioSummary")
         self.station_command_radio_summary_widget.setMinimumWidth(0)
         self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.station_command_radio_summary_layout = QHBoxLayout(self.station_command_radio_summary_widget)
+        self.station_command_radio_summary_layout = QVBoxLayout(self.station_command_radio_summary_widget)
         self.station_command_radio_summary_layout.setContentsMargins(0, 0, 0, 0)
         self.station_command_radio_summary_layout.setSpacing(6)
         self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)
@@ -6771,6 +6771,124 @@ class MainWindow(QMainWindow):
         button.setFont(font)
         button.setStyleSheet(button_style(role, theme))
 
+    def _station_command_attention_role_for_snapshot(self, snapshot: object) -> tuple[str, str]:
+        ident = self._station_command_snapshot_id(snapshot)
+        state = self._station_command_compact_state_text(self._station_command_state_text(snapshot)).strip().lower()
+        try:
+            health_state = str(self._station_command_health_summary_for_profile(snapshot).get("state", "") or "").strip().lower()
+        except Exception:
+            health_state = ""
+        if health_state == "error" or state in {"ptt active", "rf guard blocked", "blocked", "error", "failed"}:
+            return "danger", "Needs action"
+        if (
+            health_state in {"warn", "warning", "review"}
+            or state in {"manual hold", "manual qsy", "scheduler suspended", "needs review", "warning", "warn"}
+            or self._station_command_scheduler_manual_qsy_active_for_radio(ident)
+            or self._station_command_scheduler_suspended_manually_for_radio(ident)
+            or self._station_command_timed_suspend_active_for_radio(ident)
+        ):
+            return "warning", "Watch"
+        if state in {"inactive", "configured inactive", "not enabled"}:
+            return "muted", "Inactive"
+        return "success", "Clear"
+
+    def _station_command_focus_score(self, snapshot: object, selected_id: int) -> int:
+        ident = self._station_command_snapshot_id(snapshot)
+        role, _label = self._station_command_attention_role_for_snapshot(snapshot)
+        if role == "danger":
+            score = 1000
+        elif role == "warning":
+            score = 700
+        else:
+            score = 100
+        if self._station_command_bool(self._station_command_value(snapshot, "runtime_primary", False)):
+            score += 80
+        if self._station_command_bool(self._station_command_value(snapshot, "runtime_active", False)):
+            score += 40
+        if ident > 0 and ident == int(selected_id or 0):
+            score += 250
+        return score
+
+    def _station_command_promoted_snapshot(self, choices: list[object], selected: object | None) -> object | None:
+        if not choices:
+            return None
+        selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
+        selected_score = self._station_command_focus_score(selected, selected_id) if selected is not None else -1
+        best = max(
+            choices,
+            key=lambda snapshot: (
+                self._station_command_focus_score(snapshot, selected_id),
+                -choices.index(snapshot),
+            ),
+        )
+        best_score = self._station_command_focus_score(best, selected_id)
+        if selected is not None and selected_score >= best_score:
+            return selected
+        return best
+
+    def _station_command_source_chip_tooltip(self, snapshot: object, selected_id: int) -> str:
+        name = self._station_command_snapshot_name(snapshot)
+        role, label = self._station_command_attention_role_for_snapshot(snapshot)
+        now = self._station_command_now_text_for_summary(snapshot, selected_id)
+        next_text = self._station_command_next_text(snapshot)
+        plan_text = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
+        return f"{name}: {label}\nNow: {now or '--'}\nNext: {next_text or '--'}\nPlan: {plan_text or '--'}"
+
+    def _add_station_command_source_rail(
+        self,
+        layout: QLayout,
+        parent: QWidget,
+        choices: list[object],
+        selected_id: int,
+        theme: Mapping[str, object],
+    ) -> int:
+        rail = QFrame(parent)
+        rail.setObjectName("stationCommandSourceRail")
+        rail.setFrameShape(QFrame.NoFrame)
+        rail_layout = QHBoxLayout(rail)
+        rail_layout.setContentsMargins(0, 0, 0, 0)
+        rail_layout.setSpacing(6)
+        total_width = 0
+        attention = [
+            snapshot
+            for snapshot in choices
+            if self._station_command_attention_role_for_snapshot(snapshot)[0] in {"danger", "warning"}
+        ]
+        if attention:
+            target = max(attention, key=lambda snapshot: self._station_command_focus_score(snapshot, selected_id))
+            target_id = self._station_command_snapshot_id(target)
+            attention_btn = QPushButton(f"Attention {len(attention)}", rail)
+            attention_btn.setObjectName("stationCommandAttentionChip")
+            attention_btn.setToolTip("Focus the radio or source that most needs operator attention.")
+            attention_btn.setStyleSheet(button_style("warning", theme))
+            attention_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            if target_id > 0:
+                attention_btn.clicked.connect(
+                    lambda _checked=False, profile_id=target_id: self._on_station_command_summary_radio_clicked(profile_id)
+                )
+            rail_layout.addWidget(attention_btn)
+            total_width += int(attention_btn.sizeHint().width() or 0) + 6
+        for snapshot in choices:
+            ident = self._station_command_snapshot_id(snapshot)
+            selected = ident > 0 and ident == int(selected_id or 0)
+            role, _label = self._station_command_attention_role_for_snapshot(snapshot)
+            chip = QPushButton(self._station_command_snapshot_name(snapshot), rail)
+            chip.setObjectName("stationCommandSourceChip")
+            chip.setCheckable(True)
+            chip.setChecked(selected)
+            chip.setToolTip(self._station_command_source_chip_tooltip(snapshot, selected_id))
+            chip.setStyleSheet(button_style("info" if selected else role, theme))
+            chip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            if ident > 0:
+                chip.clicked.connect(
+                    lambda _checked=False, profile_id=ident: self._on_station_command_summary_radio_clicked(profile_id)
+                )
+            rail_layout.addWidget(chip)
+            total_width += int(chip.sizeHint().width() or 0) + 6
+        rail_layout.addStretch(1)
+        layout.addWidget(rail)
+        return max(0, total_width)
+
     def _refresh_station_command_radio_summary(self, choices: list[object], selected_id: int) -> None:
         layout = getattr(self, "station_command_radio_summary_layout", None)
         if layout is None:
@@ -6855,6 +6973,8 @@ class MainWindow(QMainWindow):
         parent = getattr(self, "station_command_radio_summary_widget", None)
         tiles = parent.findChildren(QFrame, "stationCommandRadioTile") if parent is not None else []
         tile_height = max((int(tile.sizeHint().height()) for tile in tiles), default=0)
+        rail = parent.findChild(QFrame, "stationCommandSourceRail") if parent is not None else None
+        rail_height = int(rail.sizeHint().height() or 0) if rail is not None else 0
         horizontal_extra = 0
         try:
             viewport_width = int(scroll.viewport().width() or 0)
@@ -6863,7 +6983,7 @@ class MainWindow(QMainWindow):
                 horizontal_extra = int(scroll.horizontalScrollBar().sizeHint().height() or 14)
         except Exception:
             horizontal_extra = 0
-        height = max(132, min(188, tile_height + horizontal_extra + 8))
+        height = max(132, min(220, tile_height + rail_height + horizontal_extra + 14))
         scroll.setFixedHeight(height)
 
     def _station_command_set_qsy_combo_to_meta(self, meta: Mapping[str, object] | None) -> None:
@@ -7119,15 +7239,25 @@ class MainWindow(QMainWindow):
         if not isinstance(pending_qsy_keys, dict):
             pending_qsy_keys = {}
             self._station_command_card_qsy_pending_keys = pending_qsy_keys
-        card_width = self._station_command_radio_card_width(len(choices))
+        focused_snapshot = next(
+            (
+                snapshot
+                for snapshot in choices
+                if self._station_command_snapshot_id(snapshot) == int(selected_id or 0)
+            ),
+            choices[0] if choices else None,
+        )
+        focused_choices = [focused_snapshot] if focused_snapshot is not None else []
+        card_width = self._station_command_radio_card_width(1)
+        rail_min_width = self._add_station_command_source_rail(layout, parent, choices, selected_id, theme)
         try:
             spacing = max(0, int(layout.spacing()))
-            row_min_width = max(0, len(choices) * card_width + max(0, len(choices) - 1) * spacing)
+            row_min_width = max(card_width, rail_min_width + spacing)
             parent.setMinimumWidth(row_min_width)
             parent.setMaximumWidth(16777215)
         except Exception:
             pass
-        for snapshot in choices:
+        for snapshot in focused_choices:
             ident = self._station_command_snapshot_id(snapshot)
             selected = ident > 0 and ident == int(selected_id or 0)
             state = self._station_command_compact_state_text(self._station_command_state_text(snapshot))
@@ -7749,7 +7879,7 @@ class MainWindow(QMainWindow):
                 seen_ids.add(ident)
         self._station_command_last_choices = list(choices)
 
-        selected = self._station_command_selected_snapshot(choices)
+        selected = self._station_command_promoted_snapshot(choices, self._station_command_selected_snapshot(choices))
         selected_id = self._station_command_snapshot_id(selected) if selected is not None else 0
         card_mode = len(choices) >= 1
         multi_active = len(choices) >= 2

@@ -691,6 +691,13 @@ Implementation note:
   MainWindow station-command snapshot labels route through the contract so card
   titles use the radio short name and long generated descriptions do not become
   primary command labels.
+- The top bar renders all active command-capable sources as compact short-name
+  chips, then renders one focused command card for the source that needs action.
+- Focus promotion order is critical health/blocker, active NCS/net, imminent
+  QSY, active send/transfer, direct or high-severity traffic, manual user focus,
+  normal primary, then all-clear fallback.
+- Off-focus warnings must remain visible in the chip rail so a source with an
+  issue is not hidden behind horizontal scrolling.
 
 ## Review Questions For Future Product Direction
 

@@ -264,10 +264,18 @@ Inputs:
 Required behavior:
 
 - use the user-defined radio short name as the primary card title
-- show as many configured radio cards as fit before enabling horizontal scroll
-- never create separate paging windows or controls for ordinary two-radio setups
-- keep cards compact at Large text without hiding core actions
-- use horizontal overflow only when cards cannot fit after normal compression
+- render every command-capable source as a compact status chip so 1-5 active
+  radios, SDRs, and future mesh/APRS-style sources remain visible at a glance
+- render one focused command card for the source that currently deserves action
+- promote focus by operational need: critical health/blocker, active NCS/net,
+  imminent QSY, active send/transfer, direct or high-severity traffic, manual
+  user focus, normal primary, then all-clear fallback
+- show off-focus issues in the chip rail so a problem on a source outside the
+  focused card is still visible without scrolling
+- keep QSY, hold/suspend, resume, health, current target, and next/plan context
+  reachable from the focused card without overlapping controls
+- use horizontal overflow only for the compact chip rail when the configured
+  source count exceeds available width
 
 ### Setup Checklist
 

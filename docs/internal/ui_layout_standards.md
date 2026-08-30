@@ -117,18 +117,20 @@ text and reduced window sizes.
 ## Station Command Bar
 
 The station command bar is the primary always-visible radio control surface. It
-is organized as one stable card per active radio. Do not rely on a `primary
-radio` concept in the operator-facing control model; a radio is either active
-and managed, or inactive and out of the command surface.
+is organized as a compact source rail plus one focused command card. Every
+active command-capable source gets a short-name chip; the full card is reserved
+for the source that needs operator action now.
 
-The card model is used for one or more active radios. A single active radio may
-use the available width, but it must still be the same card interaction model
-used when a second radio is activated. Activating or deactivating a radio should
-not switch to a different legacy control-strip layout.
+The source rail model is used for one or more active radios. A single active
+radio may use the available width, but it must still be the same chip + focus
+interaction model used when more sources are activated. Activating or
+deactivating a radio should not switch to a different legacy control-strip
+layout.
 
 At minimized widths, station command cards must remain usable before they look
-beautiful. Cards may page one radio at a time, use a real horizontal scroll area,
-and shorten action labels (`Timed QSY` to `Hold`, `Timed Suspend` to `Suspend`,
+beautiful. The chip rail may horizontally scroll when necessary, but it should
+show as many source chips as possible before scrolling. The focused card may
+shorten action labels (`Timed QSY` to `Hold`, `Timed Suspend` to `Suspend`,
 `Change Plan` to `Plan`) while keeping full action meaning in tooltips. QSY,
 hold/suspend, resume, health, current target, and next/plan context must remain
 reachable without overlapping controls.

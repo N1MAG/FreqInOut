@@ -2634,10 +2634,13 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert window.station_command_state_label.text() == "Manual Hold"
     assert window.station_command_next_label.text() == "Next: Net Plan"
     summary_tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-    assert len(summary_tiles) == 2
+    assert len(summary_tiles) == 1
     summary_buttons = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandRadioTileName")
-    assert [button.text() for button in summary_buttons] == ["DX10", "icom"]
-    assert [button.isChecked() for button in summary_buttons] == [False, True]
+    assert [button.text() for button in summary_buttons] == ["icom"]
+    assert [button.isChecked() for button in summary_buttons] == [True]
+    source_chips = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandSourceChip")
+    assert [button.text() for button in source_chips] == ["DX10", "icom"]
+    assert [button.isChecked() for button in source_chips] == [False, True]
     assert window.station_command_qsy_btn.isEnabled() is True
     assert window.station_command_freq_combo.currentText() == "MAGNET 20M"
     assert window.station_command_freq_combo.itemData(
@@ -3148,9 +3151,11 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
 
     assert 'health_btn = QPushButton("Health", tile)' in tile_block
     assert 'health_btn.setObjectName("stationCommandRadioTileHealth")' in tile_block
+    assert 'chip.setObjectName("stationCommandSourceChip")' in source
+    assert "selected = self._station_command_promoted_snapshot(" in refresh_block
     assert 'freq_combo = QComboBox(tile)' in tile_block
     assert 'freq_combo.setObjectName("stationCommandRadioTileFrequency")' in tile_block
-    assert "card_width = self._station_command_radio_card_width(len(choices))" in tile_block
+    assert "card_width = self._station_command_radio_card_width(1)" in tile_block
     assert "tile.setMinimumWidth(card_width)" in tile_block
     assert "tile.setMaximumWidth(card_width)" in tile_block
     assert "tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in tile_block
@@ -3221,7 +3226,7 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
     assert "def _sync_station_command_radio_summary_height(self, *, card_mode: bool) -> None:" in source
-    assert "height = max(132, min(188, tile_height + horizontal_extra + 8))" in source
+    assert "height = max(132, min(220, tile_height + rail_height + horizontal_extra + 14))" in source
     assert "self._sync_station_command_radio_summary_height(card_mode=card_mode)" in refresh_block
     assert "widget.setVisible(not card_mode)" in refresh_block
     assert "widget.setVisible(False)" in refresh_block
@@ -3996,17 +4001,15 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
         app.processEvents()
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-        assert len(tiles) == 2
+        assert len(tiles) == 1
+        chips = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandSourceChip")
+        assert [chip.text() for chip in chips] == ["FIO-A", "FIO-B"]
 
         first_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
-        second_combo = tiles[1].findChild(QComboBox, "stationCommandRadioTileFrequency")
         assert first_combo is not None
-        assert second_combo is not None
 
         first_labels = [first_combo.itemText(index) for index in range(first_combo.count())]
-        second_labels = [second_combo.itemText(index) for index in range(second_combo.count())]
         assert first_labels == ["MAGNET 20M", "MAGNET 40M"]
-        assert second_labels == ["AMRRON 20M", "AMRRON 40M"]
         assert MainWindow._station_command_now_text_for_summary(window, snapshots[1], selected_id=1) == "AMRRON 20M"
 
         first_qsy = next(btn for btn in tiles[0].findChildren(QPushButton) if btn.text() == "QSY")
@@ -4022,6 +4025,19 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
         assert first_qsy.isEnabled() is True
         assert first_timed.isEnabled() is True
         assert window._station_command_card_qsy_pending_keys[1] == "14.115000"
+
+        window.station_command_radio_summary_widget.deleteLater()
+        window.station_command_radio_summary_widget = QWidget()
+        window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
+        MainWindow._refresh_station_command_radio_tiles(window, snapshots, selected_id=2)
+        app.processEvents()
+
+        tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
+        assert len(tiles) == 1
+        second_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        assert second_combo is not None
+        second_labels = [second_combo.itemText(index) for index in range(second_combo.count())]
+        assert second_labels == ["AMRRON 20M", "AMRRON 40M"]
     finally:
         window.station_command_radio_summary_widget.deleteLater()
         window.station_command_bar.deleteLater()
@@ -4132,15 +4148,18 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
     ]
 
     try:
-        MainWindow._refresh_station_command_radio_tiles(window, snapshots, selected_id=1)
+        MainWindow._refresh_station_command_radio_tiles(window, snapshots, selected_id=2)
         app.processEvents()
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-        assert len(tiles) == 2
-        assert all(tile.maximumWidth() <= 480 for tile in tiles)
+        assert len(tiles) == 1
+        assert all(tile.maximumWidth() <= 900 for tile in tiles)
         assert not any(button.text() == "Manual QSY" for tile in tiles for button in tile.findChildren(QPushButton))
+        chips = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandSourceChip")
+        assert [chip.text() for chip in chips] == ["FIO-A", "FIO-B"]
+        assert [chip.isChecked() for chip in chips] == [False, True]
 
-        second_combo = tiles[1].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        second_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
         assert second_combo is not None
         assert second_combo.currentText() == "AMRRON 20M"
         assert [second_combo.itemText(index) for index in range(second_combo.count())] == ["AMRRON 20M", "AMRRON 40M"]
@@ -4148,8 +4167,8 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
         assert MainWindow._station_command_now_text_for_summary(window, snapshots[1], selected_id=1) == "AMRRON 20M"
         assert MainWindow._station_command_next_text(window, snapshots[1]) == "AMRRON 40M"
 
-        second_qsy = next(btn for btn in tiles[1].findChildren(QPushButton) if btn.text() == "QSY")
-        second_timed = tiles[1].findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
+        second_qsy = next(btn for btn in tiles[0].findChildren(QPushButton) if btn.text() == "QSY")
+        second_timed = tiles[0].findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
         assert second_timed is not None
         assert second_qsy.isEnabled() is False
         assert second_timed.isEnabled() is False
