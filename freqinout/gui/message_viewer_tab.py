@@ -4590,7 +4590,7 @@ class MessageViewerTab(QWidget):
         messages_layout.addWidget(self.messages_table)
         messages_box.setLayout(messages_layout)
         splitter = QSplitter(Qt.Vertical)
-        style_splitter_handles(splitter, resolve_theme(self._dark))
+        style_splitter_handles(splitter, resolve_theme(self.settings))
         splitter.addWidget(messages_box)
         self.messages_splitter = splitter
 
@@ -5545,7 +5545,7 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_bbs_location_row_widget)
 
         body_splitter = QSplitter(Qt.Vertical)
-        style_splitter_handles(body_splitter, resolve_theme(self._dark))
+        style_splitter_handles(body_splitter, resolve_theme(self.settings))
         self.compose_body_splitter = body_splitter
         self.compose_setup_scroll = QScrollArea()
         self.compose_setup_scroll.setWidgetResizable(True)
@@ -5555,7 +5555,7 @@ class MessageViewerTab(QWidget):
         self.compose_setup_scroll.setWidget(setup_box)
         body_splitter.addWidget(self.compose_setup_scroll)
         splitter = QSplitter(Qt.Horizontal)
-        style_splitter_handles(splitter, resolve_theme(self._dark))
+        style_splitter_handles(splitter, resolve_theme(self.settings))
         self.compose_splitter = splitter
         field_box = QGroupBox("Form Fields")
         self.compose_field_box = field_box

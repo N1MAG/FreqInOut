@@ -626,9 +626,11 @@ def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:
     assert "style_splitter_handles(self.top_splitter" in controlfreq_source
     assert "style_splitter_handles(self.left_splitter" in controlfreq_source
     assert "style_splitter_handles(self.right_splitter" in controlfreq_source
-    assert "style_splitter_handles(splitter, resolve_theme(self._dark))" in message_source
-    assert "style_splitter_handles(body_splitter, resolve_theme(self._dark))" in message_source
+    assert "style_splitter_handles(splitter, resolve_theme(self.settings))" in message_source
+    assert "style_splitter_handles(body_splitter, resolve_theme(self.settings))" in message_source
+    assert "resolve_theme(self._dark)" not in message_source
     assert "style_splitter_handles(self._map_canvas_splitter" in map_source
+    assert "resolve_theme(self._dark)" not in map_source
     assert "style_splitter_handles(self.roster_compare_splitter, resolve_theme(self.settings))" in ncs_source
     assert "resolve_theme(self._dark)" not in ncs_source
     assert "Resizable split panels must advertise that they are resizable." in layout_spec
