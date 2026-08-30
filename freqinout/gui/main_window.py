@@ -719,7 +719,7 @@ class MainWindow(QMainWindow):
         self.station_command_radio_summary_scroll.setObjectName("stationCommandRadioSummaryScroll")
         self.station_command_radio_summary_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.station_command_radio_summary_scroll.setMinimumWidth(0)
-        self.station_command_radio_summary_scroll.setWidgetResizable(True)
+        self.station_command_radio_summary_scroll.setWidgetResizable(False)
         self.station_command_radio_summary_scroll.setFrameShape(QFrame.NoFrame)
         self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.station_command_radio_summary_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -729,7 +729,7 @@ class MainWindow(QMainWindow):
         self.station_command_radio_summary_widget = QWidget()
         self.station_command_radio_summary_widget.setObjectName("stationCommandRadioSummary")
         self.station_command_radio_summary_widget.setMinimumWidth(0)
-        self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.station_command_radio_summary_layout = QHBoxLayout(self.station_command_radio_summary_widget)
         self.station_command_radio_summary_layout.setContentsMargins(0, 0, 0, 0)
         self.station_command_radio_summary_layout.setSpacing(6)
@@ -2741,6 +2741,7 @@ class MainWindow(QMainWindow):
             if abs(width - previous_width) >= 24:
                 self._station_command_last_layout_width = width
                 self._station_command_radio_summary_signature = None
+                self._refresh_station_command_bar(force=False)
             self._apply_station_command_bar_layout()
         except Exception:
             pass

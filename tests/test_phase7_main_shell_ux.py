@@ -1625,7 +1625,9 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_duration_combo.setObjectName("stationCommandDuration")' in source
     assert 'self.station_command_radio_summary_label = QLabel("Radios")' in source
     assert 'self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)' in source
+    assert "self.station_command_radio_summary_scroll.setWidgetResizable(False)" in source
     assert "self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
+    assert "self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)" in source
     assert "self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)" in source
     assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
     assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
