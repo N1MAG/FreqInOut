@@ -1625,9 +1625,9 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_duration_combo.setObjectName("stationCommandDuration")' in source
     assert 'self.station_command_radio_summary_label = QLabel("Radios")' in source
     assert 'self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)' in source
-    assert "self.station_command_radio_summary_scroll.setWidgetResizable(False)" in source
+    assert "self.station_command_radio_summary_scroll.setWidgetResizable(True)" in source
     assert "self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
-    assert "self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)" in source
+    assert "self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in source
     assert "self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)" in source
     assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
     assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
@@ -3217,7 +3217,7 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     card_width_block = source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
     assert "min(480, available // count)" in card_width_block
     assert "parent.setMaximumWidth(16777215)" in source
-    assert "scroll.horizontalScrollBar().setValue(0)" in source
+    assert "QTimer.singleShot(0, lambda: self._refresh_station_command_bar(force=False))" in source
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
     assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block
