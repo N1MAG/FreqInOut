@@ -2895,7 +2895,7 @@ class StationsMapTab(QWidget):
         tabs.addTab(overview_body, "Overview")
         tabs.addTab(status_body, "Status")
         tabs.addTab(paths_body, "Paths")
-        tabs.addTab(messages_body, "Messages")
+        tabs.addTab(messages_body, "Inbox")
         layout.addWidget(tabs, 1)
 
         action_grid = QGridLayout()
@@ -2906,14 +2906,14 @@ class StationsMapTab(QWidget):
         paths_btn = QPushButton("Show Paths To")
         group_btn = QPushButton("Group")
         topic_btn = QPushButton("Topic")
-        messages_btn = QPushButton("Messages")
+        messages_btn = QPushButton("Inbox")
         spotter_btn = QPushButton("Compose Message")
         sop_btn = QPushButton("SOP")
         center_btn.setToolTip("Center the map on this selected station, report, or area.")
         paths_btn.setToolTip("Show observed direct or shared-contact paths from my station to the selected station.")
         group_btn.setToolTip("Filter the map to this station or report group.")
         topic_btn.setToolTip("Filter the map to this report topic.")
-        messages_btn.setToolTip("Open the related message evidence for this map selection.")
+        messages_btn.setToolTip("Open Messages Inbox filtered to the evidence for this map selection.")
         spotter_btn.setToolTip("Open Compose and prefill the selected station callsign.")
         sop_btn.setToolTip("Open SOP guidance related to this selection.")
         center_btn.clicked.connect(self._center_map_selected_detail)
@@ -3041,7 +3041,7 @@ class StationsMapTab(QWidget):
         if self._map_selected_messages_btn is not None:
             target = str(message_context.get("target") or "").strip()
             self._map_selected_messages_btn.setVisible(bool(target))
-            self._map_selected_messages_btn.setText("Local Traffic" if target == "local_reports" else "Messages")
+            self._map_selected_messages_btn.setText("Local Traffic" if target == "local_reports" else "Inbox")
         if self._map_selected_spotter_btn is not None:
             can_message = bool(action_callsign) and not self._map_selected_station_is_self(action_callsign)
             self._map_selected_spotter_btn.setVisible(bool(action_callsign))
@@ -3894,6 +3894,16 @@ class StationsMapTab(QWidget):
                 reported_for = self._map_detail_first_value(rows.get("reported for"), rows.get("area"), rows.get("location"))
                 report_scope = self._map_detail_first_value(rows.get("report scope"), rows.get("scope"), payload.get("scope"))
                 reported_by = self._map_detail_first_value(rows.get("reporter"), rows.get("from"), rows.get("reported by"), payload.get("call_label"), payload.get("callsign"), payload.get("from_call"))
+                status_text = self._map_detail_first_value(rows.get("status"), rows.get("severity"))
+                topic_text = self._map_detail_first_value(
+                    rows.get("topics"),
+                    rows.get("topic"),
+                    payload.get("topic"),
+                    ", ".join(str(value or "").strip() for value in (payload.get("topics") or []) if str(value or "").strip())
+                    if isinstance(payload.get("topics"), (list, tuple, set))
+                    else "",
+                )
+                why_text = " | ".join(part for part in (status_text, topic_text, reported_for) if part)
                 action_callsign = self._map_selected_action_callsign(payload)
                 reporter_snapshot = self._map_station_activity_snapshot(action_callsign) if action_callsign else {}
                 reporter_modes = self._map_tool_list_text(reporter_snapshot.get("modes", [])) if reporter_snapshot else ""
@@ -3918,7 +3928,9 @@ class StationsMapTab(QWidget):
                 parts.append(self._map_detail_row_html("Reporter Modes", reporter_modes))
                 parts.append(self._map_detail_row_html("Reporter Last Seen", reporter_seen))
                 parts.append(self._map_detail_row_html("Reporter Seen Via", reporter_source))
-                parts.append(self._map_detail_row_html("Status", self._map_detail_first_value(rows.get("status"), rows.get("severity"))))
+                parts.append(self._map_detail_row_html("Why", why_text))
+                parts.append(self._map_detail_row_html("Status", status_text))
+                parts.append(self._map_detail_row_html("Topics", topic_text))
                 parts.append("</div>")
             elif source_family == "local_report":
                 parts.append("<div class='fio-detail-section'><div class='fio-detail-heading'>Local Report</div>")
@@ -4895,9 +4907,10 @@ class StationsMapTab(QWidget):
             }
         inbox_source = source_family
         source_key = inbox_source.strip().lower().replace(" ", "_")
-        if source_key in {"condition_alert", "fused", "mixed", "multiple_sources"} or (kind == "report" and topic):
+        if source_key in {"condition_alert", "fused", "mixed", "multiple_sources"} or (kind == "report" and topic and not source_key):
             inbox_source = ""
         final_query = query_filter or selected_call
+        grid_filter = self._map_detail_first_value(payload.get("grid"), rows.get("grid"))
         if kind == "report" and not final_query:
             area_query = self._map_detail_first_value(payload.get("state"), payload.get("grid"), rows.get("area"), rows.get("location"))
             final_query = re.split(r"[\s/|,]+", str(area_query or "").strip().upper())[0] if area_query else ""
@@ -4917,6 +4930,8 @@ class StationsMapTab(QWidget):
             "source_family": inbox_source,
             "age_filter_seconds": int(getattr(self, "recency_seconds", 0) or 0),
         }
+        if grid_filter:
+            context["grid_filter"] = grid_filter
         if concern_only:
             context["concern_only"] = True
         return context
@@ -4963,6 +4978,7 @@ class StationsMapTab(QWidget):
                     age_filter_seconds=context.get("age_filter_seconds") or 0,
                     concern_only=context.get("concern_only") or False,
                     state_filter=str(context.get("state_filter") or ""),
+                    grid_filter=str(context.get("grid_filter") or ""),
                     fema_region_filter=str(context.get("fema_region_filter") or ""),
                 )
         except Exception as exc:

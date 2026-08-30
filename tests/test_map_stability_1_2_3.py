@@ -696,7 +696,7 @@ def test_map_selected_detail_panel_has_operator_context_tabs() -> None:
     assert 'tabs.addTab(overview_body, "Overview")' in panel_block
     assert 'tabs.addTab(status_body, "Status")' in panel_block
     assert 'tabs.addTab(paths_body, "Paths")' in panel_block
-    assert 'tabs.addTab(messages_body, "Messages")' in panel_block
+    assert 'tabs.addTab(messages_body, "Inbox")' in panel_block
 
 
 def test_map_selected_status_explains_marker_without_raw_question_noise() -> None:
@@ -1717,7 +1717,7 @@ def test_map_selected_message_context_routes_by_source_family() -> None:
         "group_filter": "MR08",
         "topic_filter": "Fire",
         "query_filter": "",
-        "source_family": "",
+        "source_family": "spotter",
         "age_filter_seconds": 0,
     }
 
@@ -1803,6 +1803,49 @@ def test_map_selected_message_context_routes_by_source_family() -> None:
         },
     )
     assert pin_context == {"target": ""}
+
+
+def test_commstat_map_detail_explains_yellow_and_opens_inbox_with_grid(monkeypatch) -> None:
+    tab = _bare_tab()
+    opened: list[tuple[str, dict[str, object]]] = []
+    main_window = SimpleNamespace(
+        open_messages_section=lambda section, **kwargs: opened.append((section, kwargs))
+    )
+    payload = {
+        "type": "report",
+        "source_family": "commstat",
+        "title": "CommStat StatRep | REGION | YELLOW",
+        "topic": "Comms",
+        "group": "MAGNET",
+        "grid": "DM12MR",
+        "rows": [
+            {"label": "Reported By", "value": "KI6QDB"},
+            {"label": "Reported For", "value": "CA / DM12MR"},
+            {"label": "Status", "value": "caution"},
+            {"label": "Topics", "value": "Comms"},
+        ],
+    }
+    tab._map_selected_payload = payload
+    monkeypatch.setattr(StationsMapTab, "window", lambda _self: main_window)
+
+    detail_html = StationsMapTab._map_selected_detail_html(tab, payload)
+    context = StationsMapTab._map_selected_message_context(tab, payload)
+    StationsMapTab._open_map_selected_messages(tab)
+
+    assert "Why" in detail_html
+    assert "caution" in detail_html
+    assert "Comms" in detail_html
+    assert context["target"] == "messages"
+    assert context["grid_filter"] == "DM12MR"
+    assert len(opened) == 1
+    section, kwargs = opened[0]
+    assert section == "inbox"
+    assert kwargs["group_filter"] == "MAGNET"
+    assert kwargs["topic_filter"] == "Comms"
+    assert kwargs["query_filter"] == "DM12MR"
+    assert kwargs["source_family"] == "commstat"
+    assert kwargs["concern_only"] is True
+    assert kwargs["grid_filter"] == "DM12MR"
 
 
 def test_map_detail_clean_text_removes_html_fragments() -> None:
@@ -3400,7 +3443,9 @@ def test_map_station_action_buttons_use_operator_language() -> None:
     ]
 
     assert 'QPushButton("Show Paths To")' in panel_block
+    assert 'QPushButton("Inbox")' in panel_block
     assert 'QPushButton("Compose Message")' in panel_block
+    assert 'QPushButton("Messages")' not in panel_block
     assert 'QPushButton("Send Spotter")' not in panel_block
 
 

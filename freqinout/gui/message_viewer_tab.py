@@ -5145,8 +5145,8 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_js8_auth_row_widget)
 
         self.compose_js8_plain_row_widget = QWidget()
-        self.compose_js8_plain_row_widget.setMinimumHeight(170)
-        self.compose_js8_plain_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.compose_js8_plain_row_widget.setMinimumHeight(120)
+        self.compose_js8_plain_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         js8_plain_layout = QGridLayout(self.compose_js8_plain_row_widget)
         js8_plain_layout.setContentsMargins(0, 0, 0, 0)
         js8_plain_layout.setHorizontalSpacing(8)
@@ -5166,10 +5166,15 @@ class MessageViewerTab(QWidget):
         self.compose_js8_plain_kind_chip_group = QButtonGroup(self)
         self.compose_js8_plain_kind_chip_group.setExclusive(True)
         self.compose_js8_plain_text_label = QLabel("Text")
+        self.compose_js8_plain_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.compose_js8_plain_text_edit = QTextEdit()
         self.compose_js8_plain_text_edit.setAcceptRichText(False)
-        self.compose_js8_plain_text_edit.setMinimumHeight(132)
-        self.compose_js8_plain_text_edit.setMaximumHeight(420)
+        js8_text_h = max(
+            control_height_for_font(self.compose_js8_plain_text_edit, vertical_padding=34, floor=74),
+            self.compose_js8_plain_text_edit.fontMetrics().lineSpacing() * 3 + 18,
+        )
+        self.compose_js8_plain_text_edit.setMinimumHeight(js8_text_h)
+        self.compose_js8_plain_text_edit.setMaximumHeight(js8_text_h)
         self.compose_js8_plain_text_edit.setPlaceholderText("Short JS8 text")
         self.compose_js8_plain_text_edit.setToolTip("Keep RF traffic short. FIO will prepend the target when a target is set.")
         self.compose_js8_plain_text_edit.textChanged.connect(self._update_compose_preview)
@@ -5180,6 +5185,7 @@ class MessageViewerTab(QWidget):
         js8_plain_layout.addWidget(self.compose_js8_plain_text_label, 1, 0)
         js8_plain_layout.addWidget(self.compose_js8_plain_text_edit, 1, 1)
         js8_plain_layout.setColumnStretch(1, 1)
+        js8_plain_layout.setRowStretch(1, 0)
         self.compose_js8_plain_row_widget.setVisible(False)
         self.compose_js8_plain_scroll = QScrollArea()
         self.compose_js8_plain_scroll.setWidgetResizable(True)

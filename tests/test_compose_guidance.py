@@ -189,8 +189,8 @@ def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
     assert "self.compose_form_row_widget.setVisible(nbems_mode or spotter_mode)" in source
     assert "self.compose_header_row_widget.setVisible(nbems_mode)" in source
     assert "self.compose_setup_box = setup_box" in source
-    assert "self.compose_js8_plain_row_widget.setMinimumHeight(170)" in source
-    assert "self.compose_js8_plain_text_edit.setMinimumHeight(132)" in source
+    assert "self.compose_js8_plain_row_widget.setMinimumHeight(120)" in source
+    assert "self.compose_js8_plain_text_edit.setMaximumHeight(js8_text_h)" in source
     assert "self.compose_commstat_row_widget.setMinimumHeight(240)" in source
     assert "self.compose_rf_fields_stack = QStackedWidget()" in source
     assert "self.compose_js8_plain_scroll = QScrollArea()" in source
@@ -299,6 +299,20 @@ def test_rf_compose_modes_do_not_render_nbems_form_preview() -> None:
     assert "self.compose_rf_fields_stack.setCurrentWidget(self.compose_commstat_scroll)" in source
     assert "self.compose_field_scroll.setVisible(not (js8_mode or commstat_mode))" in source
     assert "self._refresh_compose_layout_geometry_if_needed()" in source
+
+
+def test_js8_compose_text_box_stays_short_and_label_top_aligned() -> None:
+    source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
+    block = source[
+        source.index("self.compose_js8_plain_row_widget = QWidget()")
+        : source.index("self.compose_commstat_row_widget = QWidget()")
+    ]
+
+    assert "self.compose_js8_plain_row_widget.setMinimumHeight(120)" in block
+    assert "self.compose_js8_plain_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in block
+    assert "self.compose_js8_plain_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)" in block
+    assert "js8_text_h = max(" in block
+    assert "self.compose_js8_plain_text_edit.setMaximumHeight(js8_text_h)" in block
 
 
 def test_compose_commstat_catalogs_are_cached_for_preview_performance() -> None:
