@@ -195,6 +195,7 @@ def build_radio_source_lanes(
     """Build compact operational lanes from active radio profiles."""
     lanes: list[OperationalSourceLane] = []
     seen: set[str] = set()
+    assigned_attention_ids: set[str] = set()
     for profile in radio_profiles:
         if not isinstance(profile, Mapping):
             continue
@@ -204,6 +205,7 @@ def build_radio_source_lanes(
         seen.add(source_id)
         short_name = _short_source_name(profile)
         profile_attention = _attention_for_source(source_id, short_name, attention_items)
+        assigned_attention_ids.update(str(item.id or "") for item in profile_attention if str(item.id or "").strip())
         is_primary = _truthy(profile.get("runtime_primary"))
         lanes.append(
             OperationalSourceLane(
@@ -215,6 +217,21 @@ def build_radio_source_lanes(
                 health="Primary" if is_primary else "Active",
                 attention_count=len(profile_attention),
                 attention_summary=_lane_attention_summary(profile_attention),
+            )
+        )
+    for family, family_items in _unassigned_attention_by_family(attention_items, assigned_attention_ids).items():
+        if family in seen:
+            continue
+        lanes.append(
+            OperationalSourceLane(
+                source_id=family,
+                short_name=_source_family_lane_label(family),
+                source_kind=family,
+                now="traffic",
+                next="--",
+                health="Data",
+                attention_count=len(family_items),
+                attention_summary=_lane_attention_summary(family_items),
             )
         )
     return tuple(lanes)
@@ -270,19 +287,48 @@ def _attention_for_source(
     short_norm = str(short_name or "").strip().lower()
     matches: list[AttentionItem] = []
     for item in attention_items:
-        haystack = " ".join(
+        values = tuple(
             str(value or "").strip().lower()
-            for value in (
-                item.source_ref,
-                item.source_family,
-                item.group,
-                item.summary,
-                item.subject,
-            )
+            for value in (item.source_ref, item.source_family, item.group, item.summary, item.subject)
+            if str(value or "").strip()
         )
-        if (source_id_norm and source_id_norm in haystack) or (short_norm and short_norm in haystack):
+        haystack = " ".join(values)
+        source_id_matches = bool(source_id_norm and source_id_norm in set(values))
+        short_name_matches = bool(short_norm and len(short_norm) >= 4 and short_norm in haystack)
+        if source_id_matches or short_name_matches:
             matches.append(item)
     return tuple(matches)
+
+
+def _unassigned_attention_by_family(
+    attention_items: Sequence[AttentionItem],
+    assigned_attention_ids: set[str],
+) -> dict[str, tuple[AttentionItem, ...]]:
+    buckets: dict[str, list[AttentionItem]] = {}
+    for item in attention_items:
+        item_id = str(item.id or "").strip()
+        if item_id and item_id in assigned_attention_ids:
+            continue
+        family = _normalize_source(item.source_family)
+        if not family:
+            continue
+        buckets.setdefault(family, []).append(item)
+    return {family: tuple(items) for family, items in buckets.items()}
+
+
+def _source_family_lane_label(family: str) -> str:
+    labels = {
+        "js8call": "JS8",
+        "spotter": "FIOSpotter",
+        "commstat": "CommStat",
+        "varac": "VarAC",
+        "local_report": "Local",
+        "meshcore": "MeshCore",
+        "mqtt": "Mesh MQTT",
+        "aprs": "APRS",
+        "reticulum": "LXMF",
+    }
+    return labels.get(_normalize_source(family), str(family or "Source").strip() or "Source")
 
 
 def _lane_attention_summary(items: Sequence[AttentionItem]) -> str:

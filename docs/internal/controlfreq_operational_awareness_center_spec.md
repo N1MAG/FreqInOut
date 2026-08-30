@@ -127,6 +127,10 @@ Behavior:
 - If multiple radios or data sources are active, show one compact lane per
   source. ControlFreq must not collapse multi-source operations into a single
   "Now" string.
+- Configured radio lanes render first. Received traffic from a source family
+  that is not clearly attached to a radio still gets its own data-source lane
+  so future APRS, Mesh MQTT, MeshCore, and Reticulum/LXMF traffic can appear
+  without a tab-specific custom layout.
 - Source lanes are the ControlFreq implementation of the view-contract source
   model: new data families should add a source lane projection before adding
   custom dashboard rendering.

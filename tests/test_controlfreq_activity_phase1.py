@@ -625,6 +625,29 @@ def test_controlfreq_builds_source_lanes_for_active_radios() -> None:
     assert "KI6QDB" in lanes[1].attention_summary
 
 
+def test_controlfreq_builds_data_source_lane_for_unassigned_traffic() -> None:
+    lanes = build_radio_source_lanes(
+        [{"id": 1, "name": "FIO-A", "runtime_primary": 1}],
+        current_label="MAGNET 40M 7.115 MHz",
+        next_label="MAGNET 80M 23:00",
+        attention_items=[
+            AttentionItem(
+                id="aprs-1",
+                source_family="aprs",
+                source_ref="object FIRE-1",
+                callsign="W0ABC",
+                subject="Wildfire object update",
+                topics=("Wildfire",),
+            )
+        ],
+    )
+
+    assert [lane.short_name for lane in lanes] == ["FIO-A", "APRS"]
+    assert lanes[1].source_kind == "aprs"
+    assert lanes[1].now == "traffic"
+    assert lanes[1].attention_count == 1
+
+
 def test_controlfreq_operational_awareness_uses_source_lanes() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
     spec = Path("docs/internal/controlfreq_operational_awareness_center_spec.md").read_text(encoding="utf-8")
