@@ -1449,8 +1449,8 @@ def test_phase7_controlfreq_compact_mode_scrolls_without_clipping_frequency_card
         assert tab._responsive_layout_mode == "compact"
         assert tab.top_overview_row.direction() == controlfreq_mod.QBoxLayout.TopToBottom
         assert tab.freq_ctrl_box.isVisible() is False
-        assert tab.intersection_box.minimumHeight() >= 130
-        assert tab.schedule_box.minimumHeight() >= 140
+        assert tab.intersection_box.minimumHeight() >= 96
+        assert tab.schedule_box.minimumHeight() >= 120
     finally:
         tab.deleteLater()
         app.processEvents()

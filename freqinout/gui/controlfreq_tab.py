@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QScrollArea,
     QFrame,
+    QToolButton,
 )
 
 from freqinout.core.config_paths import get_config_dir
@@ -538,15 +539,20 @@ class ControlFreqTab(QWidget):
         self.intersection_label = QLabel("Now +2h")
         self.intersection_label.setStyleSheet("font-weight: bold;")
         inter_header_row.addWidget(self.intersection_label)
-        self.intersection_info = QLabel("?")
+        self.intersection_info = QToolButton()
+        self.intersection_info.setText("?")
         self.intersection_info.setToolTip(
             "Exact-frequency overlaps between your schedule and peer schedules\n"
             "for now and the next two hours."
         )
+        self.intersection_info.setAutoRaise(False)
+        self.intersection_info.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        info_h = button_height_for_font(self.intersection_info, floor=30)
+        self.intersection_info.setFixedSize(info_h, info_h)
         self.intersection_info.setStyleSheet(
             "font-weight: bold; border: 1px solid #888; border-radius: 8px; padding: 0 4px;"
         )
-        inter_header_row.addWidget(self.intersection_info)
+        inter_header_row.addWidget(self.intersection_info, alignment=Qt.AlignVCenter)
         inter_header_row.addStretch(1)
         intersection_layout.addLayout(inter_header_row)
         self.intersection_table = QTableWidget(0, 3)
@@ -874,8 +880,8 @@ class ControlFreqTab(QWidget):
                 self.inbox_box.setMaximumHeight(16777215)
                 if getattr(self, "_responsive_layout_mode", "wide") == "compact":
                     for widget, height in (
-                        (self.intersection_box, 130),
-                        (self.schedule_box, 140),
+                        (self.intersection_box, self._content_fit_group_height(self.intersection_box, floor=96)),
+                        (self.schedule_box, self._content_fit_group_height(self.schedule_box, floor=120)),
                     ):
                         widget.setMinimumHeight(height)
                         widget.setMaximumHeight(16777215)
@@ -888,8 +894,8 @@ class ControlFreqTab(QWidget):
                     int(self.inbox_box.sizeHint().height()),
                 )
                 activity_h = max(150, int(self.activity_box.sizeHint().height()))
-                intersection_h = max(130, int(self.intersection_box.sizeHint().height()))
-                schedule_h = max(140, int(self.schedule_box.sizeHint().height()))
+                intersection_h = self._content_fit_group_height(self.intersection_box, floor=96)
+                schedule_h = self._content_fit_group_height(self.schedule_box, floor=120)
                 for widget, height in (
                     (self.freq_ctrl_box, freq_h),
                     (self.inbox_box, inbox_h),
@@ -6578,10 +6584,38 @@ class ControlFreqTab(QWidget):
     @staticmethod
     def _fit_group_box_to_contents(group_box: QGroupBox) -> None:
         try:
-            height = max(96, int(group_box.sizeHint().height()) + 8)
+            height = ControlFreqTab._content_fit_group_height(group_box, floor=96)
             group_box.setMaximumHeight(height)
         except Exception:
             pass
+
+    @staticmethod
+    def _content_fit_group_height(group_box: QGroupBox, *, floor: int = 96) -> int:
+        try:
+            layout = group_box.layout()
+            if layout is None:
+                return max(int(floor), int(group_box.sizeHint().height()))
+            margins = layout.contentsMargins()
+            spacing = max(0, int(layout.spacing()))
+            total = int(margins.top()) + int(margins.bottom()) + 28
+            visible_items = 0
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget()
+                nested = item.layout()
+                if widget is not None:
+                    if bool(widget.isHidden()):
+                        continue
+                    total += int(widget.maximumHeight() if widget.maximumHeight() < 16777215 else widget.sizeHint().height())
+                    visible_items += 1
+                elif nested is not None:
+                    total += int(nested.sizeHint().height())
+                    visible_items += 1
+            if visible_items > 1:
+                total += spacing * (visible_items - 1)
+            return max(int(floor), total + 8)
+        except Exception:
+            return max(int(floor), int(group_box.sizeHint().height()))
 
     @staticmethod
     def _apply_elide_tooltips(table: QTableWidget, col: int) -> None:
