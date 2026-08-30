@@ -347,6 +347,10 @@ Map:
 - Schedule Intersections belong with Schedule Outlook. They should feel like an
   explanatory/detail slice of the schedule timeline rather than a separate
   competing dashboard card in the traffic column.
+- Schedule Intersections must expose a real schedule-horizon control in the
+  header (`30m`, `1h`, `2h`, `6h`). The selected horizon drives both the
+  calculation and the persisted UI state. Do not use a decorative `2h ?` label
+  that appears clickable but does nothing.
 - Propagation defaults to a compact RF Readiness summary. Detailed propagation
   tables are opt-in through `Forecast Details` and must not leave a large blank
   panel when collapsed.
@@ -354,6 +358,8 @@ Map:
   Two configured radios must display together at normal/maximized laptop widths.
   Page controls must be child widgets inside the command bar, never independent
   windows.
+- Resizable ControlFreq panels must use the shared visible splitter-handle style
+  so the operator can discover and grab the divider without pixel hunting.
 
 ## Data Model Requirements
 

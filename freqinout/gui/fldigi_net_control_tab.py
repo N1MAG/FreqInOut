@@ -79,7 +79,7 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import button_height_for_font, resolve_theme, button_style
+from freqinout.gui.theme import button_height_for_font, resolve_theme, button_style, style_splitter_handles
 
 CURRENT_CHECKIN_FILE_NAMES = {
     "TFC": "CheckIns_TFC.txt",
@@ -535,7 +535,7 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(self._left_bucket_col, stretch=1)
 
         self.roster_compare_splitter = QSplitter(Qt.Vertical)
-        self.roster_compare_splitter.setChildrenCollapsible(False)
+        style_splitter_handles(self.roster_compare_splitter, resolve_theme(self._dark))
         self.roster_compare_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._left_bucket_col.addWidget(self.roster_compare_splitter, stretch=1)
 

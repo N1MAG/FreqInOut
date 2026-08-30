@@ -32,6 +32,13 @@ Required behavior:
   with scrollable category content instead of long horizontal button rows.
 - Settings-style views should keep the left rail bounded and scrollable, with the
   selected content pane owning the remaining width.
+- Resizable split panels must advertise that they are resizable. Use the shared
+  splitter-handle styling helper so the divider is wide enough to grab, visually
+  distinct from surrounding borders, hover-highlighted, and tooltipped. Do not
+  rely on an unmarked one-pixel divider for core workflows.
+- If a label looks like a control, make it a real control. Time windows such as
+  schedule horizons must be selectable when they appear in the view header;
+  static `2h ?` labels are not acceptable on operational dashboards.
 - Settings must always provide a clear path to create custom user-defined
   operating groups. `Settings > Main > HF Operating Groups` and the local group
   views may offer built-in or imported group presets, but those presets must not

@@ -369,6 +369,7 @@ from freqinout.gui.theme import (
     fit_combo_box_to_contents,
     resolve_theme,
     single_line_label_height,
+    style_splitter_handles,
 )
 from freqinout.gui.qsy_helper import perform_qsy, suspend_active, scheduler_enabled
 from freqinout.gui.dropdown_checklist import DropdownChecklist
@@ -4589,6 +4590,7 @@ class MessageViewerTab(QWidget):
         messages_layout.addWidget(self.messages_table)
         messages_box.setLayout(messages_layout)
         splitter = QSplitter(Qt.Vertical)
+        style_splitter_handles(splitter, resolve_theme(self._dark))
         splitter.addWidget(messages_box)
         self.messages_splitter = splitter
 
@@ -5543,6 +5545,7 @@ class MessageViewerTab(QWidget):
         setup_layout.addWidget(self.compose_bbs_location_row_widget)
 
         body_splitter = QSplitter(Qt.Vertical)
+        style_splitter_handles(body_splitter, resolve_theme(self._dark))
         self.compose_body_splitter = body_splitter
         self.compose_setup_scroll = QScrollArea()
         self.compose_setup_scroll.setWidgetResizable(True)
@@ -5552,6 +5555,7 @@ class MessageViewerTab(QWidget):
         self.compose_setup_scroll.setWidget(setup_box)
         body_splitter.addWidget(self.compose_setup_scroll)
         splitter = QSplitter(Qt.Horizontal)
+        style_splitter_handles(splitter, resolve_theme(self._dark))
         self.compose_splitter = splitter
         field_box = QGroupBox("Form Fields")
         self.compose_field_box = field_box

@@ -117,6 +117,7 @@ from freqinout.gui.theme import (
     led_style,
     resolve_theme,
     single_line_label_height,
+    style_splitter_handles,
 )
 from freqinout.version import __version__
 
@@ -399,7 +400,7 @@ class ControlFreqTab(QWidget):
 
         # Top region: left = Activity/Intersections/Messages, right = Frequency/Schedule Outlook
         self.top_splitter = QSplitter(Qt.Horizontal)
-        self.top_splitter.setChildrenCollapsible(False)
+        style_splitter_handles(self.top_splitter, self._theme(), width=14)
 
         self.left_col = QWidget()
         left_layout = QVBoxLayout(self.left_col)
@@ -536,23 +537,21 @@ class ControlFreqTab(QWidget):
         self.intersection_box = QGroupBox("Schedule Intersections")
         intersection_layout = QVBoxLayout(self.intersection_box)
         inter_header_row = QHBoxLayout()
-        self.intersection_label = QLabel("Now +2h")
+        self.intersection_label = QLabel("Window")
         self.intersection_label.setStyleSheet("font-weight: bold;")
         inter_header_row.addWidget(self.intersection_label)
-        self.intersection_info = QToolButton()
-        self.intersection_info.setText("?")
-        self.intersection_info.setToolTip(
-            "Exact-frequency overlaps between your schedule and peer schedules\n"
-            "for now and the next two hours."
+        self.intersection_window_combo = QComboBox()
+        self.intersection_window_combo.addItem("30m", 30)
+        self.intersection_window_combo.addItem("1h", 60)
+        self.intersection_window_combo.addItem("2h", 120)
+        self.intersection_window_combo.addItem("6h", 360)
+        self.intersection_window_combo.setCurrentIndex(2)
+        self.intersection_window_combo.setToolTip(
+            "Choose how far ahead to look for exact-frequency overlaps with peer schedules."
         )
-        self.intersection_info.setAutoRaise(False)
-        self.intersection_info.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        info_h = button_height_for_font(self.intersection_info, floor=30)
-        self.intersection_info.setFixedSize(info_h, info_h)
-        self.intersection_info.setStyleSheet(
-            "font-weight: bold; border: 1px solid #888; border-radius: 8px; padding: 0 4px;"
-        )
-        inter_header_row.addWidget(self.intersection_info, alignment=Qt.AlignVCenter)
+        self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)
+        self.intersection_window_combo.currentIndexChanged.connect(self._schedule_persist_ui_state)
+        inter_header_row.addWidget(self.intersection_window_combo, alignment=Qt.AlignVCenter)
         inter_header_row.addStretch(1)
         intersection_layout.addLayout(inter_header_row)
         self.intersection_table = QTableWidget(0, 3)
@@ -580,7 +579,7 @@ class ControlFreqTab(QWidget):
         self._set_message_summary_visible_rows(6)
 
         self.left_splitter = QSplitter(Qt.Vertical)
-        self.left_splitter.setChildrenCollapsible(False)
+        style_splitter_handles(self.left_splitter, self._theme(), width=12)
         self.left_splitter.addWidget(self.activity_box)
         left_layout.addWidget(self.left_splitter)
         self.top_splitter.addWidget(self.left_col)
@@ -701,7 +700,7 @@ class ControlFreqTab(QWidget):
         schedule_layout.addWidget(self.schedule_action_hint)
 
         self.right_splitter = QSplitter(Qt.Vertical)
-        self.right_splitter.setChildrenCollapsible(False)
+        style_splitter_handles(self.right_splitter, self._theme(), width=12)
         self.right_splitter.addWidget(self.intersection_box)
         self.right_splitter.addWidget(self.schedule_box)
         right_layout.addWidget(self.right_splitter)
@@ -960,6 +959,7 @@ class ControlFreqTab(QWidget):
                 "controlfreq_search": (self.search_edit.text() or "").strip(),
                 "controlfreq_group_filter": (self.group_combo.currentData() or "").strip().upper(),
                 "controlfreq_activity_window_min": int(self.activity_window_combo.currentData() or 120),
+                "controlfreq_intersection_window_min": int(self.intersection_window_combo.currentData() or 120),
                 "controlfreq_view_preset": str(self._view_preset or "Operations"),
                 "controlfreq_view_cards": dict(self._view_cards or {}),
                 "controlfreq_top_splitter_sizes": list(self._saved_top_sizes),
@@ -1007,6 +1007,12 @@ class ControlFreqTab(QWidget):
                 self.activity_window_combo.blockSignals(True)
                 self.activity_window_combo.setCurrentIndex(idx)
                 self.activity_window_combo.blockSignals(False)
+            saved_intersection_window = int(self.settings.get("controlfreq_intersection_window_min", 120) or 120)
+            idx = self.intersection_window_combo.findData(saved_intersection_window)
+            if idx >= 0:
+                self.intersection_window_combo.blockSignals(True)
+                self.intersection_window_combo.setCurrentIndex(idx)
+                self.intersection_window_combo.blockSignals(False)
             self._saved_top_sizes = list(self.settings.get("controlfreq_top_splitter_sizes", []) or [])
             self._saved_left_sizes = list(self.settings.get("controlfreq_left_splitter_sizes", []) or [])
             self._saved_right_sizes = list(self.settings.get("controlfreq_right_splitter_sizes", []) or [])
@@ -1958,6 +1964,9 @@ class ControlFreqTab(QWidget):
         if self.activity_window_combo.count() > 0:
             idx = self.activity_window_combo.findData(120)
             self.activity_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        if hasattr(self, "intersection_window_combo") and self.intersection_window_combo.count() > 0:
+            idx = self.intersection_window_combo.findData(120)
+            self.intersection_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._update_clear_filters_style()
         self._on_filters_changed()
 
@@ -1965,7 +1974,9 @@ class ControlFreqTab(QWidget):
         search_active = bool((self.search_edit.text() or "").strip())
         group_active = bool((self.group_combo.currentData() or "").strip())
         window_active = int(self.activity_window_combo.currentData() or 120) != 120
-        return search_active or group_active or window_active
+        intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
+        intersection_window_active = int(intersection_combo.currentData() or 120) != 120
+        return search_active or group_active or window_active or intersection_window_active
 
     def _show_app_search_results(self) -> None:
         query = (self.search_edit.text() or "").strip()
@@ -3811,7 +3822,9 @@ class ControlFreqTab(QWidget):
         now_ts = time.time()
         group_filter = normalize_group_name(self.group_combo.currentData())
         search = (self.search_edit.text() or "").strip().upper()
-        cache_key = (group_filter, search)
+        intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
+        horizon_minutes = int(intersection_combo.currentData() or 120)
+        cache_key = (group_filter, search, horizon_minutes)
         if (
             cache_key == self._intersection_cache_key
             and now_ts - self._intersection_cache_ts < 30
@@ -3822,9 +3835,12 @@ class ControlFreqTab(QWidget):
             self._fit_group_box_to_contents(self.intersection_box)
             return
 
-        rows = self._compute_intersection_summary_rows(group_filter, search)
+        rows = self._compute_intersection_summary_rows(group_filter, search, horizon_minutes=horizon_minutes)
         if not rows:
-            rows = [["Now", "0", "No exact-frequency overlaps"], ["Next 2 hours", "0", "--"]]
+            rows = [
+                ["Now", "0", "No exact-frequency overlaps"],
+                [f"Next {self._format_window_label(horizon_minutes)}", "0", "--"],
+            ]
         self._intersection_cache_ts = now_ts
         self._intersection_cache_key = cache_key
         self._intersection_cache_rows = rows
@@ -3834,14 +3850,14 @@ class ControlFreqTab(QWidget):
         self._fit_group_box_to_contents(self.intersection_box)
 
     def _compute_intersection_summary_rows(
-        self, group_filter: str, search: str
+        self, group_filter: str, search: str, *, horizon_minutes: int = 120
     ) -> List[List[str]]:
         rows: List[List[str]] = []
         now_utc = dt.datetime.now(dt.timezone.utc)
         now_min = now_utc.hour * 60 + now_utc.minute
         now_day_idx = (now_utc.weekday() + 1) % 7  # Sunday=0
         now_week_min = now_day_idx * 1440 + now_min
-        horizon_minutes = 120
+        horizon_minutes = max(1, int(horizon_minutes or 120))
 
         my_entries = self._load_my_schedule_entries()
         if not my_entries:
@@ -3896,8 +3912,24 @@ class ControlFreqTab(QWidget):
                     next_labels.add(self._format_group_band_freq_label(entry))
 
         rows.append(["Now", str(len(now_calls)), self._summarize_labels(now_labels)])
-        rows.append(["Next 2 hours", str(len(next_calls)), self._summarize_labels(next_labels)])
+        rows.append(
+            [
+                f"Next {self._format_window_label(horizon_minutes)}",
+                str(len(next_calls)),
+                self._summarize_labels(next_labels),
+            ]
+        )
         return rows
+
+    @staticmethod
+    def _format_window_label(minutes: int) -> str:
+        minutes = max(1, int(minutes or 0))
+        if minutes < 60:
+            return f"{minutes} minutes"
+        if minutes % 60 == 0:
+            hours = minutes // 60
+            return f"{hours} hour" if hours == 1 else f"{hours} hours"
+        return f"{minutes} minutes"
 
     def _format_group_band_freq_label(self, entry: Dict[str, object]) -> str:
         grp = (entry.get("group") or "--").strip().upper()

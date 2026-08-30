@@ -110,6 +110,7 @@ from freqinout.gui.theme import (
     BAND_COLORS_DARK,
     BAND_COLORS_LIGHT,
     button_style,
+    style_splitter_handles,
 )
 from freqinout.utils.timezones import get_timezone
 
@@ -2255,7 +2256,7 @@ class StationsMapTab(QWidget):
         layout.addWidget(self._map_support_card)
 
         splitter = QSplitter(Qt.Horizontal, self)
-        splitter.setHandleWidth(14)
+        style_splitter_handles(splitter, resolve_theme(self._dark), width=14)
         self._main_splitter = splitter
         layout.addWidget(splitter, stretch=1)
 
@@ -2762,7 +2763,7 @@ class StationsMapTab(QWidget):
         map_layout.addWidget(filter_bar)
 
         self._map_canvas_splitter = QSplitter(Qt.Horizontal, map_container)
-        self._map_canvas_splitter.setHandleWidth(8)
+        style_splitter_handles(self._map_canvas_splitter, resolve_theme(self._dark), width=12)
         map_layout.addWidget(self._map_canvas_splitter, stretch=1)
 
         if _ensure_webengine_imported():

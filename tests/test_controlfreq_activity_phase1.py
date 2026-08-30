@@ -598,11 +598,36 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text()
 
     assert "_sync_propagation_box_height" in controlfreq_source
-    assert "self.intersection_info = QToolButton()" in controlfreq_source
-    assert "self.intersection_info.setFixedSize(info_h, info_h)" in controlfreq_source
+    assert "self.intersection_window_combo = QComboBox()" in controlfreq_source
+    assert 'self.intersection_window_combo.addItem("30m", 30)' in controlfreq_source
+    assert 'self.intersection_window_combo.addItem("6h", 360)' in controlfreq_source
+    assert "self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)" in controlfreq_source
+    assert 'intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)' in controlfreq_source
+    assert "horizon_minutes = int(intersection_combo.currentData() or 120)" in controlfreq_source
     assert "_content_fit_group_height(self.intersection_box, floor=96)" in controlfreq_source
     assert "_content_fit_group_height(self.schedule_box, floor=120)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=4, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
     assert "box.setMaximumHeight(min(height, 420 if details_visible else 150))" in controlfreq_source
+
+
+def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:
+    controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    theme_source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
+    message_source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
+    map_source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    ncs_source = Path("freqinout/gui/fldigi_net_control_tab.py").read_text(encoding="utf-8")
+    layout_spec = Path("docs/internal/ui_layout_standards.md").read_text(encoding="utf-8")
+
+    assert "def style_splitter_handles" in theme_source
+    assert "Drag this divider to resize the panels." in theme_source
+    assert "QSplitter::handle:hover" in theme_source
+    assert "style_splitter_handles(self.top_splitter" in controlfreq_source
+    assert "style_splitter_handles(self.left_splitter" in controlfreq_source
+    assert "style_splitter_handles(self.right_splitter" in controlfreq_source
+    assert "style_splitter_handles(splitter, resolve_theme(self._dark))" in message_source
+    assert "style_splitter_handles(body_splitter, resolve_theme(self._dark))" in message_source
+    assert "style_splitter_handles(self._map_canvas_splitter" in map_source
+    assert "style_splitter_handles(self.roster_compare_splitter" in ncs_source
+    assert "Resizable split panels must advertise that they are resizable." in layout_spec

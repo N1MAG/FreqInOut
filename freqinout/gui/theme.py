@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QSplitter,
     QTextEdit,
     QWidget,
 )
@@ -556,6 +557,37 @@ def apply_text_size_accessibility_guards(root, *, include_widths: bool = True) -
                         widget.setMinimumWidth(min(420, needed))
         except Exception:
             pass
+
+
+def style_splitter_handles(splitter: QSplitter | None, theme: Dict[str, str] | None = None, *, width: int = 12) -> None:
+    """Make resizable panel handles visible and easier to grab."""
+    if splitter is None:
+        return
+    theme = theme or resolve_theme(False)
+    handle_width = max(8, int(width or 0))
+    try:
+        splitter.setHandleWidth(handle_width)
+        splitter.setChildrenCollapsible(False)
+        splitter.setToolTip("Drag this divider to resize the panels.")
+        splitter.setStyleSheet(
+            "QSplitter::handle {"
+            f" background-color: {theme['border']};"
+            " border-radius: 4px;"
+            "}"
+            "QSplitter::handle:horizontal {"
+            " margin: 3px 4px;"
+            " width: 8px;"
+            "}"
+            "QSplitter::handle:vertical {"
+            " margin: 4px 3px;"
+            " height: 8px;"
+            "}"
+            "QSplitter::handle:hover {"
+            f" background-color: {theme['accent']};"
+            "}"
+        )
+    except Exception:
+        return
 
 
 def app_stylesheet(theme: Dict[str, str]) -> str:
