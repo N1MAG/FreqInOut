@@ -15,11 +15,19 @@ Required behavior:
   clipped slivers.
 - Horizontal scrolling is avoided for control panels unless the content is an
   intentionally wide data grid.
+- Horizontal scrolling is permitted as an overflow safety net for high-use
+  command surfaces whose controls must remain immediately reachable, such as the
+  station command radio-card strip. It must not be the only adaptation: controls
+  should first shorten, wrap, stack, or switch to compact labels before clipping.
 - Dense inbox/table workspaces may preserve a wider designed body width and use
   horizontal scrolling when shrinking would clip filters, focus buttons, or
   operator-critical table columns.
 - Responsive layouts should prefer stacked/vertical control groups over shrinking
   controls below their usable size.
+- At minimized widths, a surface may promote a full-workbench/detail action, but
+  the embedded surface must still look intentional and must preserve enough
+  access for the operator to confirm draft/status state, reset or cancel work,
+  and recover without assuming the UI is broken.
 - Dense workspaces with many categories should use a stable left navigation rail
   with scrollable category content instead of long horizontal button rows.
 - Settings-style views should keep the left rail bounded and scrollable, with the
@@ -82,6 +90,23 @@ Implementation guardrails:
 See `docs/internal/ui_text_size_accessibility_assessment.md` for the current
 assessment and rollout plan.
 
+See `docs/internal/operational_view_framework_spec.md` for the preferred product
+architecture for new data-driven screens. New sources should feed reusable
+operational views through normalized projections; pages should opt into
+supported views instead of creating bespoke layouts by default.
+
+Any spec that introduces or changes a data source, projection, operational view,
+or page-level data layout must explicitly answer the Operational View Framework
+Mandatory Design Gates before implementation starts. The spec must cover source
+meaning, volume and retention, provenance and trust, constrained customization,
+map scaling, and action validity. If a gate does not apply, the spec must say why
+so the omission is intentional and reviewable.
+
+See `docs/internal/controlfreq_operational_awareness_center_spec.md` for the
+next ControlFreq dashboard direction. It is the reference design for a high-use,
+role-focused operational awareness surface that must remain glanceable at Large
+text and reduced window sizes.
+
 ## Station Command Bar
 
 The station command bar is the primary always-visible radio control surface. It
@@ -93,6 +118,13 @@ The card model is used for one or more active radios. A single active radio may
 use the available width, but it must still be the same card interaction model
 used when a second radio is activated. Activating or deactivating a radio should
 not switch to a different legacy control-strip layout.
+
+At minimized widths, station command cards must remain usable before they look
+beautiful. Cards may page one radio at a time, use a real horizontal scroll area,
+and shorten action labels (`Timed QSY` to `Hold`, `Timed Suspend` to `Suspend`,
+`Change Plan` to `Plan`) while keeping full action meaning in tooltips. QSY,
+hold/suspend, resume, health, current target, and next/plan context must remain
+reachable without overlapping controls.
 
 The `Now` hero should prefer the operator-facing operating group and band, such
 as `MAGNET 40M` or `S2/GHOSTNET 20M`, rather than the raw frequency. Exact

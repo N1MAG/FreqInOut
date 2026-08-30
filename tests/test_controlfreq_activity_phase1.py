@@ -453,12 +453,41 @@ def test_controlfreq_activity_context_navigation_hooks_are_present():
 
     assert "_open_operational_activity_messages" in controlfreq_source
     assert "_open_operational_activity_map" in controlfreq_source
+    assert "_open_operational_activity_compose" in controlfreq_source
+    assert "compose_intent=intent" in controlfreq_source
+    assert "_pin_selected_awareness_focus" in controlfreq_source
+    assert "_clear_awareness_pins" in controlfreq_source
+    assert "controlfreqAwarenessNowNext" in controlfreq_source
+    assert "controlfreqPropagationSummary" in controlfreq_source
+    assert "def _sync_inbox_summary_visibility" in controlfreq_source
+    assert 'saved_preset == "Schedule"' in controlfreq_source
+    assert "controlfreq_operations_dashboard_seen" in controlfreq_source
+    assert "query_observations" in controlfreq_source
+    assert "build_awareness_snapshot" in controlfreq_source
+    assert "source_contract_for" in controlfreq_source
+    assert "contract.actions.enabled_names()" in controlfreq_source
+    assert "self.awareness_table.itemSelectionChanged.connect(self._sync_operational_action_buttons)" in controlfreq_source
+    assert "def _sync_operational_action_buttons" in controlfreq_source
+    assert "contract.actions.reply or contract.actions.compose" in controlfreq_source
     assert "host.open_local_reports(" in controlfreq_source
-    assert "open_spotter_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
-    assert "open_local_reports_map(group_filter=group_filter, topic_filter=topic_filter)" in controlfreq_source
-    assert "group_filter=str(context.get(\"group_filter\") or \"\")" in controlfreq_source
+    assert "map_context = map_context_from_mapping(context)" in controlfreq_source
+    assert "map_context.as_map_kwargs()" in controlfreq_source
+    assert "map_context.as_messages_kwargs()" in controlfreq_source
+    assert '"group_filter": self.group_filter' in Path("freqinout/core/view_contracts.py").read_text()
     assert "def open_local_reports(self, callsign: str = \"\", *, topic_filter: str = \"\", query: str = \"\")" in main_window_source
-    assert "def open_local_reports_map(self, *, group_filter: str = \"\", topic_filter: str = \"\")" in main_window_source
+    assert "def open_local_reports_map(" in main_window_source
+    assert "grid_filter: str = \"\"" in main_window_source
     assert "_messages_nav_filter_context" in main_window_source
+    assert "prefill_compose_intent(intent)" in main_window_source
     assert "def show_inbox_with_context" in message_viewer_source
     assert "def show_context(self, *, callsign: str = \"\", topic: str = \"\", query: str = \"\")" in local_reports_source
+
+
+def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
+    controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text()
+
+    assert "_sync_propagation_box_height" in controlfreq_source
+    assert "self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)" in controlfreq_source
+    assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=4, empty_rows=1)" in controlfreq_source
+    assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
+    assert "box.setMaximumHeight(min(height, 420 if details_visible else 150))" in controlfreq_source

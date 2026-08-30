@@ -5280,10 +5280,11 @@ def test_message_context_applies_filters_after_search_is_set() -> None:
         group_filter="MR08",
         topic_filter="Fire",
         query_filter="K7ETC",
+        grid_filter="DM79",
         source_family="",
     )
 
-    assert calls[-1] == "apply:K7ETC Fire MR08"
+    assert calls[-1] == "apply:K7ETC Fire DM79 MR08"
 
 
 def test_map_selected_latlon_reads_alias_and_nested_payloads() -> None:
@@ -5297,11 +5298,13 @@ def test_map_to_messages_context_uses_real_filters_before_search_fallback() -> N
     source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
 
     assert "def _message_context_source_values" in source
-    assert 'if source == "js8call":\n            return ["js8"]' in source
+    assert 'if source == "js8call" or normalized == "js8":' in source
     assert 'if source == "forms":\n            return ["flmsg", "flamp"]' in source
-    assert 'if source == "js8spotter":\n            return ["spotter"]' in source
+    assert 'if source in {"js8spotter", "fiospotter"} or normalized == "spotter":' in source
+    assert 'if source == "commstat_rf" or normalized == "commstat":' in source
     assert "selected_group = self._select_context_group_filter(group_filter)" in source
     assert "selected_source = self._select_context_source_filter(source_values)" in source
+    assert '"grid_filter": str(grid_filter or "").strip().upper(),' in source
     assert '"" if selected_group else str(group_filter or "").strip().lstrip("@")' in source
     assert '"" if selected_source else self._message_context_source_search_fallback(source)' in source
     assert 'self.map_context_filter_label = QLabel("")' in source

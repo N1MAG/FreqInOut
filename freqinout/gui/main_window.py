@@ -71,6 +71,11 @@ from freqinout.core.station_health_summary import runtime_observability_items, s
 from freqinout.core.launch_orchestrator import LAUNCH_APP_ORDER
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
+from freqinout.core.view_contracts import (
+    compose_intent_from_mapping,
+    map_context_from_mapping,
+    station_command_radio_from_mapping,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -710,25 +715,31 @@ class MainWindow(QMainWindow):
         self._station_command_suspend_base_text = "Suspend Scheduler"
         self.station_command_radio_summary_label = QLabel("Radios")
         self.station_command_radio_summary_label.setObjectName("stationCommandRadioSummaryLabel")
-        self.station_command_radio_summary_scroll = QWidget(self.station_command_bar)
+        self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)
         self.station_command_radio_summary_scroll.setObjectName("stationCommandRadioSummaryScroll")
         self.station_command_radio_summary_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.station_command_radio_summary_scroll.setMinimumWidth(0)
+        self.station_command_radio_summary_scroll.setWidgetResizable(True)
+        self.station_command_radio_summary_scroll.setFrameShape(QFrame.NoFrame)
+        self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.station_command_radio_summary_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         summary_h = control_height_for_font(self.station_command_radio_summary_scroll, vertical_padding=18, floor=42)
         self.station_command_radio_summary_scroll.setMinimumHeight(summary_h)
         self.station_command_radio_summary_scroll.setMaximumHeight(summary_h)
-        self.station_command_radio_summary_widget = self.station_command_radio_summary_scroll
+        self.station_command_radio_summary_widget = QWidget()
         self.station_command_radio_summary_widget.setObjectName("stationCommandRadioSummary")
         self.station_command_radio_summary_widget.setMinimumWidth(0)
         self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.station_command_radio_summary_layout = QHBoxLayout(self.station_command_radio_summary_widget)
         self.station_command_radio_summary_layout.setContentsMargins(0, 0, 0, 0)
         self.station_command_radio_summary_layout.setSpacing(6)
-        self.station_command_radio_prev_btn = QPushButton("Prev")
+        self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)
+        self.station_command_radio_prev_btn = QPushButton("Prev", self.station_command_bar)
         self.station_command_radio_prev_btn.setObjectName("stationCommandRadioPagePrev")
         self.station_command_radio_prev_btn.setToolTip("Show previous radios.")
         self.station_command_radio_prev_btn.clicked.connect(lambda _checked=False: self._change_station_command_radio_page(-1))
         self.station_command_radio_prev_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.station_command_radio_next_btn = QPushButton("Next")
+        self.station_command_radio_next_btn = QPushButton("Next", self.station_command_bar)
         self.station_command_radio_next_btn.setObjectName("stationCommandRadioPageNext")
         self.station_command_radio_next_btn.setToolTip("Show next radios.")
         self.station_command_radio_next_btn.clicked.connect(lambda _checked=False: self._change_station_command_radio_page(1))
@@ -2725,6 +2736,11 @@ class MainWindow(QMainWindow):
             pass
         super().resizeEvent(event)
         try:
+            width = int(getattr(self, "station_command_bar", self).width() or 0)
+            previous_width = int(getattr(self, "_station_command_last_layout_width", 0) or 0)
+            if abs(width - previous_width) >= 24:
+                self._station_command_last_layout_width = width
+                self._station_command_radio_summary_signature = None
             self._apply_station_command_bar_layout()
         except Exception:
             pass
@@ -3348,27 +3364,45 @@ class MainWindow(QMainWindow):
         age_filter_seconds: object = 0,
         concern_only: object = False,
         state_filter: str = "",
+        grid_filter: str = "",
         fema_region_filter: str = "",
+        compose_intent: Mapping[str, object] | None = None,
     ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
         if idx < 0:
             return
         mode_key = str(mode or "inbox").strip().lower()
         self._messages_nav_context = "compose" if mode_key == "compose" else "inbox"
+        map_context = map_context_from_mapping(
+            {
+                "group_filter": group_filter,
+                "topic_filter": topic_filter,
+                "query_filter": query_filter,
+                "source_family": source_family,
+                "age_filter_seconds": age_filter_seconds,
+                "concern_only": concern_only,
+                "state_filter": state_filter,
+                "grid_filter": grid_filter,
+                "fema_region_filter": fema_region_filter,
+            }
+        )
+        normalized_intent = compose_intent_from_mapping(compose_intent).as_dict() if compose_intent else {}
         self._messages_nav_filter_context = {
-            "group_filter": str(group_filter or ""),
-            "topic_filter": str(topic_filter or ""),
-            "query_filter": str(query_filter or ""),
-            "source_family": str(source_family or ""),
-            "age_filter_seconds": age_filter_seconds,
-            "concern_only": concern_only,
-            "state_filter": str(state_filter or ""),
-            "fema_region_filter": str(fema_region_filter or ""),
+            **map_context.as_messages_kwargs(),
+            "compose_intent": normalized_intent,
         }
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
-    def open_spotter_map(self, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def open_spotter_map(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
@@ -3378,7 +3412,13 @@ class MainWindow(QMainWindow):
             if callable(focus):
                 QTimer.singleShot(
                     0,
-                    lambda: focus(group_filter=group_filter, topic_filter=topic_filter),
+                    lambda: focus(
+                        group_filter=group_filter,
+                        topic_filter=topic_filter,
+                        query_filter=query_filter,
+                        state_filter=state_filter,
+                        grid_filter=grid_filter,
+                    ),
                 )
                 QTimer.singleShot(0, self._sync_map_filters_from_tab)
         self._set_screen(idx)
@@ -3387,7 +3427,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def open_local_reports_map(self, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def open_local_reports_map(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
@@ -3395,7 +3443,13 @@ class MainWindow(QMainWindow):
         if tab is not None and hasattr(tab, "focus_local_reports"):
             QTimer.singleShot(
                 0,
-                lambda: tab.focus_local_reports(group_filter=group_filter, topic_filter=topic_filter),
+                lambda: tab.focus_local_reports(
+                    group_filter=group_filter,
+                    topic_filter=topic_filter,
+                    query_filter=query_filter,
+                    state_filter=state_filter,
+                    grid_filter=grid_filter,
+                ),
             )
             QTimer.singleShot(0, self._sync_map_filters_from_tab)
         self._set_screen(idx)
@@ -3437,6 +3491,10 @@ class MainWindow(QMainWindow):
         try:
             if mode == "compose" and hasattr(tab, "show_compose_from_navigation"):
                 tab.show_compose_from_navigation()
+                context = dict(getattr(self, "_messages_nav_filter_context", {}) or {})
+                intent = context.get("compose_intent")
+                if isinstance(intent, dict) and intent and hasattr(tab, "prefill_compose_intent"):
+                    tab.prefill_compose_intent(intent)
             elif hasattr(tab, "show_inbox_with_context"):
                 context = dict(getattr(self, "_messages_nav_filter_context", {}) or {})
                 if any(str(value or "").strip() for value in context.values()):
@@ -3956,6 +4014,39 @@ class MainWindow(QMainWindow):
         for col in range(16):
             layout.setColumnStretch(col, 0)
 
+        card_mode = bool(getattr(self, "_station_command_multi_mode_active", False))
+        if card_mode and hasattr(self, "station_command_radio_summary_scroll"):
+            for widget in (
+                self.station_command_radio_label,
+                self.station_command_radio_combo,
+                getattr(self, "station_command_radio_separator", None),
+                getattr(self, "station_command_now_caption", None),
+                self.station_command_now_label,
+                getattr(self, "station_command_freq_combo", None),
+                self.station_command_state_label,
+                getattr(self, "station_command_now_separator", None),
+                getattr(self, "station_command_action_label", None),
+                self.station_command_next_label,
+                getattr(self, "station_command_health_label", None),
+                getattr(self, "station_command_health_widget", None),
+                self.station_command_duration_combo,
+                self.station_command_qsy_btn,
+                self.station_command_hold_btn,
+                self.station_command_suspend_btn,
+                self.station_command_resume_btn,
+                getattr(self, "station_command_radio_summary_label", None),
+                getattr(self, "station_command_radio_prev_btn", None),
+                getattr(self, "station_command_radio_next_btn", None),
+                getattr(self, "station_command_radio_admin_btn", None),
+                getattr(self, "station_command_radio_admin_panel", None),
+            ):
+                if widget is not None and widget is not self.station_command_radio_summary_scroll:
+                    widget.setVisible(False)
+            self.station_command_radio_summary_scroll.setVisible(True)
+            layout.addWidget(self.station_command_radio_summary_scroll, 0, 0, 1, 16)
+            layout.setColumnStretch(15, 1)
+            return
+
         if mode == "compact":
             self.station_command_now_label.setWordWrap(False)
             self.station_command_state_label.setWordWrap(False)
@@ -3980,7 +4071,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_next_label, 3, 2, 1, 3)
             if hasattr(self, "station_command_radio_summary_label") and hasattr(self, "station_command_radio_summary_scroll"):
                 layout.addWidget(self.station_command_radio_summary_label, 4, 0)
-                layout.addWidget(self.station_command_radio_summary_scroll, 4, 1, 1, 4)
+                if hasattr(self, "station_command_radio_prev_btn"):
+                    layout.addWidget(self.station_command_radio_prev_btn, 4, 1)
+                layout.addWidget(self.station_command_radio_summary_scroll, 4, 2, 1, 2)
+                if hasattr(self, "station_command_radio_next_btn"):
+                    layout.addWidget(self.station_command_radio_next_btn, 4, 4)
             if hasattr(self, "station_command_radio_admin_btn"):
                 layout.addWidget(self.station_command_radio_admin_btn, 4, 5)
             if hasattr(self, "station_command_radio_admin_panel"):
@@ -4009,7 +4104,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(self.station_command_next_label, 1, 3, 1, 7)
             if hasattr(self, "station_command_radio_summary_label") and hasattr(self, "station_command_radio_summary_scroll"):
                 layout.addWidget(self.station_command_radio_summary_label, 2, 0)
-                layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 11)
+                if hasattr(self, "station_command_radio_prev_btn"):
+                    layout.addWidget(self.station_command_radio_prev_btn, 2, 1)
+                layout.addWidget(self.station_command_radio_summary_scroll, 2, 2, 1, 9)
+                if hasattr(self, "station_command_radio_next_btn"):
+                    layout.addWidget(self.station_command_radio_next_btn, 2, 11)
             if hasattr(self, "station_command_radio_admin_btn"):
                 layout.addWidget(self.station_command_radio_admin_btn, 2, 12)
             if hasattr(self, "station_command_radio_admin_panel"):
@@ -4849,6 +4948,10 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _station_command_snapshot_name(snapshot: object) -> str:
         try:
+            if isinstance(snapshot, Mapping):
+                projected = station_command_radio_from_mapping(snapshot)
+                if projected.short_name:
+                    return projected.card_title
             name = str(MainWindow._station_command_value(snapshot, "name", "") or "").strip()
             if name:
                 return name
@@ -6600,32 +6703,34 @@ class MainWindow(QMainWindow):
         return active if active else choices
 
     def _station_command_radio_cards_per_page(self, total: int) -> int:
-        if total <= 1:
-            return max(1, int(total or 1))
-        try:
-            width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0) - 80
-        except Exception:
-            width = 700
-        if width <= 0:
-            width = 700
-        width = max(280, width)
-        per_page = max(1, width // 330)
-        if width >= 660:
-            per_page = max(2, per_page)
-        return max(1, min(int(total), int(per_page)))
+        total = max(1, int(total or 1))
+        return total
 
     def _station_command_radio_card_width(self, count: int) -> int:
+        count = max(1, int(count or 1))
+        scroll_width = 0
         try:
-            width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0) - 80
+            scroll = getattr(self, "station_command_radio_summary_scroll", None)
+            viewport = getattr(scroll, "viewport", lambda: None)()
+            viewport_width = int(getattr(viewport, "width", lambda: 0)() or 0)
+            scroll_width = int(getattr(scroll, "width", lambda: 0)() or 0)
         except Exception:
-            width = 660
+            viewport_width = 0
+        try:
+            bar_width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0)
+        except Exception:
+            bar_width = 0
+        width = (viewport_width or scroll_width or bar_width or 660) - 20
         if width <= 0:
             width = 660
-        if int(count or 1) <= 1:
-            return max(430, min(900, width))
-        gaps = max(0, int(count or 1) - 1) * 6
-        available = max(220, width - gaps)
-        return max(240, min(430, available // max(1, int(count or 1))))
+        if count <= 1:
+            return max(280, min(900, width))
+        gaps = max(0, count - 1) * 6
+        available = max(300, width - gaps)
+        minimum_card = 280
+        if count * minimum_card + gaps <= width:
+            return max(minimum_card, min(520, available // count))
+        return minimum_card
 
     def _station_command_radio_page_slice(self, choices: list[object]) -> tuple[list[object], int, int, int]:
         total = len(choices)
@@ -6688,17 +6793,13 @@ class MainWindow(QMainWindow):
             layout.addWidget(empty)
             layout.addStretch(1)
             return
-        if len(visible_choices) <= 2:
-            self._station_command_radio_page = 0
-            page_choices = visible_choices
-        else:
-            page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)
+        page_choices = visible_choices
         signature = (
             "tiles",
             int(selected_id or 0),
-            int(getattr(self, "_station_command_radio_page", 0) or 0),
             len(visible_choices),
             self._station_command_radio_card_width(len(page_choices)),
+            int(getattr(getattr(getattr(self, "station_command_radio_summary_scroll", None), "viewport", lambda: None)(), "width", lambda: 0)() or 0),
             tuple(
                 (
                     self._station_command_snapshot_id(snapshot),
@@ -6997,6 +7098,11 @@ class MainWindow(QMainWindow):
             pending_qsy_keys = {}
             self._station_command_card_qsy_pending_keys = pending_qsy_keys
         card_width = self._station_command_radio_card_width(len(choices))
+        try:
+            row_min_width = max(0, len(choices) * card_width + max(0, len(choices) - 1) * int(layout.spacing()))
+            parent.setMinimumWidth(row_min_width)
+        except Exception:
+            pass
         for snapshot in choices:
             ident = self._station_command_snapshot_id(snapshot)
             selected = ident > 0 and ident == int(selected_id or 0)
@@ -7024,6 +7130,7 @@ class MainWindow(QMainWindow):
             tile_layout.setContentsMargins(8, 7, 8, 7)
             tile_layout.setHorizontalSpacing(8)
             tile_layout.setVerticalSpacing(5)
+            compact_card = card_width < 360
 
             name_btn = QPushButton(self._station_command_snapshot_name(snapshot), tile)
             name_btn.setObjectName("stationCommandRadioTileName")
@@ -7072,8 +7179,8 @@ class MainWindow(QMainWindow):
             next_label.setToolTip(f"Next: {next_text}\nPlan: {plan_text}\nClick Change Plan to manage assignment.")
 
             qsy_btn = QPushButton("QSY", tile)
-            qsy_btn.setMinimumWidth(76)
-            qsy_btn.setMaximumWidth(96)
+            qsy_btn.setMinimumWidth(64 if compact_card else 76)
+            qsy_btn.setMaximumWidth(88 if compact_card else 96)
             qsy_btn.setToolTip(
                 f"Select {self._station_command_snapshot_name(snapshot)} and send the selected manual QSY target."
                 if frequency_control_available
@@ -7092,10 +7199,10 @@ class MainWindow(QMainWindow):
             duration_combo.setVisible(False)
             timer_btn = QToolButton(tile)
             timer_btn.setObjectName("stationCommandRadioTileTimedSuspend")
-            timer_btn.setText(timed_qsy_text(timed_qsy_active=timed_qsy_active))
+            timer_btn.setText("Extend" if compact_card and timed_qsy_active else "Hold" if compact_card else timed_qsy_text(timed_qsy_active=timed_qsy_active))
             timer_btn.setPopupMode(QToolButton.MenuButtonPopup)
-            timer_btn.setMinimumWidth(128)
-            timer_btn.setMaximumWidth(150)
+            timer_btn.setMinimumWidth(82 if compact_card else 128)
+            timer_btn.setMaximumWidth(108 if compact_card else 150)
             timer_btn.setToolTip(
                 f"Select {self._station_command_snapshot_name(snapshot)} and QSY with a timed scheduler suspend."
                 if frequency_control_available
@@ -7153,10 +7260,20 @@ class MainWindow(QMainWindow):
                 scheduler_suspended_manual=scheduler_suspended_manual,
                 scheduler_state_text=state,
             )
-            suspend_btn.setText(scheduler_actions.timed_suspend_text)
+            if compact_card:
+                suspend_text = scheduler_actions.timed_suspend_text
+                if suspend_text == "Indefinite Suspend":
+                    suspend_text = "Indef."
+                elif suspend_text == "Extend Suspend":
+                    suspend_text = "Extend"
+                elif suspend_text == "Timed Suspend":
+                    suspend_text = "Suspend"
+                suspend_btn.setText(suspend_text)
+            else:
+                suspend_btn.setText(scheduler_actions.timed_suspend_text)
             suspend_btn.setPopupMode(QToolButton.MenuButtonPopup)
-            suspend_btn.setMinimumWidth(128)
-            suspend_btn.setMaximumWidth(150)
+            suspend_btn.setMinimumWidth(92 if compact_card else 128)
+            suspend_btn.setMaximumWidth(118 if compact_card else 150)
             suspend_btn.setToolTip(
                 f"Suspend scheduler control for {self._station_command_snapshot_name(snapshot)}."
                 if frequency_control_available
@@ -7218,6 +7335,8 @@ class MainWindow(QMainWindow):
             )
             assign_btn = QPushButton("Change Plan", tile)
             assign_btn.setObjectName("stationCommandRadioTileAssign")
+            if compact_card:
+                assign_btn.setText("Plan")
             assign_btn.setToolTip(f"Assign or change the Frequency Plan for {self._station_command_snapshot_name(snapshot)}.")
             assign_btn.setEnabled(ident > 0)
             assign_btn.clicked.connect(lambda _checked=False, profile_id=ident: self._open_schedule_assignment_for_radio(profile_id))
@@ -7298,22 +7417,33 @@ class MainWindow(QMainWindow):
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             _update_card_qsy_buttons()
 
-            tile_layout.addWidget(name_btn, 0, 0, 1, 3)
-            tile_layout.addWidget(health_btn, 0, 3)
-            tile_layout.addWidget(freq_combo, 1, 0, 1, 4)
-            tile_layout.addWidget(qsy_btn, 2, 0)
-            tile_layout.addWidget(timer_btn, 2, 1)
-            tile_layout.addWidget(suspend_btn, 2, 2)
-            tile_layout.addWidget(next_label, 3, 0, 1, 4)
-            tile_layout.addWidget(resume_btn, 4, 0, 1, 2)
-            tile_layout.addWidget(assign_btn, 4, 2, 1, 2)
+            if compact_card:
+                tile_layout.addWidget(name_btn, 0, 0, 1, 2)
+                tile_layout.addWidget(health_btn, 0, 2)
+                tile_layout.addWidget(freq_combo, 1, 0, 1, 3)
+                tile_layout.addWidget(qsy_btn, 2, 0)
+                tile_layout.addWidget(timer_btn, 2, 1)
+                tile_layout.addWidget(suspend_btn, 2, 2)
+                tile_layout.addWidget(next_label, 3, 0, 1, 3)
+                tile_layout.addWidget(resume_btn, 4, 0, 1, 2)
+                tile_layout.addWidget(assign_btn, 4, 2)
+            else:
+                tile_layout.addWidget(name_btn, 0, 0, 1, 3)
+                tile_layout.addWidget(health_btn, 0, 3)
+                tile_layout.addWidget(freq_combo, 1, 0, 1, 4)
+                tile_layout.addWidget(qsy_btn, 2, 0)
+                tile_layout.addWidget(timer_btn, 2, 1)
+                tile_layout.addWidget(suspend_btn, 2, 2)
+                tile_layout.addWidget(next_label, 3, 0, 1, 4)
+                tile_layout.addWidget(resume_btn, 4, 0, 1, 2)
+                tile_layout.addWidget(assign_btn, 4, 2, 1, 2)
             tile_layout.setColumnStretch(0, 0)
             tile_layout.setColumnStretch(1, 0)
             tile_layout.setColumnStretch(2, 0)
             tile_layout.setColumnStretch(3, 1)
-            tile_layout.setColumnMinimumWidth(0, 76)
-            tile_layout.setColumnMinimumWidth(1, 128)
-            tile_layout.setColumnMinimumWidth(2, 128)
+            tile_layout.setColumnMinimumWidth(0, 64 if compact_card else 76)
+            tile_layout.setColumnMinimumWidth(1, 82 if compact_card else 128)
+            tile_layout.setColumnMinimumWidth(2, 92 if compact_card else 128)
             if ident > 0:
                 tile_controls[ident] = {
                     "qsy_btn": qsy_btn,
@@ -7322,6 +7452,7 @@ class MainWindow(QMainWindow):
                     "resume_btn": resume_btn,
                     "freq_combo": freq_combo,
                     "frequency_controls_available": frequency_control_available,
+                    "compact_card": compact_card,
                 }
             try:
                 tile.style().unpolish(tile)
@@ -7360,6 +7491,7 @@ class MainWindow(QMainWindow):
             resume_btn = controls.get("resume_btn")
             combo = controls.get("freq_combo")
             frequency_control_available = bool(controls.get("frequency_controls_available", True))
+            compact_card = bool(controls.get("compact_card", False))
             if isinstance(qsy_btn, QPushButton) and isinstance(combo, QComboBox):
                 if not frequency_control_available:
                     qsy_btn.setText("QSY")
@@ -7396,7 +7528,10 @@ class MainWindow(QMainWindow):
                 qsy_btn.setEnabled(action_state.qsy_enabled)
                 qsy_btn.setStyleSheet(button_style(action_state.qsy_role, theme))
             if isinstance(timer_btn, QToolButton):
-                timer_btn.setText(f"{countdown} | Extend" if timed_qsy_active and countdown else timed_qsy_text(timed_qsy_active=timed_qsy_active))
+                if compact_card:
+                    timer_btn.setText(f"{countdown}" if timed_qsy_active and countdown else "Extend" if timed_qsy_active else "Hold")
+                else:
+                    timer_btn.setText(f"{countdown} | Extend" if timed_qsy_active and countdown else timed_qsy_text(timed_qsy_active=timed_qsy_active))
                 if isinstance(combo, QComboBox):
                     preferred_key = str(combo.property("stationCommandPreferredKey") or "")
                     selected_key = self._station_command_combo_selected_key(combo)
@@ -7431,6 +7566,15 @@ class MainWindow(QMainWindow):
                     if timed_suspend_active and countdown
                     else scheduler_actions.timed_suspend_text
                 )
+                if compact_card:
+                    if timed_suspend_active and countdown:
+                        suspend_text = countdown
+                    elif suspend_text == "Indefinite Suspend":
+                        suspend_text = "Indef."
+                    elif suspend_text == "Extend Suspend":
+                        suspend_text = "Extend"
+                    elif suspend_text == "Timed Suspend":
+                        suspend_text = "Suspend"
                 suspend_btn.setText(suspend_text)
                 suspend_btn.setStyleSheet(button_style(scheduler_actions.timed_suspend_role, theme))
             if isinstance(resume_btn, QPushButton):
@@ -7583,20 +7727,16 @@ class MainWindow(QMainWindow):
         if card_mode and not force and bool(getattr(self, "_station_command_multi_mode_active", False)):
             if selected is not None and selected_id > 0:
                 self._station_command_selected_profile_id = int(selected_id)
-            page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
             for btn, direction, label in (
                 (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
                 (getattr(self, "station_command_radio_next_btn", None), 1, "Next"),
             ):
                 if btn is None:
                     continue
-                show_page_control = len(choices) > 2 and page_count > 1
-                if btn.isVisible() != show_page_control:
-                    btn.setVisible(show_page_control)
-                btn.setEnabled((page > 0) if direction < 0 else (page < page_count - 1))
-                next_text = f"{label} {page + 1}/{page_count}" if page_count > 1 else label
-                if btn.text() != next_text:
-                    btn.setText(next_text)
+                btn.setVisible(False)
+                btn.setEnabled(False)
+                if btn.text() != label:
+                    btn.setText(label)
             self._refresh_station_command_radio_summary(choices, selected_id)
             try:
                 snapshot = suspend_snapshot(self.settings, allow_reload=False)
@@ -7656,21 +7796,16 @@ class MainWindow(QMainWindow):
         if getattr(self, "station_command_radio_summary_scroll", None) is not None:
             self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)
             self.station_command_radio_summary_scroll.setVisible(True)
-        page_choices: list[object] = []
-        page = 0
-        page_count = 1
-        if card_mode:
-            page_choices, page, page_count, _per_page = self._station_command_radio_page_slice(choices)
+        self._apply_station_command_bar_layout(force=True)
         for btn, direction, label in (
             (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
             (getattr(self, "station_command_radio_next_btn", None), 1, "Next"),
         ):
             if btn is None:
                 continue
-            show_page_control = card_mode and len(choices) > 2 and page_count > 1
-            btn.setVisible(show_page_control)
-            btn.setEnabled((page > 0) if direction < 0 else (page < page_count - 1))
-            btn.setText(f"{label} {page + 1}/{page_count}" if page_count > 1 else label)
+            btn.setVisible(False)
+            btn.setEnabled(False)
+            btn.setText(label)
         if getattr(self, "station_command_radio_admin_btn", None) is not None:
             self.station_command_radio_admin_btn.setVisible(False)
         if card_mode and getattr(self, "station_command_radio_admin_panel", None) is not None:

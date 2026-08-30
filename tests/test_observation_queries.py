@@ -10,6 +10,7 @@ from freqinout.core.observation_queries import (
     eligible_map_observations,
     matching_observation_callsigns,
     map_observation_rows,
+    operational_awareness_snapshot,
     operational_activity_snapshot,
     query_observations,
 )
@@ -198,3 +199,59 @@ def test_operational_activity_snapshot_scopes_by_group_and_highlights_alerts(tmp
     assert snapshot.condition_alerts == snapshot.latest
     assert snapshot.high_attention == snapshot.latest
     assert "General Intel" in snapshot.topics
+
+
+def test_operational_awareness_snapshot_projects_attention_pins_and_more_traffic(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    observations = [
+        Observation(
+            observation_id="routine:1",
+            source_family="spotter",
+            source_ref="spotter:1",
+            received_utc="2026-08-29T11:20:00+00:00",
+            event_utc="2026-08-29T11:20:00+00:00",
+            from_call="K7ETC",
+            to_target="@MAGNET",
+            groups=("MAGNET",),
+            observed_topics=("General Intel",),
+            subject="Routine check",
+        ),
+        Observation(
+            observation_id="direct:1",
+            source_family="js8call",
+            source_ref="js8:1",
+            received_utc="2026-08-29T11:50:00+00:00",
+            event_utc="2026-08-29T11:50:00+00:00",
+            from_call="N1XYZ",
+            to_target="N1MAG",
+            observed_topics=("Comms",),
+            subject="Need relay",
+        ),
+        Observation(
+            observation_id="fire:1",
+            source_family="spotter",
+            source_ref="spotter:2",
+            received_utc="2026-08-29T11:55:00+00:00",
+            event_utc="2026-08-29T11:55:00+00:00",
+            from_call="K0FIR",
+            to_target="@MAGNET",
+            groups=("MAGNET",),
+            observed_topics=("Wildfire",),
+            subject="Smoke visible",
+        ),
+    ]
+    for observation in observations:
+        upsert_observation(db_path, observation)
+
+    snapshot = operational_awareness_snapshot(
+        db_path,
+        operating_group="MAGNET",
+        local_callsign="N1MAG",
+        pins=({"type": "topic", "value": "Wildfire"},),
+        visible_attention_limit=1,
+    )
+
+    assert snapshot.attention_items[0].id == "fire:1"
+    assert snapshot.attention_items[0].pinned is True
+    assert snapshot.pins[0].matched_count == 1
+    assert {item.id for item in snapshot.more_traffic} == {"routine:1"}

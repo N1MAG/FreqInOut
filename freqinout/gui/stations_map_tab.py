@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.view_contracts import compose_intent_from_mapping, map_context_from_mapping
 
 _WEBENGINE_IMPORT_ERROR = None
 try:
@@ -4649,6 +4650,7 @@ class StationsMapTab(QWidget):
                     "last_heard_age_label": str(rows.get("js8 heard") or rows.get("updated") or ""),
                     "age_filter_seconds": int(getattr(self, "recency_seconds", 0) or 0),
                 }
+                intent = compose_intent_from_mapping(intent).as_dict()
                 prefill = getattr(tab, "prefill_compose_intent", None)
                 if callable(prefill):
                     prefill(intent)
@@ -6451,10 +6453,30 @@ class StationsMapTab(QWidget):
         *,
         group_filter: str = "",
         topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
         source_filter: Optional[str] = None,
         reason: str = "",
     ) -> None:
         """Open a temporary map focus for HF, local, or combined report review."""
+        context = map_context_from_mapping(
+            {
+                "group_filter": group_filter,
+                "topic_filter": topic_filter,
+                "query_filter": query_filter,
+                "state_filter": state_filter,
+                "grid_filter": grid_filter,
+                "source_family": source_filter or "",
+            }
+        )
+        group_filter = context.group_filter
+        topic_filter = context.topic_filter
+        query_filter = context.query_filter
+        state_filter = context.state_filter
+        grid_filter = context.grid_filter
+        if source_filter is not None:
+            source_filter = context.source_family
         self._sitrep_status_only_enabled = False
         self._observation_focus_enabled = True
         self._observation_focus_mode = str(mode or "all_reports").strip().lower()
@@ -6496,8 +6518,22 @@ class StationsMapTab(QWidget):
                 self._set_combo_by_text_or_data(self.group_filter_combo, group_filter)
             if getattr(self, "_map_topic_filter_combo", None) is not None:
                 self._set_combo_by_text_or_data(self._map_topic_filter_combo, topic_filter)
+            if getattr(self, "_map_state_filter_combo", None) is not None:
+                self._set_combo_by_text_or_data(self._map_state_filter_combo, state_filter)
             if source_filter is not None and getattr(self, "_map_source_filter_combo", None) is not None:
                 self._set_combo_by_text_or_data(self._map_source_filter_combo, source_filter)
+            if getattr(self, "_map_search_edit", None) is not None:
+                search_text = " ".join(
+                    part
+                    for part in (
+                        str(query_filter or "").strip(),
+                        str(grid_filter or "").strip().upper(),
+                    )
+                    if part
+                ).strip()
+                self._map_search_edit.blockSignals(True)
+                self._map_search_edit.setText(search_text)
+                self._map_search_edit.blockSignals(False)
             if hasattr(self, "band_combo"):
                 self.band_combo.blockSignals(True)
                 self.band_combo.setCurrentIndex(0)
@@ -6508,13 +6544,25 @@ class StationsMapTab(QWidget):
         self._update_map_view_status_label()
         self._request_map_refresh(level="medium", reason=reason or f"{self._observation_focus_mode}_map_focus")
 
-    def _apply_map_traffic_subtype(self, *, group_filter: str = "", topic_filter: str = "", reason: str = "traffic_subtype") -> None:
+    def _apply_map_traffic_subtype(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+        reason: str = "traffic_subtype",
+    ) -> None:
         subtype = self._selected_map_traffic_subtype()
         if subtype == "rf":
             self._set_report_focus_mode(
                 "hf_reports",
                 group_filter=group_filter,
                 topic_filter=topic_filter,
+                query_filter=query_filter,
+                state_filter=state_filter,
+                grid_filter=grid_filter,
                 source_filter="",
                 reason=reason,
             )
@@ -6524,6 +6572,9 @@ class StationsMapTab(QWidget):
                 "local_reports",
                 group_filter=group_filter,
                 topic_filter=topic_filter,
+                query_filter=query_filter,
+                state_filter=state_filter,
+                grid_filter=grid_filter,
                 source_filter="",
                 reason=reason,
             )
@@ -6532,6 +6583,9 @@ class StationsMapTab(QWidget):
             "all_reports",
             group_filter=group_filter,
             topic_filter=topic_filter,
+            query_filter=query_filter,
+            state_filter=state_filter,
+            grid_filter=grid_filter,
             source_filter="commstat" if subtype == "commstat" else "",
             reason=reason,
         )
@@ -6540,28 +6594,73 @@ class StationsMapTab(QWidget):
         self._clear_report_query_caches()
         self._apply_map_traffic_subtype(reason="traffic_subtype")
 
-    def focus_hf_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def focus_hf_reports(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
         """Open a map focus for HF-derived Spotter/SitRep field reports."""
-        if self._current_map_mode_key() == "hf" and not group_filter and not topic_filter:
+        if self._current_map_mode_key() == "hf" and not any((group_filter, topic_filter, query_filter, state_filter, grid_filter)):
             self.focus_all_stations()
             return
         self._set_map_traffic_subtype("rf")
-        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="hf_reports_map_focus")
+        self._apply_map_traffic_subtype(
+            group_filter=group_filter,
+            topic_filter=topic_filter,
+            query_filter=query_filter,
+            state_filter=state_filter,
+            grid_filter=grid_filter,
+            reason="hf_reports_map_focus",
+        )
 
-    def focus_local_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def focus_local_reports(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
         """Open a map focus for confirmed local operator and NCS reports."""
-        if self._current_map_mode_key() == "local" and not group_filter and not topic_filter:
+        if self._current_map_mode_key() == "local" and not any((group_filter, topic_filter, query_filter, state_filter, grid_filter)):
             self.focus_all_stations()
             return
         self._set_map_traffic_subtype("local")
-        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="local_reports_map_focus")
+        self._apply_map_traffic_subtype(
+            group_filter=group_filter,
+            topic_filter=topic_filter,
+            query_filter=query_filter,
+            state_filter=state_filter,
+            grid_filter=grid_filter,
+            reason="local_reports_map_focus",
+        )
 
-    def focus_reports(self, *, group_filter: str = "", topic_filter: str = "") -> None:
+    def focus_reports(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
         """Open a map focus for HF and confirmed local reports together."""
-        if self._current_map_mode_key() == "reports" and not group_filter and not topic_filter:
+        if self._current_map_mode_key() == "reports" and not any((group_filter, topic_filter, query_filter, state_filter, grid_filter)):
             self.focus_all_stations()
             return
-        self._apply_map_traffic_subtype(group_filter=group_filter, topic_filter=topic_filter, reason="traffic_map_focus")
+        self._apply_map_traffic_subtype(
+            group_filter=group_filter,
+            topic_filter=topic_filter,
+            query_filter=query_filter,
+            state_filter=state_filter,
+            grid_filter=grid_filter,
+            reason="traffic_map_focus",
+        )
 
     def focus_regional_intelligence(self) -> None:
         """Open the regional situation view for state/FEMA concern rollups."""
@@ -14695,7 +14794,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         text = decoded;
       }}
       return text
-        .replace(/<br\s*\/?>/gi, '\\n')
+        .replace(/<br\\s*\\/?>/gi, '\\n')
         .replace(/<[^>]+>/g, ' ')
         .replace(/\\n{{3,}}/g, '\\n\\n')
         .trim();

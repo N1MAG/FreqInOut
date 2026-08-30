@@ -336,6 +336,12 @@ This gives the operator an immediate answer to:
 - Is anything actionable for this group?
 - Should an SOP condition level change be considered?
 
+The next ControlFreq evolution is specified in
+`docs/internal/controlfreq_operational_awareness_center_spec.md`. That spec
+promotes ControlFreq from a mixed status/table view into an operator awareness
+center organized around Now/Next, Attention Queue, Topic Awareness, SOP
+Timeline, and RF Readiness summaries.
+
 ### SOP Builder
 
 SOP Builder consumes operational activity and condition alerts:

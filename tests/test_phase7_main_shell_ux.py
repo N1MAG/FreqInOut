@@ -1498,8 +1498,9 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert 'self.station_command_resume_btn.setObjectName("stationCommandResume")' in source
     assert 'self.station_command_duration_combo.setObjectName("stationCommandDuration")' in source
     assert 'self.station_command_radio_summary_label = QLabel("Radios")' in source
-    assert 'self.station_command_radio_summary_scroll = QWidget(self.station_command_bar)' in source
-    assert "self.station_command_radio_summary_widget = self.station_command_radio_summary_scroll" in source
+    assert 'self.station_command_radio_summary_scroll = QScrollArea(self.station_command_bar)' in source
+    assert "self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
+    assert "self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)" in source
     assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
     assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
     assert "def _refresh_station_command_radio_summary(self, choices: list[object], selected_id: int) -> None:" in source
@@ -1525,7 +1526,9 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "layout.addWidget(self.station_command_health_widget, 1, 1)" in source
     assert "layout.addWidget(self.station_command_next_label, 1, 3, 1, 7)" in source
     assert "layout.addWidget(self.station_command_radio_summary_label, 2, 0)" in source
-    assert "layout.addWidget(self.station_command_radio_summary_scroll, 2, 1, 1, 11)" in source
+    assert "layout.addWidget(self.station_command_radio_prev_btn, 2, 1)" in source
+    assert "layout.addWidget(self.station_command_radio_summary_scroll, 2, 2, 1, 9)" in source
+    assert "layout.addWidget(self.station_command_radio_next_btn, 2, 11)" in source
     assert "layout.addWidget(self.station_command_radio_admin_btn, 2, 12)" in source
     assert "layout.addWidget(self.station_command_radio_admin_panel, 3, 0, 1, 13)" in source
     assert "self.station_command_now_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
@@ -1626,8 +1629,9 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
     window.station_command_suspend_btn = QPushButton("Suspend Scheduler")
     window.station_command_resume_btn = QPushButton("Resume Schedule")
     window.station_command_radio_summary_label = QLabel("Radios")
-    window.station_command_radio_summary_scroll = QWidget()
-    window.station_command_radio_summary_widget = window.station_command_radio_summary_scroll
+    window.station_command_radio_summary_scroll = QScrollArea()
+    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_scroll.setWidget(window.station_command_radio_summary_widget)
     window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
     window.station_command_radio_prev_btn = QPushButton("Prev")
     window.station_command_radio_next_btn = QPushButton("Next")
@@ -1655,7 +1659,9 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(3, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(3, 2).widget() is window.station_command_next_label
         assert window.station_command_layout.itemAtPosition(4, 0).widget() is window.station_command_radio_summary_label
-        assert window.station_command_layout.itemAtPosition(4, 1).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(4, 1).widget() is window.station_command_radio_prev_btn
+        assert window.station_command_layout.itemAtPosition(4, 2).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(4, 4).widget() is window.station_command_radio_next_btn
         assert window.station_command_layout.itemAtPosition(4, 5).widget() is window.station_command_radio_admin_btn
         assert window.station_command_layout.itemAtPosition(5, 0).widget() is window.station_command_radio_admin_panel
 
@@ -1680,9 +1686,21 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
         assert window.station_command_layout.itemAtPosition(1, 1).widget() is window.station_command_health_widget
         assert window.station_command_layout.itemAtPosition(1, 3).widget() is window.station_command_next_label
         assert window.station_command_layout.itemAtPosition(2, 0).widget() is window.station_command_radio_summary_label
-        assert window.station_command_layout.itemAtPosition(2, 1).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(2, 1).widget() is window.station_command_radio_prev_btn
+        assert window.station_command_layout.itemAtPosition(2, 2).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_layout.itemAtPosition(2, 11).widget() is window.station_command_radio_next_btn
         assert window.station_command_layout.itemAtPosition(2, 12).widget() is window.station_command_radio_admin_btn
         assert window.station_command_layout.itemAtPosition(3, 0).widget() is window.station_command_radio_admin_panel
+
+        window._station_command_multi_mode_active = True
+        MainWindow._apply_station_command_bar_layout(window, force=True)
+        app.processEvents()
+
+        assert window.station_command_layout.itemAtPosition(0, 0).widget() is window.station_command_radio_summary_scroll
+        assert window.station_command_radio_summary_scroll.isHidden() is False
+        assert window.station_command_radio_combo.isVisible() is False
+        assert window.station_command_radio_prev_btn.isVisible() is False
+        assert window.station_command_radio_next_btn.isVisible() is False
     finally:
         window.station_command_bar.deleteLater()
         app.processEvents()
@@ -3008,9 +3026,10 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "tile.setMinimumWidth(card_width)" in tile_block
     assert "tile.setMaximumWidth(card_width)" in tile_block
     assert "tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in tile_block
+    assert "compact_card = card_width < 360" in tile_block
     assert "timer_btn = QToolButton(tile)" in tile_block
     assert 'timer_btn.setObjectName("stationCommandRadioTileTimedSuspend")' in tile_block
-    assert "timer_btn.setText(timed_qsy_text(timed_qsy_active=timed_qsy_active))" in tile_block
+    assert '"Hold" if compact_card else timed_qsy_text(timed_qsy_active=timed_qsy_active)' in tile_block
     assert "scheduler_actions = scheduler_action_state(" in tile_block
     assert "action_state = qsy_action_state(" in tile_block
     assert "card_snapshot: object = snapshot" in tile_block
@@ -3052,19 +3071,24 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert 'suspend_btn.setObjectName("stationCommandRadioTileSchedulerSuspend")' in tile_block
     assert 'manual_suspend_action = QAction("Indefinite", suspend_menu)' in tile_block
     assert 'assign_btn = QPushButton("Change Plan", tile)' in tile_block
+    assert 'assign_btn.setText("Plan")' in tile_block
     assert 'now_font.setBold(True)' in tile_block
     assert 'now_font.setPointSize(max(now_font.pointSize(), 13))' in tile_block
     assert 'tile_layout.addWidget(freq_combo, 1, 0, 1, 4)' in tile_block
+    assert 'tile_layout.addWidget(freq_combo, 1, 0, 1, 3)' in tile_block
     assert 'tile_layout.addWidget(state_label, 0, 2)' not in tile_block
     assert 'tile_layout.addWidget(name_btn, 0, 0, 1, 3)' in tile_block
     assert 'tile_layout.addWidget(next_label, 3, 0, 1, 4)' in tile_block
     assert 'tile_layout.addWidget(resume_btn, 4, 0, 1, 2)' in tile_block
     assert 'tile_layout.addWidget(assign_btn, 4, 2, 1, 2)' in tile_block
     assert "scheduler_suspended_manual = self._station_command_scheduler_suspended_manually_for_radio(ident)" in tile_block
-    assert "page_choices, _page, _page_count, _per_page = self._station_command_radio_page_slice(visible_choices)" in source
+    assert "page_choices = visible_choices" in source
     assert "self._change_station_command_radio_page(1)" in source
-    assert "getattr(self.station_command_bar, \"width\", lambda: 0)() or self.width() or 0" in source
-    assert ".viewport()" not in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
+    assert "station_command_radio_summary_scroll" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    assert "viewport_width or scroll_width or bar_width" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    assert "min(520, available // count)" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
+    assert "btn.setVisible(False)" in refresh_block
     assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block
     assert "widget.setVisible(not card_mode)" in refresh_block
     assert "widget.setVisible(False)" in refresh_block
@@ -3464,8 +3488,9 @@ def test_phase7_station_command_bar_uses_card_for_single_active_radio(monkeypatc
     window.station_command_suspend_btn = QPushButton("Suspend Scheduler")
     window.station_command_resume_btn = QPushButton("Resume Schedule")
     window.station_command_radio_summary_label = QLabel("Radios")
-    window.station_command_radio_summary_scroll = QWidget()
-    window.station_command_radio_summary_widget = window.station_command_radio_summary_scroll
+    window.station_command_radio_summary_scroll = QScrollArea()
+    window.station_command_radio_summary_widget = QWidget()
+    window.station_command_radio_summary_scroll.setWidget(window.station_command_radio_summary_widget)
     window.station_command_radio_summary_layout = QHBoxLayout(window.station_command_radio_summary_widget)
     window.station_command_radio_prev_btn = QPushButton("Prev")
     window.station_command_radio_next_btn = QPushButton("Next")
@@ -3979,6 +4004,7 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
         assert len(tiles) == 2
+        assert all(tile.maximumWidth() <= 520 for tile in tiles)
         assert not any(button.text() == "Manual QSY" for tile in tiles for button in tile.findChildren(QPushButton))
 
         second_combo = tiles[1].findChild(QComboBox, "stationCommandRadioTileFrequency")

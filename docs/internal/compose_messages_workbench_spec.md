@@ -476,6 +476,15 @@ observations of the current implementation, not new product behavior.
   many fields, including every form field and RF text field. Preview updates
   should be split into cheap payload recomputation versus slower discovery and
   layout recalculation.
+- Compose layout geometry must be coalesced onto the next Qt event-loop turn.
+  Form/radio/chip changes often emit several signals while the left setup panel
+  is still changing visibility; each burst should trigger one splitter/size-hint
+  pass, not several immediate passes that make the left panel visibly settle
+  over multiple seconds.
+- Large-text accessibility guards should be cached per effective tab font and
+  invalidated only when new high-use widgets are built or the font changes.
+  The guard is important for low-vision operators, but routine compose preview
+  updates must not traverse the full Messages widget tree.
 - `_refresh_compose_forms` calls discovery and form parsing synchronously when
   modes, groups, radios, families, or forms change. Spotter form discovery and
   FLMsg template parsing should be cached by radio/profile path and should not
@@ -489,6 +498,15 @@ observations of the current implementation, not new product behavior.
 - Define the full workbench as a real mode-specific composing surface, not a
   reparented copy of embedded Compose. The workbench should have independent
   geometry rules, larger body space, and optional modal/non-blocking behavior.
+- Define minimized embedded Compose as a review/recovery surface. When the main
+  Messages tab is too small for comfortable editing, the embedded Compose view
+  should visibly promote the full workbench while still allowing the operator to
+  confirm the selected radio, draft/status, reset the draft, and recover without
+  clipped or garbled controls.
+- Add an explicit `Reset Draft` action inside the compose surface and the full
+  workbench. Reset clears the current composition and staged output while
+  preserving the selected radio/profile unless the operator explicitly changes
+  it.
 - Add a hard acceptance criterion that setup rows may wrap into two logical
   rows before they clip. Any row containing more than three operator inputs must
   either wrap, move into the main body, or become mode-specific.
@@ -498,6 +516,9 @@ observations of the current implementation, not new product behavior.
   geometry checks at those sizes.
 - Add an acceptance criterion that the send/stage action and exact preview
   remain reachable without scrolling the entire Messages tab.
+- Add an acceptance criterion that opening and closing the full Compose
+  Workbench preserves the current draft and returns the embedded Compose view to
+  a clean minimized-safe layout.
 - Add a requirement for stable draft state by mode: switching away and back
   should preserve typed JS8 text, Spotter form values, CommStat fields, and
   NBEMS form values unless the operator explicitly resets or changes the

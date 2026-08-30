@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from freqinout.core.controlfreq_awareness import (
+    AwarenessPin,
+    AwarenessSnapshot,
+    build_awareness_snapshot,
+)
 from freqinout.core.observation_projection import (
     Observation,
     ObservationEligibility,
@@ -211,6 +216,13 @@ def operational_activity_snapshot(
         for observation in query_observations(db_path, q)
         if not group or _observation_matches_group(observation, group)
     )[: max(1, int(limit or 50))]
+    return activity_snapshot_from_observations(observations)
+
+
+def activity_snapshot_from_observations(
+    observations: Sequence[Observation],
+) -> OperationalActivitySnapshot:
+    """Summarize an already-scoped observation sequence for the legacy Activity header."""
     high_attention = tuple(observation for observation in observations if observation.operator_attention)
     condition_alerts = tuple(
         observation
@@ -232,6 +244,51 @@ def operational_activity_snapshot(
         high_attention=high_attention,
         condition_alerts=condition_alerts,
         topics=topics,
+    )
+
+
+def operational_awareness_snapshot(
+    db_path: str | Path,
+    query: ObservationQuery | None = None,
+    *,
+    operating_group: str = "",
+    local_callsign: str = "",
+    active_groups: Sequence[str] = (),
+    next_groups: Sequence[str] = (),
+    pins: Sequence[AwarenessPin | dict[str, object]] = (),
+    limit: int = 80,
+    visible_attention_limit: int = 7,
+) -> AwarenessSnapshot:
+    """Return the ControlFreq awareness projection for the current traffic scope."""
+    q = query or ObservationQuery(limit=limit)
+    q = ObservationQuery(
+        source_family=q.source_family,
+        source_families=q.source_families,
+        topic=q.topic,
+        from_call=q.from_call,
+        to_target=q.to_target,
+        operating_group=q.operating_group or operating_group,
+        search_text=q.search_text,
+        status=q.status,
+        state=q.state,
+        grid=q.grid,
+        since_utc=q.since_utc,
+        limit=max(limit, q.limit or limit),
+    )
+    group = _normalize_group(operating_group)
+    scoped_observations = tuple(
+        observation
+        for observation in query_observations(db_path, q)
+        if not group or _observation_matches_group(observation, group)
+    )[: max(1, int(limit or 80))]
+    effective_active_groups = tuple(active_groups) or ((group,) if group else ())
+    return build_awareness_snapshot(
+        scoped_observations,
+        local_callsign=local_callsign,
+        active_groups=effective_active_groups,
+        next_groups=next_groups,
+        pins=pins,
+        visible_attention_limit=visible_attention_limit,
     )
 
 

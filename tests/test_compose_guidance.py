@@ -202,6 +202,8 @@ def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
     assert "if target_h > cap_h:" in source
     assert "def _open_compose_workbench_dialog" in source
     assert 'self.compose_workbench_btn = QPushButton("Open Full Compose Workbench")' in source
+    assert 'self.compose_inline_reset_btn = QPushButton("Reset")' in source
+    assert 'reset_btn = QPushButton("Reset Draft")' in source
     assert "setup_scroll.setMaximumHeight(cap_h)" in source
     assert "self.compose_operating_group_combo = QComboBox()" in source
     assert "def _refresh_compose_operating_group_options" in source
@@ -213,6 +215,26 @@ def test_compose_mode_rows_are_wrapped_for_clean_visibility() -> None:
     assert "col = (idx % 2) * 2" in source
     assert "def _refresh_compose_layout_geometry_if_needed" in source
     assert "self._compose_layout_signature = signature" in source
+    assert "self._compose_layout_refresh_pending = True" in source
+    assert "QTimer.singleShot(0, self._run_pending_compose_layout_geometry_refresh)" in source
+    assert "def _run_pending_compose_layout_geometry_refresh" in source
+
+
+def test_compose_reset_clears_all_compose_modes_but_preserves_radio_choice() -> None:
+    source = open("freqinout/gui/message_viewer_tab.py", encoding="utf-8").read()
+    reset_block = source[
+        source.index("def _reset_compose_draft")
+        : source.index("def _open_compose_source_folder")
+    ]
+
+    assert "compose_radio_combo" not in reset_block
+    assert "self.compose_js8_target_edit.clear()" in reset_block
+    assert "self.compose_js8_plain_text_edit.clear()" in reset_block
+    assert "self.compose_js8_sign_chk.setChecked(False)" in reset_block
+    assert "self.compose_commstat_target_edit.clear()" in reset_block
+    assert "self.compose_commstat_comment_edit.clear()" in reset_block
+    assert "self.compose_commstat_brevity_chk.setChecked(False)" in reset_block
+    assert "self._compose_form_draft_values.clear()" in reset_block
 
 
 def test_compose_form_fields_use_dense_short_field_grid() -> None:

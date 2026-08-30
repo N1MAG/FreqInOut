@@ -38,6 +38,8 @@ def test_high_use_tabs_call_shared_large_text_guard() -> None:
     main_window = _read("freqinout/gui/main_window.py")
 
     assert "apply_text_size_accessibility_guards(self, include_widths=False)" in messages
+    assert "self._messages_text_size_guard_signature" in messages
+    assert "guard_signature != getattr(self, \"_messages_text_size_guard_signature\", None)" in messages
     assert "button_height_for_font(self.compose_mode_selector" in messages
     assert "button_height_for_font(chip)" in messages
     assert "apply_text_size_accessibility_guards(self, include_widths=False)" in settings

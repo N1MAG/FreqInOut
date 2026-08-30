@@ -184,6 +184,16 @@ from freqinout.core.message_inbox_filters import (
     row_matches_workspace_scope as _core_row_matches_workspace_scope,
     row_search_text as _core_row_search_text,
 )
+from freqinout.core.message_summary import (
+    MessageSummary,
+    message_summary_from_row,
+    normalize_message_source_family,
+)
+from freqinout.core.source_view_contracts import (
+    contract_gate_failures,
+    source_contract_for,
+)
+from freqinout.core.view_contracts import compose_intent_from_mapping
 from freqinout.core.message_delete_audit import (
     ensure_message_delete_audit_table,
     load_message_delete_audit_rows,
@@ -1718,6 +1728,7 @@ class UnifiedMessage:
     display_type: str = ""
     report_ts: float = 0.0
     age_ts_source: str = ""
+    summary: MessageSummary | None = None
 
 
 def unified_file_message_from_candidate(
@@ -1730,7 +1741,7 @@ def unified_file_message_from_candidate(
     auth_detail: str = "",
     auth_trusted: bool = False,
 ) -> UnifiedMessage:
-    return UnifiedMessage(
+    row = UnifiedMessage(
         msg_type=candidate.msg_type,
         status=candidate.status,
         from_call=candidate.from_call,
@@ -1757,6 +1768,8 @@ def unified_file_message_from_candidate(
         report_ts=candidate.report_ts,
         age_ts_source=candidate.age_ts_source,
     )
+    row.summary = message_summary_from_row(row)
+    return row
 
 
 def unified_message_from_presentation(
@@ -1770,7 +1783,7 @@ def unified_message_from_presentation(
     expect_decision: str = "",
     expect_detail: str = "",
 ) -> UnifiedMessage:
-    return UnifiedMessage(
+    row = UnifiedMessage(
         msg_type=presentation.msg_type,
         status=presentation.status,
         from_call=presentation.from_call,
@@ -1797,6 +1810,8 @@ def unified_message_from_presentation(
         actionable=presentation.actionable,
         display_type=presentation.display_type,
     )
+    row.summary = message_summary_from_row(row)
+    return row
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -2694,6 +2709,8 @@ class MessageViewerTab(QWidget):
         self._compose_commstat_brevity_catalogs_cache_key: tuple[str, ...] = ()
         self._compose_commstat_brevity_catalogs_cache: List[Tuple[str, str, Dict[str, object]]] = []
         self._compose_layout_signature: tuple[object, ...] | None = None
+        self._compose_layout_refresh_pending: bool = False
+        self._messages_text_size_guard_signature: tuple[object, ...] | None = None
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._map_context_filter: Dict[str, object] = {}
@@ -4724,6 +4741,8 @@ class MessageViewerTab(QWidget):
         self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
         self.compose_page = self._build_compose_page()
         self.messages_mode_stack.addWidget(self.compose_page)
+        self._messages_text_size_guard_signature = None
+        self._apply_accessibility_width_guards()
         self._set_messages_mode(self._messages_mode, save=False)
         self._setup_clock_timer()
         QTimer.singleShot(0, self._update_messages_responsive_layout)
@@ -4959,6 +4978,10 @@ class MessageViewerTab(QWidget):
         self.compose_workbench_btn.setToolTip("Open Compose in a larger window with more room for forms, previews, and RF send options.")
         self.compose_workbench_btn.clicked.connect(self._open_compose_workbench_dialog)
         summary_row.addWidget(self.compose_workbench_btn)
+        self.compose_inline_reset_btn = QPushButton("Reset")
+        self.compose_inline_reset_btn.setToolTip("Reset the current compose draft while keeping the selected radio.")
+        self.compose_inline_reset_btn.clicked.connect(lambda: self._reset_compose_draft())
+        summary_row.addWidget(self.compose_inline_reset_btn)
         self.compose_setup_help_btn = QPushButton("Compose Setup Help")
         self.compose_setup_help_btn.setToolTip("Open help for compose setup, VarAC copy targets, and FLAmp signing.")
         self.compose_setup_help_btn.clicked.connect(lambda: self._open_context_help("messages.compose-setup"))
@@ -5837,9 +5860,20 @@ class MessageViewerTab(QWidget):
                 and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
             ),
         )
-        if force or signature != getattr(self, "_compose_layout_signature", None):
-            self._compose_layout_signature = signature
-            self._refresh_compose_layout_geometry()
+        self._refresh_compose_workbench_button_style()
+        if not force and signature == getattr(self, "_compose_layout_signature", None):
+            return
+        self._compose_layout_signature = signature
+        if getattr(self, "_compose_layout_refresh_pending", False):
+            return
+        self._compose_layout_refresh_pending = True
+        QTimer.singleShot(0, self._run_pending_compose_layout_geometry_refresh)
+
+    def _run_pending_compose_layout_geometry_refresh(self) -> None:
+        if not getattr(self, "_compose_layout_refresh_pending", False):
+            return
+        self._compose_layout_refresh_pending = False
+        self._refresh_compose_layout_geometry()
         self._refresh_compose_workbench_button_style()
 
     def _open_compose_workbench_dialog(self) -> None:
@@ -5874,6 +5908,10 @@ class MessageViewerTab(QWidget):
 
         close_row = QHBoxLayout()
         close_row.addStretch()
+        reset_btn = QPushButton("Reset Draft")
+        reset_btn.setToolTip("Reset the current compose draft while keeping the selected radio.")
+        reset_btn.clicked.connect(lambda: self._reset_compose_draft())
+        close_row.addWidget(reset_btn)
         close_btn = QPushButton("Close Workbench")
         close_btn.clicked.connect(dialog.close)
         close_row.addWidget(close_btn)
@@ -7856,7 +7894,7 @@ class MessageViewerTab(QWidget):
         return False
 
     def prefill_compose_intent(self, intent: Mapping[str, object]) -> None:
-        data = dict(intent or {})
+        data = compose_intent_from_mapping(intent).as_dict()
         self._compose_intent = data
         mode = str(data.get("transport") or data.get("mode") or "js8").strip().lower()
         if hasattr(self, "compose_mode_selector"):
@@ -8216,6 +8254,7 @@ class MessageViewerTab(QWidget):
         age_filter_seconds: object = 0,
         concern_only: object = False,
         state_filter: str = "",
+        grid_filter: str = "",
         fema_region_filter: str = "",
     ) -> None:
         self.show_inbox_from_navigation()
@@ -8230,20 +8269,28 @@ class MessageViewerTab(QWidget):
             "age_filter_seconds": age_seconds,
             "concern_only": concern_active,
             "state_filter": str(state_filter or "").strip().upper(),
+            "grid_filter": str(grid_filter or "").strip().upper(),
             "fema_region_filter": str(fema_region_filter or "").strip().upper(),
         }
         source = str(source_family or "").strip().lower()
         source_values = self._message_context_source_values(source)
+        normalized_source = normalize_message_source_family(source)
         focus = {
             "flmsg": "forms",
             "flamp": "forms",
             "js8spotter": "spotter",
+            "fiospotter": "spotter",
             "spotter": "spotter",
             "commstat": "commstat",
+            "commstat_rf": "commstat",
             "js8call": "js8call",
             "js8": "js8call",
             "varac": "varac",
-        }.get(source, "all")
+        }.get(source, {
+            "spotter": "spotter",
+            "commstat": "commstat",
+            "js8": "js8call",
+        }.get(normalized_source, "all"))
         self._set_inbox_focus(focus)
         selected_group = self._select_context_group_filter(group_filter)
         selected_source = self._select_context_source_filter(source_values)
@@ -8252,6 +8299,7 @@ class MessageViewerTab(QWidget):
         for part in (
             str(query_filter or "").strip().lstrip("@"),
             str(topic_filter or "").strip(),
+            str(grid_filter or "").strip().upper(),
             "" if selected_group else str(group_filter or "").strip().lstrip("@"),
             "" if selected_source else self._message_context_source_search_fallback(source),
         ):
@@ -8301,31 +8349,43 @@ class MessageViewerTab(QWidget):
     @staticmethod
     def _message_context_source_values(source_family: object) -> list[str]:
         source = str(source_family or "").strip().lower()
+        normalized = normalize_message_source_family(source)
         if source in {"", "fused", "mixed", "multiple_sources", "condition_alert"}:
             return []
-        if source == "js8call":
+        if source == "js8call" or normalized == "js8":
             return ["js8"]
         if source == "forms":
             return ["flmsg", "flamp"]
         if source == "fastlight":
             return ["flmsg", "flamp"]
-        if source == "js8spotter":
+        if source in {"js8spotter", "fiospotter"} or normalized == "spotter":
             return ["spotter"]
+        if source == "commstat_rf" or normalized == "commstat":
+            return ["commstat"]
+        if normalized and normalized != "unknown":
+            return [normalized]
         return [source]
 
     @staticmethod
     def _message_context_source_search_fallback(source_family: object) -> str:
         source = str(source_family or "").strip().lower()
+        normalized = normalize_message_source_family(source)
         return {
             "js8call": "JS8Call",
             "js8": "JS8Call",
             "js8spotter": "Spotter",
+            "fiospotter": "Spotter",
             "spotter": "Spotter",
             "commstat": "CommStat",
+            "commstat_rf": "CommStat",
             "varac": "VarAC",
             "flmsg": "FLMSG",
             "flamp": "FLAMP",
-        }.get(source, "")
+        }.get(source, {
+            "js8": "JS8Call",
+            "spotter": "Spotter",
+            "commstat": "CommStat",
+        }.get(normalized, ""))
 
     @staticmethod
     def _dropdown_option_values(widget: object) -> set[str]:
@@ -8440,6 +8500,14 @@ class MessageViewerTab(QWidget):
             check_label = "off" if not self._visible_check_interval_sec else f"every {int(self._visible_check_interval_sec)} seconds while open"
             top_lines.append(f"Message check: {check_label}")
             top_lines.append(f"Folder scan: every {int(self.scan_minutes)} minute(s)")
+            summaries = self.message_summaries(visible_only=True) if hasattr(self, "_messages_model") else ()
+            default_visible = sum(1 for summary in summaries if summary.visible_by_default)
+            source_contract_lines = []
+            for source_family in sorted({summary.source_family for summary in summaries if summary.source_family}):
+                contract = source_contract_for(source_family)
+                failures = contract_gate_failures(contract)
+                status = "meets gates" if not failures else "missing " + ", ".join(failures)
+                source_contract_lines.append(f"{contract.display_name}: {status}")
             sections = (
                 (
                     "Inbox Detail",
@@ -8447,10 +8515,15 @@ class MessageViewerTab(QWidget):
                         [
                             self.loading_label.text() if getattr(self, "loading_label", None) and self.loading_label.isVisible() else "",
                             f"Visible rows: {self.messages_table.rowCount()}" if hasattr(self, "messages_table") else "",
+                            f"Operational default-visible rows: {default_visible} of {len(summaries)}" if summaries else "",
                             f"Status filter: {self.status_filter.currentText()}" if hasattr(self, "status_filter") else "",
                             f"Type filter: {self.type_filter.currentText()}" if hasattr(self, "type_filter") else "",
                         ]
                     ),
+                ),
+                (
+                    "Source Contracts",
+                    bullet_lines(source_contract_lines),
                 ),
             )
         else:
@@ -8789,9 +8862,27 @@ class MessageViewerTab(QWidget):
             self.compose_varac_target_combo.setCurrentText("None")
         if hasattr(self, "compose_report_title_edit"):
             self.compose_report_title_edit.clear()
+        if hasattr(self, "compose_js8_target_edit"):
+            self.compose_js8_target_edit.clear()
+        if hasattr(self, "compose_js8_plain_text_edit"):
+            self.compose_js8_plain_text_edit.clear()
+        if hasattr(self, "compose_js8_sign_chk"):
+            self.compose_js8_sign_chk.setChecked(False)
+        if hasattr(self, "compose_js8_auth_datecode_chk"):
+            self.compose_js8_auth_datecode_chk.setChecked(False)
+        if hasattr(self, "compose_commstat_target_edit"):
+            self.compose_commstat_target_edit.clear()
+        if hasattr(self, "compose_commstat_comment_edit"):
+            self.compose_commstat_comment_edit.clear()
+        if hasattr(self, "compose_commstat_brevity_chk"):
+            self.compose_commstat_brevity_chk.setChecked(False)
+        if hasattr(self, "compose_commstat_brevity_edit"):
+            self.compose_commstat_brevity_edit.setCurrentIndex(0)
         self._compose_last_stage_paths = []
         self._compose_form_draft_values.clear()
         self._compose_active_form_key = ""
+        if str(getattr(self, "_compose_mode", "nbems") or "nbems") == "commstat_rf":
+            self._refresh_compose_commstat_defaults()
         self._on_compose_form_changed()
         self._set_compose_status(status_text, role="info")
 
@@ -9379,6 +9470,7 @@ class MessageViewerTab(QWidget):
             self.compose_choose_message_folder_btn,
             self.compose_refresh_signing_keys_btn,
             self.compose_js8_auth_refresh_btn,
+            self.compose_inline_reset_btn,
         ):
             btn.setStyleSheet(button_style("muted", theme))
         self.compose_open_flmsg_btn.setEnabled(
@@ -12691,6 +12783,25 @@ class MessageViewerTab(QWidget):
         if not row.search_text:
             row.search_text = _core_row_search_text(row)
 
+    @staticmethod
+    def _message_summary_for_row(row: UnifiedMessage) -> MessageSummary:
+        summary = getattr(row, "summary", None)
+        if isinstance(summary, MessageSummary):
+            return summary
+        summary = message_summary_from_row(row)
+        row.summary = summary
+        return summary
+
+    def message_summaries(self, *, visible_only: bool = True, default_visible_only: bool = False) -> Tuple[MessageSummary, ...]:
+        if visible_only and hasattr(self, "_messages_model"):
+            rows = self._messages_model.rows()
+        else:
+            rows = list(getattr(self, "_message_rows", []))
+        summaries = tuple(self._message_summary_for_row(row) for row in rows)
+        if default_visible_only:
+            return tuple(summary for summary in summaries if summary.visible_by_default)
+        return summaries
+
     def _row_matches_inbox_criteria(self, row: UnifiedMessage, criteria: InboxFilterCriteria) -> bool:
         if criteria.search_query:
             self._ensure_row_search_text(row)
@@ -13077,6 +13188,7 @@ class MessageViewerTab(QWidget):
         if not isinstance(context, dict):
             return True
         state_filter = str(context.get("state_filter") or "").strip().upper()
+        grid_filter = str(context.get("grid_filter") or "").strip().upper()
         fema_region_filter = str(context.get("fema_region_filter") or "").strip().upper()
         if state_filter or fema_region_filter:
             row_state = self._map_context_row_state(row)
@@ -13084,6 +13196,16 @@ class MessageViewerTab(QWidget):
                 return False
             if fema_region_filter and STATE_TO_FEMA_REGION.get(row_state, "") != fema_region_filter:
                 return False
+        if grid_filter:
+            summary = self._message_summary_for_row(row)
+            row_grid = str(getattr(summary.map_hint, "grid_square", "") or "").strip().upper()
+            if row_grid:
+                if not row_grid.startswith(grid_filter):
+                    return False
+            else:
+                self._ensure_row_search_text(row)
+                if grid_filter not in str(row.search_text or "").upper():
+                    return False
         if not context.get("concern_only"):
             return True
         payload = getattr(row, "payload", None)
@@ -14256,6 +14378,7 @@ class MessageViewerTab(QWidget):
             getattr(self, "messages_manage_bbs_btn", None),
             getattr(self, "compose_refresh_forms_btn", None),
             getattr(self, "compose_reset_btn", None),
+            getattr(self, "compose_inline_reset_btn", None),
             getattr(self, "compose_open_source_btn", None),
             getattr(self, "refresh_btn", None),
             getattr(self, "more_actions_btn", None),
@@ -14346,7 +14469,19 @@ class MessageViewerTab(QWidget):
             self._sync_header_widths()
         except Exception:
             pass
-        apply_text_size_accessibility_guards(self, include_widths=False)
+        try:
+            font = self.font()
+            guard_signature = (
+                font.family(),
+                round(float(font.pointSizeF()), 2),
+                int(font.pixelSize()),
+                int(font.weight()),
+            )
+        except Exception:
+            guard_signature = ("", 0.0, 0, 0)
+        if guard_signature != getattr(self, "_messages_text_size_guard_signature", None):
+            apply_text_size_accessibility_guards(self, include_widths=False)
+            self._messages_text_size_guard_signature = guard_signature
 
     @staticmethod
     def _make_header_spacer() -> QWidget:
