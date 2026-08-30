@@ -188,6 +188,8 @@ class ControlFreqTab(QWidget):
         self._operational_awareness_context: Dict[str, str] = {}
         self._awareness_row_contexts: List[Dict[str, str]] = []
         self._source_lane_contexts: List[Dict[str, str]] = []
+        self._source_family_filter = ""
+        self._source_lane_syncing = False
         self._my_schedule_entries_cache: List[Dict[str, object]] = []
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
@@ -440,7 +442,7 @@ class ControlFreqTab(QWidget):
         source_header.setSectionResizeMode(1, QHeaderView.Stretch)
         source_header.setSectionResizeMode(2, QHeaderView.Stretch)
         source_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.source_lanes_table.itemSelectionChanged.connect(self._sync_operational_action_buttons)
+        self.source_lanes_table.itemSelectionChanged.connect(self._set_source_lane_focus_from_selection)
         act_layout.addWidget(self.source_lanes_table)
         self.awareness_sop_label = QLabel("SOP: --")
         self.awareness_sop_label.setObjectName("controlfreqAwarenessSop")
@@ -1994,6 +1996,9 @@ class ControlFreqTab(QWidget):
         if hasattr(self, "intersection_window_combo") and self.intersection_window_combo.count() > 0:
             idx = self.intersection_window_combo.findData(120)
             self.intersection_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._source_family_filter = ""
+        if hasattr(self, "source_lanes_table"):
+            self.source_lanes_table.clearSelection()
         self._update_clear_filters_style()
         self._on_filters_changed()
 
@@ -2003,7 +2008,8 @@ class ControlFreqTab(QWidget):
         window_active = int(self.activity_window_combo.currentData() or 120) != 120
         intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
         intersection_window_active = int(intersection_combo.currentData() or 120) != 120
-        return search_active or group_active or window_active or intersection_window_active
+        source_active = bool(str(getattr(self, "_source_family_filter", "") or "").strip())
+        return search_active or group_active or window_active or intersection_window_active or source_active
 
     def _show_app_search_results(self) -> None:
         query = (self.search_edit.text() or "").strip()
@@ -2901,6 +2907,7 @@ class ControlFreqTab(QWidget):
             window_minutes,
             search,
             str(group_filter).strip().upper(),
+            str(getattr(self, "_source_family_filter", "") or "").strip().lower(),
             self._activity_cache_token(),
         )
         now_ts = time.time()
@@ -2936,6 +2943,7 @@ class ControlFreqTab(QWidget):
             int(window_minutes or 120),
             str(search or "").strip().upper(),
             str(group_filter or "").strip().upper(),
+            str(getattr(self, "_source_family_filter", "") or "").strip().lower(),
             self._activity_cache_token(),
         )
         now_ts = time.time()
@@ -2953,6 +2961,7 @@ class ControlFreqTab(QWidget):
             observations = query_observations(
                 db_path,
                 ObservationQuery(
+                    source_family=str(getattr(self, "_source_family_filter", "") or "").strip(),
                     since_utc=since_utc,
                     operating_group=str(group_filter or ""),
                     search_text=str(search or ""),
@@ -3087,12 +3096,60 @@ class ControlFreqTab(QWidget):
         if not rows:
             rows = [["No active source", "--", "--", "check radio setup"]]
             contexts = [{}]
-        self._set_table_rows(table, rows)
-        self._source_lane_contexts = contexts
-        self._apply_elide_tooltips(table, 1)
-        self._apply_elide_tooltips(table, 2)
-        self._apply_elide_tooltips(table, 3)
-        self._fit_table_height_to_rows(table, min_rows=1, max_rows=4, empty_rows=1)
+        self._source_lane_syncing = True
+        try:
+            self._set_table_rows(table, rows)
+            self._source_lane_contexts = contexts
+            self._apply_elide_tooltips(table, 1)
+            self._apply_elide_tooltips(table, 2)
+            self._apply_elide_tooltips(table, 3)
+            self._fit_table_height_to_rows(table, min_rows=1, max_rows=4, empty_rows=1)
+        finally:
+            self._source_lane_syncing = False
+
+    def _set_source_lane_focus_from_selection(self) -> None:
+        if bool(getattr(self, "_source_lane_syncing", False)):
+            return
+        table = getattr(self, "source_lanes_table", None)
+        if table is None:
+            return
+        row = int(table.currentRow())
+        contexts = list(getattr(self, "_source_lane_contexts", []) or [])
+        if row < 0 or row >= len(contexts):
+            return
+        context = dict(contexts[row] or {})
+        source_name = str(context.get("source_name") or "").strip()
+        source_family = str(context.get("source_family") or "").strip().lower()
+        is_data_source = source_family in {
+            "aprs",
+            "commstat",
+            "fiospotter",
+            "js8call",
+            "local_report",
+            "meshcore",
+            "mqtt",
+            "reticulum",
+            "spotter",
+            "varac",
+        }
+        self._source_family_filter = source_family if is_data_source else ""
+        if hasattr(self, "search_edit"):
+            previous = self.search_edit.blockSignals(True)
+            try:
+                self.search_edit.setText("" if is_data_source else source_name)
+            finally:
+                self.search_edit.blockSignals(previous)
+        if source_name:
+            self._operational_awareness_context = {
+                "source_family": source_family if is_data_source else "",
+                "search_query": "" if is_data_source else source_name,
+            }
+            if hasattr(self, "awareness_recommend_label"):
+                text = f"Focused source: {source_name} | use Inbox, Reply, or Map from matching traffic."
+                self.awareness_recommend_label.setText(text)
+                self.awareness_recommend_label.setToolTip(text)
+        self._update_clear_filters_style()
+        self._run_filter_refresh()
 
     def _configured_awareness_pins(self) -> Tuple[Dict[str, object], ...]:
         raw_pins = self.settings.get("controlfreq_awareness_pins", ())

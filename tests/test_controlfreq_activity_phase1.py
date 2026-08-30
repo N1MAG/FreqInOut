@@ -654,7 +654,12 @@ def test_controlfreq_operational_awareness_uses_source_lanes() -> None:
 
     assert "self.source_lanes_table = QTableWidget(0, 4)" in source
     assert 'self.source_lanes_table.setHorizontalHeaderLabels(["Source", "Now", "Next", "Attention"])' in source
+    assert "self.source_lanes_table.itemSelectionChanged.connect(self._set_source_lane_focus_from_selection)" in source
     assert "build_radio_source_lanes(" in source
+    assert 'source_family=str(getattr(self, "_source_family_filter", "") or "").strip()' in source
+    assert 'self._source_family_filter = ""' in source
+    assert "def _set_source_lane_focus_from_selection" in source
+    assert "Focused source:" in source
     assert "Sources: {', '.join(sources[:4])}" in source
     assert "ControlFreq must not collapse multi-source operations into a single" in spec
 
