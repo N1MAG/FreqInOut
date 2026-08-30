@@ -3216,7 +3216,8 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "viewport_width or scroll_width or bar_width" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
     card_width_block = source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
     assert "min(480, available // count)" in card_width_block
-    assert "parent.setMaximumWidth(row_min_width)" in source
+    assert "parent.setMaximumWidth(16777215)" in source
+    assert "scroll.horizontalScrollBar().setValue(0)" in source
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
     assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block

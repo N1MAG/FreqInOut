@@ -7103,8 +7103,7 @@ class MainWindow(QMainWindow):
             spacing = max(0, int(layout.spacing()))
             row_min_width = max(0, len(choices) * card_width + max(0, len(choices) - 1) * spacing)
             parent.setMinimumWidth(row_min_width)
-            parent.setMaximumWidth(row_min_width)
-            parent.resize(row_min_width, max(int(parent.height() or 0), int(parent.sizeHint().height())))
+            parent.setMaximumWidth(16777215)
         except Exception:
             pass
         for snapshot in choices:
@@ -7465,6 +7464,13 @@ class MainWindow(QMainWindow):
                 pass
             layout.addWidget(tile)
         layout.addStretch(1)
+        try:
+            parent.adjustSize()
+            scroll = getattr(self, "station_command_radio_summary_scroll", None)
+            if scroll is not None and scroll.horizontalScrollBar() is not None:
+                scroll.horizontalScrollBar().setValue(0)
+        except Exception:
+            pass
         self._station_command_radio_tile_controls = tile_controls
 
     def _update_station_command_radio_tile_hold_controls(self, hold_snapshot: Mapping[str, object]) -> None:
