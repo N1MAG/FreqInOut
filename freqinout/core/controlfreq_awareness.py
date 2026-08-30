@@ -112,9 +112,22 @@ class RfReadinessItem:
 
 
 @dataclass(frozen=True)
+class OperationalSourceLane:
+    source_id: str
+    short_name: str
+    source_kind: str = "radio"
+    now: str = ""
+    next: str = ""
+    health: str = ""
+    attention_count: int = 0
+    attention_summary: str = ""
+
+
+@dataclass(frozen=True)
 class AwarenessSnapshot:
     generated_at_utc: str
     active_radios: tuple[Mapping[str, str], ...] = ()
+    source_lanes: tuple[OperationalSourceLane, ...] = ()
     recommended_actions: tuple[AwarenessAction, ...] = ()
     attention_items: tuple[AttentionItem, ...] = ()
     more_traffic: tuple[AttentionItem, ...] = ()
@@ -131,6 +144,7 @@ def build_awareness_snapshot(
     local_callsign: str = "",
     active_groups: Sequence[str] = (),
     next_groups: Sequence[str] = (),
+    source_lanes: Sequence[OperationalSourceLane | Mapping[str, object]] = (),
     pins: Sequence[AwarenessPin | Mapping[str, object]] = (),
     visible_attention_limit: int = 7,
     generated_at_utc: dt.datetime | str | None = None,
@@ -162,6 +176,7 @@ def build_awareness_snapshot(
     pinned_awareness = tuple(_pinned_awareness(pin, observations) for pin in normalized_pins)
     return AwarenessSnapshot(
         generated_at_utc=_format_utc(now),
+        source_lanes=_normalize_source_lanes(source_lanes),
         recommended_actions=_recommended_actions(ranked, topic_rollups, pinned_awareness),
         attention_items=ranked[:visible_limit],
         more_traffic=ranked[visible_limit:],
@@ -170,8 +185,126 @@ def build_awareness_snapshot(
     )
 
 
+def build_radio_source_lanes(
+    radio_profiles: Sequence[Mapping[str, object]],
+    *,
+    current_label: str = "",
+    next_label: str = "",
+    attention_items: Sequence[AttentionItem] = (),
+) -> tuple[OperationalSourceLane, ...]:
+    """Build compact operational lanes from active radio profiles."""
+    lanes: list[OperationalSourceLane] = []
+    seen: set[str] = set()
+    for profile in radio_profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        source_id = str(profile.get("id") or profile.get("system_key") or profile.get("name") or "").strip()
+        if not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+        short_name = _short_source_name(profile)
+        profile_attention = _attention_for_source(source_id, short_name, attention_items)
+        is_primary = _truthy(profile.get("runtime_primary"))
+        lanes.append(
+            OperationalSourceLane(
+                source_id=source_id,
+                short_name=short_name,
+                source_kind=str(profile.get("device_class") or "radio").strip() or "radio",
+                now=str(current_label or "").strip() if is_primary else "monitoring",
+                next=str(next_label or "").strip() if is_primary else "",
+                health="Primary" if is_primary else "Active",
+                attention_count=len(profile_attention),
+                attention_summary=_lane_attention_summary(profile_attention),
+            )
+        )
+    return tuple(lanes)
+
+
 def reply_compose_mode_for_source(source_family: object) -> str:
     return _SOURCE_REPLY_MODES.get(_normalize_source(source_family), "source_family")
+
+
+def _normalize_source_lanes(
+    source_lanes: Sequence[OperationalSourceLane | Mapping[str, object]],
+) -> tuple[OperationalSourceLane, ...]:
+    lanes: list[OperationalSourceLane] = []
+    for lane in source_lanes:
+        if isinstance(lane, OperationalSourceLane):
+            if lane.short_name:
+                lanes.append(lane)
+            continue
+        if not isinstance(lane, Mapping):
+            continue
+        short_name = str(lane.get("short_name") or lane.get("name") or lane.get("source_id") or "").strip()
+        if not short_name:
+            continue
+        lanes.append(
+            OperationalSourceLane(
+                source_id=str(lane.get("source_id") or lane.get("id") or short_name).strip(),
+                short_name=short_name,
+                source_kind=str(lane.get("source_kind") or "source").strip(),
+                now=str(lane.get("now") or "").strip(),
+                next=str(lane.get("next") or "").strip(),
+                health=str(lane.get("health") or "").strip(),
+                attention_count=int(lane.get("attention_count") or 0),
+                attention_summary=str(lane.get("attention_summary") or "").strip(),
+            )
+        )
+    return tuple(lanes)
+
+
+def _short_source_name(profile: Mapping[str, object]) -> str:
+    for key in ("short_name", "name", "label", "system_key"):
+        text = str(profile.get(key) or "").strip()
+        if text:
+            return text
+    return "Radio"
+
+
+def _attention_for_source(
+    source_id: str,
+    short_name: str,
+    attention_items: Sequence[AttentionItem],
+) -> tuple[AttentionItem, ...]:
+    source_id_norm = str(source_id or "").strip().lower()
+    short_norm = str(short_name or "").strip().lower()
+    matches: list[AttentionItem] = []
+    for item in attention_items:
+        haystack = " ".join(
+            str(value or "").strip().lower()
+            for value in (
+                item.source_ref,
+                item.source_family,
+                item.group,
+                item.summary,
+                item.subject,
+            )
+        )
+        if (source_id_norm and source_id_norm in haystack) or (short_norm and short_norm in haystack):
+            matches.append(item)
+    return tuple(matches)
+
+
+def _lane_attention_summary(items: Sequence[AttentionItem]) -> str:
+    if not items:
+        return "clear"
+    first = items[0]
+    callsign = str(first.callsign or "").strip()
+    subject = str(first.subject or "").strip()
+    topic = ", ".join(tuple(first.topics or ())[:1])
+    detail = " ".join(part for part in (callsign, subject or topic) if part).strip()
+    if len(items) == 1:
+        return detail or "1 item"
+    return f"{len(items)} items" + (f"; {detail}" if detail else "")
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value or 0) != 0
+    except Exception:
+        return str(value or "").strip().lower() in {"true", "yes", "on"}
 
 
 def _recommended_actions(

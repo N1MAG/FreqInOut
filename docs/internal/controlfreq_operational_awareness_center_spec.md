@@ -96,17 +96,23 @@ inventing new data systems.
 
 ControlFreq should be organized around five dashboard zones.
 
-### 1. Now / Next Strip
+### 1. Source Lanes And Now / Next Strip
 
 Purpose: answer "where should I be when?"
 
 Content:
 
-- selected/active radio short name
-- current assigned group/band
-- next scheduled group/band/time
-- scheduler state: on plan, manual QSY, hold, suspended, conflict, unknown
-- one recommended primary action:
+- every active operational source that can affect operator decisions
+  - configured TX/RX radios by user-defined short name
+  - observer/SDR sources when available
+  - Mesh MQTT, APRS, Reticulum/LXMF, and other source-contract families as they are added
+- each source lane shows:
+  - short source name only, never a long hardware/backend description in the primary UI
+  - current assigned group/band/frequency or `monitoring`
+  - next scheduled group/band/time when known
+  - scheduler/source state: primary, active, observer, hold, suspended, conflict, unknown
+  - compact attention summary/count for traffic tied to that source
+- one global recommended primary action:
   - `Stay`
   - `Tune`
   - `Resume`
@@ -118,8 +124,14 @@ Behavior:
 
 - Use compact status chips and a single primary action button.
 - Keep exact frequency, mode, and backend details in tooltip/details.
-- If multiple radios are active, show one mini-strip per active radio or use the
-  existing station command cards as the source of truth.
+- If multiple radios or data sources are active, show one compact lane per
+  source. ControlFreq must not collapse multi-source operations into a single
+  "Now" string.
+- Source lanes are the ControlFreq implementation of the view-contract source
+  model: new data families should add a source lane projection before adding
+  custom dashboard rendering.
+- The headline may summarize source count and primary next action, but it must
+  remain secondary to the source lane list.
 
 ### 2. Attention Queue
 

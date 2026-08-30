@@ -13,6 +13,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.core.controlfreq_awareness import AttentionItem, build_radio_source_lanes
 from freqinout.core.observation_projection import Observation, observation_from_rf_pin
 from freqinout.core.observation_store import upsert_observation
 
@@ -592,6 +593,47 @@ def test_controlfreq_global_activity_button_language_matches_destination() -> No
     assert 'self.operational_messages_btn = QPushButton("Inbox")' in source
     assert 'self.operational_messages_btn = QPushButton("Msgs")' not in source
     assert "use Inbox, Reply, or Map from matching traffic" in source
+
+
+def test_controlfreq_builds_source_lanes_for_active_radios() -> None:
+    attention = [
+        AttentionItem(
+            id="1",
+            source_family="commstat",
+            source_ref="FIO-B report",
+            callsign="KI6QDB",
+            subject="CommStat StatRep",
+            topics=("Comms",),
+        )
+    ]
+
+    lanes = build_radio_source_lanes(
+        [
+            {"id": 1, "name": "FIO-A", "runtime_primary": 1},
+            {"id": 2, "name": "FIO-B", "runtime_primary": 0},
+        ],
+        current_label="MAGNET 40M 7.115 MHz",
+        next_label="MAGNET 80M 23:00",
+        attention_items=attention,
+    )
+
+    assert [lane.short_name for lane in lanes] == ["FIO-A", "FIO-B"]
+    assert lanes[0].now == "MAGNET 40M 7.115 MHz"
+    assert lanes[0].next == "MAGNET 80M 23:00"
+    assert lanes[1].now == "monitoring"
+    assert lanes[1].attention_count == 1
+    assert "KI6QDB" in lanes[1].attention_summary
+
+
+def test_controlfreq_operational_awareness_uses_source_lanes() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    spec = Path("docs/internal/controlfreq_operational_awareness_center_spec.md").read_text(encoding="utf-8")
+
+    assert "self.source_lanes_table = QTableWidget(0, 4)" in source
+    assert 'self.source_lanes_table.setHorizontalHeaderLabels(["Source", "Now", "Next", "Attention"])' in source
+    assert "build_radio_source_lanes(" in source
+    assert "Sources: {', '.join(sources[:4])}" in source
+    assert "ControlFreq must not collapse multi-source operations into a single" in spec
 
 
 def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():

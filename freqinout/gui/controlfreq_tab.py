@@ -8,7 +8,7 @@ import sqlite3
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
@@ -49,7 +49,7 @@ from freqinout.core.observation_queries import (
     activity_snapshot_from_observations,
     query_observations,
 )
-from freqinout.core.controlfreq_awareness import build_awareness_snapshot
+from freqinout.core.controlfreq_awareness import build_awareness_snapshot, build_radio_source_lanes
 from freqinout.core.operational_view_registry import (
     controlfreq_preset_names,
     controlfreq_view_labels,
@@ -187,6 +187,7 @@ class ControlFreqTab(QWidget):
         self._operational_activity_context: Dict[str, str] = {}
         self._operational_awareness_context: Dict[str, str] = {}
         self._awareness_row_contexts: List[Dict[str, str]] = []
+        self._source_lane_contexts: List[Dict[str, str]] = []
         self._my_schedule_entries_cache: List[Dict[str, object]] = []
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
@@ -429,6 +430,18 @@ class ControlFreqTab(QWidget):
         self.awareness_now_next_label.setWordWrap(True)
         self.awareness_now_next_label.setStyleSheet("font-weight: 600;")
         act_layout.addWidget(self.awareness_now_next_label)
+        self.source_lanes_table = QTableWidget(0, 4)
+        self.source_lanes_table.setObjectName("controlfreqSourceLanesTable")
+        self.source_lanes_table.setHorizontalHeaderLabels(["Source", "Now", "Next", "Attention"])
+        self._setup_table_defaults(self.source_lanes_table)
+        self.source_lanes_table.setWordWrap(True)
+        source_header = self.source_lanes_table.horizontalHeader()
+        source_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        source_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        source_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        source_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.source_lanes_table.itemSelectionChanged.connect(self._sync_operational_action_buttons)
+        act_layout.addWidget(self.source_lanes_table)
         self.awareness_sop_label = QLabel("SOP: --")
         self.awareness_sop_label.setObjectName("controlfreqAwarenessSop")
         self.awareness_sop_label.setWordWrap(True)
@@ -2915,7 +2928,8 @@ class ControlFreqTab(QWidget):
         if not db_path.exists():
             self._operational_activity_context = {}
             self._operational_awareness_context = {}
-            self._set_operational_awareness_snapshot(None)
+            lanes = self._build_operational_source_lanes(())
+            self._set_operational_awareness_snapshot(None, source_lanes=lanes)
             self._set_operational_activity_text("Operational Activity: no traffic database yet", "")
             return
         cache_key = (
@@ -2967,7 +2981,8 @@ class ControlFreqTab(QWidget):
             log.debug("ControlFreq: failed to refresh operational activity snapshot: %s", e)
             self._operational_activity_context = {}
             self._operational_awareness_context = {}
-            self._set_operational_awareness_snapshot(None)
+            lanes = self._build_operational_source_lanes(())
+            self._set_operational_awareness_snapshot(None, source_lanes=lanes)
             self._set_operational_activity_text("Operational Activity: unavailable", "")
 
     def _refresh_awareness_now_next(self) -> None:
@@ -2993,9 +3008,91 @@ class ControlFreqTab(QWidget):
             if next_text.startswith(prefix):
                 next_text = next_text[len(prefix):].strip()
                 break
-        text = f"Now: {now_text or '--'} | Next: {next_text or '--'}"
+        sources = self._active_source_short_names()
+        if len(sources) > 1:
+            text = f"Sources: {', '.join(sources[:4])}"
+            if len(sources) > 4:
+                text += f" +{len(sources) - 4}"
+            text += f" | Primary now: {now_text or '--'} | Next: {next_text or '--'}"
+        elif sources:
+            text = f"Source: {sources[0]} | Now: {now_text or '--'} | Next: {next_text or '--'}"
+        else:
+            text = f"Now: {now_text or '--'} | Next: {next_text or '--'}"
         label.setText(text)
         label.setToolTip(text)
+
+    def _active_source_short_names(self) -> List[str]:
+        names: List[str] = []
+        try:
+            profiles = list(self._multi_radio_store.list_runtime_active_device_profiles())
+        except Exception:
+            profiles = []
+        for profile in profiles:
+            name = str((profile or {}).get("short_name") or (profile or {}).get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _build_operational_source_lanes(self, attention_items: Sequence[object]) -> Tuple[object, ...]:
+        try:
+            profiles = list(self._multi_radio_store.list_runtime_active_device_profiles())
+        except Exception as e:
+            log.debug("ControlFreq: failed to load active source lanes: %s", e)
+            profiles = []
+        now_text = ""
+        try:
+            now_text = self._format_current_schedule_label()
+        except Exception:
+            now_text = ""
+        next_text = ""
+        try:
+            next_label = getattr(self, "next_change_label", None)
+            next_text = str(next_label.text() or "").strip() if next_label is not None else ""
+        except Exception:
+            next_text = ""
+        for prefix in ("Next Change:", "Next Schedule:", "Current Ends:"):
+            if next_text.startswith(prefix):
+                next_text = next_text[len(prefix):].strip()
+                break
+        return build_radio_source_lanes(
+            profiles,
+            current_label=now_text,
+            next_label=next_text,
+            attention_items=attention_items,
+        )
+
+    def _set_source_lanes(self, lanes: Sequence[object]) -> None:
+        table = getattr(self, "source_lanes_table", None)
+        if table is None:
+            return
+        rows: List[List[str]] = []
+        contexts: List[Dict[str, str]] = []
+        for lane in tuple(lanes or ()):
+            source = str(getattr(lane, "short_name", "") or "").strip()
+            if not source:
+                continue
+            now_text = str(getattr(lane, "now", "") or "").strip() or "monitoring"
+            next_text = str(getattr(lane, "next", "") or "").strip() or "--"
+            attention_count = int(getattr(lane, "attention_count", 0) or 0)
+            attention_summary = str(getattr(lane, "attention_summary", "") or "").strip()
+            attention_text = attention_summary or ("clear" if attention_count <= 0 else f"{attention_count} item(s)")
+            rows.append([source, now_text, next_text, attention_text])
+            contexts.append(
+                {
+                    "source_name": source,
+                    "source_id": str(getattr(lane, "source_id", "") or "").strip(),
+                    "source_family": str(getattr(lane, "source_kind", "") or "").strip(),
+                }
+            )
+        if not rows:
+            rows = [["No active source", "--", "--", "check radio setup"]]
+            contexts = [{}]
+        self._set_table_rows(table, rows)
+        self._source_lane_contexts = contexts
+        self._apply_elide_tooltips(table, 1)
+        self._apply_elide_tooltips(table, 2)
+        self._apply_elide_tooltips(table, 3)
+        self._fit_table_height_to_rows(table, min_rows=1, max_rows=4, empty_rows=1)
 
     def _configured_awareness_pins(self) -> Tuple[Dict[str, object], ...]:
         raw_pins = self.settings.get("controlfreq_awareness_pins", ())
@@ -3017,11 +3114,20 @@ class ControlFreqTab(QWidget):
                 )
         return tuple(pins)
 
-    def _set_operational_awareness_snapshot(self, snapshot: object | None) -> None:
+    def _set_operational_awareness_snapshot(
+        self,
+        snapshot: object | None,
+        *,
+        source_lanes: Sequence[object] | None = None,
+    ) -> None:
         table = getattr(self, "awareness_table", None)
         if table is None:
             return
         attention = tuple(getattr(snapshot, "attention_items", ()) or ()) if snapshot is not None else ()
+        lanes = tuple(source_lanes or getattr(snapshot, "source_lanes", ()) or ())
+        if not lanes:
+            lanes = self._build_operational_source_lanes(attention)
+        self._set_source_lanes(lanes)
         rows: List[List[str]] = []
         row_contexts: List[Dict[str, str]] = []
         for item in attention[:6]:
