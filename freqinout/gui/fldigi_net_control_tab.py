@@ -535,7 +535,7 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(self._left_bucket_col, stretch=1)
 
         self.roster_compare_splitter = QSplitter(Qt.Vertical)
-        style_splitter_handles(self.roster_compare_splitter, resolve_theme(self._dark))
+        style_splitter_handles(self.roster_compare_splitter, resolve_theme(self.settings))
         self.roster_compare_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._left_bucket_col.addWidget(self.roster_compare_splitter, stretch=1)
 
