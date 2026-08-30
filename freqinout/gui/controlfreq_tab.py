@@ -6739,6 +6739,7 @@ class ControlFreqTab(QWidget):
     def _fit_group_box_to_contents(group_box: QGroupBox) -> None:
         try:
             height = ControlFreqTab._content_fit_group_height(group_box, floor=96)
+            group_box.setMinimumHeight(height)
             group_box.setMaximumHeight(height)
         except Exception:
             pass
