@@ -6845,6 +6845,27 @@ class MainWindow(QMainWindow):
         self._station_command_radio_tile_controls = {}
         self._refresh_station_command_radio_tiles(page_choices, selected_id)
 
+    def _sync_station_command_radio_summary_height(self, *, card_mode: bool) -> None:
+        scroll = getattr(self, "station_command_radio_summary_scroll", None)
+        if scroll is None:
+            return
+        if not card_mode:
+            scroll.setFixedHeight(control_height_for_font(scroll, vertical_padding=18, floor=42))
+            return
+        parent = getattr(self, "station_command_radio_summary_widget", None)
+        tiles = parent.findChildren(QFrame, "stationCommandRadioTile") if parent is not None else []
+        tile_height = max((int(tile.sizeHint().height()) for tile in tiles), default=0)
+        horizontal_extra = 0
+        try:
+            viewport_width = int(scroll.viewport().width() or 0)
+            content_width = int(parent.minimumWidth() if parent is not None else 0)
+            if viewport_width > 0 and content_width > viewport_width:
+                horizontal_extra = int(scroll.horizontalScrollBar().sizeHint().height() or 14)
+        except Exception:
+            horizontal_extra = 0
+        height = max(132, min(188, tile_height + horizontal_extra + 8))
+        scroll.setFixedHeight(height)
+
     def _station_command_set_qsy_combo_to_meta(self, meta: Mapping[str, object] | None) -> None:
         combo = getattr(self, "station_command_freq_combo", None)
         if not isinstance(combo, QComboBox) or not isinstance(meta, Mapping):
@@ -7466,6 +7487,7 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         try:
             parent.adjustSize()
+            self._sync_station_command_radio_summary_height(card_mode=True)
         except Exception:
             pass
         self._station_command_radio_tile_controls = tile_controls
@@ -7801,7 +7823,7 @@ class MainWindow(QMainWindow):
             self.station_command_radio_summary_label.setText("Active Radios" if card_mode else "Radios")
             self.station_command_radio_summary_label.setVisible(False)
         if getattr(self, "station_command_radio_summary_scroll", None) is not None:
-            self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)
+            self._sync_station_command_radio_summary_height(card_mode=card_mode)
             self.station_command_radio_summary_scroll.setVisible(True)
         self._apply_station_command_bar_layout(force=True)
         for btn, direction, label in (

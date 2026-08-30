@@ -3220,7 +3220,9 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "QTimer.singleShot(0, lambda: self._refresh_station_command_bar(force=False))" in source
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
-    assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block
+    assert "def _sync_station_command_radio_summary_height(self, *, card_mode: bool) -> None:" in source
+    assert "height = max(132, min(188, tile_height + horizontal_extra + 8))" in source
+    assert "self._sync_station_command_radio_summary_height(card_mode=card_mode)" in refresh_block
     assert "widget.setVisible(not card_mode)" in refresh_block
     assert "widget.setVisible(False)" in refresh_block
     assert 'tile.setProperty("selected", "true" if selected else "false")' in tile_block
