@@ -489,8 +489,8 @@ class ControlFreqTab(QWidget):
         activity_actions = QHBoxLayout()
         activity_actions.setContentsMargins(0, 0, 0, 0)
         activity_actions.setSpacing(6)
-        self.operational_messages_btn = QPushButton("Msgs")
-        self.operational_messages_btn.setToolTip("Open Messages with this activity context.")
+        self.operational_messages_btn = QPushButton("Inbox")
+        self.operational_messages_btn.setToolTip("Open the Messages Inbox with this activity context.")
         self.operational_messages_btn.setEnabled(False)
         self.operational_messages_btn.clicked.connect(self._open_operational_activity_messages)
         activity_actions.addWidget(self.operational_messages_btn)
@@ -3379,7 +3379,7 @@ class ControlFreqTab(QWidget):
             table.clearSelection()
             table.setCurrentCell(-1, -1)
         if hasattr(self, "awareness_recommend_label") and search:
-            text = f"Focused: {search} | use Read, Reply, or Map from matching traffic."
+            text = f"Focused: {search} | use Inbox, Reply, or Map from matching traffic."
             self.awareness_recommend_label.setText(text)
             self.awareness_recommend_label.setToolTip(text)
         self._update_clear_filters_style()
@@ -3410,7 +3410,7 @@ class ControlFreqTab(QWidget):
             (
                 getattr(self, "operational_messages_btn", None),
                 contract.actions.read,
-                "Open Messages with this activity context.",
+                "Open the Messages Inbox with this activity context.",
                 f"Messages is not available for {contract.display_name}.",
             ),
             (

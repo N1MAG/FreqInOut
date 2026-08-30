@@ -133,6 +133,12 @@ Required behavior:
 - use action chips/buttons for `Read`, `Reply`, `Map`, `Pin`
 - action chips must call the shared view-context projection rather than parsing
   rendered row text
+- every rendered cross-tab action must have an automated route-contract test
+  proving that the visible label opens the expected destination with the
+  expected context filters. Examples: `Inbox` opens Messages Inbox, `Reply`
+  opens Messages Compose with a compose intent, `Map` opens the map with source
+  filters, and Local Reports traffic opens Local Reports rather than the HF
+  inbox.
 - support topic/callsign/group filtering
 - never require reading a long table to see the top issue
 

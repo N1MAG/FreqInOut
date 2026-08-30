@@ -6,6 +6,28 @@ as world-class production UI.
 
 ## Open Issues
 
+### UI-003: Cross-tab action routing needs broad contract coverage
+
+Observed while auditing rendered buttons after a Map detail action labeled
+`Messages` opened Compose instead of the Inbox.
+
+Impact:
+
+- Several high-value actions are built directly in Qt views with local lambdas
+  or handler methods. The current ControlFreq and Map traffic actions now have
+  targeted route tests, but broader UI coverage is still uneven.
+- Future refactors can accidentally point a correctly labeled button to the
+  wrong destination unless the visible label, destination, and context filters
+  are tested together.
+
+Recommended fix:
+
+- Add route-contract tests for every rendered cross-tab action as each screen is
+  touched. Required cases include Inbox, Reply/Compose, Map, SOP, Settings,
+  Local Reports, and schedule/QSY actions.
+- Prefer shared context projection helpers (`MapContextFilter`, `ComposeIntent`,
+  source contracts) over parsing rendered row text.
+
 ### UI-001: Operational views still rely on large legacy Qt classes
 
 Observed while wiring ControlFreq, Messages, and Map handoffs.
@@ -97,3 +119,14 @@ Status: Addressed.
 - The embedded JavaScript regex in `freqinout/gui/stations_map_tab.py` now
   escapes the Python string backslash, preserving the generated regex while
   removing the Python `SyntaxWarning`.
+
+### ROUTE-001: Inbox-labeled map actions could be confused with Compose
+
+Status: Addressed.
+
+- Map selected-detail actions now use `Inbox` language and route to
+  `open_messages_section("inbox", ...)` with group/topic/query/source/geography
+  filters.
+- ControlFreq's global traffic action now uses `Inbox` language and has
+  execution-level tests proving it opens the Messages Inbox, while `Reply`
+  opens Compose and `Map` opens the correct map surface.

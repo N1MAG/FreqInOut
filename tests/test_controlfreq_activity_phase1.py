@@ -6,6 +6,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -481,6 +482,106 @@ def test_controlfreq_activity_context_navigation_hooks_are_present():
     assert "prefill_compose_intent(intent)" in main_window_source
     assert "def show_inbox_with_context" in message_viewer_source
     assert "def show_context(self, *, callsign: str = \"\", topic: str = \"\", query: str = \"\")" in local_reports_source
+
+
+def test_controlfreq_rendered_inbox_action_routes_to_messages_inbox(monkeypatch) -> None:
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    opened: list[tuple[str, dict[str, object]]] = []
+    host = SimpleNamespace(open_messages_section=lambda section, **kwargs: opened.append((section, kwargs)))
+    tab._operational_activity_context = {
+        "source_family": "commstat",
+        "group_filter": "MAGNET",
+        "topic_filter": "Comms",
+        "search_query": "KI6QDB",
+        "grid_filter": "DM12MR",
+    }
+    monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
+
+    ControlFreqTab._open_operational_activity_messages(tab)
+
+    assert opened == [
+        (
+            "inbox",
+            {
+                "group_filter": "MAGNET",
+                "topic_filter": "Comms",
+                "query_filter": "KI6QDB",
+                "source_family": "commstat",
+                "state_filter": "",
+                "grid_filter": "DM12MR",
+                "fema_region_filter": "",
+                "age_filter_seconds": 7 * 24 * 60 * 60,
+                "concern_only": False,
+            },
+        )
+    ]
+
+
+def test_controlfreq_reply_action_routes_only_to_compose(monkeypatch) -> None:
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    opened: list[tuple[str, dict[str, object]]] = []
+    host = SimpleNamespace(open_messages_section=lambda section, **kwargs: opened.append((section, kwargs)))
+    tab._operational_activity_context = {
+        "source_family": "commstat",
+        "callsign": "KI6QDB",
+        "topic_filter": "Comms",
+    }
+    monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
+
+    ControlFreqTab._open_operational_activity_compose(tab)
+
+    assert len(opened) == 1
+    section, kwargs = opened[0]
+    assert section == "compose"
+    assert kwargs["compose_intent"]["mode"] == "commstat_rf"
+    assert kwargs["compose_intent"]["recipient_callsign"] == "KI6QDB"
+    assert kwargs["compose_intent"]["body"] == "RE Comms: "
+
+
+def test_controlfreq_map_action_routes_by_source_family(monkeypatch) -> None:
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    opened: list[tuple[str, dict[str, object]]] = []
+    host = SimpleNamespace(
+        open_spotter_map=lambda **kwargs: opened.append(("spotter_map", kwargs)),
+        open_local_reports_map=lambda **kwargs: opened.append(("local_reports_map", kwargs)),
+    )
+    monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
+
+    tab._operational_activity_context = {"source_family": "spotter", "topic_filter": "Fire", "group_filter": "MR08"}
+    ControlFreqTab._open_operational_activity_map(tab)
+    tab._operational_activity_context = {"source_family": "local_report", "topic_filter": "Power", "group_filter": "LOCAL"}
+    ControlFreqTab._open_operational_activity_map(tab)
+
+    assert opened == [
+        (
+            "spotter_map",
+            {
+                "group_filter": "MR08",
+                "topic_filter": "Fire",
+                "query_filter": "",
+                "state_filter": "",
+                "grid_filter": "",
+            },
+        ),
+        (
+            "local_reports_map",
+            {
+                "group_filter": "LOCAL",
+                "topic_filter": "Power",
+                "query_filter": "",
+                "state_filter": "",
+                "grid_filter": "",
+            },
+        ),
+    ]
+
+
+def test_controlfreq_global_activity_button_language_matches_destination() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert 'self.operational_messages_btn = QPushButton("Inbox")' in source
+    assert 'self.operational_messages_btn = QPushButton("Msgs")' not in source
+    assert "use Inbox, Reply, or Map from matching traffic" in source
 
 
 def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
