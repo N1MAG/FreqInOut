@@ -669,7 +669,7 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
 
     assert "_sync_propagation_box_height" in controlfreq_source
     assert "self.intersection_window_combo = QComboBox()" in controlfreq_source
-    assert 'self.intersection_label = QLabel("Intersection Window")' in controlfreq_source
+    assert 'self.intersection_label = QLabel("Overlap Window")' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("30m", 30)' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("6h", 360)' in controlfreq_source
     assert "self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)" in controlfreq_source
@@ -678,6 +678,7 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "_content_fit_group_height(self.intersection_box, floor=96)" in controlfreq_source
     assert "_content_fit_group_height(self.schedule_box, floor=120)" in controlfreq_source
     assert "group_box.setMinimumHeight(height)" in controlfreq_source
+    assert "group_box.updateGeometry()" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=4, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source

@@ -3214,7 +3214,9 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "self._change_station_command_radio_page(1)" in source
     assert "station_command_radio_summary_scroll" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
     assert "viewport_width or scroll_width or bar_width" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
-    assert "min(520, available // count)" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    card_width_block = source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    assert "min(480, available // count)" in card_width_block
+    assert "parent.setMaximumWidth(row_min_width)" in source
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
     assert "self.station_command_radio_summary_scroll.setFixedHeight(188 if card_mode else 42)" in refresh_block
@@ -4132,7 +4134,7 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
         assert len(tiles) == 2
-        assert all(tile.maximumWidth() <= 520 for tile in tiles)
+        assert all(tile.maximumWidth() <= 480 for tile in tiles)
         assert not any(button.text() == "Manual QSY" for tile in tiles for button in tile.findChildren(QPushButton))
 
         second_combo = tiles[1].findChild(QComboBox, "stationCommandRadioTileFrequency")

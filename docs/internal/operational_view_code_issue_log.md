@@ -80,6 +80,40 @@ Latest verification:
   early progress range. Focused operational view and shell tests pass; the
   full-suite hang still needs a separate bisection pass.
 
+### CTRL-003: Blank `Prev 1/2` windows can appear outside ControlFreq
+
+Observed in QA screenshots after ControlFreq/station-command refactors. Tiny
+blank windows can appear and, when maximized, show only `Prev 1/2`.
+
+Impact:
+
+- Operators see orphan windows that cannot be cleared from the visible UI,
+  which damages confidence in the new dashboard even if the core data is
+  correct.
+
+Recommended fix:
+
+- Audit any remaining radio-card paging widgets, helper popups, and detached
+  window creation around station-command summary controls. Page controls must
+  remain child widgets inside the command bar and must never be top-level
+  windows.
+
+### CTRL-004: Propagation helper has duplicated solar declination assignment
+
+Observed during ControlFreq scan in
+`freqinout/gui/controlfreq_tab.py::_sunrise_sunset_local`.
+
+Impact:
+
+- The duplicate `sin_dec` assignment appears harmless, but it is a code-quality
+  smell in a calculation path used by RF readiness and should be cleaned during
+  the next propagation-focused pass.
+
+Recommended fix:
+
+- Remove the duplicate assignment and add or extend a propagation calculation
+  test that locks expected sunrise/sunset handling for a known location/date.
+
 ## Recently Addressed
 
 ### VIEW-001: Selectable operational views were not registered in code

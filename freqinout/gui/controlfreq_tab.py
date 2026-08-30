@@ -556,7 +556,7 @@ class ControlFreqTab(QWidget):
         inter_header_row = QHBoxLayout()
         inter_header_row.setContentsMargins(0, 0, 0, 0)
         inter_header_row.setSpacing(6)
-        self.intersection_label = QLabel("Intersection Window")
+        self.intersection_label = QLabel("Overlap Window")
         self.intersection_label.setStyleSheet("font-weight: bold;")
         inter_header_row.addWidget(self.intersection_label)
         self.intersection_window_combo = QComboBox()
@@ -1108,10 +1108,14 @@ class ControlFreqTab(QWidget):
     def _card_target_height(self, key: str, widget: QWidget) -> int:
         min_heights = {
             "activity": 180,
-            "intersections": 170,
-            "schedule": 220,
+            "intersections": 96,
+            "schedule": 120,
             "propagation": 220,
         }
+        if key == "intersections" and hasattr(self, "intersection_box"):
+            return self._content_fit_group_height(self.intersection_box, floor=96)
+        if key == "schedule" and hasattr(self, "schedule_box"):
+            return self._content_fit_group_height(self.schedule_box, floor=120)
         return max(
             int(min_heights.get(key, 160)),
             int(self._card_expanded_heights.get(key, 0) or 0),
@@ -6798,6 +6802,7 @@ class ControlFreqTab(QWidget):
             height = ControlFreqTab._content_fit_group_height(group_box, floor=96)
             group_box.setMinimumHeight(height)
             group_box.setMaximumHeight(height)
+            group_box.updateGeometry()
         except Exception:
             pass
 

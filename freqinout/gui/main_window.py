@@ -6730,7 +6730,7 @@ class MainWindow(QMainWindow):
         available = max(300, width - gaps)
         minimum_card = 280
         if count * minimum_card + gaps <= width:
-            return max(minimum_card, min(520, available // count))
+            return max(minimum_card, min(480, available // count))
         return minimum_card
 
     def _station_command_radio_page_slice(self, choices: list[object]) -> tuple[list[object], int, int, int]:
@@ -7100,8 +7100,11 @@ class MainWindow(QMainWindow):
             self._station_command_card_qsy_pending_keys = pending_qsy_keys
         card_width = self._station_command_radio_card_width(len(choices))
         try:
-            row_min_width = max(0, len(choices) * card_width + max(0, len(choices) - 1) * int(layout.spacing()))
+            spacing = max(0, int(layout.spacing()))
+            row_min_width = max(0, len(choices) * card_width + max(0, len(choices) - 1) * spacing)
             parent.setMinimumWidth(row_min_width)
+            parent.setMaximumWidth(row_min_width)
+            parent.resize(row_min_width, max(int(parent.height() or 0), int(parent.sizeHint().height())))
         except Exception:
             pass
         for snapshot in choices:

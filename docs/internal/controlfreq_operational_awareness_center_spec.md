@@ -366,9 +366,9 @@ Map:
 - Schedule Intersections must expose a real intersection-horizon control in the
   header (`30m`, `1h`, `2h`, `6h`). The selected horizon drives both the
   intersection calculation and the persisted UI state. Label it as an
-  `Intersection Window` unless the same control truly drives the Schedule
-  Outlook table. Do not use a decorative `2h ?` label that appears clickable
-  but does nothing.
+  `Overlap Window` unless a future shared control truly drives both the
+  intersection calculation and the Schedule Outlook table. Do not use a
+  decorative `2h ?` label that appears clickable but does nothing.
 - Propagation defaults to a compact RF Readiness summary. Detailed propagation
   tables are opt-in through `Forecast Details` and must not leave a large blank
   panel when collapsed.
@@ -501,9 +501,10 @@ Current implementation status:
 - Existing saved `Schedule` view state migrates once to `Operations`, because
   the new dashboard should be visible for current users without requiring them
   to discover the Activity chip.
-- The global station command bar pages radio cards and disables horizontal
-  scrollbar display, so maximized laptop layouts do not ask the operator to
-  scroll sideways for primary radio controls.
+- The global station command bar uses compact radio cards that show as many
+  configured radios as fit and enables horizontal scrolling only for true
+  overflow. The summary row must recalculate actual content width after
+  viewport changes so a stale wide card cannot clip the next radio.
 
 ### Phase 1: Spec And Projection
 
