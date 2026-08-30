@@ -6248,6 +6248,32 @@ def test_message_map_context_falls_back_to_single_group_filter() -> None:
     }
 
 
+def test_message_view_hf_reports_map_action_routes_to_map_with_filters(monkeypatch) -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    opened: list[dict[str, str]] = []
+    row = UnifiedMessage(
+        msg_type="Spotter",
+        status="NEW",
+        from_call="K7ETC",
+        to_call="@MR08",
+        rcv_ts=0.0,
+        rcv_display="",
+        title="Wildfire",
+        origin="spotter",
+        payload=object(),
+        topics=("Fire", "Comms"),
+    )
+    tab._current_message_table_row = lambda: row
+    tab._message_group_filter_active = lambda: False
+    tab._selected_message_groups = lambda: set()
+    host = SimpleNamespace(open_spotter_map=lambda **kwargs: opened.append(kwargs))
+    monkeypatch.setattr(MessageViewerTab, "window", lambda _self: host)
+
+    MessageViewerTab._request_spotter_map_view(tab)
+
+    assert opened == [{"group_filter": "MR08", "topic_filter": "Fire"}]
+
+
 def test_commstat_message_detail_uses_reported_for_and_reported_by_labels() -> None:
     source = Path("freqinout/gui/message_viewer_tab.py").read_text(encoding="utf-8")
     block = source[source.index("def _load_commstat_content") : source.index("def _mark_varac_read")]

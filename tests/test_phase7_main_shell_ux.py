@@ -119,6 +119,132 @@ def test_phase7_primary_nav_groups_start_collapsed() -> None:
     assert states["Operators"] is True
 
 
+def test_main_messages_navigation_routes_to_requested_surface(monkeypatch) -> None:
+    from freqinout.gui import main_window as main_window_module
+    from freqinout.gui.main_window import MainWindow
+
+    callbacks: list[object] = []
+    monkeypatch.setattr(
+        main_window_module.QTimer,
+        "singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    class FakeMessagesTab:
+        def __init__(self) -> None:
+            self.inbox_contexts: list[dict[str, object]] = []
+            self.inbox_plain_count = 0
+            self.compose_count = 0
+            self.compose_intents: list[dict[str, object]] = []
+
+        def show_inbox_with_context(self, **context: object) -> None:
+            self.inbox_contexts.append(dict(context))
+
+        def show_inbox_from_navigation(self) -> None:
+            self.inbox_plain_count += 1
+
+        def show_compose_from_navigation(self) -> None:
+            self.compose_count += 1
+
+        def prefill_compose_intent(self, intent: dict[str, object]) -> None:
+            self.compose_intents.append(dict(intent))
+
+    tab = FakeMessagesTab()
+    window = MainWindow.__new__(MainWindow)
+    window._screen_index_by_label = {"Messages": 7}
+    window._messages_nav_context = "inbox"
+    window._messages_nav_filter_context = {}
+    window.message_viewer_tab = tab
+    selected_screens: list[int] = []
+    window._set_screen = selected_screens.append
+
+    MainWindow.open_messages_section(
+        window,
+        "inbox",
+        group_filter="MAGNET",
+        topic_filter="Comms",
+        grid_filter="DM79QJ",
+    )
+    assert selected_screens == [7]
+    assert len(callbacks) == 1
+    callbacks.pop()()
+    assert tab.inbox_contexts
+    assert tab.inbox_contexts[-1]["group_filter"] == "MAGNET"
+    assert tab.inbox_contexts[-1]["topic_filter"] == "Comms"
+    assert tab.inbox_contexts[-1]["grid_filter"] == "DM79QJ"
+    assert tab.compose_count == 0
+
+    MainWindow.open_messages_section(
+        window,
+        "compose",
+        compose_intent={"target_callsign": "KI6QDB", "topic": "Comms"},
+    )
+    assert selected_screens == [7, 7]
+    assert len(callbacks) == 1
+    callbacks.pop()()
+    assert tab.compose_count == 1
+    assert tab.compose_intents[-1]["target_callsign"] == "KI6QDB"
+
+
+def test_main_map_routes_focus_expected_report_surfaces(monkeypatch) -> None:
+    from freqinout.gui import main_window as main_window_module
+    from freqinout.gui.main_window import MainWindow
+
+    callbacks: list[object] = []
+    monkeypatch.setattr(
+        main_window_module.QTimer,
+        "singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    class FakeMapTab:
+        def __init__(self) -> None:
+            self.hf_report_contexts: list[dict[str, object]] = []
+            self.local_report_contexts: list[dict[str, object]] = []
+
+        def focus_hf_reports(self, **context: object) -> None:
+            self.hf_report_contexts.append(dict(context))
+
+        def focus_local_reports(self, **context: object) -> None:
+            self.local_report_contexts.append(dict(context))
+
+    tab = FakeMapTab()
+    window = MainWindow.__new__(MainWindow)
+    window._screen_index_by_label = {"Map": 4}
+    window.stations_map_tab = tab
+    window._screen_is_runtime_suppressed = lambda _label: False
+    window._sync_map_filters_from_tab = lambda: None
+    selected_screens: list[int] = []
+    window._set_screen = selected_screens.append
+
+    MainWindow.open_spotter_map(
+        window,
+        group_filter="MAGNET",
+        topic_filter="Fire",
+        query_filter="KI6QDB",
+    )
+    assert selected_screens == [4]
+    while callbacks:
+        callbacks.pop(0)()
+    assert tab.hf_report_contexts[-1]["group_filter"] == "MAGNET"
+    assert tab.hf_report_contexts[-1]["topic_filter"] == "Fire"
+    assert tab.hf_report_contexts[-1]["query_filter"] == "KI6QDB"
+    assert not tab.local_report_contexts
+
+    MainWindow.open_local_reports_map(
+        window,
+        group_filter="AMRRON",
+        topic_filter="Comms",
+        state_filter="CO",
+    )
+    assert selected_screens == [4, 4]
+    while callbacks:
+        callbacks.pop(0)()
+    assert tab.local_report_contexts[-1]["group_filter"] == "AMRRON"
+    assert tab.local_report_contexts[-1]["topic_filter"] == "Comms"
+    assert tab.local_report_contexts[-1]["state_filter"] == "CO"
+
+
 def test_phase7_controlfreq_setup_review_sits_above_title() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
     review_widget = source.index("self.readiness_review_widget = QWidget()")

@@ -547,9 +547,19 @@ def test_controlfreq_map_action_routes_by_source_family(monkeypatch) -> None:
     )
     monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
 
-    tab._operational_activity_context = {"source_family": "spotter", "topic_filter": "Fire", "group_filter": "MR08"}
+    tab._operational_activity_context = {
+        "source_family": "spotter",
+        "topic_filter": "Fire",
+        "group_filter": "MR08",
+        "grid_filter": "DM12MR",
+    }
     ControlFreqTab._open_operational_activity_map(tab)
-    tab._operational_activity_context = {"source_family": "local_report", "topic_filter": "Power", "group_filter": "LOCAL"}
+    tab._operational_activity_context = {
+        "source_family": "local_report",
+        "topic_filter": "Power",
+        "group_filter": "LOCAL",
+        "grid_filter": "DM79QJ",
+    }
     ControlFreqTab._open_operational_activity_map(tab)
 
     assert opened == [
@@ -560,7 +570,7 @@ def test_controlfreq_map_action_routes_by_source_family(monkeypatch) -> None:
                 "topic_filter": "Fire",
                 "query_filter": "",
                 "state_filter": "",
-                "grid_filter": "",
+                "grid_filter": "DM12MR",
             },
         ),
         (
@@ -570,7 +580,7 @@ def test_controlfreq_map_action_routes_by_source_family(monkeypatch) -> None:
                 "topic_filter": "Power",
                 "query_filter": "",
                 "state_filter": "",
-                "grid_filter": "",
+                "grid_filter": "DM79QJ",
             },
         ),
     ]

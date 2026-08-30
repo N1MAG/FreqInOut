@@ -1700,6 +1700,81 @@ def test_map_topic_action_promotes_all_stations_to_all_traffic_context() -> None
     assert calls == [("all_reports", "MR08", "Fire")]
 
 
+def test_map_selected_detail_group_and_topic_actions_apply_filters() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    modes: list[tuple[str, str, str]] = []
+    tab.group_filter_combo = _FakeCombo([("All", ""), ("MAGNET", "MAGNET"), ("MR08", "MR08")])
+    tab._map_topic_filter_combo = _FakeCombo([("All Topics", ""), ("Fire", "Fire"), ("Comms", "Comms")])
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+    tab._set_report_focus_mode = lambda mode, group_filter="", topic_filter="": modes.append(
+        (mode, group_filter, topic_filter)
+    )
+
+    StationsMapTab._handle_map_detail_action(tab, {"action": "filter_group", "group": "@MAGNET"})
+    StationsMapTab._handle_map_detail_action(
+        tab,
+        {"action": "filter_topic", "topic": "Fire", "group": "@MR08"},
+    )
+
+    assert tab.group_filter_combo.index == 1
+    assert tab._map_topic_filter_combo.index == 1
+    assert refreshes == ["selected_detail_group"]
+    assert modes == [("all_reports", "MR08", "Fire")]
+
+
+def test_map_selected_detail_sop_action_routes_to_sop_context(monkeypatch) -> None:
+    tab = _bare_tab()
+    screens: list[int] = []
+    focused: list[dict[str, str]] = []
+    sop_tab = SimpleNamespace(
+        focus_traffic_context=lambda **kwargs: focused.append({key: str(value) for key, value in kwargs.items()})
+    )
+    main_window = SimpleNamespace(
+        _screen_index_by_label={"SOP": 7},
+        _set_screen=lambda idx: screens.append(int(idx)),
+        sop_tab=sop_tab,
+    )
+    tab._map_selected_payload = {
+        "type": "report",
+        "source_family": "commstat",
+        "group": "@MAGNET",
+        "topic": "Comms",
+    }
+    monkeypatch.setattr(StationsMapTab, "window", lambda _self: main_window)
+    monkeypatch.setattr("freqinout.gui.stations_map_tab.QTimer.singleShot", lambda _ms, callback: callback())
+
+    StationsMapTab._open_map_selected_sop(tab)
+
+    assert screens == [7]
+    assert focused == [{"group": "MAGNET", "topic": "Comms", "source_family": "commstat"}]
+
+
+def test_map_selected_detail_paths_action_routes_to_paths_focus() -> None:
+    tab = _bare_tab()
+    refreshes: list[str] = []
+    tab.settings = {"operator_callsign": "N1MAG"}
+    tab._map_selected_payload = {"type": "station", "title": "K7ETC"}
+    tab.link_mode_combo = _FakeCombo([("Off", ("off", "")), ("Station", ("station", "K7ETC"))])
+    tab._map_path_scope_combo = _FakeCombo([("Off", ("off", "")), ("Station", ("station", "K7ETC"))])
+    tab.map_links_chk = _FakeCheck(False)
+    tab._map_selected_tabs = SimpleNamespace(index=None, setCurrentIndex=lambda idx: setattr(tab._map_selected_tabs, "index", idx))
+    tab._refresh_relay_targets = lambda: None
+    tab._refresh_selected_paths_panel = lambda: None
+    tab._update_map_mode_buttons = lambda: None
+    tab._update_map_view_status_label = lambda: None
+    tab._update_clear_filter_buttons_visual = lambda: None
+    tab._request_map_refresh = lambda **kwargs: refreshes.append(str(kwargs.get("reason") or ""))
+
+    StationsMapTab._show_paths_for_selected_station(tab)
+
+    assert tab._observation_focus_enabled is True
+    assert tab._observation_focus_mode == "paths"
+    assert tab.show_link_paths is True
+    assert tab._map_selected_tabs.index == 2
+    assert refreshes == ["selected_detail_paths"]
+
+
 def test_map_selected_message_context_routes_by_source_family() -> None:
     tab = _bare_tab()
 
