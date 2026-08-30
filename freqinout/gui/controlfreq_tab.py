@@ -150,7 +150,7 @@ class ControlFreqTab(QWidget):
         self._clock_timer: Optional[QTimer] = None
         self._show_local = True
         self._intersection_cache_ts = 0.0
-        self._intersection_cache_key: Tuple[str, str] = ("", "")
+        self._intersection_cache_key: Tuple[Any, ...] = ()
         self._intersection_cache_rows: List[List[str]] = []
         self._prop_target_syncing = False
         self._prop_operator_geo: Dict[str, Dict[str, str]] = {}
@@ -536,8 +536,12 @@ class ControlFreqTab(QWidget):
 
         self.intersection_box = QGroupBox("Schedule Intersections")
         intersection_layout = QVBoxLayout(self.intersection_box)
+        intersection_layout.setContentsMargins(8, 6, 8, 6)
+        intersection_layout.setSpacing(4)
         inter_header_row = QHBoxLayout()
-        self.intersection_label = QLabel("Window")
+        inter_header_row.setContentsMargins(0, 0, 0, 0)
+        inter_header_row.setSpacing(6)
+        self.intersection_label = QLabel("Intersection Window")
         self.intersection_label.setStyleSheet("font-weight: bold;")
         inter_header_row.addWidget(self.intersection_label)
         self.intersection_window_combo = QComboBox()
@@ -1196,7 +1200,7 @@ class ControlFreqTab(QWidget):
             self.left_splitter.setSizes([1])
         if right_visible:
             if left_intersections and right_schedule:
-                self.right_splitter.setSizes([1, 3])
+                self._set_schedule_splitter_content_sizes()
             elif left_intersections:
                 self.right_splitter.setSizes([1, 0])
             else:
@@ -1219,6 +1223,16 @@ class ControlFreqTab(QWidget):
         activity_visible = bool(getattr(self, "_view_cards", {}).get("activity", False))
         show_inbox = (not activity_visible) or preset == "All"
         self.inbox_box.setVisible(show_inbox)
+
+    def _set_schedule_splitter_content_sizes(self) -> None:
+        if not hasattr(self, "right_splitter"):
+            return
+        try:
+            intersection_h = self._content_fit_group_height(self.intersection_box, floor=96)
+            schedule_h = self._content_fit_group_height(self.schedule_box, floor=120)
+            self.right_splitter.setSizes([max(1, intersection_h), max(1, schedule_h)])
+        except Exception:
+            pass
 
     def _apply_view_state(self, *, animated: bool) -> None:
         self._view_cards = self._normalized_view_cards(self._view_cards)
@@ -3833,6 +3847,7 @@ class ControlFreqTab(QWidget):
             self._style_intersection_rows()
             self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)
             self._fit_group_box_to_contents(self.intersection_box)
+            self._set_schedule_splitter_content_sizes()
             return
 
         rows = self._compute_intersection_summary_rows(group_filter, search, horizon_minutes=horizon_minutes)
@@ -3848,6 +3863,7 @@ class ControlFreqTab(QWidget):
         self._style_intersection_rows()
         self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)
         self._fit_group_box_to_contents(self.intersection_box)
+        self._set_schedule_splitter_content_sizes()
 
     def _compute_intersection_summary_rows(
         self, group_filter: str, search: str, *, horizon_minutes: int = 120

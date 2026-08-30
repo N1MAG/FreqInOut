@@ -347,10 +347,12 @@ Map:
 - Schedule Intersections belong with Schedule Outlook. They should feel like an
   explanatory/detail slice of the schedule timeline rather than a separate
   competing dashboard card in the traffic column.
-- Schedule Intersections must expose a real schedule-horizon control in the
+- Schedule Intersections must expose a real intersection-horizon control in the
   header (`30m`, `1h`, `2h`, `6h`). The selected horizon drives both the
-  calculation and the persisted UI state. Do not use a decorative `2h ?` label
-  that appears clickable but does nothing.
+  intersection calculation and the persisted UI state. Label it as an
+  `Intersection Window` unless the same control truly drives the Schedule
+  Outlook table. Do not use a decorative `2h ?` label that appears clickable
+  but does nothing.
 - Propagation defaults to a compact RF Readiness summary. Detailed propagation
   tables are opt-in through `Forecast Details` and must not leave a large blank
   panel when collapsed.

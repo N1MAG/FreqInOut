@@ -599,6 +599,7 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
 
     assert "_sync_propagation_box_height" in controlfreq_source
     assert "self.intersection_window_combo = QComboBox()" in controlfreq_source
+    assert 'self.intersection_label = QLabel("Intersection Window")' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("30m", 30)' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("6h", 360)' in controlfreq_source
     assert "self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)" in controlfreq_source
@@ -610,6 +611,8 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=4, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
     assert "box.setMaximumHeight(min(height, 420 if details_visible else 150))" in controlfreq_source
+    assert "def _set_schedule_splitter_content_sizes" in controlfreq_source
+    assert "self._set_schedule_splitter_content_sizes()" in controlfreq_source
 
 
 def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:

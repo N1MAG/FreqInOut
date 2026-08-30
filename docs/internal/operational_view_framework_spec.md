@@ -182,7 +182,7 @@ Required behavior:
 - size tables around visible rows
 - sparse schedule/intersection data must not reserve large empty panels
 - schedule/intersection horizon labels must be real controls when the operator
-  can change the time window
+  can change the time window, and their labels must make their scope clear
 - use compact action chips such as `QSY`, `Hold`, `Compose`
 - keep the current/next state readable at Large text
 - expose details without overwhelming the default view
@@ -528,8 +528,8 @@ The current ControlFreq work is the first implementation path:
 
 - `Operational Awareness` becomes the first Attention Queue view.
 - `Schedule Intersections` becomes part of Schedule Outlook.
-- `Schedule Intersections` uses a real horizon selector rather than a static
-  `2h ?` hint.
+- `Schedule Intersections` uses a real intersection-horizon selector rather
+  than a static `2h ?` hint.
 - `Propagation Forecast` becomes RF Readiness summary plus drill-down.
 - ControlFreq row actions carry source, callsign, topic, group, state, grid, and
   query context to Messages and Map.
