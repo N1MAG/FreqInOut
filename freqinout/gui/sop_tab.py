@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QCompleter,
     QSpinBox,
@@ -396,7 +397,7 @@ class _LegacySOPTab(QWidget):
                 pass
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
 
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("<h3>SOP Builder</h3>"))
@@ -413,7 +414,18 @@ class _LegacySOPTab(QWidget):
         title_row.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        root.addLayout(title_row)
+        outer.addLayout(title_row)
+
+        self.sop_scroll = QScrollArea(self)
+        self.sop_scroll.setObjectName("sopBuilderScroll")
+        self.sop_scroll.setWidgetResizable(True)
+        self.sop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sop_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sop_scroll_content = QWidget()
+        root = QVBoxLayout(self.sop_scroll_content)
+        root.setContentsMargins(0, 0, 0, 0)
+        self.sop_scroll.setWidget(self.sop_scroll_content)
+        outer.addWidget(self.sop_scroll, stretch=1)
 
         self.plan_context_label = PlanContextLabel(
             "sop",
@@ -799,6 +811,105 @@ class _LegacySOPTab(QWidget):
             return
         self._set_save_dirty(True)
         self._schedule_layer_sync_refresh()
+        self._refresh_sop_workbench_contracts()
+
+    def _refresh_sop_workbench_contracts(self) -> None:
+        if not hasattr(self, "sop_profile_selector_label"):
+            return
+        self._refresh_sop_profile_selector_summary()
+        self._refresh_sop_context_summary()
+        self._refresh_sop_action_cards()
+        self._refresh_sop_controlfreq_preview()
+
+    def _refresh_sop_profile_selector_summary(self) -> None:
+        label = getattr(self, "sop_profile_selector_label", None)
+        if label is None:
+            return
+        name = self.name_edit.text().strip() if hasattr(self, "name_edit") else ""
+        if not name and hasattr(self, "profile_combo"):
+            name = str(self.profile_combo.currentText() or "").strip()
+        category = str(self.category_combo.currentText() or "SOP") if hasattr(self, "category_combo") else "SOP"
+        active = "active" if hasattr(self, "active_cb") and self.active_cb.isChecked() else "inactive"
+        dirty = "unsaved changes" if bool(getattr(self, "_dirty", False)) else "saved"
+        label.setText(
+            f"<b>{html.escape(name or 'New SOP')}</b><br>"
+            f"{html.escape(category)} | {active} | {dirty}<br>"
+            "Versions and export/import protect recovery while card editing is introduced."
+        )
+
+    def _refresh_sop_context_summary(self) -> None:
+        label = getattr(self, "sop_context_summary_label", None)
+        if label is None:
+            return
+        try:
+            context_text = self._operating_plan_inputs_summary_text()
+        except Exception:
+            context_text = "Operating Plan Inputs: unavailable."
+        workflow = ""
+        workflow_label = getattr(self, "sop_workflow_status_label", None)
+        if isinstance(workflow_label, QLabel):
+            workflow = str(workflow_label.text() or "").replace("<b>", "").replace("</b>", "").strip()
+        label.setText(
+            html.escape(context_text)
+            + (f"<br><b>Impact:</b> {html.escape(workflow)}" if workflow else "")
+        )
+
+    def _action_card_line_for_row(self, row: int) -> str:
+        def combo_text(col: int) -> str:
+            widget = self.actions_table.cellWidget(row, col)
+            if isinstance(widget, QComboBox):
+                return widget.currentText().strip()
+            return ""
+
+        def line_text(col: int) -> str:
+            widget = self.actions_table.cellWidget(row, col)
+            if isinstance(widget, QLineEdit):
+                return widget.text().strip()
+            return ""
+
+        group = combo_text(self.COL_GROUP) or "Any group"
+        resource = combo_text(self.COL_RESOURCE) or "Resource"
+        action = combo_text(self.COL_ACTION) or "Action"
+        bandfreq = combo_text(self.COL_BANDFREQ)
+        start_edit = self._action_row_start_edit(row) if hasattr(self, "_action_row_start_edit") else None
+        start_text = start_edit.text().strip() if isinstance(start_edit, QLineEdit) else ""
+        end_text = line_text(self.COL_END)
+        desc = line_text(self.COL_DESC)
+        conflict_widget = self.actions_table.cellWidget(row, self.COL_CONFLICT)
+        conflict = conflict_widget.text().strip() if isinstance(conflict_widget, QToolButton) else "Pending"
+        timing = " - ".join(part for part in (start_text, end_text) if part)
+        route = " | ".join(part for part in (resource, bandfreq) if part)
+        details = " | ".join(part for part in (route, timing, conflict) if part)
+        return (
+            "<div style='border:1px solid #c8d3df; border-radius:6px; padding:6px; margin:4px 0; background:#eef4fa;'>"
+            f"<b>{html.escape(group)}</b>: {html.escape(action)}"
+            + (f"<br><span style='color:#4f6272'>{html.escape(details)}</span>" if details else "")
+            + (f"<br>{html.escape(desc)}" if desc else "")
+            + "</div>"
+        )
+
+    def _refresh_sop_action_cards(self) -> None:
+        label = getattr(self, "sop_action_cards_label", None)
+        if label is None or not hasattr(self, "actions_table"):
+            return
+        cards = [self._action_card_line_for_row(row) for row in range(self.actions_table.rowCount())]
+        label.setText("".join(cards) if cards else "No SOP actions yet.")
+
+    def _refresh_sop_controlfreq_preview(self) -> None:
+        label = getattr(self, "sop_preview_label", None)
+        if label is None:
+            return
+        profile_name = self.name_edit.text().strip() if hasattr(self, "name_edit") else ""
+        category = str(self.category_combo.currentText() or "SOP") if hasattr(self, "category_combo") else "SOP"
+        action_count = self.actions_table.rowCount() if hasattr(self, "actions_table") else 0
+        if action_count <= 0:
+            label.setText("No actions will appear in Ops Center yet.")
+            return
+        label.setText(
+            f"<b>{html.escape(profile_name or 'Selected SOP')}</b><br>"
+            f"{html.escape(category)} | {action_count} action{'s' if action_count != 1 else ''}<br>"
+            "Ops Center will match actions by schedule window, group, condition level, source, and assigned radio."
+        )
 
     def _schedule_layer_sync_refresh(self) -> None:
         if getattr(self, "_loading_ui", False):
@@ -4303,6 +4414,45 @@ class SOPTab(_LegacySOPTab):
         self._traffic_focus_context: Dict[str, str] = {}
         QTimer.singleShot(0, self.refresh_traffic_suggestions)
 
+        self.sop_workbench_box = QGroupBox("SOP Workbench")
+        sop_workbench_layout = QHBoxLayout(self.sop_workbench_box)
+        sop_workbench_layout.setContentsMargins(8, 8, 8, 8)
+        sop_workbench_layout.setSpacing(8)
+
+        self.sop_profile_selector_box = QGroupBox("SOP Profile")
+        profile_selector_layout = QVBoxLayout(self.sop_profile_selector_box)
+        self.sop_profile_selector_label = QLabel("Select or create an SOP, then review linked plans and radios.")
+        self.sop_profile_selector_label.setObjectName("sopProfileSelector")
+        self.sop_profile_selector_label.setWordWrap(True)
+        self.sop_profile_selector_label.setToolTip(
+            "SopProfileSelector: selected SOP, group/category, active state, linked plans/radios, versions, import/export."
+        )
+        profile_selector_layout.addWidget(self.sop_profile_selector_label)
+        sop_workbench_layout.addWidget(self.sop_profile_selector_box, 1)
+
+        self.sop_context_summary_box = QGroupBox("Context")
+        context_summary_layout = QVBoxLayout(self.sop_context_summary_box)
+        self.sop_context_summary_label = QLabel("Plan, radio, group, schedule, and source context will appear here.")
+        self.sop_context_summary_label.setObjectName("sopContextSummary")
+        self.sop_context_summary_label.setWordWrap(True)
+        self.sop_context_summary_label.setToolTip(
+            "SopContextSummary and SopScheduleImpact: shows assigned plan/radio context and expected schedule impact."
+        )
+        context_summary_layout.addWidget(self.sop_context_summary_label)
+        sop_workbench_layout.addWidget(self.sop_context_summary_box, 1)
+
+        self.sop_preview_box = QGroupBox("Ops Center Preview")
+        sop_preview_layout = QVBoxLayout(self.sop_preview_box)
+        self.sop_preview_label = QLabel("Save the SOP to preview the guidance Ops Center will render.")
+        self.sop_preview_label.setObjectName("sopPreview")
+        self.sop_preview_label.setWordWrap(True)
+        self.sop_preview_label.setToolTip(
+            "SopPreview: operator-facing preview of what Ops Center will show for this SOP."
+        )
+        sop_preview_layout.addWidget(self.sop_preview_label)
+        sop_workbench_layout.addWidget(self.sop_preview_box, 1)
+        root.addWidget(self.sop_workbench_box)
+
         header = QHBoxLayout()
         header.setSpacing(8)
         self.profile_combo = QComboBox()
@@ -4428,15 +4578,40 @@ class SOPTab(_LegacySOPTab):
         self._activation_defaults_expanded = False
         self._set_activation_defaults_expanded(False, refresh=False)
 
-        rows_head = QHBoxLayout()
-        rows_head.addWidget(QLabel("Action Rows"))
-        rows_head.addStretch()
+        self.sop_action_builder_box = QGroupBox("Action Builder")
+        action_builder_layout = QVBoxLayout(self.sop_action_builder_box)
+        action_builder_layout.setContentsMargins(10, 8, 10, 8)
+        action_builder_layout.setSpacing(8)
+        action_builder_header = QHBoxLayout()
+        action_builder_title = QLabel("Action Rows")
+        action_builder_title.setStyleSheet("font-weight: 700;")
+        action_builder_header.addWidget(action_builder_title)
+        action_builder_header.addStretch()
         self.hidden_rows_label = QLabel("")
-        rows_head.addWidget(self.hidden_rows_label)
+        action_builder_header.addWidget(self.hidden_rows_label)
         self.add_row_btn = QPushButton("Add Action Row")
+        self.add_row_btn.setObjectName("sopAddActionRow")
+        self.add_row_btn.setToolTip("Add a guided SOP action row for this SOP.")
         self.add_row_btn.clicked.connect(lambda: self._add_action_row(existing=None))
-        rows_head.addWidget(self.add_row_btn)
-        cfg_layout.addLayout(rows_head)
+        action_builder_header.addWidget(self.add_row_btn)
+        action_builder_layout.addLayout(action_builder_header)
+        self.sop_action_builder_hint = QLabel(
+            "Use Add Action Row, then complete the required fields in the temporary table below. Cards summarize what Ops Center will use."
+        )
+        self.sop_action_builder_hint.setObjectName("sopActionBuilderHint")
+        self.sop_action_builder_hint.setWordWrap(True)
+        action_builder_layout.addWidget(self.sop_action_builder_hint)
+        self.sop_action_cards_label = QLabel("No SOP actions yet.")
+        self.sop_action_cards_label.setObjectName("sopActionBuilderCards")
+        self.sop_action_cards_label.setWordWrap(True)
+        self.sop_action_cards_label.setTextFormat(Qt.RichText)
+        self.sop_action_cards_label.setToolTip(
+            "SopActionBuilder: compact review cards rendered from the same fields saved by the Advanced Table."
+        )
+        action_builder_layout.addWidget(self.sop_action_cards_label)
+        self.sop_action_builder_box.setMinimumHeight(132)
+        self.sop_action_builder_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        cfg_layout.addWidget(self.sop_action_builder_box)
 
         self.actions_table = QTableWidget(0, 15)
         self.actions_table.setHorizontalHeaderLabels(
@@ -4481,7 +4656,23 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnWidth(self.COL_BANDFREQ, 180)
         self.actions_table.setColumnWidth(self.COL_INTERVAL, 110)
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
-        cfg_layout.addWidget(self.actions_table)
+        self.actions_table.setMinimumHeight(220)
+        self.actions_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.advanced_table_box = QGroupBox("Advanced Table (temporary)")
+        self.advanced_table_box.setObjectName("sopAdvancedTableTemporary")
+        advanced_table_layout = QVBoxLayout(self.advanced_table_box)
+        advanced_table_layout.setContentsMargins(10, 8, 10, 8)
+        advanced_table_layout.setSpacing(8)
+        self.advanced_table_hint = QLabel(
+            "Temporary full-field editor. Do not remove until action cards preserve save/load, RF Guard, and Ops Center preview behavior."
+        )
+        self.advanced_table_hint.setObjectName("sopAdvancedTableRemovalFlag")
+        self.advanced_table_hint.setWordWrap(True)
+        advanced_table_layout.addWidget(self.advanced_table_hint)
+        advanced_table_layout.addWidget(self.actions_table)
+        self.advanced_table_box.setMinimumHeight(300)
+        self.advanced_table_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cfg_layout.addWidget(self.advanced_table_box)
 
         self.conflict_workbench_toggle_btn = QToolButton()
         self.conflict_workbench_toggle_btn.setCheckable(True)
@@ -4497,6 +4688,8 @@ class SOPTab(_LegacySOPTab):
 
         self.conflict_workbench_box = QGroupBox("Conflict Workbench")
         conflict_workbench_layout = QVBoxLayout(self.conflict_workbench_box)
+        self.conflict_workbench_box.setMinimumHeight(260)
+        self.conflict_workbench_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.conflict_workbench_hint_label = QLabel(
             "Resolve conflict policy choices here before Save. Rows that still need timing changes will be flagged and handled in the Save-time conflict dialog."
         )
@@ -4628,6 +4821,7 @@ class SOPTab(_LegacySOPTab):
         self._load_activation_conflict_defaults_ui()
         self._apply_action_table_visual_order()
         self._apply_category_table_view()
+        self._refresh_sop_workbench_contracts()
 
     def _wire_dirty_tracking(self) -> None:
         self.name_edit.textChanged.connect(self._mark_dirty)
@@ -4947,6 +5141,8 @@ class SOPTab(_LegacySOPTab):
         combo.setProperty("conflict_policy", normalized)
         if mark_dirty:
             self._mark_dirty()
+        else:
+            self._refresh_sop_workbench_contracts()
         if schedule_refresh:
             self._schedule_realtime_hf_conflict_check()
             try:
@@ -7099,6 +7295,7 @@ class SOPTab(_LegacySOPTab):
             self._add_action_row(existing=None, mark_dirty=False)
         self._apply_category_table_view()
         self._autosize_actions_table()
+        self._refresh_sop_workbench_contracts()
 
     def _add_action_row(self, existing: Dict[str, Any] | None, *, mark_dirty: bool = True) -> None:
         row = self.actions_table.rowCount()
@@ -7299,6 +7496,7 @@ class SOPTab(_LegacySOPTab):
                     self._add_action_row(existing=None, mark_dirty=False)
                 self._autosize_actions_table()
                 self._mark_dirty()
+                self._refresh_sop_workbench_contracts()
                 self._last_realtime_conflict_signature = None
                 self._schedule_realtime_hf_conflict_check()
                 return

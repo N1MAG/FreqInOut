@@ -145,6 +145,96 @@ def selected_source_schedule_dependency_refs(settings: Any) -> List[str]:
     return [ref for ref in refs if ref]
 
 
+def plan_source_usage_summary(
+    store: MultiRadioStore,
+    *,
+    category: str,
+    set_id: str,
+    live_label: str,
+    max_items: int = 4,
+) -> Dict[str, Any]:
+    """Return plans/radios that use a linked Daily or Net source schedule."""
+    clean_category = str(category or "").strip().lower()
+    clean_set_id = str(set_id or "").strip() or LIVE_SOURCE_SET_ID
+    if clean_set_id == LIVE_SOURCE_SET_ID:
+        if clean_category == HF_DAILY_SOURCE_CATEGORY:
+            dependency_refs = {"hf_daily"}
+        elif clean_category == HF_NET_SOURCE_CATEGORY:
+            dependency_refs = {"hf_nets"}
+        else:
+            dependency_refs = {str(live_label or "live").strip()}
+    else:
+        dependency_refs = {source_schedule_dependency_ref(clean_category, clean_set_id)}
+    dependency_refs = {ref for ref in dependency_refs if ref}
+
+    try:
+        plans = [dict(row) for row in store.list_frequency_plans()]
+    except Exception:
+        plans = []
+    try:
+        assignments = [dict(row) for row in store.list_effective_assigned_plans()]
+    except Exception:
+        assignments = []
+    try:
+        devices = [dict(row) for row in store.list_device_profiles()]
+    except Exception:
+        devices = []
+
+    radio_names_by_id: Dict[int, str] = {}
+    for row in devices:
+        try:
+            radio_id = int(row.get("id", 0) or 0)
+        except Exception:
+            continue
+        if radio_id > 0:
+            radio_names_by_id[radio_id] = str(row.get("name") or f"Radio {radio_id}").strip()
+    radio_ids_by_plan_id: Dict[int, List[int]] = {}
+    for assignment in assignments:
+        try:
+            plan_id = int(assignment.get("frequency_plan_id") or 0)
+            radio_id = int(assignment.get("device_profile_id") or 0)
+        except Exception:
+            continue
+        if plan_id > 0 and radio_id > 0:
+            radio_ids_by_plan_id.setdefault(plan_id, []).append(radio_id)
+
+    used_plans: List[Dict[str, Any]] = []
+    radio_names: List[str] = []
+    for plan in plans:
+        try:
+            plan_id = int(plan.get("id") or 0)
+        except Exception:
+            plan_id = 0
+        if plan_id <= 0:
+            continue
+        refs = set(_parse_ref_values(plan.get("source_refs_json", plan.get("source_refs", "[]"))))
+        if not (refs & dependency_refs):
+            continue
+        used_plans.append(plan)
+        for radio_id in radio_ids_by_plan_id.get(plan_id, []):
+            name = radio_names_by_id.get(radio_id, f"Radio {radio_id}")
+            if name not in radio_names:
+                radio_names.append(name)
+
+    plan_names = [str(row.get("name") or f"Plan {row.get('id')}").strip() for row in used_plans]
+    displayed_plans = plan_names[:max_items]
+    displayed_radios = radio_names[:max_items]
+    plan_suffix = f", +{len(plan_names) - max_items} more" if len(plan_names) > max_items else ""
+    radio_suffix = f", +{len(radio_names) - max_items} more" if len(radio_names) > max_items else ""
+    if plan_names:
+        text = f"Used by: {', '.join(displayed_plans)}{plan_suffix}"
+        if radio_names:
+            text += f" | Radios: {', '.join(displayed_radios)}{radio_suffix}"
+    else:
+        text = "Not used by a saved plan yet."
+    return {
+        "plan_names": plan_names,
+        "radio_names": radio_names,
+        "text": text,
+        "dependency_refs": sorted(dependency_refs),
+    }
+
+
 def _dependency_set_id(source_refs: List[str], category: str) -> str:
     prefix = f"{category}:"
     for ref in source_refs:

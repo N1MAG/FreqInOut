@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
       - Net Schedule
       - FLDigi Net Control
       - JS8Call Net Control
-      - FreqPlanner
+      - Plan Builder
       - Operator History
       - Help
     """
@@ -317,23 +317,23 @@ class MainWindow(QMainWindow):
         self._messages_nav_button_indices: dict[str, int] = {}
         # Sidebar button order/text requested by user.
         self._nav_specs = [
-            ("ControlFreq", "ControlFreq"),
+            ("Ops Center", "ControlFreq"),
             ("Map", "Map"),
-            ("Control Center", "Station Overview"),
-            ("Health Details", "Station Health"),
-            ("Plan Manager", "FreqPlanner"),
-            ("SOP Builder", "SOP"),
             ("Inbox", "Messages"),
             ("Compose", "Messages"),
             ("FLDigi / SSB", "NCS-FLDigi/SSB"),
             ("JS8Call", "NCS-JS8"),
             ("VHF/UHF", "NCS-Local"),
-            ("HF Daily", "HF Schedule"),
-            ("HF Nets", "Net Schedule"),
-            ("HF Peer Scheds", "Peer Schedules"),
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("Local Reports", "Local Reports"),
+            ("Plan Builder", "FreqPlanner"),
+            ("SOP Builder", "SOP"),
+            ("HF Daily", "HF Schedule"),
+            ("HF Nets", "Net Schedule"),
+            ("HF Peer Scheds", "Peer Schedules"),
+            ("Control Center", "Station Overview"),
+            ("Health Details", "Station Health"),
             ("Main", "Settings"),
             ("Radios", "Settings"),
             ("Help", "Help"),
@@ -402,7 +402,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Station", "FreqPlanner", "Messages", "NCS", "Operators", "Settings"]
+        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
         self._suppress_initial_nav_group_auto_expand = True
 
@@ -6354,6 +6354,50 @@ class MainWindow(QMainWindow):
         return "warn"
 
     @staticmethod
+    def _station_command_health_is_live_dependency(key: str, profile: object | None = None) -> bool:
+        normalized = str(key or "").strip()
+        if normalized in {"FLRig", "RigCtlD", "JS8Call_API", "Observer", "VarAC Cluster"}:
+            return True
+        backend = str(MainWindow._station_command_value(profile, "control_backend", "") or "").strip().lower()
+        return normalized == {
+            "flrig": "FLRig",
+            "rigctld": "RigCtlD",
+            "js8call": "JS8Call_API",
+        }.get(backend, "")
+
+    @staticmethod
+    def _station_command_health_issue_state(
+        key: str,
+        info: Mapping[str, object],
+        profile: object | None = None,
+    ) -> str:
+        state = str(info.get("state", "idle") or "idle").strip().lower()
+        if state == "error":
+            return "error"
+        if state == "warn":
+            return "warn"
+        if state == "ok":
+            return "ok"
+        if MainWindow._station_command_health_is_live_dependency(key, profile):
+            return "warn"
+        return "ok"
+
+    @staticmethod
+    def _station_command_health_ready_tooltip(
+        key: str,
+        label_text: str,
+        info: Mapping[str, object],
+        profile: object | None = None,
+    ) -> str:
+        tooltip = str(info.get("tooltip", "") or "").strip()
+        state = str(info.get("state", "idle") or "idle").strip().lower()
+        if state == "ok":
+            return tooltip or f"{label_text} is ready."
+        if MainWindow._station_command_health_is_live_dependency(key, profile):
+            return tooltip or f"{label_text} is not reachable."
+        return f"{label_text} is available when needed."
+
+    @staticmethod
     def _station_command_health_summary_state(issue_states: list[str]) -> str:
         if not issue_states:
             return "ok"
@@ -6433,8 +6477,8 @@ class MainWindow(QMainWindow):
         healthy_count = 0
         for key, label_text in items:
             info = snapshot.get(key, {})
-            state = self._station_command_health_state(info)
-            tooltip = str(info.get("tooltip", "Not running") or "Not running")
+            state = self._station_command_health_issue_state(key, info, profile)
+            tooltip = self._station_command_health_ready_tooltip(key, label_text, info, profile)
             if state == "ok":
                 healthy_count += 1
             else:
@@ -6457,9 +6501,9 @@ class MainWindow(QMainWindow):
             summary_tooltip = "No configured software health items for this radio."
         elif not issue_items:
             summary_label = "Healthy"
-            summary_tooltip = "All configured components for this radio are healthy."
+            summary_tooltip = "Radio control is ready. Helper tools are available when needed."
         else:
-            summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"
+            summary_label = "Setup" if summary_state == "error" else "Review"
             summary_tooltip = "; ".join(f"{label}: {tooltip}" for _key, label, _state, tooltip in issue_items)
         return {
             "items": items,
@@ -6524,7 +6568,7 @@ class MainWindow(QMainWindow):
         issues = [tuple(item) for item in summary.get("issues", []) if isinstance(item, tuple)]
         if issues:
             for _key, label, state, tooltip in issues[:6]:
-                prefix = "Block" if state == "error" else "Review"
+                prefix = "Fix" if state == "error" else "Review"
                 action = QAction(f"{prefix}: {label} - {tooltip}", menu)
                 action.setEnabled(False)
                 menu.addAction(action)
@@ -6541,6 +6585,16 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open Health Details", menu)
         open_action.triggered.connect(lambda _checked=False, profile_id=ident: self._open_station_health_detail(device_profile_id=profile_id))
         menu.addAction(open_action)
+        if ident > 0 and issues:
+            settings_action = QAction("Open Radio Settings", menu)
+            settings_action.triggered.connect(
+                lambda _checked=False, profile_id=ident: self.open_settings_section(
+                    "radio_profiles",
+                    radio_id=profile_id,
+                    settings_nav_context="radios",
+                )
+            )
+            menu.addAction(settings_action)
         self._station_command_health_menu = menu
         try:
             menu.popup(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
@@ -6592,7 +6646,7 @@ class MainWindow(QMainWindow):
                 key="__summary__",
                 label_text="Healthy",
                 state="ok",
-                tooltip=str(summary.get("tooltip", "") or "All configured components for this radio are healthy."),
+                tooltip=str(summary.get("tooltip", "") or "Radio control is ready. Helper tools are available when needed."),
                 theme=theme,
             )
         else:
@@ -8468,11 +8522,11 @@ class MainWindow(QMainWindow):
         # Keep main navigation compact on startup. Screen changes and Quick
         # Search expand the relevant group when navigation intent is explicit.
         defaults = {
-            "Station": False,
-            "FreqPlanner": False,
             "Messages": False,
             "NCS": False,
             "Operators": False,
+            "Plan Builder": False,
+            "Station": False,
             "Settings": False,
         }
         try:
@@ -8485,6 +8539,8 @@ class MainWindow(QMainWindow):
                 raw["FreqPlanner"] = raw.get("Schedules")
             if "FreqPlanner" not in raw and "Schedule" in raw:
                 raw["FreqPlanner"] = raw.get("Schedule")
+            if "Plan Builder" not in raw and "FreqPlanner" in raw:
+                raw["Plan Builder"] = raw.get("FreqPlanner")
             for key in defaults:
                 if key in raw:
                     defaults[key] = bool(raw.get(key))
@@ -8504,7 +8560,7 @@ class MainWindow(QMainWindow):
         if screen in {"Station Overview", "Station Health"}:
             return "Station"
         if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:
-            return "FreqPlanner"
+            return "Plan Builder"
         if screen == "Messages":
             return "Messages"
         if screen in {"HF Operators", "Local Operators", "Local Reports"}:
@@ -8515,7 +8571,7 @@ class MainWindow(QMainWindow):
         if txt.startswith("NCS -"):
             return "NCS"
         if txt.startswith("Schedule -"):
-            return "FreqPlanner"
+            return "Plan Builder"
         if txt.startswith("Operators -"):
             return "Operators"
         return ""

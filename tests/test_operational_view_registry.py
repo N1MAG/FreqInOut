@@ -21,7 +21,7 @@ def test_controlfreq_view_registry_defines_all_selectable_cards() -> None:
     assert tuple(labels) == CONTROLFREQ_VIEW_KEYS
     assert labels == {
         "activity": "Activity",
-        "intersections": "Intersections",
+        "intersections": "Peer Finder",
         "schedule": "Schedule",
         "propagation": "Propagation",
     }
@@ -42,6 +42,7 @@ def test_all_registered_views_declare_required_gates_and_limits() -> None:
         "compose_workbench",
         "map_context",
         "station_command",
+        "station_control_center",
     }
     for view in views:
         assert set(view.required_gates) == set(MANDATORY_VIEW_GATES)
@@ -82,3 +83,13 @@ def test_views_for_tab_can_return_selectable_subset() -> None:
     assert tuple(view.key for view in controlfreq) == CONTROLFREQ_VIEW_KEYS
     assert {"traffic_inbox", "compose_workbench"}.issubset(messages)
     assert operational_view_for("map-context").key == "map_context"
+
+
+def test_station_control_center_view_supports_local_and_future_sources() -> None:
+    view = operational_view_for("station-control-center")
+
+    assert view.default_tab == "Station Overview"
+    assert view.template == "station_control_center"
+    assert view.supports_user_selection is False
+    assert {"local", "meshcore", "mqtt", "aprs", "reticulum"}.issubset(set(view.allowed_source_families))
+    assert all(report.passed for report in validate_view_sources("station_control_center"))

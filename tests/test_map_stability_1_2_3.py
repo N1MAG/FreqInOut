@@ -1973,7 +1973,7 @@ def test_map_payload_rows_clean_html_and_report_context_stays_topic_scoped() -> 
         "group_filter": "MR08",
         "topic_filter": "Fire",
         "query_filter": "K7ETC",
-        "source_family": "",
+        "source_family": "flmsg",
         "age_filter_seconds": 0,
     }
 
@@ -3101,7 +3101,7 @@ def test_map_control_strip_uses_operator_first_sections() -> None:
     assert "def _compose_message_for_selected_station" in source
     assert "def _compose_spotter_for_selected_station" in source
     assert "def _open_map_selected_sop" in source
-    assert "QPushButton(\"Messages\")" in source
+    assert "QPushButton(\"Inbox\")" in source
     assert "QPushButton(\"SOP\")" in source
     assert "open_messages_section(" in source
     assert "focus_traffic_context" in Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
@@ -5189,7 +5189,7 @@ def test_map_detail_payload_cleans_html_tooltip_fallback() -> None:
     assert "return 'Multiple Sources';" in source
     assert "return 'Planning Pin';" in source
     assert ".replace(/&lt;/g, '<')" in source
-    assert ".replace(/<br\\s*\\/?>/gi, '\\\\n')" in source
+    assert ".replace(/<br\\\\s*\\\\/?>/gi, '\\\\n')" in source
 
 
 def test_map_report_focus_overrides_advanced_station_scope() -> None:

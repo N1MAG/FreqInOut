@@ -174,6 +174,31 @@ def test_visible_status_programs_hides_global_paths_when_active_radio_explicitly
     assert ("VarAC", "VarAC") not in visible
 
 
+def test_visible_status_programs_does_not_show_rigctld_for_flrig_profiles_with_legacy_default_port() -> None:
+    from freqinout.core.station_readiness import visible_status_programs
+
+    visible = visible_status_programs(
+        {
+            "control_via": "FLRig",
+            "rig_port": 4532,
+        },
+        device_profiles=[
+            {
+                "id": 1,
+                "enabled": 1,
+                "runtime_primary": 1,
+                "runtime_active": 1,
+                "control_backend": "flrig",
+                "use_flrig": 1,
+                "flrig_port": 12345,
+            }
+        ],
+    )
+
+    assert ("FLRig", "FLRig") in visible
+    assert ("RigCtlD", "RigCtlD") not in visible
+
+
 def test_build_station_readiness_report_marks_inactive_radios_as_informational_without_startup_noise() -> None:
     from freqinout.core.station_readiness import build_station_readiness_report, readiness_summary_badge_text
 
@@ -311,6 +336,39 @@ def test_build_station_readiness_report_tracks_js8_bundle_even_when_backend_is_f
     assert "Spotter MCF forms folder missing" in messages
     assert "TriMode Desk: JS8Spotter launch path missing" not in messages
     assert "TriMode Desk: CommStat launch path missing" in messages
+
+
+def test_build_station_readiness_report_accepts_radio_scoped_spotter_forms_path() -> None:
+    from freqinout.core.station_readiness import build_station_readiness_report
+
+    report = build_station_readiness_report(
+        {"callsign": "N1MAG", "grid": "DM79QJ"},
+        device_profiles=[
+            {
+                "id": 11,
+                "name": "TriMode Desk",
+                "enabled": 1,
+                "runtime_primary": 1,
+                "runtime_active": 1,
+                "control_backend": "flrig",
+                "use_flrig": 1,
+                "use_js8call": 1,
+                "use_js8spotter": 1,
+                "flrig_port": "12345",
+                "js8_host": "127.0.0.1",
+                "js8_port": "2442",
+                "js8_directed_path": "/tmp/DIRECTED.TXT",
+                "js8_forms_path": "/tmp/forms",
+            }
+        ],
+        operating_groups=[{"name": "@MAGNET"}],
+    )
+
+    messages = {issue.message for issue in report.issues}
+    assert "Spotter MCF forms folder missing" not in messages
+    assert "JS8Call TCP host missing" not in messages
+    assert "JS8Call TCP port missing" not in messages
+    assert "JS8Call DIRECTED.TXT path missing" not in messages
 
 
 def test_build_station_readiness_report_ignores_startup_launch_opt_out_for_ready_radio() -> None:

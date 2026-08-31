@@ -106,6 +106,7 @@ VIEW_SCHEDULE = "schedule_outlook"
 VIEW_RF_READINESS = "rf_readiness"
 VIEW_SETUP = "setup_checklist"
 VIEW_STATION_COMMAND = "station_command"
+VIEW_STATION_CONTROL_CENTER = "station_control_center"
 VIEW_OPERATOR_DIRECTORY = "operator_directory"
 VIEW_NET_CONTROL = "net_control"
 
@@ -211,7 +212,14 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf", show_confidence=True, show_relay_path=True),
         map_scaling=MapScalingContract(geometry=("lat_lon", "grid", "node", "path"), auto_fit=True, clustering_required=True),
         actions=_actions_for_family("meshcore"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_OPERATOR_DIRECTORY),
+        allowed_views=(
+            VIEW_ATTENTION,
+            VIEW_TRAFFIC_INBOX,
+            VIEW_MAP_CONTEXT,
+            VIEW_COMPOSE,
+            VIEW_OPERATOR_DIRECTORY,
+            VIEW_STATION_CONTROL_CENTER,
+        ),
         default_view=VIEW_ATTENTION,
         notes="Highest-priority future source for offline operator network awareness.",
     ),
@@ -225,7 +233,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="internet_or_bridge", show_confidence=True, show_relay_path=True),
         map_scaling=MapScalingContract(geometry=("lat_lon", "grid", "topic_region"), auto_fit=True, clustering_required=True),
         actions=_actions_for_family("mqtt"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_ATTENTION,
         notes="Requires explicit bridge/trust labeling because data may be internet-backed.",
     ),
@@ -244,7 +252,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
             default_marker_limit=250,
         ),
         actions=ActionContract(read=True, reply=False, map=True, compose=False, pin=True, open_source=True, acknowledge=True),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_MAP_CONTEXT,
         notes="Primary stress test for volume, map clustering, stale packets, and object/weather semantics.",
     ),
@@ -258,7 +266,14 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="mesh_or_store_forward", show_confidence=True, show_relay_path=True),
         map_scaling=MapScalingContract(geometry=("node", "declared_grid", "path"), auto_fit=True, clustering_required=True),
         actions=_actions_for_family("reticulum"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_OPERATOR_DIRECTORY),
+        allowed_views=(
+            VIEW_ATTENTION,
+            VIEW_TRAFFIC_INBOX,
+            VIEW_MAP_CONTEXT,
+            VIEW_COMPOSE,
+            VIEW_OPERATOR_DIRECTORY,
+            VIEW_STATION_CONTROL_CENTER,
+        ),
         default_view=VIEW_TRAFFIC_INBOX,
         notes="Store-and-forward identity context should enter through message/operator projections first.",
     ),
@@ -272,7 +287,14 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf", show_confidence=True),
         map_scaling=MapScalingContract(geometry=("grid", "callsign", "path"), auto_fit=True),
         actions=_actions_for_family("js8call"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_NET_CONTROL),
+        allowed_views=(
+            VIEW_ATTENTION,
+            VIEW_TRAFFIC_INBOX,
+            VIEW_MAP_CONTEXT,
+            VIEW_COMPOSE,
+            VIEW_NET_CONTROL,
+            VIEW_STATION_CONTROL_CENTER,
+        ),
         default_view=VIEW_TRAFFIC_INBOX,
     ),
     "fiospotter": SourceViewContract(
@@ -285,7 +307,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf_or_imported", show_confidence=True),
         map_scaling=MapScalingContract(geometry=("grid", "state", "region"), auto_fit=True),
         actions=_actions_for_family("js8call"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_ATTENTION,
     ),
     "commstat": SourceViewContract(
@@ -306,7 +328,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
             open_source=True,
             acknowledge=True,
         ),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_ATTENTION,
     ),
     "flmsg": SourceViewContract(
@@ -319,7 +341,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf_file", show_confidence=False),
         map_scaling=MapScalingContract(geometry=("grid", "state", "form_location"), auto_fit=True),
         actions=_actions_for_family("flmsg"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_TRAFFIC_INBOX,
     ),
     "flamp": SourceViewContract(
@@ -332,7 +354,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf_file", show_confidence=False),
         map_scaling=MapScalingContract(geometry=("grid", "state", "form_location"), auto_fit=True),
         actions=_actions_for_family("flamp"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_TRAFFIC_INBOX,
     ),
     "varac": SourceViewContract(
@@ -345,7 +367,7 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="rf_store_forward", show_confidence=True),
         map_scaling=MapScalingContract(geometry=("callsign", "grid", "bbs_node"), auto_fit=True),
         actions=_actions_for_family("varac"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE),
+        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_STATION_CONTROL_CENTER),
         default_view=VIEW_TRAFFIC_INBOX,
     ),
     "local": SourceViewContract(
@@ -358,7 +380,14 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         provenance=ProvenanceContract(label="local_or_manual", show_confidence=True),
         map_scaling=MapScalingContract(geometry=("lat_lon", "grid", "state"), auto_fit=True),
         actions=_actions_for_family("local"),
-        allowed_views=(VIEW_ATTENTION, VIEW_TRAFFIC_INBOX, VIEW_MAP_CONTEXT, VIEW_COMPOSE, VIEW_NET_CONTROL),
+        allowed_views=(
+            VIEW_ATTENTION,
+            VIEW_TRAFFIC_INBOX,
+            VIEW_MAP_CONTEXT,
+            VIEW_COMPOSE,
+            VIEW_NET_CONTROL,
+            VIEW_STATION_CONTROL_CENTER,
+        ),
         default_view=VIEW_ATTENTION,
     ),
 }

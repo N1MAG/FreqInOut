@@ -400,6 +400,16 @@ def _profile_software_enabled(profile: Mapping[str, Any], key: str) -> bool:
     return False
 
 
+def _profile_text_any(profiles: Iterable[Mapping[str, Any]], *keys: str) -> str:
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        text = _text_any(profile, *keys)
+        if text:
+            return text
+    return ""
+
+
 def _issue_deep_link(section_key: str, radio_id: Optional[int]) -> str:
     target = str(section_key or "freqinout").strip().lower() or "freqinout"
     if radio_id:
@@ -530,8 +540,8 @@ def visible_status_programs(
     rigctld_visible = any(
         [
             _text(settings, "control_via").upper() == "RIGCTLD",
-            _text(settings, "rig_host"),
-            _text(settings, "rig_port"),
+            _text(settings, "control_via").upper() == "RIGCTLD" and _text(settings, "rig_host"),
+            _text(settings, "control_via").upper() == "RIGCTLD" and _text(settings, "rig_port"),
             backend_counts["rigctld"],
         ]
     )
@@ -849,17 +859,21 @@ def build_station_readiness_report(
     js8_directed = _text(settings, "js8_directed_path")
     js8_forms = _text(settings, "js8_forms_path")
     js8spotter_path = _text(settings, "path_js8spotter")
-    js8call_enabled = any(_profile_software_enabled(profile, "js8call") for profile in runtime_profiles) or (
+    profile_js8call_enabled = any(_profile_software_enabled(profile, "js8call") for profile in runtime_profiles)
+    profile_js8spotter_enabled = any(_profile_software_enabled(profile, "js8spotter") for profile in runtime_profiles)
+    profile_commstat_enabled = any(_profile_software_enabled(profile, "commstat") for profile in runtime_profiles)
+    js8call_enabled = profile_js8call_enabled or (
         not _profiles_all_explicitly_disabled(runtime_profiles, "js8call")
         and bool(js8call_path or js8_host or js8_port or js8_directed or js8_forms)
     )
-    js8spotter_enabled = any(_profile_software_enabled(profile, "js8spotter") for profile in runtime_profiles) or (
+    js8spotter_enabled = profile_js8spotter_enabled or (
         not _profiles_all_explicitly_disabled(runtime_profiles, "js8spotter") and bool(js8spotter_path)
     )
-    commstat_enabled = any(_profile_software_enabled(profile, "commstat") for profile in runtime_profiles) or (
+    commstat_enabled = profile_commstat_enabled or (
         not _profiles_all_explicitly_disabled(runtime_profiles, "commstat") and bool(_text(settings, "path_commstat"))
     )
-    if js8call_enabled and not js8_host:
+    legacy_js8_check = not profile_js8call_enabled
+    if legacy_js8_check and js8call_enabled and not js8_host:
         issues.append(
             ReadinessIssue(
                 severity="required",
@@ -872,7 +886,7 @@ def build_station_readiness_report(
                 state_key="needs_setup",
             )
         )
-    if js8call_enabled and not js8_port:
+    if legacy_js8_check and js8call_enabled and not js8_port:
         issues.append(
             ReadinessIssue(
                 severity="required",
@@ -885,7 +899,7 @@ def build_station_readiness_report(
                 state_key="needs_setup",
             )
         )
-    if js8call_enabled and not js8_directed:
+    if legacy_js8_check and js8call_enabled and not js8_directed:
         issues.append(
             ReadinessIssue(
                 severity="required",
@@ -898,7 +912,8 @@ def build_station_readiness_report(
                 state_key="needs_setup",
             )
         )
-    if js8spotter_enabled and not js8_forms:
+    profile_js8_forms = _profile_text_any(runtime_profiles, "js8_forms_path")
+    if js8spotter_enabled and not (js8_forms or profile_js8_forms):
         issues.append(
             ReadinessIssue(
                 severity="required",

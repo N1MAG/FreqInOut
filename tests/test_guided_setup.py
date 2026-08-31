@@ -1417,8 +1417,8 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         open_plan_manager=True,
     )
     assert handoff.status == "needs_input"
-    assert handoff.step_detail == "Save this radio, then build its Frequency Plan in Plan Manager."
-    assert handoff.review_text == "Open Plan Manager after save so a Frequency Plan can be built and assigned."
+    assert handoff.step_detail == "Save this radio, then build its Frequency Plan in Plan Builder."
+    assert handoff.review_text == "Open Plan Builder after save so a Frequency Plan can be built and assigned."
 
     no_nets = guided_setup_schedule_decision(
         scheduler_assignment_allowed=True,
@@ -1428,8 +1428,8 @@ def test_guided_setup_schedule_decision_is_single_source_for_wizard_copy() -> No
         selected_schedule_choice="daily_no_nets",
     )
     assert no_nets.status == "needs_input"
-    assert no_nets.step_detail == "Build or choose a Daily with No Nets plan in Plan Manager after save."
-    assert no_nets.review_text == "Open Plan Manager after save for Daily with No Nets."
+    assert no_nets.step_detail == "Build or choose a Daily with No Nets plan in Plan Builder after save."
+    assert no_nets.review_text == "Open Plan Builder after save for Daily with No Nets."
 
     no_schedule = guided_setup_schedule_decision(
         scheduler_assignment_allowed=True,
@@ -1582,7 +1582,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert "selected_schedule_choice=_selected_guided_schedule_path()" in dialog_block
     assert "schedule_choice == SCHEDULE_EXISTING_PLAN" in dialog_block
     assert "guided_setup_schedule_decision(" in dialog_block
-    assert "Plan Manager will open after save" in Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
+    assert "Plan Builder will open after save" in Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
     assert "guided_initial_frequency_plan_id" in dialog_block
     assert "get_effective_assigned_plan_for_device" in dialog_block
     assert "self.multi_radio_store.list_frequency_plans()" in dialog_block
@@ -1603,8 +1603,8 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
         source.index("def _launch_item_allowed_for_profile")
         : source.index("def _is_launch_item_configured")
     ]
-    assert 'if app_name == "JS8Spotter":' in launch_allowed_block
-    assert 'profile.get("spotter_launch_path", "")' in launch_allowed_block
+    assert '"JS8Spotter": "js8spotter"' in launch_allowed_block
+    assert "self._launch_item_profile_path(profile, app_name)" in launch_allowed_block
     assert 'self._radio_software_enabled(profile, software_key)' in launch_allowed_block
     assert '"Launch Control"' not in dialog_block
     assert '"Launch and Support"' not in dialog_block
@@ -1739,7 +1739,8 @@ def test_guided_setup_status_strip_is_compact_chip_style() -> None:
         1,
     )[0]
 
-    assert "step_frame.setMaximumHeight(32)" in dialog_block
+    assert "step_frame_h = control_height_for_font(step_frame, vertical_padding=12, floor=32)" in dialog_block
+    assert "step_frame.setMaximumHeight(step_frame_h)" in dialog_block
     assert "detail_label.setVisible(False)" in dialog_block
     assert 'app_setup_plan_group = QGroupBox("Setup Status")' in dialog_block
     assert "app_setup_plan_layout.addWidget(guided_next_action_label)" not in dialog_block

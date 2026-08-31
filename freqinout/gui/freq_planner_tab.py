@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QLineEdit,
+    QSizePolicy,
+    QScrollArea,
 )
 
 from pathlib import Path
@@ -56,6 +58,7 @@ from freqinout.core.schedule_source_sets import (
     selected_source_set_id,
     assigned_plan_rf_guard_impacts_for_source_update,
     save_source_schedule,
+    plan_source_usage_summary,
     source_set_row_by_id_for_category,
     source_sets_for_category,
 )
@@ -164,7 +167,7 @@ class FreqPlannerTab(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Plan Manager</h3>"))
+        header.addWidget(QLabel("<h3>Plan Builder</h3>"))
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -202,7 +205,7 @@ class FreqPlannerTab(QWidget):
         self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")
         self.frequency_plan_combo.setEditable(True)
         self.frequency_plan_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.frequency_plan_combo.setMinimumWidth(420)
+        self.frequency_plan_combo.setMinimumWidth(240)
         if self.frequency_plan_combo.lineEdit() is not None:
             self.frequency_plan_combo.lineEdit().setPlaceholderText("Name or select a Frequency Plan")
         self.frequency_plan_combo.currentIndexChanged.connect(self._on_frequency_plan_selected)
@@ -272,17 +275,62 @@ class FreqPlannerTab(QWidget):
         source_workspace.addWidget(self.build_sop_layer_btn)
         layout.addLayout(source_workspace)
 
+        self.plan_ingredients_frame = QFrame()
+        self.plan_ingredients_frame.setObjectName("freqPlannerPlanIngredients")
+        self.plan_ingredients_frame.setFrameShape(QFrame.StyledPanel)
+        ingredients_layout = QHBoxLayout(self.plan_ingredients_frame)
+        ingredients_layout.setContentsMargins(8, 4, 8, 4)
+        ingredients_layout.setSpacing(8)
+        self.plan_ingredient_plan = QLabel("")
+        self.plan_ingredient_daily = QLabel("")
+        self.plan_ingredient_nets = QLabel("")
+        self.plan_ingredient_sop = QLabel("")
+        self.plan_ingredient_assignments = QLabel("")
+        for chip in (
+            self.plan_ingredient_plan,
+            self.plan_ingredient_daily,
+            self.plan_ingredient_nets,
+            self.plan_ingredient_sop,
+            self.plan_ingredient_assignments,
+        ):
+            chip.setWordWrap(False)
+            chip.setMinimumHeight(28)
+            chip.setMinimumWidth(230)
+            chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            chip.setStyleSheet(
+                "QLabel { border: 1px solid #c8d3df; border-radius: 6px; padding: 4px 8px; background: #eef4fa; }"
+            )
+            ingredients_layout.addWidget(chip)
+        ingredients_layout.addStretch(1)
+        self.plan_ingredients_scroll = QScrollArea()
+        self.plan_ingredients_scroll.setObjectName("freqPlannerPlanIngredientsScroll")
+        self.plan_ingredients_scroll.setWidgetResizable(True)
+        self.plan_ingredients_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.plan_ingredients_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plan_ingredients_scroll.setFrameShape(QFrame.NoFrame)
+        self.plan_ingredients_scroll.setWidget(self.plan_ingredients_frame)
+        self.plan_ingredients_scroll.setMinimumHeight(44)
+        self.plan_ingredients_scroll.setMaximumHeight(54)
+        layout.addWidget(self.plan_ingredients_scroll)
+
         self.plan_layers_label = QLabel("")
         self.plan_layers_label.setObjectName("freqPlannerPlanLayers")
-        self.plan_layers_label.setWordWrap(True)
+        self.plan_layers_label.setWordWrap(False)
+        self.plan_layers_label.setMaximumHeight(28)
         self.plan_layers_label.setToolTip(
             "Shows the selected Daily baseline, Net overlay, SOP condition layer, and review state for this Frequency Plan."
         )
-        layout.addWidget(self.plan_layers_label)
+        self.plan_layers_label.setVisible(False)
 
+        self.plan_review_controls_frame = QFrame()
+        self.plan_review_controls_frame.setObjectName("freqPlannerReviewControls")
+        self.plan_review_controls_frame.setFrameShape(QFrame.NoFrame)
+        review_controls_layout = QVBoxLayout(self.plan_review_controls_frame)
+        review_controls_layout.setContentsMargins(0, 0, 0, 0)
+        review_controls_layout.setSpacing(2)
         view_workspace = QHBoxLayout()
-        view_workspace.setSpacing(8)
-        view_workspace.addWidget(QLabel("View:"))
+        view_workspace.setSpacing(6)
+        view_workspace.addWidget(QLabel("Table View:"))
         self.planner_view_combo = QComboBox()
         self.planner_view_combo.setObjectName("freqPlannerViewCombo")
         self.planner_view_combo.addItem("Effective Windows", "effective")
@@ -297,13 +345,16 @@ class FreqPlannerTab(QWidget):
         self.band_toggle_btn.setStyleSheet(button_style("info", theme))
         self.band_toggle_btn.clicked.connect(self._toggle_band_view)
         view_workspace.addWidget(self.band_toggle_btn)
-        view_workspace.addWidget(QLabel("Day:"))
+        self.operational_day_label = QLabel("Day:")
+        self.operational_day_label.setVisible(False)
+        view_workspace.addWidget(self.operational_day_label)
         self.operational_day_combo = QComboBox()
         self.operational_day_combo.setObjectName("freqPlannerOperationalDayCombo")
         for day in DAY_NAMES:
             self.operational_day_combo.addItem(day, day)
         self.operational_day_combo.currentIndexChanged.connect(self._on_planner_view_changed)
         self.operational_day_combo.setEnabled(False)
+        self.operational_day_combo.setVisible(False)
         view_workspace.addWidget(self.operational_day_combo)
         self.radio_window_radio_label = QLabel("Radio:")
         self.radio_window_radio_label.setVisible(False)
@@ -314,23 +365,42 @@ class FreqPlannerTab(QWidget):
         self.radio_window_radio_combo.currentIndexChanged.connect(self._on_radio_window_radio_changed)
         self.radio_window_radio_combo.setVisible(False)
         view_workspace.addWidget(self.radio_window_radio_combo)
+        self.band_legend = QWidget()
+        self.band_legend_layout = QHBoxLayout(self.band_legend)
+        self.band_legend_layout.setContentsMargins(0, 0, 0, 0)
+        self.band_legend_layout.setSpacing(6)
+        view_workspace.addWidget(self.band_legend)
+        view_workspace.addStretch(1)
         view_workspace.addWidget(self.review_rf_guard_btn)
         view_workspace.addWidget(self.resolve_rf_guard_btn)
         view_workspace.addWidget(self.assign_plan_btn)
-        view_workspace.addStretch()
-        layout.addLayout(view_workspace)
+        self.plan_review_toolbar = QWidget()
+        self.plan_review_toolbar.setObjectName("freqPlannerReviewToolbar")
+        self.plan_review_toolbar.setLayout(view_workspace)
+        self.plan_review_toolbar_scroll = QScrollArea()
+        self.plan_review_toolbar_scroll.setObjectName("freqPlannerReviewToolbarScroll")
+        self.plan_review_toolbar_scroll.setWidgetResizable(True)
+        self.plan_review_toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.plan_review_toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plan_review_toolbar_scroll.setFrameShape(QFrame.NoFrame)
+        self.plan_review_toolbar_scroll.setWidget(self.plan_review_toolbar)
+        self.plan_review_toolbar_scroll.setMinimumHeight(42)
+        self.plan_review_toolbar_scroll.setMaximumHeight(54)
+        review_controls_layout.addWidget(self.plan_review_toolbar_scroll)
 
         self.frequency_plan_summary_label = QLabel("")
         self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")
         self.frequency_plan_summary_label.setWordWrap(True)
         self.frequency_plan_summary_label.setVisible(False)
-        layout.addWidget(self.frequency_plan_summary_label)
+        review_controls_layout.addWidget(self.frequency_plan_summary_label)
         self.frequency_plan_action_hint_label = QLabel(
             "Build a named plan by selecting HF Daily, HF Nets, and optional SOP layers. Use New Plan when you want a separate plan instead of updating the selected one."
         )
         self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")
-        self.frequency_plan_action_hint_label.setWordWrap(True)
-        layout.addWidget(self.frequency_plan_action_hint_label)
+        self.frequency_plan_action_hint_label.setWordWrap(False)
+        self.frequency_plan_action_hint_label.setMaximumHeight(26)
+        review_controls_layout.addWidget(self.frequency_plan_action_hint_label)
+        layout.addWidget(self.plan_review_controls_frame)
         self.rf_guard_review_card = QFrame()
         self.rf_guard_review_card.setObjectName("freqPlannerRfGuardReviewCard")
         self.rf_guard_review_card.setFrameShape(QFrame.StyledPanel)
@@ -365,7 +435,6 @@ class FreqPlannerTab(QWidget):
         self.cell_inspector_label.setObjectName("freqPlannerCellInspector")
         self.cell_inspector_label.setWordWrap(True)
         self.cell_inspector_label.setVisible(False)
-        layout.addWidget(self.cell_inspector_label)
         self.selected_window_card = QFrame()
         self.selected_window_card.setObjectName("freqPlannerSelectedWindowCard")
         self.selected_window_card.setFrameShape(QFrame.StyledPanel)
@@ -380,7 +449,6 @@ class FreqPlannerTab(QWidget):
         self.selected_window_detail_label.setWordWrap(True)
         selected_layout.addWidget(self.selected_window_title_label, 0)
         selected_layout.addWidget(self.selected_window_detail_label, 1)
-        layout.addWidget(self.selected_window_card)
         self.inline_editor_card = QFrame()
         self.inline_editor_card.setObjectName("freqPlannerInlineEditorCard")
         self.inline_editor_card.setFrameShape(QFrame.StyledPanel)
@@ -437,7 +505,6 @@ class FreqPlannerTab(QWidget):
         inline_timing_row.addWidget(self.inline_update_plan_btn)
         inline_timing_row.addWidget(self.inline_update_hf_daily_btn)
         inline_layout.addLayout(inline_timing_row)
-        layout.addWidget(self.inline_editor_card)
         inspector_actions = QHBoxLayout()
         self.edit_hf_daily_btn = QPushButton("Edit HF Daily")
         self.edit_hf_net_btn = QPushButton("Edit HF Net")
@@ -451,14 +518,7 @@ class FreqPlannerTab(QWidget):
             btn.setEnabled(False)
             inspector_actions.addWidget(btn)
         inspector_actions.addStretch()
-        layout.addLayout(inspector_actions)
         self._refresh_plan_workspace_header()
-
-        self.band_legend = QWidget()
-        self.band_legend_layout = QHBoxLayout(self.band_legend)
-        self.band_legend_layout.setContentsMargins(0, 0, 0, 0)
-        self.band_legend_layout.setSpacing(6)
-        layout.addWidget(self.band_legend)
 
         self.table = QTableWidget()
         self.table.setRowCount(24)
@@ -490,7 +550,11 @@ class FreqPlannerTab(QWidget):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
         hv.setHighlightSections(False)
 
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, stretch=1)
+        layout.addWidget(self.cell_inspector_label)
+        layout.addWidget(self.selected_window_card)
+        layout.addWidget(self.inline_editor_card)
+        layout.addLayout(inspector_actions)
 
         self._setup_clock_timer()
         self._load_band_colors()
@@ -498,8 +562,12 @@ class FreqPlannerTab(QWidget):
         self._render_band_legend()
 
     def _on_planner_view_changed(self) -> None:
+        day_visible = self._planner_view_mode() == "operational"
+        if hasattr(self, "operational_day_label"):
+            self.operational_day_label.setVisible(day_visible)
         if hasattr(self, "operational_day_combo"):
-            self.operational_day_combo.setEnabled(self._planner_view_mode() == "operational")
+            self.operational_day_combo.setEnabled(day_visible)
+            self.operational_day_combo.setVisible(day_visible)
         radio_visible = self._planner_view_mode() == "radio"
         if hasattr(self, "radio_window_radio_label"):
             self.radio_window_radio_label.setVisible(radio_visible)
@@ -859,6 +927,85 @@ class FreqPlannerTab(QWidget):
         if lane_summary:
             text = f"{text} | Radios: {lane_summary}"
         self.plan_layers_label.setText(text)
+        if hasattr(self, "plan_ingredients_scroll"):
+            self.plan_ingredients_scroll.setToolTip(text)
+        if hasattr(self, "plan_ingredients_frame"):
+            self.plan_ingredients_frame.setToolTip(text)
+        self._refresh_plan_ingredients(plan_payload=plan_payload)
+
+    def _source_combo_label(self, combo: Optional[QComboBox], fallback: str) -> str:
+        if combo is None:
+            return fallback
+        text = str(combo.currentText() or "").strip()
+        return text or fallback
+
+    def _selected_source_combo_id(self, combo: Optional[QComboBox]) -> str:
+        if combo is None:
+            return LIVE_SOURCE_SET_ID
+        value = str(combo.currentData() or "").strip()
+        return value or LIVE_SOURCE_SET_ID
+
+    def _source_usage_text(self, *, category: str, set_id: str, live_label: str) -> str:
+        try:
+            usage = plan_source_usage_summary(
+                self.plan_context_service.store,
+                category=category,
+                set_id=set_id,
+                live_label=live_label,
+            )
+            return str(usage.get("text") or "").strip()
+        except Exception as exc:
+            log.debug("FreqPlanner: source usage summary skipped: %s", exc)
+            return "Usage: --"
+
+    @staticmethod
+    def _set_ingredient_text(label: QLabel, title: str, value: str, detail: str = "") -> None:
+        detail_text = f" | {detail}" if detail else ""
+        label.setText(f"<b>{title}:</b> {value}{detail_text}")
+        label.setToolTip((f"{title}: {value}\n{detail}" if detail else f"{title}: {value}"))
+
+    def _refresh_plan_ingredients(self, *, plan_payload: Optional[Mapping[str, Any]] = None) -> None:
+        if not hasattr(self, "plan_ingredient_plan"):
+            return
+        plan = plan_payload if isinstance(plan_payload, Mapping) else self._selected_frequency_plan_row()
+        plan_name = str((plan or {}).get("name") or self._current_frequency_plan_name() or "New Frequency Plan").strip()
+        category = str((plan or {}).get("category") or "normal").strip().lower()
+        plan_kind = "SOP Schedule Plan" if category == "sop_schedule" else "Frequency Plan"
+        daily_label = self._source_combo_label(getattr(self, "hf_daily_source_combo", None), "Active Daily Schedule")
+        daily_id = self._selected_source_combo_id(getattr(self, "hf_daily_source_combo", None))
+        net_label = self._source_combo_label(getattr(self, "hf_net_source_combo", None), "Active Net Schedule")
+        net_id = self._selected_source_combo_id(getattr(self, "hf_net_source_combo", None))
+        sop_label = self._source_combo_label(getattr(self, "sop_plan_source_combo", None), "Active SOP Builder Layers")
+        assigned_radios = self._radio_lane_summary_for_payload(plan or {})
+        assigned_text = assigned_radios or "Not assigned yet"
+        self._set_ingredient_text(
+            self.plan_ingredient_plan,
+            "Plan",
+            plan_name,
+            f"{plan_kind} | linked by default",
+        )
+        self._set_ingredient_text(
+            self.plan_ingredient_daily,
+            "Daily",
+            daily_label,
+            self._source_usage_text(
+                category=HF_DAILY_SOURCE_CATEGORY,
+                set_id=daily_id,
+                live_label="hf_daily",
+            ),
+        )
+        self._set_ingredient_text(
+            self.plan_ingredient_nets,
+            "Nets",
+            net_label,
+            self._source_usage_text(
+                category=HF_NET_SOURCE_CATEGORY,
+                set_id=net_id,
+                live_label="hf_nets",
+            ),
+        )
+        self._set_ingredient_text(self.plan_ingredient_sop, "SOP", sop_label, "What-to-do layer")
+        self._set_ingredient_text(self.plan_ingredient_assignments, "Assigned", assigned_text, "RF Guard reviewed on assignment")
 
     @staticmethod
     def _normalize_condition_levels(value: Any) -> str:
@@ -1018,6 +1165,7 @@ class FreqPlannerTab(QWidget):
         ):
             self._apply_frequency_plan_source_refs(selected_plan)
         self._update_frequency_plan_summary()
+        self._refresh_plan_ingredients(plan_payload=selected_plan)
         self._update_assign_plan_action_state(plan=selected_plan)
         self._refresh_radio_window_radio_combo(selected_plan)
         self._refresh_assigned_plan_rf_guard_review(selected_plan)
@@ -4910,7 +5058,7 @@ class FreqPlannerTab(QWidget):
     def _on_build_sop_layer_clicked(self) -> None:
         self._navigate_to_tab("SOP")
         self.frequency_plan_action_hint_label.setText(
-            "Opened SOP Builder. Create or update condition-based what-to-do layers, then return to Plan Manager to review Effective Windows and RF Guard."
+            "Opened SOP Builder. Create or update condition-based what-to-do layers, then return to Plan Builder to review Effective Windows and RF Guard."
         )
 
     def _on_open_sop_builder_clicked(self) -> None:

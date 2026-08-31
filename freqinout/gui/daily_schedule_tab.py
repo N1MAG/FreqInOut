@@ -50,6 +50,7 @@ from freqinout.core.schedule_source_sets import (
     rename_source_schedule,
     reproject_frequency_plans_for_source_update,
     save_source_schedule,
+    plan_source_usage_summary,
     selected_source_set_id,
     source_set_row_by_id_for_category,
     source_sets_for_category,
@@ -451,7 +452,7 @@ class DailyScheduleTab(QWidget):
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        self.header_title_label = QLabel("<h3>HF Frequency Schedule</h3>")
+        self.header_title_label = QLabel("<h3>HF Daily Source Schedule</h3>")
         header.addWidget(self.header_title_label)
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open HF Frequency Schedule help.")
@@ -481,6 +482,13 @@ class DailyScheduleTab(QWidget):
         )
         self.plan_context_label.setVisible(False)
         self.plan_context_label.refresh_context(refresh=True)
+        self.source_usage_label = QLabel("")
+        self.source_usage_label.setObjectName("dailyScheduleSourceUsage")
+        self.source_usage_label.setWordWrap(True)
+        self.source_usage_label.setToolTip(
+            "Shows which linked Frequency Plan(s) and assigned radio(s) use the selected Daily schedule."
+        )
+        layout.addWidget(self.source_usage_label)
 
         # QSY controls row (right aligned under time bar)
         qsy_row = QHBoxLayout()
@@ -628,7 +636,7 @@ class DailyScheduleTab(QWidget):
         self.rename_source_btn.setToolTip("Rename the selected HF Daily schedule without changing its rows.")
         self.save_btn = QPushButton("Assign with RF Guard")
         self.save_btn.setToolTip(
-            "Save this named schedule, then use FreqPlanner to blend and assign it to radio(s) with RF Guard checks."
+            "Save this named schedule, then use Plan Builder to blend and assign it to radio(s) with RF Guard checks."
         )
         self.save_source_btn = QPushButton("Save / Update Schedule")
         self.save_source_btn.setToolTip("Save the visible rows as the selected HF Daily schedule, or create a new named schedule.")
@@ -808,11 +816,9 @@ class DailyScheduleTab(QWidget):
     def _update_header_title(self) -> None:
         if not hasattr(self, "header_title_label"):
             return
-        radio_name = self._current_radio_context_name()
-        suffix = f" - {radio_name}" if radio_name else ""
-        self.header_title_label.setText(f"<h3>HF Frequency Schedule{suffix}</h3>")
+        self.header_title_label.setText("<h3>HF Daily Source Schedule</h3>")
         self.header_title_label.setToolTip(
-            "Radio shown for context only. Assign saved schedules to radio(s) through FreqPlanner or Schedule Assignment so RF Guard can validate the plan."
+            "Edit a reusable Daily schedule source. Assign linked Frequency Plans to radio(s) through Plan Builder or Schedule Assignment so RF Guard can validate the result."
         )
 
     def _update_daily_responsive_layout(self) -> None:
@@ -928,6 +934,28 @@ class DailyScheduleTab(QWidget):
         self._editing_freqplanner_source_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
         self.schedule_source_combo.blockSignals(False)
         self._update_source_action_state()
+        self._update_source_usage_label()
+
+    def _update_source_usage_label(self) -> None:
+        if not hasattr(self, "source_usage_label"):
+            return
+        set_id = self._selected_freqplanner_source_id()
+        name = str(self.schedule_source_combo.currentText() or "Active Daily Schedule").strip()
+        try:
+            usage = plan_source_usage_summary(
+                self.plan_context_service.store,
+                category=HF_DAILY_SOURCE_CATEGORY,
+                set_id=set_id,
+                live_label="hf_daily",
+            )
+            usage_text = str(usage.get("text") or "").strip()
+        except Exception as exc:
+            log.debug("HF Daily: source usage summary skipped: %s", exc)
+            usage_text = "Usage: --"
+        self.source_usage_label.setText(f"<b>Editing:</b> {name or 'Daily schedule'} | {usage_text}")
+        self.source_usage_label.setToolTip(
+            "Named schedules stay linked to plans by default. Updating this source refreshes dependent plans after RF Guard review."
+        )
 
     def _selected_freqplanner_source_id(self) -> str:
         if not hasattr(self, "schedule_source_combo"):
@@ -957,6 +985,7 @@ class DailyScheduleTab(QWidget):
         except Exception:
             pass
         self._update_source_action_state()
+        self._update_source_usage_label()
         line_edit = self.schedule_source_combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("New HF Daily schedule name")
@@ -974,10 +1003,12 @@ class DailyScheduleTab(QWidget):
             self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.schedule_source_combo.blockSignals(False)
             self._update_source_action_state()
+            self._update_source_usage_label()
             return
         self._editing_freqplanner_source_id = set_id
         self.settings.set(SELECTED_HF_DAILY_SOURCE_SET_KEY, set_id)
         self._update_source_action_state()
+        self._update_source_usage_label()
         try:
             self.settings.save()
         except Exception:
@@ -1322,7 +1353,7 @@ class DailyScheduleTab(QWidget):
         QMessageBox.information(
             self,
             f"HF Daily Schedule {verb}",
-            f"{verb} '{saved['name']}' with {len(rows)} HF Daily row(s).{plan_note} Select it in Plan Manager.",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Daily row(s).{plan_note} Select it in Plan Builder.",
         )
 
     def _confirm_rf_guard_source_update(
@@ -1412,7 +1443,7 @@ class DailyScheduleTab(QWidget):
         QMessageBox.information(
             self,
             "Assign with RF Guard",
-            "Save or update this HF Daily schedule, then select it in FreqPlanner with the desired HF Net schedule. "
+            "Save or update this HF Daily schedule, then select it in Plan Builder with the desired HF Net schedule. "
             "Save the blended Frequency Plan and assign that plan to radio(s) so RF Guard can validate the assignment.",
         )
         try:
@@ -6757,7 +6788,7 @@ class DailyScheduleTab(QWidget):
             theme = resolve_theme(self.settings)
         self.save_btn.setStyleSheet(button_style("muted", theme))
         self.save_btn.setToolTip(
-            "Save or update this named HF Daily schedule, then select it in Plan Manager with Nets and SOP layers for RF Guard assignment."
+            "Save or update this named HF Daily schedule, then select it in Plan Builder with Nets and SOP layers for RF Guard assignment."
         )
 
     def _set_dirty(self, dirty: bool) -> None:

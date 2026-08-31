@@ -47,7 +47,7 @@ Code gate:
 | Messages | Compose | Compose Workbench | Partial | P1 |
 | Map | Stations / Reports Map | Map Context | Partial | P1 |
 | SOP Builder | SOP and Traffic Suggestions | SOP Decision View | Partial | P2 |
-| FreqPlanner | Plan Manager | Schedule/Plan Editor | Partial | P2 |
+| FreqPlanner | Plan Builder | Schedule/Plan Editor | Partial | P2 |
 | HF Schedule | Daily Schedule | Schedule Outlook / Editor | Partial | P2 |
 | Net Schedule | Net Schedule | Schedule Outlook / Editor | Partial | P2 |
 | Peer Schedules | Peer Schedule Review | Schedule Outlook | Partial | P2 |
@@ -64,7 +64,10 @@ Code gate:
 
 ## Existing View Details
 
-### ControlFreq Operational Awareness
+### Ops Center Operational Awareness
+
+User-facing label: `Ops Center`. Internal route/module names may still use
+`ControlFreq` for compatibility.
 
 Template: `Attention Queue`
 
@@ -116,8 +119,8 @@ Current sources:
 - assigned frequency plans
 - current/next scheduler state
 - SOP overlays
-- schedule intersections
-- peer schedule hints
+- Peer Schedule Finder
+- peer schedule hints and overlaps
 
 Gate status:
 
@@ -135,15 +138,16 @@ Gate status:
 
 Near-term rule:
 
-- Schedule intersections should feel like part of Schedule Outlook rather than a
-  separate mental model.
+- Peer Schedule Finder should feel like part of Schedule Outlook rather than a
+  separate mental model. It renders compact peer rows with `Msg`, `Map`, and
+  `Pin` actions instead of a wide technical intersection table.
 
 Implementation note:
 
-- ControlFreq schedule and intersection tables now use row-fit sizing. Sparse
-  schedule data no longer reserves a large empty panel, and intersections stay
-  visually attached to Schedule Outlook instead of behaving like a separate
-  oversized block.
+- ControlFreq schedule and peer finder tables now use row-fit sizing. Sparse
+  schedule data no longer reserves a large empty panel, and peer availability
+  stays visually attached to Schedule Outlook instead of behaving like a
+  separate oversized block.
 - ControlFreq presets are now registry-backed: `Operations`, `All`, `Traffic`,
   `Schedule`, and `Propagation`.
 
@@ -323,14 +327,32 @@ Gate status:
 Near-term rule:
 
 - SOP should consume projected traffic signals, not raw inbox rows.
+- The existing SOP action-row table is a temporary advanced compatibility view.
+  Remove it after the card-based `SopActionBuilder` reaches parity, with tests
+  proving saved SOP payloads, RF Guard checks, and ControlFreq preview remain
+  unchanged.
+- SOP Builder should be redesigned around view contracts rather than a single
+  wide action-row table:
+  - `SopProfileSelector`
+  - `SopContextSummary`
+  - `SopSuggestionQueue`
+  - `SopActionBuilder`
+  - `SopScheduleImpact`
+  - `SopConflictReview`
+  - `SopPreview`
+- SOP Builder must preview the operator-facing ControlFreq guidance that will be
+  produced by the selected SOP.
+- SOP profiles may be grouped by operating group/category and may be linked to
+  different assigned plans/radios. The selected radio/group context should shape
+  suggestions and conflict checks without hiding other affected assignments.
 
-### FreqPlanner And Schedule Editors
+### Plan Builder And Schedule Editors
 
-Templates: `Schedule Outlook`, `Schedule/Plan Editor`
+Templates: `Schedule Outlook`, `Plan Builder`, `Schedule Source Editor`
 
 Current screens:
 
-- FreqPlanner
+- Plan Builder
 - HF Daily Schedule
 - Net Schedule
 - Peer Schedules
@@ -353,6 +375,25 @@ Near-term rule:
 
 - Reuse Schedule Outlook projections in ControlFreq instead of duplicating
   schedule summaries.
+- Use `Plan Builder` as the user-facing name for FreqPlanner.
+- HF Daily and HF Nets should share a source-first layout: source selector and
+  usage context first, editable schedule table second, reusable row library
+  third.
+- Plan Builder should keep the projected table dominant. Ingredient/source cards
+  should become compact when they push the schedule table out of the primary
+  viewport. Use a horizontally scrollable ingredient strip with stable chip
+  widths so minimized windows do not clip cards into the table. Do not render a
+  duplicate Daily/Nets/SOP text summary below the ingredient strip.
+- Plan Builder table-view controls must sit immediately above the projected
+  table they control. Render those controls as a compact toolbar that can scroll
+  horizontally when necessary; do not use a tall framed hint panel above the
+  table. Selected-window edit details belong below the table unless the user is
+  actively editing that window. View-specific controls should appear only in
+  views that use them.
+- SOP Builder must keep `Add Action Row` visible in the action-builder header.
+  The advanced table is a temporary compatibility editor and must remain clearly
+  labeled until card editing fully replaces it. The builder body must be
+  scrollable on laptop/minimized windows.
 
 ### Station Command Bar
 
@@ -395,7 +436,7 @@ Implementation note:
 
 ### Station Overview
 
-Template: `Station Status Summary`
+Template: `Station Control Center View`, `Station Status Summary`
 
 Current sources:
 
@@ -406,17 +447,22 @@ Current sources:
 
 Gate status:
 
-- Source meaning: Partial.
-- Volume and retention: Meets.
+- Source meaning: Meets directionally. `Overview` provides cross-source status;
+  each active source gets its own short-name tab.
+- Volume and retention: Meets for source count. Adding radios, SDRs, or future
+  connections creates tabs instead of one long detail scroll.
 - Provenance and trust: Partial.
-- Constrained customization: Partial.
-- Map scaling: Not applicable.
+- Constrained customization: Partial. Source tabs are generated from active
+  sources; user-selectable subviews can be layered later through the registry.
+- Map scaling: Partial. Current tabs expose capability state; future traffic/map
+  handoffs must use source-aware map filters.
 - Action validity: Partial.
 
 Near-term rule:
 
-- Keep as a summary surface and route detail to Station Health, Settings, or
-  ControlFreq rather than expanding into another dashboard.
+- Keep `Overview` first, then one tab per active source. Use warning/error
+  markers in tab labels so the operator can find trouble without scanning a
+  long page.
 
 ### Station Health
 
@@ -548,7 +594,7 @@ Gate status:
 | CommStat RF | Compose, ControlFreq, Messages-adjacent | Contracted | Source/view contract preserves StatRep/brevity/scope/report-id meaning and source-aware compose/map actions. |
 | VarAC Direct/BBS | Messages, Compose, Settings, ControlFreq | Contracted | Source/view contract preserves store-and-forward/BBS context, RF provenance, and native open/read capability. |
 | Local Reports | Local NCS, Local Operators, Map, Messages-adjacent | Contracted | Source/view contract preserves verified local/NCS/operator context and maps through grid/lat-lon/state. |
-| Schedules/SOP | ControlFreq, FreqPlanner, HF Schedule, Net Schedule, SOP | Partial | Strong domain model; reusable outlook projection should be the bridge. |
+| Schedules/SOP | ControlFreq, Plan Builder, HF Schedule, Net Schedule, SOP | Partial | Strong domain model; reusable outlook projection should be the bridge. |
 | Station Runtime | Station Command Bar, ControlFreq, Health, Settings | Contracted | `StationCommandRadio` defines short-name title, card context, and command actions. |
 | Propagation | ControlFreq | Partial | Needs source/freshness/confidence detail before expansion. |
 | Operators | Operators, NCS, Map, Compose-adjacent | Partial | Identity/contact projection would improve cross-links. |

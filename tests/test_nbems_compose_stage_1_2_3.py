@@ -424,7 +424,7 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert "self._compose_active_form_key = form_identity" in text
     assert "dict(self._compose_form_draft_values.get(form_identity, {}))" in text
     assert 'parse_compose_template_fields(template_text)' in text
-    assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
+    assert "field_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in text
     assert "FLAmp signed file verified:" in text
     assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in text

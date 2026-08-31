@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QTableWidget,
     QTableWidgetItem,
+    QSizePolicy,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -264,57 +266,54 @@ class JS8CallNetControlTab(QWidget):
         header.addWidget(self.local_label)
         layout.addLayout(header)
 
-        # Role + Net Name + refresh
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Role:"))
+        controls_grid = QGridLayout()
+        controls_grid.setContentsMargins(0, 0, 0, 0)
+        controls_grid.setHorizontalSpacing(10)
+        controls_grid.setVerticalSpacing(8)
+        controls_grid.addWidget(QLabel("Role:"), 0, 0)
         self.role_combo = QComboBox()
         self.role_combo.addItems(["NCS", "ANCS"])
-        top_row.addWidget(self.role_combo)
+        controls_grid.addWidget(self.role_combo, 0, 1)
 
-        top_row.addSpacing(20)
-        top_row.addWidget(QLabel("Net Name:"))
+        controls_grid.addWidget(QLabel("Net Name:"), 0, 2)
         self.net_name_edit = QLineEdit()
         self.net_name_edit.setPlaceholderText("Type net name (auto-complete from schedule)...")
-        top_row.addWidget(self.net_name_edit, stretch=1)
+        self.net_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        controls_grid.addWidget(self.net_name_edit, 0, 3, 1, 5)
 
-        top_row.addSpacing(20)
-        top_row.addWidget(QLabel("Refresh (sec):"))
+        controls_grid.addWidget(QLabel("Refresh (sec):"), 0, 8)
         self.refresh_spin = QSpinBox()
         self.refresh_spin.setRange(5, 300)
         self.refresh_spin.setValue(15)
-        top_row.addWidget(self.refresh_spin)
+        controls_grid.addWidget(self.refresh_spin, 0, 9)
 
-        top_row.addStretch()
-        layout.addLayout(top_row)
-
-        # Group / Spotter controls
-        gs_row = QHBoxLayout()
         self.set_group_btn = QPushButton("Set Group")
         self.group_edit = QLineEdit()
         self.group_edit.setPlaceholderText("@GROUP")
-        gs_row.addWidget(self.set_group_btn)
-        gs_row.addWidget(self.group_edit)
-        gs_row.addSpacing(12)
+        controls_grid.addWidget(self.set_group_btn, 1, 0)
+        controls_grid.addWidget(self.group_edit, 1, 1, 1, 2)
         self.set_spotter_btn = QPushButton("Set Expect Query")
         self.spotter_combo = QComboBox()
-        self.spotter_combo.setMinimumWidth(240)
+        self.spotter_combo.setMinimumWidth(220)
         self.spotter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        gs_row.addWidget(self.set_spotter_btn)
-        gs_row.addWidget(self.spotter_combo)
-        gs_row.addStretch()
+        controls_grid.addWidget(self.set_spotter_btn, 1, 3)
+        controls_grid.addWidget(self.spotter_combo, 1, 4, 1, 2)
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
-        gs_row.addWidget(self.qsy_combo)
+        controls_grid.addWidget(self.qsy_combo, 1, 6)
         self.hold_duration_combo = QComboBox()
         self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
         self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
-        gs_row.addWidget(self.hold_duration_combo)
+        controls_grid.addWidget(self.hold_duration_combo, 1, 7)
         self.suspend_btn = QPushButton("QSY + Hold")
-        gs_row.addWidget(self.suspend_btn)
+        controls_grid.addWidget(self.suspend_btn, 1, 8)
         self.ad_hoc_btn = QPushButton("Ad Hoc Net")
-        gs_row.addWidget(self.ad_hoc_btn)
-        layout.addLayout(gs_row)
-        layout.addSpacing(24)
+        controls_grid.addWidget(self.ad_hoc_btn, 1, 9)
+        controls_grid.setColumnStretch(3, 2)
+        controls_grid.setColumnStretch(4, 2)
+        controls_grid.setColumnStretch(5, 2)
+        layout.addLayout(controls_grid)
+        layout.addSpacing(6)
 
         # Check-ins table
         table_layout = QVBoxLayout()

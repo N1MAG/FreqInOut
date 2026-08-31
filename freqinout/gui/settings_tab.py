@@ -18616,7 +18616,7 @@ class SettingsTab(QWidget):
         if not enabled_plans:
             self._set_schedule_assignment_guidance(
                 "Schedule Assignment",
-                "No built Frequency Plans are available yet. Build a schedule in FreqPlanner before assigning it to radios.",
+                "No built Frequency Plans are available yet. Build a schedule in Plan Builder before assigning it to radios.",
                 "warning",
             )
             return
@@ -18900,7 +18900,7 @@ class SettingsTab(QWidget):
         if not self.frequency_plans:
             self._set_schedule_assignment_guidance(
                 "Schedule Assignment",
-                "No built Frequency Plans are available yet. Build a schedule in FreqPlanner before assigning it to radios.",
+                "No built Frequency Plans are available yet. Build a schedule in Plan Builder before assigning it to radios.",
                 "warning",
             )
         else:
@@ -19901,7 +19901,7 @@ class SettingsTab(QWidget):
             schedule_plan_combo,
             "Optional. Choose the plan this radio should follow after save, or assign it later in Radio Settings.",
         )
-        schedule_open_plan_manager_chk = QCheckBox("Open Plan Manager after saving")
+        schedule_open_plan_manager_chk = QCheckBox("Open Plan Builder after saving")
         schedule_open_plan_manager_chk.setObjectName("guidedScheduleOpenPlanManager")
         schedule_open_plan_manager_chk.setToolTip(
             "Assign Plan... Use this when you still need to build a Daily, No Nets, Net, or SOP-based Frequency Plan for this radio."
@@ -23323,7 +23323,7 @@ class SettingsTab(QWidget):
                 handoff(device_profile or {}, schedule_choice=schedule_choice)
             return True
         except Exception:
-            log.debug("Failed opening Plan Manager after guided radio setup.", exc_info=True)
+            log.debug("Failed opening Plan Builder after guided radio setup.", exc_info=True)
         return False
 
     def _add_device_profile(self) -> None:

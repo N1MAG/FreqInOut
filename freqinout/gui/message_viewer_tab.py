@@ -2631,6 +2631,7 @@ class MessageViewerTab(QWidget):
         if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "varac", "bbs"}:
             self._inbox_focus = "all"
         self._advanced_filters_visible: bool = bool(cfg.get("advanced_filters_visible", False))
+        self._inbox_tools_visible: bool = bool(cfg.get("inbox_tools_visible", True))
         self._available_type_filters: List[str] = []
         self._responsive_layout_mode = "wide"
         self._responsive_compact_width = 1200
@@ -2800,6 +2801,7 @@ class MessageViewerTab(QWidget):
         self._flamp_relay_validation_cache: Dict[tuple[str, float, int], bool] = {}
         self._flamp_relay_parse_cache: Dict[tuple[str, float, int], Optional[Dict[str, object]]] = {}
         self._bbs_copy_target_session_id: str = ""
+        self._retired_worker_refs: List[object] = []
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -2834,6 +2836,22 @@ class MessageViewerTab(QWidget):
         self._setup_js8_timer()
         self._setup_pending_timer()
         self._setup_message_check_timer()
+
+    def _retain_finished_worker_refs(self, *refs: object) -> None:
+        """Keep PySide wrappers alive until queued Qt deletions have safely drained."""
+        live_refs = [ref for ref in refs if ref is not None]
+        if not live_refs:
+            return
+        self._retired_worker_refs.extend(live_refs)
+
+        def _release_refs() -> None:
+            for ref in live_refs:
+                try:
+                    self._retired_worker_refs.remove(ref)
+                except ValueError:
+                    pass
+
+        QTimer.singleShot(5000, _release_refs)
 
     def _multi_radio_message_path_entries(self) -> List[Dict[str, str]]:
         """Return enabled radio-scoped message folders for inbox scanning and form discovery."""
@@ -3986,6 +4004,7 @@ class MessageViewerTab(QWidget):
         self._signature_verify_thread.start()
 
     def _on_signature_verify_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._signature_verify_thread, self._signature_verify_worker)
         self._signature_verify_thread = None
         self._signature_verify_worker = None
         if self._signature_verify_pending and not self._is_shutting_down:
@@ -4224,6 +4243,14 @@ class MessageViewerTab(QWidget):
         self.messages_title_label = QLabel("<h3>Message Inbox</h3>")
         header.addWidget(self.messages_title_label)
         header.addStretch()
+        self.inbox_tools_toggle_btn = QPushButton("Hide Inbox Tools")
+        self.inbox_tools_toggle_btn.setCheckable(True)
+        self.inbox_tools_toggle_btn.blockSignals(True)
+        self.inbox_tools_toggle_btn.setChecked(self._inbox_tools_visible)
+        self.inbox_tools_toggle_btn.blockSignals(False)
+        self.inbox_tools_toggle_btn.setToolTip("Show or hide the Inbox tools panel.")
+        self.inbox_tools_toggle_btn.toggled.connect(self._set_inbox_tools_visible)
+        header.addWidget(self.inbox_tools_toggle_btn)
         self.utc_label = QLabel()
         self.local_label = QLabel()
         self.utc_label.setVisible(False)
@@ -4487,16 +4514,16 @@ class MessageViewerTab(QWidget):
         inbox_root.setSpacing(10)
         self.inbox_controls_panel = inbox_wrap
         self.inbox_controls_panel.setObjectName("messagesInboxControlPanel")
-        self.inbox_controls_panel.setMinimumWidth(190)
-        self.inbox_controls_panel.setMaximumWidth(250)
+        self.inbox_controls_panel.setMinimumWidth(250)
+        self.inbox_controls_panel.setMaximumWidth(340)
         self.inbox_controls_scroll = QScrollArea()
         self.inbox_controls_scroll.setObjectName("messagesInboxControlScroll")
         self.inbox_controls_scroll.setWidgetResizable(True)
         self.inbox_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.inbox_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.inbox_controls_scroll.setFrameShape(QFrame.NoFrame)
-        self.inbox_controls_scroll.setMinimumWidth(202)
-        self.inbox_controls_scroll.setMaximumWidth(262)
+        self.inbox_controls_scroll.setMinimumWidth(262)
+        self.inbox_controls_scroll.setMaximumWidth(352)
         self.inbox_controls_scroll.setWidget(self.inbox_controls_panel)
         inbox_root.addWidget(self.inbox_controls_scroll, 0)
         inbox_body = QWidget()
@@ -4847,6 +4874,37 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         self._sync_advanced_filter_visibility()
+        self._apply_inbox_tools_visibility()
+
+    def _set_inbox_tools_visible(self, visible: bool) -> None:
+        self._inbox_tools_visible = bool(visible)
+        self._apply_inbox_tools_visibility()
+        if hasattr(self, "messages_mode_stack"):
+            self._save_settings()
+
+    def _apply_inbox_tools_visibility(self) -> None:
+        scroll = getattr(self, "inbox_controls_scroll", None)
+        toggle = getattr(self, "inbox_tools_toggle_btn", None)
+        visible = bool(getattr(self, "_inbox_tools_visible", True))
+        compose_active = str(getattr(self, "_messages_mode", "Inbox") or "Inbox") == "Compose"
+        if scroll is not None:
+            scroll.setVisible(visible and not compose_active)
+            if visible:
+                scroll.setMinimumWidth(262)
+                scroll.setMaximumWidth(352)
+            else:
+                scroll.setMinimumWidth(0)
+                scroll.setMaximumWidth(0)
+        if isinstance(toggle, QPushButton):
+            toggle.blockSignals(True)
+            toggle.setChecked(visible)
+            toggle.setText("Hide Inbox Tools" if visible else "Show Inbox Tools")
+            toggle.blockSignals(False)
+            toggle.setVisible(not compose_active)
+            try:
+                toggle.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+            except Exception:
+                pass
 
     @staticmethod
     def _inbox_focus_options() -> List[Tuple[str, str, str]]:
@@ -5072,7 +5130,7 @@ class MessageViewerTab(QWidget):
         self.compose_guidance_label.setStyleSheet("color: #566573; font-weight: 600;")
         guidance_row.addWidget(self.compose_guidance_label, 1)
         self.compose_tune_recommended_btn = QPushButton("Tune Recommended")
-        self.compose_tune_recommended_btn.setToolTip("Tune the recommended radio through the existing ControlFreq and RF Guard path.")
+        self.compose_tune_recommended_btn.setToolTip("Tune the recommended radio through the existing Ops Center and RF Guard path.")
         self.compose_tune_recommended_btn.clicked.connect(self._compose_tune_recommended_radio)
         self.compose_tune_recommended_btn.setVisible(False)
         guidance_row.addWidget(self.compose_tune_recommended_btn)
@@ -5354,7 +5412,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_form_row_widget = QWidget()
         self.compose_form_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_form_row_widget.setMaximumHeight(96)
+        self.compose_form_row_widget.setMaximumHeight(16777215)
         row1 = QGridLayout(self.compose_form_row_widget)
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setHorizontalSpacing(8)
@@ -5392,7 +5450,7 @@ class MessageViewerTab(QWidget):
 
         self.compose_header_row_widget = QWidget()
         self.compose_header_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.compose_header_row_widget.setMaximumHeight(88)
+        self.compose_header_row_widget.setMaximumHeight(16777215)
         row2 = QGridLayout(self.compose_header_row_widget)
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setHorizontalSpacing(8)
@@ -8478,6 +8536,7 @@ class MessageViewerTab(QWidget):
             widget.setVisible(False)
         if hasattr(self, "_inbox_actions_row"):
             self._inbox_actions_row.setVisible(not compose_active)
+        self._apply_inbox_tools_visibility()
         if hasattr(self, "inbox_focus_widget"):
             self.inbox_focus_widget.setVisible(not compose_active)
         if hasattr(self, "message_funnel_widget"):
@@ -8493,6 +8552,10 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "inbox_bbs_summary_label"):
             self.inbox_bbs_summary_label.setVisible(not compose_active)
         self._sync_message_check_timer()
+        if compose_active:
+            self._refresh_compose_layout_geometry_if_needed(force=True)
+            QTimer.singleShot(0, lambda: self._refresh_compose_layout_geometry_if_needed(force=True))
+            QTimer.singleShot(80, lambda: self._refresh_compose_layout_geometry_if_needed(force=True))
         self._update_compose_preview()
 
     def _open_messages_help(self) -> None:
@@ -10421,6 +10484,7 @@ class MessageViewerTab(QWidget):
         self._bbs_auto_archive_thread.start()
 
     def _on_bbs_auto_archive_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._bbs_auto_archive_thread, self._bbs_auto_archive_worker)
         self._bbs_auto_archive_thread = None
         self._bbs_auto_archive_worker = None
 
@@ -10802,6 +10866,7 @@ class MessageViewerTab(QWidget):
         self._file_scan_thread.start()
 
     def _on_file_scan_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._file_scan_thread, self._file_scan_worker)
         self._file_scan_thread = None
         self._file_scan_worker = None
 
@@ -12588,6 +12653,7 @@ class MessageViewerTab(QWidget):
         self._rows_build_thread.start()
 
     def _on_rows_build_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._rows_build_thread, self._rows_build_worker)
         self._rows_build_thread = None
         self._rows_build_worker = None
         if self._rows_build_pending and not self._is_shutting_down:
@@ -18836,6 +18902,7 @@ class MessageViewerTab(QWidget):
             data["excluded_msg_types"] = sorted(self._excluded_msg_types)
             data["inbox_focus"] = str(getattr(self, "_inbox_focus", "all") or "all")
             data["advanced_filters_visible"] = bool(getattr(self, "_advanced_filters_visible", False))
+            data["inbox_tools_visible"] = bool(getattr(self, "_inbox_tools_visible", True))
             data["mode"] = self._messages_mode
             if hasattr(self.settings, "set"):
                 self.settings.set("message_viewer", data)

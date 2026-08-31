@@ -125,7 +125,7 @@ Target behavior:
 - Treat FLRig stability as high priority because it is commonly the bridge
   between software and the physical radio.
 
-## Phase 4: Guided FreqPlanner
+## Phase 4: Guided Plan Builder
 
 Target behavior:
 

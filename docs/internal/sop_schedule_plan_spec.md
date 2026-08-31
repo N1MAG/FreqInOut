@@ -248,6 +248,185 @@ save the plan-local edit only or also update the master Net Resource. Master
 resource updates are explicit, happen only after the SOP Schedule Plan save passes
 RF Guard, and mark the resource as manually updated from an SOP Schedule Plan.
 
+## Plan Builder View Contract
+
+FreqPlanner is the canonical Plan Builder, not a raw schedule table manager. The
+default mental model is source-linked:
+
+- A Frequency Plan is a named, selectable operating model.
+- A plan is built from visible ingredients: HF Daily source, HF Net source,
+  optional SOP layer, RF Guard review state, and radio assignments.
+- Saved plans keep projected schedule windows for runtime speed, but source refs
+  remain authoritative for user understanding and future refresh.
+- Multiple plans may exist for seasonal, event, region, or role-specific use.
+  Users must be able to select a plan, inspect its ingredients, and assign or
+  swap it between radios without reconstructing it from rows.
+- Updating a named HF Daily or HF Net source should explain which linked plans
+  and assigned radios will be affected before save/RF Guard review.
+
+Required Plan Builder views:
+
+- `PlanIngredientSelector`: shows selected Daily, Net, SOP, and plan name as
+  compact visible chips/cards.
+- `SourceScheduleUsage`: appears on HF Daily and HF Net schedule editors and
+  answers "which plans/radios use this source?"
+- `LiveRfGuardReview`: runs against the current projection and assigned radios
+  while the plan is being built or updated.
+- `EffectiveTimeline`: shows the resulting where-to-be/when-to-be schedule.
+- `AssignmentImpact`: shows which radios currently use the selected plan and
+  routes to Schedule Assignment for save, swap, or conflict resolution.
+
+Plan Builder actions must route to the exact source area they affect. "Edit HF
+Daily" opens the Daily source schedule; "Edit HF Net" opens the Net source
+schedule; "Build SOP Layer" opens SOP Builder; "Assign" opens radio schedule
+assignment. UI labels must avoid implying that an HF Daily or Net source belongs
+to one radio when it may feed multiple plans and radios.
+
+## Plan Builder And Source Schedule UX Corrections
+
+Observed 2026-08-30 QA:
+
+- Navigation still labels FreqPlanner as `Plan Manager`; user-facing navigation
+  should say `Plan Builder`.
+- Plan Builder's ingredient cards are useful, but they consume too much vertical
+  space and push the projected schedule table down. The effective/pattern table
+  is the primary working surface and must be visible without excessive scrolling.
+- Plan Builder view controls were visually separated from the table they
+  controlled. View selectors, time/band toggles, RF Guard actions, and the
+  selected table must be colocated so a tired operator can immediately connect
+  cause and effect.
+- HF Daily user guidance still says `FreqPlanner`; user-facing copy should say
+  `Plan Builder`.
+- Net Source Schedule displays the editable schedule table before the source
+  selector/action controls. This reverses the mental model: the user should
+  first know which named schedule is being edited, then see and edit that
+  schedule's rows.
+
+Required behavior:
+
+- `Plan Builder` is the user-facing navigation/menu label for FreqPlanner.
+- Plan Builder should prioritize table visibility:
+  - collapse ingredient cards to a compact one-line or two-line summary when
+    the view is not focused on plan setup
+  - render ingredient cards as a horizontally scrollable strip with stable
+    chip widths so minimized windows preserve table height instead of clipping
+    the cards into the table
+  - do not show a second visible Daily/Nets/SOP summary line below the
+    ingredient cards; that repeats the chip content and steals table space
+  - keep the source selectors and plan actions in a dense top band
+  - keep table view selectors immediately above the projected table
+  - render table view controls as a compact toolbar that may scroll
+    horizontally on small screens, rather than a tall explanatory panel
+  - default the main view to the most scannable table for the selected plan
+  - hide view-specific controls, such as the SOP Lanes day filter, unless the
+    selected view actually uses them
+  - keep action/status guidance to one visible line near the toolbar, with
+    longer detail available through tooltip or a focused inspector
+  - move selected-window editing details below the projected table unless a
+    blocking error requires immediate attention
+  - avoid full-width cards that add height without adding a decision
+- HF Daily and HF Nets must share the same source-first layout:
+  - title
+  - selected source schedule name/selector
+  - source usage line: linked plans and assigned radios
+  - source actions: new, save/update, rename, delete, import/export
+  - editable schedule table
+  - reusable row library
+- Net schedule names are first-class source identities, not metadata below the
+  table.
+
+Implementation order:
+
+1. Rename FreqPlanner navigation/menu copy to `Plan Builder`.
+2. Replace remaining user-visible `FreqPlanner` schedule guidance with `Plan
+   Builder`.
+3. Compact Plan Builder ingredient presentation so the schedule table remains
+   visible and dominant.
+4. Reorder Net Source Schedule to match HF Daily: source controls before table,
+   table before library.
+5. Colocate Plan Builder table-view controls with the projected table and move
+   selected-window editor details below that table.
+6. Add source-inspection tests for layout order and naming.
+
+## SOP Builder Reimagination
+
+SOP Builder is the canonical "what to do when I am there" builder. It consumes
+plan, schedule, radio, group, traffic, map, and tool-source context and produces
+operator actions that ControlFreq can render as clear operational guidance.
+
+The current wide row-table layout is insufficient because it makes the SOP feel
+like a spreadsheet instead of a decision plan. SOPs may vary by operating group,
+radio assignment, region, source family, condition level, and traffic context.
+The UI must follow the operational view-contract model so different source
+combinations can be rendered consistently without bespoke per-source screens.
+
+Required SOP Builder view contracts:
+
+- `SopProfileSelector`: selected SOP, group/category, active state, linked
+  plans/radios, versions, import/export.
+- `SopContextSummary`: current assigned plan, radio(s), group(s), schedule
+  windows, condition levels, and source refs that this SOP affects.
+- `SopSuggestionQueue`: suggested actions from traffic, schedules, map context,
+  tool-source health, condition alerts, and routing insights. Suggestions show
+  source, freshness, trust, actionability, and expected ControlFreq effect.
+- `SopActionBuilder`: guided action composition using compact fields and chips,
+  not a single very wide editable row table.
+- `SopScheduleImpact`: shows how actions map onto HF Daily, HF Nets, SOP
+  windows, and ControlFreq "what to do" output.
+- `SopConflictReview`: RF Guard, net/daily overlap, same-radio/sibling-plan
+  conflicts, and suggested fixes.
+- `SopPreview`: operator-facing preview of the exact ControlFreq guidance that
+  will be produced.
+
+Target layout:
+
+- Left rail: SOP list grouped by operating group/category with warning badges
+  and assigned radio short names.
+- Center: selected SOP action builder with stacked compact action cards. Each
+  action card has group, condition levels, trigger/source, action, frequency or
+  route, timing, and conflict state.
+- Right rail: live context and preview: linked plan/radios, schedule impact,
+  ControlFreq preview, and traffic suggestions.
+- Narrow screens collapse the right rail below the center and keep the left SOP
+  list scrollable.
+
+Suggested action flow:
+
+1. Pick or create an SOP for a group/category.
+2. See which plans/radios already use it.
+3. Review suggestions from traffic/source context.
+4. Add or accept action cards.
+5. Review schedule/RF Guard impacts.
+6. Save and preview the ControlFreq guidance.
+
+Implementation plan before code changes:
+
+1. Inventory existing SOP data model and action fields; identify fields that can
+   be grouped into compact action cards without changing persistence.
+2. Add/extend registry contracts for SOP Builder views.
+3. Build read-only context/preview panels first so the current table has a
+   trustworthy destination.
+4. Replace the wide action row table with compact action cards behind the same
+   save/load functions.
+5. Add suggestion queue filters and action validity states.
+6. Add ControlFreq preview contract and tests to prove saved SOP output appears
+   correctly in ControlFreq.
+7. Only after the card-based builder is stable, consider optional advanced table
+   view for bulk editing.
+
+Transition rule:
+
+- `SopActionBuilder` must keep the primary `Add Action Row` control visible in
+  the builder header while the card builder is still backed by the legacy table.
+- The advanced table may remain as a temporary full-field editor, but it must be
+  visibly labeled as temporary and must not be hidden behind controls that look
+  inactive or collapsed.
+- The SOP Builder body must be scrollable on laptop/minimized windows so action
+  rows, the temporary table, and conflict review remain reachable.
+- `SopConflictReview` must have an obvious Show/Hide Workbench affordance and
+  enough vertical space to render its status, filters, batch actions, and table
+  when expanded.
+
 ## Traffic-Driven SOP Inputs
 
 SOP Builder also consumes operational observations from Messages, ControlFreq,

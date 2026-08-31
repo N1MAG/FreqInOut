@@ -154,17 +154,29 @@ def test_phase5_frequency_plan_source_provenance_source_wiring() -> None:
 def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     planner_source = Path("freqinout/gui/freq_planner_tab.py").read_text(encoding="utf-8")
 
-    assert 'QLabel("<h3>Plan Manager</h3>")' in planner_source
+    assert 'QLabel("<h3>Plan Builder</h3>")' in planner_source
     assert "plan_workspace = QVBoxLayout()" in planner_source
     assert "plan_select_row = QHBoxLayout()" in planner_source
     assert "plan_select_row.addWidget(self.save_plan_btn)" in planner_source
     assert "source_workspace.addWidget(self.save_sop_plan_btn)" in planner_source
     assert "source_workspace.addWidget(self.build_sop_layer_btn)" in planner_source
+    assert 'self.plan_ingredients_frame.setObjectName("freqPlannerPlanIngredients")' in planner_source
+    assert 'self.plan_ingredients_scroll.setObjectName("freqPlannerPlanIngredientsScroll")' in planner_source
+    assert "self.plan_ingredients_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in planner_source
+    assert "chip.setMinimumWidth(230)" in planner_source
+    assert "self.plan_layers_label.setVisible(False)" in planner_source
+    assert "def _refresh_plan_ingredients" in planner_source
+    assert "linked by default" in planner_source
+    assert "plan_source_usage_summary" in planner_source
     assert "view_workspace.addWidget(self.review_rf_guard_btn)" in planner_source
     assert "view_workspace.addWidget(self.assign_plan_btn)" in planner_source
+    assert 'self.plan_review_toolbar_scroll.setObjectName("freqPlannerReviewToolbarScroll")' in planner_source
+    assert "self.plan_review_toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in planner_source
+    assert "self.plan_review_controls_frame.setFrameShape(QFrame.NoFrame)" in planner_source
     assert "self.frequency_plan_combo = QComboBox()" in planner_source
     assert 'self.frequency_plan_combo.setObjectName("freqPlannerFrequencyPlanCombo")' in planner_source
     assert "self.frequency_plan_combo.setEditable(True)" in planner_source
+    assert "self.frequency_plan_combo.setMinimumWidth(240)" in planner_source
     assert 'self.save_plan_btn = QPushButton("Save Plan")' in planner_source
     assert 'self.save_sop_plan_btn = QPushButton("Save SOP Plan")' in planner_source
     assert 'self.delete_plan_btn = QPushButton("Delete Plan")' in planner_source
@@ -180,6 +192,7 @@ def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
     assert "Choose the radio and save with RF Guard." in planner_source
     assert 'self.frequency_plan_summary_label.setObjectName("freqPlannerFrequencyPlanSummary")' in planner_source
     assert 'self.frequency_plan_action_hint_label.setObjectName("freqPlannerFrequencyPlanActionHint")' in planner_source
+    assert "self.frequency_plan_action_hint_label.setWordWrap(False)" in planner_source
     assert "Build a named plan by selecting HF Daily, HF Nets, and optional SOP layers" in planner_source
     assert "def _refresh_plan_workspace_header(self) -> None:" in planner_source
     assert "self._refresh_plan_workspace_header()" in planner_source
@@ -371,7 +384,7 @@ def test_controlfreq_uses_shared_plan_context_label_without_control_behavior_cha
     assert "create_service=self.plan_context_service is not None" in source
     assert "self.plan_context_label.refresh_context(refresh=True)" in source
     assert "self.plan_context_label.invalidate_context()" in source
-    assert "ControlFreq uses the current radio and Frequency Plan context" in source
+    assert "Ops Center uses the current radio and Frequency Plan context" in source
 
 
 def test_map_uses_shared_plan_context_label_without_map_behavior_changes() -> None:

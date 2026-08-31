@@ -40,14 +40,19 @@ def test_phase7_main_window_has_global_ledge_clock() -> None:
 def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
-    assert source.index('("ControlFreq", "ControlFreq")') < source.index('("Map", "Map")')
-    assert source.index('("Map", "Map")') < source.index('("Control Center", "Station Overview")')
+    assert source.index('("Ops Center", "ControlFreq")') < source.index('("Map", "Map")')
+    assert source.index('("Map", "Map")') < source.index('("Inbox", "Messages")')
+    assert source.index('("Inbox", "Messages")') < source.index('("FLDigi / SSB", "NCS-FLDigi/SSB")')
+    assert source.index('("FLDigi / SSB", "NCS-FLDigi/SSB")') < source.index('("HF Callsigns", "HF Operators")')
+    assert source.index('("HF Callsigns", "HF Operators")') < source.index('("Plan Builder", "FreqPlanner")')
+    assert source.index('("Plan Builder", "FreqPlanner")') < source.index('("Control Center", "Station Overview")')
+    assert source.index('("Control Center", "Station Overview")') < source.index('("Main", "Settings")')
     assert '("Control Center", "Station Overview")' in source
     assert '("Health Details", "Station Health")' in source
-    assert '("Plan Manager", "FreqPlanner")' in source
+    assert '("Plan Builder", "FreqPlanner")' in source
     assert '("SOP Builder", "SOP")' in source
-    assert source.index('("Plan Manager", "FreqPlanner")') < source.index('("SOP Builder", "SOP")')
-    assert source.index('("SOP Builder", "SOP")') < source.index('("Inbox", "Messages")')
+    assert source.index('("Plan Builder", "FreqPlanner")') < source.index('("SOP Builder", "SOP")')
+    assert source.index('("Compose", "Messages")') < source.index('("FLDigi / SSB", "NCS-FLDigi/SSB")')
     assert '("HF Daily", "HF Schedule")' in source
     assert '("HF Nets", "Net Schedule")' in source
     assert '("HF Peer Scheds", "Peer Schedules")' in source
@@ -55,15 +60,16 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '("Compose", "Messages")' in source
     assert '("Main", "Settings")' in source
     assert '("Radios", "Settings")' in source
-    assert 'self._nav_group_order: list[str] = ["Station", "FreqPlanner", "Messages", "NCS", "Operators", "Settings"]' in source
+    assert 'self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]' in source
     assert '"Messages": False' in source
     assert '"Station": False' in source
-    assert '"FreqPlanner": False' in source
+    assert '"Plan Builder": False' in source
+    assert 'raw["Plan Builder"] = raw.get("FreqPlanner")' in source
     assert "self._suppress_initial_nav_group_auto_expand = True" in source
     assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
     assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
-    assert 'return "FreqPlanner"' in source
+    assert 'return "Plan Builder"' in source
     assert 'if screen == "Messages":' in source
     assert 'return "Messages"' in source
     assert 'if screen == "Settings":' in source
@@ -92,6 +98,54 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert "Expand Station or open Health Details." in source
 
 
+def test_ops_center_visible_header_and_help_use_user_facing_name() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    help_source = Path("freqinout/gui/help_registry.py").read_text(encoding="utf-8")
+
+    assert 'QLabel("<h3>Ops Center</h3>")' in source
+    assert "Open Ops Center help." in source
+    assert "Ops Center uses the current radio and Frequency Plan context" in source
+    assert 'title="Ops Center Help"' in help_source
+    assert 'title="Ops Center Actions Help"' in help_source
+
+
+def test_plan_builder_source_schedule_labels_are_user_facing() -> None:
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    daily_source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
+    settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    guided_source = Path("freqinout/core/guided_setup.py").read_text(encoding="utf-8")
+
+    assert '("Plan Builder", "FreqPlanner")' in main_source
+    assert '"Plan Manager"' not in main_source
+    assert "use FreqPlanner" not in daily_source
+    assert "select it in FreqPlanner" not in daily_source
+    assert "Build a schedule in FreqPlanner" not in settings_source
+    assert "Plan Manager will open after save" not in guided_source
+    assert "Plan Builder will open after save" in guided_source
+
+
+def test_net_source_schedule_is_source_first_before_table() -> None:
+    source = Path("freqinout/gui/net_schedule_tab.py").read_text(encoding="utf-8")
+
+    assert source.index("self._net_action_layout = QGridLayout()") < source.index("layout.addWidget(self.table)")
+    assert source.index("layout.addWidget(self.source_usage_label)") < source.index("layout.addWidget(self.table)")
+    assert 'self.header_title_label = QLabel("<h3>Net Source Schedule</h3>")' in source
+
+
+def test_sop_builder_contract_shell_and_temporary_advanced_table_are_flagged() -> None:
+    source = Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
+    inventory = Path("docs/internal/operational_view_inventory.md").read_text(encoding="utf-8")
+
+    assert 'self.sop_workbench_box = QGroupBox("SOP Workbench")' in source
+    assert 'self.sop_profile_selector_label.setObjectName("sopProfileSelector")' in source
+    assert 'self.sop_context_summary_label.setObjectName("sopContextSummary")' in source
+    assert 'self.sop_preview_label.setObjectName("sopPreview")' in source
+    assert 'self.sop_action_cards_label.setObjectName("sopActionBuilderCards")' in source
+    assert 'self.advanced_table_box = QGroupBox("Advanced Table (temporary)")' in source
+    assert 'self.advanced_table_box.setObjectName("sopAdvancedTableTemporary")' in source
+    assert "temporary advanced compatibility view" in inventory
+
+
 def test_phase7_primary_nav_groups_start_collapsed() -> None:
     from freqinout.gui.main_window import MainWindow
 
@@ -113,7 +167,7 @@ def test_phase7_primary_nav_groups_start_collapsed() -> None:
     states = MainWindow._load_nav_group_states(window)
 
     assert states["Station"] is False
-    assert states["FreqPlanner"] is False
+    assert states["Plan Builder"] is False
     assert states["Messages"] is False
     assert states["NCS"] is True
     assert states["Operators"] is True
@@ -995,9 +1049,10 @@ def test_phase7_hf_daily_hides_manual_copy_to_library_action() -> None:
 def test_phase7_hf_daily_assignment_action_points_to_rf_guard_flow() -> None:
     source = Path("freqinout/gui/daily_schedule_tab.py").read_text(encoding="utf-8")
 
-    assert 'self.header_title_label = QLabel("<h3>HF Frequency Schedule</h3>")' in source
+    assert 'self.header_title_label = QLabel("<h3>HF Daily Source Schedule</h3>")' in source
     assert "def _update_header_title" in source
-    assert "Radio shown for context only" in source
+    assert "Edit a reusable Daily schedule source." in source
+    assert 'self.source_usage_label.setObjectName("dailyScheduleSourceUsage")' in source
     assert 'self.save_btn = QPushButton("Assign with RF Guard")' in source
     assert "self.save_btn.clicked.connect(self._on_assign_with_rf_guard_clicked)" in source
     assert "self.save_btn.clicked.connect(self._save_schedule)" not in source
@@ -1302,6 +1357,79 @@ def test_phase7_station_overview_uses_empty_state_for_empty_control_center(monke
         assert tab.control_center_empty_label.isHidden() is True
         assert tab.control_center_table.isHidden() is False
         assert tab.control_center_table.rowCount() == 1
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_station_overview_uses_overview_and_source_tabs(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.station_runtime_manager import DeviceRuntimeSnapshot
+    from freqinout.gui.station_overview_tab import StationOverviewTab
+
+    def snap(device_id: int, name: str, state: str = "ok") -> DeviceRuntimeSnapshot:
+        return DeviceRuntimeSnapshot(
+            device_profile_id=device_id,
+            name=name,
+            device_class="tx_rx",
+            control_backend="flrig",
+            deployment_mode="local",
+            runtime_active=True,
+            runtime_primary=device_id == 1,
+            scheduler_owner=device_id == 1,
+            endpoint_summary="FLRig",
+            ptt_group="",
+            assigned_operating_profile_id=1,
+            assigned_operating_profile_name="All Features",
+            assignment_state="active",
+            scheduler_enabled=True,
+            use_messages=True,
+            use_map=True,
+            use_background_ingest=True,
+            use_launch_control=False,
+            use_net_control_tabs=True,
+            control_ready=state == "ok",
+            overall_state=state,
+            status_summary="Ready" if state == "ok" else "Needs setup",
+            warning_text="check setup" if state != "ok" else "",
+            ptt_active=False,
+            shared_ptt_blocked=False,
+            shared_ptt_owner_device_id=None,
+            shared_ptt_owner_name="",
+            shared_ptt_status_text="",
+            observer_follow_source_device_id=None,
+            observer_follow_source_name="",
+            observer_follow_summary="",
+            varac_cluster_name="",
+            varac_cluster_id="",
+            varac_instance_number=None,
+            varac_gateway_handler=False,
+            varac_gateway_handler_name="",
+            varac_cluster_summary="",
+            current_frequency_hz=7115000,
+            current_frequency_label="7.115 MHz",
+            current_band="40M",
+            antenna_group="",
+            frontend_group="",
+            amplifier_group="",
+            swap_role="",
+            swap_summary="",
+            service_states={"FLRig": {"state": state, "tooltip": "FLRig ready"}},
+        )
+
+    tab = StationOverviewTab()
+    try:
+        tab._rebuild_cards([snap(1, "FIO-A"), snap(2, "FIO-B", "warn")])
+        app.processEvents()
+
+        assert tab.control_center_tabs.objectName() == "stationControlCenterSourceTabs"
+        assert tab.control_center_tabs.tabText(0) == "Overview"
+        assert tab.control_center_tabs.tabText(1) == "FIO-A"
+        assert tab.control_center_tabs.tabText(2) == "FIO-B !"
+        assert tab.control_center_table.rowCount() == 2
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -1663,7 +1791,7 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)" in source
     assert 'self.station_command_health_label = QLabel("Health:")' in source
     assert 'label_text="Healthy"' in source
-    assert 'summary_label = "Unhealthy" if summary_state == "error" else "Needs Review"' in source
+    assert 'summary_label = "Setup" if summary_state == "error" else "Review"' in source
     assert "self._apply_station_command_bar_layout(force=True)" in source
     assert "right_layout.addWidget(self.station_command_bar, 0)" in source
     assert "right_layout.addWidget(self.stack, stretch=1)" in source
@@ -1916,7 +2044,7 @@ def test_phase7_station_command_health_snapshot_idle_configured_app_is_not_green
     summary = MainWindow._station_command_health_summary_for_profile(window, snapshot)
 
     assert summary["state"] == "warn"
-    assert summary["label"] == "Needs Review"
+    assert summary["label"] == "Review"
     assert ("FLRig", "FLRig", "warn", "FLRig is not running.") in summary["issues"]
 
     app.processEvents()
@@ -1985,8 +2113,56 @@ def test_phase7_station_command_health_shows_only_unhealthy_components(monkeypat
 
         labels = {key: label.text() for key, label in window.station_command_health_text_labels.items()}
         assert labels == {
-            "__summary__": "Unhealthy",
+            "__summary__": "Setup",
         }
+    finally:
+        window.station_command_health_widget.deleteLater()
+        app.processEvents()
+
+
+def test_phase7_station_command_health_treats_idle_helper_tools_as_available(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.settings_manager import SettingsManager
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window.settings = SettingsManager()
+    window.station_command_health_widget = QWidget()
+    window.station_command_health_layout = QHBoxLayout(window.station_command_health_widget)
+    window.station_command_health_label = QLabel("Health:")
+    window.station_command_health_leds = {}
+    window.station_command_health_text_labels = {}
+    window.dependency_status_service = SimpleNamespace(
+        software_status_snapshot=lambda: {
+            "FLRig": {"state": "ok", "tooltip": "FLRig OK"},
+            "FLMsg": {"state": "idle", "tooltip": "FLMsg not running"},
+            "FLAmp": {"state": "idle", "tooltip": "FLAmp not running"},
+            "JS8Spotter": {"state": "idle", "tooltip": "FIO Spotter not running"},
+            "CommStat": {"state": "idle", "tooltip": "CommStat not running"},
+        }
+    )
+    monkeypatch.setattr(
+        MainWindow,
+        "_station_command_health_items",
+        lambda self, profile: [
+            ("FLRig", "FLRig"),
+            ("FLMsg", "FLMsg"),
+            ("FLAmp", "FLAmp"),
+            ("JS8Spotter", "FIO Spotter"),
+            ("CommStat", "CommStat"),
+        ],
+    )
+
+    try:
+        MainWindow._refresh_station_command_health(window, {"id": 1, "control_backend": "flrig"}, 1)
+        app.processEvents()
+
+        labels = {key: label.text() for key, label in window.station_command_health_text_labels.items()}
+        assert labels == {"__summary__": "Healthy"}
+        assert "available when needed" in window.station_command_health_text_labels["__summary__"].toolTip()
     finally:
         window.station_command_health_widget.deleteLater()
         app.processEvents()
@@ -4767,7 +4943,7 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "Operating Models" in spec
     assert "JS8Call, Spotter, And CommStat Setup" in spec
     assert "Fast Light Profile Creation" in spec
-    assert "Guided FreqPlanner" in spec
+    assert "Guided Plan Builder" in spec
     assert "VarAC BBS" in spec
     assert "VarAC Cluster node configuration guidance" in spec
     assert "single-instance VarAC and normal BBS monitoring do not require" in spec

@@ -277,6 +277,36 @@ Required behavior:
 - use horizontal overflow only for the compact chip rail when the configured
   source count exceeds available width
 
+### Station Control Center View
+
+Purpose: provide the deeper operational workspace for every active radio, SDR,
+and future connection without making the user scan one long scrolling page.
+
+Inputs:
+
+- runtime source snapshots
+- source family/view contracts
+- health and setup summaries
+- assigned operating profiles and schedule state
+- traffic and map action availability
+
+Required behavior:
+
+- render an `Overview` tab first for cross-source status, attention, and quick
+  comparison
+- render one tab per active source using the user-defined short name, such as
+  `FIO-A`, `FIO-B`, `SDR-1`, `Mesh`, or `APRS`
+- surface warning/error state in the source tab label so an off-screen source
+  can ask for attention without requiring vertical scrolling
+- keep each source tab bounded and scrollable independently; scrolling inside
+  one source must not hide the Overview or other source tabs
+- use the source/view contract to decide which cards are allowed in each source
+  tab; radios may show tune/control/runtime details, observers may show
+  receive/follow details, and future Mesh/APRS/Reticulum tabs may show ingest,
+  traffic, map, and attention views
+- keep the top station command bar as the compact action rail and use Station
+  Control Center for deeper detail, not duplicate long command cards there
+
 ### Setup Checklist
 
 Purpose: show configuration problems in context.
@@ -294,6 +324,16 @@ Required behavior:
 - show required vs optional setup clearly
 - link directly to the setting that fixes the issue
 - do not occupy primary operational space after setup is healthy
+- separate live dependency health from setup readiness and on-demand helpers:
+  a control endpoint, ingest feed, or active gateway that is unreachable may be
+  unhealthy; a built-in view or helper application that is simply not running
+  must read as available/idle unless the user explicitly configured it as a
+  required live dependency
+- use plain action language in health guidance: `Fix` for blockers, `Review`
+  for degraded optional setup, and `Healthy` when required runtime paths are
+  ready
+- each actionable health item must route to the FIO screen where the user can
+  fix it, preferably with radio/source focus already applied
 
 ## Page-Level Composition
 
@@ -548,6 +588,9 @@ Next likely candidates:
 - formalize Compose Intent as the common bridge into Compose Workbench
 - make Map Context accept all portable filters consistently
 - convert setup review banners into a reusable Setup Checklist view
+- keep FreqPlanner, HF Daily, HF Nets, and SOP Builder aligned to the Plan
+  Builder view contract: schedules are source ingredients, plans are linked
+  projections, and assignments are visible usage/impact context
 
 ## Acceptance Criteria
 

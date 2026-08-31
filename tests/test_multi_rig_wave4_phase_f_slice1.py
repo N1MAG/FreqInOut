@@ -322,8 +322,8 @@ def test_station_overview_shows_observer_follow_guidance(monkeypatch, tmp_path):
         tab.set_runtime_manager(manager)
         assert "Observer profiles: 1." in tab.summary_label.text()
         texts: list[str] = []
-        for idx in range(tab.cards_layout.count() - 1):
-            widget = tab.cards_layout.itemAt(idx).widget()
+        for idx in range(1, tab.control_center_tabs.count()):
+            widget = tab.control_center_tabs.widget(idx)
             if widget is None:
                 continue
             texts.extend(label.text() for label in widget.findChildren(type(tab.summary_label)))

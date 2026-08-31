@@ -587,6 +587,57 @@ def test_controlfreq_map_action_routes_by_source_family(monkeypatch) -> None:
     ]
 
 
+def test_controlfreq_peer_finder_actions_route_to_compose_and_map(monkeypatch) -> None:
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    opened_messages: list[tuple[str, dict[str, object]]] = []
+    opened_maps: list[dict[str, object]] = []
+    host = SimpleNamespace(
+        open_messages_section=lambda section, **kwargs: opened_messages.append((section, kwargs)),
+        open_spotter_map=lambda **kwargs: opened_maps.append(kwargs),
+    )
+    tab._peer_finder_contexts = [
+        {
+            "callsign": "KI6QDB",
+            "group_filter": "MAGNET",
+            "source_family": "js8",
+            "compose_mode": "js8call",
+            "search_query": "KI6QDB",
+        }
+    ]
+    monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
+
+    ControlFreqTab._open_peer_finder_compose(tab, 0)
+    ControlFreqTab._open_peer_finder_map(tab, 0)
+
+    assert opened_messages == [
+        (
+            "compose",
+            {
+                "compose_intent": {
+                    "mode": "js8",
+                    "transport": "js8",
+                    "target": "KI6QDB",
+                    "recipient_callsign": "KI6QDB",
+                    "group": "MAGNET",
+                    "source": "context",
+                    "source_family": "js8",
+                    "age_filter_seconds": 7 * 24 * 60 * 60,
+                    "target_callsign": "KI6QDB",
+                }
+            },
+        )
+    ]
+    assert opened_maps == [
+        {
+            "group_filter": "MAGNET",
+            "topic_filter": "",
+            "query_filter": "KI6QDB",
+            "state_filter": "",
+            "grid_filter": "",
+        }
+    ]
+
+
 def test_controlfreq_global_activity_button_language_matches_destination() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
 
@@ -668,8 +719,13 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     controlfreq_source = Path("freqinout/gui/controlfreq_tab.py").read_text()
 
     assert "_sync_propagation_box_height" in controlfreq_source
+    assert 'self.intersection_box = QGroupBox("Peer Schedule Finder")' in controlfreq_source
     assert "self.intersection_window_combo = QComboBox()" in controlfreq_source
     assert 'self.intersection_label = QLabel("Overlap Window")' in controlfreq_source
+    assert 'self.peer_finder_table.setHorizontalHeaderLabels(["Peer", "When", "Net/Band", "Heard", "Actions"])' in controlfreq_source
+    assert '("Msg", self._open_peer_finder_compose' in controlfreq_source
+    assert '("Map", self._open_peer_finder_map' in controlfreq_source
+    assert '("Pin", self._pin_peer_finder_row' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("30m", 30)' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("6h", 360)' in controlfreq_source
     assert "self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)" in controlfreq_source
@@ -680,7 +736,8 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "group_box.setMinimumHeight(height)" in controlfreq_source
     assert "group_box.updateGeometry()" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)" in controlfreq_source
-    assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=4, empty_rows=1)" in controlfreq_source
+    assert "self._fit_table_height_to_rows(self.peer_finder_table, min_rows=0, max_rows=6, empty_rows=1)" in controlfreq_source
+    assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=8, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
     assert "box.setMaximumHeight(min(height, 420 if details_visible else 150))" in controlfreq_source
     assert "def _set_schedule_splitter_content_sizes" in controlfreq_source

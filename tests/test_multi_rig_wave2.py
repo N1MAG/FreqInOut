@@ -271,7 +271,9 @@ def test_station_overview_tab_renders_active_runtime_cards(monkeypatch, tmp_path
             for row in range(tab.control_center_table.rowCount())
             if tab.control_center_table.item(row, 5) is not None
         } == {"Read-only"}
-        assert tab.cards_layout.count() >= 2
+        assert tab.control_center_tabs.count() >= 2
+        assert tab.control_center_tabs.tabText(0) == "Overview"
+        assert any("Remote FLRig" in tab.control_center_tabs.tabText(idx) for idx in range(1, tab.control_center_tabs.count()))
     finally:
         tab.deleteLater()
         app.processEvents()

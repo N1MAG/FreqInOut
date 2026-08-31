@@ -59,6 +59,7 @@ from freqinout.core.schedule_source_sets import (
     rename_source_schedule,
     reproject_frequency_plans_for_source_update,
     save_source_schedule,
+    plan_source_usage_summary,
     selected_source_set_id,
     source_set_row_by_id_for_category,
     source_sets_for_category,
@@ -329,7 +330,8 @@ class NetScheduleTab(QWidget):
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>Net Schedules</h3>"))
+        self.header_title_label = QLabel("<h3>Net Source Schedule</h3>")
+        header.addWidget(self.header_title_label)
         self.help_btn = QPushButton("Help")
         self.help_btn.setToolTip("Open Net Schedules help.")
         self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-nets"))
@@ -355,6 +357,13 @@ class NetScheduleTab(QWidget):
         )
         self.plan_context_label.setVisible(False)
         self.plan_context_label.refresh_context(refresh=True)
+        self.source_usage_label = QLabel("")
+        self.source_usage_label.setObjectName("netScheduleSourceUsage")
+        self.source_usage_label.setWordWrap(True)
+        self.source_usage_label.setToolTip(
+            "Shows which linked Frequency Plan(s) and assigned radio(s) use the selected Net schedule."
+        )
+        self.source_usage_label.setVisible(False)
 
         # table
         self.table = QTableWidget()
@@ -370,7 +379,6 @@ class NetScheduleTab(QWidget):
         hv.setSectionResizeMode(self.COL_NETNAME, QHeaderView.Stretch)
         hv.setStretchLastSection(False)
         hv.setMinimumSectionSize(50)
-        layout.addWidget(self.table)
 
         self.add_btn = QPushButton("Add Row")
         self.del_btn = QPushButton("Delete Selected")
@@ -411,6 +419,9 @@ class NetScheduleTab(QWidget):
         self._net_action_layout.setContentsMargins(0, 0, 0, 0)
         self._net_action_layout.setSpacing(8)
         layout.addLayout(self._net_action_layout)
+        self.source_usage_label.setVisible(True)
+        layout.addWidget(self.source_usage_label)
+        layout.addWidget(self.table)
 
         # Net resources section
         res_header = QHBoxLayout()
@@ -673,6 +684,28 @@ class NetScheduleTab(QWidget):
         self._editing_freqplanner_source_id = str(self.schedule_source_combo.currentData() or LIVE_SOURCE_SET_ID)
         self.schedule_source_combo.blockSignals(False)
         self._update_source_action_state()
+        self._update_source_usage_label()
+
+    def _update_source_usage_label(self) -> None:
+        if not hasattr(self, "source_usage_label"):
+            return
+        set_id = self._selected_freqplanner_source_id()
+        name = str(self.schedule_source_combo.currentText() or "Active Net Schedule").strip()
+        try:
+            usage = plan_source_usage_summary(
+                self.plan_context_service.store,
+                category=HF_NET_SOURCE_CATEGORY,
+                set_id=set_id,
+                live_label="hf_nets",
+            )
+            usage_text = str(usage.get("text") or "").strip()
+        except Exception as exc:
+            log.debug("HF Nets: source usage summary skipped: %s", exc)
+            usage_text = "Usage: --"
+        self.source_usage_label.setText(f"<b>Editing:</b> {name or 'Net schedule'} | {usage_text}")
+        self.source_usage_label.setToolTip(
+            "Named net schedules stay linked to plans by default. Updating this source refreshes dependent plans after RF Guard review."
+        )
 
     def _on_freqplanner_source_selected(self, *_args: Any) -> None:
         if not hasattr(self, "schedule_source_combo"):
@@ -685,10 +718,12 @@ class NetScheduleTab(QWidget):
             self.schedule_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.schedule_source_combo.blockSignals(False)
             self._update_source_action_state()
+            self._update_source_usage_label()
             return
         self._editing_freqplanner_source_id = set_id
         self.settings.set(SELECTED_HF_NET_SOURCE_SET_KEY, set_id)
         self._update_source_action_state()
+        self._update_source_usage_label()
         try:
             self.settings.save()
         except Exception:
@@ -724,6 +759,7 @@ class NetScheduleTab(QWidget):
         except Exception:
             pass
         self._update_source_action_state()
+        self._update_source_usage_label()
         line_edit = self.schedule_source_combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("New HF Net schedule name")
@@ -967,7 +1003,7 @@ class NetScheduleTab(QWidget):
         QMessageBox.information(
             self,
             f"HF Net Schedule {verb}",
-            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s).{plan_note} Select it in Plan Manager.",
+            f"{verb} '{saved['name']}' with {len(rows)} HF Net row(s).{plan_note} Select it in Plan Builder.",
         )
 
     def _on_rename_freqplanner_source_clicked(self) -> None:
@@ -1457,7 +1493,7 @@ class NetScheduleTab(QWidget):
         else:
             role = "eligible_success" if self._dirty else "muted"
             self.save_btn.setToolTip(
-                "Save the visible rows as the selected named HF Net schedule, or create a new named schedule for Plan Manager."
+                "Save the visible rows as the selected named HF Net schedule, or create a new named schedule for Plan Builder."
             )
         self.save_btn.setStyleSheet(button_style(role, theme))
 

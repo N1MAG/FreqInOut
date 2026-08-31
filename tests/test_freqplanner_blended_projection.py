@@ -2372,7 +2372,7 @@ def test_hf_daily_tab_saves_named_freqplanner_source(monkeypatch, tmp_path) -> N
     assert refs[0]["frequency"] == "7.078"
     assert settings.get(SELECTED_HF_DAILY_SOURCE_SET_KEY) == f"plan:{saved_plans[0]['id']}"
     assert refreshed == [True]
-    assert any("Select it in Plan Manager" in str(args[-1]) for args in messages)
+    assert any("Select it in Plan Builder" in str(args[-1]) for args in messages)
 
 
 def test_hf_net_tab_saves_named_freqplanner_source(monkeypatch, tmp_path) -> None:
@@ -2422,7 +2422,7 @@ def test_hf_net_tab_saves_named_freqplanner_source(monkeypatch, tmp_path) -> Non
     assert refs[0]["net_name"] == "Ops Net"
     assert settings.get(SELECTED_HF_NET_SOURCE_SET_KEY) == f"plan:{saved_plans[0]['id']}"
     assert refreshed == [True]
-    assert any("Select it in Plan Manager" in str(args[-1]) for args in messages)
+    assert any("Select it in Plan Builder" in str(args[-1]) for args in messages)
 
 
 def test_hf_daily_tab_renames_existing_schedule_from_editable_combo(monkeypatch, tmp_path) -> None:

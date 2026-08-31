@@ -37,14 +37,14 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
     "tab.controlfreq": HelpContext(
         key="tab.controlfreq",
         anchor="controlfreq",
-        title="ControlFreq Help",
-        summary="Frequency control, plan context cue, schedule awareness, activity panels, unread message and BBS file awareness, and operator decision support.",
+        title="Ops Center Help",
+        summary="Operational awareness, frequency control, schedule guidance, peer finder, traffic attention, and operator decision support.",
     ),
     "controlfreq.actions": HelpContext(
         key="controlfreq.actions",
         anchor="controlfreq-actions",
-        title="ControlFreq Actions Help",
-        summary="Buttons and controls used to hold, resume, refresh, and filter ControlFreq.",
+        title="Ops Center Actions Help",
+        summary="Buttons and controls used to hold, resume, refresh, filter, and act from Ops Center.",
     ),
     "tab.messages": HelpContext(
         key="tab.messages",

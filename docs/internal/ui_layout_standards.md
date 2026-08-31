@@ -110,9 +110,14 @@ map scaling, and action validity. If a gate does not apply, the spec must say wh
 so the omission is intentional and reviewable.
 
 See `docs/internal/controlfreq_operational_awareness_center_spec.md` for the
-next ControlFreq dashboard direction. It is the reference design for a high-use,
+Ops Center dashboard direction. It is the reference design for a high-use,
 role-focused operational awareness surface that must remain glanceable at Large
 text and reduced window sizes.
+
+Main navigation should follow operator decision flow, not legacy feature names:
+`Ops Center`, `Map`, `Messages`, `NCS`, `Operators`, `Plan Builder`, `Station`,
+`Settings`. Internal route keys may remain stable, but user-facing labels should
+use the decision-flow names.
 
 ## Station Command Bar
 

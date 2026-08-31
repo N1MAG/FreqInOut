@@ -12,6 +12,7 @@ from freqinout.core.source_view_contracts import (
     VIEW_SCHEDULE,
     VIEW_SETUP,
     VIEW_STATION_COMMAND,
+    VIEW_STATION_CONTROL_CENTER,
     VIEW_TRAFFIC_INBOX,
     SourceViewContract,
     contracts_for_view,
@@ -29,6 +30,7 @@ VIEW_TEMPLATE_SCHEDULE_OUTLOOK = "schedule_outlook"
 VIEW_TEMPLATE_RF_READINESS = "rf_readiness"
 VIEW_TEMPLATE_SETUP_CHECKLIST = "setup_checklist"
 VIEW_TEMPLATE_STATION_COMMAND = "station_command"
+VIEW_TEMPLATE_STATION_CONTROL_CENTER = "station_control_center"
 VIEW_TEMPLATE_OPERATOR_DIRECTORY = "operator_directory"
 
 
@@ -128,16 +130,16 @@ _VIEW_DEFINITIONS: dict[str, OperationalViewDefinition] = {
     ),
     "intersections": OperationalViewDefinition(
         key="intersections",
-        label="Intersections",
+        label="Peer Finder",
         template=VIEW_TEMPLATE_SCHEDULE_OUTLOOK,
         default_tab="ControlFreq",
         default_enabled=True,
         supports_user_selection=True,
         allowed_source_families=("local",),
         required_gates=MANDATORY_VIEW_GATES,
-        action_kinds=("tune", "compose"),
-        max_default_rows=2,
-        notes="Schedule intersections are displayed as part of schedule outlook, not as a separate mental model.",
+        action_kinds=("compose", "map", "pin"),
+        max_default_rows=6,
+        notes="Peer Schedule Finder shows likely reachable peers now or soon with compact compose/map/pin actions.",
     ),
     "schedule": OperationalViewDefinition(
         key="schedule",
@@ -216,6 +218,19 @@ _VIEW_DEFINITIONS: dict[str, OperationalViewDefinition] = {
         action_kinds=("tune", "open_source"),
         max_default_rows=0,
         notes="Always-visible short-name radio command cards.",
+    ),
+    "station_control_center": OperationalViewDefinition(
+        key="station_control_center",
+        label="Station Control Center",
+        template=VIEW_TEMPLATE_STATION_CONTROL_CENTER,
+        default_tab="Station Overview",
+        default_enabled=True,
+        supports_user_selection=False,
+        allowed_source_families=("local", "meshcore", "mqtt", "aprs", "reticulum"),
+        required_gates=MANDATORY_VIEW_GATES,
+        action_kinds=("read", "reply", "map", "pin", "tune", "open_source"),
+        max_default_rows=0,
+        notes="Overview plus per-source tabs for radios, SDRs, and future station connections.",
     ),
     "setup_checklist": OperationalViewDefinition(
         key="setup_checklist",

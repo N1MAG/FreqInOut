@@ -5172,7 +5172,7 @@ class MultiRadioStore:
             )
         conn.commit()
         _normalize_runtime_primary_device(conn)
-        project_runtime_active_device_to_legacy_settings_if_single_active(conn, int(device_profile_id))
+        project_runtime_active_device_to_legacy_settings(conn, int(device_profile_id))
         return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
     @staticmethod

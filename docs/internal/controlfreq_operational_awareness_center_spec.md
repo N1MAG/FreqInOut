@@ -1,13 +1,17 @@
-# ControlFreq Operational Awareness Center Spec
+# Ops Center Operational Awareness Spec
 
 ## Purpose
 
-ControlFreq should become FIO's operational awareness center: the place an
+Ops Center is the user-facing name for the former ControlFreq tab. Internally,
+existing code and route keys may still use `ControlFreq` until a dedicated
+module rename is worth the migration risk.
+
+Ops Center should become FIO's operational awareness center: the place an
 operator glances to understand what matters now, what is coming next, and what
 action FIO recommends based on assigned Frequency Plans, SOP layers, propagation,
 and received traffic.
 
-This is not a replacement for Messages, Map, SOP Builder, or FreqPlanner. It is
+This is not a replacement for Messages, Map, SOP Builder, or Plan Builder. It is
 the role-focused dashboard that fuses those systems into a clear answer:
 
 - Where should I be now?
@@ -28,7 +32,7 @@ Emergency management dashboard patterns point to a few durable principles:
   and field reports rather than exposing raw data first. FIO's equivalent
   lifelines are communications reachability, station readiness, upcoming nets,
   traffic topics, and critical message/report clusters.
-- Role-focused views are better than one giant common picture. ControlFreq
+- Role-focused views are better than one giant common picture. Ops Center
   should be tailored for the operator at the radio, while Map remains spatial,
   Messages remains the inbox/detail reader, and SOP Builder remains the policy
   and action-definition surface.
@@ -66,8 +70,9 @@ Design tone:
 - operator language instead of database/source language
 - action-oriented summaries, not wall-to-wall tables
 
-The tab title may remain `ControlFreq`, but the first screen should read as
-`Operational Awareness` or `Awareness Center` in its header/subheader.
+The tab title, help title, and user-facing navigation must use `Ops Center`.
+Internal route keys may keep `ControlFreq` for compatibility, but operators
+should not have to learn the legacy name.
 
 ## Current Building Blocks
 
@@ -360,15 +365,22 @@ Map:
   - timeline movement
   - station/radio readiness badges
 - Do not make the dashboard feel like an incident report form.
-- Schedule Intersections belong with Schedule Outlook. They should feel like an
-  explanatory/detail slice of the schedule timeline rather than a separate
-  competing dashboard card in the traffic column.
-- Schedule Intersections must expose a real intersection-horizon control in the
-  header (`30m`, `1h`, `2h`, `6h`). The selected horizon drives both the
-  intersection calculation and the persisted UI state. Label it as an
-  `Overlap Window` unless a future shared control truly drives both the
-  intersection calculation and the Schedule Outlook table. Do not use a
-  decorative `2h ?` label that appears clickable but does nothing.
+- Peer Schedule Finder belongs with Schedule Outlook. It answers "who can I
+  likely reach now or soon?" and should feel like an adjacent operational action
+  surface rather than a competing schedule dashboard.
+- Peer Schedule Finder must expose a real look-ahead control in the header
+  (`30m`, `1h`, `2h`, `6h`). The selected horizon drives peer overlap
+  calculation and persisted UI state. Label the control as `Overlap Window`
+  until a future shared control truly drives both peer overlap calculation and
+  the Schedule Outlook table.
+- Peer Schedule Finder rows should stay narrow: visible columns are `Peer`,
+  `When`, `Net/Band`, `Heard`, and compact action chips. Details such as exact
+  overlap range, source schedule, confidence, and route can live in tooltips or
+  an expandable detail view.
+- Peer actions should route through the same view-contract destinations used by
+  Operational Awareness: `Msg` opens Compose addressed to the peer, `Map` opens
+  map context when location is known, and `Pin` keeps the peer visible in the
+  attention queue.
 - Propagation defaults to a compact RF Readiness summary. Detailed propagation
   tables are opt-in through `Forecast Details` and must not leave a large blank
   panel when collapsed.

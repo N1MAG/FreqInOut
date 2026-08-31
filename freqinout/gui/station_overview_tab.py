@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QScrollArea,
     QSizePolicy,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -75,6 +76,16 @@ class StationOverviewTab(QWidget):
         control_title.setAccessibleName("Station Control Center")
         layout.addWidget(control_title)
 
+        self.control_center_tabs = QTabWidget(self)
+        self.control_center_tabs.setObjectName("stationControlCenterSourceTabs")
+        self.control_center_tabs.setAccessibleName("Station Control Center source tabs")
+        layout.addWidget(self.control_center_tabs, 1)
+
+        self.control_center_overview_page = QWidget(self.control_center_tabs)
+        overview_layout = QVBoxLayout(self.control_center_overview_page)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(8)
+
         self.control_center_table = QTableWidget(0, 6)
         self.control_center_table.setObjectName("stationControlCenterTable")
         self.control_center_table.setAccessibleName("Station Control Center table")
@@ -106,22 +117,16 @@ class StationOverviewTab(QWidget):
         self.control_center_empty_label.setObjectName("stationControlCenterEmptyState")
         self.control_center_empty_label.setWordWrap(True)
         self.control_center_empty_label.setVisible(False)
-        layout.addWidget(self.control_center_empty_label, 0)
-        layout.addWidget(self.control_center_table, 0)
+        overview_layout.addWidget(self.control_center_empty_label, 0)
+        overview_layout.addWidget(self.control_center_table, 0)
+        overview_layout.addStretch(1)
+        self.control_center_tabs.addTab(self.control_center_overview_page, "Overview")
         self._update_control_center_empty_state()
 
-        self.scroll = QScrollArea(self)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        layout.addWidget(self.scroll, 1)
-
-        self.cards_container = QWidget(self.scroll)
+        self.cards_container = QWidget(self)
         self.cards_layout = QVBoxLayout(self.cards_container)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.cards_layout.setSpacing(10)
-        self.cards_layout.addStretch(1)
-        self.scroll.setWidget(self.cards_container)
+        self.cards_layout.setSpacing(0)
 
     def set_runtime_manager(self, manager: Optional[StationRuntimeManager]) -> None:
         self._runtime_manager = manager
@@ -156,7 +161,13 @@ class StationOverviewTab(QWidget):
         self._rebuild_cards(snapshots)
 
     def _clear_cards(self) -> None:
-        while self.cards_layout.count() > 1:
+        if hasattr(self, "control_center_tabs"):
+            while self.control_center_tabs.count() > 1:
+                widget = self.control_center_tabs.widget(1)
+                self.control_center_tabs.removeTab(1)
+                if widget is not None:
+                    widget.deleteLater()
+        while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
@@ -269,7 +280,59 @@ class StationOverviewTab(QWidget):
             self.alerts_label.setStyleSheet(f"color: {theme['warning']}; font-weight: 600;")
             self.alerts_label.setVisible(True)
         for snap in snaps:
-            self.cards_layout.insertWidget(self.cards_layout.count() - 1, self._build_runtime_card(snap, theme))
+            self._add_source_tab(snap, theme)
+        self._sync_source_tab_badges(snaps)
+
+    @staticmethod
+    def _source_tab_label(snapshot: DeviceRuntimeSnapshot) -> str:
+        name = str(snapshot.name or f"Device {snapshot.device_profile_id}").strip()
+        state = str(snapshot.overall_state or "idle").strip().lower()
+        marker = " !" if state in {"warn", "error"} or snapshot.warning_text or snapshot.shared_ptt_blocked else ""
+        role = " SDR" if snapshot.device_class == "observer" else ""
+        return f"{name}{role}{marker}"
+
+    def _add_source_tab(self, snapshot: DeviceRuntimeSnapshot, theme: dict[str, str]) -> None:
+        page = QWidget(self.control_center_tabs)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+        scroll = QScrollArea(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page_layout.addWidget(scroll, 1)
+        body = QWidget(scroll)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+        body_layout.addWidget(self._build_runtime_card(snapshot, theme, parent=body), 0)
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        self.control_center_tabs.addTab(page, self._source_tab_label(snapshot))
+
+        legacy_marker = QLabel(str(snapshot.name or f"Device {snapshot.device_profile_id}"), self.cards_container)
+        legacy_marker.setVisible(False)
+        self.cards_layout.addWidget(legacy_marker)
+
+    def _sync_source_tab_badges(self, snapshots: Iterable[DeviceRuntimeSnapshot]) -> None:
+        if not hasattr(self, "control_center_tabs"):
+            return
+        self.control_center_tabs.setTabToolTip(
+            0,
+            "Overview of all active radios, SDRs, and future station sources.",
+        )
+        for index, snapshot in enumerate(list(snapshots), start=1):
+            if index >= self.control_center_tabs.count():
+                break
+            tooltip = (
+                f"{snapshot.name or f'Device {snapshot.device_profile_id}'} | "
+                f"{self._control_state_text(snapshot)} | "
+                f"{snapshot.status_summary or 'No status summary available.'}"
+            )
+            if snapshot.warning_text:
+                tooltip += f" | {snapshot.warning_text}"
+            self.control_center_tabs.setTabToolTip(index, tooltip)
 
     @staticmethod
     def _manual_state_label(raw_state: str) -> str:
@@ -413,8 +476,14 @@ class StationOverviewTab(QWidget):
             for name, info in sorted((service_states or {}).items())
         ]
 
-    def _build_runtime_card(self, snapshot: DeviceRuntimeSnapshot, theme: dict[str, str]) -> QWidget:
-        card = QFrame(self.cards_container)
+    def _build_runtime_card(
+        self,
+        snapshot: DeviceRuntimeSnapshot,
+        theme: dict[str, str],
+        *,
+        parent: QWidget | None = None,
+    ) -> QWidget:
+        card = QFrame(parent or self)
         card.setObjectName("stationRuntimeCard")
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         card.setStyleSheet(

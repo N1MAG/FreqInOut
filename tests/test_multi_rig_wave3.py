@@ -977,7 +977,7 @@ def test_controlfreq_qsy_blocked_feedback_publishes_radio_event() -> None:
     ControlFreqTab._publish_qsy_blocked_feedback(
         fake,
         "QSY blocked: select a frequency first.",
-        "Choose a ControlFreq frequency before sending QSY.",
+        "Choose an Ops Center frequency before sending QSY.",
         source_surface="controlfreq",
     )
 
@@ -986,7 +986,7 @@ def test_controlfreq_qsy_blocked_feedback_publishes_radio_event() -> None:
     assert events[0].action_type == "qsy"
     assert events[0].status == "blocked"
     assert events[0].summary == "QSY blocked: select a frequency first."
-    assert events[0].detail == "Choose a ControlFreq frequency before sending QSY."
+    assert events[0].detail == "Choose an Ops Center frequency before sending QSY."
     assert events[0].radio_profile_id == "7"
     assert events[0].target_label == "DX10"
     assert events[0].source_surface == "controlfreq"
@@ -1021,7 +1021,7 @@ def test_controlfreq_no_selected_frequency_publishes_blocked_feedback(monkeypatc
     assert feedback_calls == [
         (
             "QSY blocked: select a frequency first.",
-            "Choose a ControlFreq frequency before sending QSY.",
+            "Choose an Ops Center frequency before sending QSY.",
             "controlfreq",
         )
     ]

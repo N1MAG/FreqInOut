@@ -878,12 +878,12 @@ def guided_setup_schedule_decision(
             SCHEDULE_SOP_CONDITION: "SOP condition plan",
         }
         path_label = path_labels.get(schedule_choice, "Frequency Plan")
-        text = f"Plan Manager will open after save to build or choose a {path_label} plan."
+        text = f"Plan Builder will open after save to build or choose a {path_label} plan."
         return GuidedScheduleDecision(
             status="needs_input",
-            step_detail=f"Build or choose a {path_label} plan in Plan Manager after save.",
+            step_detail=f"Build or choose a {path_label} plan in Plan Builder after save.",
             status_text=text,
-            review_text=f"Open Plan Manager after save for {path_label}.",
+            review_text=f"Open Plan Builder after save for {path_label}.",
         )
     if selected:
         return GuidedScheduleDecision(
@@ -894,18 +894,18 @@ def guided_setup_schedule_decision(
         )
     if bool(open_plan_manager) or count <= 0:
         text = (
-            "Plan Manager will open after save so you can build or choose this radio's Frequency Plan."
+            "Plan Builder will open after save so you can build or choose this radio's Frequency Plan."
         )
         if count <= 0:
             text = (
-                "No Frequency Plans exist yet. Save this radio, then Plan Manager will open so you can build "
+                "No Frequency Plans exist yet. Save this radio, then Plan Builder will open so you can build "
                 "a Daily with No Nets, Net, or SOP-based plan."
             )
         return GuidedScheduleDecision(
             status="needs_input",
-            step_detail="Save this radio, then build its Frequency Plan in Plan Manager.",
+            step_detail="Save this radio, then build its Frequency Plan in Plan Builder.",
             status_text=text,
-            review_text="Open Plan Manager after save so a Frequency Plan can be built and assigned.",
+            review_text="Open Plan Builder after save so a Frequency Plan can be built and assigned.",
         )
     text = (
         "Choose a Frequency Plan to run the RF Guard antenna check now, or assign one later."

@@ -2261,6 +2261,7 @@ class StationsMapTab(QWidget):
         layout.addWidget(splitter, stretch=1)
 
         controls_scroll = QScrollArea(self)
+        self._controls_scroll = controls_scroll
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setFrameShape(QFrame.NoFrame)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -5140,8 +5141,17 @@ class StationsMapTab(QWidget):
         total = max(1, self.width())
         panel_width = min(300, max(220, int(total * 0.27)))
         if self._controls_drawer_open:
+            controls_scroll = getattr(self, "_controls_scroll", None)
+            if controls_scroll is not None:
+                controls_scroll.setMinimumWidth(300)
+                controls_scroll.setMaximumWidth(520)
+                controls_scroll.setVisible(True)
             self._main_splitter.setSizes([panel_width, max(1, total - panel_width)])
         else:
+            controls_scroll = getattr(self, "_controls_scroll", None)
+            if controls_scroll is not None:
+                controls_scroll.setMinimumWidth(0)
+                controls_scroll.setMaximumWidth(0)
             self._main_splitter.setSizes([0, total])
         if self._controls_button is not None:
             self._controls_button.setText("Hide Advanced Tools" if self._controls_drawer_open else "Advanced Map Tools")
