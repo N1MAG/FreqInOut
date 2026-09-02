@@ -902,8 +902,13 @@ git_current_branch() {
   git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true
 }
 
+is_git_checkout() {
+  [[ -e "$INSTALL_DIR" ]] || return 1
+  git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
 git_worktree_is_dirty() {
-  [[ -d "$INSTALL_DIR/.git" ]] || return 1
+  is_git_checkout || return 1
   [[ -n "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]]
 }
 
@@ -950,19 +955,59 @@ handle_dirty_worktree() {
 }
 
 is_freqinout_running() {
-  if command_exists pgrep; then
-    if pgrep -f "freqinout.main|freqinout" >/dev/null 2>&1; then
-      return 0
-    fi
-    return 1
-  fi
+  command_exists python3 || return 1
+  python3 - <<'PY'
+import os
+from pathlib import Path
 
-  if command_exists ps; then
-    if ps aux 2>/dev/null | grep -E "freqinout\.main|freqinout" | grep -v grep >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
-  return 1
+SELF = os.getpid()
+PARENT = os.getppid()
+INSTALLER_NAMES = {"install_FreqInOut_linux.sh", "uninstall_FreqInOut_linux.sh"}
+APP_NAMES = {"freqinout", "freqinout.exe", "freqinout.appimage"}
+
+
+def _linux_cmdlines():
+    proc = Path("/proc")
+    if not proc.exists():
+        return
+    for item in proc.iterdir():
+        if not item.name.isdigit():
+            continue
+        pid = int(item.name)
+        if pid in {SELF, PARENT}:
+            continue
+        try:
+            raw = (item / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", "ignore") for part in raw.split(b"\0") if part]
+        if args:
+            yield pid, args
+
+
+def _is_installer(args):
+    return any(Path(arg).name in INSTALLER_NAMES for arg in args)
+
+
+def _is_freqinout_app(args):
+    if _is_installer(args):
+        return False
+    for idx, arg in enumerate(args):
+        if arg == "-m" and idx + 1 < len(args) and args[idx + 1] == "freqinout.main":
+            return True
+    first = Path(args[0]).name.lower() if args else ""
+    if first in APP_NAMES:
+        return True
+    return False
+
+
+for _, cmdline in _linux_cmdlines() or ():
+    if _is_freqinout_app(cmdline):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 ensure_app_not_running_for_update() {
@@ -1019,7 +1064,7 @@ clone_repository_into_install_dir() {
 }
 
 configure_runtime_sparse_checkout() {
-  [[ -d "$INSTALL_DIR/.git" ]] || return 0
+  is_git_checkout || return 0
   if [[ $DRY_RUN -eq 1 ]]; then
     log "DRY RUN: would configure runtime sparse checkout for $INSTALL_DIR"
     return 0
@@ -1097,7 +1142,7 @@ handle_non_git_install_dir() {
 
 clone_fresh() {
   mkdir -p "$(dirname "$INSTALL_DIR")"
-  if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+  if [[ -e "$INSTALL_DIR" ]] && ! is_git_checkout; then
     handle_non_git_install_dir
     if [[ $SKIP_UPDATE_WORK -eq 1 ]]; then
       return 0
@@ -1105,7 +1150,7 @@ clone_fresh() {
     return 0
   fi
 
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
+  if is_git_checkout; then
     log "Existing git checkout found; updating it."
     update_existing_install
     return
@@ -1121,7 +1166,7 @@ update_existing_install() {
     log "Skipping update because app is running."
     return 0
   fi
-  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+  if ! is_git_checkout; then
     handle_non_git_install_dir
     if [[ $SKIP_UPDATE_WORK -eq 1 ]]; then
       log "Skipping update due to non-git install path."
@@ -1349,7 +1394,7 @@ refresh_icon_asset() {
     log "Offline mode enabled; skipping icon refresh."
     return 0
   fi
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
+  if is_git_checkout; then
     branch="$(git_current_branch)"
     if [[ -z "$branch" ]]; then
       warn "Could not determine current git branch; skipping icon refresh."
