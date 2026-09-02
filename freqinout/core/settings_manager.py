@@ -22,6 +22,8 @@ from freqinout.core.multi_radio_store import (
 )
 
 APP_NAME = "FreqInOut"
+_DEFERRED_MIGRATION_LOGGED = False
+_DEFERRED_MIGRATION_LOG_LOCK = threading.Lock()
 
 
 class SettingsManager:
@@ -55,9 +57,15 @@ class SettingsManager:
         if is_multi_rig_migration_current(self._conn):
             log.debug("SettingsManager: multi-rig migration marker is current.")
         elif existing_fio_usage:
-            log.info(
-                "SettingsManager: existing FIO configuration detected; multi-rig migration remains deferred."
-            )
+            global _DEFERRED_MIGRATION_LOGGED
+            with _DEFERRED_MIGRATION_LOG_LOCK:
+                log_first_deferred_migration = not _DEFERRED_MIGRATION_LOGGED
+                _DEFERRED_MIGRATION_LOGGED = True
+            message = "SettingsManager: existing FIO configuration detected; multi-rig migration remains deferred."
+            if log_first_deferred_migration:
+                log.info(message)
+            else:
+                log.debug(message)
         else:
             set_multi_rig_migration_deferred(self._conn, False)
             set_multi_rig_migration_version(

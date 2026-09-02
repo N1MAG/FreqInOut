@@ -13282,8 +13282,6 @@ class StationsMapTab(QWidget):
         self._map_dirty = False
         theme_key = ""
         try:
-            if hasattr(self.settings, "reload"):
-                self.settings.reload()
             theme_key = str(self.settings.get("ui_theme", "") or "").strip().lower()
         except Exception:
             theme_key = ""

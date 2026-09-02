@@ -37,6 +37,22 @@ def test_phase7_main_window_has_global_ledge_clock() -> None:
     assert "get_timezone(tz_name)" in source
 
 
+def test_phase7_main_window_does_not_prewarm_messages_tab() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    assert MainWindow._runtime_lazy_prewarm_labels(set()) == ["FreqPlanner"]
+    assert MainWindow._runtime_lazy_prewarm_labels({"FreqPlanner"}) == []
+
+
+def test_phase7_station_health_nav_uses_lightweight_alert_items() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "def _station_health_alert_extra_items(self) -> list[Mapping[str, object]]:" in source
+    assert "include_runtime_sources=False" in source
+    assert "include_sop_audit=False" in source
+    assert "summarize_station_health(include_ok=False, extra_items=self._station_health_alert_extra_items())" in source
+
+
 def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 

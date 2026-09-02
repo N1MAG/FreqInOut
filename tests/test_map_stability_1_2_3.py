@@ -5644,6 +5644,13 @@ def test_map_refresh_does_not_pump_nested_ui_events() -> None:
     assert ".processEvents(" not in refresh_block
 
 
+def test_map_render_does_not_reload_settings_on_ui_thread() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_block = source[source.index("def _render_map") : source.index("def _push_map_payload")]
+
+    assert ".settings.reload(" not in render_block
+
+
 def test_shared_splitter_style_does_not_put_resize_tooltips_on_map() -> None:
     source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
     style_start = source.index("def style_splitter_handles")

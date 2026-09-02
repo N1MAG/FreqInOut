@@ -818,12 +818,13 @@ class MainWindow(QMainWindow):
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._active_tab_index = None
-        self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
+        self._lazy_prewarm_labels = ["FreqPlanner"]
         self._lazy_prewarm_index = 0
         self._webengine_warmup_widget = None
         self._webengine_warmup_done = False
         self._pending_map_switch_index: int | None = None
         self._runtime_client_signature: tuple[object, ...] | None = None
+        self._station_command_last_refresh_monotonic = 0.0
 
         startup_policy = self._primary_runtime_policy()
         startup_suppressed = self._suppressed_screens_for_runtime(self._active_runtime_profile, startup_policy)
@@ -1330,6 +1331,15 @@ class MainWindow(QMainWindow):
         self._station_command_refresh_pending = False
         force = bool(getattr(self, "_station_command_refresh_force", False))
         self._station_command_refresh_force = False
+        now = time.monotonic()
+        last_refresh = float(getattr(self, "_station_command_last_refresh_monotonic", 0.0) or 0.0)
+        min_interval_sec = 0.75
+        if not force and last_refresh > 0.0 and now - last_refresh < min_interval_sec:
+            self._station_command_refresh_pending = True
+            delay_ms = max(40, int((min_interval_sec - (now - last_refresh)) * 1000.0))
+            QTimer.singleShot(delay_ms, self._flush_station_command_bar_refresh)
+            return
+        self._station_command_last_refresh_monotonic = now
         self._run_timed_ui_refresh(
             "station_command_bar",
             lambda: self._refresh_station_command_bar(force=force),
@@ -4265,9 +4275,12 @@ class MainWindow(QMainWindow):
             return
         width = int(getattr(self.station_command_bar, "width", lambda: 0)() or self.width() or 0)
         mode = self._station_command_layout_mode_for_width(width)
-        if not force and mode == getattr(self, "_station_command_layout_mode", ""):
+        card_mode = bool(getattr(self, "_station_command_multi_mode_active", False))
+        layout_signature = (mode, card_mode)
+        if not force and layout_signature == getattr(self, "_station_command_layout_signature", None):
             return
         self._station_command_layout_mode = mode
+        self._station_command_layout_signature = layout_signature
         layout = self.station_command_layout
         for widget in (
             self.station_command_radio_label,
@@ -4299,7 +4312,6 @@ class MainWindow(QMainWindow):
         for col in range(16):
             layout.setColumnStretch(col, 0)
 
-        card_mode = bool(getattr(self, "_station_command_multi_mode_active", False))
         if card_mode and hasattr(self, "station_command_radio_summary_scroll"):
             for widget in (
                 self.station_command_radio_label,
@@ -4988,7 +5000,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _runtime_lazy_prewarm_labels(suppressed_labels: set[str]) -> list[str]:
-        return [label for label in ("Messages", "FreqPlanner") if label not in suppressed_labels]
+        return [label for label in ("FreqPlanner",) if label not in suppressed_labels]
 
     @staticmethod
     def _runtime_banner_text(profile: object, policy: object) -> str:
@@ -8772,7 +8784,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "station_command_radio_summary_scroll", None) is not None:
             self._sync_station_command_radio_summary_height(card_mode=card_mode)
             self.station_command_radio_summary_scroll.setVisible(True)
-        self._apply_station_command_bar_layout(force=True)
+        self._apply_station_command_bar_layout(force=False)
         for btn, direction, label in (
             (getattr(self, "station_command_radio_prev_btn", None), -1, "Prev"),
             (getattr(self, "station_command_radio_next_btn", None), 1, "Next"),
@@ -10033,9 +10045,19 @@ class MainWindow(QMainWindow):
         return label
 
     def _station_health_runtime_items(self) -> list[Mapping[str, object]]:
-        return self._station_health_extra_items()
+        return self._station_health_extra_items(
+            include_assigned_schedules=True,
+            include_runtime_sources=True,
+            include_sop_audit=True,
+        )
 
-    def _station_health_extra_items(self) -> list[Mapping[str, object]]:
+    def _station_health_extra_items(
+        self,
+        *,
+        include_assigned_schedules: bool = True,
+        include_runtime_sources: bool = True,
+        include_sop_audit: bool = True,
+    ) -> list[Mapping[str, object]]:
         items: list[Mapping[str, object]] = []
         station_poll_metrics = None
         scheduler_poll_metrics = None
@@ -10068,8 +10090,10 @@ class MainWindow(QMainWindow):
             js8_registry_status = JS8ApiClientRegistry.status_dicts()
         except Exception:
             js8_registry_status = []
-        assigned_schedule_status = self._station_health_assigned_schedule_status_rows()
-        runtime_source_rows = self._station_health_runtime_source_rows()
+        if include_assigned_schedules:
+            assigned_schedule_status = self._station_health_assigned_schedule_status_rows()
+        if include_runtime_sources:
+            runtime_source_rows = self._station_health_runtime_source_rows()
         items.extend(
             runtime_observability_items(
                 station_poll_metrics=station_poll_metrics,
@@ -10081,13 +10105,21 @@ class MainWindow(QMainWindow):
                 runtime_source_rows=runtime_source_rows,
             )
         )
-        try:
-            sop_audit_item = condition_sop_audit_observability_item(get_config_dir() / "config" / "freqinout_nets.db")
-        except Exception:
-            sop_audit_item = None
-        if sop_audit_item:
-            items.append(sop_audit_item)
+        if include_sop_audit:
+            try:
+                sop_audit_item = condition_sop_audit_observability_item(get_config_dir() / "config" / "freqinout_nets.db")
+            except Exception:
+                sop_audit_item = None
+            if sop_audit_item:
+                items.append(sop_audit_item)
         return items
+
+    def _station_health_alert_extra_items(self) -> list[Mapping[str, object]]:
+        return self._station_health_extra_items(
+            include_assigned_schedules=False,
+            include_runtime_sources=False,
+            include_sop_audit=False,
+        )
 
     def _station_health_assigned_schedule_status_rows(self) -> list[Mapping[str, object]]:
         try:
@@ -10151,7 +10183,7 @@ class MainWindow(QMainWindow):
             self._mark_ui_refresh_dirty("station_health_alert")
             return
         try:
-            summary = summarize_station_health(include_ok=False, extra_items=self._station_health_extra_items())
+            summary = summarize_station_health(include_ok=False, extra_items=self._station_health_alert_extra_items())
         except Exception:
             summary = {"issue_count": 0, "severity": "ok", "issue_items": []}
         issue_count = int(summary.get("issue_count", 0) or 0)
@@ -10173,7 +10205,7 @@ class MainWindow(QMainWindow):
         try:
             summary = getattr(self, "_station_health_alert_summary", None)
             if not isinstance(summary, dict):
-                summary = summarize_station_health(include_ok=False, extra_items=self._station_health_extra_items())
+                summary = summarize_station_health(include_ok=False, extra_items=self._station_health_alert_extra_items())
             issue_count = int(summary.get("issue_count", 0) or 0)
             severity = str(summary.get("severity", "ok") or "ok")
             return issue_count, severity

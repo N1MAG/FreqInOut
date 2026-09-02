@@ -498,7 +498,7 @@ def test_main_window_feeds_assigned_schedule_status_to_station_health_runtime_it
     assert "validation_status_json" not in runtime_block
 
 
-def test_station_health_sidebar_badge_counts_runtime_observability_items(monkeypatch):
+def test_station_health_sidebar_badge_uses_lightweight_runtime_observability_items(monkeypatch):
     from freqinout.gui import main_window
 
     captured = {}
@@ -525,7 +525,7 @@ def test_station_health_sidebar_badge_counts_runtime_observability_items(monkeyp
     monkeypatch.setattr(main_window, "summarize_station_health", fake_summary)
     window = main_window.MainWindow.__new__(main_window.MainWindow)
     window._ui_refresh_allowed = lambda: True
-    window._station_health_extra_items = lambda: [runtime_issue]
+    window._station_health_alert_extra_items = lambda: [runtime_issue]
     window._station_health_nav_index = None
     window._update_ncs_nav_button_styles = lambda: None
 
@@ -535,6 +535,26 @@ def test_station_health_sidebar_badge_counts_runtime_observability_items(monkeyp
     assert captured["extra_items"] == [runtime_issue]
     assert window._station_health_alert_summary["issue_count"] == 1
     assert window._station_health_alert_summary["issue_items"] == [runtime_issue]
+
+
+def test_station_health_runtime_items_keep_full_detail_path():
+    from freqinout.gui import main_window
+
+    captured = {}
+    window = main_window.MainWindow.__new__(main_window.MainWindow)
+
+    def fake_extra_items(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    window._station_health_extra_items = fake_extra_items
+
+    assert window._station_health_runtime_items() == []
+    assert captured == {
+        "include_assigned_schedules": True,
+        "include_runtime_sources": True,
+        "include_sop_audit": True,
+    }
 
 
 def test_runtime_observability_items_explain_forced_background_refresh_decision():
