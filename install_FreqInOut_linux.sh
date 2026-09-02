@@ -1102,6 +1102,7 @@ handle_non_git_install_dir() {
 
   case "$policy" in
     replace)
+      backup_user_data
       stamp="$(date +%Y%m%d-%H%M%S)"
       backup_path="$HOME/.local/state/freqinout/backups/non-git-install-$stamp"
       run_cmd mkdir -p "$(dirname "$backup_path")"
@@ -1122,6 +1123,7 @@ handle_non_git_install_dir() {
   esac
 
   if prompt_yes_no "Replace this folder with a fresh git clone (recommended for updates)?"; then
+    backup_user_data
     stamp="$(date +%Y%m%d-%H%M%S)"
     backup_path="$HOME/.local/state/freqinout/backups/non-git-install-$stamp"
     run_cmd mkdir -p "$(dirname "$backup_path")"
