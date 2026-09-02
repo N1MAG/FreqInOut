@@ -1603,6 +1603,134 @@ PY
   fi
 }
 
+finalize_multi_rig_config_migration() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "DRY RUN: would finalize multi-rig configuration migration."
+    return 0
+  fi
+  [[ -d "$INSTALL_DIR" ]] || die "Install folder not found: $INSTALL_DIR"
+  [[ -x "$VENV_DIR/bin/python" ]] || die "Python virtual environment not found at $VENV_DIR"
+
+  log "Finalizing multi-rig configuration migration..."
+  (
+    cd "$INSTALL_DIR"
+    "$VENV_DIR/bin/python" - <<'PY'
+from __future__ import annotations
+
+import json
+
+from freqinout.core.multi_radio_store import (
+    CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    ensure_multi_rig_migration,
+    get_multi_rig_migration_deferred,
+    get_multi_rig_migration_version,
+    is_multi_rig_migration_current,
+)
+from freqinout.core.settings_manager import SettingsManager
+
+
+def _text(values: dict[str, object], key: str) -> str:
+    return str(values.get(key, "") or "").strip()
+
+
+def _message_paths(values: dict[str, object]) -> dict[str, object]:
+    raw = values.get("message_paths")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _detected_roles(values: dict[str, object]) -> tuple[str, ...]:
+    roles: set[str] = set()
+    message_paths = _message_paths(values)
+    control_via = _text(values, "control_via").lower()
+    if (
+        _text(values, "path_flrig")
+        or _text(values, "path_fldigi")
+        or _text(values, "flrig_host")
+        or _text(values, "fldigi_host")
+        or control_via in {"flrig", "fldigi", "fast_light"}
+    ):
+        roles.add("fast_light")
+    if (
+        _text(values, "path_js8call")
+        or _text(values, "js8_host")
+        or _text(values, "js8_profile_path")
+        or _text(values, "js8_directed_path")
+        or _text(values, "js8_forms_path")
+        or control_via == "js8call"
+    ):
+        roles.add("js8call")
+    if _text(values, "path_js8spotter") or _text(values, "js8spotter_import_db_path"):
+        roles.add("js8spotter")
+    if (
+        _text(values, "varac_path")
+        or _text(values, "varac_db_path")
+        or _text(values, "varac_ini_path")
+        or _text(values, "varac_launch_cmd")
+        or _text(values, "varac_incoming_path")
+        or _text(values, "varac_outbox_dir")
+        or _text(values, "varac_bbs_dir")
+        or _text(values, "varac_bbs_archive_dir")
+        or _text(message_paths, "varac")
+    ):
+        roles.add("varac")
+    if _text(values, "path_flamp") or _text(message_paths, "flamp"):
+        roles.add("flamp")
+    if _text(values, "path_flmsg") or _text(message_paths, "flmsg"):
+        roles.add("flmsg")
+    if _text(values, "path_commstat"):
+        roles.add("commstat")
+    return tuple(sorted(roles))
+
+
+settings = SettingsManager()
+conn = settings._conn
+if conn is None:
+    raise SystemExit("Settings database was not opened.")
+
+before_version = get_multi_rig_migration_version(conn)
+if is_multi_rig_migration_current(conn):
+    print(
+        "Multi-rig migration already current: "
+        f"version={before_version}, deferred={get_multi_rig_migration_deferred(conn)}"
+    )
+    raise SystemExit(0)
+
+values = settings.all()
+roles = _detected_roles(values)
+result = ensure_multi_rig_migration(
+    conn,
+    values,
+    operating_plan_name="Daily HF Schedule",
+    enabled_software_roles=roles,
+)
+settings.reload()
+after_version = get_multi_rig_migration_version(conn)
+deferred = get_multi_rig_migration_deferred(conn)
+print(
+    "Multi-rig migration finalized: "
+    f"from_version={result.from_version}, to_version={result.to_version}, "
+    f"applied={result.applied}, already_current={result.already_current}, "
+    f"version={after_version}, deferred={deferred}, roles={','.join(roles) or 'none'}"
+)
+if result.warnings:
+    print("Multi-rig migration warnings: " + " | ".join(result.warnings))
+if after_version < CURRENT_MULTI_RIG_MIGRATION_VERSION or deferred:
+    raise SystemExit("Multi-rig migration did not reach the current marker.")
+if not result.applied and not result.already_current:
+    raise SystemExit("Multi-rig migration did not apply.")
+PY
+  )
+}
+
 print_finish_message() {
   local completed="no changes requested"
   if [[ $DO_UPDATE -eq 1 && $DO_ICON -eq 1 ]]; then
@@ -1694,6 +1822,7 @@ main() {
       run_step "Update existing install from git" update_existing_install
       if [[ $SKIP_UPDATE_WORK -eq 0 ]]; then
         run_step "Create virtual environment and install dependencies" create_venv_and_install_python_deps
+        run_step "Finalize multi-rig configuration migration" finalize_multi_rig_config_migration
         run_step "Run post-install self-test" run_self_test
       else
         log "Skipping dependency refresh and self-test because app update was skipped."
@@ -1716,6 +1845,7 @@ main() {
     run_step "Create virtual environment and install dependencies" create_venv_and_install_python_deps
     run_step "Create launcher script" create_launcher
     run_step "Create desktop icon and menu entry" create_desktop_icon
+    run_step "Finalize multi-rig configuration migration" finalize_multi_rig_config_migration
     run_step "Run post-install self-test" run_self_test
   else
     log "Skipping install/update actions after clone step due to user choice."
