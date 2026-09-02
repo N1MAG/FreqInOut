@@ -115,6 +115,7 @@ Inputs:
 - NCS/event log entries
 - direct messages and welfare/relay requests
 - mesh/local messages
+- operational pins and map annotations received from allowed RF/app sources
 - CommStat, Spotter, FLMsg/FLAmp, JS8Call, VarAC, BBS, APRS, Reticulum/LXMF,
   Mesh MQTT, and future source-family projections
 - map reports and location clusters
@@ -129,11 +130,21 @@ Required output:
   logistics, comms, medical, water, power, shelter, or similar operator action
 - `handled`: recently acknowledged/closed items so the user can see progress
 - `where`: map-ready location hints with source confidence
+- `pins`: tactical map annotations such as hazards, shelters, checkpoints,
+  comms relays, supply points, or welfare areas when they affect the current
+  operating context
 - `who`: callsigns/nodes/groups most involved
 - `next_actions`: 1 to 3 concrete actions such as `Read`, `Reply`, `Relay`,
   `Map`, `Tune`, `Open Net`, or `Review SOP`
 - `confidence`: source count, freshness, duplicate/conflict state, and
   approximate location confidence when relevant
+
+Operational pins in Ops Center must be summarized as reported information, not
+as verified truth. The card/table wording should answer: what is it, where is
+it, who reported it, how old is it, how confident is the location, and what can
+the operator do next. Pins should appear in `Needs Attention` only when their
+category, severity, group, route, or recency crosses the same attention gates as
+traffic. Otherwise they belong in `Recent Traffic` or map-only layers.
 
 Example summaries:
 

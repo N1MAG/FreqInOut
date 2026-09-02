@@ -237,20 +237,26 @@ class BackgroundIngestController(QObject):
 
     def stop(self) -> None:
         self._running = False
-        for t in (
-            self._js8_links_timer,
-            self._messages_timer,
-            self._varac_timer,
-            self._varac_vault_timer,
-            self._varac_vault_activity_timer,
-            self._varac_guard_timer,
-            self._sitrep_timer,
-            self._prop_outcome_timer,
-            self._peer_sched_timer,
-            self._job_watchdog_timer,
+        for attr in (
+            "_js8_links_timer",
+            "_messages_timer",
+            "_varac_timer",
+            "_varac_vault_timer",
+            "_varac_vault_activity_timer",
+            "_varac_guard_timer",
+            "_sitrep_timer",
+            "_prop_outcome_timer",
+            "_peer_sched_timer",
+            "_job_watchdog_timer",
         ):
+            t = getattr(self, attr, None)
             if t:
-                t.stop()
+                try:
+                    t.stop()
+                    t.deleteLater()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         self._shutdown_executor()
         self._shutdown_realtime_executor()
 

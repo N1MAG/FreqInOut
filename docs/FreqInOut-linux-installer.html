@@ -31,12 +31,13 @@
   <p>The installer script is <code>install_FreqInOut_linux.sh</code>.</p>
 
   <h2>1) Fast path (recommended)</h2>
-  <p>Open a terminal and run:</p>
-  <pre><code>curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqInOut_linux.sh -o install_FreqInOut_linux.sh
-bash install_FreqInOut_linux.sh</code></pre>
-  <p>If you already cloned the repo:</p>
+  <p>From a checked-out multi-rig WIP repo, open a terminal and run:</p>
   <pre><code>bash install_FreqInOut_linux.sh</code></pre>
-  <p>When started with no arguments, the installer opens a guided prompt flow.</p>
+  <p>If you still need the WIP repo locally:</p>
+  <pre><code>git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" git@github.com:N1MAG/FreqInOut-internal-testing.git FreqInOut-multi-rig
+cd FreqInOut-multi-rig
+bash install_FreqInOut_linux.sh</code></pre>
+  <p>When started with no arguments, the installer opens a guided prompt flow. In this WIP branch, the default repository is <code>git@github.com:N1MAG/FreqInOut-internal-testing.git</code> and the default branch is <code>wip/private-testing-multi-rig-1.2.3-not-ready</code>.</p>
 
   <h2>2) What the installer does</h2>
   <p>It automatically:</p>
@@ -51,6 +52,7 @@ bash install_FreqInOut_linux.sh</code></pre>
     <li>cleans up deprecated files from old versions during install/update/repair</li>
   </ul>
   <p>Default install location: <code>~/FreqInOut</code>.</p>
+  <p><code>requirements.txt</code> includes <code>keyring</code>, so the installer installs it during fresh installs, repairs, and updates. FIO uses <code>keyring</code> for secure GPG signing passphrase storage. Linux systems still need an OS credential backend such as Secret Service or KWallet; if no secure backend is available, FIO reports that passphrase storage is unavailable instead of storing plaintext.</p>
 
   <h2>3) Guided prompts (what to expect)</h2>
   <p>The installer may ask:</p>
@@ -75,16 +77,14 @@ bash install_FreqInOut_linux.sh</code></pre>
 
   <h2>5) Advanced options</h2>
   <p>Use a specific repo:</p>
-  <pre><code>bash install_FreqInOut_linux.sh --repo "https://github.com/ORG/FreqInOut.git"</code></pre>
+  <pre><code>bash install_FreqInOut_linux.sh --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git"</code></pre>
   <p>Use a specific branch:</p>
-  <pre><code>bash install_FreqInOut_linux.sh --branch "main"</code></pre>
+  <pre><code>bash install_FreqInOut_linux.sh --branch "wip/private-testing-multi-rig-1.2.3-not-ready"</code></pre>
   <p>Use channel shortcut:</p>
   <pre><code>bash install_FreqInOut_linux.sh --channel beta</code></pre>
   <p>Install a private multi-rig WIP build for isolated testing:</p>
   <pre><code>bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"</code></pre>
+  --dir "$HOME/FreqInOut-multi-rig-test"</code></pre>
   <p>Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.</p>
   <p>Offline mode:</p>
   <pre><code>bash install_FreqInOut_linux.sh --offline</code></pre>
@@ -102,8 +102,7 @@ bash install_FreqInOut_linux.sh</code></pre>
     <li>Terminal: <code>freqinout</code></li>
   </ul>
   <p>Uninstall:</p>
-  <pre><code>curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/uninstall_FreqInOut_linux.sh -o uninstall_FreqInOut_linux.sh
-bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"</code></pre>
+  <pre><code>bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"</code></pre>
 
   <h2>7) Troubleshooting (quick)</h2>
   <p>If desktop icon or launcher does not appear:</p>
@@ -127,6 +126,7 @@ bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"</code></pre>
   <ul>
     <li>single-instance lock (prevents concurrent runs)</li>
     <li>running-app detection before in-place update</li>
+    <li>pre-update backup coverage for Linux single-rig and multi-rig config roots under <code>~/.freqinout</code></li>
     <li>dirty git worktree protection (prompt/policy)</li>
     <li>non-git folder handling (replace/skip/fail)</li>
     <li>rollback points for launcher/desktop/icon/venv on failure</li>

@@ -12,9 +12,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGridLayout
 
 from freqinout.core.mesh import (
+    activate_mesh_connection_config,
     discover_meshcore_ble_devices,
     default_mesh_db_path,
     default_policy_for_channel,
@@ -29,12 +30,14 @@ from freqinout.core.mesh import (
     MeshEventStoreSink,
     list_mesh_channel_policies,
     load_mesh_connection_configs,
+    load_saved_mesh_connection_configs,
     list_mesh_health,
     list_mesh_messages,
     list_mesh_nodes,
     list_mesh_source_connection_snapshots,
     message_allowed_for_surface,
     mesh_ingest_readiness,
+    mesh_connection_config_key,
     set_mesh_message_topic_override,
     MeshNode,
     mesh_node_source_ref,
@@ -63,7 +66,11 @@ from freqinout.core.mesh.meshcore_codec import (
     normalize_meshcore_waiting_messages,
 )
 from freqinout.core.mesh.models import MeshAdapterEvent, MeshHealthSnapshot, MeshMessage
-from freqinout.core.mesh.settings import discover_serial_ports, serialize_mesh_connection_library
+from freqinout.core.mesh.settings import (
+    discover_serial_ports,
+    load_saved_mesh_connection_configs,
+    serialize_mesh_connection_library,
+)
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
 from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter, MeshCoreBleCompanionClient, _AsyncioLoopRunner
 from freqinout.core.controlfreq_awareness import is_awareness_traffic_observation
@@ -143,6 +150,251 @@ def test_mesh_config_loader_includes_saved_device_library() -> None:
 
     assert tuple(config.protocol for config in configs) == ("meshcore", "meshtastic")
     assert tuple(config.adapter_id for config in configs) == ("meshcore-mobl1", "meshtastic-main")
+
+
+def test_mesh_config_loader_loads_active_meshcore_and_meshtastic_by_default() -> None:
+    configs = load_mesh_connection_configs(
+        {
+            "meshcore_enabled": True,
+            "meshcore_protocol": "meshcore",
+            "meshcore_adapter_id": "meshcore-mobl1",
+            "meshcore_connection_type": "ble",
+            "meshcore_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshcore_ble_device_name": "MeshCore-N1MAG MOBL1",
+            "meshtastic_enabled": True,
+            "meshtastic_protocol": "meshtastic",
+            "meshtastic_adapter_id": "meshtastic-tcp",
+            "meshtastic_connection_type": "tcp",
+            "meshtastic_tcp_host": "192.0.2.10",
+        }
+    )
+
+    assert tuple(config.protocol for config in configs) == ("meshcore", "meshtastic")
+    assert tuple(config.adapter_id for config in configs) == ("meshcore-mobl1", "meshtastic-tcp")
+
+
+def test_meshcore_prefix_defaults_to_meshcore_for_legacy_settings() -> None:
+    config = MeshConnectionConfig.from_mapping(
+        {
+            "meshcore_enabled": True,
+            "meshcore_connection_type": "ble",
+            "meshcore_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshcore_ble_device_name": "MeshCore-N1MAG MOBL1",
+        },
+        prefix="meshcore",
+    )
+
+    assert config.enabled is True
+    assert config.protocol == "meshcore"
+    assert config.adapter_id == "meshcore-main"
+    assert config.connection_type is MeshConnectionType.BLE
+
+
+def test_mesh_loader_does_not_route_legacy_meshcore_ble_to_meshtastic() -> None:
+    configs = load_mesh_connection_configs(
+        {
+            "meshcore_enabled": True,
+            "meshcore_connection_type": "ble",
+            "meshcore_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshcore_ble_device_name": "MeshCore-N1MAG MOBL1",
+            "meshtastic_enabled": False,
+        }
+    )
+
+    assert len(configs) == 1
+    assert configs[0].protocol == "meshcore"
+    assert configs[0].adapter_id == "meshcore-main"
+    assert configs[0].display_name == "MeshCore-N1MAG MOBL1"
+
+
+def test_mesh_loader_repairs_stale_meshtastic_record_for_meshcore_ble() -> None:
+    configs = load_mesh_connection_configs(
+        {
+            "meshtastic_enabled": True,
+            "meshtastic_protocol": "meshtastic",
+            "meshtastic_adapter_id": "meshcore-mobl1",
+            "meshtastic_connection_type": "ble",
+            "meshtastic_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshtastic_ble_device_name": "MeshCore-N1MAG MOBL1",
+        }
+    )
+
+    assert len(configs) == 1
+    assert configs[0].protocol == "meshcore"
+    assert configs[0].adapter_id == "meshcore-mobl1"
+    assert configs[0].display_name == "MeshCore-N1MAG MOBL1"
+
+
+def test_saved_mesh_library_repairs_stale_meshtastic_record_for_meshcore_ble() -> None:
+    library = serialize_mesh_connection_library(
+        (
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl1",
+                protocol="meshtastic",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+                ble_device_name="MeshCore-N1MAG MOBL1",
+            ),
+        )
+    )
+
+    runtime_configs = load_mesh_connection_configs({"mesh_connection_library": library})
+    saved_configs = load_saved_mesh_connection_configs({"mesh_connection_library": library})
+
+    assert tuple(config.protocol for config in runtime_configs) == ("meshcore",)
+    assert tuple(config.protocol for config in saved_configs) == ("meshcore",)
+
+
+def test_mesh_config_saved_library_preserves_disconnected_devices_for_ui() -> None:
+    library = serialize_mesh_connection_library(
+        (
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl1",
+                protocol="meshcore",
+                enabled=False,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+                ble_device_name="MeshCore-N1MAG MOBL1",
+            ),
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl2",
+                protocol="meshcore",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="B8752C73-007D-D8AF-D938-AE58CB78A414",
+                ble_device_name="MeshCore-N1MAG MOBL2",
+            ),
+        )
+    )
+
+    runtime_configs = load_mesh_connection_configs({"mesh_connection_library": library})
+    saved_configs = load_saved_mesh_connection_configs({"mesh_connection_library": library})
+
+    assert tuple(config.adapter_id for config in runtime_configs) == ("meshcore-mobl2",)
+    assert tuple(config.adapter_id for config in saved_configs) == ("meshcore-mobl1", "meshcore-mobl2")
+
+
+def test_activate_saved_mesh_connection_selects_endpoint_and_preserves_sibling_protocol() -> None:
+    library = serialize_mesh_connection_library(
+        (
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl1",
+                protocol="meshcore",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+                ble_device_name="MeshCore-N1MAG MOBL1",
+            ),
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl2",
+                protocol="meshcore",
+                enabled=False,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="B8752C73-007D-D8AF-D938-AE58CB78A414",
+                ble_device_name="MeshCore-N1MAG MOBL2",
+            ),
+            MeshConnectionConfig(
+                adapter_id="meshtastic-tcp",
+                protocol="meshtastic",
+                enabled=True,
+                connection_type=MeshConnectionType.TCP,
+                tcp_host="192.0.2.44",
+            ),
+        )
+    )
+
+    payload = activate_mesh_connection_config(
+        {"mesh_connection_library": library},
+        "meshcore:ble:b8752c73-007d-d8af-d938-ae58cb78a414",
+    )
+
+    assert payload is not None
+    assert payload["meshcore_protocol"] == "meshcore"
+    assert payload["meshcore_enabled"] is True
+    assert payload["meshcore_ble_device_name"] == "MeshCore-N1MAG MOBL2"
+    assert "meshtastic_protocol" not in payload
+    runtime_configs = load_mesh_connection_configs(payload)
+    saved_configs = load_saved_mesh_connection_configs(payload)
+    assert tuple(config.adapter_id for config in runtime_configs) == ("meshcore-mobl2", "meshtastic-tcp")
+    assert {
+        config.adapter_id: config.enabled
+        for config in saved_configs
+        if config.protocol in {"meshcore", "meshtastic"}
+    } == {
+        "meshcore-mobl1": False,
+        "meshcore-mobl2": True,
+        "meshtastic-tcp": True,
+    }
+
+
+def test_activate_saved_mesh_connection_disables_stale_sibling_endpoint() -> None:
+    meshcore_config = MeshConnectionConfig(
+        adapter_id="meshcore-mobl1",
+        protocol="meshcore",
+        enabled=False,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    library = serialize_mesh_connection_library((meshcore_config,))
+
+    payload = activate_mesh_connection_config(
+        {
+            "mesh_connection_library": library,
+            "meshtastic_enabled": True,
+            "meshtastic_protocol": "meshtastic",
+            "meshtastic_adapter_id": "meshcore-mobl1",
+            "meshtastic_connection_type": "ble",
+            "meshtastic_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshtastic_ble_device_name": "MeshCore-N1MAG MOBL1",
+        },
+        mesh_connection_config_key(meshcore_config),
+        prefix="meshcore",
+    )
+
+    assert payload is not None
+    assert payload["meshcore_protocol"] == "meshcore"
+    assert payload["meshcore_enabled"] is True
+    assert payload["meshcore_ble_device_name"] == "MeshCore-N1MAG MOBL1"
+    assert payload["meshtastic_enabled"] is False
+    runtime_configs = load_mesh_connection_configs(
+        {
+            **payload,
+            "meshtastic_protocol": "meshtastic",
+            "meshtastic_adapter_id": "meshcore-mobl1",
+            "meshtastic_connection_type": "ble",
+            "meshtastic_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshtastic_ble_device_name": "MeshCore-N1MAG MOBL1",
+        }
+    )
+    assert tuple(config.protocol for config in runtime_configs) == ("meshcore",)
+
+
+def test_settings_loader_get_fallback_includes_meshcore_active_config() -> None:
+    class SettingsLike:
+        def __init__(self, values: dict[str, object]) -> None:
+            self._values = values
+
+        def get(self, key: str, default: object = None) -> object:
+            return self._values.get(key, default)
+
+    configs = load_mesh_connection_configs(
+        SettingsLike(
+            {
+                "meshcore_enabled": True,
+                "meshcore_protocol": "meshcore",
+                "meshcore_adapter_id": "meshcore-mobl1",
+                "meshcore_connection_type": "ble",
+                "meshcore_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+                "meshcore_ble_device_name": "MeshCore-N1MAG MOBL1",
+            }
+        )
+    )
+
+    assert len(configs) == 1
+    assert configs[0].protocol == "meshcore"
+    assert configs[0].ble_device_name == "MeshCore-N1MAG MOBL1"
 
 
 def test_mesh_source_family_labels_are_user_facing() -> None:
@@ -826,6 +1078,164 @@ def test_meshtastic_text_packet_normalizes_to_view_context() -> None:
     assert context["summary"] == "Fire spotting near the ridge"
 
 
+def test_meshtastic_object_packet_normalizes_to_view_context() -> None:
+    class Decoded:
+        portnum = "TEXT_MESSAGE_APP"
+        text = "Water outage at the park"
+
+    class Packet:
+        id = 456
+        fromId = "!source"
+        toId = "^all"
+        channel = 1
+        rxTime = 1_788_122_500
+        rxSnr = 7.25
+        rxRssi = -84
+        decoded = Decoded()
+
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+    message = adapter.ingest_packet(Packet())
+    events = list(adapter.receive_events())
+
+    assert message is not None
+    assert message.message_id == "456"
+    assert message.from_node == "!source"
+    assert message.channel == "Channel 1"
+    assert message.snr == pytest.approx(7.25)
+    assert len(events) == 1
+    assert events[0].message is message
+
+
+def test_meshtastic_direct_text_uses_direct_channel() -> None:
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+
+    message = adapter.normalize_text_packet(
+        {
+            "id": "direct-1",
+            "fromId": "!source",
+            "toId": "!target",
+            "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "Can you copy?"},
+        }
+    )
+
+    assert message is not None
+    assert message.channel == "Direct"
+    assert message.to_node == "!target"
+    assert message.direct_receive is True
+
+
+def test_meshtastic_position_packet_becomes_node_event_not_message() -> None:
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+
+    message = adapter.ingest_packet(
+        {
+            "fromId": "!router",
+            "rxTime": 1_788_122_401,
+            "decoded": {
+                "portnum": "POSITION_APP",
+                "payload": b"\x01\x02not text",
+                "position": {"latitudeI": 397392000, "longitudeI": -1049903000},
+            },
+        }
+    )
+    events = list(adapter.receive_events())
+
+    assert message is None
+    assert len(events) == 1
+    assert events[0].event_type == "node"
+    assert events[0].message is None
+    assert events[0].node is not None
+    assert events[0].node.node_id == "!router"
+    assert events[0].node.lat == pytest.approx(39.7392)
+    assert events[0].node.lon == pytest.approx(-104.9903)
+
+
+def test_meshtastic_object_position_packet_becomes_node_event_not_message() -> None:
+    class Position:
+        latitudeI = 397392000
+        longitudeI = -1049903000
+
+    class Decoded:
+        portnum = "POSITION_APP"
+        position = Position()
+
+    class Packet:
+        fromId = "!router"
+        rxTime = 1_788_122_401
+        decoded = Decoded()
+
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+    message = adapter.ingest_packet(Packet())
+    events = list(adapter.receive_events())
+
+    assert message is None
+    assert len(events) == 1
+    assert events[0].event_type == "node"
+    assert events[0].node is not None
+    assert events[0].node.lat == pytest.approx(39.7392)
+    assert events[0].node.lon == pytest.approx(-104.9903)
+
+
+def test_meshtastic_nodeinfo_packet_becomes_node_event_not_message() -> None:
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+
+    message = adapter.ingest_packet(
+        {
+            "fromId": "!node",
+            "decoded": {
+                "portnum": "NODEINFO_APP",
+                "user": {"id": "!node", "longName": "Neighborhood Router", "shortName": "NBR1"},
+            },
+        }
+    )
+    events = list(adapter.receive_events())
+
+    assert message is None
+    assert len(events) == 1
+    assert events[0].event_type == "node"
+    assert events[0].node is not None
+    assert events[0].node.display_name == "NBR1"
+
+
+def test_meshtastic_channels_sort_named_feeds_before_generated_channels() -> None:
+    class FakeSettings:
+        def __init__(self, name: str, psk: bytes = b"") -> None:
+            self.name = name
+            self.psk = psk
+
+    class FakeChannel:
+        def __init__(self, name: str, psk: bytes = b"", role: str = "") -> None:
+            self.settings = FakeSettings(name, psk)
+            self.role = role
+
+    class FakeLocalNode:
+        channels = (
+            FakeChannel(""),
+            FakeChannel("MAGNET", b"\x01\x02", "SECONDARY"),
+            FakeChannel(""),
+            FakeChannel("Parker Radio Association", b"\x03", "SECONDARY"),
+        )
+
+    class FakeInterface:
+        localNode = FakeLocalNode()
+
+    adapter = MeshtasticLocalAdapter(MeshConnectionConfig(adapter_id="local-mesh"))
+    adapter._interface = FakeInterface()
+
+    channels = adapter.list_channels()
+
+    assert [channel.name for channel in channels] == [
+        "Public",
+        "MAGNET",
+        "Parker Radio Association",
+        "Channel 2",
+    ]
+    assert channels[0].privacy == "public"
+    assert channels[0].psk_hint == "not needed"
+    assert channels[1].privacy == "private"
+    assert channels[1].psk_hint == "on device"
+
+
 def test_meshtastic_tcp_connect_is_lazy_and_mockable(monkeypatch: pytest.MonkeyPatch) -> None:
     meshtastic = types.ModuleType("meshtastic")
     tcp_module = types.ModuleType("meshtastic.tcp_interface")
@@ -933,14 +1343,35 @@ def test_settings_local_mesh_panel_builds_and_persists_payload(monkeypatch: pyte
 
     payload = tab._mesh_settings_payload_from_ui()
 
-    assert payload["meshtastic_protocol"] == "meshcore"
-    assert payload["meshtastic_enabled"] is True
-    assert payload["meshtastic_connection_type"] == "serial"
-    assert payload["meshtastic_serial_port"] == "/dev/cu.usbmesh"
-    assert payload["meshtastic_send_enabled"] is False
+    assert payload["meshcore_protocol"] == "meshcore"
+    assert payload["meshcore_enabled"] is True
+    assert payload["meshcore_connection_type"] == "serial"
+    assert payload["meshcore_serial_port"] == "/dev/cu.usbmesh"
+    assert payload["meshcore_send_enabled"] is False
+    assert "meshtastic_enabled" not in payload
     assert "Ready to configure Meshcore over SERIAL" in tab.mesh_status_label.text()
     assert hasattr(tab, "mesh_ble_scan_btn")
     assert hasattr(tab, "mesh_ble_results_combo")
+    assert isinstance(tab.mesh_ble_row.layout(), QGridLayout)
+    assert tab.mesh_ble_row.layout().rowCount() >= 2
+    assert tab.mesh_ble_timeout_spin.minimumWidth() >= 140
+    assert isinstance(tab.mesh_channel_actions_layout, QGridLayout)
+    assert tab.mesh_channel_actions_layout.rowCount() >= 2
+
+
+def test_mesh_saved_loader_does_not_show_unconfigured_meshtastic_chip_for_meshcore_only() -> None:
+    configs = load_saved_mesh_connection_configs(
+        {
+            "meshcore_enabled": True,
+            "meshcore_protocol": "meshcore",
+            "meshcore_adapter_id": "meshcore-mobl1",
+            "meshcore_connection_type": "ble",
+            "meshcore_ble_device_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "meshcore_ble_device_name": "MeshCore-N1MAG MOBL1",
+        }
+    )
+
+    assert tuple(config.protocol for config in configs) == ("meshcore",)
 
 
 def test_settings_meshcore_ble_scan_selection_populates_identity(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

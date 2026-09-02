@@ -103,6 +103,104 @@ Represent pins as observations or observation-adjacent records:
 Pins received over RF should be stored once, deduped by sender/grid/type/text,
 and displayed through the same map topic/layer controls used by reports.
 
+FIO implementation must use the shared Operational Pin contract in
+`docs/internal/map_operator_interaction_spec.md`. SuperSpotter-style RF pins are
+valuable because they let an operator share map-ready tactical notes without
+internet service, but FIO must avoid turning them into a separate subsystem.
+They enter as normalized observations, carry source/trust/location confidence,
+age out unless retained, and are rendered through the stable map layer payload.
+
+Initial pin categories should remain intentionally small:
+
+- `hazard`
+- `road`
+- `shelter`
+- `medical`
+- `supply`
+- `comms`
+- `checkpoint`
+- `weather`
+- `welfare`
+- `info`
+- `custom`
+
+RF pin receive should be opt-in per source/group. RF pin transmit should be a
+separate explicit permission because a map annotation can influence real-world
+operator decisions. Unsigned or unknown-source pins can be useful, but must be
+displayed as unverified.
+
+### Location Confidence From Spotter And Traffic
+
+SuperSpotter's six-character grid extraction and locked roster-grid behavior
+should enrich, not replace, FIO's existing operator geography model. FIO already
+captures and uses grids from JS8Call, CommStat, FIOSpotter/legacy Spotter
+imports, and map projections. The gap is a formal cross-source confidence
+contract.
+
+Requirements:
+
+- JS8Call and CommStat receive paths may fill missing operator grids and upgrade
+  compatible four-character grids to six-character grids.
+- FIOSpotter/legacy imports may contribute grid evidence, but must not silently
+  override a higher-confidence manual or direct structured location.
+- Manual roster/operator locations are treated as locked unless the operator
+  explicitly allows automatic movement.
+- Equal-rank grid changes are retained as newer evidence and may move a station
+  only when the source explains why the station likely moved.
+- Map and Ops Center detail must show short provenance such as `reported grid`,
+  `roster grid`, `Spotter grid`, or `route-derived`.
+- The comparison/update logic belongs in a reusable projection helper so
+  JS8Call, CommStat, FIOSpotter, MeshCore, APRS, and future Reticulum/LXMF
+  adapters use the same rules.
+
+Acceptance checks:
+
+- A six-character grid from a trusted report upgrades a matching four-character
+  roster/import grid.
+- A route-derived mesh location does not replace an existing grid6/manual
+  station location.
+- A stale low-confidence grid can be superseded by a newer direct structured
+  report.
+- Map detail shows the location source and confidence without requiring the
+  operator to inspect raw protocol text.
+
+Implementation status:
+
+- A reusable location-confidence helper now ranks manual, GPS, structured
+  report, grid, state, route-derived, and source-metadata evidence.
+- Observation projection now carries the normalized confidence record in
+  provenance while preserving the older short `location_confidence` label for
+  existing UI paths.
+- RF/operational pin candidates can be built from message intelligence through
+  the shared pin helper when source/group receive policy allows it.
+- Operator-facing Spotter labels in shared Inbox filters now use `FIOSpotter`
+  instead of `JS8Spotter`. Legacy source-family/provenance values may still
+  preserve old names internally when required for compatibility, but user UI
+  should identify the built-in FIO capability.
+
+### Store-And-Forward Status
+
+Store-and-forward ideas from SuperSpotter are useful, but are explicitly
+deferred. JS8Call query-message workflows already allow another operator to ask
+whether FIO is holding traffic for them, so FIO does not need RF advertisement
+behavior in this phase.
+
+Future consideration should treat store-and-forward as a protocol-neutral
+`Message Relay Queue`, not as a Spotter-only feature. It may later cover JS8,
+MeshCore rooms, Reticulum/LXMF, APRS messaging, or other intermittent transports
+with clear states such as `held`, `offered`, `requested`, `sent`, `acked`,
+`expired`, and `failed`.
+
+Guardrails for later design:
+
+- opt-in per source, group, and destination
+- no automatic advertisement unless explicitly enabled
+- expiry and retry limits
+- loop prevention and duplicate detection
+- visible audit trail
+- signing/trust display when available
+- operator-readable "why this message is being held" detail
+
 ### Condition Alert Rules
 
 Add configurable condition-alert rules rather than hard-coded MAGCON handling.

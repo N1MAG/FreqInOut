@@ -35,6 +35,73 @@ Bring-up order should be conservative:
 
 USB and BLE are both required field use cases, but neither should be assumed always available. FIO must never import optional hardware libraries or open a device during app startup.
 
+## Meshtastic Mirrored Integration Contract
+
+Meshtastic should be implemented as the second local-mesh source family using
+the same contracts already built for MeshCore. The goal is a shared local-mesh
+experience with protocol-specific adapters, not a separate Meshtastic-only UI.
+FIO should mirror MeshCore behavior for saved devices, connection lifecycle,
+channel/feed policy, Inbox projection, Ops Center summaries, Map projection,
+retention, topic scanning, and source-control chips. Only protocol facts that
+are truly different should diverge.
+
+Implementation must verify the current official Meshtastic Client API, Python
+library, HTTP API, and MQTT docs before coding exact transport calls. The FIO
+contract stays stable even if a library or firmware detail changes.
+
+Meshtastic-specific source differences:
+
+- Transports: support TCP/WiFi, USB serial, BLE, HTTP protobuf, and optional
+  MQTT as distinct connection modes. The Settings UI must show only the fields
+  relevant to the selected mode.
+- Device identity: store a stable configured device record with protocol,
+  transport, endpoint, Meshtastic node id when known, long name, short name, and
+  user-facing display name. Routine UI should prefer the configured short name
+  or Meshtastic short name, with raw ids shown only as secondary detail.
+- Channels: preserve channel index, channel name, role, uplink/downlink
+  capability when exposed, and key readiness. Named channels sort before blank
+  or generated channel labels.
+- Encryption: private-channel PSKs or keys are required to join or configure a
+  private feed unless the connected device already has the channel configured.
+  Secrets must not be logged, displayed after entry, copied into observations,
+  or stored in plain diagnostic exports.
+- Direct messages: node-to-node messages are person/operator traffic. They must
+  not be projected as channel traffic merely because the adapter also reports a
+  default or public channel.
+- Non-message packets: node info, position, telemetry, admin, routing, and
+  traceroute packets are topology or health observations. They do not belong in
+  the Message Inbox unless the user explicitly opens a diagnostics view.
+- Position: explicit Meshtastic position packets are high-confidence map
+  evidence subject to age and precision metadata. If no position exists, route
+  or first-hop evidence may provide lower-confidence locality only when clearly
+  labeled.
+- Routing: hop limit/start, route, repeater, and traceroute details are optional
+  context for the map/detail inspector. They must not make FIO feel like a full
+  Meshtastic route analyzer unless later work explicitly adds that mode.
+- MQTT: Meshtastic MQTT is a separate bridge/provenance mode. It must be
+  opt-in, visibly labeled, and never silently mixed with local RF/BLE/serial
+  traffic.
+- Send: receive-only comes first. Sending remains disabled until the operator
+  enables it for the configured device/channel and the send path has explicit
+  policy, audit, and failure handling.
+
+Meshtastic must use the same `SourceConnectionSnapshot` lifecycle values as
+MeshCore: configured, scanning, pairing-needed, connecting, connected,
+retrying, disconnected, disabled, stale, and error. Disconnects are normal
+field behavior, not failure by themselves. Last-known messages, nodes, routes,
+and positions remain available to Inbox, Ops Center, and Map according to
+retention policy even when the live device is gone.
+
+Control bar behavior:
+
+- Configured Meshtastic devices appear under a `Meshtastic` protocol chip, not
+  under a generic `Mesh` chip when multiple mesh protocols are configured.
+- The chip menu lists only saved devices for routine `Connect`/`Disconnect`
+  actions.
+- Unsaved discoveries appear only in Local Mesh `Add Device` or scan flows.
+- If a hidden Meshtastic device has attention, the protocol chip carries that
+  state and offers the shortest path to the device detail.
+
 ## Configuration Rules
 
 Each mesh adapter config must include:
@@ -670,6 +737,23 @@ Implemented now:
   If the live worker is connected to a device different from the selected form
   entry, Settings must show that as connection state, not silently relabel the
   selected configuration.
+- Saved-device activation must use a stable protocol/transport/endpoint key,
+  not only a friendly adapter id. Choosing `Connect` for a saved MeshCore BLE
+  device from the top source rail updates the active Local Mesh settings to
+  that endpoint, preserves disconnected saved siblings for future selection,
+  disables only the previous saved endpoint in the same protocol/transport
+  family, and leaves separately configured sibling protocols such as
+  Meshtastic enabled.
+- Implementation note 2026-09-02: activation and health projection are
+  protocol-specific. A saved MeshCore endpoint must not be activated under the
+  Meshtastic settings prefix, even when called through a generic mesh dropdown.
+  Health rows whose `transport` does not match the saved-device protocol are
+  stale diagnostics for the other connector family and must not color the
+  selected protocol chip or block the MeshCore BLE retry loop.
+- Disconnect menu items should be shown only when the protocol has a connected
+  saved runtime. A disconnected saved-device menu should offer Connect, Manage
+  Channels, Add Device, and Settings without implying there is a live worker to
+  disconnect.
 - Mesh channel review tables must order real named feeds before generated
   placeholders such as `Channel 9`; accepted named feeds appear first, pending
   generated channels appear afterward in numeric order.
@@ -682,6 +766,11 @@ Implemented now:
   connection should not show blank TCP, USB Serial, HTTP, or MQTT rows. BLE
   scan results are discovery state only; when the saved BLE device is connected,
   a failed/empty scan must not display as the primary connection state.
+- Local Mesh tables and status panels must pass the UI display contract in
+  light and dark themes. Row-state colors such as accepted/pending/ignored must
+  use theme-aware foreground/background pairs with sufficient contrast, and
+  dark-mode detection must be semantic or luminance-based instead of checking
+  for a single exact background hex value.
 - policy-gated mesh message promotion: raw packets persist immediately, but
   Inbox/Ops/Map/topic observation visibility requires an accepted channel policy
 - accepted channel policies shape rendered mesh observations: mapped groups
@@ -721,6 +810,18 @@ Implemented now:
 - `SourceConnectionSnapshot` lifecycle projection for retained MeshCore health
   rows. APRS and future local sources must implement the same contract before
   they appear in Ops Center or Map.
+- Meshtastic read-only adapter normalization now accepts both dict-like fixture
+  packets and object-shaped packets from client libraries. Text packets become
+  accepted-feed message events; direct packets are labelled `Direct`; position
+  and node-info packets become node/topology events and remain out of Message
+  Inbox.
+- Meshtastic channel discovery preserves public, named private, and generated
+  channel ordering. Named feeds are shown before generated placeholders, and
+  private-channel key state is exposed as `on device` without storing or
+  displaying raw PSKs.
+- Mesh health and source chips use the saved device/display name first. Raw
+  BLE UUIDs and transient endpoint ids are diagnostics only and must not be the
+  normal daily operator label.
 - Map projection worker boundary for retained markers, observations, nodes, and
   routes. Live connection state is intentionally outside the projection
   signature so reconnect churn does not redraw the map.

@@ -128,6 +128,9 @@ when known:
 - `age`: newest evidence timestamp used by the current view.
 - `location_confidence`: direct structured location, message metadata, grid
   inference, source fallback, or unknown.
+- `location_confidence_record`: normalized location evidence record from the
+  operational view framework, including source, rank, staleness, and a short
+  operator-facing explanation.
 
 CommStat deserves special care because it can report on locations other than
 the reporter's own station. Map placement for CommStat event/status artifacts
@@ -547,6 +550,55 @@ into the inbox so the operator lands on the evidence that caused the map state.
    fields are available.
 4. Preserve source-specific confidence so inferred signals do not override
    direct reports.
+
+### Operational Pins
+
+Operational pins are map-first observations for tactical information that is
+not necessarily tied to a known station. They may be created manually, imported,
+or received over an RF/app source such as JS8/Spotter, MeshCore, APRS,
+Reticulum/LXMF, or future Mesh MQTT.
+
+Required pin fields:
+
+- `pin_id`: stable id derived from source, location, category, text, and sender
+  when the source does not provide one.
+- `pin_type`: `hazard`, `checkpoint`, `supply`, `medical`, `comms`, `shelter`,
+  `road`, `weather`, `welfare`, `info`, or `custom`.
+- `summary`: one short operator-facing sentence.
+- `details`: optional longer note.
+- `location_confidence_record`: normalized confidence evidence as defined by
+  the operational view framework.
+- `reported_by`: callsign, node id, operator, or source label.
+- `group`: operating group/channel when available.
+- `source_family` and `source_ref`.
+- `created_utc`, `updated_utc`, and optional `expires_utc`.
+- `trust_state`: `manual`, `trusted`, `signed`, `unsigned`, `imported`,
+  `unverified`, or source-specific equivalent.
+- `exercise_flag`.
+
+Display rules:
+
+- Pins render through the same stable map payload contract as reports and mesh
+  nodes. A pin layer update must not rebuild the map shell.
+- Pins must show source, age, confidence, reporter, and verification/trust state
+  in the detail panel.
+- Pin color/icon comes from `pin_type` and concern level, not from source
+  family alone.
+- Unknown or low-confidence pins should be visible only when the layer policy
+  allows them, and should be visually humble.
+- Pin actions are source-aware: `Center`, `Inbox`, `Compose/Message`, `Topic`,
+  `SOP`, `Expire`, and `Copy` appear only when valid for the selected pin.
+
+Lifecycle rules:
+
+- RF/app pins are deduped by source id when present, otherwise by
+  sender/category/location/text within a source-specific time window.
+- Pins age out according to category defaults unless manually pinned by the
+  operator.
+- A newer duplicate may refresh age or improve confidence, but it must not
+  overwrite a higher-confidence location with a weaker one.
+- Manual edits create an audit trail and move the pin to manual/user-confirmed
+  confidence.
 
 ## Acceptance Tests
 

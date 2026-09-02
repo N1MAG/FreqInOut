@@ -94,39 +94,44 @@ def test_log_assisted_toggle_starts_and_stops_session_timer(monkeypatch):
     assert not tab._log_assisted_timer.isActive()
 
 
-def test_end_net_pauses_log_assisted_timer_before_save_and_restarts_on_cancel(monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+def test_end_net_pauses_log_assisted_timer_before_save_and_keeps_it_stopped(monkeypatch):
+    class FakeSignal:
+        def __init__(self):
+            self.emitted = []
 
-    import freqinout.gui.fldigi_net_control_tab as fldigi_tab_module
+        def emit(self, *args):
+            self.emitted.append(args)
 
     tab = FldigiNetControlTab.__new__(FldigiNetControlTab)
     tab.LOG_ASSISTED_INTAKE_VISIBLE = True
+    tab.net_status_changed = FakeSignal()
     tab.log_assisted_enable_chk = FakeCheckbox(True)
     tab._log_assisted_timer = FakeTimer()
     tab._log_assisted_timer.start()
     tab._net_in_progress = True
-    prompts = [QMessageBox.Yes, QMessageBox.No]
     observed = []
 
-    def fake_question(*args, **kwargs):
-        return prompts.pop(0)
-
-    def fake_save_checkins():
+    def fake_save_checkins(*args, **kwargs):
         observed.append(("save", tab._log_assisted_timer.isActive()))
 
-    monkeypatch.setattr(fldigi_tab_module.QMessageBox, "question", fake_question)
+    tab._confirm_end_net = lambda: (True, False)
     tab._save_checkins = fake_save_checkins
     tab._checkin_file_paths = lambda: ("main", "qru", "late")
     tab._roster_table_text = lambda bucket=None: ""
     tab._read_file = lambda path: ""
     tab._archive_checkin_files = lambda: observed.append(("archive", True))
+    tab._set_net_button_styles = lambda active: observed.append(("styles", active))
+    tab._update_copy_buttons_state = lambda: observed.append(("copy_state", True))
+    tab._persist_ncs_session_snapshot = lambda **kwargs: observed.append(("snapshot", kwargs))
+    tab._refresh_ncs_session_context = lambda: observed.append(("context", True))
+    tab._show_roster_action_status = lambda *args: observed.append(("status", args))
 
     FldigiNetControlTab._end_net(tab)
 
-    assert observed == [("save", False)]
+    assert observed[0:2] == [("save", False), ("archive", True)]
     assert tab._log_assisted_timer.stopped == 1
-    assert tab._log_assisted_timer.started == 2
-    assert tab._log_assisted_timer.isActive()
+    assert tab._log_assisted_timer.started == 1
+    assert not tab._log_assisted_timer.isActive()
 
 
 
@@ -375,6 +380,7 @@ def test_mid_session_log_path_rollover_clears_context_and_state(monkeypatch, tmp
     monkeypatch.setattr(FldigiNetControlTab, "_apply_theme", lambda self: None)
     monkeypatch.setattr(FldigiNetControlTab, "_setup_timers", lambda self: None)
     monkeypatch.setattr(FldigiNetControlTab, "_refresh_qsy_options", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(FldigiNetControlTab, "LOG_ASSISTED_INTAKE_VISIBLE", True)
 
     log_path_a = tmp_path / "fldigi20260419_a.log"
     log_path_b = tmp_path / "fldigi20260419_b.log"
@@ -423,6 +429,7 @@ def test_mid_session_log_path_rollover_clears_auto_ingested_buckets(monkeypatch,
     monkeypatch.setattr(FldigiNetControlTab, "_apply_theme", lambda self: None)
     monkeypatch.setattr(FldigiNetControlTab, "_setup_timers", lambda self: None)
     monkeypatch.setattr(FldigiNetControlTab, "_refresh_qsy_options", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(FldigiNetControlTab, "LOG_ASSISTED_INTAKE_VISIBLE", True)
 
     log_path_a = tmp_path / "fldigi20260419_a.log"
     log_path_b = tmp_path / "fldigi20260419_b.log"

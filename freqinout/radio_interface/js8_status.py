@@ -758,7 +758,7 @@ class VarACStatusClient:
         except Exception:
             return ""
 
-    def get_status(self, *, include_db_transfer: bool = False) -> Dict[str, object]:
+    def get_status(self, *, include_db_transfer: bool = True) -> Dict[str, object]:
         log_paths = self._resolve_log_paths()
         status = {"busy": False, "waiting_for_frequency": False, "reason": None}
         try:

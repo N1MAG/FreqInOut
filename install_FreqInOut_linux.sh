@@ -6,7 +6,9 @@ MIN_PYTHON_MINOR=9
 MAX_PYTHON_MAJOR=3
 MAX_PYTHON_MINOR=13
 
-REPO_URL="${REPO_URL:-https://github.com/N1MAG/FreqInOut.git}"
+DEFAULT_REPO_URL="git@github.com:N1MAG/FreqInOut-internal-testing.git"
+DEFAULT_BRANCH="wip/private-testing-multi-rig-1.2.3-not-ready"
+REPO_URL="${REPO_URL:-$DEFAULT_REPO_URL}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/FreqInOut}"
 LOG_FILE="${LOG_FILE:-$HOME/freqinout-install.log}"
 
@@ -66,8 +68,8 @@ Usage:
 
 Options:
   -d, --dir <path>      Install location (default: ~/FreqInOut)
-  -r, --repo <url>      Git repository URL
-  -c, --channel <name>  Update channel: stable or beta (default: stable)
+  -r, --repo <url>      Git repository URL (default: multi-rig WIP repo)
+  -c, --channel <name>  Update channel: stable or beta (default: stable/WIP branch)
   -b, --branch <name>   Git branch override (takes priority over --channel)
       --repair          Rebuild venv + launcher + icon without recloning
       --dry-run         Show what would be done without changing anything
@@ -114,11 +116,11 @@ run_step() {
   log "STEP START: $step_name"
   if "$@"; then
     end_ts="$(date +%s)"
-    log "STEP SUCCESS: $step_name (${end_ts-start_ts}s)"
+    log "STEP SUCCESS: $step_name ($((end_ts - start_ts))s)"
     return 0
   fi
   end_ts="$(date +%s)"
-  warn "STEP FAILED: $step_name (${end_ts-start_ts}s)"
+  warn "STEP FAILED: $step_name ($((end_ts - start_ts))s)"
   return 1
 }
 
@@ -766,6 +768,10 @@ ensure_python_and_tools() {
   if [[ $need_packages -eq 1 ]]; then
     warn "Missing required tools (git/python3/venv)."
     warn "Manual install command: $(manual_install_hint)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      warn "Dry-run mode: continuing preview without installing system packages."
+      return 0
+    fi
     if prompt_yes_no "Install missing packages automatically now?"; then
       install_required_system_packages
     else
@@ -783,7 +789,7 @@ resolve_channel_branch() {
   case "${CHANNEL,,}" in
     stable)
       if [[ -z "$BRANCH" ]]; then
-        BRANCH=""
+        BRANCH="$DEFAULT_BRANCH"
       fi
       ;;
     beta)
@@ -850,13 +856,18 @@ EOF
 backup_user_data() {
   local candidates=(
     "$INSTALL_DIR/config"
+    "$INSTALL_DIR/runtime"
+    "$HOME/.freqinout"
+    "$HOME/.freqinout/config"
+    "$HOME/.freqinout/runtime/single-rig/config"
+    "$HOME/.freqinout/runtime/multi-rig/config"
     "$HOME/.config/FreqInOut"
     "$HOME/.local/share/FreqInOut"
   )
   local existing=()
   local item
   for item in "${candidates[@]}"; do
-    if [[ -e "$item" ]]; then
+    if [[ -e "$item" ]] && ! path_covered_by_existing_backup "$item" "${existing[@]}"; then
       existing+=("$item")
     fi
   done
@@ -873,6 +884,18 @@ backup_user_data() {
 
   tar -czf "$BACKUP_ARCHIVE" --absolute-names "${existing[@]}"
   log "Backed up user data to $BACKUP_ARCHIVE"
+}
+
+path_covered_by_existing_backup() {
+  local candidate="$1"
+  shift || true
+  local parent
+  for parent in "$@"; do
+    if [[ "$candidate" == "$parent" || "$candidate" == "$parent/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 git_current_branch() {
@@ -1138,6 +1161,10 @@ update_existing_install() {
 }
 
 create_venv_and_install_python_deps() {
+  if [[ $DRY_RUN -eq 1 && ! -f "$INSTALL_DIR/requirements.txt" ]]; then
+    log "DRY RUN: would install Python dependencies from $INSTALL_DIR/requirements.txt after source checkout."
+    return 0
+  fi
   [[ -f "$INSTALL_DIR/requirements.txt" ]] || die "requirements.txt not found in $INSTALL_DIR"
 
   if [[ -d "$VENV_DIR" && -z "$ROLLBACK_VENV_BACKUP" ]]; then
@@ -1208,6 +1235,10 @@ cleanup_deprecated_files() {
 }
 
 create_launcher() {
+  if [[ $DRY_RUN -eq 1 && ! -d "$INSTALL_DIR" ]]; then
+    log "DRY RUN: would write launcher to $LAUNCHER_PATH after source checkout."
+    return 0
+  fi
   [[ -d "$INSTALL_DIR" ]] || die "Install folder not found: $INSTALL_DIR"
   log "Preparing launcher at $LAUNCHER_PATH"
   if [[ -z "$ROLLBACK_LAUNCHER_BACKUP" ]]; then
@@ -1369,6 +1400,10 @@ install_pixmaps_icon() {
 }
 
 create_desktop_icon() {
+  if [[ $DRY_RUN -eq 1 && ! -d "$INSTALL_DIR" ]]; then
+    log "DRY RUN: would write desktop entry to $DESKTOP_ENTRY_PATH after source checkout."
+    return 0
+  fi
   [[ -d "$INSTALL_DIR" ]] || die "Install folder not found: $INSTALL_DIR"
 
   local icon_value="applications-utilities"
@@ -1457,8 +1492,18 @@ run_self_test() {
   log "Running post-install self-test..."
   if "$VENV_DIR/bin/python" - <<'PY'
 import importlib
+import os
+import tempfile
+from pathlib import Path
+
+temp_root = Path(tempfile.mkdtemp(prefix="freqinout-installer-selftest-"))
+os.environ["FREQINOUT_CONFIG_DIR"] = str(temp_root)
 importlib.import_module("freqinout.main")
-print("Self-test passed: freqinout.main import OK")
+from freqinout.core.settings_manager import SettingsManager
+
+SettingsManager()
+assert (temp_root / "config" / "freqinout.db").exists()
+print("Self-test passed: freqinout.main import and settings DB check OK")
 PY
   then
     log "Self-test passed."

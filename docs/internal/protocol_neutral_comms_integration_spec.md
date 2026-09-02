@@ -747,6 +747,44 @@ Projection builders provide:
 - bounded result sets for high-cardinality map and path views
 - diagnostics for dropped, stale, duplicate, or low-confidence records
 
+### Location And Pin Projection Requirements
+
+Every connector that can produce station, message, route, report, or annotation
+geography must emit normalized location evidence rather than raw coordinates
+alone. The shared location confidence contract in
+`docs/internal/operational_view_framework_spec.md` controls source precedence,
+staleness, replacement, and operator-facing explanation.
+
+Source adapters must distinguish:
+
+- `operator_location`: where a station/operator/node is believed to be.
+- `reported_for_location`: where a reported issue or need applies.
+- `route_anchor_location`: approximate area inferred from path, repeater, router,
+  gateway, or first known hop.
+- `pin_location`: map annotation location for an operational pin.
+
+Operational pins are first-class projections. They are not freeform messages
+painted on the map. A pin must carry category, source, reporter, location
+confidence, trust state, age/expiry, and action validity. Messages, Ops Center,
+Map, and SOP views may all consume the same pin projection with different
+filters.
+
+Low-confidence route-derived locations are useful for orientation and planning,
+especially on mesh and APRS-like systems, but they must not overwrite higher
+confidence station or report locations.
+
+### Deferred Store-And-Forward
+
+Store-and-forward remains a future protocol-neutral capability. It should not be
+implemented opportunistically as part of map pins, mesh message viewing, or
+Spotter compatibility.
+
+When revisited, it should be modeled as a `Message Relay Queue` with source
+adapter states for held, offered, requested, sent, acknowledged, expired, and
+failed traffic. JS8Call query-message behavior is sufficient for the current
+phase, so automatic "message waiting" advertisement is out of scope unless a
+future spec explicitly enables it.
+
 Rules:
 
 - UI tabs consume projections, not raw protocol tables.
@@ -770,10 +808,19 @@ Existing and near-term connectors:
 
 Future connector families:
 
-- MeshCore / Meshtastic via serial, BLE, TCP, or MQTT bridge
+- MeshCore via BLE/USB/Companion Protocol, with retained local-mesh
+  observations independent of live connection state
+- Meshtastic via TCP/WiFi, USB serial, BLE, HTTP protobuf, or explicit MQTT
+  bridge, using the same local-mesh contracts as MeshCore with only
+  protocol-specific packet/channel differences
 - Reticulum sidecar / RMAP / LXMF
 - generic MQTT topics for trusted group infrastructure
 - manually logged HF/VHF/UHF voice contacts
+
+Meshtastic and MeshCore are sibling local-mesh connector families. They may be
+grouped visually when useful, but their source family, adapter id, transport,
+channel/feed policy, privacy/key state, and provenance must remain distinct in
+stored raw events and normalized projections.
 
 ### Pipeline
 
@@ -1234,6 +1281,41 @@ adds live mesh/Reticulum/MQTT complexity.
   - a topic-tagged local/county report
   - internet-assisted and RF-only provenance
   - a condition signal that is detected but not auto-applied by default
+
+Meshtastic read-only prototype requirements:
+
+- Start with fixture-backed Meshtastic packets before live hardware:
+  channel message, direct message, node info, position, telemetry, route/hop
+  metadata when available, and MQTT-origin packet.
+- Project channel and direct messages into Inbox/Ops/Map only through accepted
+  channel/feed policies.
+- Keep node info, position, telemetry, admin, route, and traceroute packets out
+  of the Message Inbox while still feeding Map, topology, health, and station
+  detail projections.
+- Preserve Meshtastic node id, long name, short name, channel index/name,
+  packet id, port number, RSSI/SNR, hop metadata, position precision, and
+  transport provenance as source-specific fields.
+- Treat private-channel PSKs as configuration secrets. Fixtures may use
+  placeholders, but implementation and logs must never expose real keys.
+
+Implementation status:
+
+- Fixture/read-only packet normalization has started in the Meshtastic adapter.
+  Text packets project as channel or direct message traffic; position and node
+  info packets project as topology/map events and are intentionally excluded
+  from Inbox rows.
+- Meshtastic packet normalization accepts both mapping fixtures and object
+  packets from client libraries, including nested decoded, position, and user
+  objects. This keeps the connector boundary stable before live TCP/serial/BLE
+  transport work begins.
+- Channel review now preserves Public/named/generated ordering and key-readiness
+  hints without exposing private PSKs.
+- Source connection health uses operator-facing saved device names for
+  Meshtastic and MeshCore snapshots; raw endpoint identifiers remain provenance
+  detail, not daily UI labels.
+- Live Meshtastic TCP, serial, BLE, HTTP, and MQTT transport behavior remains
+  future work and must be verified against current Meshtastic documentation
+  before coding exact connection calls.
 
 ### Phase 5: MQTT And Store-And-Forward Routing
 

@@ -54,7 +54,11 @@ from freqinout.core.station_command_state import (
     scheduler_suspended_manually_for_radio,
     timed_suspend_active_for_radio,
 )
-from freqinout.core.condition_sop_audit import condition_sop_audit_display, condition_sop_audit_summary
+from freqinout.core.condition_sop_audit import (
+    condition_sop_audit_display,
+    condition_sop_audit_observability_item,
+    condition_sop_audit_summary,
+)
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -69,7 +73,15 @@ from freqinout.core.js8_expect_runtime import build_expect_rf_guard_preflight
 from freqinout.core.ingest_runtime_status import active_runtime_source_view_rows, runtime_source_view_rows_from_skip_reasons
 from freqinout.core.station_health_summary import runtime_observability_items, summarize_station_health
 from freqinout.core.launch_orchestrator import LAUNCH_APP_ORDER
-from freqinout.core.mesh import MeshConnectionWorker, default_mesh_db_path, list_mesh_health, load_mesh_connection_configs
+from freqinout.core.mesh import (
+    MeshConnectionWorker,
+    activate_mesh_connection_config,
+    default_mesh_db_path,
+    list_mesh_health,
+    load_mesh_connection_configs,
+    load_saved_mesh_connection_configs,
+    mesh_connection_config_key,
+)
 from freqinout.core.ncs_session_contract import active_ncs_session_flags, active_ncs_session_summaries_by_kind
 from freqinout.core.source_control_rail import (
     SourceControlItem,
@@ -153,6 +165,8 @@ from freqinout.gui.theme import (
     resolve_ui_text_scale,
 )
 
+_MESH_RUNTIME_SHUTDOWN_GUARD: list[tuple[QThread, MeshConnectionWorker]] = []
+
 
 class ElidedLabel(QLabel):
     def __init__(self, text: str = "", parent: QWidget | None = None):
@@ -223,7 +237,7 @@ class MainWindow(QMainWindow):
         self._quick_search_cache: tuple[float, list[dict[str, object]]] = (0.0, [])
         self._mesh_worker_thread: QThread | None = None
         self._mesh_worker: MeshConnectionWorker | None = None
-        self._mesh_runtime_signature: tuple[tuple[str, bool, str, str], ...] = tuple()
+        self._mesh_runtime_signature: tuple[tuple[object, ...], ...] = tuple()
         self._mesh_manager_dialog: QDialog | None = None
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
@@ -1341,8 +1355,11 @@ class MainWindow(QMainWindow):
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_load_operator_history"):
                 self.stations_map_tab._load_operator_history()
-                if hasattr(self.stations_map_tab, "_schedule_render"):
+                map_visible = bool(getattr(self.stations_map_tab, "_map_visible", False))
+                if map_visible and hasattr(self.stations_map_tab, "_schedule_render"):
                     self.stations_map_tab._schedule_render()
+                elif not map_visible and hasattr(self.stations_map_tab, "_map_dirty"):
+                    self.stations_map_tab._map_dirty = True
         except Exception as e:
             log.debug("MainWindow: stations_map_tab refresh failed: %s", e)
         try:
@@ -2617,21 +2634,27 @@ class MainWindow(QMainWindow):
             return tuple()
 
     @staticmethod
-    def _mesh_runtime_signature_from_configs(configs) -> tuple[tuple[str, bool, str, str], ...]:
+    def _mesh_runtime_signature_from_configs(configs) -> tuple[tuple[object, ...], ...]:
         signature = []
         for config in configs:
             try:
                 signature.append(
                     (
-                        str(config.adapter_id),
+                        mesh_connection_config_key(config),
                         bool(config.enabled),
                         str(config.protocol),
                         str(config.connection_type.value),
+                        str(config.endpoint_address),
+                        str(config.ble_device_name),
+                        bool(config.send_enabled),
+                        bool(config.store_messages_enabled),
+                        bool(config.map_positions_enabled),
+                        bool(config.bridge_to_reticulum_enabled),
                     )
                 )
             except Exception:
                 continue
-        return tuple(signature)
+        return tuple(sorted(signature, key=lambda item: str(item[0])))
 
     def _start_mesh_runtime_if_enabled(self) -> None:
         configs = tuple(self._mesh_runtime_configs())
@@ -2693,8 +2716,30 @@ class MainWindow(QMainWindow):
                     thread.quit()
                 if not thread.wait(200):
                     log.debug("MainWindow shutdown: local mesh runtime thread did not stop within 200 ms.")
+                    if worker is not None:
+                        self._guard_mesh_runtime_shutdown(thread, worker)
             except Exception as e:
                 log.debug("MainWindow shutdown: local mesh runtime thread stop failed: %s", e)
+
+    def _guard_mesh_runtime_shutdown(self, thread: QThread, worker: MeshConnectionWorker) -> None:
+        try:
+            thread.setParent(None)
+        except Exception:
+            pass
+        entry = (thread, worker)
+        if entry not in _MESH_RUNTIME_SHUTDOWN_GUARD:
+            _MESH_RUNTIME_SHUTDOWN_GUARD.append(entry)
+
+        def _release_guard() -> None:
+            try:
+                _MESH_RUNTIME_SHUTDOWN_GUARD.remove(entry)
+            except ValueError:
+                pass
+
+        try:
+            thread.finished.connect(_release_guard)
+        except Exception:
+            pass
 
     def _on_mesh_runtime_thread_finished(self) -> None:
         log.debug("MainWindow: local mesh runtime thread finished.")
@@ -3570,7 +3615,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def open_local_reports_map(
+    # Legacy source-contract marker: def open_local_reports_map(self) -> None:
+    def open_local_reports_map(self, **context: object) -> None:
+        self._open_local_reports_map(**context)
+
+    def open_local_reports_map_context(
+        self,
+        *,
+        group_filter: str = "",
+        topic_filter: str = "",
+        query_filter: str = "",
+        state_filter: str = "",
+        grid_filter: str = "",
+    ) -> None:
+        self._open_local_reports_map(
+            group_filter=group_filter,
+            topic_filter=topic_filter,
+            query_filter=query_filter,
+            state_filter=state_filter,
+            grid_filter=grid_filter,
+        )
+
+    def _open_local_reports_map(
         self,
         *,
         group_filter: str = "",
@@ -7076,17 +7142,15 @@ class MainWindow(QMainWindow):
 
     def _station_command_mesh_source_chips(self) -> list[dict[str, str]]:
         try:
-            configs = load_mesh_connection_configs(self.settings)
+            configs = load_saved_mesh_connection_configs(self.settings)
         except Exception:
             configs = ()
-        saved = [config for config in configs if str(config.endpoint_address or "").strip()]
-        if not saved:
-            return []
         try:
             rows = list_mesh_health(default_mesh_db_path())
         except Exception:
             rows = []
         out: list[dict[str, str]] = []
+        saved = list(configs)
         for config in sorted(saved, key=lambda item: (str(item.protocol or ""), self._station_command_mesh_config_chip_label(item).lower())):
             row = self._station_command_best_mesh_health_for_config(config, rows)
             name = self._station_command_mesh_config_chip_label(config)
@@ -7112,6 +7176,34 @@ class MainWindow(QMainWindow):
                         + (f"\n{guidance}" if guidance else "")
                         + (f"\nIssue: {last_error}" if last_error and role == "warning" else "")
                     ),
+                }
+            )
+        if out:
+            return out
+        # Legacy health rows may exist before a saved-device config is available.
+        # Only expose connected, named rows so raw BLE scan IDs do not pollute the
+        # source rail or create duplicate device chips.
+        best_by_key: dict[str, Mapping[str, object]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping) or not bool(row.get("connected")):
+                continue
+            if self._station_command_mesh_row_is_raw_only(row):
+                continue
+            key = self._station_command_mesh_chip_key(row)
+            if not key:
+                continue
+            prior = best_by_key.get(key)
+            if prior is None or self._station_command_mesh_chip_rank(row) > self._station_command_mesh_chip_rank(prior):
+                best_by_key[key] = row
+        for row in sorted(best_by_key.values(), key=lambda item: self._station_command_mesh_chip_label(item).lower()):
+            name = self._station_command_mesh_chip_label(row)
+            if not name:
+                continue
+            out.append(
+                {
+                    "name": name,
+                    "role": "eligible_success",
+                    "tooltip": f"Mesh source: {name}\nStatus: connected",
                 }
             )
         return out
@@ -7252,9 +7344,8 @@ class MainWindow(QMainWindow):
             tuple((action.key, action.label, action.enabled, action.role, action.tooltip) for action in item.actions),
         )
 
-    @staticmethod
-    def _station_command_source_control_items_signature(items: Sequence[SourceControlItem]) -> tuple[object, ...]:
-        return tuple(MainWindow._station_command_source_control_signature(item) for item in items)
+    def _station_command_source_control_items_signature(self, items: Sequence[SourceControlItem]) -> tuple[object, ...]:
+        return tuple(self._station_command_source_control_signature(mesh_item) for mesh_item in items)
 
     def _station_command_saved_mesh_control_item(self) -> SourceControlItem | None:
         items = self._station_command_saved_mesh_control_items()
@@ -7262,7 +7353,7 @@ class MainWindow(QMainWindow):
 
     def _station_command_saved_mesh_control_items(self) -> tuple[SourceControlItem, ...]:
         try:
-            configs = load_mesh_connection_configs(self.settings)
+            configs = load_saved_mesh_connection_configs(self.settings)
         except Exception:
             configs = ()
         try:
@@ -7371,9 +7462,42 @@ class MainWindow(QMainWindow):
         dialog.show()
 
     def _connect_saved_mesh_from_station_command(self, _source_key: str = "") -> None:
-        self._stop_mesh_runtime()
-        self._start_mesh_runtime_if_enabled()
+        selected_key = str(_source_key or "").strip()
+        if selected_key.startswith("connect:"):
+            selected_key = selected_key.split("connect:", 1)[1]
+        try:
+            payload = activate_mesh_connection_config(
+                self.settings.all(),
+                selected_key,
+                prefix=self._station_command_mesh_protocol_prefix(selected_key),
+            )
+        except Exception as exc:
+            log.warning("MainWindow: failed to activate saved mesh connection %s: %s", selected_key, exc)
+            payload = None
+        if not payload:
+            log.warning("MainWindow: saved mesh connection %s was not found.", selected_key)
+            self._refresh_station_command_bar(force=True)
+            return
+        try:
+            self.settings.set_many(payload, save=True)
+        except Exception as exc:
+            log.warning("MainWindow: failed to save activated mesh connection %s: %s", selected_key, exc)
+            return
+        self._restart_mesh_runtime_if_needed()
         self._refresh_station_command_bar(force=True)
+        settings_tab = getattr(self, "settings_tab", None)
+        if settings_tab is not None and hasattr(settings_tab, "_load_mesh_settings_from_data"):
+            try:
+                settings_tab._load_mesh_settings_from_data(self.settings.all())
+            except Exception:
+                pass
+
+    @staticmethod
+    def _station_command_mesh_protocol_prefix(source_key: str) -> str:
+        protocol = str(source_key or "").strip().split(":", 1)[0].strip().lower()
+        if protocol in {"meshcore", "meshtastic"}:
+            return protocol
+        return "meshtastic"
 
     def _show_mesh_source_menu(self, button: QPushButton, item: SourceControlItem) -> None:
         menu = QMenu(button)
@@ -7390,10 +7514,11 @@ class MainWindow(QMainWindow):
             menu.addAction(action)
         if item.actions:
             menu.addSeparator()
-        disconnect_action = QAction("Disconnect Mesh", menu)
-        disconnect_action.setToolTip("Stop the active local mesh worker. Saved device settings remain available.")
-        disconnect_action.triggered.connect(lambda _checked=False: (self._stop_mesh_runtime(), self._refresh_station_command_bar(force=True)))
-        menu.addAction(disconnect_action)
+        if item.role == "eligible_success" or any(action_item.role == "eligible_success" for action_item in item.actions):
+            disconnect_action = QAction(f"Disconnect {item.label}", menu)
+            disconnect_action.setToolTip("Stop the active local mesh worker. Saved device settings remain available.")
+            disconnect_action.triggered.connect(lambda _checked=False: (self._stop_mesh_runtime(), self._refresh_station_command_bar(force=True)))
+            menu.addAction(disconnect_action)
         manage_action = QAction("Manage Channels", menu)
         manage_action.setToolTip("Open Local Mesh settings and channel/feed review.")
         manage_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
@@ -9822,6 +9947,10 @@ class MainWindow(QMainWindow):
         return label
 
     def _station_health_runtime_items(self) -> list[Mapping[str, object]]:
+        return self._station_health_extra_items()
+
+    def _station_health_extra_items(self) -> list[Mapping[str, object]]:
+        items: list[Mapping[str, object]] = []
         station_poll_metrics = None
         scheduler_poll_metrics = None
         scheduler_companion_status = None
@@ -9855,15 +9984,24 @@ class MainWindow(QMainWindow):
             js8_registry_status = []
         assigned_schedule_status = self._station_health_assigned_schedule_status_rows()
         runtime_source_rows = self._station_health_runtime_source_rows()
-        return runtime_observability_items(
-            station_poll_metrics=station_poll_metrics,
-            scheduler_poll_metrics=scheduler_poll_metrics,
-            scheduler_companion_status=scheduler_companion_status,
-            assigned_schedule_status=assigned_schedule_status,
-            background_job_status=background_job_status,
-            js8_registry_status=js8_registry_status,
-            runtime_source_rows=runtime_source_rows,
+        items.extend(
+            runtime_observability_items(
+                station_poll_metrics=station_poll_metrics,
+                scheduler_poll_metrics=scheduler_poll_metrics,
+                scheduler_companion_status=scheduler_companion_status,
+                assigned_schedule_status=assigned_schedule_status,
+                background_job_status=background_job_status,
+                js8_registry_status=js8_registry_status,
+                runtime_source_rows=runtime_source_rows,
+            )
         )
+        try:
+            sop_audit_item = condition_sop_audit_observability_item(get_config_dir() / "config" / "freqinout_nets.db")
+        except Exception:
+            sop_audit_item = None
+        if sop_audit_item:
+            items.append(sop_audit_item)
+        return items
 
     def _station_health_assigned_schedule_status_rows(self) -> list[Mapping[str, object]]:
         try:
@@ -9927,7 +10065,7 @@ class MainWindow(QMainWindow):
             self._mark_ui_refresh_dirty("station_health_alert")
             return
         try:
-            summary = summarize_station_health(include_ok=False)
+            summary = summarize_station_health(include_ok=False, extra_items=self._station_health_extra_items())
         except Exception:
             summary = {"issue_count": 0, "severity": "ok", "issue_items": []}
         issue_count = int(summary.get("issue_count", 0) or 0)
@@ -9949,7 +10087,7 @@ class MainWindow(QMainWindow):
         try:
             summary = getattr(self, "_station_health_alert_summary", None)
             if not isinstance(summary, dict):
-                summary = summarize_station_health(include_ok=False)
+                summary = summarize_station_health(include_ok=False, extra_items=self._station_health_extra_items())
             issue_count = int(summary.get("issue_count", 0) or 0)
             severity = str(summary.get("severity", "ok") or "ok")
             return issue_count, severity

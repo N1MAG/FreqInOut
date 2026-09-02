@@ -11,20 +11,21 @@ The installer script is:
 
 ## 1) Fast path (recommended)
 
-Open a terminal and run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqInOut_linux.sh -o install_FreqInOut_linux.sh
-bash install_FreqInOut_linux.sh
-```
-
-If you already cloned the repo:
+From a checked-out multi-rig WIP repo, open a terminal and run:
 
 ```bash
 bash install_FreqInOut_linux.sh
 ```
 
-When started with no arguments, the installer opens a guided prompt flow.
+If you still need the WIP repo locally:
+
+```bash
+git clone --branch "wip/private-testing-multi-rig-1.2.3-not-ready" git@github.com:N1MAG/FreqInOut-internal-testing.git FreqInOut-multi-rig
+cd FreqInOut-multi-rig
+bash install_FreqInOut_linux.sh
+```
+
+When started with no arguments, the installer opens a guided prompt flow. In this WIP branch, the default repository is `git@github.com:N1MAG/FreqInOut-internal-testing.git` and the default branch is `wip/private-testing-multi-rig-1.2.3-not-ready`.
 
 ---
 
@@ -93,13 +94,13 @@ bash install_FreqInOut_linux.sh --dry-run
 Use a specific repo:
 
 ```bash
-bash install_FreqInOut_linux.sh --repo "https://github.com/ORG/FreqInOut.git"
+bash install_FreqInOut_linux.sh --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git"
 ```
 
 Use a specific branch:
 
 ```bash
-bash install_FreqInOut_linux.sh --branch "main"
+bash install_FreqInOut_linux.sh --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
 ```
 
 Use channel shortcut:
@@ -112,9 +113,7 @@ Install a private multi-rig WIP build for isolated testing:
 
 ```bash
 bash install_FreqInOut_linux.sh \
-  --dir "$HOME/FreqInOut-multi-rig-test" \
-  --repo "git@github.com:N1MAG/FreqInOut-internal-testing.git" \
-  --branch "wip/private-testing-multi-rig-1.2.3-not-ready"
+  --dir "$HOME/FreqInOut-multi-rig-test"
 ```
 
 Use a separate install directory for this WIP branch until upgrade testing is complete. The branch name is intentionally treated as an opaque test-channel name even when the app version advances to 2.0.0.
@@ -154,7 +153,6 @@ Run FreqInOut:
 Uninstall:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/uninstall_FreqInOut_linux.sh -o uninstall_FreqInOut_linux.sh
 bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"
 ```
 
@@ -185,6 +183,7 @@ If internet checks fail:
 The installer includes:
 - single-instance lock (prevents concurrent runs)
 - running-app detection before in-place update
+- pre-update backup coverage for Linux single-rig and multi-rig config roots under `~/.freqinout`
 - dirty git worktree protection (prompt/policy)
 - non-git folder handling (replace/skip/fail)
 - rollback points for launcher/desktop/icon/venv on failure

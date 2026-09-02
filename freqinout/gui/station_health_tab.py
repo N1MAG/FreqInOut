@@ -19,8 +19,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from freqinout.core.config_paths import get_config_dir
-from freqinout.core.condition_sop_audit import condition_sop_audit_observability_item
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_health_summary import ScopeResolver, summarize_station_health
 from freqinout.gui.help_registry import resolve_help_host
@@ -274,12 +272,6 @@ class StationHealthTab(QWidget):
                 runtime_items = list(self._runtime_item_provider() or [])
             except Exception:
                 runtime_items = []
-        try:
-            sop_audit_item = condition_sop_audit_observability_item(get_config_dir() / "config" / "freqinout_nets.db")
-        except Exception:
-            sop_audit_item = None
-        if sop_audit_item:
-            runtime_items.append(sop_audit_item)
         self._runtime_source_rows = []
         if self._runtime_source_provider is not None:
             try:

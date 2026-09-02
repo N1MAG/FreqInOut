@@ -1753,7 +1753,7 @@ def test_active_inbox_scope_summary_is_core_operator_text() -> None:
 
     assert "Focus Spotter" in summary
     assert "Groups MAGNET, MR08, MR09 +1" in summary
-    assert "Sources CommStat, JS8Call, JS8Spotter +1" in summary
+    assert "Sources CommStat, FIOSpotter, JS8Call +1" in summary
     assert "Older than 2 weeks" in summary
     assert 'Search "wildfire"' in summary
     assert "Status Action Needed" in summary

@@ -212,8 +212,12 @@ from freqinout.core.mesh import (
     discover_serial_ports,
     list_mesh_health,
     list_mesh_channel_policies,
+    load_mesh_connection_configs,
+    load_saved_mesh_connection_configs,
     merge_mesh_connection_library,
     mesh_ingest_readiness,
+    mesh_connection_active_settings_payload,
+    normalize_mesh_connection_config,
     serialize_mesh_connection_library,
     stage_mesh_channel_policies_from_channels,
     upsert_mesh_channel_policy,
@@ -341,6 +345,21 @@ from freqinout.gui.theme import (
     fit_combo_box_to_contents,
 )
 from freqinout.version import __version__
+
+
+def _theme_appears_dark(theme: Mapping[str, str]) -> bool:
+    text = str(theme.get("bg") or theme.get("window_bg") or "").strip().lstrip("#")
+    if len(text) not in (3, 6):
+        return False
+    if len(text) == 3:
+        text = "".join(ch * 2 for ch in text)
+    try:
+        red = int(text[0:2], 16)
+        green = int(text[2:4], 16)
+        blue = int(text[4:6], 16)
+    except ValueError:
+        return False
+    return ((0.2126 * red) + (0.7152 * green) + (0.0722 * blue)) / 255.0 < 0.45
 
 
 def _vault_location_requires_code_badge(
@@ -5494,9 +5513,10 @@ class SettingsTab(QWidget):
         mesh_form.addRow("USB Serial:", self.mesh_serial_row)
 
         self.mesh_ble_row = QWidget()
-        mesh_ble_layout = QHBoxLayout(self.mesh_ble_row)
+        mesh_ble_layout = QGridLayout(self.mesh_ble_row)
         mesh_ble_layout.setContentsMargins(0, 0, 0, 0)
-        mesh_ble_layout.setSpacing(6)
+        mesh_ble_layout.setHorizontalSpacing(8)
+        mesh_ble_layout.setVerticalSpacing(6)
         self.mesh_ble_device_id_edit = QLineEdit()
         self.mesh_ble_device_id_edit.setPlaceholderText("Saved BLE device id")
         self.mesh_ble_device_name_edit = QLineEdit()
@@ -5506,16 +5526,20 @@ class SettingsTab(QWidget):
         self.mesh_ble_timeout_spin.setValue(20)
         self.mesh_ble_timeout_spin.setSuffix(" sec")
         self.mesh_ble_timeout_spin.setToolTip("BLE scan timeout.")
-        self.mesh_ble_timeout_spin.setMinimumWidth(105)
-        self.mesh_ble_timeout_spin.setMaximumWidth(130)
+        self.mesh_ble_timeout_spin.setMinimumWidth(140)
+        self.mesh_ble_timeout_spin.setMaximumWidth(170)
         self.mesh_ble_scan_btn = QPushButton("Scan MeshCore")
         self.mesh_ble_scan_btn.setToolTip("Look for nearby MeshCore BLE devices and choose one for this connection.")
         self.mesh_ble_scan_btn.clicked.connect(self._on_mesh_ble_scan_clicked)
-        mesh_ble_layout.addWidget(self.mesh_ble_device_id_edit, 1)
-        mesh_ble_layout.addWidget(self.mesh_ble_device_name_edit, 1)
-        mesh_ble_layout.addWidget(QLabel("Scan timeout"))
-        mesh_ble_layout.addWidget(self.mesh_ble_timeout_spin)
-        mesh_ble_layout.addWidget(self.mesh_ble_scan_btn)
+        self.mesh_ble_device_id_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mesh_ble_device_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        mesh_ble_layout.addWidget(self.mesh_ble_device_id_edit, 0, 0, 1, 2)
+        mesh_ble_layout.addWidget(self.mesh_ble_device_name_edit, 0, 2, 1, 2)
+        mesh_ble_layout.addWidget(QLabel("Scan timeout"), 1, 0)
+        mesh_ble_layout.addWidget(self.mesh_ble_timeout_spin, 1, 1)
+        mesh_ble_layout.addWidget(self.mesh_ble_scan_btn, 1, 2)
+        mesh_ble_layout.setColumnStretch(0, 1)
+        mesh_ble_layout.setColumnStretch(2, 1)
         mesh_form.addRow("BLE:", self.mesh_ble_row)
         self.mesh_ble_results_row = QWidget()
         mesh_ble_results_layout = QHBoxLayout(self.mesh_ble_results_row)
@@ -5609,8 +5633,9 @@ class SettingsTab(QWidget):
         mesh_policy_header.setSectionResizeMode(10, QHeaderView.Stretch)
         mesh_channels_layout.addWidget(self.mesh_channel_policy_table)
 
-        mesh_channel_actions = QHBoxLayout()
-        mesh_channel_actions.setSpacing(8)
+        self.mesh_channel_actions_layout = QGridLayout()
+        self.mesh_channel_actions_layout.setHorizontalSpacing(8)
+        self.mesh_channel_actions_layout.setVerticalSpacing(8)
         self.mesh_stage_default_channels_btn = QPushButton("Stage Public + Direct")
         self.mesh_stage_default_channels_btn.setToolTip(
             "Create Public and Direct channel policies for this mesh connection so you can review them before use."
@@ -5641,20 +5666,27 @@ class SettingsTab(QWidget):
         self.mesh_category_ignore_btn.clicked.connect(lambda: self._set_selected_mesh_channel_category("ignore"))
         self.mesh_refresh_channels_btn = QPushButton("Refresh Review")
         self.mesh_refresh_channels_btn.clicked.connect(self._refresh_mesh_channel_table)
-        for button in (
-            self.mesh_stage_default_channels_btn,
-            self.mesh_add_private_channel_btn,
-            self.mesh_accept_channels_btn,
-            self.mesh_mark_joined_btn,
-            self.mesh_ignore_channels_btn,
-            self.mesh_category_auto_btn,
-            self.mesh_category_social_btn,
-            self.mesh_category_ignore_btn,
-            self.mesh_refresh_channels_btn,
-        ):
-            mesh_channel_actions.addWidget(button)
-        mesh_channel_actions.addStretch(1)
-        mesh_channels_layout.addLayout(mesh_channel_actions)
+        mesh_channel_action_rows = (
+            (
+                self.mesh_stage_default_channels_btn,
+                self.mesh_add_private_channel_btn,
+                self.mesh_accept_channels_btn,
+                self.mesh_refresh_channels_btn,
+            ),
+            (
+                self.mesh_mark_joined_btn,
+                self.mesh_ignore_channels_btn,
+                self.mesh_category_auto_btn,
+                self.mesh_category_social_btn,
+                self.mesh_category_ignore_btn,
+            ),
+        )
+        for row_index, buttons in enumerate(mesh_channel_action_rows):
+            for column_index, button in enumerate(buttons):
+                button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+                self.mesh_channel_actions_layout.addWidget(button, row_index, column_index)
+        self.mesh_channel_actions_layout.setColumnStretch(5, 1)
+        mesh_channels_layout.addLayout(self.mesh_channel_actions_layout)
         mesh_layout.addWidget(mesh_channels_group)
 
         mesh_actions = QHBoxLayout()
@@ -8088,8 +8120,8 @@ class SettingsTab(QWidget):
         self._autofill_dismiss_buttons["varac"] = self.varac_autofill_dismiss_btn
         varac_autofill_actions_row.addWidget(self.varac_autofill_dismiss_btn)
         varac_paths_v.addLayout(varac_autofill_status_row)
-        varac_paths_v.addWidget(varac_autofill_actions_widget)
-        varac_paths_v.addWidget(self._make_autofill_review_table("varac"))
+        varac_v.addWidget(varac_autofill_actions_widget)
+        varac_v.addWidget(self._make_autofill_review_table("varac"))
 
         varac_cluster_mode_row = QHBoxLayout()
         varac_cluster_mode_row.setContentsMargins(0, 0, 0, 0)
@@ -9977,39 +10009,30 @@ class SettingsTab(QWidget):
         )
 
     def _mesh_settings_payload_from_ui(self) -> Dict[str, Any]:
-        config = self._mesh_config_from_ui()
+        config = normalize_mesh_connection_config(self._mesh_config_from_ui())
         try:
             existing_values = self.settings.all()
         except Exception:
             existing_values = {}
         library = merge_mesh_connection_library(existing_values, config)
-        return {
-            "meshtastic_adapter_id": config.adapter_id,
-            "meshtastic_protocol": config.protocol,
-            "meshtastic_enabled": config.enabled,
-            "meshtastic_connection_type": config.connection_type.value,
-            "meshtastic_tcp_host": config.tcp_host,
-            "meshtastic_tcp_port": config.tcp_port,
-            "meshtastic_serial_port": config.serial_port,
-            "meshtastic_serial_baud": config.serial_baud,
-            "meshtastic_ble_device_id": config.ble_device_id,
-            "meshtastic_ble_device_name": config.ble_device_name,
-            "meshtastic_ble_scan_timeout_sec": config.ble_scan_timeout_sec,
-            "meshtastic_http_base_url": config.http_base_url,
-            "meshtastic_mqtt_enabled": config.mqtt_enabled,
-            "meshtastic_mqtt_broker": config.mqtt_broker,
-            "meshtastic_mqtt_topic_root": config.mqtt_topic_root,
-            "meshtastic_send_enabled": config.send_enabled,
-            "meshtastic_store_messages_enabled": config.store_messages_enabled,
-            "meshtastic_map_positions_enabled": config.map_positions_enabled,
-            "meshtastic_bridge_to_reticulum_enabled": config.bridge_to_reticulum_enabled,
-            "mesh_connection_library": serialize_mesh_connection_library(library),
-        }
+        prefix = str(config.protocol or "meshtastic").strip().lower()
+        if prefix not in {"meshcore", "meshtastic"}:
+            prefix = "meshtastic"
+        payload = mesh_connection_active_settings_payload(config, prefix=prefix)
+        payload["mesh_connection_library"] = serialize_mesh_connection_library(library)
+        return payload
 
     def _load_mesh_settings_from_data(self, data: Mapping[str, Any]) -> None:
         if not hasattr(self, "mesh_enabled_chk"):
             return
-        config = MeshConnectionConfig.from_mapping(data)
+        runtime_configs = load_mesh_connection_configs(data)
+        saved_configs = load_saved_mesh_connection_configs(data)
+        config = next((candidate for candidate in runtime_configs if candidate.enabled), None)
+        if config is None:
+            config = next(iter(saved_configs), None)
+        if config is None:
+            config = MeshConnectionConfig.from_mapping(data)
+        config = normalize_mesh_connection_config(config)
         self.mesh_enabled_chk.setChecked(config.enabled)
         self._set_combo_data_if_present(self.mesh_protocol_combo, config.protocol, fallback="meshtastic")
         self.mesh_adapter_id_edit.setText(config.adapter_id)
@@ -10079,7 +10102,7 @@ class SettingsTab(QWidget):
 
     def _mesh_channel_policy_brushes(self, review_state: str) -> tuple[QBrush, QBrush]:
         theme = resolve_theme(self.settings)
-        is_dark = theme.get("bg") == "#0F1216"
+        is_dark = _theme_appears_dark(theme)
         state = str(review_state or "").strip().lower()
         if is_dark:
             colors = {
@@ -10508,7 +10531,7 @@ class SettingsTab(QWidget):
         if not isinstance(indicator, QLabel):
             return
         theme = resolve_theme(self.settings)
-        is_dark = theme.get("bg") == "#0F1216"
+        is_dark = _theme_appears_dark(theme)
         if not config.enabled:
             indicator.setText("Disconnected")
             muted = theme.get("text_muted", "#5b6b78")

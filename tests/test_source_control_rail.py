@@ -55,6 +55,38 @@ def test_mesh_source_control_uses_saved_device_names_not_raw_ids() -> None:
     assert item.role == "eligible_success"
     assert "97C92879" not in item.tooltip
     assert tuple(action.label for action in item.actions) == ("Connect: N1MAG MOBL1",)
+    assert tuple(action.key for action in item.actions) == (
+        "connect:meshcore:ble:97c92879-047e-fea8-7a11-8a2ee82b381d",
+    )
+
+
+def test_mesh_source_control_ignores_health_rows_from_other_protocols() -> None:
+    item = source_control_mesh_item_from_configs(
+        (
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl1",
+                protocol="meshcore",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_name="MeshCore-N1MAG MOBL1",
+            ),
+        ),
+        (
+            {
+                "adapter_id": "meshcore-mobl1",
+                "transport": "meshtastic",
+                "device_name": "MeshCore-N1MAG MOBL1",
+                "connected": False,
+                "last_error": "Meshtastic Python package is not installed",
+                "lifecycle_state": "config_error",
+            },
+        ),
+    )
+
+    assert item is not None
+    assert item.label == "MeshCore"
+    assert item.role == "muted"
+    assert "needs attention" not in item.tooltip
 
 
 def test_mesh_source_control_aggregates_multiple_saved_sources() -> None:
@@ -92,6 +124,10 @@ def test_mesh_source_control_aggregates_multiple_saved_sources() -> None:
     assert tuple(action.label for action in item.actions) == (
         "Connect: N1MAG MOBL1",
         "Connect: N1MAG MOBL2",
+    )
+    assert tuple(action.key for action in item.actions) == (
+        "connect:meshcore:ble:meshcore-n1mag mobl1",
+        "connect:meshcore:ble:meshcore-n1mag mobl2",
     )
 
 

@@ -12,7 +12,7 @@ from freqinout.core.sitrep_metadata import parse_filter_subtype_label
 
 MESSAGE_SOURCE_LABELS = {
     "js8": "JS8Call",
-    "spotter": "JS8Spotter",
+    "spotter": "FIOSpotter",
     "varac": "VarAC",
     "flmsg": "FLMSG",
     "flamp": "FLAmp",

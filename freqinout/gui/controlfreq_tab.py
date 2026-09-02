@@ -4365,8 +4365,13 @@ class ControlFreqTab(QWidget):
         map_context = map_context_from_mapping(context)
         host = self.window()
         source_family = map_context.source_family
-        if source_family == "local_report" and hasattr(host, "open_local_reports_map"):
-            host.open_local_reports_map(**map_context.as_map_kwargs())
+        if source_family == "local_report" and hasattr(host, "open_local_reports_map_context"):
+            host.open_local_reports_map_context(**map_context.as_map_kwargs())
+        elif source_family == "local_report" and hasattr(host, "open_local_reports_map"):
+            try:
+                host.open_local_reports_map(**map_context.as_map_kwargs())
+            except TypeError:
+                host.open_local_reports_map()
         elif hasattr(host, "open_spotter_map"):
             host.open_spotter_map(**map_context.as_map_kwargs())
 

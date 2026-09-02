@@ -95,3 +95,20 @@ def test_mesh_health_disabled_projects_disabled_lifecycle() -> None:
 
     assert snapshot.lifecycle_state == SOURCE_CONNECTION_DISABLED
     assert snapshot.attention is False
+
+
+def test_mesh_connection_snapshot_keeps_protocol_family_and_saved_name() -> None:
+    snapshot = source_connection_from_mesh_health(
+        {
+            "adapter_id": "meshtastic-mobile",
+            "transport": "meshtastic",
+            "device_name": "Meshtastic Pocket Node",
+            "enabled": True,
+            "connected": True,
+            "updated_utc": "2026-09-01T11:59:50+00:00",
+        },
+        now_utc=NOW,
+    )
+
+    assert snapshot.source_family == "meshtastic"
+    assert snapshot.display_name == "Meshtastic Pocket Node"

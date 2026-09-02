@@ -717,9 +717,10 @@ def test_qru_checkins_are_saved_and_imported_on_end_net(monkeypatch, tmp_path):
     tab.show()
     app.processEvents()
     try:
-        tab.main_text.setPlainText("K1AAA / Alice / CO\n")
-        tab.qru_text.setPlainText("K2BBB / Bob / AZ\n")
-        tab.late_text.setPlainText("K3CCC / Carol / NM\n")
+        monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+        tab._roster_append_row("K1AAA", "Alice", "CO", "", "TFC")
+        tab._roster_append_row("K2BBB", "Bob", "AZ", "", "QRU")
+        tab._roster_append_row("K3CCC", "Carol", "NM", "", "LATE")
 
         main_path, qru_path, late_path = tab._ensure_checkin_files()
         created_names = {path.name for path in Path(main_path).parent.iterdir() if path.is_file()}
@@ -727,17 +728,16 @@ def test_qru_checkins_are_saved_and_imported_on_end_net(monkeypatch, tmp_path):
         assert not {"main_checkins.txt", "qru_checkins.txt", "new-late_checkins.txt", "all_checkins.txt"} & created_names
         tab._save_checkins()
 
-        assert Path(qru_path).read_text(encoding="utf-8") == tab.qru_text.toPlainText()
-        assert Path(main_path).read_text(encoding="utf-8") == tab.main_text.toPlainText()
-        assert Path(late_path).read_text(encoding="utf-8") == tab.late_text.toPlainText()
+        assert Path(qru_path).read_text(encoding="utf-8") == "K2BBB / Bob / AZ"
+        assert Path(main_path).read_text(encoding="utf-8") == "K1AAA / Alice / CO"
+        assert Path(late_path).read_text(encoding="utf-8") == "K3CCC / Carol / NM"
 
-        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
-        monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
         monkeypatch.setattr(tab, "_bump_operator_history", lambda entries: None)
+        monkeypatch.setattr(tab, "_confirm_end_net", lambda: (True, False))
         tab._net_in_progress = True
         tab._end_net()
 
-        assert {entry["callsign"] for entry in captured_entries} == {"K1AAA", "K2BBB"}
+        assert {entry["callsign"] for entry in captured_entries} == {"K1AAA", "K2BBB", "K3CCC"}
     finally:
         tab.deleteLater()
 

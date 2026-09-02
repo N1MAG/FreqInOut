@@ -8,6 +8,7 @@ from freqinout.core.observation_projection import (
     observation_from_message_intelligence,
     observation_from_rf_pin,
 )
+from freqinout.core.rf_pins import operational_pin_from_message_intelligence
 
 
 def test_message_observation_keeps_intelligence_advisory_not_authorized() -> None:
@@ -37,7 +38,10 @@ def test_message_observation_keeps_intelligence_advisory_not_authorized() -> Non
     assert obs.operator_attention is True
     assert obs.route_eligible is False
     assert obs.publish_authorized is False
-    assert json.loads(obs.provenance_json)["routing_candidate"] is True
+    provenance = json.loads(obs.provenance_json)
+    assert provenance["routing_candidate"] is True
+    assert provenance["location_confidence_record"]["location_kind"] == "structured_report"
+    assert provenance["location_confidence_record"]["explanation"] == "Spotter report grid or state"
 
 
 def test_map_eligibility_requires_enabled_layer_and_mappable_location() -> None:
@@ -182,4 +186,34 @@ def test_rf_pin_projection_is_mappable_but_not_routing_authorized() -> None:
     map_status = explain_map_eligibility(obs, layer_enabled=True)
     assert map_status.allowed is True
     assert "location:grid" in map_status.reasons
-    assert json.loads(obs.provenance_json)["source_type"] == "rf_pin"
+    provenance = json.loads(obs.provenance_json)
+    assert provenance["source_type"] == "rf_pin"
+    assert provenance["pin_type"] == "comms"
+    assert provenance["location_confidence_record"]["location_kind"] == "grid4"
+
+
+def test_spotter_intelligence_can_build_operational_pin_candidate() -> None:
+    info = analyze_spotter_text(
+        "F!701 TO[@MAGNET] FR[W0IFM] ST[MO] GR[EM48EQ] NA[Wildfire evacuation update]",
+        form_name="MCF701 Field Report",
+    )
+
+    pin = operational_pin_from_message_intelligence(info, source_ref="spotter:42", created_by="N1MAG")
+
+    assert pin is not None
+    assert pin["pin_type"] == "hazard"
+    assert pin["grid"] == "EM48EQ"
+    assert pin["group"] == "@MAGNET"
+    assert pin["created_by"] == "N1MAG"
+
+
+def test_operational_pin_candidate_requires_receive_gate_and_location() -> None:
+    info = analyze_spotter_text("F!701 TO[@MAGNET] FR[W0IFM] NA[Fire update]")
+
+    assert operational_pin_from_message_intelligence(info, source_ref="spotter:43") is None
+    info_with_location = analyze_spotter_text("F!701 TO[@MAGNET] FR[W0IFM] GR[EM48EQ] NA[Fire update]")
+    assert operational_pin_from_message_intelligence(
+        info_with_location,
+        source_ref="spotter:44",
+        receive_enabled=False,
+    ) is None

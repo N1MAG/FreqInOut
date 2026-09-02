@@ -239,8 +239,11 @@ class JS8RxHub(QObject):
     def shutdown(self) -> None:
         try:
             timer = getattr(self, "_timer", None)
-            if timer is not None and timer.isActive():
-                timer.stop()
+            if timer is not None:
+                if timer.isActive():
+                    timer.stop()
+                timer.deleteLater()
+                self._timer = None
         except Exception:
             pass
         self._detach_api_listener()

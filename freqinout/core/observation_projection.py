@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
 from freqinout.core.condition_alerts import ConditionAlertMatch
+from freqinout.core.location_confidence import location_evidence_from_values, location_evidence_to_provenance
 from freqinout.core.message_intelligence import MessageIntelligence
 
 
@@ -89,6 +90,16 @@ def observation_from_message_intelligence(
         "routing_candidate": info.routing_candidate,
         "routing_reasons": list(info.routing_reasons),
     }
+    location_evidence = location_evidence_from_values(
+        grid=info.grid,
+        state=info.state,
+        location_kind=_message_location_kind(source),
+        source_family=source,
+        source_ref=ref,
+        observed_utc=_clean(received_utc or event_utc or info.date_summary),
+        explanation=_message_location_explanation(source),
+    )
+    provenance["location_confidence_record"] = location_evidence_to_provenance(location_evidence)
     if extra_provenance:
         provenance.update(dict(extra_provenance))
     return Observation(
@@ -241,9 +252,26 @@ def observation_from_rf_pin(pin: Mapping[str, Any]) -> Observation:
         "source_type": "rf_pin",
         "source_ref": ref,
         "pin_kind": _clean(pin.get("pin_kind") or pin.get("kind")),
+        "pin_type": _pin_type_from_values(
+            pin.get("pin_type") or pin.get("type") or pin.get("pin_kind") or pin.get("kind"),
+            topics,
+        ),
         "created_by": _clean(pin.get("created_by")),
         "expires_utc": _clean(pin.get("expires_utc")),
     }
+    location_evidence = location_evidence_from_values(
+        lat=pin.get("lat"),
+        lon=pin.get("lon"),
+        grid=pin.get("grid"),
+        state=pin.get("state"),
+        location_kind=_clean(pin.get("location_kind") or pin.get("location_confidence")),
+        source_family="rf_pin",
+        source_ref=ref,
+        observed_utc=now,
+        stale_after=_clean(pin.get("expires_utc")),
+        explanation="Operational pin location",
+    )
+    provenance["location_confidence_record"] = location_evidence_to_provenance(location_evidence)
     return Observation(
         observation_id=_observation_id("rf_pin", ref),
         source_family="rf_pin",
@@ -277,6 +305,53 @@ def observation_from_rf_pin(pin: Mapping[str, Any]) -> Observation:
         publish_authorized=False,
         provenance=provenance,
     )
+
+
+def _message_location_kind(source_family: str) -> str:
+    normalized = _clean(source_family).lower()
+    if normalized in {"spotter", "fiospotter", "js8spotter", "commstat"}:
+        return "structured_report"
+    if normalized in {"meshcore", "meshtastic", "aprs"}:
+        return "structured_report"
+    return ""
+
+
+def _message_location_explanation(source_family: str) -> str:
+    normalized = _clean(source_family).lower()
+    if normalized in {"spotter", "fiospotter", "js8spotter"}:
+        return "Spotter report grid or state"
+    if normalized == "commstat":
+        return "CommStat reported location"
+    if normalized in {"meshcore", "meshtastic"}:
+        return "Mesh message location"
+    if normalized == "aprs":
+        return "APRS packet location"
+    return "Message-derived location"
+
+
+def _pin_type_from_values(pin_type: object, topics: Sequence[object]) -> str:
+    text = _clean(pin_type).lower().replace(" ", "_").replace("-", "_")
+    if text:
+        return text
+    topic_map = {
+        "Fire": "hazard",
+        "Weather": "weather",
+        "Medical": "medical",
+        "Comms": "comms",
+        "Infrastructure": "comms",
+        "Shelter": "shelter",
+        "Travel/Roads": "road",
+        "Food": "supply",
+        "Water": "supply",
+        "Fuel": "supply",
+        "Logistics": "supply",
+        "Security": "checkpoint",
+    }
+    for topic in topics:
+        mapped = topic_map.get(_clean(topic))
+        if mapped:
+            return mapped
+    return "info"
 
 
 def _clean_condition_group(value: object) -> str:

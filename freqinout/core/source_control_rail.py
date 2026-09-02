@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping, Sequence
 
-from freqinout.core.mesh.settings import MeshConnectionConfig
+from freqinout.core.mesh.settings import MeshConnectionConfig, mesh_connection_config_key
 
 
 SOURCE_CONTROL_KIND_RADIO = "radio"
@@ -83,7 +83,7 @@ def _source_control_mesh_item_for_protocol(
         label = f"Connect: {name}" if name else "Connect saved mesh"
         actions.append(
             SourceControlAction(
-                key=f"connect:{config.adapter_id}",
+                key=f"connect:{mesh_connection_config_key(config)}",
                 label=label,
                 enabled=True,
                 role="eligible_success" if row_connected else "muted",
@@ -147,6 +147,7 @@ def _best_health_row_for_config(
     config: MeshConnectionConfig,
     rows: Sequence[Mapping[str, object]],
 ) -> Mapping[str, object] | None:
+    config_protocol = str(config.protocol or "").strip().lower()
     keys = {
         _normalize_identity(config.adapter_id),
         _normalize_identity(config.ble_device_id),
@@ -157,6 +158,9 @@ def _best_health_row_for_config(
         return None
     matches = []
     for row in rows:
+        row_protocol = str(row.get("transport") or "").strip().lower()
+        if config_protocol and row_protocol and row_protocol != config_protocol:
+            continue
         row_keys = {
             _normalize_identity(row.get("adapter_id")),
             _normalize_identity(row.get("device_name")),

@@ -190,12 +190,13 @@ def test_js8_shadow_mismatch_surfaces_as_native_diagnostic():
         include_scheduler_events=False,
     )
 
-    assert result["severity"] == "warning"
-    assert result["issue_count"] == 1
+    assert result["severity"] == "ok"
+    assert result["issue_count"] == 0
     item = result["items"][0]
     assert item["dependency"] == "JS8Call native diagnostic"
-    assert item["state"] == "Warning"
-    assert "native JS8 remains diagnostic only" in item["action"]
+    assert item["state"] == "Diagnostic"
+    assert item["is_issue"] is False
+    assert "existing JS8 path" in item["action"]
 
 
 def test_fldigi_busy_check_internal_events_do_not_fill_issue_log(monkeypatch):

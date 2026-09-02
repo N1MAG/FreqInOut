@@ -604,9 +604,6 @@ def normalize_hold_minutes(value) -> int:
 def get_hold_duration_default(settings, profile: Optional[Dict[str, object]] = None) -> int:
     if isinstance(profile, dict) and profile.get("schedule_hold_minutes_default") not in (None, ""):
         return normalize_hold_minutes(profile.get("schedule_hold_minutes_default"))
-    cached = _HOLD_DURATION_DEFAULT_CACHE.get("minutes")
-    if isinstance(cached, int):
-        return normalize_hold_minutes(cached)
     try:
         mins = normalize_hold_minutes(settings.get("schedule_hold_minutes_default", DEFAULT_HOLD_DURATION_MIN))
     except Exception:

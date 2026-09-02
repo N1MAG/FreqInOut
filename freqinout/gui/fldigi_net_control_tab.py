@@ -5455,7 +5455,7 @@ class FldigiNetControlTab(QWidget):
         self._persist_ncs_session_snapshot(timing_state="active")
         self._refresh_ncs_session_context()
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
-        self._refresh_operator_history_views()
+        QTimer.singleShot(0, self._refresh_operator_history_views)
 
     def _start_ad_hoc_net(self):
         """

@@ -4069,6 +4069,13 @@ class SchedulerEngine(QObject):
                         state.flrig_vfo = vfo_txt
             except Exception as exc:
                 state.errors["rig_frequency"] = str(exc)
+        cached_ptt_age_s = (now_ts - self._status_flrig_ptt_ts) if self._status_flrig_ptt_ts else None
+        cached_ptt_fresh = cached_ptt_age_s is not None and cached_ptt_age_s <= self._status_flrig_ptt_max_age_s
+        if bool(self._status_flrig_ptt_known) and cached_ptt_fresh and bool(self._last_ptt_active):
+            state.flrig_ptt_active = True
+            state.flrig_ptt_known = True
+            state.flrig_ptt_age_s = max(0.0, float(cached_ptt_age_s))
+            state.flrig_ptt_stale = False
         if js8_client is not None and (mode == "JS8CALL" or state.flrig_freq_hz is None):
             try:
                 if hasattr(js8_client, "get_frequency"):

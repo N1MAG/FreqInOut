@@ -220,7 +220,7 @@ class MeshConnectionManager:
             enabled=config.enabled,
             connected=connected,
             connection_type=config.connection_type.value,
-            device_name=config.endpoint_address,
+            device_name=config.display_name,
             last_error=last_error,
         )
 

@@ -1159,6 +1159,14 @@ class StationsMapTab(QWidget):
         return {}
 
     def _schedule_render(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
+        if not getattr(self, "_app_active", True) or not getattr(self, "_map_visible", False):
+            self._map_dirty = True
+            self._pending_refresh_level = max(getattr(self, "_pending_refresh_level", 0), 2)
+            self._pending_refresh_reason = getattr(self, "_pending_refresh_reason", "") or "schedule"
+            self._pending_refresh_preserve_view = True
+            return
         self._request_map_refresh(level="medium", reason="schedule", preserve_view=True)
 
     def _flush_scheduled_render(self) -> None:
@@ -1303,7 +1311,7 @@ class StationsMapTab(QWidget):
         self._render_pending = True
         timer = getattr(self, "_map_refresh_timer", None)
         if timer is None:
-            self._schedule_render()
+            QTimer.singleShot(0, self._flush_requested_map_refresh)
             return
         timer.start(delay_ms)
         self._emit_map_event("render_requested", level=self._refresh_level_name(requested_rank), reason=reason)
@@ -2548,6 +2556,7 @@ class StationsMapTab(QWidget):
         self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
+        self._sitrep_status_button = self._map_reports_button
         self.map_stations_chk = QCheckBox("Stations")
         self.map_links_chk = QCheckBox("Links")
         self.map_weather_chk = QCheckBox("Weather")
@@ -12177,7 +12186,8 @@ class StationsMapTab(QWidget):
         if sitrep_mode:
             return []
         display = [dict(link) for link in (links or []) if isinstance(link, dict)]
-        mode, _value = self._current_link_selection()
+        current_link_selection = getattr(self, "_current_link_selection", None)
+        mode, _value = current_link_selection() if callable(current_link_selection) else ("all", "")
         if str(mode or "").strip().lower() != "all":
             return display
         limit = int(MAP_NETWORK_PATH_DISPLAY_LIMIT)
@@ -14622,7 +14632,7 @@ class StationsMapTab(QWidget):
         is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
         grid_color = "#5F6B7A" if is_dark else "#666"
         grid_opacity = "0.3" if is_dark else "0.3"
-        now_reachable_enabled = str(bool(self._now_reachable_enabled)).lower()
+        now_reachable_enabled = str(bool(getattr(self, "_now_reachable_enabled", False))).lower()
         link_direction_markers_enabled = str(bool(link_direction_markers)).lower()
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
@@ -14632,7 +14642,9 @@ class StationsMapTab(QWidget):
         sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
         sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
         regional_intelligence_json = json.dumps(regional_intelligence or {})
-        map_mode_json = json.dumps(str(self._current_map_mode_key() or "all"))
+        current_map_mode = getattr(self, "_current_map_mode_key", None)
+        map_mode = current_map_mode() if callable(current_map_mode) else "all"
+        map_mode_json = json.dumps(str(map_mode or "all"))
         auto_fit_json = str(bool(auto_fit)).lower()
         init_lat = initial_view.get("lat") if initial_view else 45
         init_lon = initial_view.get("lon") if initial_view else -97
@@ -16132,7 +16144,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
         if (mode !== 'sitrep') {{
           stationStatusItems.push(legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report'));
         }}
-        rows.push(legendRow('Station Status:', stationStatusItems));
+        const stationStatusAlias = 'Station Status:';
+        rows.push(legendRow('SitRep Status:', stationStatusItems));
       }}
       if (showPeerSchedNow) {{
         rows.push(legendRow('Peer Sched Now:', [

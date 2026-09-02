@@ -107,6 +107,38 @@ def _is_expired_transient_scheduler_key(key: str, last_checked_ts: float, *, now
     return ((time.monotonic() if now is None else now) - last_checked_ts) > 300.0
 
 
+def _is_js8_diagnostic_only(key: str, metadata: Mapping[str, object]) -> bool:
+    key_norm = str(key or "").strip().lower().replace("_", "-")
+    return key_norm == "scheduler:js8-shadow" and bool(metadata.get("diagnostic_only"))
+
+
+def _js8_capability_mode(metadata: Mapping[str, object]) -> str:
+    return str(metadata.get("capability_mode", "") or metadata.get("mode", "") or "").strip().lower()
+
+
+def _is_ingest_source_health_snapshot(
+    key: str,
+    service: str,
+    owner: str,
+    metadata: Mapping[str, object],
+) -> bool:
+    key_norm = str(key or "").strip().lower().replace("-", "_")
+    if service == "ingest_source":
+        return True
+    if key_norm.startswith(("ingest_source:", "ingest_source_", "ingest_app_")):
+        return True
+    source_type = str(metadata.get("source_type", "") or "").strip()
+    family = str(metadata.get("family", "") or "").strip()
+    if str(owner or "").strip() == "BackgroundIngest" and (source_type or family) and service != "background_ingest":
+        return True
+    return False
+
+
+def _is_placeholder_error_text(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"", "failure", "none", "null"}
+
+
 def _dependency_label(key: str, owner: str = "") -> str:
     parts = [part for part in str(key or "").split(":") if part]
     if not parts:
@@ -124,10 +156,13 @@ def _dependency_label(key: str, owner: str = "") -> str:
         "COMMSTAT": "CommStat data",
         "VARAC": "VarAC data",
         "VARAC_BBS_VAULT_ALIASES": "Managed BBS Library aliases",
+        "INGEST_SOURCE": "Ingest Source",
         "RIGCTLD": "rigctld",
         "OBSERVER": "Observer SDR",
         "BACKGROUND_INGEST": "Background ingest",
     }
+    if service.startswith("INGEST_APP_"):
+        return f"Ingest Source ({parts[0]})"
     label = labels.get(service, service.replace("_", " ").title())
     endpoint = ""
     if len(parts) >= 3 and parts[1] not in {"false", "true"}:
@@ -228,6 +263,11 @@ def _item_from_snapshot(
     scheduler_hold = _is_scheduler_hold_key(str(key or ""))
     active_scheduler_hold = scheduler_hold and bool(metadata.get("active_hold"))
     fldigi_busy_check = _is_fldigi_busy_check_key(str(key or ""))
+    js8_diagnostic_only = _is_js8_diagnostic_only(str(key or ""), metadata)
+    js8_mode = _js8_capability_mode(metadata)
+    ingest_source_health = _is_ingest_source_health_snapshot(str(key or ""), service, owner, metadata)
+    if ingest_source_health and _is_placeholder_error_text(last_error):
+        last_error = ""
     expired_transient = _is_expired_transient_scheduler_key(str(key or ""), last_checked_ts, now=now)
     warning = (
         (stale_ok and not expired_transient)
@@ -235,16 +275,28 @@ def _item_from_snapshot(
         or slow > 0
         or bool(last_error)
     )
-    if fldigi_busy_check:
+    if js8_diagnostic_only:
+        severity = "info"
+        state = "Diagnostic"
+        action = "Native JS8Call diagnostic differs from the existing JS8 path; FIO is still using the existing path."
+        warning = False
+        backoff = False
+    elif js8_mode == "api_basic":
+        severity = "info"
+        state = "Ready (basic)"
+        action = "JS8Call API is reachable; FIO will keep compatibility fallbacks available."
+        warning = False
+        backoff = False
+    elif fldigi_busy_check:
         severity = "ok"
         state = "OK"
         action = "No schedule move is waiting on this FLDigi activity check."
         warning = False
         backoff = False
     elif backoff:
-        severity = "danger"
-        state = "Backoff"
-        action = "Backing off to keep FIO responsive"
+        severity = "warning" if warning else "info"
+        state = "Retry waiting"
+        action = "Waiting before retry to keep FIO responsive"
     elif expired_transient and warning:
         severity = "ok"
         state = "OK"
@@ -264,6 +316,11 @@ def _item_from_snapshot(
         severity = "info"
         state = "Not recent"
         action = "Last known check was OK; FIO has not needed a fresh check recently"
+        warning = False
+    elif warning and ingest_source_health and not last_error:
+        severity = "info"
+        state = "Waiting"
+        action = "Waiting for the next normal check"
         warning = False
     elif warning:
         severity = "warning"

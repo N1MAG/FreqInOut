@@ -22,9 +22,9 @@ Use this checklist before pushing a release commit, tagging, or building install
 
 ## 3) Installer / Packaging
 
-- Linux: run installer in at least one fresh scenario and one update scenario.
+- Linux: run installer in at least one fresh scenario and one update scenario against `git@github.com:N1MAG/FreqInOut-internal-testing.git` branch `wip/private-testing-multi-rig-1.2.3-not-ready`.
 - Linux: verify desktop launcher/icon behavior and logs.
-- Linux multi-rig WIP: install into a separate test directory before any in-place production upgrade test.
+- Linux multi-rig WIP: install into a separate test directory before any in-place production upgrade test, then run one explicit in-place upgrade from the current single-rig install.
 - Windows: run `python build_executable.py`.
 - Windows: update `installer.iss` and compile with Inno Setup.
 

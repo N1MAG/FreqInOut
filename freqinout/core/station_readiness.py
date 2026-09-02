@@ -690,6 +690,7 @@ def build_station_readiness_report(
         name = _profile_display_name(profile)
         backend = _profile_backend(profile)
         active_or_primary = _profile_is_primary_or_active(profile)
+        launch_control_enabled = bool(int(profile.get("launch_enabled", 0) or 0))
 
         if not active_or_primary:
             issues.append(
@@ -719,6 +720,7 @@ def build_station_readiness_report(
             )
         if not active_or_primary:
             continue
+        _ = launch_control_enabled
 
         js8_enabled = _profile_software_enabled(profile, "js8call")
         flrig_enabled = _profile_software_enabled(profile, "flrig")

@@ -130,6 +130,189 @@ def test_station_health_marks_stale_ok_checks_as_informational_not_alerts(monkey
     assert "has not needed a fresh check" in item["action"].lower()
 
 
+def test_station_health_marks_cooldown_backoff_as_informational_not_alerts(monkeypatch):
+    from freqinout.core import station_health_summary as summary_module
+
+    now = 100_000.0
+    monkeypatch.setattr(summary_module.time, "monotonic", lambda: now)
+    summary = summary_module.summarize_station_health(
+        {
+            "js8call:127.0.0.1:2442": {
+                "key": "js8call:127.0.0.1:2442",
+                "owner": "FIO-A",
+                "consecutive_failures": 0,
+                "consecutive_slow": 0,
+                "last_success_ts": now - 4,
+                "last_failure_ts": 0.0,
+                "issue_started_ts": 0.0,
+                "last_checked_ts": now - 4,
+                "last_duration_ms": 4.0,
+                "cooldown_remaining_sec": 12.0,
+                "degraded": False,
+                "last_error": "",
+                "metadata": {
+                    "action": (
+                        "JS8Call API is reachable at 127.0.0.1:2442; "
+                        "FIO will use basic API features and keep fallbacks available."
+                    )
+                },
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 0
+    assert item["state"] == "Retry waiting"
+    assert item["severity"] == "info"
+    assert item["is_issue"] is False
+    assert "JS8Call API is reachable" in item["action"]
+
+
+def test_station_health_marks_js8_basic_api_as_informational_even_after_probe_failure():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "js8call:127.0.0.1:2442:capability": {
+                "owner": "SoftwareStatusService",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now - 2,
+                "last_error": "",
+                "metadata": {
+                    "capability_mode": "api_basic",
+                    "endpoint": "127.0.0.1:2442",
+                    "action": (
+                        "JS8Call API is reachable at 127.0.0.1:2442; "
+                        "FIO will use basic API features and keep fallbacks available."
+                    ),
+                },
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 0
+    assert item["dependency"] == "JS8Call API (127.0.0.1:2442)"
+    assert item["state"] == "Ready (basic)"
+    assert item["severity"] == "info"
+    assert item["is_issue"] is False
+    assert "JS8Call API is reachable" in item["action"]
+
+
+def test_station_health_keeps_ingest_waiting_rows_informational_without_error_detail():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "ingest_source:meshcore": {
+                "owner": "IngestRuntime",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now - 6,
+                "last_error": "",
+                "metadata": {},
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 0
+    assert item["dependency"] == "Ingest Source"
+    assert item["state"] == "Waiting"
+    assert item["severity"] == "info"
+    assert item["is_issue"] is False
+
+
+def test_station_health_keeps_generated_ingest_source_ids_informational_without_error_detail():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "ingest_app_js8call_7_8_127.0.0.1_2442_abcd1234": {
+                "owner": "BackgroundIngest",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now - 10,
+                "last_error": "",
+                "metadata": {
+                    "family": "js8call",
+                    "source_type": "api",
+                    "label": "FIO-A JS8Call API",
+                },
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 0
+    assert item["dependency"].startswith("Ingest Source")
+    assert item["state"] == "Waiting"
+    assert item["severity"] == "info"
+    assert item["is_issue"] is False
+
+
+def test_station_health_keeps_placeholder_ingest_source_errors_informational():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "ingest_app_js8call_7_8_127.0.0.1_2442_abcd1234": {
+                "owner": "BackgroundIngest",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now - 10,
+                "last_error": "failure",
+                "metadata": {
+                    "family": "js8call",
+                    "source_type": "api",
+                    "label": "FIO-A JS8Call API",
+                },
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 0
+    assert item["state"] == "Waiting"
+    assert item["severity"] == "info"
+    assert item["last_issue"] == ""
+    assert item["is_issue"] is False
+
+
+def test_station_health_keeps_actionable_ingest_source_errors_as_warnings():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "ingest_app_js8call_7_8_127.0.0.1_2442_abcd1234": {
+                "owner": "BackgroundIngest",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now - 10,
+                "last_error": "source path missing",
+                "metadata": {
+                    "family": "js8call",
+                    "source_type": "file",
+                    "label": "FIO-A DIRECTED.TXT",
+                },
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 1
+    assert item["state"] == "Warning"
+    assert item["severity"] == "warning"
+    assert item["is_issue"] is True
+    assert item["last_issue"] == "source path missing"
+
+
 def test_inactive_scheduler_busy_health_rows_are_ok_not_alerts():
     from freqinout.core.station_health_summary import summarize_station_health
 
@@ -297,6 +480,45 @@ def test_main_window_feeds_assigned_schedule_status_to_station_health_runtime_it
     assert "def _station_health_assigned_schedule_status_rows(self)" in source
     assert "store.list_effective_assigned_plans()" in source
     assert "validation_status_json" not in runtime_block
+
+
+def test_station_health_sidebar_badge_counts_runtime_observability_items(monkeypatch):
+    from freqinout.gui import main_window
+
+    captured = {}
+
+    def fake_summary(*, include_ok=True, extra_items=None, **_kwargs):
+        captured["include_ok"] = include_ok
+        captured["extra_items"] = list(extra_items or [])
+        issue_items = [item for item in captured["extra_items"] if item.get("is_issue")]
+        return {
+            "issue_count": len(issue_items),
+            "severity": "warning" if issue_items else "ok",
+            "issue_items": issue_items,
+        }
+
+    runtime_issue = {
+        "key": "runtime:ingest:source-view",
+        "scope": "Station-wide",
+        "dependency": "Runtime ingest sources",
+        "state": "Warning",
+        "severity": "warning",
+        "action": "1 source needs attention",
+        "is_issue": True,
+    }
+    monkeypatch.setattr(main_window, "summarize_station_health", fake_summary)
+    window = main_window.MainWindow.__new__(main_window.MainWindow)
+    window._ui_refresh_allowed = lambda: True
+    window._station_health_extra_items = lambda: [runtime_issue]
+    window._station_health_nav_index = None
+    window._update_ncs_nav_button_styles = lambda: None
+
+    window._refresh_station_health_alert()
+
+    assert captured["include_ok"] is False
+    assert captured["extra_items"] == [runtime_issue]
+    assert window._station_health_alert_summary["issue_count"] == 1
+    assert window._station_health_alert_summary["issue_items"] == [runtime_issue]
 
 
 def test_runtime_observability_items_explain_forced_background_refresh_decision():
@@ -856,9 +1078,9 @@ def test_station_health_generic_dependency_row_opens_related_settings_area():
             {
                 "scope": "Radio 12",
                 "dependency": "JS8Call API (127.0.0.1:2242)",
-                "state": "Backoff",
-                "severity": "danger",
-                "action": "Backing off to keep FIO responsive",
+                "state": "Retry waiting",
+                "severity": "warning",
+                "action": "Waiting before retry to keep FIO responsive",
                 "last_issue": "Connection refused",
                 "issue_since": "since 2m ago",
                 "cooldown": "30s",

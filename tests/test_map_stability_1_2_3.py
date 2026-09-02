@@ -3914,7 +3914,9 @@ def test_map_load_finished_flushes_deferred_render_request() -> None:
     tab._render_requested_during_load = True
     tab._map_visible = True
     scheduled: list[str] = []
+    requested: list[dict[str, object]] = []
     tab._schedule_render = lambda: scheduled.append("render")
+    tab._request_map_refresh = lambda **kwargs: requested.append(kwargs)
 
     tab._on_map_load_finished(True)
 
@@ -3922,7 +3924,8 @@ def test_map_load_finished_flushes_deferred_render_request() -> None:
     assert tab._map_initialized is True
     assert tab._map_load_ok is True
     assert tab._render_requested_during_load is False
-    assert scheduled == ["render"]
+    assert scheduled == []
+    assert requested == [{"level": "medium", "reason": "post_load", "preserve_view": True}]
 
 
 def test_push_map_payload_queues_while_page_loading() -> None:

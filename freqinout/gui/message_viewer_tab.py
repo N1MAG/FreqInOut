@@ -5670,6 +5670,7 @@ class MessageViewerTab(QWidget):
         body_splitter.addWidget(splitter)
         body_splitter.setStretchFactor(0, 0)
         body_splitter.setStretchFactor(1, 1)
+        self._refresh_compose_splitter_handles()
         root.addWidget(body_splitter, 1)
 
         self.compose_output_box = QGroupBox("Staging Output")
@@ -5768,11 +5769,24 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
 
+    def _refresh_compose_splitter_handles(self) -> None:
+        """Keep embedded compose automatic; reserve visible resize handles for the workbench."""
+        in_workbench = bool(getattr(self, "_compose_in_workbench", False))
+        handle_width = 10 if in_workbench else 0
+        for splitter_name in ("compose_body_splitter", "compose_splitter"):
+            splitter = getattr(self, splitter_name, None)
+            if isinstance(splitter, QSplitter):
+                try:
+                    splitter.setHandleWidth(handle_width)
+                except Exception:
+                    pass
+
     def _refresh_compose_layout_geometry(self) -> None:
         splitter = getattr(self, "compose_splitter", None)
         body_splitter = getattr(self, "compose_body_splitter", None)
         mode = str(getattr(self, "_compose_mode", "nbems") or "nbems")
         in_workbench = bool(getattr(self, "_compose_in_workbench", False))
+        self._refresh_compose_splitter_handles()
         compact = False if in_workbench else self._messages_responsive_mode_for_width(int(self.width() or 0)) == "compact"
         compose_sidebar = mode in {"nbems", "spotter", "commstat_rf"} and not compact
         if isinstance(body_splitter, QSplitter):
@@ -5981,6 +5995,7 @@ class MessageViewerTab(QWidget):
         dialog = QDialog(self)
         self._compose_workbench_dialog = dialog
         self._compose_in_workbench = True
+        self._refresh_compose_splitter_handles()
         dialog.setWindowTitle("Compose Workbench")
         dialog.setModal(False)
         dialog.setMinimumSize(1180, 780)
@@ -6010,6 +6025,7 @@ class MessageViewerTab(QWidget):
 
         def restore_compose_widgets() -> None:
             self._compose_in_workbench = False
+            self._refresh_compose_splitter_handles()
             root = getattr(self, "compose_root_layout", None)
             if root is not None:
                 for widget_name in ("compose_type_box", "compose_body_splitter", "compose_output_box"):

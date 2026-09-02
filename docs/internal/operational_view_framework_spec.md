@@ -627,6 +627,55 @@ Any source that can produce location, path, region, state, grid, or station data
 must define how it behaves on the map. Large point sets must use filtering,
 clustering, culling, rollups, or drill-down rather than drawing everything.
 
+### Location Confidence Contract
+
+Every view contract that projects an operator, message, report, route, node,
+or pin onto the map must publish a normalized location confidence record. This
+keeps FIO from silently treating every coordinate, grid, or inferred area as
+equally reliable.
+
+Required fields:
+
+- `location_value`: the original lat/lon, grid, state, county, region, or route
+  anchor used by the source.
+- `location_kind`: `gps`, `grid6`, `grid4`, `state_grid4`, `state`,
+  `route_derived`, `roster`, `manual`, `source_metadata`, or `unknown`.
+- `confidence_rank`: ordered numeric or enum value used for comparison and
+  replacement decisions.
+- `source_family`: the producing source family, such as JS8Call, FIOSpotter,
+  CommStat, FLMsg/FLAmp, MeshCore, APRS, or manual roster.
+- `source_ref`: durable reference back to the message, packet, observation,
+  roster entry, or settings row.
+- `observed_utc`: when this evidence was observed or last confirmed.
+- `stale_after`: source-specific freshness window used for UI aging and
+  replacement decisions.
+- `explanation`: short operator-facing wording, such as `reported grid`,
+  `roster grid`, `device GPS`, or `route-derived from first repeater`.
+
+Ranking defaults:
+
+1. Manual operator/roster override or user-confirmed location.
+2. Device GPS or explicit lat/lon from a trusted source payload.
+3. Direct structured reported-for grid/location from CommStat, Spotter/MCF,
+   APRS, MeshCore node metadata, or FLMsg/FLAmp form fields.
+4. Six-character Maidenhead grid reported by the station or imported from a
+   trusted source table.
+5. Four-character grid constrained by state/province.
+6. Four-character grid alone.
+7. Route-derived location, such as first known mesh repeater/router heard.
+8. Source fallback, inferred text, or unknown.
+
+Updates must improve or clarify the stored location record. A lower-ranked
+source must not overwrite a higher-ranked source unless the higher-ranked source
+is stale and the operator has not locked it. Equal-rank updates may replace the
+current value only when newer evidence is materially more precise, comes from a
+more trusted source, or indicates the station has moved. All replacements must
+preserve provenance so the operator can understand why the marker moved.
+
+Location confidence must be visible in Map detail panels and available to Ops
+Center, Messages, and SOP projections. It should be concise in the UI; details
+belong in tooltips or source detail views.
+
 Map rendering must follow a stable shell plus layer-payload contract:
 
 - The map shell, base assets, JavaScript helpers, and theme scaffolding should
