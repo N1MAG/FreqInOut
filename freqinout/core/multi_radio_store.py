@@ -104,6 +104,7 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_db_path",
         "varac_ini_path",
         "varac_launch_cmd",
+        "varac_incoming_path",
         "varac_outbox_dir",
         "varac_bbs_dir",
         "varac_bbs_archive_dir",
@@ -130,6 +131,14 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_bbs_vault_runtime_state_v1",
         "varac_bbs_vault_last_summary",
         "message_paths",
+        "gpg_verify_flamp_k2s_enabled",
+        "hash_verify_flamp_k2s_enabled",
+        "js8_msg_auth_enabled",
+        "gpg_executable_path",
+        "gpg_trusted_signers",
+        "gpg_compose_signing_key_fingerprint",
+        "trusted_file_hashes",
+        "js8spotter_import_db_path",
         "launch_control_enabled",
         "use_scheduler",
         "schedule_hold_minutes_default",
@@ -3864,8 +3873,17 @@ def _seed_fast_light_defaults(settings_values: Mapping[str, Any]) -> Dict[str, A
     }
 
 
-def _seed_varac_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
+def _settings_varac_incoming_path(settings_values: Mapping[str, Any]) -> str:
+    direct = _settings_text(settings_values, "varac_incoming_path", "")
+    if direct:
+        return direct
     message_paths = settings_values.get("message_paths", {}) or {}
+    if isinstance(message_paths, Mapping):
+        return _coerce_text(message_paths.get("varac", ""), "")
+    return ""
+
+
+def _seed_varac_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "system_key": DEFAULT_VARAC_NODE_SYSTEM_KEY,
         "name": DEFAULT_VARAC_NODE_NAME,
@@ -3873,7 +3891,7 @@ def _seed_varac_defaults(settings_values: Mapping[str, Any]) -> Dict[str, Any]:
         "db_path": _settings_text(settings_values, "varac_db_path", ""),
         "ini_path": _settings_text(settings_values, "varac_ini_path", ""),
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
-        "incoming_path": _coerce_text(message_paths.get("varac", ""), ""),
+        "incoming_path": _settings_varac_incoming_path(settings_values),
     }
 
 
@@ -3946,7 +3964,14 @@ def _seed_device_defaults(
         "use_js8spotter": _coerce_bool_int(bool(_settings_text(settings_values, "path_js8spotter", "")), False),
         "use_commstat": _coerce_bool_int(bool(_settings_text(settings_values, "path_commstat", "")), False),
         "use_varac": _coerce_bool_int(
-            bool(_settings_text(settings_values, "varac_path", "") or _settings_text(settings_values, "varac_launch_cmd", "")),
+            bool(
+                _settings_text(settings_values, "varac_path", "")
+                or _settings_text(settings_values, "varac_launch_cmd", "")
+                or _settings_text(settings_values, "varac_db_path", "")
+                or _settings_text(settings_values, "varac_ini_path", "")
+                or _settings_varac_incoming_path(settings_values)
+                or _settings_text(settings_values, "varac_outbox_dir", "")
+            ),
             False,
         ),
         "rig_host": _settings_text(settings_values, "rig_host", ""),
@@ -4835,7 +4860,7 @@ def mirror_legacy_settings_into_runtime_active_device(
                 "db_path": _settings_text(settings_values, "varac_db_path", ""),
                 "ini_path": _settings_text(settings_values, "varac_ini_path", ""),
                 "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
-                "incoming_path": _coerce_text(message_paths.get("varac", ""), ""),
+                "incoming_path": _settings_varac_incoming_path(settings_values),
             },
         )
 

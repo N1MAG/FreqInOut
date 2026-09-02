@@ -4267,6 +4267,51 @@ def test_launch_control_includes_commstat_when_selected_radio_has_launch_path_on
     assert tab._is_launch_item_configured("CommStat") is True
 
 
+def test_launch_table_startup_change_recomputes_startup_button_state() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    block = source[source.index("def _on_launch_table_item_changed") : source.index("def _launch_configured_now")]
+
+    assert "self._sync_launch_cache_from_table()" in block
+    assert "self._update_launch_control_buttons()" in block
+
+
+def test_settings_batch_save_includes_radio_software_and_auth_compat_keys() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    save_block = source[source.index("def _save_settings(") : source.index("def _on_theme_changed")]
+    expected_keys = {
+        '"message_paths"',
+        '"varac_incoming_path"',
+        '"varac_outbox_dir"',
+        '"path_commstat"',
+        '"js8_msg_auth_enabled"',
+        '"js8spotter_import_db_path"',
+        '"gpg_executable_path"',
+        '"gpg_trusted_signers"',
+        '"gpg_compose_signing_key_fingerprint"',
+    }
+
+    for key in expected_keys:
+        assert key in save_block
+
+
+def test_settings_resize_event_defers_expensive_layout_work() -> None:
+    source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    resize_block = source[source.index("def resizeEvent") : source.index("def _js8_api_reachable")]
+
+    assert "QTimer.singleShot(80, self._flush_resize_update)" in resize_block
+    assert "self._update_logging_actions_layout()" in resize_block
+
+
+def test_station_health_table_resize_rows_are_signature_gated() -> None:
+    source = Path("freqinout/gui/station_health_tab.py").read_text(encoding="utf-8")
+
+    assert "def _table_height_signature" in source
+    assert "self._issue_row_height_signature" in source
+    assert "self._runtime_source_row_height_signature" in source
+    assert "self._scheduler_row_height_signature" in source
+    assert source.count("resizeRowsToContents()") == 3
+
+
 def test_launch_control_source_profile_uses_current_js8_commstat_draft() -> None:
     from freqinout.gui.settings_tab import SettingsTab
 

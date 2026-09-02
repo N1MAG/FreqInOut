@@ -37,6 +37,9 @@ class StationHealthTab(QWidget):
         self._runtime_item_provider: Optional[Callable[[], Iterable[Mapping[str, object]]]] = None
         self._runtime_source_provider: Optional[Callable[[], Iterable[Mapping[str, object]]]] = None
         self._runtime_source_rows: list[Mapping[str, object]] = []
+        self._issue_row_height_signature: tuple[object, ...] = ()
+        self._runtime_source_row_height_signature: tuple[object, ...] = ()
+        self._scheduler_row_height_signature: tuple[object, ...] = ()
         self._pending_focus_scope = ""
         self._pending_focus_radio_id: Optional[int] = None
         self._refresh_timer = QTimer(self)
@@ -343,8 +346,14 @@ class StationHealthTab(QWidget):
                 item.setForeground(QBrush(QColor(theme.get("success", "#2E7D32"))))
         return item
 
+    @staticmethod
+    def _table_height_signature(table: QTableWidget, rows: Iterable[Iterable[object]]) -> tuple[object, ...]:
+        width = int(table.viewport().width() if table.viewport() else table.width())
+        return (width, tuple(tuple(str(value or "") for value in row) for row in rows))
+
     def _render_table(self) -> None:
         items = list(self._last_summary.get("items", []) or [])
+        height_rows: list[list[object]] = []
         self.table.setRowCount(len(items))
         for row, item in enumerate(items):
             if not isinstance(item, Mapping):
@@ -357,9 +366,13 @@ class StationHealthTab(QWidget):
                 item.get("action", ""),
                 item.get("last_check", ""),
             ]
+            height_rows.append(values[:4])
             for col, value in enumerate(values):
                 self.table.setItem(row, col, self._item(value, severity=severity if col == 2 else ""))
-        self.table.resizeRowsToContents()
+        signature = self._table_height_signature(self.table, height_rows)
+        if signature != self._issue_row_height_signature:
+            self.table.resizeRowsToContents()
+            self._issue_row_height_signature = signature
         self._update_health_table_empty_state()
         self._apply_pending_focus_scope()
         current_row = self.table.currentRow() if hasattr(self, "table") else -1
@@ -440,6 +453,7 @@ class StationHealthTab(QWidget):
         if not hasattr(self, "runtime_sources_table"):
             return
         rows = list(getattr(self, "_runtime_source_rows", []) or [])
+        height_rows: list[list[object]] = []
         self.runtime_sources_table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
             severity = str(row.get("severity", "") or "")
@@ -457,13 +471,17 @@ class StationHealthTab(QWidget):
                 self._runtime_source_activity_summary(row),
                 row.get("action_hint", ""),
             ]
+            height_rows.append(values)
             for col, value in enumerate(values):
                 self.runtime_sources_table.setItem(
                     row_idx,
                     col,
                     self._item(value, severity=severity if col == 1 else ""),
                 )
-        self.runtime_sources_table.resizeRowsToContents()
+        signature = self._table_height_signature(self.runtime_sources_table, height_rows)
+        if signature != self._runtime_source_row_height_signature:
+            self.runtime_sources_table.resizeRowsToContents()
+            self._runtime_source_row_height_signature = signature
         self._update_runtime_sources_empty_state()
         self._render_runtime_source_detail()
 
@@ -866,6 +884,7 @@ class StationHealthTab(QWidget):
 
     def _render_scheduler_events(self) -> None:
         events = list(self._last_summary.get("recent_scheduler_events", []) or [])
+        height_rows: list[list[object]] = []
         self.scheduler_table.setRowCount(len(events))
         for row, item in enumerate(events):
             if not isinstance(item, Mapping):
@@ -883,9 +902,13 @@ class StationHealthTab(QWidget):
                 item.get("detail", ""),
                 self._format_scheduler_target(item),
             ]
+            height_rows.append(values)
             for col, value in enumerate(values):
                 self.scheduler_table.setItem(row, col, self._item(value, severity=severity if col == 1 else ""))
-        self.scheduler_table.resizeRowsToContents()
+        signature = self._table_height_signature(self.scheduler_table, height_rows)
+        if signature != self._scheduler_row_height_signature:
+            self.scheduler_table.resizeRowsToContents()
+            self._scheduler_row_height_signature = signature
         self._update_scheduler_table_empty_state()
 
     def _update_scheduler_table_empty_state(self) -> None:

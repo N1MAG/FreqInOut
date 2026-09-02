@@ -11,6 +11,7 @@ import pytest
 from freqinout.core.multi_radio_store import (
     CURRENT_MULTI_RIG_MIGRATION_VERSION,
     FALLBACK_RADIO_NAMES,
+    MIRRORED_LEGACY_KEYS,
     MULTI_RIG_MIGRATION_COMPLETED_AT_KEY,
     MULTI_RIG_MIGRATION_SUMMARY_PREFIX,
     MULTI_RIG_MIGRATION_VERSION_KEY,
@@ -339,6 +340,62 @@ def test_explicit_migration_writes_key_map_columns(monkeypatch, tmp_path):
     assert operating["name"] == "Daily HF Schedule"
     assert operating["scheduler_enabled"] == 0
     assert operating["use_launch_control"] == 0
+
+
+def test_migration_preserves_direct_varac_incoming_path_and_auth_settings(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(
+        db_path,
+        {
+            "varac_path": "/opt/varac",
+            "varac_incoming_path": "/varac/incoming",
+            "varac_outbox_dir": "/varac/outgoing",
+            "gpg_verify_flamp_k2s_enabled": True,
+            "hash_verify_flamp_k2s_enabled": False,
+            "js8_msg_auth_enabled": True,
+            "gpg_executable_path": "/usr/bin/gpg",
+            "gpg_trusted_signers": ["ABC123"],
+            "gpg_compose_signing_key_fingerprint": "DEF456",
+            "trusted_file_hashes": [{"algorithm": "sha256", "hash": "0" * 64, "label": "test"}],
+            "js8spotter_import_db_path": "/var/lib/js8spotter/spotter.db",
+        },
+    )
+
+    settings = SettingsManager()
+    ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+    settings.reload()
+    store = MultiRadioStore(settings_db_path())
+
+    device = store.list_device_profiles()[0]
+    varac = store.list_varac_nodes()[0]
+
+    assert device["use_varac"] == 1
+    assert device["varac_incoming_path"] == "/varac/incoming"
+    assert device["varac_outbox_dir"] == "/varac/outgoing"
+    assert varac["incoming_path"] == "/varac/incoming"
+    assert settings.get("gpg_executable_path") == "/usr/bin/gpg"
+    assert settings.get("gpg_trusted_signers") == ["ABC123"]
+    assert settings.get("gpg_compose_signing_key_fingerprint") == "DEF456"
+    assert settings.get("js8spotter_import_db_path") == "/var/lib/js8spotter/spotter.db"
+
+
+def test_mirrored_legacy_keys_cover_auth_and_varac_incoming_settings() -> None:
+    expected = {
+        "varac_incoming_path",
+        "gpg_verify_flamp_k2s_enabled",
+        "hash_verify_flamp_k2s_enabled",
+        "js8_msg_auth_enabled",
+        "gpg_executable_path",
+        "gpg_trusted_signers",
+        "gpg_compose_signing_key_fingerprint",
+        "trusted_file_hashes",
+        "js8spotter_import_db_path",
+    }
+
+    assert expected.issubset(MIRRORED_LEGACY_KEYS)
 
 
 def test_migration_summary_records_unknown_role_warning(monkeypatch, tmp_path):

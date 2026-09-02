@@ -12001,6 +12001,11 @@ class SettingsTab(QWidget):
         )
         # Message paths
         msg_paths = data.get("message_paths", {})
+        if not isinstance(msg_paths, dict):
+            msg_paths = {}
+        if not str(msg_paths.get("varac", "") or "").strip() and str(data.get("varac_incoming_path", "") or "").strip():
+            msg_paths = dict(msg_paths)
+            msg_paths["varac"] = str(data.get("varac_incoming_path", "") or "").strip()
         for origin, edit in self.msg_paths_edits.items():
             edit.setText(msg_paths.get(origin, ""))
         gpg_enabled = bool(data.get("gpg_verify_flamp_k2s_enabled", False))
@@ -12456,6 +12461,7 @@ class SettingsTab(QWidget):
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
         data["message_paths"] = msg_paths
+        data["varac_incoming_path"] = str(msg_paths.get("varac", "") or "").strip()
         data["gpg_verify_flamp_k2s_enabled"] = bool(
             self.gpg_verify_enabled_chk.isChecked() if hasattr(self, "gpg_verify_enabled_chk") else False
         )
@@ -12791,14 +12797,51 @@ class SettingsTab(QWidget):
                 "js8_prompt_interval": data.get("js8_prompt_interval", "Hourly"),
                 "ui_theme": data.get("ui_theme", "light"),
                 "primary_js8_groups": data["primary_js8_groups"],
+                "js8_host": data.get("js8_host", "127.0.0.1"),
+                "js8_port": data.get("js8_port", 2442),
+                "js8_offset_hz": data.get("js8_offset_hz", 0),
+                "js8_profile_path": data.get("js8_profile_path", ""),
+                "js8_directed_path": data.get("js8_directed_path", ""),
+                "js8_forms_path": data.get("js8_forms_path", ""),
+                "path_js8call": data.get("path_js8call", ""),
+                "path_js8spotter": data.get("path_js8spotter", ""),
+                "path_commstat": data.get("path_commstat", ""),
+                "message_paths": data.get("message_paths", {}),
                 MAPPER_SETTINGS_KEY: data.get(MAPPER_SETTINGS_KEY, []),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "gpg_verify_flamp_k2s_enabled": data.get("gpg_verify_flamp_k2s_enabled", False),
                 "hash_verify_flamp_k2s_enabled": data.get("hash_verify_flamp_k2s_enabled", True),
+                "js8_msg_auth_enabled": data.get("js8_msg_auth_enabled", True),
+                "js8spotter_import_db_path": data.get("js8spotter_import_db_path", ""),
                 "gpg_executable_path": data.get("gpg_executable_path", ""),
                 "gpg_trusted_signers": data.get("gpg_trusted_signers", []),
                 "gpg_compose_signing_key_fingerprint": data.get("gpg_compose_signing_key_fingerprint", ""),
                 "trusted_file_hashes": data.get("trusted_file_hashes", []),
+                "path_flrig": data.get("path_flrig", ""),
+                "path_fldigi": data.get("path_fldigi", ""),
+                "path_flmsg": data.get("path_flmsg", ""),
+                "path_flamp": data.get("path_flamp", ""),
+                "flrig_host": data.get("flrig_host", "127.0.0.1"),
+                "flrig_port": data.get("flrig_port", 12345),
+                "fldigi_host": data.get("fldigi_host", "127.0.0.1"),
+                "fldigi_port": data.get("fldigi_port", 7362),
+                "fldigi_log_path": data.get("fldigi_log_path", ""),
+                "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
+                "varac_path": data.get("varac_path", ""),
+                "varac_db_path": data.get("varac_db_path", ""),
+                "varac_ini_path": data.get("varac_ini_path", ""),
+                "varac_launch_cmd": data.get("varac_launch_cmd", ""),
+                "varac_incoming_path": data.get("varac_incoming_path", ""),
+                "varac_outbox_dir": data.get("varac_outbox_dir", ""),
+                "varac_bbs_dir": data.get("varac_bbs_dir", ""),
+                "varac_bbs_archive_dir": data.get("varac_bbs_archive_dir", ""),
+                "varac_bbs_enabled": data.get("varac_bbs_enabled", False),
+                "varac_bbs_limit_access_enabled": data.get("varac_bbs_limit_access_enabled", False),
+                "varac_bbs_allowed_callsigns": data.get("varac_bbs_allowed_callsigns", ""),
+                "varac_bbs_allowed_group_sources": data.get("varac_bbs_allowed_group_sources", ""),
+                "varac_bbs_announce_enabled": data.get("varac_bbs_announce_enabled", False),
+                "varac_bbs_auto_archive_enabled": data.get("varac_bbs_auto_archive_enabled", False),
+                "varac_bbs_auto_archive_days": data.get("varac_bbs_auto_archive_days", 14),
                 "varac_cluster_mode_enabled": data.get("varac_cluster_mode_enabled", False),
                 "sop_export_preamble": data.get("sop_export_preamble", ""),
                 "sop_export_postamble": data.get("sop_export_postamble", ""),
@@ -12832,6 +12875,16 @@ class SettingsTab(QWidget):
             self.settings.set("control_via", data["control_via"])
             self.settings.set("log_level", data.get("log_level", "DISABLED"))
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
+            self.settings.set("js8_host", data.get("js8_host", "127.0.0.1"))
+            self.settings.set("js8_port", data.get("js8_port", 2442))
+            self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
+            self.settings.set("js8_profile_path", data.get("js8_profile_path", ""))
+            self.settings.set("js8_directed_path", data.get("js8_directed_path", ""))
+            self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
+            self.settings.set("path_js8call", data.get("path_js8call", ""))
+            self.settings.set("path_js8spotter", data.get("path_js8spotter", ""))
+            self.settings.set("path_commstat", data.get("path_commstat", ""))
+            self.settings.set("message_paths", data.get("message_paths", {}))
             self.settings.set("freq_enforcement_mode", data.get("freq_enforcement_mode", "On Schedule Change"))
             self.settings.set("freq_prompt_interval", data.get("freq_prompt_interval", "Hourly"))
             self.settings.set("fldigi_enforcement_mode", data.get("fldigi_enforcement_mode", "On Schedule Change"))
@@ -12855,6 +12908,31 @@ class SettingsTab(QWidget):
                 data.get("gpg_compose_signing_key_fingerprint", ""),
             )
             self.settings.set("trusted_file_hashes", data.get("trusted_file_hashes", []))
+            self.settings.set("path_flrig", data.get("path_flrig", ""))
+            self.settings.set("path_fldigi", data.get("path_fldigi", ""))
+            self.settings.set("path_flmsg", data.get("path_flmsg", ""))
+            self.settings.set("path_flamp", data.get("path_flamp", ""))
+            self.settings.set("flrig_host", data.get("flrig_host", "127.0.0.1"))
+            self.settings.set("flrig_port", data.get("flrig_port", 12345))
+            self.settings.set("fldigi_host", data.get("fldigi_host", "127.0.0.1"))
+            self.settings.set("fldigi_port", data.get("fldigi_port", 7362))
+            self.settings.set("fldigi_log_path", data.get("fldigi_log_path", ""))
+            self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
+            self.settings.set("varac_path", data.get("varac_path", ""))
+            self.settings.set("varac_db_path", data.get("varac_db_path", ""))
+            self.settings.set("varac_ini_path", data.get("varac_ini_path", ""))
+            self.settings.set("varac_launch_cmd", data.get("varac_launch_cmd", ""))
+            self.settings.set("varac_incoming_path", data.get("varac_incoming_path", ""))
+            self.settings.set("varac_outbox_dir", data.get("varac_outbox_dir", ""))
+            self.settings.set("varac_bbs_dir", data.get("varac_bbs_dir", ""))
+            self.settings.set("varac_bbs_archive_dir", data.get("varac_bbs_archive_dir", ""))
+            self.settings.set("varac_bbs_enabled", data.get("varac_bbs_enabled", False))
+            self.settings.set("varac_bbs_limit_access_enabled", data.get("varac_bbs_limit_access_enabled", False))
+            self.settings.set("varac_bbs_allowed_callsigns", data.get("varac_bbs_allowed_callsigns", ""))
+            self.settings.set("varac_bbs_allowed_group_sources", data.get("varac_bbs_allowed_group_sources", ""))
+            self.settings.set("varac_bbs_announce_enabled", data.get("varac_bbs_announce_enabled", False))
+            self.settings.set("varac_bbs_auto_archive_enabled", data.get("varac_bbs_auto_archive_enabled", False))
+            self.settings.set("varac_bbs_auto_archive_days", data.get("varac_bbs_auto_archive_days", 14))
             self.settings.set("varac_cluster_mode_enabled", data.get("varac_cluster_mode_enabled", False))
             self.settings.set("sop_export_preamble", data.get("sop_export_preamble", ""))
             self.settings.set("sop_export_postamble", data.get("sop_export_postamble", ""))
@@ -16518,6 +16596,11 @@ class SettingsTab(QWidget):
                 origin: edit.text().strip()
                 for origin, edit in self.msg_paths_edits.items()
             },
+            "varac_incoming_path": (
+                self.msg_paths_edits.get("varac").text().strip()
+                if self.msg_paths_edits.get("varac")
+                else ""
+            ),
             "varac_path": self.varac_path_edit.text().strip(),
             "varac_ini_path": self.varac_ini_path_edit.text().strip(),
             "varac_launch_cmd": self.varac_launch_cmd_edit.text().strip(),
@@ -16849,6 +16932,11 @@ class SettingsTab(QWidget):
         payload = dict(profile)
         radio_name = self._profile_display_name(profile)
         message_paths = state.get("message_paths", {}) or {}
+        varac_incoming_path = str(
+            state.get("varac_incoming_path", "")
+            or (message_paths.get("varac", "") if isinstance(message_paths, dict) else "")
+            or ""
+        ).strip()
 
         def _txt(key: str, default: str = "") -> str:
             return str(state.get(key, default) or default).strip()
@@ -16937,7 +17025,7 @@ class SettingsTab(QWidget):
                 self._radio_software_enabled(profile, "varac"),
                 varac_install_path,
                 _txt("varac_launch_cmd"),
-                str(message_paths.get("varac", "") or "").strip(),
+                varac_incoming_path,
                 existing_varac_id > 0,
             ]
         )
@@ -16949,7 +17037,7 @@ class SettingsTab(QWidget):
                     "install_path": varac_install_path,
                     "db_path": varac_db_path,
                     "ini_path": str(profile.get("varac_ini_path", "") or "").strip(),
-                    "incoming_path": str(message_paths.get("varac", "") or "").strip(),
+                    "incoming_path": varac_incoming_path,
                     "launch_cmd": _txt("varac_launch_cmd"),
                 }
             )
@@ -17039,7 +17127,7 @@ class SettingsTab(QWidget):
                 "use_varac": bool(int(profile.get("use_varac", 0) or 0))
                 or bool(varac_install_path)
                 or bool(_txt("varac_launch_cmd"))
-                or bool(str(message_paths.get("varac", "") or "").strip()),
+                or bool(varac_incoming_path),
             }
         )
         return self.multi_radio_store.save_device_profile(payload)
@@ -25559,6 +25647,7 @@ class SettingsTab(QWidget):
             return
         self._sync_launch_cache_from_table()
         self._mark_settings_dirty()
+        self._update_launch_control_buttons()
         self._refresh_section_titles()
 
     def _launch_configured_now(self) -> None:
@@ -26014,6 +26103,13 @@ class SettingsTab(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if getattr(self, "_settings_resize_update_pending", False):
+            return
+        self._settings_resize_update_pending = True
+        QTimer.singleShot(80, self._flush_resize_update)
+
+    def _flush_resize_update(self) -> None:
+        self._settings_resize_update_pending = False
         self._update_logging_actions_layout()
 
     def _js8_api_reachable(self) -> bool:
