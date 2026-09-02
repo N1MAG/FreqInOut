@@ -313,6 +313,22 @@ def test_station_health_keeps_actionable_ingest_source_errors_as_warnings():
     assert item["last_issue"] == "source path missing"
 
 
+def test_linux_installer_running_detector_is_scoped_and_diagnostic():
+    source = Path("install_FreqInOut_linux.sh").read_text(encoding="utf-8")
+    detector = source[source.index("is_freqinout_running()") : source.index("ensure_app_not_running_for_update()")]
+
+    assert 'FIO_INSTALL_DIR="$INSTALL_DIR" python3' in detector
+    assert "Matched process(es):" in source
+    assert "pytest" in detector
+    assert "release_preflight.py" in detector
+    assert "compileall" in detector
+    assert "codex" in detector
+    assert "root in path.parents" in detector
+    assert "freqinout.main" in detector
+    assert "install_freqinout_linux.sh" in detector
+    assert "uninstall_freqinout_linux.sh" in detector
+
+
 def test_inactive_scheduler_busy_health_rows_are_ok_not_alerts():
     from freqinout.core.station_health_summary import summarize_station_health
 

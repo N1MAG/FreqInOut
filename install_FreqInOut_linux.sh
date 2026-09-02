@@ -956,7 +956,7 @@ handle_dirty_worktree() {
 
 is_freqinout_running() {
   command_exists python3 || return 1
-  python3 - <<'PY'
+  FIO_INSTALL_DIR="$INSTALL_DIR" python3 - <<'PY'
 import os
 from pathlib import Path
 
@@ -964,6 +964,7 @@ SELF = os.getpid()
 PARENT = os.getppid()
 INSTALLER_NAMES = {"install_FreqInOut_linux.sh", "uninstall_FreqInOut_linux.sh"}
 APP_NAMES = {"freqinout", "freqinout.exe", "freqinout.appimage"}
+INSTALL_DIR = Path(os.environ.get("FIO_INSTALL_DIR", "") or "").expanduser()
 
 
 def _linux_cmdlines():
@@ -988,24 +989,65 @@ def _linux_cmdlines():
 
 
 def _is_installer(args):
-    return any(Path(arg).name in INSTALLER_NAMES for arg in args)
+    text = "\0".join(args)
+    if any(Path(arg).name in INSTALLER_NAMES for arg in args):
+        return True
+    lowered = text.lower()
+    return any(token in lowered for token in ("pytest", "release_preflight.py", "compileall", "codex"))
 
 
-def _is_freqinout_app(args):
+def _path_is_inside_install(path_text):
+    if not path_text or not str(INSTALL_DIR):
+        return False
+    try:
+        path = Path(path_text).expanduser().resolve()
+        root = INSTALL_DIR.resolve()
+        return path == root or root in path.parents
+    except Exception:
+        return False
+
+
+def _proc_cwd(pid):
+    try:
+        return str(Path(f"/proc/{pid}/cwd").resolve())
+    except Exception:
+        return ""
+
+
+def _is_freqinout_app(pid, args):
     if _is_installer(args):
+        return False
+    text = "\0".join(args).lower()
+    if "install_freqinout_linux.sh" in text or "uninstall_freqinout_linux.sh" in text:
         return False
     for idx, arg in enumerate(args):
         if arg == "-m" and idx + 1 < len(args) and args[idx + 1] == "freqinout.main":
             return True
     first = Path(args[0]).name.lower() if args else ""
     if first in APP_NAMES:
-        return True
+        exe_path = args[0] if args else ""
+        if _path_is_inside_install(exe_path) or _path_is_inside_install(_proc_cwd(pid)):
+            return True
+        # Packaged/AppImage launches may not live under INSTALL_DIR.
+        if first in {"freqinout.exe", "freqinout.appimage"}:
+            return True
+        return False
+    for arg in args:
+        name = Path(arg).name.lower()
+        if name in APP_NAMES and _path_is_inside_install(arg):
+            return True
     return False
 
 
-for _, cmdline in _linux_cmdlines() or ():
-    if _is_freqinout_app(cmdline):
-        raise SystemExit(0)
+matches = []
+for pid, cmdline in _linux_cmdlines() or ():
+    if _is_freqinout_app(pid, cmdline):
+        matches.append((pid, cmdline))
+
+if matches:
+    for pid, cmdline in matches[:5]:
+        print(f"{pid}: {' '.join(cmdline)}")
+    raise SystemExit(0)
 raise SystemExit(1)
 PY
 }
@@ -1017,6 +1059,8 @@ ensure_app_not_running_for_update() {
   fi
 
   warn "FreqInOut appears to be running."
+  warn "Matched process(es):"
+  is_freqinout_running >&2 || true
   if [[ "$policy" == "prompt" && $ASSUME_YES -eq 1 ]]; then
     policy="skip"
   fi
