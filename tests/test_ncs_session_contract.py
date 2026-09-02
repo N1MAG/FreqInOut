@@ -7,6 +7,7 @@ from freqinout.core.ncs_session_contract import (
     active_ncs_session_snapshot_list,
     active_ncs_session_summaries,
     active_ncs_session_summaries_by_kind,
+    clear_persisted_active_ncs_sessions,
     ncs_session_is_active,
     ncs_session_kind,
     ncs_session_key,
@@ -141,3 +142,39 @@ def test_active_ncs_session_summaries_are_sorted_for_shell_display() -> None:
         "FLDIGI": ["FIO-A | FLDigi/SSB | NCS | County Voice | started"],
         "JS8": ["FIO-B | JS8Call | ANCS | MAGNET | active"],
     }
+
+
+def test_clear_persisted_active_ncs_sessions_marks_restarted_sessions_interrupted() -> None:
+    settings = _Settings()
+    write_ncs_session_snapshot(
+        settings,
+        NcsSessionSnapshot(
+            protocol="JS8Call",
+            source_id="1",
+            source_name="FIO-A",
+            net_name="MAGNET",
+            timing_state="active",
+            started_utc="2026-09-02T14:00:00",
+        ),
+    )
+    write_ncs_session_snapshot(
+        settings,
+        NcsSessionSnapshot(
+            protocol="FLDigi/SSB",
+            source_id="2",
+            source_name="FIO-B",
+            timing_state="ended",
+            ended_utc="2026-09-02T15:00:00",
+        ),
+    )
+
+    assert clear_persisted_active_ncs_sessions(settings) == 1
+    assert active_ncs_session_flags(settings) == {
+        "FLDIGI": False,
+        "JS8": False,
+        "LOCAL": False,
+    }
+
+    snapshots = read_ncs_session_snapshots(settings)
+    assert snapshots["js8call:1"].timing_state == "interrupted"
+    assert snapshots["js8call:1"].ended_utc == "2026-09-02T14:00:00"

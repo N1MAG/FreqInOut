@@ -136,6 +136,30 @@ def active_ncs_session_summaries_by_kind(settings: Any) -> dict[str, list[str]]:
     return summaries
 
 
+def clear_persisted_active_ncs_sessions(settings: Any, *, timing_state: str = "interrupted") -> int:
+    try:
+        raw = settings.get(NCS_SESSION_SNAPSHOTS_KEY, {})
+    except Exception:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        return 0
+    store = dict(raw)
+    changed = 0
+    for key, record in list(store.items()):
+        snapshot = snapshot_from_record(record if isinstance(record, Mapping) else None)
+        if snapshot is None or not ncs_session_is_active(snapshot):
+            continue
+        updated = dict(snapshot.to_record())
+        updated["timing_state"] = str(timing_state or "interrupted")
+        if not updated.get("ended_utc"):
+            updated["ended_utc"] = snapshot.started_utc
+        store[str(key)] = updated
+        changed += 1
+    if changed:
+        settings.set(NCS_SESSION_SNAPSHOTS_KEY, store)
+    return changed
+
+
 def write_ncs_session_snapshot(settings: Any, snapshot: NcsSessionSnapshot) -> None:
     try:
         raw = settings.get(NCS_SESSION_SNAPSHOTS_KEY, {})

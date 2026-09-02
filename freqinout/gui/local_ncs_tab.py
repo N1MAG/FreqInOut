@@ -665,8 +665,8 @@ class LocalNCSTab(QWidget):
         self._net_end_utc = None
         self._reset_session_table()
         self.lookup_edit.setFocus()
-        self.net_status_changed.emit("LOCAL", True)
         self._persist_ncs_session_snapshot(timing_state="active")
+        self.net_status_changed.emit("LOCAL", True)
         self._update_net_session_ui()
         self._refresh_ncs_session_context()
 
@@ -689,8 +689,8 @@ class LocalNCSTab(QWidget):
         self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
         self._net_start_utc = None
         self._reset_session_table()
-        self.net_status_changed.emit("LOCAL", False)
         self._persist_ncs_session_snapshot(timing_state="ended")
+        self.net_status_changed.emit("LOCAL", False)
         self._update_net_session_ui()
         self._refresh_ncs_session_context()
 

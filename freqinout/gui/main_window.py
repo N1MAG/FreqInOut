@@ -82,7 +82,11 @@ from freqinout.core.mesh import (
     load_saved_mesh_connection_configs,
     mesh_connection_config_key,
 )
-from freqinout.core.ncs_session_contract import active_ncs_session_flags, active_ncs_session_summaries_by_kind
+from freqinout.core.ncs_session_contract import (
+    active_ncs_session_flags,
+    active_ncs_session_summaries_by_kind,
+    clear_persisted_active_ncs_sessions,
+)
 from freqinout.core.source_control_rail import (
     SourceControlItem,
     source_control_mesh_items_from_configs,
@@ -230,6 +234,7 @@ class MainWindow(QMainWindow):
         self.plan_context_service = PlanContextService()
         self._action_feedback_unsubscribe = None
         self._notify_startup_status("Loading application settings...")
+        self._clear_stale_ncs_activity_on_startup()
         self.dependency_status_service = get_dependency_status_service(self.settings)
         self.multi_radio_store = MultiRadioStore()
         self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
@@ -9944,7 +9949,6 @@ class MainWindow(QMainWindow):
         kind_key = (kind or "").strip().upper()
         if kind_key in self._ncs_net_active:
             self._ncs_net_active[kind_key] = bool(active)
-        self._refresh_ncs_activity_from_snapshots()
         try:
             # Scheduler only tracks FLDIGI/JS8 manual net locks.
             if kind_key in {"FLDIGI", "JS8"} and hasattr(self, "scheduler"):
@@ -9960,6 +9964,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.debug("Main shell: failed to read NCS session snapshots: %s", exc)
             return {"FLDIGI": False, "JS8": False, "LOCAL": False}
+
+    def _clear_stale_ncs_activity_on_startup(self) -> None:
+        try:
+            cleared = clear_persisted_active_ncs_sessions(self.settings, timing_state="interrupted")
+            if cleared:
+                log.info("Main shell: cleared %s stale persisted NCS session snapshot(s) on startup.", cleared)
+        except Exception as exc:
+            log.debug("Main shell: failed to clear stale NCS session snapshots on startup: %s", exc)
 
     def _refresh_ncs_activity_from_snapshots(self) -> None:
         try:

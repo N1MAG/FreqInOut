@@ -183,10 +183,31 @@ def test_main_shell_reads_ncs_session_snapshots_for_nav_state() -> None:
     assert "must expose active session labels" in spec
     assert "active_ncs_session_flags" in text
     assert "active_ncs_session_summaries_by_kind" in text
+    assert "clear_persisted_active_ncs_sessions" in text
     assert "_active_ncs_session_flags_from_settings" in text
+    assert "_clear_stale_ncs_activity_on_startup" in text
     assert "_refresh_ncs_activity_from_snapshots" in text
     assert "_active_ncs_session_tooltip" in text
-    assert "self._ncs_net_active: dict[str, bool] = self._active_ncs_session_flags_from_settings()" in text
+    assert "self._clear_stale_ncs_activity_on_startup()" in text
+    status_handler = text[text.index("def _on_ncs_net_status_changed") : text.index("def _active_ncs_session_flags_from_settings")]
+    assert "_refresh_ncs_activity_from_snapshots()" not in status_handler
+
+
+def test_ncs_tabs_persist_session_snapshot_before_status_signal() -> None:
+    sources = (
+        _read(Path("freqinout/gui/fldigi_net_control_tab.py")),
+        _read(Path("freqinout/gui/js8call_net_control_tab.py")),
+        _read(Path("freqinout/gui/local_ncs_tab.py")),
+    )
+
+    for text in sources:
+        for marker in ('net_status_changed.emit("FLDIGI"', 'net_status_changed.emit("JS8"', 'net_status_changed.emit("LOCAL"'):
+            search_from = 0
+            while marker in text[search_from:]:
+                emit_index = text.index(marker, search_from)
+                preceding = text[max(0, emit_index - 180) : emit_index]
+                assert "_persist_ncs_session_snapshot" in preceding
+                search_from = emit_index + len(marker)
 
 
 def test_fldigi_ncs_scroll_content_mounts_during_ui_build() -> None:

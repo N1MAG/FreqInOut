@@ -1084,7 +1084,6 @@ class JS8CallNetControlTab(QWidget):
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         self._net_end_utc = None
-        self.net_status_changed.emit("JS8", True)
         self._all_calls_seen.clear()
         self._queried_msg_ids.clear()
         self._pending_queries.clear()
@@ -1104,6 +1103,7 @@ class JS8CallNetControlTab(QWidget):
         self.ack_btn.setEnabled(True)
         self.ack_callsign_btn.setEnabled(True)
         self._persist_ncs_session_snapshot(timing_state="active")
+        self.net_status_changed.emit("JS8", True)
         self._refresh_ncs_session_context()
 
           # Track file size so we only read new lines
@@ -1186,8 +1186,8 @@ class JS8CallNetControlTab(QWidget):
         self._write_net_log_file()
 
         self._net_in_progress = False
-        self.net_status_changed.emit("JS8", False)
         self._persist_ncs_session_snapshot(timing_state="ended")
+        self.net_status_changed.emit("JS8", False)
         self._refresh_ncs_session_context()
         self._auto_query_paused_by_net = False
         self.end_btn.setEnabled(False)

@@ -5449,10 +5449,10 @@ class FldigiNetControlTab(QWidget):
             self._add_joiner_net_control_rows()
         self._roster_sync_legacy_buffers(write_files=True)
         self._set_roster_dirty(False)
-        self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
         self._update_copy_buttons_state()
         self._persist_ncs_session_snapshot(timing_state="active")
+        self.net_status_changed.emit("FLDIGI", True)
         self._refresh_ncs_session_context()
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
         QTimer.singleShot(0, self._refresh_operator_history_views)
@@ -5658,10 +5658,10 @@ class FldigiNetControlTab(QWidget):
             self._net_in_progress = False
             self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
             self._stop_log_assisted_timer()
-            self.net_status_changed.emit("FLDIGI", False)
             self._set_net_button_styles(active=False)
             self._update_copy_buttons_state()
             self._persist_ncs_session_snapshot(timing_state="ended")
+            self.net_status_changed.emit("FLDIGI", False)
             self._refresh_ncs_session_context()
             self._show_roster_action_status("Net ended. No check-ins were logged.", "info")
             log.info("FLDigi net ended (no check-ins file content).")
@@ -5734,10 +5734,10 @@ class FldigiNetControlTab(QWidget):
         self._net_in_progress = False
         self._net_end_utc = now_utc
         self._stop_log_assisted_timer()
-        self.net_status_changed.emit("FLDIGI", False)
         self._set_net_button_styles(active=False)
         self._update_copy_buttons_state()
         self._persist_ncs_session_snapshot(timing_state="ended")
+        self.net_status_changed.emit("FLDIGI", False)
         self._refresh_ncs_session_context()
         if copy_state_summary:
             state_summary = self._state_summary_text()
