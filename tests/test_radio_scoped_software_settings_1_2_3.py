@@ -178,6 +178,47 @@ def test_settings_add_radio_marks_first_radio_active_before_projection() -> None
     assert "sync_runtime_active_device_to_legacy_settings" in persist_block
 
 
+def test_settings_add_radio_button_opens_guided_dialog(monkeypatch) -> None:
+    from freqinout.gui.settings_tab import SettingsTab
+
+    app = QApplication.instance() or QApplication([])
+    called = {"count": 0}
+
+    def fake_open_dialog(self, existing=None):
+        called["count"] += 1
+        return None
+
+    monkeypatch.setattr(SettingsTab, "_open_device_profile_dialog", fake_open_dialog)
+    tab = SettingsTab()
+    tab.show_settings_context("radios")
+    app.processEvents()
+
+    tab.add_device_profile_btn.click()
+
+    assert called["count"] == 1
+
+
+def test_guided_add_radio_dialog_construction_does_not_raise(monkeypatch) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    app = QApplication.instance() or QApplication([])
+    dialog_titles: list[str] = []
+
+    def fake_exec(self):
+        dialog_titles.append(self.windowTitle())
+        return QDialog.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    tab = SettingsTab()
+    result = tab._open_device_profile_dialog(existing=None)
+    app.processEvents()
+
+    assert result is None
+    assert dialog_titles == ["Guided Add Radio"]
+
+
 def test_radio_profile_save_preserves_linked_endpoints_when_fields_omitted(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

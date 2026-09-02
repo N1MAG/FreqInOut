@@ -17,6 +17,13 @@ The product goal is not a generic dashboard builder. FIO remains an opinionated
 radio operations tool. Users can choose useful views, but each view has a clear
 operational purpose, tuned layout rules, and performance expectations.
 
+All source, projection, and view work must satisfy the UI Responsiveness
+Contract in `docs/internal/ui_layout_standards.md`. A projection may ingest or
+summarize high-volume feeds such as MeshCore, APRS, Mesh MQTT, or Reticulum/LXMF,
+but it must do so with bounded queries, coalesced updates, stale-result guards,
+and non-blocking UI handoff. Rendering more data is not useful if it makes the
+operator wait for the event loop to recover.
+
 Current product defaults:
 
 - Future source priority is `MeshCore`, `Mesh MQTT`, `APRS`, then
@@ -92,7 +99,10 @@ Projections are the bridge between raw data and display. They should:
 
 Projection examples:
 
+- `SituationSummary`
 - `AttentionItem`
+- `NeedSummary`
+- `IncidentStoryline`
 - `MessageSummary`
 - `ScheduleWindow` for schedule rows, outlook rows, and schedule-driven handoffs
 - `RfReadiness` for compact propagation/readiness guidance plus optional detail
@@ -110,7 +120,92 @@ Projection objects should answer these questions:
 - Who is involved?
 - What should the operator do next?
 
+For blended operational views, projections should also answer:
+
+- Is this human/operator traffic, source telemetry, or infrastructure state?
+- Is this part of a larger incident/storyline?
+- Does it describe an open need, a handled need, or general awareness?
+- What confidence should FIO show for the topic, location, and source?
+- Which tab owns the authoritative drill-down?
+
 ## Standard View Templates
+
+### Situation Summary
+
+Purpose: summarize what FIO believes is happening now and what the operator
+should do next.
+
+Inputs:
+
+- ranked traffic and direct messages
+- NCS/event log entries
+- needs for help, relay, welfare, logistics, communications, medical, power,
+  water, shelter, or similar action
+- incident/storyline clusters
+- map/location projections
+- SOP and schedule projections
+- source health only when it affects current operation
+
+Required behavior:
+
+- produce one plain-language headline that is useful without opening another tab
+- show 1 to 3 next actions with route-contract-backed destinations
+- separate `open`, `handled`, `watching`, `stale`, and `false-positive` items
+- preserve links to the underlying evidence in Messages, Map, NCS, SOP Builder,
+  Plan Builder, or source-specific detail
+- summarize by meaning, not source mechanics; for example, "two welfare messages
+  unanswered" is better than "two rows in the JS8 table"
+- never promote protocol telemetry, node advertisements, or router chatter as
+  human traffic unless a source contract explicitly marks it as operator content
+- accept operator corrections such as topic change, mute pattern, pin storyline,
+  mark handled, or attach item to incident
+- remain useful when only routine/social traffic exists by saying so clearly
+  without creating false urgency
+
+### Incident Storyline
+
+Purpose: keep related reports understandable over time without requiring a full
+incident-management workflow.
+
+Inputs:
+
+- topic/category
+- geography
+- recency and trend
+- involved callsigns/nodes/sources
+- direct messages, reports, NCS logs, map pins, and manual operator notes
+
+Required behavior:
+
+- cluster related observations by topic, place, actors, and time
+- support state: new, active, watching, handled, stale, muted, false-positive
+- surface trend signals such as "more reports", "new area", "no update", or
+  "handled"
+- link to map focus, message evidence, compose reply/update, and SOP review
+- retain enough provenance that the user can tell whether the story came from
+  RF, mesh, imported data, manual NCS notes, or mixed evidence
+
+### Needs Tracker
+
+Purpose: make requests for help, relays, welfare checks, resources, and
+operator follow-up visible until they are handled.
+
+Inputs:
+
+- inbound messages and forms
+- NCS/event log entries
+- operator-created notes
+- SOP suggestions
+- map/context reports
+
+Required behavior:
+
+- show open needs prominently in Ops Center and relevant detail views
+- show recently handled needs briefly so the operator sees progress
+- support statuses: open, relayed, acknowledged, handled, stale, cancelled
+- carry category, severity, requested-by, assigned-to, location, and last-update
+  context when known
+- route to authoritative detail and avoid duplicating a separate task system
 
 ### Attention Queue
 
@@ -264,9 +359,18 @@ Inputs:
 Required behavior:
 
 - use the user-defined radio short name as the primary card title
-- render every command-capable source as a compact status chip so 1-5 active
-  radios, SDRs, and future mesh/APRS-style sources remain visible at a glance
-- render one focused command card for the source that currently deserves action
+- render commandable radios as compact status chips so 1-5 active radios remain
+  visible at a glance
+- render two full radio command cards by default when exactly two radios are
+  active and the viewport can fit both at a usable width
+- render high-volume source families, including Mesh and future APRS-style
+  feeds, as aggregate source controls with saved endpoint actions instead of
+  one chip per discovered or retained endpoint
+- render one focused command card when three or more radios are active, or when
+  the viewport cannot fit two usable radio cards
+- use green for the active clear radio, blue for clear available radios, amber
+  for warning, red for blocker/error, and muted styling for inactive/unavailable
+  sources; never rely on color alone
 - promote focus by operational need: critical health/blocker, active NCS/net,
   imminent QSY, active send/transfer, direct or high-severity traffic, manual
   user focus, normal primary, then all-clear fallback
@@ -522,6 +626,50 @@ Required spec answers:
 Any source that can produce location, path, region, state, grid, or station data
 must define how it behaves on the map. Large point sets must use filtering,
 clustering, culling, rollups, or drill-down rather than drawing everything.
+
+Map rendering must follow a stable shell plus layer-payload contract:
+
+- The map shell, base assets, JavaScript helpers, and theme scaffolding should
+  load once and remain stable during ordinary source refreshes. Routine data,
+  filter, source, and view-mode changes must be pushed as map payload updates
+  instead of rebuilding the whole map document.
+- A source map adapter must emit stable layer item ids, source family,
+  confidence, freshness, action validity, and display priority. The map renderer
+  should use those ids to update, add, remove, cluster, or fade items
+  incrementally.
+- High-volume adapters such as Mesh, APRS, Mesh MQTT, and Reticulum/LXMF must
+  define payload caps, aggregation rules, stale-item rules, and update cadence
+  before they are allowed on the map. The default is coalesced updates and
+  bounded markers, not unbounded full redraws.
+- `clear all layers and redraw` is allowed only for initial shell load, explicit
+  reset, or incompatible renderer-version changes. It is not an acceptable
+  routine refresh strategy for live source updates.
+- Auto-fit is one-shot intent. It may occur when the user enters a map view,
+  clicks a `Map`/`Center` action, or explicitly chooses fit results. Live
+  refreshes after that must preserve the operator's viewport.
+- View-specific reference layers, such as towns/cities for Mesh Nodes, may be
+  enabled by the view contract without changing persistent global map
+  preferences.
+- Map refresh code must not pump nested UI events during rendering. Rendering
+  must be scheduled/coalesced through timers or queued callbacks so WebEngine,
+  splitter, focus, and window-state events cannot reenter the update pipeline.
+- Hover and resize affordances must be scoped. Splitter handles may be visually
+  discoverable, but map hover should never show generic panel-resize tooltips
+  over map content.
+- Each map adapter must provide a low-cost empty/loading state. A source with no
+  mappable observations should not force a shell reload or create fake points.
+
+Current implementation debt to retire before large APRS/Mesh volumes:
+
+- The existing Leaflet bridge still has whole-layer `clearLayers()` refreshes in
+  several renderer functions. New high-volume layers must not copy that pattern;
+  they need stable id diffing or clustering adapters first.
+- Some Python map configuration state is still coupled to full HTML reload
+  decisions. View-specific display preferences should move into payload/runtime
+  state so entering Mesh/APRS views does not cause a visible page sweep.
+- Map source adapters should expose update telemetry during QA: incoming item
+  count, rendered marker count, cluster count, dropped/stale count, render time,
+  and whether a shell reload occurred.
 
 Required spec answers:
 

@@ -127,6 +127,9 @@ def normalize_source_family(value: object) -> str:
         "local": "local",
         "mesh": "meshcore",
         "meshcore": "meshcore",
+        "meshtastic": "meshtastic",
+        "mesh_client": "meshtastic",
+        "local_mesh": "meshtastic",
         "mesh_mqtt": "mqtt",
         "meshmqtt": "mqtt",
         "meshtastic_mqtt": "mqtt",
@@ -149,7 +152,7 @@ def source_contract_for(family: object) -> SourceViewContract:
 
 
 def all_source_contracts() -> tuple[SourceViewContract, ...]:
-    priority = ("meshcore", "mqtt", "aprs", "reticulum")
+    priority = ("meshcore", "meshtastic", "mqtt", "aprs", "reticulum")
     ordered = [source_contract_for(key) for key in priority if key in _SOURCE_CONTRACTS]
     ordered.extend(contract for key, contract in _SOURCE_CONTRACTS.items() if key not in priority)
     return tuple(ordered)
@@ -183,7 +186,7 @@ def _actions_for_family(family: str) -> ActionContract:
         pin=True,
         tune=bool(caps.frequency_control),
         open_source=bool(caps.launch_control or caps.bbs_read),
-        acknowledge=family in {"meshcore", "mqtt", "aprs", "reticulum", "commstat", "fiospotter"},
+        acknowledge=family in {"meshcore", "meshtastic", "mqtt", "aprs", "reticulum", "commstat", "fiospotter"},
     )
 
 
@@ -222,6 +225,32 @@ _SOURCE_CONTRACTS: dict[str, SourceViewContract] = {
         ),
         default_view=VIEW_ATTENTION,
         notes="Highest-priority future source for offline operator network awareness.",
+    ),
+    "meshtastic": SourceViewContract(
+        family="meshtastic",
+        display_name="Meshtastic",
+        source_specific_fields=("node_id", "channel", "portnum", "hop_count", "snr", "rssi", "packet_id"),
+        common_fields=COMMON_TRAFFIC_FIELDS,
+        drilldown_fields=("raw_packet", "node_info", "device_metadata", "store_forward_state"),
+        retention=RetentionContract(default_visible_limit=100, rollup_required=True),
+        provenance=ProvenanceContract(label="rf", show_confidence=True, show_relay_path=True),
+        map_scaling=MapScalingContract(
+            geometry=("lat_lon", "grid", "node", "path"),
+            auto_fit=True,
+            clustering_required=True,
+            default_marker_limit=200,
+        ),
+        actions=_actions_for_family("meshtastic"),
+        allowed_views=(
+            VIEW_ATTENTION,
+            VIEW_TRAFFIC_INBOX,
+            VIEW_MAP_CONTEXT,
+            VIEW_COMPOSE,
+            VIEW_OPERATOR_DIRECTORY,
+            VIEW_STATION_CONTROL_CENTER,
+        ),
+        default_view=VIEW_ATTENTION,
+        notes="First-class local mesh source. USB serial and BLE must be configured explicitly and must not block the Qt UI.",
     ),
     "mqtt": SourceViewContract(
         family="mqtt",

@@ -49,11 +49,13 @@ from freqinout.core.message_row_presentation import (
     message_display_profile_for_focus_type,
     message_display_profile_headers,
     message_row_search_text,
+    observation_message_row_presentation,
     relative_age_label,
     spotter_mcf_display_label,
     spotter_message_row_presentation,
     varac_message_row_presentation,
 )
+from freqinout.core.observation_projection import Observation
 from freqinout.core.message_inbox_filters import (
     InboxFilterCriteria,
     active_inbox_scope_summary,
@@ -1532,6 +1534,8 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
     flmsg = UnifiedMessage("FLMSG", "READ", "K7ETC", "MR08", 1.0, "", "Widemouth", "flmsg", object())
     commstat = UnifiedMessage("CommStat SitRep", "INFO", "K7ETC", "MR08", 1.0, "", "Power", "commstat", object())
     js8 = UnifiedMessage("JS8 MSG", "READ", "K7ETC", "MR08", 1.0, "", "Directed message", "js8", object())
+    meshcore = UnifiedMessage("Mesh", "NEW", "K7MESH", "Public", 1.0, "", "Local traffic", "meshcore", object())
+    meshtastic = UnifiedMessage("Mesh", "NEW", "K7MES2", "Public", 1.0, "", "Local traffic", "meshtastic", object())
     varac = UnifiedMessage("VarAC", "READ", "K7ETC", "MR08", 1.0, "", "VMAIL", "varac", object())
     bbs = UnifiedMessage("BBS", "READ", "K7ETC", "MR08", 1.0, "", "Bulletin", "bbs", object())
     bbs_archive = UnifiedMessage("BBS", "READ", "K7ETC", "MR08", 1.0, "", "Old Bulletin", "bbs_archive", object())
@@ -1550,12 +1554,129 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
     assert row_matches_inbox_focus(js8, "js8call") is True
     assert row_matches_inbox_focus(spotter, "js8call") is False
 
+    assert row_matches_inbox_focus(meshcore, "mesh") is True
+    assert row_matches_inbox_focus(meshtastic, "mesh") is True
+    assert row_matches_inbox_focus(js8, "mesh") is False
+
     assert row_matches_inbox_focus(varac, "varac") is True
     assert row_matches_inbox_focus(flmsg, "varac") is False
 
     assert row_matches_inbox_focus(bbs, "bbs") is True
     assert row_matches_inbox_focus(bbs_archive, "bbs") is True
     assert row_matches_inbox_focus(varac, "bbs") is False
+
+
+def test_mesh_observation_presentation_routes_to_mesh_inbox_focus() -> None:
+    observation = Observation(
+        observation_id="meshcore:meshcore-field:private-1",
+        source_family="meshcore",
+        source_ref="mesh:meshcore:local:private-1",
+        source_app="MeshCore",
+        received_utc="2026-08-31T12:34:56+00:00",
+        from_call="K7MESH",
+        to_target="County Ops",
+        groups=("COUNTY",),
+        observed_topics=("Water", "Comms"),
+        operator_attention=True,
+        status="NEW",
+        summary="county ops water outage",
+        provenance={
+            "channel_policy": {
+                "channel_name": "County Ops",
+                "channel_privacy": "encrypted",
+                "key_status": "Joined",
+            },
+            "routing": {"route_type": "mesh", "hop_count": 2},
+            "surfaces": ["inbox", "ops_center", "map", "topic_scan"],
+        },
+    )
+
+    presentation = observation_message_row_presentation(observation)
+    row = UnifiedMessage(
+        presentation.msg_type,
+        presentation.status,
+        presentation.from_call,
+        presentation.to_call,
+        presentation.rcv_ts,
+        "2026-08-31 12:34:56",
+        presentation.title,
+        presentation.origin,
+        observation,
+        topics=presentation.topics,
+        actionable=presentation.actionable,
+        display_type=presentation.display_type,
+    )
+
+    assert row.msg_type == "MeshCore"
+    assert row.to_call == "County Ops"
+    assert row.topics == ("Water", "Comms")
+    assert row_matches_inbox_focus(row, "mesh") is True
+    assert row_matches_age_filter(row, 0, now_ts=presentation.rcv_ts + 3600) is True
+    assert row_matches_inbox_focus(row, "commstat") is False
+
+
+def test_mesh_observation_presentation_uses_policy_channel_name_for_channel_target() -> None:
+    observation = Observation(
+        observation_id="meshcore:meshcore-field:public-1",
+        source_family="meshcore",
+        source_ref="mesh:meshcore:local:public-1",
+        source_app="MeshCore",
+        received_utc="2026-08-31T12:34:56+00:00",
+        from_call="K7MESH",
+        to_target="channel",
+        groups=("PUBLIC",),
+        observed_topics=("Social",),
+        status="INFO",
+        summary="hello",
+        provenance={
+            "channel_policy": {
+                "channel_name": "Public",
+                "channel_privacy": "public",
+                "key_status": "Not needed",
+            },
+            "surfaces": ["inbox", "ops_center", "map", "topic_scan"],
+        },
+    )
+
+    presentation = observation_message_row_presentation(observation)
+
+    assert presentation.to_call == "Public"
+
+
+def test_mesh_node_observation_is_not_message_inbox_traffic() -> None:
+    observation = Observation(
+        observation_id="meshcore:mesh-node:meshcore:local:node-1",
+        source_family="meshcore",
+        source_ref="mesh-node:meshcore:local:node-1",
+        source_app="MeshCore",
+        received_utc="2026-08-31T12:34:56+00:00",
+        from_call="NODE1",
+        observed_topics=("Comms",),
+        status="seen",
+        subject="Mesh node: NODE1",
+        summary="Mesh node: NODE1",
+        provenance={
+            "routing": {"route_type": "direct", "direct_receive": True},
+            "surfaces": ["map", "ops_center"],
+        },
+    )
+    presentation = observation_message_row_presentation(observation)
+    row = UnifiedMessage(
+        presentation.msg_type,
+        presentation.status,
+        presentation.from_call,
+        presentation.to_call,
+        presentation.rcv_ts,
+        "2026-08-31 12:34:56",
+        presentation.title,
+        presentation.origin,
+        observation,
+        topics=presentation.topics,
+        actionable=presentation.actionable,
+        display_type=presentation.display_type,
+    )
+
+    assert row_matches_inbox_focus(row, "mesh") is False
 
 
 def test_inbox_focus_selects_operator_readable_table_profiles() -> None:
@@ -2175,7 +2296,13 @@ def test_received_age_filter_supports_recent_and_cleanup_windows() -> None:
     now_ts = 1_800_000_000.0
     recent = UnifiedMessage("FLMSG", "READ", "K7ETC", "MR08", now_ts - 3600, "", "Recent", "flmsg", object())
     old = UnifiedMessage("FLMSG", "READ", "K7ETC", "MR08", now_ts - (45 * 24 * 60 * 60), "", "Old", "flmsg", object())
+    undated_mesh = UnifiedMessage("Mesh", "NEW", "K7MESH", "Public", 0.0, "", "Mesh chatter", "meshcore", object())
 
+    assert row_matches_age_filter(undated_mesh, 0, now_ts=now_ts) is True
+    assert row_matches_inbox_criteria(
+        undated_mesh,
+        InboxFilterCriteria(focus="mesh", age_filter_seconds=0, now_ts=now_ts),
+    ) is True
     assert row_matches_age_filter(recent, 24 * 60 * 60, now_ts=now_ts) is True
     assert row_matches_age_filter(old, 24 * 60 * 60, now_ts=now_ts) is False
     assert row_matches_age_filter(old, -14 * 24 * 60 * 60, now_ts=now_ts) is True

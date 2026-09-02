@@ -54,9 +54,11 @@ def test_all_registered_views_declare_required_gates_and_limits() -> None:
 
 def test_future_sources_have_expected_selectable_views() -> None:
     meshcore_views = {view.key for view in operational_views_for_source("MeshCore")}
+    meshtastic_views = {view.key for view in operational_views_for_source("Meshtastic")}
     aprs_views = {view.key for view in operational_views_for_source("APRS")}
 
     assert {"activity", "traffic_inbox", "compose_workbench", "map_context"}.issubset(meshcore_views)
+    assert {"activity", "traffic_inbox", "compose_workbench", "map_context"}.issubset(meshtastic_views)
     assert {"activity", "traffic_inbox", "map_context"}.issubset(aprs_views)
     assert "compose_workbench" not in aprs_views
 
@@ -91,5 +93,7 @@ def test_station_control_center_view_supports_local_and_future_sources() -> None
     assert view.default_tab == "Station Overview"
     assert view.template == "station_control_center"
     assert view.supports_user_selection is False
-    assert {"local", "meshcore", "mqtt", "aprs", "reticulum"}.issubset(set(view.allowed_source_families))
+    assert {"local", "meshcore", "meshtastic", "mqtt", "aprs", "reticulum"}.issubset(
+        set(view.allowed_source_families)
+    )
     assert all(report.passed for report in validate_view_sources("station_control_center"))

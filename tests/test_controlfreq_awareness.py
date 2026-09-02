@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from freqinout.core.controlfreq_awareness import (
     AwarenessPin,
+    OperationalSourceLane,
     HIGH_VALUE_TOPICS,
     build_awareness_snapshot,
+    is_awareness_traffic_observation,
     reply_compose_mode_for_source,
 )
 from freqinout.core.observation_projection import Observation
@@ -91,6 +95,37 @@ def test_awareness_global_attention_queue_ranks_direct_and_alerts() -> None:
     assert snapshot.recommended_actions[0].kind == "reply"
 
 
+def test_awareness_separates_recent_traffic_from_needs_attention() -> None:
+    snapshot = build_awareness_snapshot(
+        [
+            _obs(
+                "social",
+                source_family="MeshCore",
+                from_call="K7CHAT",
+                to_target="PUBLIC",
+                topics=("Social",),
+                subject="Coffee check-in",
+                summary="Coffee check-in",
+            ),
+            _obs(
+                "weather",
+                source_family="MeshCore",
+                from_call="K7WX",
+                to_target="PUBLIC",
+                topics=("Weather",),
+                subject="Wind damage at the school",
+                summary="Wind damage at the school",
+            ),
+        ],
+        generated_at_utc="2026-08-29T12:00:00Z",
+    )
+
+    assert [item.id for item in snapshot.needs_attention] == ["weather"]
+    assert [item.id for item in snapshot.recent_traffic] == ["social"]
+    assert [item.id for item in snapshot.attention_items] == ["weather"]
+    assert [item.id for item in snapshot.more_traffic] == ["social"]
+
+
 def test_awareness_reply_defaults_to_source_family() -> None:
     assert reply_compose_mode_for_source("js8call") == "js8"
     assert reply_compose_mode_for_source("FIOSpotter") == "spotter"
@@ -157,6 +192,119 @@ def test_awareness_more_traffic_strip_keeps_routine_overflow_visible() -> None:
         generated_at_utc="2026-08-29T12:00:00Z",
     )
 
-    assert len(snapshot.attention_items) == 3
-    assert len(snapshot.more_traffic) == 2
-    assert [item.id for item in snapshot.more_traffic] == ["item-1", "item-0"]
+    assert snapshot.attention_items == ()
+    assert len(snapshot.recent_traffic) == 5
+    assert len(snapshot.more_traffic) == 5
+    assert [item.id for item in snapshot.more_traffic] == ["item-4", "item-3", "item-2", "item-1", "item-0"]
+
+
+def test_awareness_excludes_mesh_node_advertisements_from_traffic_queue() -> None:
+    node_ad = _obs(
+        "node-ad",
+        source_family="MeshCore",
+        from_call="B00BFD586CE2",
+        to_target="PUBLIC",
+        topics=("Comms",),
+        subject="Mesh node: Zekiel PRIM",
+        summary="Zekiel PRIM",
+    )
+    node_ad = replace(node_ad, provenance={"node_id": "B00BFD586CE2", "transport": "MeshCore"})
+    user_message = _obs(
+        "mesh-message",
+        source_family="MeshCore",
+        from_call="K7MESH",
+        to_target="Public",
+        topics=("Comms",),
+        subject="Need relay into town",
+        summary="Need relay into town",
+        operator_attention=True,
+    )
+
+    snapshot = build_awareness_snapshot(
+        [node_ad, user_message],
+        visible_attention_limit=6,
+        generated_at_utc="2026-08-29T12:00:00Z",
+    )
+
+    assert is_awareness_traffic_observation(node_ad) is False
+    assert is_awareness_traffic_observation(user_message) is True
+    assert [item.id for item in snapshot.attention_items] == ["mesh-message"]
+    assert [rollup.topic for rollup in snapshot.topic_rollups] == ["Comms"]
+
+
+def test_awareness_situation_summary_tracks_open_needs_and_storylines() -> None:
+    snapshot = build_awareness_snapshot(
+        [
+            _obs(
+                "need-water",
+                source_family="MeshCore",
+                from_call="K7HELP",
+                to_target="PUBLIC",
+                topics=("Water",),
+                subject="Need water at shelter",
+                summary="Need water at shelter",
+                operator_attention=True,
+                state="NC",
+            ),
+            _obs(
+                "weather",
+                source_family="js8call",
+                from_call="N1WX",
+                to_target="MAGNET",
+                topics=("Weather",),
+                subject="High wind report",
+                state="NC",
+            ),
+        ],
+        generated_at_utc="2026-08-29T12:00:00Z",
+    )
+
+    situation = snapshot.situation_summary
+
+    assert situation is not None
+    assert "1 open need" in situation.headline
+    assert situation.top_needs[0].summary == "Need water at shelter"
+    assert situation.top_needs[0].category == "Water"
+    assert situation.top_needs[0].requested_by == "K7HELP"
+    assert situation.top_needs[0].location_hint == "NC"
+    assert {story.topic for story in situation.active_incidents} == {"Water", "Weather"}
+    assert situation.where == ("NC", "PUBLIC", "MAGNET")
+
+
+def test_awareness_situation_summary_reports_quiet_monitored_sources() -> None:
+    snapshot = build_awareness_snapshot(
+        [],
+        source_lanes=(
+            OperationalSourceLane("fio-a", "FIO-A"),
+            OperationalSourceLane("meshcore", "MeshCore", source_kind="mesh"),
+        ),
+        generated_at_utc="2026-08-29T12:00:00Z",
+    )
+
+    assert snapshot.situation_summary is not None
+    assert snapshot.situation_summary.headline == "No traffic needs attention. Monitoring FIO-A, MeshCore."
+    assert snapshot.situation_summary.confidence == "0 active incidents | 0 open needs"
+
+
+def test_awareness_situation_summary_tracks_handled_needs_separately() -> None:
+    snapshot = build_awareness_snapshot(
+        [
+            _obs(
+                "handled-relay",
+                source_family="MeshCore",
+                from_call="K7REL",
+                to_target="PUBLIC",
+                topics=("Relay",),
+                subject="Relay request handled",
+                summary="Relay request handled",
+            )
+        ],
+        generated_at_utc="2026-08-29T12:00:00Z",
+    )
+
+    situation = snapshot.situation_summary
+
+    assert situation is not None
+    assert situation.top_needs == ()
+    assert len(situation.handled) == 1
+    assert situation.handled[0].status == "handled"

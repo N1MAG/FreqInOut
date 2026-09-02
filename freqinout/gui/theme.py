@@ -568,7 +568,7 @@ def style_splitter_handles(splitter: QSplitter | None, theme: Dict[str, str] | N
     try:
         splitter.setHandleWidth(handle_width)
         splitter.setChildrenCollapsible(False)
-        splitter.setToolTip("Drag this divider to resize the panels.")
+        splitter.setToolTip("")
         splitter.setStyleSheet(
             "QSplitter::handle {"
             f" background-color: {theme['border']};"
@@ -616,6 +616,37 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
         f" border: 1px solid {theme['border']};"
         " border-radius: 4px; padding: 2px 4px;"
         "}"
+        "QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QListWidget:disabled, QTableWidget:disabled, QComboBox:disabled {"
+        f" background-color: {theme['surface_alt']};"
+        f" color: {theme['text_muted']};"
+        f" border: 1px solid {theme['border']};"
+        "}"
+        "QTabWidget::pane {"
+        f" border: 1px solid {theme['border']};"
+        f" background-color: {theme['bg']};"
+        " top: -1px;"
+        "}"
+        "QTabBar::tab {"
+        f" background-color: {theme['surface_alt']};"
+        f" color: {theme['text']};"
+        f" border: 1px solid {theme['border']};"
+        " border-bottom-color: transparent;"
+        " padding: 6px 14px;"
+        " min-height: 22px;"
+        "}"
+        "QTabBar::tab:selected {"
+        f" background-color: {theme['surface']};"
+        f" color: {theme['text']};"
+        f" border-color: {theme['accent']};"
+        "}"
+        "QTabBar::tab:hover {"
+        f" background-color: {theme['surface']};"
+        f" color: {theme['text']};"
+        "}"
+        "QTabBar::tab:disabled {"
+        f" background-color: {theme['surface_alt']};"
+        f" color: {theme['text_muted']};"
+        "}"
         "QPushButton, QToolButton {"
         f" background-color: {theme['surface_alt']};"
         f" color: {theme['text']};"
@@ -635,6 +666,10 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
         "}"
         "QTableWidget::item:selected, QListWidget::item:selected {"
         f" background-color: {theme['surface_alt']};"
+        f" color: {theme['text']};"
+        "}"
+        "QTableWidget::item:disabled, QListWidget::item:disabled {"
+        f" color: {theme['text_muted']};"
         "}"
         "QHeaderView::section {"
         f" background-color: {theme['surface_alt']};"
@@ -727,6 +762,11 @@ def apply_app_theme(app, theme: Dict[str, str], *, ui_text_scale: float = 1.00) 
     pal.setColor(QPalette.Link, qcolor(theme["accent"]))
     pal.setColor(QPalette.Highlight, qcolor(theme["accent"]))
     pal.setColor(QPalette.HighlightedText, qcolor(theme["text"]))
+    pal.setColor(QPalette.Disabled, QPalette.WindowText, qcolor(theme["text_muted"]))
+    pal.setColor(QPalette.Disabled, QPalette.Text, qcolor(theme["text_muted"]))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, qcolor(theme["text_muted"]))
+    pal.setColor(QPalette.Disabled, QPalette.Base, qcolor(theme["surface_alt"]))
+    pal.setColor(QPalette.Disabled, QPalette.Button, qcolor(theme["surface_alt"]))
     app.setPalette(pal)
     app.setStyleSheet(app_stylesheet(theme))
     fit_existing_combo_boxes(app)

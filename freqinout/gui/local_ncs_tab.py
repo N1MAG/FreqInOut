@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QCompleter,
+    QGroupBox,
 )
 
 from freqinout.core.local_ops_store import (
@@ -38,6 +39,7 @@ from freqinout.core.local_ops_store import (
 )
 from freqinout.core.message_intelligence import TOPIC_TAXONOMY
 from freqinout.core.logger import log
+from freqinout.core.ncs_session_contract import NcsSessionSnapshot, write_ncs_session_snapshot
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.utils.timezones import get_timezone
@@ -84,6 +86,7 @@ class LocalNCSTab(QWidget):
         self._net_in_progress = False
         self._net_session_mode = ""
         self._net_start_utc: Optional[str] = None
+        self._net_end_utc: Optional[str] = None
         self._ignore_next_lookup_return = False
         self._clock_timer: Optional[QTimer] = None
         self._autosave_timer: Optional[QTimer] = None
@@ -96,6 +99,40 @@ class LocalNCSTab(QWidget):
         self._load_checkins()
         self._setup_timers()
         self.apply_theme()
+
+    def _refresh_ncs_session_context(self) -> None:
+        if not hasattr(self, "ncs_session_summary_label"):
+            return
+        role = self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS"
+        net_name = self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else ""
+        channels = self.channels_edit.text().strip() if hasattr(self, "channels_edit") else ""
+        summary = f"Session: Local | VHF/UHF | {role}"
+        if net_name:
+            summary = f"{summary} | {net_name}"
+        if channels:
+            summary = f"{summary} | {channels}"
+        self.ncs_session_summary_label.setText(summary)
+        self.ncs_session_summary_label.setToolTip(summary)
+
+    def _current_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> NcsSessionSnapshot:
+        state = timing_state or ("active" if self._net_in_progress else "idle")
+        return NcsSessionSnapshot(
+            protocol="Local",
+            source_id="local",
+            source_name="Local",
+            role=self.role_combo.currentText().strip() if hasattr(self, "role_combo") else "NCS",
+            net_name=self.net_name_edit.text().strip() if hasattr(self, "net_name_edit") else "",
+            timing_state=state,
+            started_utc=self._net_start_utc or "",
+            ended_utc=self._net_end_utc or "",
+            detail=self.channels_edit.text().strip() if hasattr(self, "channels_edit") else "",
+        )
+
+    def _persist_ncs_session_snapshot(self, *, timing_state: Optional[str] = None) -> None:
+        try:
+            write_ncs_session_snapshot(self.settings, self._current_ncs_session_snapshot(timing_state=timing_state))
+        except Exception as exc:
+            log.debug("Local NCS: failed to persist session snapshot: %s", exc)
 
     def _build_ui(self) -> None:
         outer_layout = QVBoxLayout(self)
@@ -121,6 +158,24 @@ class LocalNCSTab(QWidget):
         header.addWidget(self.local_label)
         layout.addLayout(header)
 
+        session_group = QGroupBox("NCS Session")
+        session_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        session_layout = QVBoxLayout()
+        session_layout.setContentsMargins(12, 10, 12, 10)
+        session_layout.setSpacing(8)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(QLabel("Source:"))
+        self.local_ncs_source_chip = QPushButton("Local")
+        self.local_ncs_source_chip.setFocusPolicy(Qt.NoFocus)
+        self.local_ncs_source_chip.setToolTip("Local NCS workspace for VHF/UHF, voice, GMRS, or in-room check-ins.")
+        source_row.addWidget(self.local_ncs_source_chip)
+        source_row.addStretch()
+        self.ncs_session_summary_label = QLabel("Session: Local | VHF/UHF | NCS")
+        self.ncs_session_summary_label.setWordWrap(True)
+        session_layout.addLayout(source_row)
+        session_layout.addWidget(self.ncs_session_summary_label)
+
         info_row = QHBoxLayout()
         info_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
@@ -137,7 +192,7 @@ class LocalNCSTab(QWidget):
         self.channels_edit = QLineEdit()
         self.channels_edit.setPlaceholderText("Example: 146.520 simplex; GMRS RPT 462.650")
         info_row.addWidget(self.channels_edit, stretch=1)
-        layout.addLayout(info_row)
+        session_layout.addLayout(info_row)
 
         session_row = QHBoxLayout()
         self.start_net_btn = QPushButton("Start Net")
@@ -149,7 +204,9 @@ class LocalNCSTab(QWidget):
         session_row.addWidget(self.end_net_btn)
         session_row.addSpacing(10)
         session_row.addWidget(self.session_status_label, stretch=1)
-        layout.addLayout(session_row)
+        session_layout.addLayout(session_row)
+        session_group.setLayout(session_layout)
+        layout.addWidget(session_group)
 
         lookup_row = QHBoxLayout()
         lookup_row.addWidget(QLabel("Operator Lookup/Add:"))
@@ -299,6 +356,8 @@ class LocalNCSTab(QWidget):
         self.channels_edit.textChanged.connect(self._persist_context)
         self.net_name_edit.textChanged.connect(self._update_net_session_ui)
         self.channels_edit.textChanged.connect(self._update_net_session_ui)
+        self.net_name_edit.textChanged.connect(lambda _text: self._refresh_ncs_session_context())
+        self.channels_edit.textChanged.connect(lambda _text: self._refresh_ncs_session_context())
         self.start_net_btn.clicked.connect(self._start_local_net)
         self.join_net_btn.clicked.connect(self._join_local_net)
         self.end_net_btn.clicked.connect(self._end_local_net)
@@ -320,6 +379,7 @@ class LocalNCSTab(QWidget):
         self.setTabOrder(self.lookup_edit, self.add_checkin_btn)
         self.local_ncs_scroll_area.setWidget(self.local_ncs_content)
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _setup_timers(self) -> None:
         self._clock_timer = QTimer(self)
@@ -347,6 +407,7 @@ class LocalNCSTab(QWidget):
         try:
             self.settings.set("local_ncs_net_name", self.net_name_edit.text().strip())
             self.settings.set("local_ncs_channels", self.channels_edit.text().strip())
+            self._persist_ncs_session_snapshot()
         except Exception:
             pass
 
@@ -375,6 +436,8 @@ class LocalNCSTab(QWidget):
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        if hasattr(self, "local_ncs_source_chip"):
+            self.local_ncs_source_chip.setStyleSheet(button_style("success", theme))
         self.start_net_btn.setStyleSheet(button_style("muted", theme))
         self.join_net_btn.setStyleSheet(button_style("muted", theme))
         self.end_net_btn.setStyleSheet(button_style("muted", theme))
@@ -599,10 +662,13 @@ class LocalNCSTab(QWidget):
         self._net_in_progress = True
         self._net_session_mode = "JOINED" if joined else "STARTED"
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+        self._net_end_utc = None
         self._reset_session_table()
         self.lookup_edit.setFocus()
         self.net_status_changed.emit("LOCAL", True)
+        self._persist_ncs_session_snapshot(timing_state="active")
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _end_local_net(self) -> None:
         if not self._net_in_progress:
@@ -620,10 +686,13 @@ class LocalNCSTab(QWidget):
         self._autosave_dirty()
         self._net_in_progress = False
         self._net_session_mode = ""
+        self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
         self._net_start_utc = None
         self._reset_session_table()
         self.net_status_changed.emit("LOCAL", False)
+        self._persist_ncs_session_snapshot(timing_state="ended")
         self._update_net_session_ui()
+        self._refresh_ncs_session_context()
 
     def _update_net_session_ui(self) -> None:
         active = bool(self._net_in_progress)

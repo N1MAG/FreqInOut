@@ -1,6 +1,7 @@
 import datetime
 
-from PySide6.QtWidgets import QApplication, QToolButton
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMessageBox, QSizePolicy, QToolButton
 
 from freqinout.gui.fldigi_net_control_tab import FldigiNetControlTab
 
@@ -141,6 +142,25 @@ def test_roster_copy_text_excludes_operational_notes():
 
     assert tab._roster_table_text() == "N1MAG / Bill / CO / ANCS\nW1ABC / Bob / CA / 1RR"
     assert "generator" not in tab._roster_table_text("TFC")
+
+
+def test_state_summary_counts_accepted_checkins_without_net_control_rows_or_duplicates():
+    tab = _tab()
+    tab.net_name_combo = type("Combo", (), {"currentText": lambda self: "Weekly Net"})()
+    tab._roster_table_rows = lambda: [
+        {"callsign": "NCS1", "state": "CO", "station_role": "NCS"},
+        {"callsign": "ANCS1", "state": "WY", "station_role": "ANCS"},
+        {"callsign": "W1ABC", "state": "CA", "station_role": ""},
+        {"callsign": "w1abc", "state": "CA", "station_role": ""},
+        {"callsign": "K0XYZ", "state": "CO", "station_role": ""},
+        {"callsign": "K7BTH", "state": "", "station_role": ""},
+    ]
+
+    text = tab._state_summary_text()
+
+    assert text == "Weekly Net Check-ins by state/province: CA: 1, CO: 1, Unknown: 1. Total: 3."
+    assert "NCS1" not in text
+    assert "ANCS1" not in text
 
 
 def test_keyword_and_slash_traffic_parse_to_separate_fields():
@@ -327,10 +347,30 @@ def test_inline_compare_for_ancs_shows_copyable_relays_to_ncs():
 
     tab._run_inline_compare()
 
-    assert "Stations to Relay to NCS" in tab.compare_results_card.title()
+    assert "Roster Gap" in tab.compare_results_card.title()
+    assert "Missing from NCS" in tab.compare_results_text.toPlainText()
     assert "W1ABC / Bob / CA / 1PP" in tab.compare_results_text.toPlainText()
     assert "K0XYZ / Lee / WY" in tab._compare_missing_text
     assert "N5REF" not in tab._compare_missing_text
+
+
+def test_copy_roster_gap_copies_single_partner_delta_action():
+    app = _app()
+    tab = FldigiNetControlTab()
+    tab.role_combo.setCurrentText("ANCS")
+    tab._roster_append_row("W1ABC", "Bob", "CA", "1PP", "TFC", "Local")
+    tab._roster_append_row("K0XYZ", "Lee", "WY", "", "QRU", "Local")
+    tab._roster_append_row("N5REF", "Sue", "AZ", "1RR", "TFC", "Local")
+    tab.reference_card.set_text("N5REF / Sue / AZ / 1RR")
+
+    tab._copy_roster_gap()
+
+    copied = app.clipboard().text()
+    assert "Missing from NCS" in copied
+    assert "W1ABC / Bob / CA / 1PP" in copied
+    assert "K0XYZ / Lee / WY" in copied
+    assert "N5REF" not in copied
+    assert tab.compare_results_card.title() == "Roster Gap"
 
 
 def test_role_first_macro_files_stay_current_from_roster(tmp_path):
@@ -370,12 +410,76 @@ def test_live_action_layout_separates_scope_save_and_primary_actions():
 
     assert tab.macro_profile_details_btn.text() == "Macro: None"
     assert not tab.setup_details_frame.isVisible()
+    assert not tab.setup_frame.isVisible()
+    assert tab._ncs_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert tab.net_name_combo.maximumWidth() <= 440
+    assert tab.next_change_label.maximumWidth() <= 620
+    assert not tab.next_change_label.wordWrap()
+    assert tab.macro_profile_details_btn.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed
+    assert tab.known_op_edit.maximumWidth() <= 520
     assert tab.save_btn.text() == "Save Check-ins"
     assert tab.copy_needs_sync_btn.text() == "ACK Needed"
     assert tab.next_tfc_btn.text() == "Next TFC"
     assert tab.copy_tfc_btn.text() == "TFC"
     assert tab.copy_roster_summary_btn.text() == "All Check-ins"
+    assert tab.roster_compare_status_btn.text() == "Compare Rosters"
+    assert tab.copy_roster_gap_btn.text() == "Copy Gap"
+    assert tab.relay_compare_btn.isHidden()
+    assert tab.copy_relays_btn.isHidden()
     assert set(tab.roster_scope_buttons) == {"NCS", "ANCS", "SHARED", "ALL"}
+
+
+def test_state_summary_is_post_net_only():
+    _app()
+    tab = FldigiNetControlTab()
+    tab._roster_append_row("W1ABC", "Bob", "CA", "1RR", "TFC", "Local")
+
+    tab._net_in_progress = True
+    tab._net_end_utc = None
+    tab._update_copy_buttons_state()
+    assert tab.copy_state_summary_btn.isHidden()
+    assert not tab.copy_state_summary_btn.isEnabled()
+
+    tab._net_in_progress = False
+    tab._net_end_utc = "2026-09-01T22:00:00"
+    tab._update_copy_buttons_state()
+    assert not tab.copy_state_summary_btn.isHidden()
+    assert tab.copy_state_summary_btn.isEnabled()
+
+
+def test_roster_compare_status_chip_scrolls_to_compare_workspace(monkeypatch):
+    _app()
+    tab = FldigiNetControlTab()
+    calls = []
+    monkeypatch.setattr(tab, "_scroll_to_roster_compare", lambda: calls.append("scrolled"))
+
+    tab._show_roster_compare()
+
+    assert calls == ["scrolled"]
+    assert not tab.compare_workspace_body.isHidden()
+    assert tab.compare_workspace_tabs.currentWidget() is tab.reference_card
+
+
+def test_end_net_uses_one_confirmation_and_quiet_save(tmp_path, monkeypatch):
+    app = _app()
+    tab = FldigiNetControlTab()
+    tab.settings.set("fldigi_checkin_dir", str(tmp_path))
+    tab.role_combo.setCurrentText("NCS")
+    tab.net_name_combo.setCurrentText("FLDIGI Test Net")
+    tab._net_in_progress = True
+    tab._roster_append_row("W1ABC", "Bob", "CA", "1RR", "TFC", "Local")
+    confirmations = []
+    info_dialogs = []
+    monkeypatch.setattr(tab, "_confirm_end_net", lambda: confirmations.append("asked") or (True, True))
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: info_dialogs.append(args))
+
+    tab._end_net()
+
+    assert confirmations == ["asked"]
+    assert info_dialogs == []
+    assert not tab._net_in_progress
+    assert "CA: 1" in app.clipboard().text()
+    assert "State summary copied" in tab.roster_action_status.text()
 
 
 def test_next_tfc_end_of_queue_marks_last_station_called(tmp_path):
@@ -452,9 +556,9 @@ def test_log_assisted_intake_is_disabled_while_hidden():
 
 def test_net_schedule_occurrences_include_active_window_and_dedupe_daily_rows():
     tab = _tab()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    start = (now - datetime.timedelta(minutes=15)).strftime("%H:%M")
-    end = (now + datetime.timedelta(minutes=45)).strftime("%H:%M")
+    now = datetime.datetime(2026, 9, 1, 12, 0, tzinfo=datetime.timezone.utc)
+    start = "00:00"
+    end = "23:59"
     row = {
         "net_name": "Late Friendly Net",
         "day_utc": now.strftime("%A"),

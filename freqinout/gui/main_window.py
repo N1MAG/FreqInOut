@@ -6,7 +6,7 @@ import re
 import sqlite3
 import sys
 import time
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QMetaObject, Qt, QThread, QTimer, QUrl
 from pathlib import Path
 
 from freqinout.core.logger import log
@@ -69,6 +69,12 @@ from freqinout.core.js8_expect_runtime import build_expect_rf_guard_preflight
 from freqinout.core.ingest_runtime_status import active_runtime_source_view_rows, runtime_source_view_rows_from_skip_reasons
 from freqinout.core.station_health_summary import runtime_observability_items, summarize_station_health
 from freqinout.core.launch_orchestrator import LAUNCH_APP_ORDER
+from freqinout.core.mesh import MeshConnectionWorker, default_mesh_db_path, list_mesh_health, load_mesh_connection_configs
+from freqinout.core.ncs_session_contract import active_ncs_session_flags, active_ncs_session_summaries_by_kind
+from freqinout.core.source_control_rail import (
+    SourceControlItem,
+    source_control_mesh_items_from_configs,
+)
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.core.view_contracts import (
@@ -215,6 +221,10 @@ class MainWindow(QMainWindow):
         self._launch_startup_suppressed = False
         self._station_health_scope_map: dict[str, str] = {}
         self._quick_search_cache: tuple[float, list[dict[str, object]]] = (0.0, [])
+        self._mesh_worker_thread: QThread | None = None
+        self._mesh_worker: MeshConnectionWorker | None = None
+        self._mesh_runtime_signature: tuple[tuple[str, bool, str, str], ...] = tuple()
+        self._mesh_manager_dialog: QDialog | None = None
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
@@ -397,7 +407,7 @@ class MainWindow(QMainWindow):
         self._station_health_nav_index = None
         self._station_health_alert_signature: tuple[object, ...] | None = None
         self._ncs_nav_indices: dict[str, int] = {}
-        self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
+        self._ncs_net_active: dict[str, bool] = self._active_ncs_session_flags_from_settings()
         self._nav_group_headers: dict[str, QPushButton] = {}
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
@@ -746,6 +756,12 @@ class MainWindow(QMainWindow):
         self.station_command_radio_next_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._station_command_radio_page = 0
         self._station_command_radio_summary_signature: tuple[object, ...] | None = None
+        self._mesh_health_command_refresh_timer = QTimer(self)
+        self._mesh_health_command_refresh_timer.setSingleShot(True)
+        self._mesh_health_command_refresh_timer.setInterval(350)
+        self._mesh_health_command_refresh_timer.timeout.connect(
+            lambda: self._refresh_station_command_bar(force=False)
+        )
         self.station_command_radio_admin_btn = QPushButton("All Radios")
         self.station_command_radio_admin_btn.setObjectName("stationCommandRadioAdminToggle")
         self.station_command_radio_admin_btn.setToolTip("Show or hide the all-radio status and assignment panel.")
@@ -915,6 +931,7 @@ class MainWindow(QMainWindow):
                 self.local_ncs_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
         except Exception:
             pass
+        self._refresh_ncs_activity_from_snapshots()
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
@@ -1016,6 +1033,7 @@ class MainWindow(QMainWindow):
         _connect_or_log("settings_saved -> log indicator", self.settings_tab.settings_saved, self._update_log_indicator)
         _connect_or_log("settings_saved -> background ingest", self.settings_tab.settings_saved, self.background_ingest.refresh_runtime_settings)
         _connect_or_log("settings_saved -> station health", self.settings_tab.settings_saved, self._on_station_health_settings_saved)
+        _connect_or_log("settings_saved -> local mesh runtime", self.settings_tab.settings_saved, self._restart_mesh_runtime_if_needed)
         _connect_or_log("open_logs_requested -> log window", self.settings_tab.open_logs_requested, self._open_logs_window)
         _connect_or_log("log_level_changed -> log indicator", self.settings_tab.log_level_changed, self._update_log_indicator)
         self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
@@ -1026,6 +1044,7 @@ class MainWindow(QMainWindow):
         self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
 
         log.info("Main window initialized.")
+        self._start_mesh_runtime_if_enabled()
         # Sync sidebar filters initially
         self._sync_map_filters_from_tab()
         self._update_log_indicator()
@@ -2590,20 +2609,143 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _mesh_runtime_configs(self):
+        try:
+            return load_mesh_connection_configs(self.settings)
+        except Exception as e:
+            log.debug("MainWindow: local mesh settings load failed: %s", e)
+            return tuple()
+
+    @staticmethod
+    def _mesh_runtime_signature_from_configs(configs) -> tuple[tuple[str, bool, str, str], ...]:
+        signature = []
+        for config in configs:
+            try:
+                signature.append(
+                    (
+                        str(config.adapter_id),
+                        bool(config.enabled),
+                        str(config.protocol),
+                        str(config.connection_type.value),
+                    )
+                )
+            except Exception:
+                continue
+        return tuple(signature)
+
+    def _start_mesh_runtime_if_enabled(self) -> None:
+        configs = tuple(self._mesh_runtime_configs())
+        signature = self._mesh_runtime_signature_from_configs(configs)
+        self._mesh_runtime_signature = signature
+        if not configs:
+            return
+        if self._mesh_worker_thread is not None:
+            return
+        try:
+            thread = QThread(self)
+            worker = MeshConnectionWorker(configs, db_path=default_mesh_db_path())
+            worker.moveToThread(thread)
+            thread.started.connect(worker.start)
+            worker.error_ready.connect(self._on_mesh_runtime_error)
+            worker.health_ready.connect(self._on_mesh_runtime_health)
+            worker.event_ready.connect(self._on_mesh_runtime_event)
+            worker.stopped.connect(thread.quit)
+            worker.stopped.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._on_mesh_runtime_thread_finished)
+            self._mesh_worker_thread = thread
+            self._mesh_worker = worker
+            thread.start()
+            log.info("MainWindow: local mesh runtime starting for %s configured source(s).", len(configs))
+        except Exception as e:
+            self._mesh_worker_thread = None
+            self._mesh_worker = None
+            log.warning("MainWindow: local mesh runtime failed to start: %s", e)
+
+    def _restart_mesh_runtime_if_needed(self) -> None:
+        configs = tuple(self._mesh_runtime_configs())
+        signature = self._mesh_runtime_signature_from_configs(configs)
+        if signature == getattr(self, "_mesh_runtime_signature", tuple()):
+            return
+        self._stop_mesh_runtime()
+        self._mesh_runtime_signature = signature
+        if configs:
+            self._start_mesh_runtime_if_enabled()
+
+    def _stop_mesh_runtime(self) -> None:
+        worker = getattr(self, "_mesh_worker", None)
+        thread = getattr(self, "_mesh_worker_thread", None)
+        self._mesh_worker = None
+        self._mesh_worker_thread = None
+        stop_requested = False
+        if worker is not None:
+            try:
+                if thread is not None and thread.isRunning():
+                    QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
+                    stop_requested = True
+                else:
+                    worker.stop()
+            except Exception as e:
+                log.debug("MainWindow shutdown: local mesh runtime stop failed: %s", e)
+        if thread is not None:
+            try:
+                if not stop_requested:
+                    thread.quit()
+                if not thread.wait(200):
+                    log.debug("MainWindow shutdown: local mesh runtime thread did not stop within 200 ms.")
+            except Exception as e:
+                log.debug("MainWindow shutdown: local mesh runtime thread stop failed: %s", e)
+
+    def _on_mesh_runtime_thread_finished(self) -> None:
+        log.debug("MainWindow: local mesh runtime thread finished.")
+
+    def _on_mesh_runtime_error(self, message: str) -> None:
+        text = str(message or "").strip()
+        if text:
+            log.warning("Local Mesh runtime: %s", text)
+
+    def _on_mesh_runtime_health(self, health) -> None:
+        try:
+            if hasattr(self, "station_health_tab") and hasattr(self.station_health_tab, "refresh"):
+                self.station_health_tab.refresh()
+        except Exception:
+            pass
+        try:
+            timer = getattr(self, "_mesh_health_command_refresh_timer", None)
+            if isinstance(timer, QTimer):
+                timer.start()
+            else:
+                QTimer.singleShot(350, lambda: self._refresh_station_command_bar(force=False))
+        except Exception:
+            pass
+
+    def _on_mesh_runtime_event(self, event) -> None:
+        try:
+            if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "refresh_view"):
+                self.controlfreq_tab.refresh_view()
+        except Exception:
+            pass
+        try:
+            if self.message_viewer_tab is not None and hasattr(self.message_viewer_tab, "refresh_messages"):
+                self.message_viewer_tab.refresh_messages()
+        except Exception:
+            pass
+
     def _on_app_about_to_quit(self):
         if self._shutting_down:
             return
         self._shutting_down = True
         self._close_transient_shutdown_ui()
         try:
-            shutdown_dependency_status_service()
-        except Exception as e:
-            log.debug("MainWindow shutdown: dependency status service stop failed: %s", e)
-        try:
             if hasattr(self, "_ui_watchdog"):
                 self._ui_watchdog.stop()
         except Exception:
             pass
+        self._stop_mesh_runtime()
+        try:
+            shutdown_dependency_status_service()
+        except Exception as e:
+            log.debug("MainWindow shutdown: dependency status service stop failed: %s", e)
         try:
             if hasattr(self, "_sop_data_refresh_timer"):
                 self._sop_data_refresh_timer.stop()
@@ -6761,9 +6903,9 @@ class MainWindow(QMainWindow):
         total = max(1, int(total or 1))
         return total
 
-    def _station_command_radio_card_width(self, count: int) -> int:
-        count = max(1, int(count or 1))
+    def _station_command_radio_summary_available_width(self) -> int:
         scroll_width = 0
+        viewport_width = 0
         try:
             scroll = getattr(self, "station_command_radio_summary_scroll", None)
             viewport = getattr(scroll, "viewport", lambda: None)()
@@ -6776,13 +6918,38 @@ class MainWindow(QMainWindow):
         except Exception:
             bar_width = 0
         width = (viewport_width or scroll_width or bar_width or 660) - 20
-        if width <= 0:
-            width = 660
+        return max(1, width)
+
+    def _station_command_dual_radio_cards_fit(self, choices: Sequence[object]) -> bool:
+        if len(choices) != 2:
+            return False
+        width = self._station_command_radio_summary_available_width()
+        return width >= (380 * 2 + 6)
+
+    def _station_command_card_choices_for_layout(self, choices: Sequence[object], selected_id: int) -> list[object]:
+        card_choices = list(choices)
+        if not card_choices:
+            return []
+        if self._station_command_dual_radio_cards_fit(card_choices):
+            return card_choices
+        focused_snapshot = next(
+            (
+                snapshot
+                for snapshot in card_choices
+                if self._station_command_snapshot_id(snapshot) == int(selected_id or 0)
+            ),
+            card_choices[0],
+        )
+        return [focused_snapshot]
+
+    def _station_command_radio_card_width(self, count: int) -> int:
+        count = max(1, int(count or 1))
+        width = self._station_command_radio_summary_available_width()
         if count <= 1:
             return max(280, min(900, width))
         gaps = max(0, count - 1) * 6
         available = max(300, width - gaps)
-        minimum_card = 280
+        minimum_card = 380 if count == 2 else 280
         if count * minimum_card + gaps <= width:
             return max(minimum_card, min(480, available // count))
         return minimum_card
@@ -6815,11 +6982,14 @@ class MainWindow(QMainWindow):
         except Exception:
             theme = {}
         state = str(state_text or "").strip().lower()
-        role = "muted" if state in {"inactive", "configured inactive", "not enabled"} else "info"
-        if state in {"ptt active", "rf guard blocked", "blocked", "error", "failed"}:
+        if state in {"inactive", "configured inactive", "not enabled"}:
+            role = "muted"
+        elif state in {"ptt active", "rf guard blocked", "blocked", "error", "failed"}:
             role = "danger"
         elif state in {"manual hold", "manual qsy", "scheduler suspended", "needs review", "warning", "warn"}:
             role = "warning"
+        else:
+            role = "success" if selected else "info"
         font = button.font()
         font.setBold(True)
         button.setFont(font)
@@ -6845,6 +7015,22 @@ class MainWindow(QMainWindow):
         if state in {"inactive", "configured inactive", "not enabled"}:
             return "muted", "Inactive"
         return "success", "Clear"
+
+    def _station_command_snapshot_needs_operator_attention(self, snapshot: object) -> bool:
+        role, _label = self._station_command_attention_role_for_snapshot(snapshot)
+        if role == "danger":
+            return True
+        if role != "warning":
+            return False
+        ident = self._station_command_snapshot_id(snapshot)
+        operator_control_state = (
+            self._station_command_scheduler_manual_qsy_active_for_radio(ident)
+            or self._station_command_scheduler_suspended_manually_for_radio(ident)
+            or self._station_command_timed_suspend_active_for_radio(ident)
+        )
+        if operator_control_state:
+            return False
+        return True
 
     def _station_command_focus_score(self, snapshot: object, selected_id: int) -> int:
         ident = self._station_command_snapshot_id(snapshot)
@@ -6888,6 +7074,340 @@ class MainWindow(QMainWindow):
         plan_text = self._station_command_display_plan_name(self._station_command_plan_name_for_snapshot(snapshot))
         return f"{name}: {label}\nNow: {now or '--'}\nNext: {next_text or '--'}\nPlan: {plan_text or '--'}"
 
+    def _station_command_mesh_source_chips(self) -> list[dict[str, str]]:
+        try:
+            configs = load_mesh_connection_configs(self.settings)
+        except Exception:
+            configs = ()
+        saved = [config for config in configs if str(config.endpoint_address or "").strip()]
+        if not saved:
+            return []
+        try:
+            rows = list_mesh_health(default_mesh_db_path())
+        except Exception:
+            rows = []
+        out: list[dict[str, str]] = []
+        for config in sorted(saved, key=lambda item: (str(item.protocol or ""), self._station_command_mesh_config_chip_label(item).lower())):
+            row = self._station_command_best_mesh_health_for_config(config, rows)
+            name = self._station_command_mesh_config_chip_label(config)
+            if not name:
+                continue
+            connected = bool(row and row.get("connected"))
+            lifecycle_state = str(row.get("lifecycle_state") or "").strip().lower() if row else ""
+            last_error = str(row.get("last_error") or "").strip() if row else ""
+            if connected or lifecycle_state == "connected":
+                role = "eligible_success"
+            elif lifecycle_state in {"reconnecting", "away", "disabled"}:
+                role = "muted"
+            else:
+                role = "warning" if last_error or lifecycle_state == "config_error" else "muted"
+            status = lifecycle_state.replace("_", " ") if lifecycle_state else ("connected" if connected else "not connected")
+            guidance = str(row.get("guidance") or "").strip() if row else ""
+            out.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "tooltip": (
+                        f"Mesh source: {name}\nStatus: {status}"
+                        + (f"\n{guidance}" if guidance else "")
+                        + (f"\nIssue: {last_error}" if last_error and role == "warning" else "")
+                    ),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _station_command_mesh_config_chip_label(config: object) -> str:
+        name = str(getattr(config, "ble_device_name", "") or "").strip()
+        adapter = str(getattr(config, "adapter_id", "") or "").strip()
+        endpoint = str(getattr(config, "endpoint_address", "") or "").strip()
+        if MainWindow._station_command_mesh_identifier_looks_raw(name):
+            name = ""
+        if not name and not MainWindow._station_command_mesh_identifier_looks_raw(adapter):
+            name = adapter
+        if not name and not MainWindow._station_command_mesh_identifier_looks_raw(endpoint):
+            name = endpoint
+        for prefix in ("MeshCore-", "meshcore-", "Meshtastic-", "meshtastic-", "Mesh ", "mesh "):
+            if name.startswith(prefix):
+                name = name[len(prefix) :].strip()
+        return name or "Mesh"
+
+    @staticmethod
+    def _station_command_best_mesh_health_for_config(
+        config: object,
+        rows: Sequence[Mapping[str, object]],
+    ) -> Mapping[str, object] | None:
+        keys = {
+            MainWindow._station_command_normalized_mesh_identity(getattr(config, "adapter_id", "")),
+            MainWindow._station_command_normalized_mesh_identity(getattr(config, "ble_device_id", "")),
+            MainWindow._station_command_normalized_mesh_identity(getattr(config, "ble_device_name", "")),
+        }
+        keys.discard("")
+        if not keys:
+            return None
+        matches = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            row_keys = {
+                MainWindow._station_command_normalized_mesh_identity(row.get("adapter_id")),
+                MainWindow._station_command_normalized_mesh_identity(row.get("device_name")),
+            }
+            if keys.intersection(row_keys):
+                matches.append(row)
+        if not matches:
+            return None
+        return max(matches, key=MainWindow._station_command_mesh_chip_rank)
+
+    @staticmethod
+    def _station_command_normalized_mesh_identity(value: object) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"^(meshcore|meshtastic|mesh)[\s:_-]+", "", text)
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    @staticmethod
+    def _station_command_mesh_chip_label(row: Mapping[str, object]) -> str:
+        name = str(row.get("device_name") or "").strip()
+        adapter = str(row.get("adapter_id") or "").strip()
+        if MainWindow._station_command_mesh_identifier_looks_raw(name):
+            name = ""
+        if not name and not MainWindow._station_command_mesh_identifier_looks_raw(adapter):
+            name = adapter
+        for prefix in ("MeshCore-", "meshcore-", "Mesh ", "mesh "):
+            if name.startswith(prefix):
+                name = name[len(prefix) :].strip()
+        return name or "Mesh"
+
+    @staticmethod
+    def _station_command_mesh_chip_key(row: Mapping[str, object]) -> str:
+        device_name = str(row.get("device_name") or "").strip()
+        adapter_id = str(row.get("adapter_id") or "").strip()
+        candidates = []
+        if not MainWindow._station_command_mesh_identifier_looks_raw(device_name):
+            candidates.append(device_name)
+        if not MainWindow._station_command_mesh_identifier_looks_raw(adapter_id):
+            candidates.append(adapter_id)
+        if not any(candidates) and (adapter_id or device_name):
+            return f"mesh:{str(row.get('transport') or 'mesh').strip().lower() or 'mesh'}"
+        for candidate in candidates:
+            if not candidate:
+                continue
+            normalized = candidate.lower()
+            normalized = re.sub(r"^(meshcore|mesh)[\s:_-]+", "", normalized)
+            normalized = re.sub(r"[^a-z0-9]+", "", normalized)
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _station_command_mesh_identifier_looks_raw(value: object) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        text = re.sub(r"^(meshcore|mesh)[\s:_-]+", "", text, flags=re.IGNORECASE).strip()
+        if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", text):
+            return True
+        if re.fullmatch(r"(?:ble|scan)[:_-][0-9a-fA-F:-]{6,}", text):
+            return True
+        if re.fullmatch(r"[0-9a-fA-F:-]{12,}", text):
+            return True
+        return False
+
+    @staticmethod
+    def _station_command_mesh_row_is_raw_only(row: Mapping[str, object]) -> bool:
+        device = str(row.get("device_name") or "").strip()
+        adapter = str(row.get("adapter_id") or "").strip()
+        device_is_raw = not device or MainWindow._station_command_mesh_identifier_looks_raw(device)
+        adapter_is_raw = not adapter or MainWindow._station_command_mesh_identifier_looks_raw(adapter)
+        return device_is_raw and adapter_is_raw
+
+    @staticmethod
+    def _station_command_mesh_chip_rank(row: Mapping[str, object]) -> tuple[int, str]:
+        connected = 2 if bool(row.get("connected")) else 0
+        issue = 0 if str(row.get("last_error") or "").strip() else 1
+        updated = str(row.get("updated_utc") or "").strip()
+        return (connected + issue, updated)
+
+    @staticmethod
+    def _station_command_mesh_chip_signature(chips: Sequence[Mapping[str, object]]) -> tuple[tuple[str, str, str], ...]:
+        return tuple(
+            (
+                str(chip.get("name") or "").strip(),
+                str(chip.get("role") or "").strip(),
+                str(chip.get("tooltip") or "").strip(),
+            )
+            for chip in chips
+        )
+
+    @staticmethod
+    def _station_command_source_control_signature(item: SourceControlItem | None) -> tuple[object, ...]:
+        if item is None:
+            return ("none",)
+        return (
+            item.key,
+            item.kind,
+            item.label,
+            item.role,
+            item.tooltip,
+            tuple((action.key, action.label, action.enabled, action.role, action.tooltip) for action in item.actions),
+        )
+
+    @staticmethod
+    def _station_command_source_control_items_signature(items: Sequence[SourceControlItem]) -> tuple[object, ...]:
+        return tuple(MainWindow._station_command_source_control_signature(item) for item in items)
+
+    def _station_command_saved_mesh_control_item(self) -> SourceControlItem | None:
+        items = self._station_command_saved_mesh_control_items()
+        return items[0] if items else None
+
+    def _station_command_saved_mesh_control_items(self) -> tuple[SourceControlItem, ...]:
+        try:
+            configs = load_mesh_connection_configs(self.settings)
+        except Exception:
+            configs = ()
+        try:
+            rows = list_mesh_health(default_mesh_db_path())
+        except Exception:
+            rows = []
+        return source_control_mesh_items_from_configs(configs, rows)
+
+    def _open_mesh_settings_from_station_command(self) -> None:
+        try:
+            self.open_settings_section("local_mesh", settings_nav_context="settings")
+        except Exception:
+            try:
+                self.open_settings_section("operator_info", settings_nav_context="settings")
+            except Exception:
+                pass
+
+    def _open_mesh_manager_from_station_command(self) -> None:
+        existing = getattr(self, "_mesh_manager_dialog", None)
+        if isinstance(existing, QDialog) and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = QDialog(self)
+        self._mesh_manager_dialog = dialog
+        dialog.setWindowTitle("Local Mesh")
+        dialog.setModal(False)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.finished.connect(lambda *_args: setattr(self, "_mesh_manager_dialog", None))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("<b>Local Mesh</b>", dialog)
+        title.setTextFormat(Qt.RichText)
+        layout.addWidget(title)
+
+        try:
+            rows = list_mesh_health(default_mesh_db_path())
+        except Exception:
+            rows = []
+        chips = self._station_command_mesh_source_chips()
+        if chips:
+            for chip in chips:
+                name = str(chip.get("name") or "Mesh").strip()
+                role = str(chip.get("role") or "muted").strip()
+                tooltip = str(chip.get("tooltip") or "").strip()
+                status = "Connected" if role == "eligible_success" else ("Needs attention" if role == "warning" else "Not connected")
+                label = QLabel(f"<b>{name}</b><br>{status}", dialog)
+                label.setTextFormat(Qt.RichText)
+                label.setWordWrap(True)
+                if tooltip:
+                    label.setToolTip(tooltip)
+                layout.addWidget(label)
+        else:
+            empty = QLabel("No local mesh connection is configured for FIO.", dialog)
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+
+        if rows:
+            detail_text = (
+                f"{len(rows)} retained mesh health row{'s' if len(rows) != 1 else ''}. "
+                "Open Local Mesh settings to review BLE scan results, channel policies, and pairing details."
+            )
+        else:
+            detail_text = "Use Local Mesh settings to add or scan a MeshCore, Meshtastic, or future mesh source."
+        detail = QLabel(detail_text, dialog)
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        restart_btn = QPushButton("Reconnect", dialog)
+        restart_btn.setToolTip("Restart the local mesh worker for the configured connection.")
+        restart_btn.clicked.connect(
+            lambda _checked=False: (
+                self._stop_mesh_runtime(),
+                self._start_mesh_runtime_if_enabled(),
+                self._refresh_station_command_bar(force=True),
+            )
+        )
+        buttons.addWidget(restart_btn)
+
+        disconnect_btn = QPushButton("Disconnect", dialog)
+        disconnect_btn.setToolTip("Stop the local mesh worker. The saved configuration remains unchanged.")
+        disconnect_btn.clicked.connect(
+            lambda _checked=False: (
+                self._stop_mesh_runtime(),
+                self._refresh_station_command_bar(force=True),
+            )
+        )
+        buttons.addWidget(disconnect_btn)
+
+        settings_btn = QPushButton("Local Mesh Settings", dialog)
+        settings_btn.setToolTip("Open the full Local Mesh setup and channel policy screen.")
+        settings_btn.clicked.connect(lambda _checked=False, dlg=dialog: (dlg.close(), self._open_mesh_settings_from_station_command()))
+        buttons.addWidget(settings_btn)
+
+        close_btn = QPushButton("Close", dialog)
+        close_btn.clicked.connect(dialog.close)
+        buttons.addWidget(close_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        dialog.resize(560, max(220, dialog.sizeHint().height()))
+        dialog.show()
+
+    def _connect_saved_mesh_from_station_command(self, _source_key: str = "") -> None:
+        self._stop_mesh_runtime()
+        self._start_mesh_runtime_if_enabled()
+        self._refresh_station_command_bar(force=True)
+
+    def _show_mesh_source_menu(self, button: QPushButton, item: SourceControlItem) -> None:
+        menu = QMenu(button)
+        menu.setObjectName("stationCommandMeshMenu")
+        menu.setToolTipsVisible(True)
+        for action_item in item.actions:
+            action = QAction(action_item.label, menu)
+            action.setEnabled(bool(action_item.enabled))
+            if action_item.tooltip:
+                action.setToolTip(action_item.tooltip)
+            key = str(action_item.key or "")
+            if key.startswith("connect:"):
+                action.triggered.connect(lambda _checked=False, source_key=key: self._connect_saved_mesh_from_station_command(source_key))
+            menu.addAction(action)
+        if item.actions:
+            menu.addSeparator()
+        disconnect_action = QAction("Disconnect Mesh", menu)
+        disconnect_action.setToolTip("Stop the active local mesh worker. Saved device settings remain available.")
+        disconnect_action.triggered.connect(lambda _checked=False: (self._stop_mesh_runtime(), self._refresh_station_command_bar(force=True)))
+        menu.addAction(disconnect_action)
+        manage_action = QAction("Manage Channels", menu)
+        manage_action.setToolTip("Open Local Mesh settings and channel/feed review.")
+        manage_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
+        menu.addAction(manage_action)
+        add_action = QAction("Add Device...", menu)
+        add_action.setToolTip("Open Local Mesh settings to scan or add a saved device.")
+        add_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
+        menu.addAction(add_action)
+        settings_action = QAction("Mesh Settings", menu)
+        settings_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
+        menu.addAction(settings_action)
+        self._station_command_mesh_menu = menu
+        menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+
     def _add_station_command_source_rail(
         self,
         layout: QLayout,
@@ -6895,6 +7415,8 @@ class MainWindow(QMainWindow):
         choices: list[object],
         selected_id: int,
         theme: Mapping[str, object],
+        *,
+        mesh_chips: Sequence[Mapping[str, object]] | None = None,
     ) -> int:
         rail = QFrame(parent)
         rail.setObjectName("stationCommandSourceRail")
@@ -6906,7 +7428,7 @@ class MainWindow(QMainWindow):
         attention = [
             snapshot
             for snapshot in choices
-            if self._station_command_attention_role_for_snapshot(snapshot)[0] in {"danger", "warning"}
+            if self._station_command_snapshot_needs_operator_attention(snapshot)
         ]
         if attention:
             target = max(attention, key=lambda snapshot: self._station_command_focus_score(snapshot, selected_id))
@@ -6922,6 +7444,15 @@ class MainWindow(QMainWindow):
                 )
             rail_layout.addWidget(attention_btn)
             total_width += int(attention_btn.sizeHint().width() or 0) + 6
+        for mesh_item in self._station_command_saved_mesh_control_items():
+            chip = QPushButton(f"{mesh_item.label} \u25be", rail)
+            chip.setObjectName("stationCommandSourceChip")
+            chip.setToolTip(mesh_item.tooltip or "Manage saved local mesh connections.")
+            chip.setStyleSheet(button_style(mesh_item.role, theme))
+            chip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            chip.clicked.connect(lambda _checked=False, button=chip, item=mesh_item: self._show_mesh_source_menu(button, item))
+            rail_layout.addWidget(chip)
+            total_width += int(chip.sizeHint().width() or 0) + 6
         for snapshot in choices:
             ident = self._station_command_snapshot_id(snapshot)
             selected = ident > 0 and ident == int(selected_id or 0)
@@ -6931,7 +7462,8 @@ class MainWindow(QMainWindow):
             chip.setCheckable(True)
             chip.setChecked(selected)
             chip.setToolTip(self._station_command_source_chip_tooltip(snapshot, selected_id))
-            chip.setStyleSheet(button_style("info" if selected else role, theme))
+            chip_role = role if role in {"danger", "warning", "muted"} else "success" if selected else "info"
+            chip.setStyleSheet(button_style(chip_role, theme))
             chip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             if ident > 0:
                 chip.clicked.connect(
@@ -6967,11 +7499,16 @@ class MainWindow(QMainWindow):
             layout.addStretch(1)
             return
         page_choices = visible_choices
+        card_choices = self._station_command_card_choices_for_layout(page_choices, selected_id)
+        mesh_chips = self._station_command_mesh_source_chips()
+        mesh_items = self._station_command_saved_mesh_control_items()
         signature = (
             "tiles",
             int(selected_id or 0),
             len(visible_choices),
-            self._station_command_radio_card_width(len(page_choices)),
+            tuple(self._station_command_snapshot_id(snapshot) for snapshot in card_choices),
+            self._station_command_radio_card_width(len(card_choices)),
+            self._station_command_source_control_items_signature(mesh_items),
             int(getattr(getattr(getattr(self, "station_command_radio_summary_scroll", None), "viewport", lambda: None)(), "width", lambda: 0)() or 0),
             tuple(
                 (
@@ -7015,7 +7552,7 @@ class MainWindow(QMainWindow):
                 widget.setParent(None)
                 widget.deleteLater()
         self._station_command_radio_tile_controls = {}
-        self._refresh_station_command_radio_tiles(page_choices, selected_id)
+        self._refresh_station_command_radio_tiles(page_choices, selected_id, mesh_chips=mesh_chips)
 
     def _sync_station_command_radio_summary_height(self, *, card_mode: bool) -> None:
         scroll = getattr(self, "station_command_radio_summary_scroll", None)
@@ -7279,7 +7816,13 @@ class MainWindow(QMainWindow):
                 return band
         return ""
 
-    def _refresh_station_command_radio_tiles(self, choices: list[object], selected_id: int) -> None:
+    def _refresh_station_command_radio_tiles(
+        self,
+        choices: list[object],
+        selected_id: int,
+        *,
+        mesh_chips: Sequence[Mapping[str, object]] | None = None,
+    ) -> None:
         layout = getattr(self, "station_command_radio_summary_layout", None)
         parent = getattr(self, "station_command_radio_summary_widget", None)
         if layout is None or parent is None:
@@ -7293,25 +7836,32 @@ class MainWindow(QMainWindow):
         if not isinstance(pending_qsy_keys, dict):
             pending_qsy_keys = {}
             self._station_command_card_qsy_pending_keys = pending_qsy_keys
-        focused_snapshot = next(
-            (
-                snapshot
-                for snapshot in choices
-                if self._station_command_snapshot_id(snapshot) == int(selected_id or 0)
-            ),
-            choices[0] if choices else None,
+        card_choices = self._station_command_card_choices_for_layout(choices, selected_id)
+        card_width = self._station_command_radio_card_width(len(card_choices))
+        rail_min_width = self._add_station_command_source_rail(
+            layout,
+            parent,
+            choices,
+            selected_id,
+            theme,
+            mesh_chips=mesh_chips,
         )
-        focused_choices = [focused_snapshot] if focused_snapshot is not None else []
-        card_width = self._station_command_radio_card_width(1)
-        rail_min_width = self._add_station_command_source_rail(layout, parent, choices, selected_id, theme)
         try:
             spacing = max(0, int(layout.spacing()))
-            row_min_width = max(card_width, rail_min_width + spacing)
+            card_row_width = card_width * max(1, len(card_choices)) + spacing * max(0, len(card_choices) - 1)
+            row_min_width = max(card_row_width, rail_min_width + spacing)
             parent.setMinimumWidth(row_min_width)
             parent.setMaximumWidth(16777215)
         except Exception:
             pass
-        for snapshot in focused_choices:
+        card_row = QFrame(parent)
+        card_row.setObjectName("stationCommandRadioCardRow")
+        card_row.setFrameShape(QFrame.NoFrame)
+        card_row_layout = QHBoxLayout(card_row)
+        card_row_layout.setContentsMargins(0, 0, 0, 0)
+        card_row_layout.setSpacing(6)
+        card_row.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        for snapshot in card_choices:
             ident = self._station_command_snapshot_id(snapshot)
             selected = ident > 0 and ident == int(selected_id or 0)
             state = self._station_command_compact_state_text(self._station_command_state_text(snapshot))
@@ -7327,7 +7877,7 @@ class MainWindow(QMainWindow):
             frequency_control_available = self._station_command_frequency_controls_available(snapshot)
             health_summary = self._station_command_health_summary_for_profile(snapshot)
             health_state = str(health_summary.get("state", "warn") or "warn").strip().lower()
-            tile = QFrame(parent)
+            tile = QFrame(card_row)
             tile.setObjectName("stationCommandRadioTile")
             tile.setProperty("selected", "true" if selected else "false")
             tile.setFrameShape(QFrame.StyledPanel)
@@ -7667,7 +8217,9 @@ class MainWindow(QMainWindow):
                 tile.style().polish(tile)
             except Exception:
                 pass
-            layout.addWidget(tile)
+            card_row_layout.addWidget(tile)
+        card_row_layout.addStretch(1)
+        layout.addWidget(card_row)
         layout.addStretch(1)
         try:
             parent.adjustSize()
@@ -8650,6 +9202,7 @@ class MainWindow(QMainWindow):
 
     def _update_nav_group_header_styles(self, theme: dict) -> None:
         align_style = self._nav_button_alignment_style()
+        ncs_tooltip = self._active_ncs_session_tooltip()
         for key in self._nav_group_order:
             header = self._nav_group_headers.get(key)
             if header is None:
@@ -8661,6 +9214,9 @@ class MainWindow(QMainWindow):
             # reminder on the accordion header.
             if key == "NCS" and (not expanded) and any(bool(v) for v in self._ncs_net_active.values()):
                 role = "warning"
+                header.setToolTip(ncs_tooltip)
+            elif key == "NCS":
+                header.setToolTip(ncs_tooltip)
             if key == "Station" and not expanded:
                 issue_count, severity = self._station_health_alert_counts()
                 if issue_count > 0:
@@ -9165,6 +9721,7 @@ class MainWindow(QMainWindow):
         kind_key = (kind or "").strip().upper()
         if kind_key in self._ncs_net_active:
             self._ncs_net_active[kind_key] = bool(active)
+        self._refresh_ncs_activity_from_snapshots()
         try:
             # Scheduler only tracks FLDIGI/JS8 manual net locks.
             if kind_key in {"FLDIGI", "JS8"} and hasattr(self, "scheduler"):
@@ -9173,6 +9730,40 @@ class MainWindow(QMainWindow):
             pass
         self._update_ncs_nav_button_styles()
         self._refresh_scheduler_status_panel()
+
+    def _active_ncs_session_flags_from_settings(self) -> dict[str, bool]:
+        try:
+            return active_ncs_session_flags(self.settings)
+        except Exception as exc:
+            log.debug("Main shell: failed to read NCS session snapshots: %s", exc)
+            return {"FLDIGI": False, "JS8": False, "LOCAL": False}
+
+    def _refresh_ncs_activity_from_snapshots(self) -> None:
+        try:
+            snapshot_flags = active_ncs_session_flags(self.settings)
+        except Exception as exc:
+            log.debug("Main shell: failed to refresh NCS session snapshots: %s", exc)
+            return
+        for kind_key, active in snapshot_flags.items():
+            if kind_key in self._ncs_net_active:
+                self._ncs_net_active[kind_key] = bool(active)
+
+    def _active_ncs_session_tooltip(self, kind: str | None = None) -> str:
+        try:
+            by_kind = active_ncs_session_summaries_by_kind(self.settings)
+        except Exception as exc:
+            log.debug("Main shell: failed to read NCS session summaries: %s", exc)
+            by_kind = {}
+        if kind:
+            summaries = list(by_kind.get(str(kind or "").strip().upper(), []))
+        else:
+            summaries = [label for labels in by_kind.values() for label in labels]
+        if not summaries:
+            return ""
+        visible = summaries[:6]
+        suffix = "" if len(summaries) <= len(visible) else f"\n...and {len(summaries) - len(visible)} more"
+        plural = "s" if len(summaries) != 1 else ""
+        return f"Active NCS session{plural}:\n" + "\n".join(visible) + suffix
 
     @staticmethod
     def _nav_button_alignment_style() -> str:
@@ -9203,6 +9794,10 @@ class MainWindow(QMainWindow):
                 continue
             btn = self.nav_buttons[idx]
             active = bool(self._ncs_net_active.get(kind_key))
+            try:
+                btn.setToolTip(self._active_ncs_session_tooltip(kind_key))
+            except Exception:
+                pass
             if not active:
                 continue
             try:

@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QSplitter,
     QAbstractItemView,
+    QInputDialog,
     QMenu,
     QCompleter,
     QScrollArea,
@@ -49,7 +51,13 @@ from freqinout.core.observation_queries import (
     activity_snapshot_from_observations,
     query_observations,
 )
-from freqinout.core.controlfreq_awareness import build_awareness_snapshot, build_radio_source_lanes
+from freqinout.core.observation_store import list_observations, upsert_observation
+from freqinout.core.mesh import (
+    clear_mesh_message_topic_override,
+    default_mesh_db_path,
+    set_mesh_message_topic_override,
+)
+from freqinout.core.controlfreq_awareness import AwarenessAction, build_awareness_snapshot, build_radio_source_lanes
 from freqinout.core.operational_view_registry import (
     controlfreq_preset_names,
     controlfreq_view_labels,
@@ -186,6 +194,8 @@ class ControlFreqTab(QWidget):
         self._operational_snapshot_cache_ttl_sec = 10.0
         self._operational_activity_context: Dict[str, str] = {}
         self._operational_awareness_context: Dict[str, str] = {}
+        self._operational_awareness_full_snapshot: object | None = None
+        self._awareness_topic_filter = ""
         self._awareness_row_contexts: List[Dict[str, str]] = []
         self._source_lane_contexts: List[Dict[str, str]] = []
         self._source_family_filter = ""
@@ -343,6 +353,20 @@ class ControlFreqTab(QWidget):
         self.group_combo.currentIndexChanged.connect(self._on_filters_changed)
         filter_row.addWidget(self.group_combo)
 
+        self.traffic_source_combo = QComboBox()
+        self.traffic_source_combo.setToolTip("Limit Ops Center traffic to one message source.")
+        self.traffic_source_combo.addItem("Traffic Source: All", "")
+        self.traffic_source_combo.addItem("FLMsg/FLAmp", "nbems")
+        self.traffic_source_combo.addItem("JS8Call", "js8call")
+        self.traffic_source_combo.addItem("FIOSpotter", "spotter")
+        self.traffic_source_combo.addItem("CommStat", "commstat")
+        self.traffic_source_combo.addItem("Mesh", "meshcore")
+        self.traffic_source_combo.addItem("VarAC", "varac")
+        self.traffic_source_combo.addItem("BBS", "bbs")
+        self.traffic_source_combo.setMinimumWidth(170)
+        self.traffic_source_combo.currentIndexChanged.connect(self._on_traffic_source_filter_changed)
+        filter_row.addWidget(self.traffic_source_combo)
+
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_all)
         filter_row.addWidget(self.refresh_btn)
@@ -454,12 +478,29 @@ class ControlFreqTab(QWidget):
         self.awareness_recommend_label.setWordWrap(True)
         self.awareness_recommend_label.setStyleSheet("font-weight: 600; color: #5b6875;")
         act_layout.addWidget(self.awareness_recommend_label)
-        self.awareness_lead_label = QLabel("Top Attention: no current traffic.")
+        self.situation_summary_label = QLabel("Situation: no traffic needs attention.")
+        self.situation_summary_label.setObjectName("controlfreqSituationSummary")
+        self.situation_summary_label.setWordWrap(True)
+        self.situation_summary_label.setStyleSheet("font-weight: 700; padding: 6px; border-radius: 6px;")
+        act_layout.addWidget(self.situation_summary_label)
+        self.situation_detail_label = QLabel("")
+        self.situation_detail_label.setObjectName("controlfreqSituationDetail")
+        self.situation_detail_label.setWordWrap(True)
+        self.situation_detail_label.setStyleSheet("color: #5b6875;")
+        self.situation_detail_label.setVisible(False)
+        act_layout.addWidget(self.situation_detail_label)
+        self.situation_cards_container = QWidget()
+        self.situation_cards_layout = QVBoxLayout(self.situation_cards_container)
+        self.situation_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.situation_cards_layout.setSpacing(6)
+        self.situation_cards_container.setVisible(False)
+        act_layout.addWidget(self.situation_cards_container)
+        self.awareness_lead_label = QLabel("Needs Attention: clear.")
         self.awareness_lead_label.setObjectName("controlfreqAwarenessLead")
         self.awareness_lead_label.setWordWrap(True)
         self.awareness_lead_label.setStyleSheet("font-weight: 700; padding: 6px; border-radius: 6px;")
         act_layout.addWidget(self.awareness_lead_label)
-        self.operational_activity_label = QLabel("Operational Activity: no recent actionable traffic")
+        self.operational_activity_label = QLabel("Recent Traffic: none in the selected window")
         self.operational_activity_label.setWordWrap(True)
         self.operational_activity_label.setStyleSheet("font-weight: 600;")
         act_layout.addWidget(self.operational_activity_label)
@@ -1237,8 +1278,12 @@ class ControlFreqTab(QWidget):
                 self._set_schedule_splitter_content_sizes()
             elif left_intersections:
                 self.right_splitter.setSizes([1, 0])
+                self._set_single_right_card_height(self.intersection_box, floor=96)
             else:
                 self.right_splitter.setSizes([0, 1])
+                self._set_single_right_card_height(self.schedule_box, floor=120)
+        else:
+            self._reset_right_splitter_height()
         if left_visible or right_visible:
             if getattr(self, "_responsive_layout_mode", "wide") == "compact":
                 self.top_splitter.setSizes([1 if left_visible else 0, 1 if right_visible else 0])
@@ -1272,6 +1317,26 @@ class ControlFreqTab(QWidget):
                 total_h += 12
             self.right_splitter.setMinimumHeight(total_h)
             self.right_splitter.setMaximumHeight(total_h)
+        except Exception:
+            pass
+
+    def _set_single_right_card_height(self, widget: QWidget, *, floor: int) -> None:
+        if not hasattr(self, "right_splitter") or widget is None:
+            return
+        try:
+            height = self._content_fit_group_height(widget, floor=floor)
+            self.right_splitter.setMinimumHeight(height)
+            self.right_splitter.setMaximumHeight(height)
+        except Exception:
+            self._reset_right_splitter_height()
+
+    def _reset_right_splitter_height(self) -> None:
+        splitter = getattr(self, "right_splitter", None)
+        if splitter is None:
+            return
+        try:
+            splitter.setMinimumHeight(0)
+            splitter.setMaximumHeight(16777215)
         except Exception:
             pass
 
@@ -1420,6 +1485,26 @@ class ControlFreqTab(QWidget):
         if self._theme_cache is None:
             self._theme_cache = resolve_theme(self.settings)
         return self._theme_cache
+
+    def _semantic_panel_colors(self, role: str) -> tuple[str, str, str]:
+        theme = self._theme()
+        is_dark = theme.get("bg") == "#0F1216"
+        normalized = str(role or "secondary").strip().lower()
+        if is_dark:
+            palette = {
+                "warning": ("#3A3015", "#FFF0BE", "#A06F18"),
+                "success": ("#173822", "#E8F6EA", "#39874D"),
+                "secondary": ("#16263A", "#E8F1FF", "#2E4A68"),
+                "panel": (theme.get("surface_alt", "#202632"), theme.get("text", "#E7EBF0"), theme.get("border", "#2A313A")),
+            }
+        else:
+            palette = {
+                "warning": ("#FFF4D6", "#1C1F21", "#E0B15B"),
+                "success": ("#EEF7EE", "#1C1F21", "#8DCF9E"),
+                "secondary": ("#EAF2FF", "#1C1F21", "#B8D4E8"),
+                "panel": (theme.get("surface", "#F0F2F4"), theme.get("text", "#1C1F21"), theme.get("border", "#D3D7DD")),
+            }
+        return palette.get(normalized, palette["panel"])
 
     def _invalidate_theme_cache(self) -> None:
         self._theme_cache = None
@@ -2023,8 +2108,16 @@ class ControlFreqTab(QWidget):
             idx = self.intersection_window_combo.findData(120)
             self.intersection_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._source_family_filter = ""
+        if hasattr(self, "traffic_source_combo"):
+            previous = self.traffic_source_combo.blockSignals(True)
+            try:
+                self.traffic_source_combo.setCurrentIndex(0)
+            finally:
+                self.traffic_source_combo.blockSignals(previous)
         if hasattr(self, "source_lanes_table"):
             self.source_lanes_table.clearSelection()
+        self._awareness_topic_filter = ""
+        self._operational_awareness_context = {}
         self._update_clear_filters_style()
         self._on_filters_changed()
 
@@ -2035,7 +2128,8 @@ class ControlFreqTab(QWidget):
         intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
         intersection_window_active = int(intersection_combo.currentData() or 120) != 120
         source_active = bool(str(getattr(self, "_source_family_filter", "") or "").strip())
-        return search_active or group_active or window_active or intersection_window_active or source_active
+        topic_active = bool(str(getattr(self, "_awareness_topic_filter", "") or "").strip())
+        return search_active or group_active or window_active or intersection_window_active or source_active or topic_active
 
     def _show_app_search_results(self) -> None:
         query = (self.search_edit.text() or "").strip()
@@ -2056,6 +2150,71 @@ class ControlFreqTab(QWidget):
             self.clear_filters_btn.setStyleSheet(button_style(role, theme))
         except Exception:
             pass
+
+    def _on_traffic_source_filter_changed(self, *_args) -> None:
+        self._source_family_filter = str(self.traffic_source_combo.currentData() or "").strip().lower()
+        if hasattr(self, "source_lanes_table"):
+            try:
+                self.source_lanes_table.clearSelection()
+            except Exception:
+                pass
+        self._operational_snapshot_cache_key = ()
+        self._activity_cache_key = ()
+        self._on_filters_changed()
+
+    def _set_traffic_source_filter(self, source_family: str) -> None:
+        normalized = self._normalize_traffic_source_filter(source_family)
+        self._source_family_filter = normalized
+        combo = getattr(self, "traffic_source_combo", None)
+        if combo is None:
+            return
+        previous = combo.blockSignals(True)
+        try:
+            idx = combo.findData(normalized)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+        finally:
+            combo.blockSignals(previous)
+
+    @staticmethod
+    def _normalize_traffic_source_filter(source_family: str) -> str:
+        source = str(source_family or "").strip().lower()
+        aliases = {
+            "mesh": "meshcore",
+            "meshcore": "meshcore",
+            "local_mesh": "meshcore",
+            "js8": "js8call",
+            "js8call": "js8call",
+            "js8spotter": "spotter",
+            "fiospotter": "spotter",
+            "spotter": "spotter",
+            "commstat_rf": "commstat",
+            "commstat": "commstat",
+            "flmsg": "nbems",
+            "flamp": "nbems",
+            "fastlight": "nbems",
+            "nbems": "nbems",
+            "varac": "varac",
+            "bbs": "bbs",
+        }
+        return aliases.get(source, source)
+
+    @staticmethod
+    def _traffic_source_query_families(source_family: str) -> Tuple[str, ...]:
+        source = ControlFreqTab._normalize_traffic_source_filter(source_family)
+        families = {
+            "meshcore": ("MeshCore", "meshcore", "mesh"),
+            "js8call": ("js8call", "js8", "JS8Call"),
+            "spotter": ("spotter", "fiospotter", "js8spotter", "spotter_traffic"),
+            "commstat": ("commstat", "commstat_rf", "CommStat"),
+            "nbems": ("flmsg", "flamp", "nbems", "fastlight"),
+            "varac": ("varac", "VarAC"),
+            "bbs": ("bbs", "BBS"),
+        }.get(source, ())
+        deduped: List[str] = []
+        for family in families:
+            if family and family not in deduped:
+                deduped.append(family)
+        return tuple(deduped)
 
     def _refresh_all(
         self,
@@ -2963,7 +3122,7 @@ class ControlFreqTab(QWidget):
             self._operational_awareness_context = {}
             lanes = self._build_operational_source_lanes(())
             self._set_operational_awareness_snapshot(None, source_lanes=lanes)
-            self._set_operational_activity_text("Operational Activity: no traffic database yet", "")
+            self._set_operational_activity_text("Recent Traffic: no traffic database yet", "")
             return
         cache_key = (
             int(window_minutes or 120),
@@ -2987,7 +3146,9 @@ class ControlFreqTab(QWidget):
             observations = query_observations(
                 db_path,
                 ObservationQuery(
-                    source_family=str(getattr(self, "_source_family_filter", "") or "").strip(),
+                    source_families=self._traffic_source_query_families(
+                        str(getattr(self, "_source_family_filter", "") or "").strip()
+                    ),
                     since_utc=since_utc,
                     operating_group=str(group_filter or ""),
                     search_text=str(search or ""),
@@ -3007,6 +3168,7 @@ class ControlFreqTab(QWidget):
                 pins=self._configured_awareness_pins(),
                 visible_attention_limit=6,
             )
+            self._operational_awareness_full_snapshot = awareness_snapshot
             self._set_operational_awareness_snapshot(awareness_snapshot)
             self._set_operational_activity_text(
                 headline,
@@ -3018,7 +3180,7 @@ class ControlFreqTab(QWidget):
             self._operational_awareness_context = {}
             lanes = self._build_operational_source_lanes(())
             self._set_operational_awareness_snapshot(None, source_lanes=lanes)
-            self._set_operational_activity_text("Operational Activity: unavailable", "")
+            self._set_operational_activity_text("Recent Traffic: unavailable", "")
 
     def _refresh_awareness_now_next(self) -> None:
         label = getattr(self, "awareness_now_next_label", None)
@@ -3106,7 +3268,7 @@ class ControlFreqTab(QWidget):
             source = str(getattr(lane, "short_name", "") or "").strip()
             if not source:
                 continue
-            now_text = str(getattr(lane, "now", "") or "").strip() or "monitoring"
+            now_text = str(getattr(lane, "now", "") or "").strip() or "--"
             next_text = str(getattr(lane, "next", "") or "").strip() or "--"
             attention_count = int(getattr(lane, "attention_count", 0) or 0)
             attention_summary = str(getattr(lane, "attention_summary", "") or "").strip()
@@ -3159,6 +3321,10 @@ class ControlFreqTab(QWidget):
             "varac",
         }
         self._source_family_filter = source_family if is_data_source else ""
+        if is_data_source:
+            self._set_traffic_source_filter(source_family)
+        else:
+            self._set_traffic_source_filter("")
         if hasattr(self, "search_edit"):
             previous = self.search_edit.blockSignals(True)
             try:
@@ -3206,21 +3372,31 @@ class ControlFreqTab(QWidget):
         table = getattr(self, "awareness_table", None)
         if table is None:
             return
-        attention = tuple(getattr(snapshot, "attention_items", ()) or ()) if snapshot is not None else ()
+        display_snapshot = self._awareness_display_snapshot(snapshot)
+        needs = tuple(getattr(display_snapshot, "needs_attention", ()) or ()) if display_snapshot is not None else ()
+        if not needs and display_snapshot is not None:
+            needs = tuple(getattr(display_snapshot, "attention_items", ()) or ())
+        recent = tuple(getattr(display_snapshot, "recent_traffic", ()) or ()) if display_snapshot is not None else ()
         lanes = tuple(source_lanes or getattr(snapshot, "source_lanes", ()) or ())
         if not lanes:
-            lanes = self._build_operational_source_lanes(attention)
+            lanes = self._build_operational_source_lanes(needs)
         self._set_source_lanes(lanes)
         rows: List[List[str]] = []
         row_contexts: List[Dict[str, str]] = []
-        for item in attention[:6]:
+        display_items: List[Tuple[str, object]] = [("needs", item) for item in needs[:6]]
+        if recent:
+            display_items.extend(("recent", item) for item in recent[: max(0, 6 - len(display_items))])
+        for lane_name, item in display_items:
             topic = ", ".join(tuple(getattr(item, "topics", ()) or ())[:2])
             focus_parts = [
                 str(getattr(item, "subject", "") or "").strip(),
                 topic,
                 str(getattr(item, "group", "") or getattr(item, "to_target", "") or "").strip(),
             ]
-            priority_label = "Pinned" if bool(getattr(item, "pinned", False)) else self._awareness_priority_label(int(getattr(item, "priority", 0) or 0))
+            if lane_name == "recent":
+                priority_label = "Recent"
+            else:
+                priority_label = "Pinned" if bool(getattr(item, "pinned", False)) else self._awareness_priority_label(int(getattr(item, "priority", 0) or 0))
             rows.append(
                 [
                     priority_label,
@@ -3231,7 +3407,7 @@ class ControlFreqTab(QWidget):
             )
             row_contexts.append(self._awareness_item_context(item))
         if not rows:
-            rows = [["Ready", "-", "No recent actionable traffic", "Monitor"]]
+            rows = [["Ready", "-", "No traffic needs attention", "Monitor"]]
             row_contexts = [{}]
         self._set_table_rows(table, rows)
         self._awareness_row_contexts = row_contexts
@@ -3246,9 +3422,33 @@ class ControlFreqTab(QWidget):
             table.setMaximumHeight(260)
         except Exception:
             pass
-        self._set_awareness_lead_text(attention[0] if attention else None)
-        self._set_awareness_recommended_text(snapshot)
+        self._set_awareness_lead_text(needs[0] if needs else None)
+        self._set_awareness_recommended_text(display_snapshot)
+        self._set_situation_summary_text(display_snapshot)
+        self._set_situation_cards(display_snapshot)
         self._set_awareness_support_text(snapshot)
+
+    def _awareness_display_snapshot(self, snapshot: object | None) -> object | None:
+        topic_filter = str(getattr(self, "_awareness_topic_filter", "") or "").strip().lower()
+        if snapshot is None or not topic_filter:
+            return snapshot
+
+        def matches_topic(item: object) -> bool:
+            return any(str(topic or "").strip().lower() == topic_filter for topic in tuple(getattr(item, "topics", ()) or ()))
+
+        return replace(
+            snapshot,
+            needs_attention=tuple(item for item in tuple(getattr(snapshot, "needs_attention", ()) or ()) if matches_topic(item)),
+            recent_traffic=tuple(item for item in tuple(getattr(snapshot, "recent_traffic", ()) or ()) if matches_topic(item)),
+            attention_items=tuple(item for item in tuple(getattr(snapshot, "attention_items", ()) or ()) if matches_topic(item)),
+            more_traffic=tuple(item for item in tuple(getattr(snapshot, "more_traffic", ()) or ()) if matches_topic(item)),
+            topic_rollups=tuple(
+                rollup
+                for rollup in tuple(getattr(snapshot, "topic_rollups", ()) or ())
+                if str(getattr(rollup, "topic", "") or "").strip().lower() == topic_filter
+            ),
+            situation_summary=None,
+        )
 
     @staticmethod
     def _awareness_priority_label(priority: int) -> str:
@@ -3276,12 +3476,329 @@ class ControlFreqTab(QWidget):
         label.setText(text)
         label.setToolTip(text)
 
+    def _set_situation_summary_text(self, snapshot: object | None) -> None:
+        label = getattr(self, "situation_summary_label", None)
+        detail_label = getattr(self, "situation_detail_label", None)
+        if label is None:
+            return
+        situation = getattr(snapshot, "situation_summary", None) if snapshot is not None else None
+        headline = str(getattr(situation, "headline", "") or "").strip()
+        if not headline:
+            attention = tuple(getattr(snapshot, "attention_items", ()) or ()) if snapshot is not None else ()
+            topic_filter = str(getattr(self, "_awareness_topic_filter", "") or "").strip()
+            if attention and topic_filter:
+                headline = f"{len(attention)} {topic_filter} item{'s' if len(attention) != 1 else ''} in the current view."
+            elif attention:
+                headline = f"{len(attention)} traffic item{'s' if len(attention) != 1 else ''} need attention."
+            else:
+                headline = "No traffic needs attention."
+        text = "Situation: " + headline
+        label.setText(text)
+        label.setToolTip(text)
+        detail_parts: list[str] = []
+        needs = tuple(getattr(situation, "top_needs", ()) or ()) if situation is not None else ()
+        incidents = tuple(getattr(situation, "active_incidents", ()) or ()) if situation is not None else ()
+        handled = tuple(getattr(situation, "handled", ()) or ()) if situation is not None else ()
+        if needs:
+            detail_parts.append(
+                "Needs: "
+                + "; ".join(
+                    str(getattr(need, "summary", "") or "").strip()
+                    for need in needs[:2]
+                    if str(getattr(need, "summary", "") or "").strip()
+                )
+            )
+        if incidents:
+            detail_parts.append(
+                "Storylines: "
+                + "; ".join(
+                    str(getattr(story, "headline", "") or "").strip()
+                    for story in incidents[:3]
+                    if str(getattr(story, "headline", "") or "").strip()
+                )
+            )
+        if handled:
+            detail_parts.append(f"Handled: {len(handled)}")
+        confidence = str(getattr(situation, "confidence", "") or "").strip()
+        if confidence:
+            detail_parts.append(confidence)
+        detail = " | ".join(part for part in detail_parts if part.strip())
+        if detail_label is not None:
+            detail_label.setText(detail)
+            detail_label.setToolTip(detail)
+            detail_label.setVisible(bool(detail))
+        try:
+            has_need = bool(needs)
+            urgent_story = any(str(getattr(story, "severity", "") or "") == "urgent" for story in incidents)
+            if has_need or urgent_story:
+                bg, fg, border = self._semantic_panel_colors("warning")
+            elif incidents:
+                bg, fg, border = self._semantic_panel_colors("secondary")
+            else:
+                bg, fg, border = self._semantic_panel_colors("success")
+            label.setStyleSheet(
+                f"font-weight: 700; padding: 6px; border-radius: 6px; background: {bg}; color: {fg}; border: 1px solid {border};"
+            )
+        except Exception:
+            pass
+
+    def _set_situation_cards(self, snapshot: object | None) -> None:
+        layout = getattr(self, "situation_cards_layout", None)
+        container = getattr(self, "situation_cards_container", None)
+        if layout is None or container is None:
+            return
+        self._clear_awareness_chip_layout(layout)
+        situation = getattr(snapshot, "situation_summary", None) if snapshot is not None else None
+        cards: list[QWidget] = []
+        needs = tuple(getattr(situation, "top_needs", ()) or ()) if situation is not None else ()
+        incidents = tuple(getattr(situation, "active_incidents", ()) or ()) if situation is not None else ()
+        handled = tuple(getattr(situation, "handled", ()) or ()) if situation is not None else ()
+        attention = tuple(getattr(snapshot, "attention_items", ()) or ()) if snapshot is not None else ()
+        topic_filter = str(getattr(self, "_awareness_topic_filter", "") or "").strip()
+
+        if snapshot is not None:
+            overview_role = "success"
+            if needs:
+                overview_role = "warning"
+            elif incidents or attention:
+                overview_role = "secondary"
+            cards.append(
+                self._build_situation_card(
+                    "Situation",
+                    self._situation_overview_text(snapshot),
+                    self._situation_overview_actions(snapshot),
+                    role=overview_role,
+                )
+            )
+
+        if needs:
+            need = needs[0]
+            title = "Open Need"
+            body = self._situation_need_text(need)
+            cards.append(
+                self._build_situation_card(
+                    title,
+                    body,
+                    tuple(getattr(need, "actions", ()) or ()),
+                    role="warning" if str(getattr(need, "severity", "") or "") == "urgent" else "secondary",
+                )
+            )
+        if incidents:
+            story = incidents[0]
+            title = "Storyline"
+            body = self._situation_story_text(story)
+            cards.append(
+                self._build_situation_card(
+                    title,
+                    body,
+                    tuple(getattr(story, "actions", ()) or ()),
+                    role="warning" if str(getattr(story, "severity", "") or "") in {"urgent", "important"} else "secondary",
+                )
+            )
+        if handled:
+            cards.append(
+                self._build_situation_card(
+                    "Handled",
+                    f"{len(handled)} recently handled need{'s' if len(handled) != 1 else ''}.",
+                    tuple(getattr(handled[0], "actions", ()) or ())[:1],
+                    role="success",
+                )
+            )
+        if len(cards) <= 1 and attention and topic_filter:
+            context = {
+                "topic_filter": topic_filter,
+                "search_query": topic_filter,
+            }
+            cards.append(
+                self._build_situation_card(
+                    "Filtered Topic",
+                    f"{len(attention)} {topic_filter} item{'s' if len(attention) != 1 else ''} in view.",
+                    (
+                        self._awareness_action("messages", "Inbox", context),
+                        self._awareness_action("map", "Map", context),
+                    ),
+                    role="secondary",
+                )
+            )
+
+        for card in cards[:3]:
+            layout.addWidget(card)
+        layout.addStretch(1)
+        container.setVisible(bool(cards))
+
+    @staticmethod
+    def _awareness_action(kind: str, label: str, context: Dict[str, str]) -> object:
+        return AwarenessAction(kind, label, dict(context))
+
+    def _situation_overview_text(self, snapshot: object) -> str:
+        situation = getattr(snapshot, "situation_summary", None)
+        headline = str(getattr(situation, "headline", "") or "").strip()
+        if not headline:
+            attention = tuple(getattr(snapshot, "attention_items", ()) or ())
+            if attention:
+                headline = f"{len(attention)} item{'s' if len(attention) != 1 else ''} need attention."
+            else:
+                headline = "No traffic needs attention."
+        parts = [headline]
+        needs = tuple(getattr(situation, "top_needs", ()) or ()) if situation is not None else ()
+        incidents = tuple(getattr(situation, "active_incidents", ()) or ()) if situation is not None else ()
+        if needs:
+            parts.append(f"{len(needs)} open need{'s' if len(needs) != 1 else ''}")
+        if incidents:
+            parts.append(f"{len(incidents)} storyline{'s' if len(incidents) != 1 else ''}")
+        confidence = str(getattr(situation, "confidence", "") or "").strip()
+        if confidence:
+            parts.append(confidence)
+        return " | ".join(parts)
+
+    def _situation_overview_actions(self, snapshot: object) -> tuple[object, ...]:
+        context: Dict[str, str] = {}
+        topic_filter = str(getattr(self, "_awareness_topic_filter", "") or "").strip()
+        if topic_filter:
+            context["topic_filter"] = topic_filter
+            context["search_query"] = topic_filter
+        return (
+            self._awareness_action("messages", "Inbox", context),
+            self._awareness_action("map", "Map", context),
+        )
+
+    @staticmethod
+    def _situation_need_text(need: object) -> str:
+        summary = str(getattr(need, "summary", "") or "Review request").strip()
+        category = str(getattr(need, "category", "") or "").strip()
+        location = str(getattr(need, "location_hint", "") or "").strip()
+        requested_by = str(getattr(need, "requested_by", "") or "").strip()
+        parts = [summary]
+        if category:
+            parts.append(category)
+        if requested_by:
+            parts.append(requested_by)
+        if location:
+            parts.append(location)
+        return " | ".join(parts)
+
+    @staticmethod
+    def _situation_story_text(story: object) -> str:
+        headline = str(getattr(story, "headline", "") or "Review storyline").strip()
+        source_count = int(getattr(story, "source_count", 0) or 0)
+        callsign_count = int(getattr(story, "callsign_count", 0) or 0)
+        detail = []
+        if callsign_count:
+            detail.append(f"{callsign_count} station{'s' if callsign_count != 1 else ''}")
+        if source_count:
+            detail.append(f"{source_count} source{'s' if source_count != 1 else ''}")
+        return headline + (f" | {', '.join(detail)}" if detail else "")
+
+    def _build_situation_card(
+        self,
+        title: str,
+        body: str,
+        actions: Sequence[object],
+        *,
+        role: str,
+    ) -> QWidget:
+        try:
+            theme = self._theme()
+        except Exception:
+            theme = {}
+        try:
+            bg, fg, border = self._semantic_panel_colors(role)
+        except Exception:
+            bg = theme.get("surface", "#F4F6F8")
+            border = theme.get("border", "#CAD6E2")
+            fg = theme.get("text", "#111111")
+        frame = QFrame(self.situation_cards_container)
+        frame.setObjectName("controlfreqSituationCard")
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setStyleSheet(
+            f"QFrame#controlfreqSituationCard {{ background: {bg}; border: 1px solid {border}; border-radius: 6px; }}"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(6)
+        text = QLabel(f"<b>{title}:</b> {body}")
+        text.setTextFormat(Qt.RichText)
+        text.setWordWrap(True)
+        text.setStyleSheet(f"color: {fg};")
+        text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row.addWidget(text, 1)
+        for action in tuple(actions or ())[:3]:
+            label = str(getattr(action, "label", "") or getattr(action, "kind", "") or "").strip()
+            kind = str(getattr(action, "kind", "") or "").strip().lower()
+            context = self._situation_action_context(action)
+            if not label or kind == "monitor":
+                continue
+            if kind in {"reply", "compose"} and not context.get("callsign"):
+                continue
+            btn = QPushButton(label)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setMaximumWidth(74)
+            btn.setMinimumHeight(button_height_for_font(btn, floor=26))
+            btn.setToolTip(self._situation_action_tooltip(kind, context))
+            btn.setStyleSheet(button_style("secondary", theme))
+            btn.clicked.connect(lambda _checked=False, k=kind, c=dict(context): self._activate_situation_action(k, c))
+            row.addWidget(btn)
+        return frame
+
+    @staticmethod
+    def _situation_action_context(action: object) -> Dict[str, str]:
+        raw = getattr(action, "context", {}) or {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized = {str(key): str(value) for key, value in raw.items() if str(value or "").strip()}
+        group = normalized.get("group") or normalized.get("to_target") or ""
+        topic = normalized.get("topic") or normalized.get("topic_filter") or ""
+        search = normalized.get("search_query") or " ".join(
+            part
+            for part in (
+                normalized.get("callsign", ""),
+                group,
+                topic,
+            )
+            if part
+        )
+        return {
+            "group_filter": group,
+            "topic_filter": topic,
+            "callsign": normalized.get("callsign", ""),
+            "source_family": normalized.get("source_family", ""),
+            "source_ref": normalized.get("source_ref", ""),
+            "compose_mode": normalized.get("compose_mode", ""),
+            "state_filter": normalized.get("state", ""),
+            "grid_filter": normalized.get("grid", ""),
+            "search_query": search,
+        }
+
+    @staticmethod
+    def _situation_action_tooltip(kind: str, context: Dict[str, str]) -> str:
+        label = context.get("callsign") or context.get("topic_filter") or context.get("group_filter") or "this item"
+        if kind in {"reply", "compose"}:
+            return f"Compose a reply for {label}."
+        if kind == "map":
+            return f"Open Map focused on {label}."
+        if kind in {"sop", "open_sop"}:
+            return f"Open SOP Builder for {label}."
+        return f"Open Inbox focused on {label}."
+
+    def _activate_situation_action(self, kind: str, context: Dict[str, str]) -> None:
+        self._operational_awareness_context = {key: value for key, value in dict(context or {}).items() if value}
+        action = str(kind or "").strip().lower()
+        if action in {"reply", "compose"}:
+            self._open_operational_activity_compose()
+        elif action == "map":
+            self._open_operational_activity_map()
+        elif action in {"sop", "open_sop"}:
+            self._navigate_to_tab("SOP")
+        else:
+            self._open_operational_activity_messages()
+
     def _set_awareness_lead_text(self, item: object | None) -> None:
         label = getattr(self, "awareness_lead_label", None)
         if label is None:
             return
         if item is None:
-            text = "Top Attention: no current traffic."
+            text = "Needs Attention: clear."
             role = "positive"
         else:
             priority = "Pinned" if bool(getattr(item, "pinned", False)) else self._awareness_priority_label(int(getattr(item, "priority", 0) or 0))
@@ -3290,20 +3807,19 @@ class ControlFreqTab(QWidget):
             topics = ", ".join(tuple(getattr(item, "topics", ()) or ())[:2])
             group = str(getattr(item, "group", "") or getattr(item, "to_target", "") or "").strip()
             detail = " | ".join(part for part in (callsign, subject, topics, group) if part)
-            text = f"Top Attention: {priority}" + (f" | {detail}" if detail else "")
+            text = f"Needs Attention: {priority}" + (f" | {detail}" if detail else "")
             role = "warning" if priority in {"Alert", "Urgent", "Direct"} else "secondary"
         label.setText(text)
         label.setToolTip(text)
         try:
-            theme = self._theme()
-            colors = {
-                "positive": (theme.get("success_bg", "#EEF7EE"), theme.get("text", "#111")),
-                "secondary": (theme.get("panel_alt", "#EAF2FF"), theme.get("text", "#111")),
-                "warning": (theme.get("warning_bg", "#FFF4D6"), theme.get("text", "#111")),
-            }
-            bg, fg = colors.get(role, colors["secondary"])
+            if role == "positive":
+                bg, fg, border = self._semantic_panel_colors("success")
+            elif role == "warning":
+                bg, fg, border = self._semantic_panel_colors("warning")
+            else:
+                bg, fg, border = self._semantic_panel_colors("secondary")
             label.setStyleSheet(
-                f"font-weight: 700; padding: 6px; border-radius: 6px; background: {bg}; color: {fg};"
+                f"font-weight: 700; padding: 6px; border-radius: 6px; background: {bg}; color: {fg}; border: 1px solid {border};"
             )
         except Exception:
             pass
@@ -3337,6 +3853,7 @@ class ControlFreqTab(QWidget):
                     "topic_filter": topic,
                     "callsign": normalized.get("callsign", ""),
                     "source_family": source_family,
+                    "source_ref": normalized.get("source_ref", ""),
                     "compose_mode": compose_mode,
                     "search_query": search,
                     "state_filter": normalized.get("state", ""),
@@ -3347,6 +3864,7 @@ class ControlFreqTab(QWidget):
             "topic_filter": next(iter(tuple(getattr(item, "topics", ()) or ())), ""),
             "callsign": str(getattr(item, "callsign", "") or "").strip(),
             "source_family": str(getattr(item, "source_family", "") or "").strip(),
+            "source_ref": str(getattr(item, "source_ref", "") or "").strip(),
             "compose_mode": str(getattr(item, "reply_compose_mode", "") or "").strip(),
             "state_filter": str(getattr(item, "state", "") or "").strip().upper(),
             "grid_filter": str(getattr(item, "grid", "") or "").strip().upper(),
@@ -3371,6 +3889,7 @@ class ControlFreqTab(QWidget):
             "ALERT": palette["critical"],
             "URGENT": palette["soon"],
             "WATCH": palette["upcoming"],
+            "RECENT": None,
             "INFO": None,
             "READY": palette["positive"],
         }
@@ -3421,11 +3940,13 @@ class ControlFreqTab(QWidget):
                 ("Read", "read", "Open Messages focused to this traffic."),
                 ("Reply", "reply", "Compose a reply using this traffic context."),
                 ("Map", "map", "Open Map filtered to this traffic context."),
+                ("Topic", "topic", "Correct this traffic category."),
             ):
                 action_allowed = {
                     "read": contract.actions.read,
                     "reply": contract.actions.reply or contract.actions.compose,
                     "map": contract.actions.map,
+                    "topic": bool(context.get("source_ref")),
                 }.get(action, False)
                 enabled = bool(context and action_allowed)
                 btn = QPushButton(label, cell)
@@ -3454,8 +3975,141 @@ class ControlFreqTab(QWidget):
             self._open_operational_activity_compose()
         elif action == "map":
             self._open_operational_activity_map()
+        elif action == "topic":
+            self._show_awareness_topic_menu(row)
         else:
             self._open_operational_activity_messages()
+
+    def _show_awareness_topic_menu(self, row: int) -> None:
+        try:
+            context = dict(self._awareness_row_contexts[int(row)] or {})
+        except Exception:
+            context = {}
+        if not context.get("source_ref"):
+            return
+        menu = QMenu(self)
+        presets = (
+            ("Mark Social", ("Social",), False),
+            ("Mark Comms", ("Comms",), False),
+            ("Mark Weather", ("Weather",), True),
+        )
+        for label, topics, attention in presets:
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, c=dict(context), t=tuple(topics), a=attention: self._override_awareness_topics(c, t, operator_attention=a)
+            )
+        menu.addSeparator()
+        custom = menu.addAction("Change Topic...")
+        custom.triggered.connect(lambda _checked=False, c=dict(context): self._prompt_awareness_topic_override(c))
+        clear = menu.addAction("Clear Override")
+        clear.triggered.connect(lambda _checked=False, c=dict(context): self._clear_awareness_topic_override(c))
+        table = getattr(self, "awareness_table", None)
+        if table is not None:
+            widget = table.cellWidget(max(0, int(row or 0)), 3)
+            if widget is not None:
+                menu.exec(widget.mapToGlobal(widget.rect().bottomLeft()))
+                return
+        menu.exec(self.mapToGlobal(self.rect().center()))
+
+    def _prompt_awareness_topic_override(self, context: Dict[str, str]) -> None:
+        text, ok = QInputDialog.getText(
+            self,
+            "Change Traffic Topic",
+            "Topic:",
+            text=str(context.get("topic_filter") or "Social"),
+        )
+        if not ok:
+            return
+        topic = str(text or "").strip()
+        if topic:
+            self._override_awareness_topics(context, (topic,), operator_attention=topic.lower() != "social")
+
+    def _override_awareness_topics(
+        self,
+        context: Dict[str, str],
+        topics: Sequence[object],
+        *,
+        operator_attention: bool,
+    ) -> None:
+        source_ref = str(context.get("source_ref") or "").strip()
+        source_family = str(context.get("source_family") or "").strip()
+        if not source_ref:
+            return
+        if source_ref.startswith("mesh:"):
+            try:
+                set_mesh_message_topic_override(
+                    default_mesh_db_path(),
+                    source_ref,
+                    topics,
+                    operator_attention=operator_attention,
+                )
+            except Exception as exc:
+                log.debug("ControlFreq: failed to store mesh topic override: %s", exc)
+        self._update_observation_topic_override(
+            source_family,
+            source_ref,
+            topics,
+            operator_attention=operator_attention,
+            override_active=True,
+        )
+
+    def _clear_awareness_topic_override(self, context: Dict[str, str]) -> None:
+        source_ref = str(context.get("source_ref") or "").strip()
+        source_family = str(context.get("source_family") or "").strip()
+        if not source_ref:
+            return
+        if source_ref.startswith("mesh:"):
+            try:
+                clear_mesh_message_topic_override(default_mesh_db_path(), source_ref)
+            except Exception as exc:
+                log.debug("ControlFreq: failed to clear mesh topic override: %s", exc)
+        self._operational_snapshot_cache_key = ()
+        self._refresh_activity()
+
+    def _update_observation_topic_override(
+        self,
+        source_family: str,
+        source_ref: str,
+        topics: Sequence[object],
+        *,
+        operator_attention: bool,
+        override_active: bool,
+    ) -> None:
+        db_path = default_mesh_db_path() if source_ref.startswith("mesh:") else settings_db_path()
+        candidates = []
+        families = [source_family] if source_family else ["meshcore", "meshtastic"]
+        for family in families:
+            try:
+                candidates.extend(list_observations(db_path, source_family=family, limit=1000))
+            except Exception as exc:
+                log.debug("ControlFreq: failed to load observations for topic override: %s", exc)
+        normalized_topics = tuple(str(topic or "").strip() for topic in topics if str(topic or "").strip())
+        for observation in candidates:
+            if str(observation.source_ref or "").strip() != source_ref:
+                continue
+            provenance = dict(observation.provenance or {})
+            if override_active:
+                provenance["topic_override"] = {
+                    "topics": list(normalized_topics),
+                    "operator_attention": bool(operator_attention),
+                }
+            else:
+                provenance.pop("topic_override", None)
+            try:
+                upsert_observation(
+                    db_path,
+                    replace(
+                        observation,
+                        observed_topics=normalized_topics,
+                        operator_attention=operator_attention,
+                        provenance=provenance,
+                    ),
+                )
+            except Exception as exc:
+                log.debug("ControlFreq: failed to update observation topic override: %s", exc)
+        self._awareness_topic_filter = ""
+        self._operational_snapshot_cache_key = ()
+        self._refresh_activity()
 
     def _set_awareness_support_text(self, snapshot: object | None) -> None:
         topics = tuple(getattr(snapshot, "topic_rollups", ()) or ()) if snapshot is not None else ()
@@ -3472,7 +4126,7 @@ class ControlFreqTab(QWidget):
                     text,
                     {
                         "topic_filter": label,
-                        "search_query": label,
+                        "awareness_topic_chip": "1",
                     },
                     f"Focus Operational Awareness on {label}" + (f" near {geo}." if geo else "."),
                 )
@@ -3571,11 +4225,30 @@ class ControlFreqTab(QWidget):
                 widget.deleteLater()
 
     def _set_awareness_focus_context(self, context: Dict[str, str]) -> None:
+        raw_context = dict(context or {})
+        topic_chip = str(raw_context.get("awareness_topic_chip") or "").strip()
+        topic_filter = str(raw_context.get("topic_filter") or "").strip()
+        if topic_chip and topic_filter:
+            if str(getattr(self, "_awareness_topic_filter", "") or "").strip().lower() == topic_filter.lower():
+                self._awareness_topic_filter = ""
+                self._operational_awareness_context = {}
+            else:
+                self._awareness_topic_filter = topic_filter
+                self._operational_awareness_context = {
+                    "topic_filter": topic_filter,
+                    "awareness_topic_chip": "1",
+                }
+            snapshot = getattr(self, "_operational_awareness_full_snapshot", None)
+            if snapshot is not None:
+                self._set_operational_awareness_snapshot(snapshot)
+            self._update_clear_filters_style()
+            return
         self._operational_awareness_context = {
             str(key): str(value)
             for key, value in dict(context or {}).items()
             if str(value or "").strip()
         }
+        self._awareness_topic_filter = ""
         search = (
             self._operational_awareness_context.get("topic_filter")
             or self._operational_awareness_context.get("callsign")
@@ -3600,6 +4273,10 @@ class ControlFreqTab(QWidget):
         self._run_filter_refresh()
 
     def _awareness_context_matches(self, context: Dict[str, str]) -> bool:
+        if str(dict(context or {}).get("awareness_topic_chip") or "").strip():
+            active_topic = str(getattr(self, "_awareness_topic_filter", "") or "").strip().lower()
+            context_topic = str(dict(context or {}).get("topic_filter") or "").strip().lower()
+            return bool(active_topic and active_topic == context_topic)
         active = getattr(self, "_operational_awareness_context", {}) or {}
         if not active:
             return False
@@ -3610,7 +4287,7 @@ class ControlFreqTab(QWidget):
         return False
 
     def _set_operational_activity_text(self, headline: str, topics: str) -> None:
-        self.operational_activity_label.setText(str(headline or "").strip() or "Operational Activity: no recent actionable traffic")
+        self.operational_activity_label.setText(str(headline or "").strip() or "Recent Traffic: none in the selected window")
         self.operational_topics_label.setText(str(topics or "").strip())
         self.operational_topics_label.setVisible(False)
         self._sync_operational_action_buttons()
@@ -3766,7 +4443,7 @@ class ControlFreqTab(QWidget):
         alerts = tuple(getattr(snapshot, "condition_alerts", ()) or ())
         attention = tuple(getattr(snapshot, "high_attention", ()) or ())
         if not latest:
-            return "Operational Activity: no recent actionable traffic"
+            return "Recent Traffic: none in the selected window"
         if alerts:
             first = alerts[0]
             level = str(getattr(first, "status", "") or getattr(first, "subject", "") or "Condition Alert").strip()
@@ -3781,7 +4458,9 @@ class ControlFreqTab(QWidget):
         target = normalize_group_name(getattr(first, "to_target", "") or "")
         route = " -> ".join(part for part in (sender, target) if part)
         count = len(attention) if attention else len(latest)
-        prefix = f"Operational Activity: {count} high-value" if attention else f"Operational Activity: {len(latest)} recent"
+        prefix = f"Recent Traffic: {len(latest)} recent"
+        if attention:
+            prefix += f" | {count} need attention"
         if subject:
             return f"{prefix} | {family}: {subject}" + (f" | {route}" if route else "")
         return f"{prefix} | {family}" + (f" | {route}" if route else "")
@@ -5988,6 +6667,8 @@ class ControlFreqTab(QWidget):
 
     def _on_message_summary_ready(self, request_id: int, rows: object, error: object) -> None:
         self._message_summary_pending = False
+        if request_id != int(getattr(self, "_message_summary_request_id", 0) or 0):
+            return
         if request_id < self._message_summary_applied_id:
             return
         if error:

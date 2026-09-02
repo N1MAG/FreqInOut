@@ -377,6 +377,83 @@ def commstat_message_row_presentation(msg: object) -> MessageRowPresentation:
     )
 
 
+def observation_message_row_presentation(observation: object) -> MessageRowPresentation:
+    source_family = str(getattr(observation, "source_family", "") or "").strip().lower()
+    source_label = {
+        "meshcore": "MeshCore",
+        "meshtastic": "Meshtastic",
+        "mesh_client": "Meshtastic",
+        "local_mesh": "Mesh",
+    }.get(source_family, source_family.title() if source_family else "Message")
+    received = str(getattr(observation, "received_utc", "") or getattr(observation, "event_utc", "") or "").strip()
+    rcv_ts = _parse_observation_ts(received)
+    topics = tuple(str(v or "").strip() for v in (getattr(observation, "observed_topics", ()) or ()) if str(v or "").strip())
+    summary = str(getattr(observation, "summary", "") or "").strip()
+    subject = str(getattr(observation, "subject", "") or "").strip()
+    title = _table_title(subject or summary or source_label)
+    status_raw = str(getattr(observation, "status", "") or "").strip().upper()
+    status = status_raw or ("NEW" if bool(getattr(observation, "operator_attention", False)) else "INFO")
+    provenance = getattr(observation, "provenance", {}) or {}
+    channel_policy = provenance.get("channel_policy", {}) if isinstance(provenance, Mapping) else {}
+    if not isinstance(channel_policy, Mapping):
+        channel_policy = {}
+    channel_name = str(channel_policy.get("channel_name", "") or "").strip()
+    key_status = str(channel_policy.get("key_status", "") or "").strip()
+    routing = provenance.get("routing", {}) if isinstance(provenance, Mapping) else {}
+    if not isinstance(routing, Mapping):
+        routing = {}
+    hop_count = routing.get("hop_count", "")
+    route_type = str(routing.get("route_type", "") or "").strip()
+    groups = tuple(str(v or "").strip() for v in (getattr(observation, "groups", ()) or ()) if str(v or "").strip())
+    search_detail = " ".join(
+        part
+        for part in (
+            source_label,
+            channel_name,
+            key_status,
+            route_type,
+            f"{hop_count} hop" if hop_count not in ("", None) else "",
+            " ".join(groups),
+            " ".join(topics),
+            str(getattr(observation, "state", "") or ""),
+            str(getattr(observation, "grid", "") or ""),
+            subject,
+            summary,
+        )
+        if str(part or "").strip()
+    )
+    return MessageRowPresentation(
+        msg_type=source_label,
+        status=status,
+        from_call=_clean_call(getattr(observation, "from_call", "")),
+        to_call=_observation_display_target(observation, channel_policy=channel_policy),
+        rcv_ts=rcv_ts,
+        title=title,
+        origin=source_family or "message",
+        topics=topics,
+        actionable=bool(getattr(observation, "operator_attention", False)),
+        display_type=source_label,
+        search_detail=search_detail,
+    )
+
+
+def _observation_display_target(observation: object, *, channel_policy: Mapping[str, object] | None = None) -> str:
+    raw_target = strip_group_marker(getattr(observation, "to_target", ""))
+    source_family = str(getattr(observation, "source_family", "") or "").strip().lower()
+    if source_family not in {"meshcore", "meshtastic"}:
+        return raw_target
+    policy = channel_policy if isinstance(channel_policy, Mapping) else {}
+    channel_name = strip_group_marker(policy.get("channel_name", ""))
+    channel_id = strip_group_marker(policy.get("channel_id", ""))
+    groups = tuple(str(v or "").strip() for v in (getattr(observation, "groups", ()) or ()) if str(v or "").strip())
+    target_key = raw_target.strip().lower()
+    if target_key in {"", "channel", "channels", "public"}:
+        return channel_name or (groups[0] if groups else "") or raw_target or "Public"
+    if channel_id and target_key == channel_id.strip().lower():
+        return channel_name or raw_target
+    return raw_target
+
+
 def strip_group_marker(value: object) -> str:
     text = str(value or "").strip()
     while text.startswith("@"):
@@ -427,6 +504,24 @@ def _lookup_form_title(form_title_lookup: Mapping[str, str] | Callable[[str], st
 
 def _clean_call(value: object) -> str:
     return str(value or "").strip().upper()
+
+
+def _parse_observation_ts(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.datetime.fromisoformat(normalized).timestamp()
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d-%H%M%SZ", "%y%m%d-%H%MZ"):
+        try:
+            dt = datetime.datetime.strptime(text, fmt).replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            continue
+    return 0.0
 
 
 def _table_title(value: object, *, limit: int = 60) -> str:

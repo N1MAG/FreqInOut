@@ -24,6 +24,22 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def test_controlfreq_dark_semantic_panel_colors_are_readable() -> None:
+    class FakeSettings:
+        def get(self, key: str, default=None):
+            if key == "ui_theme":
+                return "dark"
+            return default
+
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    tab.settings = FakeSettings()
+    tab._theme_cache = None
+
+    assert tab._semantic_panel_colors("warning") == ("#3A3015", "#FFF0BE", "#A06F18")
+    assert tab._semantic_panel_colors("success") == ("#173822", "#E8F6EA", "#39874D")
+    assert tab._semantic_panel_colors("secondary") == ("#16263A", "#E8F1FF", "#2E4A68")
+
+
 def _write_settings_db(
     cfg_root: Path,
     *,
@@ -394,7 +410,7 @@ def test_activity_panel_summarizes_high_attention_topics(monkeypatch, tmp_path):
     finally:
         tab.deleteLater()
 
-    assert "Operational Activity: 1 high-value" in headline
+    assert "Recent Traffic: 1 recent | 1 need attention" in headline
     assert "Widemouth 2 Fire" in headline
     assert "K7ETC -> MR08" in headline
     assert "Fire" in topics
@@ -441,7 +457,7 @@ def test_activity_panel_summarizes_rf_pin_observations(monkeypatch, tmp_path):
     finally:
         tab.deleteLater()
 
-    assert "Operational Activity: 1 high-value" in headline
+    assert "Recent Traffic: 1 recent | 1 need attention" in headline
     assert "RF Pin: Relay check" in headline
     assert "MAGNET" in headline
     assert "Comms" in topics
@@ -671,7 +687,7 @@ def test_controlfreq_builds_source_lanes_for_active_radios() -> None:
     assert [lane.short_name for lane in lanes] == ["FIO-A", "FIO-B"]
     assert lanes[0].now == "MAGNET 40M 7.115 MHz"
     assert lanes[0].next == "MAGNET 80M 23:00"
-    assert lanes[1].now == "monitoring"
+    assert lanes[1].now == ""
     assert lanes[1].attention_count == 1
     assert "KI6QDB" in lanes[1].attention_summary
 
@@ -707,11 +723,14 @@ def test_controlfreq_operational_awareness_uses_source_lanes() -> None:
     assert 'self.source_lanes_table.setHorizontalHeaderLabels(["Source", "Now", "Next", "Attention"])' in source
     assert "self.source_lanes_table.itemSelectionChanged.connect(self._set_source_lane_focus_from_selection)" in source
     assert "build_radio_source_lanes(" in source
-    assert 'source_family=str(getattr(self, "_source_family_filter", "") or "").strip()' in source
+    assert 'self.traffic_source_combo.addItem("Traffic Source: All", "")' in source
+    assert "source_families=self._traffic_source_query_families(" in source
+    assert "def _traffic_source_query_families" in source
     assert 'self._source_family_filter = ""' in source
     assert "def _set_source_lane_focus_from_selection" in source
     assert "Focused source:" in source
     assert "Sources: {', '.join(sources[:4])}" in source
+    assert "Traffic Source Filtering And Telemetry Boundary" in spec
     assert "ControlFreq must not collapse multi-source operations into a single" in spec
 
 
@@ -753,7 +772,7 @@ def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:
     layout_spec = Path("docs/internal/ui_layout_standards.md").read_text(encoding="utf-8")
 
     assert "def style_splitter_handles" in theme_source
-    assert "Drag this divider to resize the panels." in theme_source
+    assert "Drag this divider to resize the panels." not in theme_source
     assert "QSplitter::handle:hover" in theme_source
     assert "style_splitter_handles(self.top_splitter" in controlfreq_source
     assert "style_splitter_handles(self.left_splitter" in controlfreq_source
@@ -765,4 +784,4 @@ def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:
     assert "resolve_theme(self._dark)" not in map_source
     assert "style_splitter_handles(self.roster_compare_splitter, resolve_theme(self.settings))" in ncs_source
     assert "resolve_theme(self._dark)" not in ncs_source
-    assert "Resizable split panels must advertise that they are resizable." in layout_spec
+    assert "persistent tooltips that can cover operational content" in layout_spec

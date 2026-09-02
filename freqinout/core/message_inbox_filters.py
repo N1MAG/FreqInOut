@@ -19,6 +19,9 @@ MESSAGE_SOURCE_LABELS = {
     "bbs": "BBS",
     "sitrep": "SitRep",
     "commstat": "CommStat",
+    "mesh": "Mesh",
+    "meshcore": "MeshCore",
+    "meshtastic": "Meshtastic",
 }
 
 class MessageRowLike(Protocol):
@@ -454,12 +457,50 @@ def row_matches_inbox_focus(row: MessageRowLike, focus: str) -> bool:
         return row_matches_type_filter(row, "CommStat")
     if focus == "js8call":
         return row_matches_type_filter(row, "JS8Call")
+    if focus == "mesh":
+        origin = str(getattr(row, "origin", "") or "").strip().lower()
+        if origin not in {"mesh", "meshcore", "meshtastic", "mesh_client", "local_mesh"}:
+            return False
+        return mesh_row_is_inbox_message(row)
     if focus == "varac":
         return str(getattr(row, "origin", "") or "").strip().lower() == "varac" or (
             str(getattr(row, "msg_type", "") or "").strip() == "VarAC"
         )
     if focus == "bbs":
         return str(getattr(row, "origin", "") or "").strip().lower() in {"bbs", "bbs_archive"}
+    return True
+
+
+def mesh_row_is_inbox_message(row: MessageRowLike) -> bool:
+    """Return true for mesh traffic rows, excluding topology/node projections."""
+    source_ref = ""
+    payload = getattr(row, "payload", None)
+    provenance = getattr(payload, "provenance", {}) if payload is not None else {}
+    for candidate in (
+        getattr(row, "source_ref", ""),
+        getattr(payload, "source_ref", ""),
+    ):
+        text = str(candidate or "").strip().lower()
+        if text:
+            source_ref = text
+            break
+    if source_ref.startswith(("mesh-node:", "mesh-channel:")):
+        return False
+    if source_ref.startswith("mesh:"):
+        return True
+    subject = str(getattr(row, "title", "") or getattr(payload, "subject", "") or "").strip().lower()
+    summary = str(getattr(payload, "summary", "") or "").strip().lower()
+    if subject.startswith("mesh node:") or summary.startswith("mesh node:"):
+        return False
+    if isinstance(provenance, Mapping):
+        if str(provenance.get("node_id") or "").strip() and not str(provenance.get("message_id") or "").strip():
+            return False
+        surfaces = provenance.get("surfaces")
+        if isinstance(surfaces, (list, tuple, set)):
+            normalized = {str(surface or "").strip().lower() for surface in surfaces}
+            if normalized:
+                return "inbox" in normalized
+    # Preserve legacy mesh message rows that predate the source_ref contract.
     return True
 
 

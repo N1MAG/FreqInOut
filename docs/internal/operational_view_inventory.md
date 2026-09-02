@@ -54,7 +54,7 @@ Code gate:
 | Station Command Bar | Active Radio Cards | Station Command View | Partial | P1 |
 | Station Overview | Control Center | Station Status Summary | Partial | P2 |
 | Station Health | Health Details | Setup Checklist / Runtime Health | Meets | P2 |
-| NCS-FLDigi/SSB | Net Control | Net Control Workspace | Legacy | P2 |
+| NCS-FLDigi/SSB | Net Control | Net Control Workspace | Specified | P2 |
 | NCS-JS8 | Net Control | Net Control Workspace | Legacy | P2 |
 | NCS-Local | Local NCS | Local Report / Net Control | Partial | P2 |
 | Operators | HF Callsigns | Operator Directory | Partial | P3 |
@@ -502,7 +502,8 @@ Current screens:
 Gate status:
 
 - Source meaning: Partial for Local, Legacy for FLDigi/JS8. Native net-control
-  semantics are strong, but projection boundaries are older.
+  semantics are strong, but projection boundaries are older. FLDigi/SSB now has
+  a dedicated redesign contract in `docs/internal/fldigi_ncs_workbench_spec.md`.
 - Volume and retention: Partial. Rosters and check-ins are manageable today.
 - Provenance and trust: Partial. ANCS/relay/source provenance should be explicit.
 - Constrained customization: Partial. These are role workspaces, not generic
@@ -516,6 +517,10 @@ Near-term rule:
 - Do not force NCS into generic templates. Extract reusable projections for
   roster, traffic, relay, and local report signals where they feed ControlFreq,
   Messages, Map, or SOP.
+- FLDigi/SSB must be treated as a role-scoped live net cockpit before it is
+  surfaced in Ops Center. Its first reusable output is `NcsSessionSnapshot`;
+  Ops Center may consume session state and accepted aggregate counts, but must
+  not inspect FLDigi widgets or raw log-assisted candidates.
 
 ### Operator Directories
 

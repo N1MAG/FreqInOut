@@ -1757,6 +1757,8 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "self.station_command_radio_summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.station_command_radio_summary_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in source
     assert "self.station_command_radio_summary_scroll.setWidget(self.station_command_radio_summary_widget)" in source
+    assert "self._mesh_health_command_refresh_timer = QTimer(self)" in source
+    assert "self._station_command_source_control_signature(mesh_item)" in source
     assert 'self.station_command_radio_admin_btn = QPushButton("All Radios")' in source
     assert 'self.station_command_radio_admin_panel = QWidget(self.station_command_bar)' in source
     assert "def _refresh_station_command_radio_summary(self, choices: list[object], selected_id: int) -> None:" in source
@@ -1960,6 +1962,79 @@ def test_phase7_station_command_bar_uses_planned_compact_layout(monkeypatch, tmp
     finally:
         window.station_command_bar.deleteLater()
         app.processEvents()
+
+
+def test_phase7_station_command_mesh_source_chips_dedupe_connected_health(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    from freqinout.gui import main_window as main_window_module
+    from freqinout.gui.main_window import MainWindow
+
+    rows = [
+        {
+            "adapter_id": "scan:n1mag-mobl1",
+            "device_name": "N1MAG MOBL1",
+            "connected": False,
+            "last_error": "No MeshCore BLE devices found",
+            "updated_utc": "2026-08-31T21:59:00Z",
+        },
+        {
+            "adapter_id": "97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "device_name": "",
+            "connected": False,
+            "last_error": "BLE disconnected",
+            "updated_utc": "2026-08-31T21:59:30Z",
+        },
+        {
+            "adapter_id": "scan:97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "device_name": "Mesh 97C92879-047E-FEA8-7A11-8A2EE82B381D",
+            "connected": False,
+            "last_error": "Scan identity",
+            "updated_utc": "2026-08-31T21:59:45Z",
+        },
+        {
+            "adapter_id": "ble:97c92879",
+            "device_name": "MeshCore-N1MAG MOBL1",
+            "connected": True,
+            "last_error": "",
+            "updated_utc": "2026-08-31T22:00:00Z",
+        },
+    ]
+    monkeypatch.setattr(main_window_module, "list_mesh_health", lambda _path: rows)
+
+    window = MainWindow.__new__(MainWindow)
+    chips = MainWindow._station_command_mesh_source_chips(window)
+
+    assert len(chips) == 1
+    assert chips[0]["name"] == "N1MAG MOBL1"
+    assert chips[0]["role"] == "eligible_success"
+    assert "97C92879" not in chips[0]["name"]
+    assert "97C92879" not in repr(chips)
+    assert "No MeshCore BLE devices found" not in chips[0]["tooltip"]
+
+
+def test_phase7_station_command_mesh_chips_open_lightweight_manager() -> None:
+    source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+
+    assert "def _open_mesh_manager_from_station_command" in source
+    assert 'restart_btn = QPushButton("Reconnect"' in source
+    assert 'disconnect_btn = QPushButton("Disconnect"' in source
+    assert 'settings_btn = QPushButton("Local Mesh Settings"' in source
+    assert "def _show_mesh_source_menu" in source
+    assert '"Add Device..."' in source
+    assert "source_control_mesh_items_from_configs" in source
+
+
+def test_phase7_source_control_rail_contract_uses_mesh_dropdown() -> None:
+    source = Path("freqinout/core/source_control_rail.py").read_text(encoding="utf-8")
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
+    spec = Path("docs/internal/mesh_client_integration_spec.md").read_text(encoding="utf-8")
+
+    assert "class SourceControlItem" in source
+    assert "source_control_mesh_items_from_configs" in source
+    assert "Build top-rail mesh controls from saved configs only, grouped by protocol." in source
+    assert 'chip = QPushButton(f"{mesh_item.label} \\u25be", rail)' in main_source
+    assert "Connect:" in source
+    assert "unsaved BLE devices must not appear in the daily source rail" in spec
 
 
 def test_phase7_station_command_health_collapses_all_green(monkeypatch, tmp_path) -> None:
@@ -2797,6 +2872,7 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     window._suppressed_screen_labels = set()
     window._refresh_plan_context_labels = lambda *_args, **_kwargs: None
     window._refresh_station_overview = lambda *_args, **_kwargs: None
+    window._station_command_mesh_source_chips = lambda: []
 
     MainWindow._refresh_station_command_bar(window, force=True)
 
@@ -3331,7 +3407,8 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "selected = self._station_command_promoted_snapshot(" in refresh_block
     assert 'freq_combo = QComboBox(tile)' in tile_block
     assert 'freq_combo.setObjectName("stationCommandRadioTileFrequency")' in tile_block
-    assert "card_width = self._station_command_radio_card_width(1)" in tile_block
+    assert "card_choices = self._station_command_card_choices_for_layout(choices, selected_id)" in tile_block
+    assert "card_width = self._station_command_radio_card_width(len(card_choices))" in tile_block
     assert "tile.setMinimumWidth(card_width)" in tile_block
     assert "tile.setMaximumWidth(card_width)" in tile_block
     assert "tile.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in tile_block
@@ -3393,9 +3470,14 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "scheduler_suspended_manual = self._station_command_scheduler_suspended_manually_for_radio(ident)" in tile_block
     assert "page_choices = visible_choices" in source
     assert "self._change_station_command_radio_page(1)" in source
-    assert "station_command_radio_summary_scroll" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
-    assert "viewport_width or scroll_width or bar_width" in source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    width_helper_block = source[
+        source.index("def _station_command_radio_summary_available_width")
+        : source.index("def _station_command_radio_card_width")
+    ]
+    assert "station_command_radio_summary_scroll" in width_helper_block
+    assert "viewport_width or scroll_width or bar_width" in width_helper_block
     card_width_block = source[source.index("def _station_command_radio_card_width") : source.index("def _station_command_radio_page_slice")]
+    assert "minimum_card = 380 if count == 2 else 280" in card_width_block
     assert "min(480, available // count)" in card_width_block
     assert "parent.setMaximumWidth(16777215)" in source
     assert "QTimer.singleShot(0, lambda: self._refresh_station_command_bar(force=False))" in source
@@ -4177,9 +4259,10 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
         app.processEvents()
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-        assert len(tiles) == 1
+        assert len(tiles) == 2
         chips = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandSourceChip")
         assert [chip.text() for chip in chips] == ["FIO-A", "FIO-B"]
+        assert [chip.isChecked() for chip in chips] == [True, False]
 
         first_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
         assert first_combo is not None
@@ -4209,8 +4292,13 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
         app.processEvents()
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-        assert len(tiles) == 1
-        second_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        assert len(tiles) == 2
+        second_tile = next(
+            tile
+            for tile in tiles
+            if tile.findChild(QPushButton, "stationCommandRadioTileName").text() == "FIO-B"
+        )
+        second_combo = second_tile.findChild(QComboBox, "stationCommandRadioTileFrequency")
         assert second_combo is not None
         second_labels = [second_combo.itemText(index) for index in range(second_combo.count())]
         assert second_labels == ["AMRRON 20M", "AMRRON 40M"]
@@ -4328,14 +4416,19 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
         app.processEvents()
 
         tiles = window.station_command_radio_summary_widget.findChildren(QFrame, "stationCommandRadioTile")
-        assert len(tiles) == 1
+        assert len(tiles) == 2
         assert all(tile.maximumWidth() <= 900 for tile in tiles)
-        assert not any(button.text() == "Manual QSY" for tile in tiles for button in tile.findChildren(QPushButton))
         chips = window.station_command_radio_summary_widget.findChildren(QPushButton, "stationCommandSourceChip")
         assert [chip.text() for chip in chips] == ["FIO-A", "FIO-B"]
         assert [chip.isChecked() for chip in chips] == [False, True]
 
-        second_combo = tiles[0].findChild(QComboBox, "stationCommandRadioTileFrequency")
+        second_tile = next(
+            tile
+            for tile in tiles
+            if tile.findChild(QPushButton, "stationCommandRadioTileName").text() == "FIO-B"
+        )
+        assert not any(button.text() == "Manual QSY" for button in second_tile.findChildren(QPushButton))
+        second_combo = second_tile.findChild(QComboBox, "stationCommandRadioTileFrequency")
         assert second_combo is not None
         assert second_combo.currentText() == "AMRRON 20M"
         assert [second_combo.itemText(index) for index in range(second_combo.count())] == ["AMRRON 20M", "AMRRON 40M"]
@@ -4343,11 +4436,11 @@ def test_phase7_station_command_cards_do_not_inherit_manual_state_or_unscoped_sc
         assert MainWindow._station_command_now_text_for_summary(window, snapshots[1], selected_id=1) == "AMRRON 20M"
         assert MainWindow._station_command_next_text(window, snapshots[1]) == "AMRRON 40M"
 
-        second_qsy = next(btn for btn in tiles[0].findChildren(QPushButton) if btn.text() == "QSY")
-        second_timed = tiles[0].findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
+        second_qsy = next(btn for btn in second_tile.findChildren(QPushButton) if btn.text() == "QSY")
+        second_timed = second_tile.findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
         assert second_timed is not None
         assert second_qsy.isEnabled() is False
-        assert second_timed.isEnabled() is False
+        assert second_timed.text() == "Timed QSY"
 
         second_combo.setCurrentIndex(1)
         app.processEvents()
@@ -4452,6 +4545,25 @@ def test_phase7_station_command_timed_suspend_clears_manual_qsy_marker(monkeypat
     assert window._station_command_manual_qsy_meta is None
     assert window._station_command_manual_qsy_profile_id is None
     assert window._station_command_timed_suspend_profile_id == 2
+
+
+def test_phase7_station_command_operator_hold_does_not_create_global_attention() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    window._station_command_health_summary_for_profile = lambda snapshot: {
+        "state": "error" if int(getattr(snapshot, "device_profile_id", 0) or 0) == 2 else "ok"
+    }
+    window._station_command_scheduler_manual_qsy_active_for_radio = lambda profile_id: int(profile_id or 0) == 1
+    window._station_command_scheduler_suspended_manually_for_radio = lambda _profile_id: False
+    window._station_command_timed_suspend_active_for_radio = lambda _profile_id: False
+
+    held_snapshot = SimpleNamespace(device_profile_id=1, name="FIO-A", runtime_active=True)
+    blocked_snapshot = SimpleNamespace(device_profile_id=2, name="FIO-B", runtime_active=True)
+
+    assert MainWindow._station_command_attention_role_for_snapshot(window, held_snapshot)[0] == "warning"
+    assert MainWindow._station_command_snapshot_needs_operator_attention(window, held_snapshot) is False
+    assert MainWindow._station_command_snapshot_needs_operator_attention(window, blocked_snapshot) is True
 
 
 def test_phase7_station_command_card_indefinite_suspend_is_radio_scoped(monkeypatch) -> None:

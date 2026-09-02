@@ -34,8 +34,9 @@ Required behavior:
   selected content pane owning the remaining width.
 - Resizable split panels must advertise that they are resizable. Use the shared
   splitter-handle styling helper so the divider is wide enough to grab, visually
-  distinct from surrounding borders, hover-highlighted, and tooltipped. Do not
-  rely on an unmarked one-pixel divider for core workflows.
+  distinct from surrounding borders, and hover-highlighted without relying on
+  persistent tooltips that can cover operational content. Do not rely on an
+  unmarked one-pixel divider for core workflows.
 - If a label looks like a control, make it a real control. Time windows such as
   schedule horizons must be selectable when they appear in the view header;
   static `2h ?` labels are not acceptable on operational dashboards.
@@ -81,6 +82,38 @@ Required behavior:
 - New UI code must use shared theme/layout helpers for text-bearing control
   sizing. Local one-off accessibility guards are temporary exceptions and
   should be moved into the shared helper layer when touched.
+- Net-control/NCS views must present the workflow as compact sections, not as
+  one long sparse row across the window. Setup controls belong in a bounded
+  setup group, the check-in/roster table owns the remaining vertical space, and
+  empty-state text stays attached to that table. At reduced height and Large
+  text, controls may wrap or the page may scroll, but the operator must not see
+  a large blank gap above the active net controls.
+- Net-control/NCS views must expose an explicit `NCS Session` context before
+  start, end, ACK, QSY, roster, or check-in actions. The session label uses the
+  configured radio short name, protocol, role, and net name when known. When
+  multiple active radios can run NCS or ANCS duty, show short-name radio chips
+  so the operator can switch the scoped session without hunting through
+  Settings. The selected session chip uses a success/go treatment; alternate
+  eligible sessions use the information treatment and carry a tooltip. NCS
+  actions must never be visually ambiguous about which radio/source they will
+  affect.
+- Parallel NCS and ANCS duty across more than one radio is represented as
+  separate session snapshots: protocol, radio profile id, role, net name, and
+  timing state form the session key. Only the visible session renders live
+  controls; inactive sessions retain state and summarize as chips or cards.
+  Long-running polling, file scans, and roster comparison work must follow the
+  UI Responsiveness Contract and update the visible session through snapshots.
+- The main shell, navigation, Ops Center, and future NCS-aware summaries must
+  read active NCS/ANCS state from persisted session snapshots instead of
+  inspecting the currently visible tab. Collapsed navigation groups and compact
+  status indicators must expose active session labels in tooltips or detail
+  views so a multi-radio operator can understand what is running after tab
+  switches or restart.
+- FLDigi / SSB NCS has its own live-workbench contract in
+  `docs/internal/fldigi_ncs_workbench_spec.md`. UI changes there must preserve
+  the `Action for: NCS <callsign> | ANCS <callsign>` wording, keep QSY actions
+  in the Station Command Bar, and count only accepted aggregate check-ins for
+  post-net summaries.
 
 Implementation guardrails:
 
@@ -114,6 +147,133 @@ Ops Center dashboard direction. It is the reference design for a high-use,
 role-focused operational awareness surface that must remain glanceable at Large
 text and reduced window sizes.
 
+## Theme Contrast
+
+FIO must remain readable in Light and Dark themes without requiring users to
+find individual broken tabs. Theme safety is a shared UI contract, not a
+per-screen polish task.
+
+Required behavior:
+
+- New tab bars, nested workbenches, tables, list views, status chips, and
+  settings subpanels must use the shared theme palette or shared styling helpers.
+- Do not hard-code light gray tab/table backgrounds with white or pale text.
+  If a surface needs semantic colors, define both background and foreground for
+  each theme and verify contrast.
+- Item-level table backgrounds must be refreshed when the app theme changes.
+  Tables that color rows by state must not keep stale light-theme brushes after
+  switching to Dark theme.
+- Selected and disabled table/list rows must keep readable foreground colors in
+  both themes. Selection styling may be subtle, but text cannot wash out.
+- `QTabWidget`/`QTabBar` controls should normally rely on the global app
+  stylesheet. If a local override is necessary, it must explicitly cover normal,
+  selected, hover, and disabled states for both themes.
+
+Acceptance check for future UI slices:
+
+- Review touched screens in Light and Dark themes, including selected rows,
+  disabled actions, nested tab widgets, and settings tables.
+- Add a focused regression test when a change introduces local stylesheet rules
+  for tab bars, table items, semantic table rows, or dark-theme-specific colors.
+
+## UI Responsiveness Contract
+
+FIO must never make the operator wonder whether the app froze. Every new UI,
+source integration, map layer, and data-view contract must preserve event-loop
+responsiveness under normal use, reduced window sizes, Large text, and shutdown.
+The UI watchdog is a last-resort diagnostic, not an acceptable steady-state
+behavior.
+
+Mandatory rules:
+
+- GUI event handlers must not perform unbounded blocking work. Expensive device
+  I/O, BLE/serial/TCP reads, filesystem scans, database rebuilds, geocoding,
+  map projection, route derivation, subprocess work, and message parsing must
+  run in a worker, async service, or coalesced timer-backed pipeline.
+- Do not use `Qt.BlockingQueuedConnection` from GUI code. Cross-thread requests
+  must be queued, signal-driven, cancellable where practical, and safe if the
+  result arrives after the view changed.
+- Do not use unbounded `QThread.wait()` during UI shutdown or tab transitions.
+  If a bounded wait is unavoidable, keep each wait at or below 250 ms and prefer
+  a non-blocking quit/request-interruption flow.
+- Do not call `subprocess.run`, `subprocess.check_call`, or
+  `subprocess.check_output` from GUI code without a small timeout and a clear
+  reason it cannot be moved off-thread.
+- Do not call `future.result()` on the GUI thread unless the future is already
+  known complete inside a done callback. Prefer Qt signals or queued callbacks
+  that carry the result without blocking.
+- Do not use `QApplication.processEvents()` as a layout or performance fix.
+  Existing uses are migration exceptions only; new UI code should use workers,
+  timers, debouncing, or explicit progress states.
+- Data-view contracts must be incremental and stale-result safe. A view may
+  render a placeholder or last-known snapshot while a newer projection builds,
+  but an old worker result must not overwrite a newer filter/source selection.
+- Expensive projections must use worker snapshots. Capture widget state,
+  filters, and settings into plain Python data on the UI thread; build schedule,
+  map, route, message, and operational projections in a worker; then apply only
+  the latest generation through a Qt signal on the UI thread.
+- Follow-up actions that need the same projection, such as save, RF Guard
+  review, or route-to-source actions, should reuse the latest matching worker
+  snapshot before rebuilding. If the snapshot is stale, show progress and build
+  a fresh worker result instead of blocking the event loop.
+- Map views must coalesce redraws and avoid full WebEngine reloads for simple
+  layer, filter, or selection changes. High-volume layers such as Mesh, APRS,
+  and future MQTT sources must use stable layer updates and bounded projection
+  work.
+- Source health is not map data. Health-only changes, including MeshCore BLE
+  reconnecting, away, or disabled states, may update chips and status labels but
+  must not force map projection or WebEngine redraws.
+- Local/device sources must publish a `SourceConnectionSnapshot` lifecycle
+  (`connected`, `reconnecting`, `away`, `disabled`, or `config_error`) instead
+  of making each view infer meaning from a boolean connection flag. Retained
+  observations, nodes, and routes remain valid for Inbox, Ops Center, and Map
+  even when the live device is disconnected.
+- Shutdown and disconnect/reconnect flows must be non-blocking. Ordinary
+  teardown must not trigger a UI watchdog hang report.
+- QObjects that own timers must stop and delete those timers in their owning
+  thread. GUI shutdown should queue the worker stop, let the worker emit its
+  finished/stopped signal, and only use a short bounded wait as a cleanup
+  grace period.
+
+Implementation gates:
+
+- Specs that add a UI surface, data source, source contract, or map layer must
+  state how work is bounded, debounced, cancelled, or moved off the UI thread.
+- Tests must include static guardrails for high-risk blocking patterns and
+  focused behavior tests for any worker/coalescing path introduced by the slice.
+- Known legacy exceptions must be recorded in the guardrail tests and reduced as
+  touched. Adding a new exception requires a comment explaining why it is safe
+  or temporary.
+- User-observed regressions that span more than one implementation pass are
+  tracked in `docs/internal/ui_regression_work_log.md`. Update that log whenever
+  a new visual, routing, responsiveness, theme, or lifecycle issue is confirmed
+  or closed.
+
+Current remediation gates from the responsiveness audit:
+
+1. Map rendering keeps a stable shell. Routine marker, path, city, mesh,
+   traffic, and topic changes update the existing WebEngine page through a
+   payload push. Full HTML/page reload is reserved for base-map or structural
+   configuration changes. Asynchronous JavaScript payloads carry a generation
+   guard so stale map updates cannot overwrite a newer view.
+2. Message Inbox and Message Compose build file, database, and mesh projections
+   from immutable snapshots. Results are applied only when their request or
+   generation id is current; older results are discarded without clearing the
+   current table.
+3. Daily Schedule and Settings must not use `QApplication.processEvents()` to
+   force repaint or commit editors. Use focus changes, model commits,
+   `QTimer.singleShot(0, ...)`, or worker completion callbacks.
+4. Mesh runtime shutdown and reconnect paths must avoid long waits. If a GUI
+   thread waits for a worker, the wait is capped at 250 ms and failure to stop
+   cleanly is logged rather than freezing the UI.
+5. Plan Builder, daily schedule, net schedule, and SOP views must move broad
+   table projection and RF Guard scans into worker snapshots before further
+   high-volume source families are added.
+6. NCS, operator history, and import/export workflows are lower-risk but still
+   covered by this contract. New file scans, database scans, subprocess calls,
+   and import/export operations must be bounded and must not run as open-ended
+   work in GUI handlers.
+
 Main navigation should follow operator decision flow, not legacy feature names:
 `Ops Center`, `Map`, `Messages`, `NCS`, `Operators`, `Plan Builder`, `Station`,
 `Settings`. Internal route keys may remain stable, but user-facing labels should
@@ -122,15 +282,34 @@ use the decision-flow names.
 ## Station Command Bar
 
 The station command bar is the primary always-visible radio control surface. It
-is organized as a compact source rail plus one focused command card. Every
-active command-capable source gets a short-name chip; the full card is reserved
-for the source that needs operator action now.
+is organized as a compact source rail plus direct command cards for the sources
+the operator is most likely to touch now.
+Commandable radios get direct short-name chips. Source families that may have
+many saved endpoints or noisy discovery state, such as Mesh now and APRS later,
+render as one aggregate dropdown chip with saved-device actions.
+
+When exactly two commandable radios are active and the viewport can fit two
+usable cards, render both full radio command cards by default. This is the
+normal two-radio operator posture and avoids hiding available actions behind an
+extra click. At three or more commandable radios, or when the bar cannot fit two
+usable cards, render one focused command card and keep every off-focus radio
+reachable and status-visible in the chip rail.
+
+Color semantics must be consistent and not color-only. A clear focused radio is
+green because it is the active/go control surface. Clear available radios are
+blue. Warnings and blockers override focus color with amber/red; inactive or
+unavailable sources are muted. Text, tooltip, and state labels must carry the
+same meaning for color-blind users.
 
 The source rail model is used for one or more active radios. A single active
 radio may use the available width, but it must still be the same chip + focus
 interaction model used when more sources are activated. Activating or
 deactivating a radio should not switch to a different legacy control-strip
 layout.
+
+Source rail chips must be operator-facing. Use radio short names and saved mesh
+device names in menus. Raw BLE UUIDs, scan-only discoveries, adapter ids, and
+debug identifiers belong in settings/details, not in the daily rail.
 
 At minimized widths, station command cards must remain usable before they look
 beautiful. The chip rail may horizontally scroll when necessary, but it should

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import time
 import sqlite3
 import re
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -111,6 +113,27 @@ class EffectiveWindowCell:
         return self.segment.net_name or self.segment.group_name or self.segment.profile_name or self.segment.label
 
 
+@dataclass(frozen=True)
+class _PlanProjectionResult:
+    request_id: int
+    mode: str
+    snapshot: str
+    hf_sched: Tuple[Dict[str, Any], ...]
+    net_sched: Tuple[Dict[str, Any], ...]
+    sop_sched: Tuple[Dict[str, Any], ...]
+    policy_rows: Tuple[Dict[str, Any], ...]
+    week_sunday: datetime.date
+    projection: Optional[object] = None
+    selected_plan: Optional[Dict[str, Any]] = None
+    selected_plan_refs: Tuple[Dict[str, Any], ...] = ()
+    started_at: float = 0.0
+    error: str = ""
+
+
+class _PlanProjectionEmitter(QObject):
+    finished = Signal(object)
+
+
 class FreqPlannerTab(QWidget):
     """
     Frequency planner view.
@@ -154,6 +177,14 @@ class FreqPlannerTab(QWidget):
         self._last_snapshot: str = ""
         self._last_rebuild_check_ts: float = 0.0
         self._pending_rebuild: bool = False
+        self._projection_executor: ThreadPoolExecutor | None = None
+        self._projection_request_id: int = 0
+        self._projection_pending: bool = False
+        self._projection_emitter = _PlanProjectionEmitter(self)
+        self._projection_emitter.finished.connect(self._on_projection_ready)
+        self._latest_projection_snapshot: str = ""
+        self._latest_projection_mode: str = ""
+        self._latest_projection: Optional[object] = None
         self._creating_new_frequency_plan: bool = False
         self._frequency_plan_layers_dirty: bool = False
         self._guided_plan_handoff_device_profile_id: int = 0
@@ -1586,6 +1617,9 @@ class FreqPlannerTab(QWidget):
 
     def _build_blended_projection(self) -> BlendedScheduleProjection:
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
+        if snapshot == self._latest_projection_snapshot and isinstance(self._latest_projection, BlendedScheduleProjection):
+            return self._latest_projection
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         week_sunday = self._week_start_sunday_utc(now_utc)
         return build_blended_schedule_projection(
@@ -1598,6 +1632,9 @@ class FreqPlannerTab(QWidget):
 
     def _build_operational_projection(self) -> OperationalDayProjection:
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
+        if snapshot == self._latest_projection_snapshot and isinstance(self._latest_projection, OperationalDayProjection):
+            return self._latest_projection
         hf_sched = self._filter_rows_to_configured_groups(hf_sched)
         net_sched = self._filter_rows_to_configured_groups(net_sched)
         sop_sched = self._filter_rows_to_configured_groups(sop_sched)
@@ -5134,6 +5171,253 @@ class FreqPlannerTab(QWidget):
         self._pending_rebuild = False
         self.rebuild_table()
 
+    def _projection_worker(self) -> ThreadPoolExecutor:
+        if self._projection_executor is None:
+            self._projection_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-plan-projection")
+        return self._projection_executor
+
+    def _shutdown_projection_worker(self) -> None:
+        executor = self._projection_executor
+        self._projection_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def closeEvent(self, event) -> None:  # pragma: no cover - Qt lifecycle glue
+        self._shutdown_projection_worker()
+        super().closeEvent(event)
+
+    @staticmethod
+    def _build_projection_snapshot(
+        request_id: int,
+        mode: str,
+        snapshot: str,
+        hf_sched: Tuple[Dict[str, Any], ...],
+        net_sched: Tuple[Dict[str, Any], ...],
+        sop_sched: Tuple[Dict[str, Any], ...],
+        policy_rows: Tuple[Dict[str, Any], ...],
+        net_resources: Tuple[Dict[str, Any], ...],
+        week_sunday: datetime.date,
+        selected_plan: Optional[Dict[str, Any]],
+        selected_plan_refs: Tuple[Dict[str, Any], ...],
+        started_at: float,
+    ) -> _PlanProjectionResult:
+        try:
+            if mode == "operational":
+                if selected_plan_refs:
+                    projection = build_operational_day_projection_from_refs(
+                        [dict(row) for row in selected_plan_refs],
+                        week_start_utc=week_sunday,
+                    )
+                else:
+                    projection = build_operational_day_projection(
+                        [dict(row) for row in hf_sched],
+                        [dict(row) for row in net_sched],
+                        [dict(row) for row in sop_sched],
+                        [dict(row) for row in net_resources],
+                        [dict(row) for row in policy_rows],
+                        week_start_utc=week_sunday,
+                    )
+            else:
+                projection = build_blended_schedule_projection(
+                    [dict(row) for row in hf_sched],
+                    [dict(row) for row in net_sched],
+                    [dict(row) for row in sop_sched],
+                    [dict(row) for row in policy_rows],
+                    week_start_utc=week_sunday,
+                )
+            return _PlanProjectionResult(
+                request_id=request_id,
+                mode=mode,
+                snapshot=snapshot,
+                hf_sched=hf_sched,
+                net_sched=net_sched,
+                sop_sched=sop_sched,
+                policy_rows=policy_rows,
+                week_sunday=week_sunday,
+                projection=projection,
+                selected_plan=dict(selected_plan) if isinstance(selected_plan, dict) else None,
+                selected_plan_refs=selected_plan_refs,
+                started_at=started_at,
+            )
+        except Exception as exc:
+            return _PlanProjectionResult(
+                request_id=request_id,
+                mode=mode,
+                snapshot=snapshot,
+                hf_sched=hf_sched,
+                net_sched=net_sched,
+                sop_sched=sop_sched,
+                policy_rows=policy_rows,
+                week_sunday=week_sunday,
+                selected_plan=dict(selected_plan) if isinstance(selected_plan, dict) else None,
+                selected_plan_refs=selected_plan_refs,
+                started_at=started_at,
+                error=str(exc),
+            )
+
+    def _start_projection_worker(
+        self,
+        *,
+        mode: str,
+        snapshot: str,
+        hf_sched: List[Dict[str, Any]],
+        net_sched: List[Dict[str, Any]],
+        sop_sched: List[Dict[str, Any]],
+        policy_rows: List[Dict[str, Any]],
+        week_sunday: datetime.date,
+        started_at: float,
+    ) -> None:
+        self._projection_request_id += 1
+        request_id = int(self._projection_request_id)
+        self._projection_pending = True
+        selected_plan = self._selected_sop_schedule_plan_row() if mode == "operational" else None
+        selected_plan_refs: Tuple[Dict[str, Any], ...] = ()
+        net_resources: Tuple[Dict[str, Any], ...] = ()
+        worker_hf = tuple(dict(row) for row in hf_sched)
+        worker_net = tuple(dict(row) for row in net_sched)
+        worker_sop = tuple(dict(row) for row in sop_sched)
+        worker_policy = tuple(dict(row) for row in policy_rows)
+        if mode == "operational":
+            if selected_plan:
+                selected_plan_refs = tuple(
+                    dict(row)
+                    for row in self._filter_rows_to_configured_groups(self._schedule_refs_from_plan_row(selected_plan))
+                    if isinstance(row, dict)
+                )
+            else:
+                worker_hf = tuple(dict(row) for row in self._filter_rows_to_configured_groups(hf_sched))
+                worker_net = tuple(dict(row) for row in self._filter_rows_to_configured_groups(net_sched))
+                worker_sop = tuple(dict(row) for row in self._filter_rows_to_configured_groups(sop_sched))
+                net_resources = tuple(
+                    dict(row)
+                    for row in self._filter_rows_to_configured_groups(self._load_net_resources_from_db() or [])
+                    if isinstance(row, dict)
+                )
+        future = self._projection_worker().submit(
+            self._build_projection_snapshot,
+            request_id,
+            mode,
+            snapshot,
+            worker_hf,
+            worker_net,
+            worker_sop,
+            worker_policy,
+            net_resources,
+            week_sunday,
+            dict(selected_plan) if isinstance(selected_plan, dict) else None,
+            selected_plan_refs,
+            started_at,
+        )
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            self._on_projection_future_done(request_id, mode, snapshot, started_at, future)
+            return
+        future.add_done_callback(lambda done: self._on_projection_future_done(request_id, mode, snapshot, started_at, done))
+
+    def _on_projection_future_done(
+        self,
+        request_id: int,
+        mode: str,
+        snapshot: str,
+        started_at: float,
+        future: Future,
+    ) -> None:
+        try:
+            result = future.result()
+        except Exception as exc:
+            result = _PlanProjectionResult(
+                request_id=request_id,
+                mode=mode,
+                snapshot=snapshot,
+                hf_sched=(),
+                net_sched=(),
+                sop_sched=(),
+                policy_rows=(),
+                week_sunday=self._week_start_sunday_utc(datetime.datetime.now(datetime.timezone.utc)),
+                started_at=started_at,
+                error=str(exc),
+            )
+        self._projection_emitter.finished.emit(result)
+
+    def _on_projection_ready(self, result: object) -> None:
+        if not isinstance(result, _PlanProjectionResult):
+            return
+        if result.request_id != int(getattr(self, "_projection_request_id", 0) or 0):
+            return
+        try:
+            current_snapshot = self._snapshot(*self._load_schedules())
+        except Exception:
+            current_snapshot = result.snapshot
+        if result.snapshot != current_snapshot:
+            self._projection_pending = False
+            return
+        self._projection_pending = False
+        if result.error:
+            self.frequency_plan_action_hint_label.setText(f"Unable to build Plan Builder projection: {result.error}")
+            log.warning("FreqPlanner projection worker failed: %s", result.error)
+            return
+        self._last_snapshot = result.snapshot
+        self._latest_projection_snapshot = result.snapshot
+        self._latest_projection_mode = result.mode
+        self._latest_projection = result.projection
+        hf_sched = [dict(row) for row in result.hf_sched]
+        net_sched = [dict(row) for row in result.net_sched]
+        sop_sched = [dict(row) for row in result.sop_sched]
+        policy_rows = [dict(row) for row in result.policy_rows]
+        theme = resolve_theme(self.settings)
+        self.table.setSortingEnabled(False)
+        self.table.clearContents()
+        self.table.clearSpans()
+        if result.mode == "operational":
+            self._rebuild_operational_lane_table(
+                hf_sched,
+                net_sched,
+                sop_sched,
+                policy_rows,
+                result.week_sunday,
+                theme,
+                projection=result.projection if isinstance(result.projection, OperationalDayProjection) else None,
+                selected_plan=result.selected_plan,
+            )
+        elif result.mode == "effective":
+            self._rebuild_effective_windows_table(
+                hf_sched,
+                net_sched,
+                sop_sched,
+                policy_rows,
+                result.week_sunday,
+                theme,
+                projection=result.projection if isinstance(result.projection, BlendedScheduleProjection) else None,
+            )
+        elif result.mode == "patterns":
+            self._rebuild_pattern_summary_table(
+                hf_sched,
+                net_sched,
+                sop_sched,
+                policy_rows,
+                result.week_sunday,
+                theme,
+                projection=result.projection if isinstance(result.projection, BlendedScheduleProjection) else None,
+            )
+        else:
+            self._rebuild_shared_week_table(
+                hf_sched,
+                net_sched,
+                sop_sched,
+                policy_rows,
+                result.week_sunday,
+                theme,
+                projection=result.projection if isinstance(result.projection, BlendedScheduleProjection) else None,
+            )
+        self._update_clock_labels()
+        emit_span(
+            "freqplanner.rebuild_table",
+            (time.perf_counter() - float(result.started_at or time.perf_counter())) * 1000.0,
+            settings=self.settings,
+            meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": result.mode, "worker": True},
+            min_ms=5.0,
+        )
+        log.info("FreqPlanner table rebuilt from %s worker projection.", result.mode)
+
     # ------------- core rebuild ------------- #
 
     def _rebuild_operational_lane_table(
@@ -5144,9 +5428,12 @@ class FreqPlannerTab(QWidget):
         policy_rows: List[Dict[str, Any]],
         week_sunday: datetime.date,
         theme: Dict[str, Any],
+        *,
+        projection: Optional[OperationalDayProjection] = None,
+        selected_plan: Optional[Dict[str, Any]] = None,
     ) -> None:
-        selected_plan = self._selected_sop_schedule_plan_row()
-        projection = self._build_selected_sop_plan_projection(week_sunday) if selected_plan else None
+        selected_plan = selected_plan if isinstance(selected_plan, dict) else self._selected_sop_schedule_plan_row()
+        projection = projection or (self._build_selected_sop_plan_projection(week_sunday) if selected_plan else None)
         source_text = f"saved plan '{str(selected_plan.get('name') or 'SOP Schedule Plan')}'" if selected_plan else "live projection"
         if projection is None:
             hf_sched = self._filter_rows_to_configured_groups(hf_sched)
@@ -5242,8 +5529,10 @@ class FreqPlannerTab(QWidget):
         policy_rows: List[Dict[str, Any]],
         week_sunday: datetime.date,
         theme: Dict[str, Any],
+        *,
+        projection: Optional[BlendedScheduleProjection] = None,
     ) -> None:
-        projection = build_blended_schedule_projection(
+        projection = projection or build_blended_schedule_projection(
             hf_sched,
             net_sched,
             sop_sched,
@@ -5376,8 +5665,10 @@ class FreqPlannerTab(QWidget):
         policy_rows: List[Dict[str, Any]],
         week_sunday: datetime.date,
         theme: Dict[str, Any],
+        *,
+        projection: Optional[BlendedScheduleProjection] = None,
     ) -> None:
-        projection = build_blended_schedule_projection(
+        projection = projection or build_blended_schedule_projection(
             hf_sched,
             net_sched,
             sop_sched,
@@ -5593,24 +5884,20 @@ class FreqPlannerTab(QWidget):
             summary = f"{self._radio_label_for_id(selected_radio_id)}: {summary}"
         self.frequency_plan_action_hint_label.setText(summary)
 
-    def rebuild_table(self):
-        """
-        Recompute the table based on current hf_schedule and net_schedule in config.
-        """
-        perf_start = time.perf_counter()
-        try:
-            self.settings.reload()
-        except Exception:
-            pass
-        self._refresh_source_set_controls()
-        self.plan_context_label.refresh_context(refresh=True)
-        self._refresh_plan_workspace_header()
-        self.table.setSortingEnabled(False)
-        self.table.clearContents()
-        self.table.clearSpans()
+    def _rebuild_shared_week_table(
+        self,
+        hf_sched: List[Dict],
+        net_sched: List[Dict],
+        sop_sched: List[Dict],
+        policy_rows: List[Dict[str, Any]],
+        week_sunday: datetime.date,
+        theme: Dict[str, Any],
+        *,
+        projection: Optional[BlendedScheduleProjection] = None,
+    ) -> None:
         tz_name, tz_abbr = self._current_timezone_label()
-        if not self._show_local:
-            headers = [
+        headers = (
+            [
                 "UTC Hour",
                 f"Local Time ({tz_abbr})",
                 "Sunday",
@@ -5621,8 +5908,8 @@ class FreqPlannerTab(QWidget):
                 "Friday",
                 "Saturday",
             ]
-        else:
-            headers = [
+            if not self._show_local
+            else [
                 f"Local Hour ({tz_abbr})",
                 "UTC Time",
                 "Sunday",
@@ -5633,59 +5920,7 @@ class FreqPlannerTab(QWidget):
                 "Friday",
                 "Saturday",
             ]
-        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
-        theme = resolve_theme(self.settings)
-        self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        week_sunday = self._week_start_sunday_utc(now_utc)
-        if self._planner_view_mode() == "operational":
-            self._rebuild_operational_lane_table(hf_sched, net_sched, sop_sched, policy_rows, week_sunday, theme)
-            self._update_clock_labels()
-            emit_span(
-                "freqplanner.rebuild_table",
-                (time.perf_counter() - perf_start) * 1000.0,
-                settings=self.settings,
-                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "operational"},
-                min_ms=5.0,
-            )
-            log.info("FreqPlanner table rebuilt from operational day projection.")
-            return
-        if self._planner_view_mode() == "effective":
-            self._rebuild_effective_windows_table(hf_sched, net_sched, sop_sched, policy_rows, week_sunday, theme)
-            self._update_clock_labels()
-            emit_span(
-                "freqplanner.rebuild_table",
-                (time.perf_counter() - perf_start) * 1000.0,
-                settings=self.settings,
-                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "effective"},
-                min_ms=5.0,
-            )
-            log.info("FreqPlanner table rebuilt from effective windows projection.")
-            return
-        if self._planner_view_mode() == "patterns":
-            self._rebuild_pattern_summary_table(hf_sched, net_sched, sop_sched, policy_rows, week_sunday, theme)
-            self._update_clock_labels()
-            emit_span(
-                "freqplanner.rebuild_table",
-                (time.perf_counter() - perf_start) * 1000.0,
-                settings=self.settings,
-                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "patterns"},
-                min_ms=5.0,
-            )
-            log.info("FreqPlanner table rebuilt from pattern summary projection.")
-            return
-        if self._planner_view_mode() == "radio":
-            self._rebuild_radio_windows_table(hf_sched, net_sched, sop_sched, week_sunday, theme)
-            self._update_clock_labels()
-            emit_span(
-                "freqplanner.rebuild_table",
-                (time.perf_counter() - perf_start) * 1000.0,
-                settings=self.settings,
-                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "radio"},
-                min_ms=5.0,
-            )
-            log.info("FreqPlanner table rebuilt from radio windows projection.")
-            return
+        )
         self.table.setColumnCount(9)
         self.table.setRowCount(24)
         self.table.setHorizontalHeaderLabels(headers)
@@ -5694,7 +5929,7 @@ class FreqPlannerTab(QWidget):
         hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.Stretch)
         for col in range(self.COL_DAY_OFFSET, 9):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
-        projection = build_blended_schedule_projection(
+        projection = projection or build_blended_schedule_projection(
             hf_sched,
             net_sched,
             sop_sched,
@@ -5708,7 +5943,7 @@ class FreqPlannerTab(QWidget):
             effective_count=len(projection.effective_segments),
         )
         projection_cells = self._projection_cells_by_utc_key(projection)
-
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         tz_name_cfg, tz = self._current_timezone()
         now_local = datetime.datetime.now(tz)
         now_plus_24 = now_utc + datetime.timedelta(hours=24)
@@ -5791,17 +6026,58 @@ class FreqPlannerTab(QWidget):
                     item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, col, item)
 
-        self._update_clock_labels()
         self._visible_bands = sorted(visible_bands)
         self._render_band_legend()
-        emit_span(
-            "freqplanner.rebuild_table",
-            (time.perf_counter() - perf_start) * 1000.0,
-            settings=self.settings,
-            meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "shared"},
-            min_ms=5.0,
+
+    def rebuild_table(self):
+        """
+        Recompute the table based on current hf_schedule and net_schedule in config.
+        """
+        perf_start = time.perf_counter()
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._refresh_source_set_controls()
+        self.plan_context_label.refresh_context(refresh=True)
+        self._refresh_plan_workspace_header()
+        self.table.setSortingEnabled(False)
+        self.table.clearContents()
+        self.table.clearSpans()
+        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        theme = resolve_theme(self.settings)
+        snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
+        self._last_snapshot = snapshot
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        week_sunday = self._week_start_sunday_utc(now_utc)
+        mode = self._planner_view_mode()
+        if mode == "radio":
+            self._projection_request_id += 1
+            self._projection_pending = False
+            self._rebuild_radio_windows_table(hf_sched, net_sched, sop_sched, week_sunday, theme)
+            self._update_clock_labels()
+            emit_span(
+                "freqplanner.rebuild_table",
+                (time.perf_counter() - perf_start) * 1000.0,
+                settings=self.settings,
+                meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band), "projection": "radio"},
+                min_ms=5.0,
+            )
+            log.info("FreqPlanner table rebuilt from radio windows projection.")
+            return
+        if mode not in {"operational", "effective", "patterns"}:
+            mode = "shared"
+        self.frequency_plan_action_hint_label.setText("Building Plan Builder view...")
+        self._start_projection_worker(
+            mode=mode,
+            snapshot=snapshot,
+            hf_sched=hf_sched,
+            net_sched=net_sched,
+            sop_sched=sop_sched,
+            policy_rows=policy_rows,
+            week_sunday=week_sunday,
+            started_at=perf_start,
         )
-        log.info("FreqPlanner table rebuilt from shared schedule projection.")
         return
 
     def _snapshot(
@@ -5849,6 +6125,8 @@ class FreqPlannerTab(QWidget):
         return ";".join(parts)
 
     def _maybe_rebuild_if_changed(self):
+        if self._projection_pending:
+            return
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
         snap = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
         if snap != self._last_snapshot:

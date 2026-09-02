@@ -8,6 +8,7 @@ from freqinout.core.controlfreq_awareness import (
     AwarenessPin,
     AwarenessSnapshot,
     build_awareness_snapshot,
+    is_awareness_traffic_observation,
 )
 from freqinout.core.observation_projection import (
     Observation,
@@ -223,24 +224,27 @@ def activity_snapshot_from_observations(
     observations: Sequence[Observation],
 ) -> OperationalActivitySnapshot:
     """Summarize an already-scoped observation sequence for the legacy Activity header."""
-    high_attention = tuple(observation for observation in observations if observation.operator_attention)
+    traffic_observations = tuple(
+        observation for observation in observations if is_awareness_traffic_observation(observation)
+    )
+    high_attention = tuple(observation for observation in traffic_observations if observation.operator_attention)
     condition_alerts = tuple(
         observation
-        for observation in observations
+        for observation in traffic_observations
         if str(observation.source_family or "").strip().lower() == "condition_alert"
     )
     topics = tuple(
         sorted(
             {
                 str(topic or "").strip()
-                for observation in observations
+                for observation in traffic_observations
                 for topic in observation.observed_topics
                 if str(topic or "").strip()
             }
         )
     )
     return OperationalActivitySnapshot(
-        latest=observations,
+        latest=traffic_observations,
         high_attention=high_attention,
         condition_alerts=condition_alerts,
         topics=topics,

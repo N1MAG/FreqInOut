@@ -41,6 +41,7 @@ def _bare_tab() -> StationsMapTab:
     tab._pending_map_payload = None
     tab._last_map_payload_sig = None
     tab._last_map_auto_fit_sig = None
+    tab._mesh_nodes_auto_fit_pending = False
     tab._last_js8_load_ts = 0.0
     tab._last_exit_ts = 0.0
     tab._js8_rx_hub = None
@@ -134,6 +135,48 @@ def test_map_topic_filter_requires_direct_content_evidence_not_topic_tag_only() 
         "fire",
         {"topics": ["Fire"], "title": "LA and Solano wildfires active", "search_text": ""},
     ) is True
+
+
+def test_mesh_node_detail_uses_mesh_language_and_lists_cluster_nodes() -> None:
+    tab = _bare_tab()
+    labels = [f"NODE-{idx}" for idx in range(1, 8)] + ["BIG-REPEATER"]
+    summary = "\n".join(f"Mesh node: {label}" for label in labels)
+    payload = {
+        "type": "report",
+        "source_family": "meshcore",
+        "source_ref": "mesh-node:meshcore:ble:test:cluster",
+        "count": len(labels),
+        "title": "Comms Reports: 8",
+        "summary": summary,
+        "age": "now",
+        "topics": ["Comms"],
+        "location_confidence": "declared",
+    }
+
+    title = tab._map_selected_display_title(payload, str(payload["title"]), tab._map_payload_rows(payload))
+    html = tab._map_selected_detail_html(payload, summary=str(payload["summary"]))
+    status_html = tab._map_selected_status_html(payload, summary=str(payload["summary"]))
+
+    assert title.startswith("Mesh Nodes:")
+    assert "Mesh Topology" in html
+    assert "BIG-REPEATER" in html
+    assert "Operational Report" not in html
+    assert "Mesh Status" in status_html
+
+
+def test_mesh_nodes_view_enables_reference_city_labels_without_global_toggle() -> None:
+    tab = _bare_tab()
+    tab.show_city_labels = False
+    tab.city_pop_min = 100000
+
+    assert tab._effective_city_label_config(
+        observation_focus_enabled=True,
+        observation_focus_mode="mesh_nodes",
+    ) == (True, 1000)
+    assert tab._effective_city_label_config(
+        observation_focus_enabled=True,
+        observation_focus_mode="all_reports",
+    ) == (False, 100000)
 
 
 class _FakeWeb:
@@ -1086,7 +1129,7 @@ def test_selected_station_show_paths_converts_to_paths_context() -> None:
 
     assert "action_callsign = self._map_selected_action_callsign(payload)" in detail_block
     assert "can_show_paths = bool(action_callsign and not self._map_selected_station_is_self(action_callsign))" in detail_block
-    assert "self._map_selected_paths_btn.setVisible(bool(action_callsign))" in detail_block
+    assert "self._map_selected_paths_btn.setVisible(bool(action_callsign or is_mesh_node))" in detail_block
     assert "self._map_selected_paths_btn.setEnabled(can_show_paths)" in detail_block
     assert 'self._observation_focus_mode = "paths"' in paths_block
     assert "self._sitrep_status_only_enabled = False" in paths_block
@@ -1921,6 +1964,54 @@ def test_commstat_map_detail_explains_yellow_and_opens_inbox_with_grid(monkeypat
     assert kwargs["source_family"] == "commstat"
     assert kwargs["concern_only"] is True
     assert kwargs["grid_filter"] == "DM12MR"
+
+
+def test_map_detail_renders_mesh_routing_context() -> None:
+    payload = {
+        "type": "station",
+        "source_family": "meshcore",
+        "provenance": {
+            "routing": {
+                "route_type": "flood",
+                "direct_receive": False,
+                "hop_count": 2,
+                "via_node": "NODE2",
+                "path_hops": ["NODE1", "NODE2"],
+                "rssi": -82,
+                "snr": 7.5,
+            }
+        },
+    }
+
+    html = StationsMapTab._map_detail_routing_section_html(payload)
+
+    assert "Mesh Routing" in html
+    assert "2 hops" in html
+    assert "Flood" in html
+    assert "NODE2" in html
+    assert "NODE1 -&gt; NODE2" in html
+    assert "RSSI -82" in html
+    assert "SNR 7.5" in html
+
+
+def test_map_status_labels_route_derived_mesh_location() -> None:
+    tab = _bare_tab()
+    payload = {
+        "type": "traffic",
+        "source_family": "meshcore",
+        "location_confidence": "route_derived",
+        "provenance": {
+            "location_source": {
+                "type": "route_derived",
+                "label": "RLY1",
+            }
+        },
+    }
+
+    html = StationsMapTab._map_selected_status_html(tab, payload, summary="Mesh public traffic")
+
+    assert "Location" in html
+    assert "Route-derived approx via RLY1" in html
 
 
 def test_map_detail_clean_text_removes_html_fragments() -> None:
@@ -3893,6 +3984,52 @@ def test_map_auto_fit_does_not_trigger_for_unfiltered_all_stations() -> None:
     )
 
 
+def test_mesh_nodes_auto_fit_only_fires_for_explicit_view_entry() -> None:
+    tab = _bare_tab()
+    tab.recency_seconds = 86400
+    mesh_node = {
+        "source_ref": "mesh-node:meshcore:test:node-1",
+        "source_family": "meshcore",
+        "lat": 39.5,
+        "lon": -104.8,
+    }
+
+    assert (
+        tab._map_auto_fit_requested(
+            ("mesh_nodes", "live-update-1"),
+            map_mode="mesh_nodes",
+            markers=[],
+            links=[],
+            infrastructure_events=[mesh_node],
+        )
+        is False
+    )
+
+    tab._mesh_nodes_auto_fit_pending = True
+    assert (
+        tab._map_auto_fit_requested(
+            ("mesh_nodes", "explicit-entry"),
+            map_mode="mesh_nodes",
+            markers=[],
+            links=[],
+            infrastructure_events=[mesh_node],
+        )
+        is True
+    )
+    assert tab._mesh_nodes_auto_fit_pending is False
+
+    assert (
+        tab._map_auto_fit_requested(
+            ("mesh_nodes", "live-update-2"),
+            map_mode="mesh_nodes",
+            markers=[],
+            links=[],
+            infrastructure_events=[{**mesh_node, "source_ref": "mesh-node:meshcore:test:node-2"}],
+        )
+        is False
+    )
+
+
 def test_js8_log_indexer_repeated_scan_does_not_duplicate_map_or_activity_rows(
     monkeypatch,
     tmp_path: Path,
@@ -5008,10 +5145,12 @@ def test_map_view_mode_controls_use_compact_selector_with_drawer_fallback() -> N
     source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
 
     assert "self._map_mode_combo = QComboBox()" in source
+    assert '("Mesh Nodes", "mesh_nodes")' in source
     assert 'filter_field("View", self._map_mode_combo' in source
     assert 'filter_field("Paths", self._map_path_scope_combo' in source
     assert "def _on_map_mode_combo_changed" in source
     assert "def _sync_map_mode_combo" in source
+    assert "def focus_mesh_nodes" in source
     assert "def _on_map_traffic_subtype_changed" in source
     assert "def _update_map_compact_control_visibility" in source
     assert "sensitivity_field.setVisible(key == \"regional\")" in source
@@ -5033,7 +5172,9 @@ def test_traffic_subtype_selector_drives_single_traffic_view() -> None:
     assert '("Local Traffic", "local")' not in build_block
     assert '("Station Status", "sitrep")' not in build_block
     assert "def _apply_map_traffic_subtype" in source
-    assert 'source_filter="commstat" if subtype == "commstat" else ""' in source
+    assert '("Mesh", "mesh")' in build_block
+    assert 'source_filter="commstat" if subtype == "commstat" else ("mesh" if subtype == "mesh" else "")' in source
+    assert 'wanted == "mesh"' in source
     assert '"hf_reports"' in source
     assert '"local_reports"' in source
 
@@ -5058,7 +5199,7 @@ def test_map_loading_feedback_is_set_before_heavy_render_and_preserved_for_web_l
     load_block = source[source.index("def _load_web_map_file") : source.index("def _ensure_web_view")]
 
     assert "_show_map_refresh_pending_feedback" in request_block
-    assert "QCoreApplication.processEvents()" in perform_block
+    assert "QCoreApplication.processEvents()" not in perform_block
     assert "detail or self._map_runtime_detail or \"Loading the map surface.\"" in load_block
 
 
@@ -5105,6 +5246,7 @@ def test_map_mode_combo_syncs_to_active_operator_view() -> None:
             ("Traffic", "reports"),
             ("Regional Intel", "regional"),
             ("Paths", "paths"),
+            ("Mesh Nodes", "mesh_nodes"),
         ]
     )
 
@@ -5119,6 +5261,9 @@ def test_map_mode_combo_syncs_to_active_operator_view() -> None:
 
     StationsMapTab._sync_map_mode_combo(tab, "paths")
     assert tab._map_mode_combo.currentText() == "Paths"
+
+    StationsMapTab._sync_map_mode_combo(tab, "mesh_nodes")
+    assert tab._map_mode_combo.currentText() == "Mesh Nodes"
 
 
 def test_map_topic_icon_mapping_covers_message_taxonomy() -> None:
@@ -5459,8 +5604,61 @@ def test_city_population_layer_is_optional_and_zoom_aware() -> None:
     city_block = source[city_start : source.index("dark_map_filter", city_start)]
 
     assert "self.show_cities = False" in source
-    assert "const showCities" in city_block
-    assert "const minPop" in city_block
-    assert "Number(pop) >= minPop" in city_block
+    assert "let showCities" in city_block
+    assert "let minPop" in city_block
+    assert "function cityPopulationThreshold" in city_block
+    assert "return Math.max(minPop, 1000)" in city_block
+    assert "pop >= threshold" in city_block
     assert "if (map.getZoom() >= 5)" in city_block
     assert "map.removeLayer(cityLayer)" in city_block
+    assert "place-label" in city_block
+
+
+def test_mesh_nodes_city_labels_bypass_global_city_toggle() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    render_start = source.index("def _render_map")
+    config_start = source.index("config_sig = (", render_start)
+    config_block = source[config_start : source.index("force_reload =", config_start)]
+    payload_start = source.index("self._push_map_payload(", render_start)
+    payload_block = source[payload_start : payload_start + 900]
+
+    assert "show_cities=bool(self.show_cities)" in source
+    assert "show_city_labels=bool(effective_show_city_labels)" in source
+    assert "city_min_pop=int(effective_city_pop_min)" in source
+    assert "setCityConfig({" in source
+    assert "show_city_labels=bool(effective_show_city_labels)" in payload_block
+    assert "observation_focus_mode == \"mesh_nodes\"" not in config_block
+
+
+def test_map_refresh_does_not_pump_nested_ui_events() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    pending_start = source.index("def _show_map_refresh_pending_feedback")
+    pending_block = source[pending_start : source.index("def _flush_requested_map_refresh", pending_start)]
+    refresh_start = source.index("def _perform_map_refresh")
+    refresh_block = source[refresh_start : source.index("def _map_loading_detail_text", refresh_start)]
+
+    assert ".processEvents(" not in pending_block
+    assert ".processEvents(" not in refresh_block
+
+
+def test_shared_splitter_style_does_not_put_resize_tooltips_on_map() -> None:
+    source = Path("freqinout/gui/theme.py").read_text(encoding="utf-8")
+    style_start = source.index("def style_splitter_handles")
+    style_block = source[style_start : style_start + 1200]
+
+    assert "Drag this divider to resize the panels." not in style_block
+
+
+def test_live_map_layers_use_reconcile_instead_of_full_clear_redraw() -> None:
+    source = Path("freqinout/gui/stations_map_tab.py").read_text(encoding="utf-8")
+    shell_start = source.index("const stationsLayer = L.layerGroup().addTo(map);")
+    shell_end = source.index("window.updateMapData = function(payload)", shell_start)
+    shell_block = source[shell_start:shell_end]
+
+    assert "function reconcileLayer" in shell_block
+    for name in ("renderMarkers", "renderLinks", "renderWeatherEvents", "renderOperationalEvents"):
+        start = shell_block.index(f"function {name}")
+        next_function = shell_block.find("\n    function ", start + 1)
+        block = shell_block[start : next_function if next_function > start else len(shell_block)]
+        assert "reconcileLayer(" in block
+        assert ".clearLayers()" not in block

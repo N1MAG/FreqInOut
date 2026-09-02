@@ -29,6 +29,21 @@ def test_theme_has_global_large_text_accessibility_guards() -> None:
     assert "apply_text_size_accessibility_guards(app, include_widths=False)" in text
 
 
+def test_global_theme_styles_tab_bars_and_table_selection_for_dark_contrast() -> None:
+    from freqinout.gui.theme import app_stylesheet, get_theme
+
+    dark = get_theme("dark")
+    css = app_stylesheet(dark)
+
+    assert "QTabWidget::pane" in css
+    assert "QTabBar::tab" in css
+    assert f"background-color: {dark['surface_alt']}" in css
+    assert f"color: {dark['text']}" in css
+    assert "QTabBar::tab:selected" in css
+    assert "QTableWidget::item:selected" in css
+    assert "QTableWidget::item:disabled" in css
+
+
 def test_high_use_tabs_call_shared_large_text_guard() -> None:
     messages = _read("freqinout/gui/message_viewer_tab.py")
     settings = _read("freqinout/gui/settings_tab.py")

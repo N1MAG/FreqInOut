@@ -144,7 +144,9 @@ from freqinout.core.message_source_delete import (
     sitrep_message_key as _core_sitrep_message_key,
     soft_delete_varac_source_row as _core_soft_delete_varac_source_row,
 )
-from freqinout.core.observation_store import delete_observations_by_source_refs
+from freqinout.core.observation_projection import Observation
+from freqinout.core.observation_store import delete_observations_by_source_refs, list_observations
+from freqinout.core.mesh import default_mesh_db_path
 from freqinout.core.message_row_presentation import (
     MessageRowPresentation,
     commstat_message_row_presentation,
@@ -157,6 +159,7 @@ from freqinout.core.message_row_presentation import (
     message_display_profile_for_type,
     message_display_profile_headers,
     message_row_search_text,
+    observation_message_row_presentation,
     relative_age_label,
     sitrep_message_row_presentation,
     spotter_mcf_display_label as _core_spotter_mcf_display_label,
@@ -174,6 +177,7 @@ from freqinout.core.message_inbox_filters import (
     message_group_value as _core_message_group_value,
     message_source_options as _core_message_source_options,
     message_source_value as _core_message_source_value,
+    mesh_row_is_inbox_message as _core_mesh_row_is_inbox_message,
     normalize_message_group_filter_value as _core_normalize_message_group_filter_value,
     primary_message_group_values as _core_primary_message_group_values,
     row_matches_age_filter as _core_row_matches_age_filter,
@@ -901,6 +905,7 @@ class _RowsBuildWorker(QObject):
         sitrep_show_raw_duplicates: bool,
         force: bool,
         generation: int,
+        observation_messages: List[Observation] | None = None,
     ):
         super().__init__()
         self._js8_messages = list(js8_messages)
@@ -908,6 +913,7 @@ class _RowsBuildWorker(QObject):
         self._varac_messages = list(varac_messages)
         self._sitrep_messages = list(sitrep_messages)
         self._commstat_messages = list(commstat_messages)
+        self._observation_messages = list(observation_messages or [])
         self._files = {
             "varac": list(files.get("varac", [])),
             "flmsg": list(files.get("flmsg", [])),
@@ -1411,6 +1417,20 @@ class _RowsBuildWorker(QObject):
                 unified_message_from_presentation(
                     presentation,
                     payload=msg,
+                    rcv_display=rcv_display,
+                )
+            )
+
+        for observation in self._observation_messages:
+            presentation = observation_message_row_presentation(observation)
+            rcv_display = self._format_rcv_display(
+                presentation.rcv_ts,
+                str(getattr(observation, "received_utc", "") or getattr(observation, "event_utc", "") or ""),
+            )
+            rows.append(
+                unified_message_from_presentation(
+                    presentation,
+                    payload=observation,
                     rcv_display=rcv_display,
                 )
             )
@@ -2628,7 +2648,7 @@ class MessageViewerTab(QWidget):
             cfg.get("excluded_msg_types", [])
         )
         self._inbox_focus: str = str(cfg.get("inbox_focus", "all") or "all").strip().lower()
-        if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "varac", "bbs"}:
+        if self._inbox_focus not in {"all", "new", "forms", "spotter", "commstat", "js8call", "mesh", "varac", "bbs"}:
             self._inbox_focus = "all"
         self._advanced_filters_visible: bool = bool(cfg.get("advanced_filters_visible", False))
         self._inbox_tools_visible: bool = bool(cfg.get("inbox_tools_visible", True))
@@ -2668,9 +2688,11 @@ class MessageViewerTab(QWidget):
         self.varac_messages: List[VarACMessage] = []
         self.sitrep_messages: List[SitrepMessage] = []
         self.commstat_messages: List[CommStatArtifact] = []
+        self.observation_messages: List[Observation] = []
         self.current_js8: JS8Message | None = None
         self.current_sitrep: SitrepMessage | None = None
         self.current_commstat: CommStatArtifact | None = None
+        self.current_observation: Observation | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -4915,6 +4937,7 @@ class MessageViewerTab(QWidget):
             ("spotter", "Spotter", "Show FIOSpotter MCF forms."),
             ("commstat", "CommStat", "Show CommStat-derived messages and reports."),
             ("js8call", "JS8Call", "Show raw JS8Call messages that are not Spotter MCF forms."),
+            ("mesh", "Mesh", "Show MeshCore and Meshtastic local mesh traffic."),
             ("varac", "VarAC", "Show VarAC messages."),
             ("bbs", "BBS", "Manage live BBS, managed library, incoming, outgoing, and archived BBS files."),
         ]
@@ -8353,11 +8376,18 @@ class MessageViewerTab(QWidget):
             "commstat_rf": "commstat",
             "js8call": "js8call",
             "js8": "js8call",
+            "mesh": "mesh",
+            "meshcore": "mesh",
+            "meshtastic": "mesh",
+            "mesh_client": "mesh",
+            "local_mesh": "mesh",
             "varac": "varac",
         }.get(source, {
             "spotter": "spotter",
             "commstat": "commstat",
             "js8": "js8call",
+            "meshcore": "mesh",
+            "meshtastic": "mesh",
         }.get(normalized_source, "all"))
         self._set_inbox_focus(focus)
         selected_group = self._select_context_group_filter(group_filter)
@@ -8390,6 +8420,16 @@ class MessageViewerTab(QWidget):
             return
         seconds = int(age_seconds or 0)
         if seconds <= 0:
+            idx = self.received_filter.findData(0)
+            if idx >= 0:
+                try:
+                    self.received_filter.blockSignals(True)
+                    self.received_filter.setCurrentIndex(idx)
+                finally:
+                    try:
+                        self.received_filter.blockSignals(False)
+                    except Exception:
+                        pass
             return
         label_map = {
             15 * 60: "Last 15 min",
@@ -8430,6 +8470,10 @@ class MessageViewerTab(QWidget):
             return ["spotter"]
         if source == "commstat_rf" or normalized == "commstat":
             return ["commstat"]
+        if source in {"mesh", "meshcore", "meshtastic", "mesh_client", "local_mesh"}:
+            return ["mesh", "meshcore", "meshtastic"]
+        if normalized in {"meshcore", "meshtastic"}:
+            return [normalized]
         if normalized and normalized != "unknown":
             return [normalized]
         return [source]
@@ -8449,10 +8493,16 @@ class MessageViewerTab(QWidget):
             "varac": "VarAC",
             "flmsg": "FLMSG",
             "flamp": "FLAMP",
+            "mesh": "Mesh",
+            "meshcore": "MeshCore",
+            "meshtastic": "Meshtastic",
+            "mesh_client": "Meshtastic",
         }.get(source, {
             "js8": "JS8Call",
             "spotter": "Spotter",
             "commstat": "CommStat",
+            "meshcore": "MeshCore",
+            "meshtastic": "Meshtastic",
         }.get(normalized, ""))
 
     @staticmethod
@@ -10049,6 +10099,22 @@ class MessageViewerTab(QWidget):
                     )
                 ),
             ),
+            (
+                "observations",
+                tuple(
+                    sorted(
+                        (
+                            str(obs.observation_id or ""),
+                            str(obs.source_family or ""),
+                            str(obs.source_ref or ""),
+                            str(obs.status or ""),
+                            str(obs.received_utc or obs.event_utc or ""),
+                            self._source_text_hash(obs.summary),
+                        )
+                        for obs in getattr(self, "observation_messages", [])
+                    )
+                ),
+            ),
         )
 
     def _on_visible_message_check_timer(self) -> None:
@@ -11109,8 +11175,35 @@ class MessageViewerTab(QWidget):
             self._load_commstat_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: CommStat local load failed: %s", e)
+        try:
+            self._load_mesh_observations_from_store()
+        except Exception as e:
+            log.debug("MessageViewer: mesh observation load failed: %s", e)
         if rebuild:
             self._populate_messages_table(force=force)
+
+    def _load_mesh_observations_from_store(self, *, limit: int = 300) -> None:
+        db_path = default_mesh_db_path()
+        rows: list[Observation] = []
+        for source_family in ("meshcore", "meshtastic"):
+            try:
+                rows.extend(list_observations(db_path, source_family=source_family, limit=limit))
+            except Exception as exc:
+                log.debug("MessageViewer: failed to load %s observations: %s", source_family, exc)
+        visible: list[Observation] = []
+        for row in rows:
+            if not _core_mesh_row_is_inbox_message(row):
+                continue
+            provenance = row.provenance if isinstance(row.provenance, Mapping) else {}
+            surfaces = provenance.get("surfaces", ()) if isinstance(provenance, Mapping) else ()
+            if surfaces and "inbox" not in {str(surface or "").strip().lower() for surface in surfaces}:
+                continue
+            visible.append(row)
+        self.observation_messages = sorted(
+            visible,
+            key=lambda obs: str(obs.received_utc or obs.event_utc or ""),
+            reverse=True,
+        )[: max(1, int(limit or 300))]
 
     def _refresh_sitrep_messages(self, force: bool = False, rebuild: bool = True) -> None:
         if self._is_shutting_down:
@@ -11124,6 +11217,10 @@ class MessageViewerTab(QWidget):
             self._load_commstat_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: CommStat refresh failed: %s", e)
+        try:
+            self._load_mesh_observations_from_store()
+        except Exception as e:
+            log.debug("MessageViewer: mesh observation refresh failed: %s", e)
         after_fp = self._message_sources_fingerprint()
         if rebuild and (force or after_fp != before_fp or not getattr(self, "_message_rows", [])):
             self._populate_messages_table(force=force)
@@ -11777,28 +11874,21 @@ class MessageViewerTab(QWidget):
                 self._filter_timer.stop()
         except Exception:
             pass
+        self._request_worker_thread_stop(self._file_scan_thread)
+        self._request_worker_thread_stop(self._rows_build_thread)
+        self._request_worker_thread_stop(self._signature_verify_thread)
+        self._request_worker_thread_stop(self._bbs_auto_archive_thread)
+
+    @staticmethod
+    def _request_worker_thread_stop(thread: QThread | None, *, wait_ms: int = 150) -> None:
+        if thread is None:
+            return
         try:
-            if self._file_scan_thread and self._file_scan_thread.isRunning():
-                self._file_scan_thread.quit()
-                self._file_scan_thread.wait(1000)
-        except Exception:
-            pass
-        try:
-            if self._rows_build_thread and self._rows_build_thread.isRunning():
-                self._rows_build_thread.quit()
-                self._rows_build_thread.wait(1000)
-        except Exception:
-            pass
-        try:
-            if self._signature_verify_thread and self._signature_verify_thread.isRunning():
-                self._signature_verify_thread.quit()
-                self._signature_verify_thread.wait(1000)
-        except Exception:
-            pass
-        try:
-            if self._bbs_auto_archive_thread and self._bbs_auto_archive_thread.isRunning():
-                self._bbs_auto_archive_thread.quit()
-                self._bbs_auto_archive_thread.wait(1000)
+            if not thread.isRunning():
+                return
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(max(0, min(int(wait_ms), 250)))
         except Exception:
             pass
 
@@ -12580,6 +12670,7 @@ class MessageViewerTab(QWidget):
             "varac_messages": list(self.varac_messages),
             "sitrep_messages": list(self.sitrep_messages),
             "commstat_messages": list(self.commstat_messages),
+            "observation_messages": list(self.observation_messages),
             "files": files_for_rows,
             "file_metadata_map": file_metadata_map,
             "read_state_map": dict(self._read_state_map),
@@ -12625,6 +12716,7 @@ class MessageViewerTab(QWidget):
             varac_messages=snapshot.get("varac_messages", []),  # type: ignore[arg-type]
             sitrep_messages=snapshot.get("sitrep_messages", []),  # type: ignore[arg-type]
             commstat_messages=snapshot.get("commstat_messages", []),  # type: ignore[arg-type]
+            observation_messages=snapshot.get("observation_messages", []),  # type: ignore[arg-type]
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
             file_metadata_map=snapshot.get("file_metadata_map", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
@@ -14956,6 +15048,7 @@ class MessageViewerTab(QWidget):
                 self.current_record = None
                 self.current_sitrep = None
                 self.current_commstat = None
+                self.current_observation = None
                 self.current_js8 = row.payload
                 self._load_js8_content(row.payload)
                 self._mark_js8_read(row.payload, row_ref=row)
@@ -14964,12 +15057,14 @@ class MessageViewerTab(QWidget):
                 self.current_js8 = None
                 self.current_sitrep = None
                 self.current_commstat = None
+                self.current_observation = None
                 self._load_js8_content(row.payload)
                 self._mark_spotter_read(row.payload, row_ref=row)
             elif isinstance(row.payload, FileRecord):
                 self.current_js8 = None
                 self.current_sitrep = None
                 self.current_commstat = None
+                self.current_observation = None
                 self.current_record = row.payload
                 try:
                     self._load_content(row.payload)
@@ -14990,19 +15085,29 @@ class MessageViewerTab(QWidget):
                 self.current_record = None
                 self.current_sitrep = None
                 self.current_commstat = None
+                self.current_observation = None
                 self._load_varac_content(row.payload, row_ref=row)
             elif isinstance(row.payload, SitrepMessage):
                 self.current_js8 = None
                 self.current_record = None
                 self.current_commstat = None
+                self.current_observation = None
                 self.current_sitrep = row.payload
                 self._load_sitrep_content(row.payload)
             elif isinstance(row.payload, CommStatArtifact):
                 self.current_js8 = None
                 self.current_record = None
                 self.current_sitrep = None
+                self.current_observation = None
                 self.current_commstat = row.payload
                 self._load_commstat_content(row.payload)
+            elif isinstance(row.payload, Observation):
+                self.current_js8 = None
+                self.current_record = None
+                self.current_sitrep = None
+                self.current_commstat = None
+                self.current_observation = row.payload
+                self._load_observation_content(row.payload)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:
@@ -16606,7 +16711,7 @@ class MessageViewerTab(QWidget):
             if not shutil.which(exe):
                 continue
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
                 if res.returncode == 0:
                     return True
                 log.debug(
@@ -17458,6 +17563,64 @@ class MessageViewerTab(QWidget):
                 + (f" | {msg.transport_label}" if msg.transport_label else "")
                 + (f" | {msg.reach_label}" if msg.reach_label else "")
             )
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText("\n".join(lines))
+
+    def _load_observation_content(self, observation: Observation) -> None:
+        with perf_span(
+            "messages.load_observation_content",
+            settings=self.settings,
+            meta={"source_family": observation.source_family},
+            min_ms=2.0,
+        ):
+            mode = self._current_time_mode()
+            label = "UTC" if mode == "UTC" else "Local"
+            ts_display = self._format_rcv_display(
+                observation_message_row_presentation(observation).rcv_ts,
+                observation.received_utc or observation.event_utc,
+            )
+            provenance = observation.provenance if isinstance(observation.provenance, Mapping) else {}
+            channel_policy = provenance.get("channel_policy", {}) if isinstance(provenance, Mapping) else {}
+            if not isinstance(channel_policy, Mapping):
+                channel_policy = {}
+            routing = provenance.get("routing", {}) if isinstance(provenance, Mapping) else {}
+            if not isinstance(routing, Mapping):
+                routing = {}
+            row_presentation = observation_message_row_presentation(observation)
+            source_label = row_presentation.display_type or observation.source_family
+            display_target = row_presentation.to_call or observation.to_target
+            lines = [
+                f"{source_label} | {observation.from_call} -> {display_target}",
+            ]
+            self._append_detail_section(
+                lines,
+                "Key Fields",
+                (
+                    ("From", observation.from_call),
+                    ("To", display_target),
+                    ("Groups", ", ".join(observation.groups)),
+                    ("Received", f"{label}: {ts_display}"),
+                    ("Status", observation.status or "INFO"),
+                    ("Urgency", observation.urgency),
+                    ("Topics", ", ".join(observation.observed_topics)),
+                    ("State/Grid", " / ".join(part for part in (observation.state, observation.grid) if part)),
+                ),
+            )
+            self._append_text_body(lines, "Message", observation.summary or observation.subject or "--")
+            self._append_detail_section(
+                lines,
+                "Mesh Context",
+                (
+                    ("Channel", channel_policy.get("channel_name") or display_target),
+                    ("Privacy", channel_policy.get("channel_privacy")),
+                    ("Key", channel_policy.get("key_status")),
+                    ("Route", routing.get("route_type")),
+                    ("Hops", routing.get("hop_count")),
+                    ("Direct", "yes" if routing.get("direct_receive") else ""),
+                    ("Source", observation.source_app or observation.source_family),
+                ),
+            )
+            self.info_label.setText(f"{source_label} {observation.from_call} -> {display_target}")
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(lines))
 

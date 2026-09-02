@@ -1632,7 +1632,7 @@ def test_settings_guided_add_radio_uses_setup_type_selector_as_ui_shell() -> Non
     assert '"Files"' in dialog_block
     assert "files_review_lines = [" in dialog_block
     assert "Paths configured: {len(configured_file_lines)}" in dialog_block
-    assert "save_review_label.setToolTip(\"\\n\".join(file_lines + app_config_lines))" in dialog_block
+    assert "save_review_label.setToolTip(\"\\n\".join(list(file_lines) + list(app_config_lines)))" in dialog_block
     assert '"Files and Launch"' not in dialog_block
     assert '"Launch:"' not in dialog_block
     assert '"Radio launch"' not in dialog_block

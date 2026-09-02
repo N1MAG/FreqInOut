@@ -1188,11 +1188,19 @@ class DailyScheduleTab(QWidget):
             return "", False
         return name_edit.text().strip(), True
 
-    def _source_rows_for_freqplanner_snapshot(self) -> List[Dict[str, Any]]:
+    def _commit_active_table_editor(self) -> None:
+        """Ask Qt to commit an in-progress table edit without pumping events."""
         fw = QApplication.focusWidget()
-        if fw is not None and self.table.isAncestorOf(fw):
+        if fw is None or not self.table.isAncestorOf(fw):
+            return
+        try:
             fw.clearFocus()
-            QApplication.processEvents()
+            self.table.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
+
+    def _source_rows_for_freqplanner_snapshot(self) -> List[Dict[str, Any]]:
+        self._commit_active_table_editor()
 
         hf_rows: List[Dict[str, Any]] = []
         format_errors: List[str] = []
@@ -6017,10 +6025,7 @@ class DailyScheduleTab(QWidget):
 
     def _save_schedule(self):
         # Ensure in-progress cell edits are committed
-        fw = QApplication.focusWidget()
-        if fw is not None and self.table.isAncestorOf(fw):
-            fw.clearFocus()
-            QApplication.processEvents()
+        self._commit_active_table_editor()
 
         hf_rows: List[Dict[str, Any]] = []
         sop_updates: Dict[int, List[Dict[str, Any]]] = {}

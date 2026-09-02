@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from freqinout.core.observation_projection import Observation
 
@@ -90,6 +90,48 @@ class TopicRollup:
 
 
 @dataclass(frozen=True)
+class IncidentStoryline:
+    topic: str
+    headline: str
+    count: int = 0
+    source_count: int = 0
+    callsign_count: int = 0
+    newest_utc: str = ""
+    geography_hint: str = ""
+    severity: str = "neutral"
+    state: str = "watching"
+    actions: tuple[AwarenessAction, ...] = ()
+
+
+@dataclass(frozen=True)
+class NeedSummary:
+    need_id: str
+    source_family: str
+    source_ref: str
+    summary: str
+    category: str = ""
+    severity: str = "watch"
+    location_hint: str = ""
+    requested_by: str = ""
+    assigned_to: str = ""
+    status: str = "open"
+    last_update_utc: str = ""
+    actions: tuple[AwarenessAction, ...] = ()
+
+
+@dataclass(frozen=True)
+class SituationSummary:
+    headline: str
+    active_incidents: tuple[IncidentStoryline, ...] = ()
+    top_needs: tuple[NeedSummary, ...] = ()
+    handled: tuple[NeedSummary, ...] = ()
+    where: tuple[str, ...] = ()
+    who: tuple[str, ...] = ()
+    next_actions: tuple[AwarenessAction, ...] = ()
+    confidence: str = ""
+
+
+@dataclass(frozen=True)
 class SopTimelineItem:
     due_utc: str
     label: str
@@ -128,7 +170,10 @@ class AwarenessSnapshot:
     generated_at_utc: str
     active_radios: tuple[Mapping[str, str], ...] = ()
     source_lanes: tuple[OperationalSourceLane, ...] = ()
+    situation_summary: SituationSummary | None = None
     recommended_actions: tuple[AwarenessAction, ...] = ()
+    needs_attention: tuple[AttentionItem, ...] = ()
+    recent_traffic: tuple[AttentionItem, ...] = ()
     attention_items: tuple[AttentionItem, ...] = ()
     more_traffic: tuple[AttentionItem, ...] = ()
     topic_rollups: tuple[TopicRollup, ...] = ()
@@ -151,6 +196,9 @@ def build_awareness_snapshot(
 ) -> AwarenessSnapshot:
     """Build the ControlFreq awareness projection from existing observations."""
     now = _coerce_utc(generated_at_utc) or dt.datetime.now(dt.timezone.utc)
+    traffic_observations = tuple(
+        observation for observation in observations if is_awareness_traffic_observation(observation)
+    )
     active_group_set = {_normalize_group(value) for value in active_groups if _normalize_group(value)}
     next_group_set = {_normalize_group(value) for value in next_groups if _normalize_group(value)}
     normalized_pins = tuple(
@@ -169,20 +217,63 @@ def build_awareness_snapshot(
             next_groups=next_group_set,
             pins=normalized_pins,
         )
-        for observation in observations
+        for observation in traffic_observations
     )
     ranked = tuple(sorted(items, key=lambda item: (item.priority, _negative_age(item)), reverse=True))
-    topic_rollups = _topic_rollups(observations)
-    pinned_awareness = tuple(_pinned_awareness(pin, observations) for pin in normalized_pins)
+    needs_attention = tuple(item for item in ranked if _item_needs_attention(item))
+    recent_traffic = tuple(item for item in ranked if not _item_needs_attention(item))
+    topic_rollups = _topic_rollups(traffic_observations)
+    pinned_awareness = tuple(_pinned_awareness(pin, traffic_observations) for pin in normalized_pins)
+    normalized_lanes = _normalize_source_lanes(source_lanes)
+    recommended_actions = _recommended_actions(needs_attention or ranked, topic_rollups, pinned_awareness)
     return AwarenessSnapshot(
         generated_at_utc=_format_utc(now),
-        source_lanes=_normalize_source_lanes(source_lanes),
-        recommended_actions=_recommended_actions(ranked, topic_rollups, pinned_awareness),
-        attention_items=ranked[:visible_limit],
-        more_traffic=ranked[visible_limit:],
+        source_lanes=normalized_lanes,
+        situation_summary=_situation_summary(
+            needs_attention,
+            topic_rollups,
+            normalized_lanes,
+            recommended_actions,
+            recent_items=recent_traffic,
+            now=now,
+        ),
+        recommended_actions=recommended_actions,
+        needs_attention=needs_attention,
+        recent_traffic=recent_traffic,
+        attention_items=needs_attention[:visible_limit],
+        more_traffic=needs_attention[visible_limit:] + recent_traffic,
         topic_rollups=topic_rollups,
         pins=pinned_awareness,
     )
+
+
+def is_awareness_traffic_observation(observation: Observation) -> bool:
+    """Return True when an observation belongs in Ops Center traffic attention.
+
+    Source telemetry belongs in source health, diagnostics, or map layers. The
+    attention queue is for user/operator traffic and actionable reports.
+    """
+    source_ref = str(observation.source_ref or observation.observation_id or "").strip().lower()
+    subject = str(observation.subject or "").strip().lower()
+    summary = str(observation.summary or "").strip().lower()
+    provenance = dict(observation.provenance or {})
+    if source_ref.startswith("mesh-node:"):
+        return False
+    if subject.startswith("mesh node:") or summary.startswith("mesh node:"):
+        return False
+    if str(provenance.get("node_id") or "").strip() and not str(provenance.get("message_id") or "").strip():
+        return False
+    surfaces = provenance.get("surfaces")
+    if isinstance(surfaces, (list, tuple, set)):
+        normalized_surfaces = {str(surface or "").strip().lower() for surface in surfaces}
+        if normalized_surfaces and "ops_center" not in normalized_surfaces and "ops" not in normalized_surfaces:
+            return False
+    channel_policy = provenance.get("channel_policy")
+    if isinstance(channel_policy, Mapping):
+        ops_enabled = channel_policy.get("ops_enabled")
+        if isinstance(ops_enabled, bool) and not ops_enabled:
+            return False
+    return True
 
 
 def build_radio_source_lanes(
@@ -212,7 +303,7 @@ def build_radio_source_lanes(
                 source_id=source_id,
                 short_name=short_name,
                 source_kind=str(profile.get("device_class") or "radio").strip() or "radio",
-                now=str(current_label or "").strip() if is_primary else "monitoring",
+                now=str(current_label or "").strip() if is_primary else "",
                 next=str(next_label or "").strip() if is_primary else "",
                 health="Primary" if is_primary else "Active",
                 attention_count=len(profile_attention),
@@ -396,6 +487,251 @@ def _recommended_actions(
     if not actions:
         actions.append(AwarenessAction("monitor", "Monitor traffic", {}))
     return tuple(actions[:3])
+
+
+def _situation_summary(
+    ranked_items: Sequence[AttentionItem],
+    topic_rollups: Sequence[TopicRollup],
+    source_lanes: Sequence[OperationalSourceLane],
+    recommended_actions: Sequence[AwarenessAction],
+    *,
+    recent_items: Sequence[AttentionItem] = (),
+    now: dt.datetime,
+) -> SituationSummary:
+    items = tuple(ranked_items or ())
+    recent = tuple(recent_items or ())
+    rollups = tuple(topic_rollups or ())
+    source_names = tuple(lane.short_name for lane in source_lanes if str(lane.short_name or "").strip())
+    handled = _need_summaries(items + recent, handled=True)
+    if not items:
+        monitored = ", ".join(source_names[:4])
+        if recent:
+            headline = f"No traffic needs attention; {len(recent)} recent item{'s' if len(recent) != 1 else ''}."
+        else:
+            headline = "No traffic needs attention."
+        if monitored:
+            headline += f" Monitoring {monitored}."
+        return SituationSummary(
+            headline=headline,
+            handled=handled,
+            next_actions=tuple(recommended_actions or ()),
+            confidence="0 active incidents | 0 open needs" + (f" | {len(handled)} handled" if handled else ""),
+        )
+
+    incidents = _incident_storylines(rollups)
+    open_needs = _need_summaries(items, handled=False)
+    where = _unique_text(
+        value
+        for item in items
+        for value in (item.state, item.grid, item.group, item.to_target)
+        if str(value or "").strip()
+    )
+    who = _unique_text(item.callsign for item in items if str(item.callsign or "").strip())
+    headline = _situation_headline(items, incidents, open_needs)
+    confidence_parts = [
+        f"{len(incidents)} active incident{'s' if len(incidents) != 1 else ''}",
+        f"{len(open_needs)} open need{'s' if len(open_needs) != 1 else ''}",
+    ]
+    if handled:
+        confidence_parts.append(f"{len(handled)} handled")
+    return SituationSummary(
+        headline=headline,
+        active_incidents=incidents,
+        top_needs=open_needs,
+        handled=handled,
+        where=where[:4],
+        who=who[:5],
+        next_actions=tuple(recommended_actions or ()),
+        confidence=" | ".join(confidence_parts),
+    )
+
+
+def _situation_headline(
+    items: Sequence[AttentionItem],
+    incidents: Sequence[IncidentStoryline],
+    open_needs: Sequence[NeedSummary],
+) -> str:
+    if open_needs:
+        top = open_needs[0]
+        route = " from ".join(part for part in (top.summary, top.requested_by) if part)
+        location = f" near {top.location_hint}" if top.location_hint else ""
+        return f"{len(open_needs)} open need{'s' if len(open_needs) != 1 else ''}: {route}{location}."
+    top_item = items[0]
+    top_topic = incidents[0].topic if incidents else next(iter(top_item.topics), "")
+    top_text = _item_display_summary(top_item)
+    route = " from ".join(part for part in (top_text, top_item.callsign) if part)
+    if top_item.priority >= 700:
+        return f"Top attention: {route}."
+    if incidents:
+        return f"{len(items)} recent item{'s' if len(items) != 1 else ''}; top storyline {top_topic}."
+    return f"{len(items)} recent operator traffic item{'s' if len(items) != 1 else ''}."
+
+
+def _incident_storylines(rollups: Sequence[TopicRollup], *, limit: int = 3) -> tuple[IncidentStoryline, ...]:
+    stories: list[IncidentStoryline] = []
+    for rollup in rollups[:limit]:
+        topic = str(rollup.topic or "").strip()
+        if not topic:
+            continue
+        geo = str(rollup.geography_hint or "").strip()
+        headline = f"{topic}: {rollup.count} item{'s' if rollup.count != 1 else ''}"
+        if geo:
+            headline += f" near {geo}"
+        context = {"topic": topic, "geography": geo}
+        stories.append(
+            IncidentStoryline(
+                topic=topic,
+                headline=headline,
+                count=rollup.count,
+                source_count=rollup.source_count,
+                callsign_count=rollup.callsign_count,
+                newest_utc=rollup.newest_utc,
+                geography_hint=geo,
+                severity=rollup.severity,
+                state="active" if rollup.severity in {"urgent", "important"} else "watching",
+                actions=(
+                    AwarenessAction("messages", "Inbox", context),
+                    AwarenessAction("map", "Map", context),
+                    AwarenessAction("sop", "SOP", context),
+                ),
+            )
+        )
+    return tuple(stories)
+
+
+def _need_summaries(
+    items: Sequence[AttentionItem],
+    *,
+    handled: bool,
+    limit: int = 3,
+) -> tuple[NeedSummary, ...]:
+    needs: list[NeedSummary] = []
+    for item in items:
+        category = _need_category(item)
+        if not category:
+            continue
+        is_handled = _item_looks_handled(item)
+        if bool(handled) != bool(is_handled):
+            continue
+        context = {
+            "source_family": item.source_family,
+            "source_ref": item.source_ref,
+            "callsign": item.callsign,
+            "group": item.group or item.to_target,
+            "topic": category,
+        }
+        needs.append(
+            NeedSummary(
+                need_id=item.id,
+                source_family=item.source_family,
+                source_ref=item.source_ref,
+                summary=_item_display_summary(item),
+                category=category,
+                severity="urgent" if item.priority >= 700 else "watch",
+                location_hint=_item_location_hint(item),
+                requested_by=item.callsign,
+                status="handled" if handled else "open",
+                last_update_utc=_format_item_relative_age(item),
+                actions=(
+                    AwarenessAction("read", "Inbox", context),
+                    AwarenessAction("reply", "Reply", {**context, "compose_mode": item.reply_compose_mode}),
+                    AwarenessAction("map", "Map", context),
+                ),
+            )
+        )
+        if len(needs) >= limit:
+            break
+    return tuple(needs)
+
+
+def _need_category(item: AttentionItem) -> str:
+    text = " ".join(
+        str(value or "").lower()
+        for value in (
+            item.subject,
+            item.summary,
+            *tuple(item.topics or ()),
+        )
+    )
+    topic_map = {
+        "water": "Water",
+        "medical": "Medical",
+        "medic": "Medical",
+        "shelter": "Shelter",
+        "food": "Food",
+        "fuel": "Fuel",
+        "power": "Power",
+        "comms": "Comms",
+        "communications": "Comms",
+        "relay": "Relay",
+        "rescue": "Rescue",
+        "evac": "Evacuation",
+        "welfare": "Welfare",
+    }
+    need_terms = ("need", "needs", "request", "requested", "help", "assist", "shortage", "outage", "relay")
+    has_need_language = any(term in text for term in need_terms)
+    for needle, category in topic_map.items():
+        if needle in text and (has_need_language or needle in {"relay", "rescue", "evac"}):
+            return category
+    if has_need_language:
+        return next(iter(tuple(item.topics or ())), "General Need") or "General Need"
+    return ""
+
+
+def _item_looks_handled(item: AttentionItem) -> bool:
+    text = " ".join(str(value or "").lower() for value in (item.subject, item.summary))
+    handled_terms = ("handled", "resolved", "complete", "closed", "delivered", "filled", "met", "ack")
+    return any(term in text for term in handled_terms)
+
+
+def _item_location_hint(item: AttentionItem) -> str:
+    for value in (item.state, item.grid, item.group, item.to_target):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _item_display_summary(item: AttentionItem) -> str:
+    text = str(item.subject or item.summary or "").strip()
+    if not text:
+        topic = next(iter(tuple(item.topics or ())), "")
+        text = topic or "Traffic item"
+    return " ".join(text.split())
+
+
+def _item_needs_attention(item: AttentionItem) -> bool:
+    if bool(item.pinned):
+        return True
+    if int(item.priority or 0) >= 180:
+        return True
+    topics = {_normalize_topic(topic) for topic in tuple(item.topics or ()) if _normalize_topic(topic)}
+    return bool(topics.intersection(HIGH_VALUE_TOPICS))
+
+
+def _format_item_relative_age(item: AttentionItem) -> str:
+    if item.age_seconds is None:
+        return ""
+    seconds = int(item.age_seconds)
+    if seconds < 60:
+        return "now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _unique_text(values: Iterable[object]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        key = text.upper()
+        if text and key not in seen:
+            seen.add(key)
+            output.append(text)
+    return tuple(output)
 
 
 def _attention_item(

@@ -16,9 +16,9 @@ from freqinout.core.source_view_contracts import (
 def test_future_source_priority_contracts_are_complete_and_ordered() -> None:
     contracts = all_source_contracts()
 
-    assert [contract.family for contract in contracts[:4]] == ["meshcore", "mqtt", "aprs", "reticulum"]
-    assert source_contracts_missing_gates(contracts[:4]) == {}
-    assert all(contract.complete for contract in contracts[:4])
+    assert [contract.family for contract in contracts[:5]] == ["meshcore", "meshtastic", "mqtt", "aprs", "reticulum"]
+    assert source_contracts_missing_gates(contracts[:5]) == {}
+    assert all(contract.complete for contract in contracts[:5])
 
 
 def test_source_contract_aliases_match_product_language() -> None:
@@ -27,6 +27,8 @@ def test_source_contract_aliases_match_product_language() -> None:
     assert normalize_source_family("JS8Spotter") == "fiospotter"
     assert normalize_source_family("CommStat RF") == "commstat"
     assert normalize_source_family("BBS") == "varac"
+    assert normalize_source_family("Mesh Client") == "meshtastic"
+    assert normalize_source_family("Meshtastic") == "meshtastic"
 
 
 def test_aprs_contract_limits_volume_and_map_actions() -> None:
@@ -41,8 +43,8 @@ def test_aprs_contract_limits_volume_and_map_actions() -> None:
     assert contract.actions.compose is False
 
 
-def test_meshcore_and_lxmf_can_feed_attention_inbox_map_and_compose() -> None:
-    for family in ("meshcore", "reticulum"):
+def test_mesh_sources_can_feed_attention_inbox_map_and_compose() -> None:
+    for family in ("meshcore", "meshtastic", "reticulum"):
         contract = source_contract_for(family)
         assert contract.supports_view(VIEW_ATTENTION)
         assert contract.supports_view(VIEW_TRAFFIC_INBOX)
@@ -64,5 +66,6 @@ def test_view_lookup_returns_only_sources_allowed_for_template() -> None:
     compose_sources = {contract.family for contract in contracts_for_view(VIEW_COMPOSE)}
 
     assert "meshcore" in compose_sources
+    assert "meshtastic" in compose_sources
     assert "reticulum" in compose_sources
     assert "aprs" not in compose_sources
