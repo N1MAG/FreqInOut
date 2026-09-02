@@ -2627,6 +2627,8 @@ class MessageHeaderWithCheckbox(QHeaderView):
 
 
 class MessageViewerTab(QWidget):
+    busyStateChanged = Signal(bool)
+
     """
     Message Viewer for VarAC / FLMSG / FLAMP inbox-like folders.
 
@@ -2755,6 +2757,8 @@ class MessageViewerTab(QWidget):
         self._is_shutting_down = False
         self._app_active = True
         self._refresh_files_inflight = False
+        self._refresh_files_pending: bool = False
+        self._refresh_files_pending_force: bool = False
         self.loading_label: QLabel | None = None
         self._file_scan_thread: QThread | None = None
         self._file_scan_worker: _FileScanWorker | None = None
@@ -2764,6 +2768,8 @@ class MessageViewerTab(QWidget):
         self._rows_build_generation: int = 0
         self._rows_build_pending: bool = False
         self._rows_build_pending_force: bool = False
+        self._rows_build_active_fp: Optional[Tuple[object, ...]] = None
+        self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
         self._loading_text: str = "Checking Messages..."
@@ -2874,6 +2880,48 @@ class MessageViewerTab(QWidget):
                     pass
 
         QTimer.singleShot(5000, _release_refs)
+
+    @staticmethod
+    def _qt_thread_running(thread: QThread | None) -> bool:
+        if thread is None:
+            return False
+        try:
+            return bool(thread.isRunning())
+        except RuntimeError:
+            return False
+
+    def _message_refresh_busy(self) -> bool:
+        return bool(
+            bool(getattr(self, "_refresh_files_inflight", False))
+            or bool(getattr(self, "_visible_message_check_inflight", False))
+            or bool(getattr(self, "_activation_refresh_pending", False))
+            or self._qt_thread_running(getattr(self, "_file_scan_thread", None))
+            or self._qt_thread_running(getattr(self, "_rows_build_thread", None))
+            or self._qt_thread_running(getattr(self, "_signature_verify_thread", None))
+        )
+
+    def _emit_message_refresh_busy(self) -> None:
+        busy = self._message_refresh_busy()
+        if busy == getattr(self, "_messages_busy_state", False):
+            return
+        self._messages_busy_state = busy
+        try:
+            self.busyStateChanged.emit(busy)
+        except Exception:
+            pass
+
+    def _message_scan_or_build_active(self) -> bool:
+        return bool(
+            bool(getattr(self, "_refresh_files_inflight", False))
+            or self._qt_thread_running(getattr(self, "_file_scan_thread", None))
+            or self._qt_thread_running(getattr(self, "_rows_build_thread", None))
+        )
+
+    def _apply_message_filters_light(self) -> None:
+        try:
+            self._apply_message_filters(refresh_options=False)
+        except TypeError:
+            self._apply_message_filters()
 
     def _multi_radio_message_path_entries(self) -> List[Dict[str, str]]:
         """Return enabled radio-scoped message folders for inbox scanning and form discovery."""
@@ -4024,11 +4072,13 @@ class MessageViewerTab(QWidget):
         self._signature_verify_thread.finished.connect(self._on_signature_verify_thread_finished)
         self._signature_verify_thread.finished.connect(self._signature_verify_thread.deleteLater)
         self._signature_verify_thread.start()
+        self._emit_message_refresh_busy()
 
     def _on_signature_verify_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._signature_verify_thread, self._signature_verify_worker)
         self._signature_verify_thread = None
         self._signature_verify_worker = None
+        self._emit_message_refresh_busy()
         if self._signature_verify_pending and not self._is_shutting_down:
             self._signature_verify_pending = False
             self._start_signature_verification(force=False)
@@ -4953,7 +5003,7 @@ class MessageViewerTab(QWidget):
         self._inbox_focus = focus
         self._sync_inbox_focus_buttons()
         self._unfreeze_table()
-        self._apply_message_filters()
+        self._apply_message_filters_light()
         self._save_settings()
 
     def _sync_inbox_focus_buttons(self) -> None:
@@ -8428,7 +8478,7 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "rcv_search"):
             self.rcv_search.setText(search)
         self._select_context_age_filter(age_seconds)
-        self._apply_message_filters()
+        self._apply_message_filters_light()
         self._update_map_context_filter_label()
 
     def _select_context_age_filter(self, age_seconds: int) -> None:
@@ -10134,11 +10184,18 @@ class MessageViewerTab(QWidget):
         )
 
     def _on_visible_message_check_timer(self) -> None:
-        if self._visible_message_check_inflight:
+        if (
+            bool(getattr(self, "_visible_message_check_inflight", False))
+            or bool(getattr(self, "_refresh_files_inflight", False))
+            or self._qt_thread_running(getattr(self, "_file_scan_thread", None))
+            or self._qt_thread_running(getattr(self, "_rows_build_thread", None))
+            or self._qt_thread_running(getattr(self, "_signature_verify_thread", None))
+        ):
             self._message_check_status_text = "Still checking..."
             self._update_message_check_status()
             return
         self._visible_message_check_inflight = True
+        self._emit_message_refresh_busy()
         before_count = self._message_source_count()
         before_fp = self._message_sources_fingerprint()
         self._message_check_status_text = "Checking..."
@@ -10162,6 +10219,7 @@ class MessageViewerTab(QWidget):
             self._message_check_status_text = "Check failed"
         finally:
             self._visible_message_check_inflight = False
+            self._emit_message_refresh_busy()
             if self._has_active_view and self._messages_mode == "Inbox" and self._visible_check_interval_sec:
                 self._next_visible_message_check_ts = time.time() + max(15, int(self._visible_check_interval_sec or 30))
             self._update_message_check_status()
@@ -10200,6 +10258,13 @@ class MessageViewerTab(QWidget):
 
     def _on_refresh_now(self) -> None:
         self._unfreeze_table()
+        if self._message_scan_or_build_active():
+            self._refresh_files_pending = True
+            self._refresh_files_pending_force = True
+            self._message_check_status_text = "Still checking..."
+            self._update_message_check_status()
+            self._schedule_loading("Finishing current check...")
+            return
         self._message_check_status_text = "Checking..."
         self._update_message_check_status()
         self._set_loading(True)
@@ -10253,9 +10318,9 @@ class MessageViewerTab(QWidget):
             self._last_file_refresh_ts = time.time()
             QTimer.singleShot(1500, lambda: self._refresh_files(force=False))
         self._refresh_js8_messages(rebuild=False)
-        self._refresh_varac_messages(force=True, rebuild=False)
+        self._refresh_varac_messages(force=False, rebuild=False)
         if self._has_active_view:
-            self._populate_messages_table(force=True)
+            self._populate_messages_table(force=False)
             QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
         else:
             self._initial_populate_deferred = True
@@ -10321,10 +10386,17 @@ class MessageViewerTab(QWidget):
             if self._activation_refresh_pending:
                 return
             self._activation_refresh_pending = True
+            self._emit_message_refresh_busy()
             self._schedule_loading("Checking Messages...")
-            QTimer.singleShot(0, lambda: self._run_activation_refresh(force=not self._message_rows))
+            QTimer.singleShot(0, lambda: self._run_activation_refresh(force=False))
 
     def _run_activation_refresh(self, force: bool = False) -> None:
+        if self._message_scan_or_build_active():
+            self._activation_refresh_pending = False
+            self._last_activation_refresh_ts = time.time()
+            self._set_loading(False)
+            self._emit_message_refresh_busy()
+            return
         with perf_span(
             "messages.activation_refresh",
             settings=self.settings,
@@ -10350,6 +10422,7 @@ class MessageViewerTab(QWidget):
             finally:
                 self._activation_refresh_pending = False
                 self._set_loading(False)
+                self._emit_message_refresh_busy()
 
     def _load_message_sources_from_local(self, *, force: bool = False) -> None:
         try:
@@ -10391,7 +10464,7 @@ class MessageViewerTab(QWidget):
             if self._initial_populate_deferred:
                 self._initial_populate_deferred = False
                 self._deferred_refresh = False
-                QTimer.singleShot(0, lambda: self._populate_messages_table(force=True))
+                QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
                 return
             if self._deferred_refresh:
                 QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
@@ -10892,16 +10965,23 @@ class MessageViewerTab(QWidget):
         return "".join(out)
 
     def _refresh_files(self, force: bool = False):
-        if self._is_shutting_down or self._refresh_files_inflight or self._bbs_auto_archive_inflight:
+        if self._is_shutting_down:
+            return
+        if self._refresh_files_inflight or self._bbs_auto_archive_inflight:
+            self._refresh_files_pending = True
+            self._refresh_files_pending_force = bool(self._refresh_files_pending_force or force)
             return
         if self._file_scan_thread:
             try:
                 if self._file_scan_thread.isRunning():
+                    self._refresh_files_pending = True
+                    self._refresh_files_pending_force = bool(self._refresh_files_pending_force or force)
                     return
             except RuntimeError:
                 self._file_scan_thread = None
                 self._file_scan_worker = None
         self._refresh_files_inflight = True
+        self._emit_message_refresh_busy()
         self._file_scan_start_ts = time.time()
         self._load_paths_lists()
         watch_dirs = self._effective_watch_dirs()
@@ -10913,6 +10993,7 @@ class MessageViewerTab(QWidget):
             finally:
                 self._refresh_files_inflight = False
                 self._last_file_refresh_ts = time.time()
+                self._emit_message_refresh_busy()
                 elapsed = time.time() - self._file_scan_start_ts
                 total_records = sum(len(v) for v in self.files.values())
                 emit_span(
@@ -10951,6 +11032,12 @@ class MessageViewerTab(QWidget):
         self._retain_finished_worker_refs(self._file_scan_thread, self._file_scan_worker)
         self._file_scan_thread = None
         self._file_scan_worker = None
+        self._emit_message_refresh_busy()
+        if self._refresh_files_pending and not self._is_shutting_down:
+            pending_force = bool(self._refresh_files_pending_force)
+            self._refresh_files_pending = False
+            self._refresh_files_pending_force = False
+            QTimer.singleShot(1200, lambda force=pending_force: self._refresh_files(force=force))
 
     def _on_file_scan_finished(self, payload: object, force: bool) -> None:
         if self._is_shutting_down:
@@ -11011,6 +11098,7 @@ class MessageViewerTab(QWidget):
         finally:
             self._refresh_files_inflight = False
             self._last_file_refresh_ts = time.time()
+            self._emit_message_refresh_busy()
             elapsed = time.time() - self._file_scan_start_ts
             emit_span(
                 "messages.file_scan_total",
@@ -12711,11 +12799,13 @@ class MessageViewerTab(QWidget):
     def _start_rows_build(self, force: bool = False) -> None:
         if self._is_shutting_down:
             return
+        source_fp = self._message_sources_fingerprint()
         if self._rows_build_thread:
             try:
                 if self._rows_build_thread.isRunning():
-                    self._rows_build_pending = True
-                    self._rows_build_pending_force = bool(self._rows_build_pending_force or force)
+                    if source_fp != getattr(self, "_rows_build_active_fp", None):
+                        self._rows_build_pending = True
+                        self._rows_build_pending_force = bool(self._rows_build_pending_force or force)
                     return
             except RuntimeError:
                 self._rows_build_thread = None
@@ -12725,6 +12815,7 @@ class MessageViewerTab(QWidget):
         generation = int(self._rows_build_generation)
         self._rows_build_pending = False
         self._rows_build_pending_force = False
+        self._rows_build_active_fp = source_fp
         self._rows_build_thread = QThread(self)
         self._rows_build_worker = _RowsBuildWorker(
             js8_messages=snapshot.get("js8_messages", []),  # type: ignore[arg-type]
@@ -12759,16 +12850,19 @@ class MessageViewerTab(QWidget):
         self._rows_build_thread.finished.connect(self._on_rows_build_thread_finished)
         self._rows_build_thread.finished.connect(self._rows_build_thread.deleteLater)
         self._rows_build_thread.start()
+        self._emit_message_refresh_busy()
 
     def _on_rows_build_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._rows_build_thread, self._rows_build_worker)
         self._rows_build_thread = None
         self._rows_build_worker = None
+        self._rows_build_active_fp = None
+        self._emit_message_refresh_busy()
         if self._rows_build_pending and not self._is_shutting_down:
             pending_force = bool(self._rows_build_pending_force)
             self._rows_build_pending = False
             self._rows_build_pending_force = False
-            self._start_rows_build(force=pending_force)
+            QTimer.singleShot(250, lambda force=pending_force: self._start_rows_build(force=force))
 
     def _on_rows_build_finished(self, payload: object) -> None:
         if self._is_shutting_down:
@@ -12996,15 +13090,23 @@ class MessageViewerTab(QWidget):
             criteria = replace(criteria, focus="all")
         return _core_row_matches_inbox_criteria(row, criteria)
 
-    def _apply_message_filters(self) -> None:
+    def _apply_message_filters(self, *, refresh_options: bool = True) -> None:
         rows = self._message_rows
         now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
         criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
         type_sel = criteria.type_sel
+        selected_sources = self._selected_message_sources()
+        selected_groups = self._expanded_selected_message_groups()
+        configured_groups = self._configured_message_group_names()
 
         filtered = []
         for row in rows:
-            if not self._row_matches_workspace_filters(row):
+            if not _core_row_matches_workspace_scope(
+                row,
+                selected_sources=selected_sources,
+                selected_groups=selected_groups,
+                configured_groups=configured_groups,
+            ):
                 continue
             if not self._row_matches_inbox_criteria(row, criteria):
                 continue
@@ -13024,9 +13126,9 @@ class MessageViewerTab(QWidget):
         self._update_clear_filters_style()
         self._update_map_context_filter_label()
         self._update_mark_all_read_style()
-        self._refresh_workspace_filter_options(self._rows_for_group_filter_options(rows))
-        selected_groups = self._selected_message_groups()
-        selected_sources = self._selected_message_sources()
+        if refresh_options:
+            self._refresh_workspace_filter_options(self._rows_for_group_filter_options(rows))
+        display_groups = self._selected_message_groups()
         log.debug(
             "MessageViewer: filters focus=%s age=%s type=%s hidden=%d status=%s from=%s to=%s rcv=%s groups=%s sources=%s => %d rows",
             criteria.focus,
@@ -13037,7 +13139,7 @@ class MessageViewerTab(QWidget):
             criteria.from_sel,
             criteria.to_sel,
             criteria.search_query or "ALL",
-            sorted(selected_groups) if selected_groups is not None else ["ALL"],
+            sorted(display_groups) if display_groups is not None else ["ALL"],
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             len(filtered),
         )
@@ -13045,9 +13147,9 @@ class MessageViewerTab(QWidget):
     def _rows_for_group_filter_options(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
         now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
         criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
+        sources = self._selected_message_sources()
         option_rows: List[UnifiedMessage] = []
         for row in rows:
-            sources = self._selected_message_sources()
             if sources is not None and self._message_source_value(row) not in sources:
                 continue
             if not self._row_matches_inbox_criteria(row, criteria):
@@ -13223,8 +13325,9 @@ class MessageViewerTab(QWidget):
 
     def _message_group_source_map(self, rows: List[UnifiedMessage]) -> dict[str, set[str]]:
         pairs: list[tuple[str, str]] = []
+        configured_groups = self._configured_message_group_names()
         for row in rows:
-            group = self._message_group_value(row)
+            group = _core_message_group_value(row, configured_groups=configured_groups)
             if group:
                 pairs.append((group, self._message_source_value(row)))
         return _core_message_group_source_map(pairs, family_map=self._operator_group_family_map())
@@ -13633,7 +13736,7 @@ class MessageViewerTab(QWidget):
     def _on_filter_changed(self) -> None:
         self._unfreeze_table()
         self._update_excluded_types_button_state()
-        self._apply_message_filters()
+        self._apply_message_filters_light()
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
         self.messages_table.setUpdatesEnabled(False)

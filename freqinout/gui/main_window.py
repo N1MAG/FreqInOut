@@ -216,6 +216,7 @@ class MainWindow(QMainWindow):
         self._app_active = True
         self._ui_resume_pending = False
         self._ui_refresh_dirty = False
+        self._heavy_content_refresh_active = False
         self._ui_timers_paused_for_inactive = False
         self._status_refresh_pending = False
         self._status_refresh_running = False
@@ -1268,7 +1269,19 @@ class MainWindow(QMainWindow):
             not getattr(self, "_shutting_down", False)
             and getattr(self, "_app_active", True)
             and not getattr(self, "_ui_resume_pending", False)
+            and not getattr(self, "_heavy_content_refresh_active", False)
         )
+
+    def _set_heavy_content_refresh_active(self, active: bool) -> None:
+        active = bool(active)
+        if active == bool(getattr(self, "_heavy_content_refresh_active", False)):
+            return
+        self._heavy_content_refresh_active = active
+        if active:
+            self._mark_ui_refresh_dirty("heavy_content_refresh")
+            return
+        if getattr(self, "_ui_refresh_dirty", False):
+            QTimer.singleShot(250, lambda: self._flush_visible_ui_refresh("heavy_content_refresh_complete"))
 
     def _mark_ui_refresh_dirty(self, reason: str = "") -> None:
         self._ui_refresh_dirty = True
@@ -4694,6 +4707,10 @@ class MainWindow(QMainWindow):
             self.message_viewer_tab = MessageViewerTab(self, plan_context_service=self.plan_context_service)
             try:
                 self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
+            except Exception:
+                pass
+            try:
+                self.message_viewer_tab.busyStateChanged.connect(self._set_heavy_content_refresh_active)
             except Exception:
                 pass
             return self.message_viewer_tab
@@ -9935,7 +9952,7 @@ class MainWindow(QMainWindow):
                     pass
                 self._update_map_filters_visibility(index)
                 self._update_ncs_nav_button_styles()
-                QTimer.singleShot(0, self._refresh_scheduler_status_panel)
+                QTimer.singleShot(0, self._schedule_status_refresh)
                 try:
                     widget = self.stack.widget(index)
                     if hasattr(widget, "show_loading_toast"):
