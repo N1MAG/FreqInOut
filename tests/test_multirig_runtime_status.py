@@ -127,6 +127,90 @@ def test_migrated_status_after_explicit_migration(monkeypatch, tmp_path):
     assert status.active_device_profile_ids == (status.primary_device_profile_id,)
 
 
+def test_migration_assigns_existing_single_rig_schedules_to_default_radio(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    db_path = cfg_root / "config" / "freqinout.db"
+    nets_db_path = cfg_root / "config" / "freqinout_nets.db"
+    _insert_kv(db_path, {"control_via": "FLRig", "flrig_port": 12345, "use_scheduler": True})
+    settings = SettingsManager()
+    with settings._conn:  # type: ignore[union-attr]
+        settings._conn.execute(  # type: ignore[union-attr]
+            """
+            CREATE TABLE daily_schedule_tab (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day_utc TEXT,
+                band TEXT,
+                mode TEXT,
+                vfo TEXT,
+                frequency TEXT,
+                start_utc TEXT,
+                end_utc TEXT,
+                group_name TEXT,
+                auto_tune INTEGER
+            )
+            """
+        )
+        settings._conn.execute(  # type: ignore[union-attr]
+            """
+            INSERT INTO daily_schedule_tab(day_utc, band, mode, vfo, frequency, start_utc, end_utc, group_name, auto_tune)
+            VALUES('Monday', '40M', 'Digi', 'A', '7.078', '01:00', '02:00', 'MAGNET', 1)
+            """
+        )
+    nets_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(nets_db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE net_schedule_tab (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day_utc TEXT,
+                recurrence TEXT,
+                band TEXT,
+                mode TEXT,
+                vfo TEXT,
+                frequency TEXT,
+                start_utc TEXT,
+                end_utc TEXT,
+                early_checkin INTEGER,
+                primary_js8call_group TEXT,
+                net_name TEXT,
+                group_name TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO net_schedule_tab(
+                day_utc, recurrence, band, mode, vfo, frequency, start_utc, end_utc,
+                early_checkin, primary_js8call_group, net_name, group_name
+            )
+            VALUES('Tuesday', 'Weekly', '20M', 'Digi', 'B', '14.110', '03:00', '04:00', 1, '@AMRRON', 'Tuesday Net', 'AMRRON')
+            """
+        )
+
+    result = ensure_multi_rig_migration(
+        settings._conn,  # type: ignore[arg-type]
+        settings.all(),
+        radio_name="Production Radio",
+        operating_plan_name="Production Schedule",
+    )
+
+    store = MultiRadioStore()
+    plans = store.list_frequency_plans()
+    assignments = store.list_effective_assigned_plans()
+
+    assert result.created_frequency_plan_id is not None
+    assert len(plans) == 1
+    assert plans[0]["name"] == "Production Schedule"
+    assert json.loads(plans[0]["source_refs_json"]) == ["hf_daily", "hf_nets"]
+    schedule_refs = json.loads(plans[0]["schedule_refs_json"])
+    assert [row["source_table"] for row in schedule_refs] == ["daily_schedule_tab", "net_schedule_tab"]
+    assert json.loads(plans[0]["frequency_refs_json"]) == ["40M:7.078", "20M:14.110"]
+    assert json.loads(plans[0]["group_refs_json"]) == ["MAGNET", "AMRRON"]
+    assert len(assignments) == 1
+    assert int(assignments[0]["frequency_plan_id"]) == int(plans[0]["id"])
+
+
 def test_migration_error_status_uses_warnings(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

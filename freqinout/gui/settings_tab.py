@@ -17717,6 +17717,7 @@ class SettingsTab(QWidget):
             radio_name=radio_name,
             operating_plan_name=operating_plan_name,
             config_dir=get_config_dir(),
+            extra_backup_paths=self._multi_rig_autoconfig_extra_app_paths(migration_settings),
         )
         if not apply_plan.can_apply:
             detail = "\n".join(apply_plan.blockers)

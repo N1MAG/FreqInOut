@@ -171,6 +171,7 @@ class MigrationResult:
     to_version: int
     created_device_profile_id: Optional[int] = None
     created_operating_profile_id: Optional[int] = None
+    created_frequency_plan_id: Optional[int] = None
     created_js8_instance_id: Optional[int] = None
     created_fast_light_config_id: Optional[int] = None
     created_varac_node_id: Optional[int] = None
@@ -1008,17 +1009,38 @@ def _fetchone_dict(cursor: sqlite3.Cursor) -> Optional[Dict[str, Any]]:
 
 
 def _fetchall_dicts(conn: sqlite3.Connection, query: str, params: Iterable[Any] = ()) -> List[Dict[str, Any]]:
-    original_row_factory = conn.row_factory
-    try:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute(query, tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
-    finally:
-        conn.row_factory = original_row_factory
+    cursor = conn.execute(query, tuple(params))
+    columns = [str(col[0]) for col in (cursor.description or [])]
+    rows: List[Dict[str, Any]] = []
+    for row in cursor.fetchall():
+        if isinstance(row, sqlite3.Row):
+            rows.append(dict(row))
+        else:
+            rows.append({columns[idx]: row[idx] for idx in range(min(len(columns), len(row)))})
+    return rows
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (str(table),),
+    ).fetchone()
+    return row is not None
+
+
+def _conn_database_path(conn: sqlite3.Connection) -> Optional[Path]:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row is None:
+            return None
+        path_text = str(row[2] if not isinstance(row, sqlite3.Row) else row["file"] or "").strip()
+        return Path(path_text) if path_text else None
+    except Exception:
+        return None
 
 
 def _load_kv_settings(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -3112,7 +3134,7 @@ def _set_assigned_plan_conn(
     )
     if commit:
         conn.commit()
-    return dict(conn.execute("SELECT * FROM assigned_plans WHERE id=last_insert_rowid()").fetchone())
+    return _fetchone_dict(conn.execute("SELECT * FROM assigned_plans WHERE id=last_insert_rowid()")) or {}
 
 
 def _effective_assigned_plan_for_device(conn: sqlite3.Connection, device_profile_id: int) -> Optional[Dict[str, Any]]:
@@ -4069,6 +4091,211 @@ def _seed_device_defaults(
     }
 
 
+def _schedule_row_ref(row: Mapping[str, Any], *, source_table: str, source: str) -> Dict[str, Any]:
+    def _value(key: str, default: str = "") -> str:
+        return _coerce_text(row.get(key, default), default)
+
+    ref: Dict[str, Any] = {
+        "source": source,
+        "source_table": source_table,
+        "source_row_id": int(row.get("id") or 0),
+        "day_utc": _value("day_utc", "ALL") or "ALL",
+        "band": _value("band", "").upper(),
+        "mode": _value("mode", ""),
+        "vfo": _value("vfo", "A").upper() or "A",
+        "frequency": _value("frequency", ""),
+        "start_utc": _value("start_utc", ""),
+        "end_utc": _value("end_utc", ""),
+        "auto_tune": bool(row.get("auto_tune") or 0),
+    }
+    for key in (
+        "recurrence",
+        "biweekly_offset_weeks",
+        "month_weeks",
+        "group_name",
+        "early_checkin",
+        "primary_js8call_group",
+        "comment",
+        "net_name",
+        "fldigi_mode",
+        "fldigi_offset",
+        "resource_id",
+        "target_scope",
+        "target_device_profile_id",
+        "target_operating_profile_id",
+    ):
+        value = row.get(key)
+        if value not in (None, ""):
+            ref[key] = value
+    return ref
+
+
+def _legacy_schedule_refs_from_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    refs: List[Dict[str, Any]] = []
+    if _table_exists(conn, "daily_schedule_tab"):
+        for row in _fetchall_dicts(
+            conn,
+            """
+            SELECT *
+              FROM daily_schedule_tab
+          ORDER BY day_utc ASC, start_utc ASC, id ASC
+            """,
+        ):
+            refs.append(_schedule_row_ref(row, source_table="daily_schedule_tab", source="HF"))
+    return refs
+
+
+def _legacy_schedule_refs_from_path(db_path: Optional[Path]) -> List[Dict[str, Any]]:
+    if db_path is None or not db_path.exists():
+        return []
+    refs: List[Dict[str, Any]] = []
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            if _table_exists(conn, "daily_schedule_tab"):
+                for row in _fetchall_dicts(
+                    conn,
+                    """
+                    SELECT *
+                      FROM daily_schedule_tab
+                  ORDER BY day_utc ASC, start_utc ASC, id ASC
+                    """,
+                ):
+                    refs.append(_schedule_row_ref(row, source_table="daily_schedule_tab", source="HF"))
+            for table in ("net_schedule_tab", "net_schedule"):
+                if not _table_exists(conn, table):
+                    continue
+                for row in _fetchall_dicts(
+                    conn,
+                    f"""
+                    SELECT *
+                      FROM {table}
+                  ORDER BY day_utc ASC, start_utc ASC, id ASC
+                    """,
+                ):
+                    refs.append(_schedule_row_ref(row, source_table=table, source="NET"))
+                if any(str(row.get("source_table") or "") in {"net_schedule_tab", "net_schedule"} for row in refs):
+                    break
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("MultiRadioStore: legacy schedule migration scan skipped: %s", exc)
+    return refs
+
+
+def _frequency_refs_from_schedule_refs(schedule_refs: Iterable[Mapping[str, Any]]) -> List[str]:
+    refs: List[str] = []
+    for row in schedule_refs:
+        band = _coerce_text(row.get("band", ""), "").upper()
+        freq = _coerce_text(row.get("frequency", ""), "")
+        if band and freq:
+            refs.append(f"{band}:{freq}")
+        elif freq:
+            refs.append(freq)
+        elif band:
+            refs.append(band)
+    return list(dict.fromkeys(refs))
+
+
+def _group_refs_from_schedule_refs(schedule_refs: Iterable[Mapping[str, Any]]) -> List[str]:
+    groups: List[str] = []
+    for row in schedule_refs:
+        group = _coerce_text(row.get("group_name") or row.get("group") or row.get("primary_js8call_group"), "").upper()
+        if group:
+            groups.append(group)
+    return list(dict.fromkeys(groups))
+
+
+def _dedupe_schedule_refs(schedule_refs: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in schedule_refs:
+        data = dict(row)
+        key = json.dumps(
+            {
+                "source_table": data.get("source_table"),
+                "source_row_id": data.get("source_row_id"),
+                "day_utc": data.get("day_utc"),
+                "band": data.get("band"),
+                "frequency": data.get("frequency"),
+                "start_utc": data.get("start_utc"),
+                "end_utc": data.get("end_utc"),
+                "net_name": data.get("net_name"),
+                "group_name": data.get("group_name"),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(data)
+    return out
+
+
+def _ensure_migrated_single_rig_frequency_plan(
+    conn: sqlite3.Connection,
+    *,
+    device_id: int,
+    operating_plan_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    if _effective_assigned_plan_for_device(conn, int(device_id)):
+        return None
+    existing = _record_by_system_key(conn, "frequency_plans", DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY)
+    if existing:
+        _set_assigned_plan_conn(
+            conn,
+            int(device_id),
+            int(existing["id"]),
+            reason="Assigned migrated single-rig Frequency Plan.",
+            created_by="migration",
+            commit=False,
+        )
+        return existing
+
+    schedule_refs = _legacy_schedule_refs_from_conn(conn)
+    settings_db = _conn_database_path(conn)
+    nets_db = settings_db.with_name("freqinout_nets.db") if settings_db else get_config_dir() / "config" / "freqinout_nets.db"
+    schedule_refs.extend(_legacy_schedule_refs_from_path(nets_db))
+    schedule_refs = _dedupe_schedule_refs(schedule_refs)
+    if not schedule_refs:
+        return None
+
+    has_daily = any(str(row.get("source_table") or "") == "daily_schedule_tab" for row in schedule_refs)
+    has_net = any(str(row.get("source_table") or "") in {"net_schedule_tab", "net_schedule"} for row in schedule_refs)
+    source_refs: List[str] = []
+    if has_daily:
+        source_refs.append("hf_daily")
+    if has_net:
+        source_refs.append("hf_nets")
+    plan_name = _coerce_text(operating_plan_name, "") or "Migrated Single-Rig Schedule"
+    plan = _save_frequency_plan_conn(
+        conn,
+        {
+            "system_key": DEFAULT_FREQUENCY_PLAN_SYSTEM_KEY,
+            "name": plan_name,
+            "description": "Created from existing single-rig station schedule rows during Multi-Rig migration.",
+            "category": "normal",
+            "status": "saved",
+            "source_refs": source_refs,
+            "schedule_refs": schedule_refs,
+            "frequency_refs": _frequency_refs_from_schedule_refs(schedule_refs),
+            "group_refs": _group_refs_from_schedule_refs(schedule_refs),
+            "notes": f"Migrated from single-rig schedules {_utc_now_iso()}.",
+        },
+    )
+    _set_assigned_plan_conn(
+        conn,
+        int(device_id),
+        int(plan["id"]),
+        reason="Assigned migrated single-rig schedule.",
+        created_by="migration",
+        commit=False,
+    )
+    return plan
+
+
 def ensure_default_multi_radio_records(conn: sqlite3.Connection, settings_values: Mapping[str, Any]) -> None:
     """Create the default multi-rig baseline.
 
@@ -4277,6 +4504,13 @@ def ensure_multi_rig_migration(
                     "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
                     (plan_name, _utc_now_iso(), int(operating["id"])),
                 )
+        migrated_frequency_plan = None
+        if device:
+            migrated_frequency_plan = _ensure_migrated_single_rig_frequency_plan(
+                conn,
+                device_id=int(device["id"]),
+                operating_plan_name=operating_plan_name,
+            )
 
         if from_version < 2 <= to_version:
             _apply_launch_safety_migration_v2(conn)
@@ -4292,6 +4526,7 @@ def ensure_multi_rig_migration(
                 "to_version": to_version,
                 "created_device_profile_id": int(device["id"]) if device else None,
                 "created_operating_profile_id": int(operating["id"]) if operating else None,
+                "created_frequency_plan_id": int(migrated_frequency_plan["id"]) if migrated_frequency_plan else None,
                 "enabled_software_roles": list(roles),
                 "warnings": list(all_warnings),
             },
@@ -4305,6 +4540,7 @@ def ensure_multi_rig_migration(
             to_version=to_version,
             created_device_profile_id=int(device["id"]) if device else None,
             created_operating_profile_id=int(operating["id"]) if operating else None,
+            created_frequency_plan_id=int(migrated_frequency_plan["id"]) if migrated_frequency_plan else None,
             created_js8_instance_id=int(js8["id"]) if js8 else None,
             created_fast_light_config_id=int(fast_light["id"]) if fast_light else None,
             created_varac_node_id=int(varac["id"]) if varac else None,

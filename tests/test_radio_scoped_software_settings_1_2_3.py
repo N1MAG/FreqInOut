@@ -2084,6 +2084,7 @@ def test_settings_multirig_setup_apply_is_backup_backed_before_migration() -> No
     ]
 
     assert "build_single_rig_upgrade_apply_plan(" in setup_block
+    assert "extra_backup_paths=self._multi_rig_autoconfig_extra_app_paths(migration_settings)" in setup_block
     assert "create_config_backup(apply_plan.backup_paths, reason=apply_plan.backup_reason)" in setup_block
     assert setup_block.index("create_config_backup(") < setup_block.index("ensure_multi_rig_migration(")
     assert "if not apply_plan.can_apply:" in setup_block

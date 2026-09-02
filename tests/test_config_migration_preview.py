@@ -93,7 +93,7 @@ def test_single_rig_upgrade_backup_paths_include_config_and_external_profile_hin
     )
 
 
-def test_single_rig_upgrade_preview_reports_referenced_data_paths_not_backed_up(tmp_path) -> None:
+def test_single_rig_upgrade_preview_backs_up_referenced_data_paths(tmp_path) -> None:
     settings = {
         "control_via": "FLRig",
         "fldigi_log_path": str(tmp_path / "fldigi-logs"),
@@ -106,16 +106,21 @@ def test_single_rig_upgrade_preview_reports_referenced_data_paths_not_backed_up(
     }
 
     preview = build_single_rig_upgrade_preview(settings, config_dir=tmp_path / "fio-config")
+    referenced_paths = collect_referenced_data_paths_not_backed_up(settings)
 
-    assert collect_referenced_data_paths_not_backed_up(settings) == (
+    assert referenced_paths == (
         str(tmp_path / "fldigi-logs"),
         str(tmp_path / "checkins"),
         str(tmp_path / "bbs"),
         str(tmp_path / "flmsg-messages"),
         str(tmp_path / "flamp-rx"),
     )
-    assert preview.referenced_paths_not_backed_up == collect_referenced_data_paths_not_backed_up(settings)
-    assert "referenced but not backed up" in " ".join(preview.warnings)
+    assert preview.backup_paths == (
+        str(tmp_path / "fio-config"),
+        *referenced_paths,
+    )
+    assert preview.referenced_paths_not_backed_up == ()
+    assert "referenced but not backed up" not in " ".join(preview.warnings)
 
 
 def test_single_rig_upgrade_apply_plan_requires_backup_path_before_apply(tmp_path) -> None:

@@ -65,19 +65,24 @@ def build_single_rig_upgrade_preview(
         operating_profile["name"] = "Daily HF Schedule"
 
     roles = _enabled_roles_from_radio_profile(radio_profile)
-    referenced_paths = collect_referenced_data_paths_not_backed_up(settings_values)
-    warnings = _preview_warnings(radio_profile, roles, referenced_paths)
+    referenced_data_paths = collect_referenced_data_paths_not_backed_up(settings_values)
+    combined_extra_backup_paths = tuple(extra_backup_paths) + tuple(Path(path) for path in referenced_data_paths)
     backups = collect_single_rig_upgrade_backup_paths(
         settings_values,
         config_dir=config_dir,
-        extra_backup_paths=extra_backup_paths,
+        extra_backup_paths=combined_extra_backup_paths,
     )
+    backed_up = {str(Path(path)) for path in backups}
+    referenced_paths_not_backed_up = tuple(
+        path for path in referenced_data_paths if str(Path(path)) not in backed_up
+    )
+    warnings = _preview_warnings(radio_profile, roles, referenced_paths_not_backed_up)
     return SingleRigUpgradePreview(
         radio_profile=radio_profile,
         operating_profile=operating_profile,
         enabled_software_roles=roles,
         backup_paths=backups,
-        referenced_paths_not_backed_up=referenced_paths,
+        referenced_paths_not_backed_up=referenced_paths_not_backed_up,
         summary=_preview_summary(radio_profile, roles),
         warnings=warnings,
     )
