@@ -213,6 +213,12 @@ class MainWindow(QMainWindow):
         self._ui_resume_pending = False
         self._ui_refresh_dirty = False
         self._ui_timers_paused_for_inactive = False
+        self._status_refresh_pending = False
+        self._status_refresh_running = False
+        self._station_command_refresh_pending = False
+        self._station_command_refresh_force = False
+        self._station_command_layout_pending = False
+        self._settings_saved_refresh_pending = False
         self._help_dialog_settle_until = 0.0
         self._ui_resume_settle_timer = QTimer(self)
         self._ui_resume_settle_timer.setSingleShot(True)
@@ -789,7 +795,9 @@ class MainWindow(QMainWindow):
         self.station_command_radio_admin_panel.setVisible(False)
         self._apply_station_command_bar_layout(force=True)
         try:
-            self.dependency_status_service.snapshot_changed.connect(lambda _snapshot: self._refresh_station_command_bar(force=False))
+            self.dependency_status_service.snapshot_changed.connect(
+                lambda _snapshot: self._schedule_station_command_bar_refresh("dependency_status", force=False)
+            )
         except Exception:
             pass
         right_layout.addWidget(self.station_command_bar, 0)
@@ -949,11 +957,7 @@ class MainWindow(QMainWindow):
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
-        self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
-        self._status_timer.timeout.connect(self._refresh_condition_level_panel)
-        self._status_timer.timeout.connect(self._refresh_station_overview)
-        self._status_timer.timeout.connect(self._refresh_station_health_alert)
-        self._status_timer.timeout.connect(self._check_timed_debug_expiry)
+        self._status_timer.timeout.connect(self._schedule_status_refresh)
         self._status_timer.start()
         self._ledge_clock_timer = QTimer(self)
         self._ledge_clock_timer.setInterval(1000)
@@ -1265,6 +1269,88 @@ class MainWindow(QMainWindow):
         if reason:
             log.debug("UI_LIFECYCLE|refresh_deferred reason=%s", reason)
 
+    def _run_timed_ui_refresh(self, label: str, callback: Callable[[], None]) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty(label)
+            return
+        start = time.perf_counter()
+        try:
+            callback()
+        except Exception:
+            log.debug("UI_PERF|refresh_failed label=%s", label, exc_info=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if elapsed_ms >= 250.0:
+            log.warning("UI_PERF|slow_refresh label=%s elapsed_ms=%.1f", label, elapsed_ms)
+        elif elapsed_ms >= 75.0:
+            log.info("UI_PERF|refresh label=%s elapsed_ms=%.1f", label, elapsed_ms)
+
+    def _status_refresh_callbacks(self) -> tuple[tuple[str, Callable[[], None]], ...]:
+        return (
+            ("scheduler_status", self._refresh_scheduler_status_panel),
+            ("condition_level_panel", self._refresh_condition_level_panel),
+            ("station_overview", lambda: self._refresh_station_overview(force=False)),
+            ("station_health_alert", self._refresh_station_health_alert),
+            ("timed_debug_expiry", self._check_timed_debug_expiry),
+        )
+
+    def _schedule_status_refresh(self) -> None:
+        if getattr(self, "_status_refresh_pending", False) or getattr(self, "_status_refresh_running", False):
+            return
+        self._status_refresh_pending = True
+        QTimer.singleShot(0, self._flush_status_refresh)
+
+    def _flush_status_refresh(self) -> None:
+        self._status_refresh_pending = False
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("status_timer")
+            return
+        callbacks = self._status_refresh_callbacks()
+        self._status_refresh_running = True
+        for offset_ms, (label, callback) in enumerate(callbacks):
+            QTimer.singleShot(
+                offset_ms * 60,
+                lambda refresh_label=label, refresh_callback=callback: self._run_timed_ui_refresh(
+                    refresh_label,
+                    refresh_callback,
+                ),
+            )
+        QTimer.singleShot(len(callbacks) * 60 + 10, lambda: setattr(self, "_status_refresh_running", False))
+
+    def _schedule_station_command_bar_refresh(self, reason: str = "", *, force: bool = False) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty(reason or "station_command_bar")
+            return
+        self._station_command_refresh_force = bool(getattr(self, "_station_command_refresh_force", False) or force)
+        if getattr(self, "_station_command_refresh_pending", False):
+            return
+        self._station_command_refresh_pending = True
+        QTimer.singleShot(90, self._flush_station_command_bar_refresh)
+
+    def _flush_station_command_bar_refresh(self) -> None:
+        self._station_command_refresh_pending = False
+        force = bool(getattr(self, "_station_command_refresh_force", False))
+        self._station_command_refresh_force = False
+        self._run_timed_ui_refresh(
+            "station_command_bar",
+            lambda: self._refresh_station_command_bar(force=force),
+        )
+
+    def _schedule_station_command_layout(self, *, force: bool = False) -> None:
+        if force:
+            self._apply_station_command_bar_layout(force=True)
+            return
+        if getattr(self, "_station_command_layout_pending", False):
+            return
+        self._station_command_layout_pending = True
+        QTimer.singleShot(80, self._flush_station_command_layout)
+
+    def _flush_station_command_layout(self) -> None:
+        self._station_command_layout_pending = False
+        self._run_timed_ui_refresh(
+            "station_command_layout",
+            lambda: self._apply_station_command_bar_layout(force=False),
+        )
+
     def _pause_noncritical_ui_timers(self) -> None:
         for timer_name in ("_status_timer", "_hold_state_timer", "_condition_levels_refresh_timer"):
             timer = getattr(self, timer_name, None)
@@ -1300,17 +1386,7 @@ class MainWindow(QMainWindow):
             return
         self._ui_refresh_dirty = False
         log.info("UI_LIFECYCLE|visible_refresh reason=%s", reason)
-        for callback in (
-            self._refresh_scheduler_status_panel,
-            self._refresh_condition_level_panel,
-            self._refresh_station_overview,
-            self._refresh_station_health_alert,
-            self._check_timed_debug_expiry,
-        ):
-            try:
-                callback()
-            except Exception:
-                pass
+        self._flush_status_refresh()
         try:
             widget = self.stack.currentWidget() if hasattr(self, "stack") else None
             if widget is not None and hasattr(widget, "on_tab_activated"):
@@ -2928,8 +3004,8 @@ class MainWindow(QMainWindow):
             if abs(width - previous_width) >= 24:
                 self._station_command_last_layout_width = width
                 self._station_command_radio_summary_signature = None
-                QTimer.singleShot(0, lambda: self._refresh_station_command_bar(force=False))
-            self._apply_station_command_bar_layout()
+                self._schedule_station_command_bar_refresh("resize", force=False)
+            self._schedule_station_command_layout(force=False)
         except Exception:
             pass
         try:
@@ -4716,24 +4792,34 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_settings_saved_for_lazy_tabs(self) -> None:
+        if getattr(self, "_settings_saved_refresh_pending", False):
+            return
+        self._settings_saved_refresh_pending = True
+        QTimer.singleShot(120, self._flush_settings_saved_for_lazy_tabs)
+
+    def _flush_settings_saved_for_lazy_tabs(self) -> None:
+        self._settings_saved_refresh_pending = False
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("settings_saved")
+            return
         self._refresh_plan_context_labels("settings_saved")
         try:
             if self.freq_planner_tab is not None:
-                self.freq_planner_tab.on_settings_saved()
+                self._run_timed_ui_refresh("settings_saved.freq_planner", self.freq_planner_tab.on_settings_saved)
         except Exception:
             pass
         try:
             if self.message_viewer_tab is not None:
-                self.message_viewer_tab.on_settings_saved()
+                self._run_timed_ui_refresh("settings_saved.message_viewer", self.message_viewer_tab.on_settings_saved)
         except Exception:
             pass
         try:
             if self.controlfreq_tab is not None:
-                self.controlfreq_tab.on_settings_saved()
+                self._run_timed_ui_refresh("settings_saved.controlfreq", self.controlfreq_tab.on_settings_saved)
         except Exception:
             pass
         try:
-            self._refresh_condition_level_panel()
+            self._run_timed_ui_refresh("settings_saved.condition_level_panel", self._refresh_condition_level_panel)
         except Exception:
             pass
         try:
@@ -5099,7 +5185,7 @@ class MainWindow(QMainWindow):
                 self.station_overview_tab.refresh_from_manager(force=force)
         except Exception:
             pass
-        self._refresh_station_command_bar(force=False)
+        self._schedule_station_command_bar_refresh("station_overview", force=False)
 
     @staticmethod
     def _station_command_value(source: object, key: str, default: object = "") -> object:

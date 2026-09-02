@@ -1808,8 +1808,11 @@ def test_phase7_station_command_bar_is_global_context_not_command_execution() ->
     assert "background: transparent; color:" in source
     assert '"station_control_surface": "#D7EAF8"' in theme_source
     assert '"station_control_surface": "#12324A"' in theme_source
-    assert "self._status_timer.timeout.connect(self._refresh_station_overview)" in source
-    assert "self._refresh_station_command_bar(force=False)" in source
+    assert "self._status_timer.timeout.connect(self._schedule_status_refresh)" in source
+    assert "def _schedule_status_refresh" in source
+    assert "def _flush_status_refresh" in source
+    assert "UI_PERF|slow_refresh" in source
+    assert 'self._schedule_station_command_bar_refresh("station_overview", force=False)' in source
     assert "self.station_command_qsy_btn.setEnabled(can_qsy)" in source
     assert '"warning" if manual_qsy_active or scheduler_suspended_manual or timed_hold_active else "muted"' in source
     assert 'self.station_command_state_label.setText("Manual QSY")' in source
@@ -3480,7 +3483,7 @@ def test_phase7_station_command_multi_radio_tiles_use_operator_command_layout() 
     assert "minimum_card = 380 if count == 2 else 280" in card_width_block
     assert "min(480, available // count)" in card_width_block
     assert "parent.setMaximumWidth(16777215)" in source
-    assert "QTimer.singleShot(0, lambda: self._refresh_station_command_bar(force=False))" in source
+    assert 'self._schedule_station_command_bar_refresh("resize", force=False)' in source
     assert "return total" in source[source.index("def _station_command_radio_cards_per_page") : source.index("def _station_command_radio_page_slice")]
     assert "btn.setVisible(False)" in refresh_block
     assert "def _sync_station_command_radio_summary_height(self, *, card_mode: bool) -> None:" in source
