@@ -4999,9 +4999,11 @@ class MessageViewerTab(QWidget):
             focus = "all"
         if focus == self._inbox_focus:
             self._sync_inbox_focus_buttons()
+            self._sync_source_filter_for_inbox_focus(focus)
             return
         self._inbox_focus = focus
         self._sync_inbox_focus_buttons()
+        self._sync_source_filter_for_inbox_focus(focus)
         self._unfreeze_table()
         self._apply_message_filters_light()
         self._save_settings()
@@ -5014,6 +5016,40 @@ class MessageViewerTab(QWidget):
             btn.setChecked(active)
             btn.blockSignals(False)
             btn.setStyleSheet(button_style("primary" if active else "muted", theme))
+
+    @staticmethod
+    def _source_values_for_inbox_focus(focus: object) -> list[str]:
+        focus_key = str(focus or "all").strip().lower()
+        return {
+            "forms": ["flmsg", "flamp"],
+            "spotter": ["spotter"],
+            "commstat": ["commstat"],
+            "js8call": ["js8"],
+            "mesh": ["mesh", "meshcore", "meshtastic"],
+            "varac": ["varac"],
+            "bbs": ["bbs"],
+        }.get(focus_key, [])
+
+    def _sync_source_filter_for_inbox_focus(self, focus: object) -> None:
+        source_filter = getattr(self, "source_filter", None)
+        if source_filter is None:
+            return
+        options = self._dropdown_option_values(source_filter)
+        source_values = self._source_values_for_inbox_focus(focus)
+        if not source_values:
+            selected = sorted(options)
+        else:
+            selected = [value for value in source_values if value in options]
+            if not selected:
+                selected = sorted(options)
+        try:
+            source_filter.blockSignals(True)
+            source_filter.set_selected_values(selected)
+        finally:
+            try:
+                source_filter.blockSignals(False)
+            except Exception:
+                pass
 
     def _toggle_advanced_filters(self) -> None:
         self._advanced_filters_visible = bool(self.advanced_filters_btn.isChecked())
@@ -11704,6 +11740,12 @@ class MessageViewerTab(QWidget):
         fingerprint = self._local_projection_fingerprint(("commstat_artifacts", "commstat_artifact_deletions"))
         if self._can_skip_local_projection_load("_commstat_local_snapshot_fp", fingerprint, force=force):
             return
+        started = time.perf_counter()
+        try:
+            limit = int(self.settings.get("commstat_message_load_limit", 20000) or 20000)
+        except Exception:
+            limit = 20000
+        limit = max(1000, min(50000, limit))
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -11728,8 +11770,9 @@ class MessageViewerTab(QWidget):
                 {deletion_join}
                 {deletion_where}
                 ORDER BY ca.event_ts DESC, ca.id DESC
-                LIMIT 5000
-                """
+                LIMIT ?
+                """,
+                (limit,),
             )
             rows = cur.fetchall()
             conn.close()
@@ -11779,6 +11822,13 @@ class MessageViewerTab(QWidget):
         self._project_commstat_alerts_to_observations()
         if rebuild:
             self._populate_messages_table(force=force)
+        emit_span(
+            "messages.load_commstat_from_local",
+            (time.perf_counter() - started) * 1000.0,
+            settings=self.settings,
+            meta={"rows": len(msgs), "limit": limit, "force": bool(force), "rebuild": bool(rebuild)},
+            min_ms=5.0,
+        )
 
     # ---------- Pending JS8 MSG backlog ---------- #
 
@@ -12891,12 +12941,17 @@ class MessageViewerTab(QWidget):
         except Exception:
             build_ms = 0.0
         if build_ms > 0:
+            origin_counts: dict[str, int] = {}
+            for row in rows:
+                origin = str(getattr(row, "origin", "") or "unknown").strip().lower() or "unknown"
+                origin_counts[origin] = origin_counts.get(origin, 0) + 1
             emit_span(
                 "messages.build_rows",
                 build_ms,
                 settings=self.settings,
                 meta={
                     "rows": len(rows),
+                    "origins": origin_counts,
                     "force": bool(data.get("force", False)),
                     "file_metadata_hits": int(data.get("file_metadata_hits", 0) or 0),
                     "file_parse_count": int(data.get("file_parse_count", 0) or 0),

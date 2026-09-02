@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime
+from functools import lru_cache
 import re
 from typing import Callable, Mapping
 
@@ -317,30 +318,51 @@ def sitrep_message_row_presentation(msg: object) -> MessageRowPresentation:
     )
 
 
-def commstat_message_row_presentation(msg: object) -> MessageRowPresentation:
-    status = str(getattr(msg, "status_label", "") or "INFO").strip().upper() or "INFO"
+@lru_cache(maxsize=30000)
+def _cached_commstat_message_row_presentation(fields: tuple[object, ...]) -> MessageRowPresentation:
+    (
+        artifact_kind,
+        title_raw,
+        body_text,
+        from_call,
+        target,
+        report_group,
+        state_code,
+        grid,
+        scope,
+        status_label,
+        alert_color,
+        subtype,
+        remarks_text,
+        transport_label,
+        reach_label,
+        source_family_label,
+        event_ts_utc,
+        event_ts,
+    ) = fields
+    status = str(status_label or "INFO").strip().upper() or "INFO"
     intelligence = analyze_commstat_fields(
-        artifact_kind=getattr(msg, "artifact_kind", ""),
-        title=getattr(msg, "title", ""),
-        body=getattr(msg, "body_text", ""),
-        from_call=getattr(msg, "from_call", ""),
-        target=getattr(msg, "target", ""),
-        report_group=getattr(msg, "report_group", ""),
-        state=getattr(msg, "state_code", ""),
-        grid=getattr(msg, "grid", ""),
-        scope=getattr(msg, "scope", ""),
-        status=getattr(msg, "status_label", ""),
-        alert_color=getattr(msg, "alert_color", ""),
-        subtype=getattr(msg, "subtype", ""),
-        remarks=getattr(msg, "remarks_text", ""),
-        transport=getattr(msg, "transport_label", ""),
-        reach=getattr(msg, "reach_label", ""),
-        source_family=getattr(msg, "source_family_label", ""),
-        event_utc=getattr(msg, "event_ts_utc", ""),
+        artifact_kind=artifact_kind,
+        title=title_raw,
+        body=body_text,
+        from_call=from_call,
+        target=target,
+        report_group=report_group,
+        state=state_code,
+        grid=grid,
+        scope=scope,
+        status=status_label,
+        alert_color=alert_color,
+        subtype=subtype,
+        remarks=remarks_text,
+        transport=transport_label,
+        reach=reach_label,
+        source_family=source_family_label,
+        event_utc=event_ts_utc,
     )
-    msg_type = intelligence.form_name or artifact_kind_label(getattr(msg, "artifact_kind", ""))
+    msg_type = intelligence.form_name or artifact_kind_label(artifact_kind)
     title = _table_title(
-        strip_group_markers_in_display_text(intelligence.summary or str(getattr(msg, "title", "") or "").strip() or msg_type)
+        strip_group_markers_in_display_text(intelligence.summary or str(title_raw or "").strip() or msg_type)
     )
     detail = " ".join(
         part
@@ -349,25 +371,25 @@ def commstat_message_row_presentation(msg: object) -> MessageRowPresentation:
             " ".join(intelligence.topics),
             intelligence.state,
             intelligence.grid,
-            getattr(msg, "report_group", ""),
-            getattr(msg, "transport_label", ""),
-            getattr(msg, "reach_label", ""),
-            getattr(msg, "source_family_label", ""),
-            getattr(msg, "body_text", ""),
-            getattr(msg, "remarks_text", ""),
-            getattr(msg, "alert_color", ""),
-            getattr(msg, "status_label", ""),
-            getattr(msg, "grid", ""),
-            getattr(msg, "state_code", ""),
+            report_group,
+            transport_label,
+            reach_label,
+            source_family_label,
+            body_text,
+            remarks_text,
+            alert_color,
+            status_label,
+            grid,
+            state_code,
         )
         if str(part or "").strip()
     )
     return MessageRowPresentation(
         msg_type=msg_type,
         status=status,
-        from_call=_clean_call(getattr(msg, "from_call", "")),
-        to_call=intelligence.to_call or strip_group_marker(getattr(msg, "target", "")),
-        rcv_ts=float(getattr(msg, "event_ts", 0.0) or 0.0),
+        from_call=_clean_call(from_call),
+        to_call=intelligence.to_call or strip_group_marker(target),
+        rcv_ts=float(event_ts or 0.0),
         title=title,
         origin="commstat",
         topics=tuple(intelligence.topics),
@@ -375,6 +397,30 @@ def commstat_message_row_presentation(msg: object) -> MessageRowPresentation:
         search_detail=detail,
         intelligence=intelligence,
     )
+
+
+def commstat_message_row_presentation(msg: object) -> MessageRowPresentation:
+    fields = (
+        str(getattr(msg, "artifact_kind", "") or ""),
+        str(getattr(msg, "title", "") or ""),
+        str(getattr(msg, "body_text", "") or ""),
+        str(getattr(msg, "from_call", "") or ""),
+        str(getattr(msg, "target", "") or ""),
+        str(getattr(msg, "report_group", "") or ""),
+        str(getattr(msg, "state_code", "") or ""),
+        str(getattr(msg, "grid", "") or ""),
+        str(getattr(msg, "scope", "") or ""),
+        str(getattr(msg, "status_label", "") or ""),
+        str(getattr(msg, "alert_color", "") or ""),
+        str(getattr(msg, "subtype", "") or ""),
+        str(getattr(msg, "remarks_text", "") or ""),
+        str(getattr(msg, "transport_label", "") or ""),
+        str(getattr(msg, "reach_label", "") or ""),
+        str(getattr(msg, "source_family_label", "") or ""),
+        str(getattr(msg, "event_ts_utc", "") or ""),
+        float(getattr(msg, "event_ts", 0.0) or 0.0),
+    )
+    return _cached_commstat_message_row_presentation(fields)
 
 
 def observation_message_row_presentation(observation: object) -> MessageRowPresentation:

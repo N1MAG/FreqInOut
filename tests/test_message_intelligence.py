@@ -2254,6 +2254,26 @@ def test_message_source_filter_always_includes_connected_app_sources() -> None:
     assert ("commstat", "CommStat") in message_source_options([row])
 
 
+def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
+    class FakeSourceFilter:
+        def __init__(self) -> None:
+            self._options = [("js8", "JS8Call"), ("spotter", "FIOSpotter"), ("commstat", "CommStat")]
+            self.selected: list[str] = ["spotter"]
+
+        def blockSignals(self, _blocked: bool) -> None:
+            pass
+
+        def set_selected_values(self, values: list[str]) -> None:
+            self.selected = list(values)
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.source_filter = FakeSourceFilter()
+
+    MessageViewerTab._sync_source_filter_for_inbox_focus(tab, "commstat")
+
+    assert tab.source_filter.selected == ["commstat"]
+
+
 def test_js8_relay_route_display_is_not_group_or_destination_noise() -> None:
     assert _js8_relay_route_display("K7RIE>", "N1MAG: K7RIE>KC7WOK status") == "KC7WOK via K7RIE"
     assert _js8_relay_route_display("K7RIE>", "F!304 GREEN") == "via K7RIE"
