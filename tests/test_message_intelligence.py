@@ -65,6 +65,7 @@ from freqinout.core.message_inbox_filters import (
     message_group_rebuild_selection,
     message_group_source_map,
     message_group_value,
+    message_source_aliases,
     message_source_options,
     message_source_value,
     normalize_message_group_filter_value,
@@ -73,6 +74,7 @@ from freqinout.core.message_inbox_filters import (
     row_matches_inbox_criteria,
     row_matches_inbox_focus,
     row_matches_search_query,
+    row_matches_source_filter,
     row_matches_status_filter,
     row_matches_type_filter,
     row_matches_workspace_scope,
@@ -2252,6 +2254,21 @@ def test_message_source_filter_always_includes_connected_app_sources() -> None:
     row = UnifiedMessage("CommStat", "INFO", "K7ETC", "MR08", 1.0, "", "Power", "commstat", object())
     assert message_source_value(row) == "commstat"
     assert ("commstat", "CommStat") in message_source_options([row])
+
+
+def test_commstat_source_filter_matches_projected_commstat_sitreps() -> None:
+    payload = SimpleNamespace(
+        source_family="sitrep",
+        source_label="SitRep",
+        message_type="COMMSTAT",
+        source_family_label="CommStat",
+    )
+    row = UnifiedMessage("COMMSTAT", "INFO", "K7ETC", "MR08", 1.0, "", "Power update", "sitrep", payload)
+
+    assert "commstat" in message_source_aliases(row)
+    assert row_matches_source_filter(row, {"commstat"}) is True
+    assert row_matches_workspace_scope(row, selected_sources={"commstat"}) is True
+    assert row_matches_inbox_focus(row, "commstat") is True
 
 
 def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
@@ -5578,6 +5595,7 @@ def test_file_scan_finished_unchanged_scan_does_not_rebuild_rows(tmp_path) -> No
     tab._save_file_scan_cache = lambda *_args, **_kwargs: calls.__setitem__("save", calls["save"] + 1)
     tab._update_fldigi_senders = lambda *_args, **_kwargs: calls.__setitem__("senders", calls["senders"] + 1)
     tab._project_message_files_to_observations = lambda *_args, **_kwargs: calls.__setitem__("project", calls["project"] + 1)
+    tab._start_native_file_projection_write = lambda *_args, **_kwargs: None
     tab._refresh_varac_messages = lambda *_args, **_kwargs: calls.__setitem__("varac", calls["varac"] + 1)
     tab._populate_messages_table = lambda *_args, **_kwargs: calls.__setitem__("populate", calls["populate"] + 1)
     tab._start_signature_verification = lambda *_args, **_kwargs: calls.__setitem__("sig", calls["sig"] + 1)
@@ -5693,6 +5711,7 @@ def test_file_scan_finished_changed_scan_rebuilds_rows_and_cache(tmp_path) -> No
     tab._read_state_map = {}
     tab._load_read_state_map = lambda: {"loaded": ("READ", 1.0, 0)}
     tab._project_message_files_to_observations = lambda *_args, **_kwargs: calls.__setitem__("project", calls["project"] + 1)
+    tab._start_native_file_projection_write = lambda *_args, **_kwargs: None
     tab._refresh_varac_messages = lambda *_args, **_kwargs: calls.__setitem__("varac", calls["varac"] + 1)
     tab._populate_messages_table = lambda *_args, **_kwargs: calls.__setitem__("populate", calls["populate"] + 1)
     tab._start_signature_verification = lambda *_args, **_kwargs: calls.__setitem__("sig", calls["sig"] + 1)
@@ -5777,6 +5796,22 @@ def test_visible_message_check_rebuilds_when_sources_change() -> None:
 
     assert calls == {"populate": 1, "pending": 1}
     assert tab._message_check_status_text == "1 new message"
+
+
+def test_structured_projection_uses_checkpoints_even_when_refresh_is_forced() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    calls: dict[str, object] = {}
+    tab._load_js8_from_local = lambda **_kwargs: None
+    tab._load_spotter_from_db = lambda **_kwargs: None
+    tab._load_sitrep_from_local = lambda **_kwargs: None
+    tab._load_commstat_from_local = lambda **_kwargs: None
+    tab._load_mesh_observations_from_store = lambda: None
+    tab._start_native_message_projection_write = lambda **kwargs: calls.setdefault("native_force", kwargs.get("force"))
+    tab._populate_messages_table = lambda **_kwargs: calls.setdefault("populate", True)
+
+    MessageViewerTab._load_structured_message_projections(tab, force=True, rebuild=False)
+
+    assert calls == {"native_force": False}
 
 
 def test_message_sources_fingerprint_includes_js8_and_spotter_source_identity() -> None:

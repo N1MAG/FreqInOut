@@ -185,6 +185,7 @@ from freqinout.core.message_inbox_filters import (
     row_matches_excluded_types as _core_row_matches_excluded_types,
     row_matches_inbox_criteria as _core_row_matches_inbox_criteria,
     row_matches_inbox_focus as _core_row_matches_inbox_focus,
+    row_matches_source_filter as _core_row_matches_source_filter,
     row_matches_type_filter as _core_row_matches_type_filter,
     row_matches_workspace_scope as _core_row_matches_workspace_scope,
     row_search_text as _core_row_search_text,
@@ -11621,7 +11622,7 @@ class MessageViewerTab(QWidget):
             self._load_mesh_observations_from_store()
         except Exception as e:
             log.debug("MessageViewer: mesh observation load failed: %s", e)
-        self._start_native_message_projection_write(force=force)
+        self._start_native_message_projection_write(force=False)
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -13440,7 +13441,7 @@ class MessageViewerTab(QWidget):
         if self._qt_thread_running(getattr(self, "_native_projection_thread", None)):
             self._native_projection_pending_force = bool(self._native_projection_pending_force or force)
             return
-        self._native_projection_generation += 1
+        self._native_projection_generation = int(getattr(self, "_native_projection_generation", 0) or 0) + 1
         generation = int(self._native_projection_generation)
         self._native_projection_pending_force = False
         self._native_projection_thread = QThread(self)
@@ -13506,7 +13507,7 @@ class MessageViewerTab(QWidget):
             self._native_file_projection_pending_records = {str(k or ""): list(v or []) for k, v in (records or {}).items()}
             self._native_file_projection_pending_force = bool(self._native_file_projection_pending_force or force)
             return
-        self._native_file_projection_generation += 1
+        self._native_file_projection_generation = int(getattr(self, "_native_file_projection_generation", 0) or 0) + 1
         generation = int(self._native_file_projection_generation)
         self._native_file_projection_pending_records = {}
         self._native_file_projection_pending_force = False
@@ -13801,7 +13802,7 @@ class MessageViewerTab(QWidget):
         sources = self._selected_message_sources()
         option_rows: List[UnifiedMessage] = []
         for row in rows:
-            if sources is not None and self._message_source_value(row) not in sources:
+            if not _core_row_matches_source_filter(row, sources):
                 continue
             if not self._row_matches_inbox_criteria(row, criteria):
                 continue

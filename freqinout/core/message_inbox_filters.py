@@ -62,7 +62,7 @@ def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
     origin = str(getattr(row, "origin", "") or "").strip().lower()
     msg_type = str(getattr(row, "msg_type", "") or "")
     if type_sel == "CommStat":
-        return origin == "commstat"
+        return "commstat" in message_source_aliases(row)
     if type_sel == "Spotter":
         return origin == "spotter"
     if type_sel == "JS8Call":
@@ -82,6 +82,72 @@ def row_matches_type_filter(row: MessageRowLike, type_sel: str) -> bool:
 
 def message_source_value(row: MessageRowLike) -> str:
     return str(getattr(row, "origin", "") or "").strip().lower()
+
+
+def _normalize_source_alias(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    aliases = {
+        "js8call": "js8",
+        "js8": "js8",
+        "js8spotter": "spotter",
+        "fiospotter": "spotter",
+        "spotter": "spotter",
+        "varac": "varac",
+        "varac_bbs": "bbs",
+        "bbs_archive": "bbs",
+        "bbs": "bbs",
+        "flmsg": "flmsg",
+        "flamp": "flamp",
+        "fastlight": "flmsg",
+        "sitrep": "sitrep",
+        "commstat": "commstat",
+        "commstat_rf": "commstat",
+        "commstat rf": "commstat",
+        "local_report": "local_report",
+    }
+    if "commstat" in text:
+        return "commstat"
+    return aliases.get(text, text)
+
+
+def message_source_aliases(row: MessageRowLike) -> set[str]:
+    origin = message_source_value(row)
+    aliases = {_normalize_source_alias(origin)} if origin else set()
+    payload = getattr(row, "payload", None)
+    for attr in (
+        "source_family",
+        "source_family_label",
+        "source_label",
+        "source_first",
+        "source_last",
+        "message_type",
+        "display_type",
+        "subtype",
+        "artifact_kind",
+    ):
+        candidate = getattr(payload, attr, "") if payload is not None else ""
+        normalized = _normalize_source_alias(candidate)
+        if normalized:
+            aliases.add(normalized)
+    for candidate in (getattr(row, "msg_type", ""), getattr(row, "title", "")):
+        normalized = _normalize_source_alias(candidate)
+        if normalized == "commstat":
+            aliases.add("commstat")
+    return {alias for alias in aliases if alias}
+
+
+def row_matches_source_filter(
+    row: MessageRowLike,
+    selected_sources: set[str] | frozenset[str] | None,
+) -> bool:
+    if selected_sources is None:
+        return True
+    selected = {_normalize_source_alias(source) for source in selected_sources if _normalize_source_alias(source)}
+    if not selected:
+        return False
+    return bool(message_source_aliases(row) & selected)
 
 
 def message_source_label(source: object) -> str:
@@ -235,7 +301,7 @@ def row_matches_workspace_scope(
     selected_groups: set[str] | frozenset[str] | None = None,
     configured_groups: set[str] | frozenset[str] | None = None,
 ) -> bool:
-    if selected_sources is not None and message_source_value(row) not in selected_sources:
+    if not row_matches_source_filter(row, selected_sources):
         return False
     if selected_groups is not None and message_group_value(row, configured_groups=configured_groups) not in selected_groups:
         return False
