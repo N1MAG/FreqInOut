@@ -528,6 +528,14 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_status.setWordWrap(True)
         details_layout.addWidget(self.macro_profile_status)
 
+        mapping_action_row = QHBoxLayout()
+        self.macro_profile_edit_mappings_btn = QPushButton("Edit Mappings...")
+        self.macro_profile_edit_mappings_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.macro_profile_edit_mappings_btn.clicked.connect(self._open_macro_mapping_dialog)
+        mapping_action_row.addWidget(self.macro_profile_edit_mappings_btn)
+        mapping_action_row.addStretch()
+        details_layout.addLayout(mapping_action_row)
+
         self.macro_mapping_locations_label = QLabel()
         self.macro_mapping_locations_label.setWordWrap(True)
         self.macro_mapping_locations_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -4517,9 +4525,24 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_details_btn.setStyleSheet(self._macro_header_style())
         if hasattr(self, "macro_setup_controls"):
             self.macro_setup_controls.setVisible(not selected_path or needs_mapping)
+        if hasattr(self, "macro_profile_edit_mappings_btn"):
+            self.macro_profile_edit_mappings_btn.setVisible(bool(selected_path))
+            self.macro_profile_edit_mappings_btn.setEnabled(bool(selected_path))
         self._refresh_macro_mapping_locations()
 
     def _macro_mapping_locations_text(self) -> str:
+        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        active_mappings = [
+            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
+        ] if isinstance(mappings, list) else []
+        if active_mappings:
+            lines = ["Mapped macro files:"]
+            for mapping in active_mappings:
+                lines.append(self._macro_mapping_location_line(mapping))
+            return "\n".join(lines)
+
         checkin_dir = self._resolve_checkin_dir()
         default_paths = [
             (label, checkin_dir / filename)
@@ -4530,30 +4553,28 @@ class FldigiNetControlTab(QWidget):
                 (f"{role}_{label}", checkin_dir / filename)
                 for label, filename in ROLE_CHECKIN_FILE_NAMES[role].items()
             )
-        lines = ["Macro check-in files:"]
+        lines = ["Default macro check-in files:"]
         lines.extend(f"{label}: {path}" for label, path in default_paths)
         lines.append(f"Archive: {checkin_dir / 'archive'}")
-
-        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
-        record = self._macro_profile_record(selected)
-        mappings = record.get("mappings")
-        active_mappings = [
-            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
-        ] if isinstance(mappings, list) else []
-        if not active_mappings:
+        if selected:
             lines.append("Mapped macro files: none active.")
             return "\n".join(lines)
-
-        lines.append("Mapped macro files:")
-        for mapping in active_mappings:
-            function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
-            if function == "CUSTOM":
-                function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
-            scope = str(mapping.get("scope") or "").strip().upper()
-            source_file = str(mapping.get("source_file") or "").strip()
-            label = f"{scope} {function}".strip()
-            lines.append(f"{label}: {source_file or '(macro-only mapping)'}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _macro_mapping_location_line(mapping: Dict[str, object]) -> str:
+        function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
+        if function == "CUSTOM":
+            function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
+        scope = str(mapping.get("scope") or "").strip().upper()
+        macro_label = str(mapping.get("macro_label") or "").strip()
+        macro_id = str(mapping.get("macro_id") or "").strip()
+        source_file = str(mapping.get("source_file") or "").strip()
+        label = f"{scope} {function}".strip()
+        macro_bits = " / ".join(bit for bit in (macro_label, macro_id) if bit)
+        if macro_bits:
+            label = f"{label} ({macro_bits})"
+        return f"{label}: {source_file or '(macro-only mapping)'}"
 
     def _refresh_macro_mapping_locations(self) -> None:
         if hasattr(self, "macro_mapping_locations_label"):

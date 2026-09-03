@@ -831,12 +831,16 @@ def test_macro_details_show_file_locations_and_expanded_info_style(monkeypatch, 
         assert tab.macro_profile_details_btn.styleSheet()
         assert tab.macro_profile_details_btn.text() == "Macro: Mapped - mapped"
         assert not tab.macro_setup_controls.isVisibleTo(tab)
+        assert tab.macro_profile_edit_mappings_btn.isVisibleTo(tab)
+        assert tab.macro_profile_edit_mappings_btn.isEnabled()
         locations = tab.macro_mapping_locations_label.text()
-        assert "CheckIns_TFC.txt" in locations
-        assert "CheckIns_ALL.txt" in locations
-        assert "NCS_ACK_Pending.txt" in locations
-        assert "ANCS_Next_TFC.txt" in locations
+        assert "NCS TFC (TRAFFIC / slot_00):" in locations
+        assert "traffic.txt" in locations
         assert str(source_path) in locations
+        assert "Default macro check-in files:" not in locations
+        assert "CheckIns_ALL.txt" not in locations
+        assert "NCS_ACK_Pending.txt" not in locations
+        assert "ANCS_Next_TFC.txt" not in locations
 
         tab._set_setup_details_expanded(False)
         assert tab.macro_profile_details_btn.text() == "Macro: Mapped - mapped"
