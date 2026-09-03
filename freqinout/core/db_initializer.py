@@ -14,6 +14,7 @@ from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.sqlite_utils import connect_sqlite
@@ -1756,6 +1757,7 @@ def _ensure_nets_db() -> None:
 
         _ensure_operator_checkins(conn)
         _ensure_local_operator_tables(conn)
+        ensure_message_projection_schema(conn)
         _ensure_js8_links(conn)
         ensure_varac_local_tables(conn)
         _ensure_js8_expect_tables(conn)
