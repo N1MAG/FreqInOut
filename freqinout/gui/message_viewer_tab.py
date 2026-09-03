@@ -11432,7 +11432,11 @@ class MessageViewerTab(QWidget):
                     self._start_native_file_projection_write(records, force=force)
                     self._refresh_varac_messages(force=force, rebuild=False)
                     self._populate_messages_table(force=force)
-                self._start_signature_verification(force=force)
+                if not (
+                    bool(getattr(self, "_projection_primary_enabled", False))
+                    and float(getattr(self, "_last_projection_render_ts", 0.0) or 0.0) > 0.0
+                ):
+                    self._start_signature_verification(force=force)
                 self._files_snapshot_fp = records_fp
         finally:
             self._refresh_files_inflight = False
@@ -12949,8 +12953,18 @@ class MessageViewerTab(QWidget):
         with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
             self._refresh_message_filters(rows)
         with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
-            self._apply_message_filters()
-        log.debug("MessageViewer: loaded %d projected messages", len(rows))
+            self._apply_message_filters(recover_empty_stale_scope=True)
+        model_rows = 0
+        try:
+            model_rows = len(self._messages_model.rows())
+        except Exception:
+            model_rows = 0
+        log.info(
+            "MESSAGES|projected_table_loaded rows=%d rendered=%d scope=%s",
+            len(rows),
+            model_rows,
+            self._active_message_scope_summary(),
+        )
         return True
 
     def _load_projected_message_rows(self, *, limit: int = 1500) -> List[UnifiedMessage]:
@@ -13742,7 +13756,12 @@ class MessageViewerTab(QWidget):
             criteria = replace(criteria, focus="all")
         return _core_row_matches_inbox_criteria(row, criteria)
 
-    def _apply_message_filters(self, *, refresh_options: bool = True) -> None:
+    def _apply_message_filters(
+        self,
+        *,
+        refresh_options: bool = True,
+        recover_empty_stale_scope: bool = False,
+    ) -> None:
         rows = self._message_rows
         now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
         criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
@@ -13765,6 +13784,30 @@ class MessageViewerTab(QWidget):
             if not self._row_matches_map_context_filter(row):
                 continue
             filtered.append(row)
+        if (
+            recover_empty_stale_scope
+            and not filtered
+            and rows
+            and self._recover_empty_message_filter_state(rows, criteria, selected_sources, selected_groups)
+        ):
+            criteria = self._current_inbox_filter_criteria(now_ts=now_ts)
+            type_sel = criteria.type_sel
+            selected_sources = self._selected_message_sources()
+            selected_groups = self._expanded_selected_message_groups()
+            configured_groups = self._configured_message_group_names()
+            for row in rows:
+                if not _core_row_matches_workspace_scope(
+                    row,
+                    selected_sources=selected_sources,
+                    selected_groups=selected_groups,
+                    configured_groups=configured_groups,
+                ):
+                    continue
+                if not self._row_matches_inbox_criteria(row, criteria):
+                    continue
+                if not self._row_matches_map_context_filter(row):
+                    continue
+                filtered.append(row)
         self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
         if (
             type_sel == "BBS"
@@ -13795,6 +13838,63 @@ class MessageViewerTab(QWidget):
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             len(filtered),
         )
+        log.info(
+            "MESSAGES|inbox_filter_result loaded=%d rendered=%d focus=%s sources=%s groups=%s type=%s status=%s search=%s",
+            len(rows),
+            len(filtered),
+            criteria.focus,
+            sorted(selected_sources) if selected_sources is not None else ["ALL"],
+            sorted(display_groups) if display_groups is not None else ["ALL"],
+            criteria.type_sel,
+            criteria.status_sel,
+            criteria.search_query or "ALL",
+        )
+
+    def _recover_empty_message_filter_state(
+        self,
+        rows: List[UnifiedMessage],
+        criteria: InboxFilterCriteria,
+        selected_sources: Optional[Set[str]],
+        selected_groups: Optional[Set[str]],
+    ) -> bool:
+        if not rows:
+            return False
+        stale_source_filter = selected_sources is not None and not any(
+            _core_row_matches_source_filter(row, selected_sources) for row in rows
+        )
+        configured_groups = self._configured_message_group_names()
+        stale_group_filter = selected_groups is not None and not any(
+            _core_message_group_value(row, configured_groups=configured_groups) in selected_groups
+            for row in rows
+        )
+        if not stale_source_filter and not stale_group_filter:
+            return False
+        if stale_source_filter and hasattr(self, "source_filter"):
+            self._select_all_dropdown_values(self.source_filter)
+        if stale_group_filter and hasattr(self, "operating_group_filter"):
+            self._select_all_dropdown_values(self.operating_group_filter)
+        log.warning(
+            "MESSAGES|recovered_empty_filter_state loaded=%d focus=%s stale_sources=%s stale_groups=%s",
+            len(rows),
+            criteria.focus,
+            bool(stale_source_filter),
+            bool(stale_group_filter),
+        )
+        return True
+
+    @staticmethod
+    def _select_all_dropdown_values(widget: object) -> None:
+        values = [value for value, _label in getattr(widget, "_options", []) or [] if str(value or "").strip()]
+        if not values:
+            return
+        try:
+            widget.blockSignals(True)
+            widget.set_selected_values(values)
+        finally:
+            try:
+                widget.blockSignals(False)
+            except Exception:
+                pass
 
     def _rows_for_group_filter_options(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
         now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()

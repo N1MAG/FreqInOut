@@ -2271,6 +2271,37 @@ def test_commstat_source_filter_matches_projected_commstat_sitreps() -> None:
     assert row_matches_inbox_focus(row, "commstat") is True
 
 
+def test_message_filter_recovery_selects_all_when_stale_scope_hides_loaded_rows() -> None:
+    class FakeDropdown:
+        def __init__(self, options: list[tuple[str, str]]) -> None:
+            self._options = options
+            self.selected: list[str] = []
+
+        def blockSignals(self, _blocked: bool) -> None:
+            pass
+
+        def set_selected_values(self, values: list[str]) -> None:
+            self.selected = list(values)
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.source_filter = FakeDropdown([("commstat", "CommStat"), ("js8", "JS8Call")])
+    tab.operating_group_filter = FakeDropdown([("MR08", "MR08"), ("MAGNET", "MAGNET")])
+    tab._configured_message_group_names = lambda: {"MR08", "MAGNET"}
+    row = UnifiedMessage("CommStat", "INFO", "K7ETC", "MR08", 1.0, "", "Power", "commstat", SimpleNamespace())
+
+    recovered = MessageViewerTab._recover_empty_message_filter_state(
+        tab,
+        [row],
+        InboxFilterCriteria(focus="all"),
+        {"missing-source"},
+        {"MISSING-GROUP"},
+    )
+
+    assert recovered is True
+    assert tab.source_filter.selected == ["commstat", "js8"]
+    assert tab.operating_group_filter.selected == ["MR08", "MAGNET"]
+
+
 def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
     class FakeSourceFilter:
         def __init__(self) -> None:
