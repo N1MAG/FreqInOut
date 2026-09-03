@@ -12924,7 +12924,7 @@ class MessageViewerTab(QWidget):
                 return
             self._deferred_refresh = False
             if self._projection_primary_enabled and self._load_projected_messages_into_table():
-                if not force and (time.time() - float(getattr(self, "_last_source_rows_build_ts", 0.0) or 0.0)) < 60.0:
+                if not force:
                     return
             self._start_rows_build(force=force)
 
@@ -15415,7 +15415,7 @@ class MessageViewerTab(QWidget):
                 pass
 
         try:
-            progress_w = int(self.loading_label.fontMetrics().horizontalAdvance("Checking Messages...") + 64)
+            progress_w = int(self.loading_label.fontMetrics().horizontalAdvance("Indexing messages...") + 64)
             self._loading_progress.setFixedWidth(max(140, min(260, progress_w)))
         except Exception:
             pass

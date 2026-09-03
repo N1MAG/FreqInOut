@@ -141,6 +141,20 @@ Rules:
   deletion/archive state.
 - Default inbox queries must return in less than 250 ms on a typical production
   laptop with 100k projected messages.
+- Messages activation is projected-DB-first. Opening Inbox must not parse
+  external databases, scan watched folders, verify signatures, or build legacy
+  unified source rows before first paint.
+- Inbox first paint must use the last available FIO projection immediately, then
+  refresh counts, source freshness, signatures, and deep intelligence
+  progressively.
+- Legacy unified row construction is a compatibility/projection-repair path. It
+  may run on explicit forced refresh or in a background feeder after projected
+  rows are already visible, but it must not gate normal navigation or filter
+  changes.
+- Startup warmup should create the Messages surface and start message indexing
+  when the runtime policy allows Messages. Operators may see an informational
+  `Indexing messages...` state, but this state must not be represented as a
+  warning or a user-actionable fault.
 - Detail views may lazy-load raw bodies/artifacts by `message_id`.
 - Re-enrichment is triggered only when content hash, source metadata,
   intelligence version, or operator override changes.
@@ -156,8 +170,9 @@ Rules:
 - Project existing unified message rows into the normalized FIO tables on a
   coalesced background worker.
 - Skip unchanged projection refreshes through durable projection checkpoints.
-- Render the Messages tab projection-first when projected rows exist, keeping
-  source row building as a background refresh/projection feeder.
+- Render the Messages tab projection-first when projected rows exist. A
+  successful projected load is terminal for normal Inbox activation; source row
+  building remains a forced refresh, repair, or background projection feeder.
 - Preserve external references for JS8Call, FIOSpotter, CommStat, SitRep,
   VarAC, FLMsg, FLAmp, and BBS rows.
 - Preserve file-backed artifact metadata, including FLAmp Q IDs and block ids.
@@ -169,6 +184,6 @@ Rules:
   delete effects with audit results on a bounded Messages-tab queue timer.
 - Add contract tests for uniqueness, bounded queries, external refs, artifacts,
   and delete queue/audit behavior.
-- Migrate the Messages tab to query this projection in a follow-up slice, then
-  move source-specific ingestion into incremental checkpointed projection
+- Messages tab queries this projection directly for normal Inbox display, while
+  source-specific ingestion runs through incremental checkpointed projection
   writers.

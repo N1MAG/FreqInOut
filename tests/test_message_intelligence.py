@@ -3717,6 +3717,46 @@ def test_refresh_js8_messages_fallback_ingest_reloads_projection_after_local_ing
     assert "populate" not in calls
 
 
+def test_projection_primary_populate_does_not_start_legacy_rows_build_on_normal_activation(monkeypatch) -> None:
+    from freqinout.gui.message_viewer_tab import MessageViewerTab
+
+    calls: list[str] = []
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = {}
+    tab._has_active_view = True
+    tab._app_active = True
+    tab._freeze_messages_table = False
+    tab._deferred_refresh = True
+    tab._projection_primary_enabled = True
+    tab._load_projected_messages_into_table = lambda: calls.append("projected") or True
+    tab._start_rows_build = lambda **_kwargs: calls.append("legacy_build")
+
+    MessageViewerTab._populate_messages_table(tab, force=False)
+
+    assert calls == ["projected"]
+    assert tab._deferred_refresh is False
+
+
+def test_projection_primary_forced_populate_can_rebuild_legacy_rows_for_repair(monkeypatch) -> None:
+    from freqinout.gui.message_viewer_tab import MessageViewerTab
+
+    calls: list[str] = []
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = {}
+    tab._has_active_view = True
+    tab._app_active = True
+    tab._freeze_messages_table = False
+    tab._deferred_refresh = True
+    tab._projection_primary_enabled = True
+    tab._load_projected_messages_into_table = lambda: calls.append("projected") or True
+    tab._start_rows_build = lambda **kwargs: calls.append(f"legacy_build:{bool(kwargs.get('force'))}")
+
+    MessageViewerTab._populate_messages_table(tab, force=True)
+
+    assert calls == ["projected", "legacy_build:True"]
+    assert tab._deferred_refresh is False
+
+
 def test_bulk_delete_audits_skipped_unsupported_rows(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     row = UnifiedMessage("Mystery", "NEW", "K7ETC", "MR08", 2.0, "", "Unsupported", "mystery", object())
