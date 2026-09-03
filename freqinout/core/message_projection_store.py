@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import datetime
 import json
 import sqlite3
 from dataclasses import dataclass, field
@@ -677,7 +678,7 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
     clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
     if not clean_ids:
         return 0
-    conn = connect_sqlite(db_path)
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
     try:
         ensure_message_projection_schema(conn)
         stamp = utc_now_iso()
@@ -694,10 +695,64 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
                     """,
                     (stamp, message_id),
                 )
+                _mark_source_refs_read(conn, message_id, stamp)
                 count += int(cur.rowcount or 0)
             return count
     finally:
         conn.close()
+
+
+def _mark_source_refs_read(conn: sqlite3.Connection, message_id: str, stamp: str) -> None:
+    refs = list(
+        conn.execute(
+            """
+            SELECT *
+              FROM message_external_refs
+             WHERE message_id=? AND COALESCE(read_capability, '') IN (
+                'mark_read', 'js8_mark_read', 'spotter_mark_read', 'varac_mark_read'
+             )
+            """,
+            (message_id,),
+        )
+    )
+    read_ts = datetime_from_iso_ts(stamp)
+    for ref in refs:
+        kind = str(ref["external_kind"] or "").strip().lower()
+        key = str(ref["external_key"] or "").strip()
+        metadata = _parse_json_object(ref["metadata_json"])
+        row_id = str(metadata.get("row_id") or "").strip()
+        try:
+            if kind == "js8_message" and _table_exists(conn, "js8_messages"):
+                target = _int_text(row_id or key)
+                if target > 0:
+                    conn.execute(
+                        "UPDATE js8_messages SET state='READ', read_ts=? WHERE id=? OR COALESCE(source_id, id)=?",
+                        (read_ts, target, target),
+                    )
+            elif kind == "spotter_message" and _table_exists(conn, "spotter_traffic"):
+                target = _int_text(row_id or key)
+                if target > 0:
+                    conn.execute("UPDATE spotter_traffic SET state='READ', read_ts=? WHERE id=?", (read_ts, target))
+            elif kind == "varac_message" and _table_exists(conn, "varac_messages"):
+                target = _int_text(row_id)
+                source = str(metadata.get("source") or "").strip()
+                source_key = str(metadata.get("source_key") or "").strip()
+                if target > 0 and source and _table_has_column(conn, "varac_messages", "ingest_source_key"):
+                    conn.execute(
+                        "UPDATE varac_messages SET read_status=1 WHERE ingest_source_key=? AND source=? AND id=?",
+                        (source_key, source, target),
+                    )
+                elif target > 0:
+                    conn.execute("UPDATE varac_messages SET read_status=1 WHERE id=?", (target,))
+        except Exception:
+            continue
+
+
+def datetime_from_iso_ts(value: str) -> float:
+    try:
+        return datetime.datetime.fromisoformat(str(value or "")).timestamp()
+    except Exception:
+        return 0.0
 
 
 def get_message_projection_checkpoint(
@@ -798,9 +853,11 @@ def _process_delete_queue_row(conn: sqlite3.Connection, row: sqlite3.Row) -> str
     if not delete_id or not message_id:
         return "skipped"
     try:
-        if effect in {"hide_fio", "source_delete"}:
+        if effect == "hide_fio":
             _complete_delete_queue_row(conn, delete_id, message_id, effect, "completed", "Projection hidden")
             return "completed"
+        if effect == "source_delete":
+            return _process_source_external_delete(conn, delete_id, message_id, effect)
         if effect == "audit_only":
             with conn:
                 conn.execute(
@@ -821,6 +878,115 @@ def _process_delete_queue_row(conn: sqlite3.Connection, row: sqlite3.Row) -> str
     except Exception as exc:
         _complete_delete_queue_row(conn, delete_id, message_id, effect, "failed", str(exc))
         return "failed"
+
+
+def _process_source_external_delete(
+    conn: sqlite3.Connection,
+    delete_id: str,
+    message_id: str,
+    effect: str,
+) -> str:
+    refs = list(
+        conn.execute(
+            """
+            SELECT *
+              FROM message_external_refs
+             WHERE message_id=? AND COALESCE(delete_capability, '') IN (
+                'delete_source', 'js8_delete', 'spotter_delete', 'varac_soft_delete',
+                'sitrep_delete', 'commstat_delete'
+             )
+             ORDER BY source_id, external_kind, external_key
+            """,
+            (message_id,),
+        )
+    )
+    if not refs:
+        _complete_delete_queue_row(conn, delete_id, message_id, effect, "completed", "Projection hidden; no source-delete refs")
+        return "completed"
+    deleted = 0
+    skipped = 0
+    errors: list[str] = []
+    with conn:
+        for ref in refs:
+            try:
+                if _delete_source_ref(conn, ref):
+                    deleted += 1
+                else:
+                    skipped += 1
+            except Exception as exc:
+                errors.append(f"{ref['external_kind']}:{ref['external_key']}: {exc}")
+    detail = f"Deleted {deleted} source ref(s); skipped {skipped}"
+    if errors:
+        detail += "; errors: " + "; ".join(errors[:3])
+    state = "failed" if errors and deleted == 0 else "completed"
+    _complete_delete_queue_row(conn, delete_id, message_id, effect, state, detail)
+    return "failed" if state == "failed" else "completed"
+
+
+def _delete_source_ref(conn: sqlite3.Connection, ref: sqlite3.Row) -> bool:
+    kind = str(ref["external_kind"] or "").strip().lower()
+    key = str(ref["external_key"] or "").strip()
+    metadata = _parse_json_object(ref["metadata_json"])
+    row_id = str(metadata.get("row_id") or "").strip()
+    if kind == "js8_message":
+        if not _table_exists(conn, "js8_messages"):
+            return False
+        target = _int_text(row_id or key)
+        if target <= 0:
+            return False
+        cur = conn.execute("DELETE FROM js8_messages WHERE id=? OR COALESCE(source_id, id)=?", (target, target))
+        try:
+            conn.execute("DELETE FROM js8_inbox_state WHERE id=? OR COALESCE(source_id, id)=?", (target, target))
+        except Exception:
+            pass
+        return int(cur.rowcount or 0) > 0
+    if kind == "spotter_message":
+        if not _table_exists(conn, "spotter_traffic"):
+            return False
+        target = _int_text(row_id or key)
+        if target <= 0:
+            return False
+        cur = conn.execute("DELETE FROM spotter_traffic WHERE id=?", (target,))
+        return int(cur.rowcount or 0) > 0
+    if kind == "varac_message":
+        if not _table_exists(conn, "varac_messages"):
+            return False
+        target = _int_text(row_id)
+        source = str(metadata.get("source") or "").strip()
+        source_key = str(metadata.get("source_key") or "").strip()
+        if target > 0 and source and _table_has_column(conn, "varac_messages", "ingest_source_key"):
+            cur = conn.execute(
+                "UPDATE varac_messages SET is_deleted=1 WHERE ingest_source_key=? AND source=? AND id=?",
+                (source_key, source, target),
+            )
+            return int(cur.rowcount or 0) > 0
+        if target > 0:
+            cur = conn.execute("UPDATE varac_messages SET is_deleted=1 WHERE id=?", (target,))
+            return int(cur.rowcount or 0) > 0
+        if key:
+            cur = conn.execute(
+                "UPDATE varac_messages SET is_deleted=1 WHERE guid=? OR vmail_guid=?",
+                (key, key),
+            )
+            return int(cur.rowcount or 0) > 0
+        return False
+    if kind == "sitrep_event":
+        if not _table_exists(conn, "sitrep_events"):
+            return False
+        target = _int_text(row_id)
+        if target > 0:
+            cur = conn.execute("DELETE FROM sitrep_events WHERE id=?", (target,))
+            return int(cur.rowcount or 0) > 0
+        if key:
+            cur = conn.execute("DELETE FROM sitrep_events WHERE report_key=?", (key,))
+            return int(cur.rowcount or 0) > 0
+        return False
+    if kind == "commstat_artifact":
+        if not _table_exists(conn, "commstat_artifacts"):
+            return False
+        cur = conn.execute("DELETE FROM commstat_artifacts WHERE artifact_key=?", (key,))
+        return int(cur.rowcount or 0) > 0
+    return False
 
 
 def _process_file_external_delete(
@@ -866,6 +1032,39 @@ def _process_file_external_delete(
     state = "failed" if errors and deleted == 0 else "completed"
     _complete_delete_queue_row(conn, delete_id, message_id, effect, state, detail)
     return "failed" if state == "failed" else "completed"
+
+
+def _parse_json_object(value: object) -> dict[str, object]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _int_text(value: object) -> int:
+    try:
+        return int(float(str(value or "").strip()))
+    except Exception:
+        return 0
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        return any(str(row[1] or "") == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+    except Exception:
+        return False
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name=?",
+            (str(table or "").strip(),),
+        ).fetchone()
+    except Exception:
+        return False
+    return bool(row)
 
 
 def _complete_delete_queue_row(

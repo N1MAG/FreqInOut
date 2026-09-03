@@ -29,8 +29,9 @@ Acceptance:
 
 ## Phase 2: Incremental Projectors
 
-Status: checkpointed row-backed all-source projector implemented; source-native
-incremental checkpoints remain.
+Status: source-native incremental projectors implemented for local SQLite
+message sources and file-scan records; row-backed projection retained as
+compatibility backfill.
 
 Populate the projection spine from the existing unified message row builder
 without changing the UI read path yet. This gives every currently rendered
@@ -39,6 +40,13 @@ message intelligence row while keeping external sources authoritative.
 
 Implemented:
 
+- JS8Call, FIOSpotter, VarAC, SitRep, and CommStat local tables project
+  directly into `message_projection` through Qt-free source-native projectors.
+- FLMsg, FLAmp, VarAC file, and BBS file scan records project directly from
+  `FileRecord` scan results, including file-delete refs and FLAmp Q ID/block
+  artifact metadata.
+- Source-native projectors use durable `message_projection_checkpoint` records
+  so unchanged local tables and unchanged file scans skip projection writes.
 - All current Messages row families project into `message_projection`.
 - JS8Call, FIOSpotter, CommStat, SitRep, VarAC, FLMsg, FLAmp, and BBS rows get
   stable external reference keys.
@@ -51,15 +59,11 @@ Implemented:
   auditable projection delete entry.
 - Perf telemetry separates `messages.project_rows` from row build and rendering.
 
-Remaining source-native projectors:
+Remaining enrichment refinements:
 
-- JS8Call projector: inbox rows and raw directed traffic.
-- FIOSpotter projector: decoded forms, report keys, Expect/auth metadata.
-- CommStat projector: artifact keys, status, scope, reach, source refs.
-- SitRep projector: fused event rows and report keys.
-- VarAC projector: messages, VMail, BBS links, callsign stats references.
-- FLMsg/FLAmp projector: files, forms, FLAmp Q IDs, block/transfer state.
-- BBS projector: live/archive mailbox entries with source-side capabilities.
+- Add deeper source-native intelligence fields where existing source tables
+  expose Expect/auth metadata, VarAC callsign traits, or source-specific reply
+  hints not yet materialized in the hot projection.
 
 Acceptance:
 
@@ -71,8 +75,8 @@ Acceptance:
 
 ## Phase 3: Message UI Read Path
 
-Status: projection-first Messages read path implemented; rich source-native
-detail remains a background refresh/fallback behavior.
+Status: projection-first Messages read path implemented with source-native
+projection refreshes and row-backed compatibility fallback.
 
 Move the Messages tab from source-list row building to projection queries.
 
@@ -91,13 +95,15 @@ Implemented:
 - Hide/delete projected rows through the projection delete queue and audit path.
 - Use loaded file refs for projection-only file open, live BBS archive, and file
   delete actions while keeping table paint/click handling in-memory.
+- Run source-native projection workers for structured local message tables and
+  file-scan records independently of table rendering.
 - Keep source row building as a background projection refresh feeder.
 
 Remaining:
 
-- Use non-file source refs for JS8, Spotter, CommStat, SitRep, and VarAC
-  source-native open, source-native mark-read/delete, and compose handoff when
-  the row is loaded only from projection.
+- Use non-file source refs for richer source-specific compose/reply prefill
+  where needed. Projection rows already preserve source refs for detail,
+  source-native mark-read, and source-native delete.
 - Keep bounded live views, with explicit history/search controls for older
   traffic.
 
@@ -112,9 +118,8 @@ Acceptance:
 ## Phase 4: Intelligence And Purge Workers
 
 Status: core queue processor and Messages-tab bounded queue scheduling
-implemented for FIO hide/source tombstones, audit-only minimization, and
-file-delete capable external refs; every source-native external delete handler
-remains.
+implemented for FIO hide/source tombstones, audit-only minimization,
+source-table deletes, and file-delete capable external refs.
 
 Move rich intelligence and destructive source actions into background services.
 

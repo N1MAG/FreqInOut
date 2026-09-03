@@ -198,6 +198,7 @@ from freqinout.core.message_projection_projector import (
     mark_projected_message_rows_deleted,
     project_unified_message_rows,
 )
+from freqinout.core.message_source_projectors import project_native_file_records, project_native_message_sources
 from freqinout.core.message_projection_payload import ProjectedMessagePayload, projected_payload_from_row
 from freqinout.core.message_projection_store import (
     list_projected_messages,
@@ -1609,6 +1610,74 @@ class _MessageProjectionWriteWorker(QObject):
         )
 
 
+class _NativeMessageProjectionWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(self, *, db_path: str, generation: int, force: bool = False):
+        super().__init__()
+        self._db_path = str(db_path or "")
+        self._generation = int(generation)
+        self._force = bool(force)
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        projected: dict[str, int] = {}
+        error = ""
+        try:
+            if self._db_path:
+                projected = project_native_message_sources(self._db_path, force=self._force)
+        except Exception as exc:
+            error = str(exc)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "projected": projected,
+                "elapsed_ms": elapsed_ms,
+                "error": error,
+                "force": self._force,
+            }
+        )
+
+
+class _NativeFileProjectionWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        db_path: str,
+        records: Dict[str, List[FileRecord]],
+        generation: int,
+        force: bool = False,
+    ):
+        super().__init__()
+        self._db_path = str(db_path or "")
+        self._records = {str(k or ""): list(v or []) for k, v in (records or {}).items()}
+        self._generation = int(generation)
+        self._force = bool(force)
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        projected = 0
+        error = ""
+        try:
+            if self._db_path:
+                projected = project_native_file_records(self._db_path, self._records, force=self._force)
+        except Exception as exc:
+            error = str(exc)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "projected": projected,
+                "elapsed_ms": elapsed_ms,
+                "error": error,
+                "force": self._force,
+            }
+        )
+
+
 @dataclass
 class FileSignatureState:
     status: str = "unsigned"
@@ -2933,6 +3002,15 @@ class MessageViewerTab(QWidget):
         self._projection_write_worker: _MessageProjectionWriteWorker | None = None
         self._projection_write_generation: int = 0
         self._projection_write_pending_rows: List[UnifiedMessage] = []
+        self._native_projection_thread: QThread | None = None
+        self._native_projection_worker: _NativeMessageProjectionWorker | None = None
+        self._native_projection_generation: int = 0
+        self._native_projection_pending_force: bool = False
+        self._native_file_projection_thread: QThread | None = None
+        self._native_file_projection_worker: _NativeFileProjectionWorker | None = None
+        self._native_file_projection_generation: int = 0
+        self._native_file_projection_pending_records: Dict[str, List[FileRecord]] = {}
+        self._native_file_projection_pending_force: bool = False
         self._last_source_rows_build_ts: float = 0.0
         self._last_projection_render_ts: float = 0.0
         self._messages_busy_state: bool = False
@@ -11327,6 +11405,7 @@ class MessageViewerTab(QWidget):
                     self.files = records
                     self._save_file_scan_cache_meta_only(dir_mtimes=dir_mtimes)
                     self._scan_cache_loaded = True
+                    self._start_native_file_projection_write(records, force=force)
                 else:
                     self.files = records
                     self._update_fldigi_senders(records)
@@ -11335,6 +11414,7 @@ class MessageViewerTab(QWidget):
                     self._scan_cache_loaded = True
                     self._apply_bbs_sweeper_rules_after_file_scan(records)
                     self._project_message_files_to_observations(records)
+                    self._start_native_file_projection_write(records, force=force)
                     self._refresh_varac_messages(force=force, rebuild=False)
                     self._populate_messages_table(force=force)
                 self._start_signature_verification(force=force)
@@ -11527,6 +11607,7 @@ class MessageViewerTab(QWidget):
             self._load_mesh_observations_from_store()
         except Exception as e:
             log.debug("MessageViewer: mesh observation load failed: %s", e)
+        self._start_native_message_projection_write(force=force)
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -12258,6 +12339,8 @@ class MessageViewerTab(QWidget):
         self._request_worker_thread_stop(self._file_scan_thread)
         self._request_worker_thread_stop(self._rows_build_thread)
         self._request_worker_thread_stop(self._projection_write_thread)
+        self._request_worker_thread_stop(self._native_projection_thread)
+        self._request_worker_thread_stop(self._native_file_projection_thread)
         self._request_worker_thread_stop(self._signature_verify_thread)
         self._request_worker_thread_stop(self._bbs_auto_archive_thread)
 
@@ -13333,6 +13416,139 @@ class MessageViewerTab(QWidget):
             pending = list(self._projection_write_pending_rows)
             self._projection_write_pending_rows = []
             QTimer.singleShot(100, lambda rows=pending: self._start_message_projection_write(rows))
+
+    def _start_native_message_projection_write(self, *, force: bool = False) -> None:
+        if self._is_shutting_down:
+            return
+        db_path = self._db_path()
+        if db_path is None:
+            return
+        if self._qt_thread_running(getattr(self, "_native_projection_thread", None)):
+            self._native_projection_pending_force = bool(self._native_projection_pending_force or force)
+            return
+        self._native_projection_generation += 1
+        generation = int(self._native_projection_generation)
+        self._native_projection_pending_force = False
+        self._native_projection_thread = QThread(self)
+        self._native_projection_worker = _NativeMessageProjectionWorker(
+            db_path=str(db_path),
+            generation=generation,
+            force=force,
+        )
+        self._native_projection_worker.moveToThread(self._native_projection_thread)
+        self._native_projection_thread.started.connect(self._native_projection_worker.run)
+        self._native_projection_worker.finished.connect(self._on_native_message_projection_finished)
+        self._native_projection_worker.finished.connect(self._native_projection_thread.quit)
+        self._native_projection_worker.finished.connect(self._native_projection_worker.deleteLater)
+        self._native_projection_thread.finished.connect(self._on_native_message_projection_thread_finished)
+        self._native_projection_thread.finished.connect(self._native_projection_thread.deleteLater)
+        self._native_projection_thread.start()
+
+    def _on_native_message_projection_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        error = str(data.get("error", "") or "")
+        if error:
+            log.warning("MessageViewer: native message projection failed: %s", error)
+            return
+        try:
+            elapsed_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        except Exception:
+            elapsed_ms = 0.0
+        projected = data.get("projected", {})
+        if elapsed_ms > 0:
+            emit_span(
+                "messages.project_native_sources",
+                elapsed_ms,
+                settings=self.settings,
+                meta={
+                    "projected": projected if isinstance(projected, dict) else {},
+                    "force": bool(data.get("force", False)),
+                },
+                min_ms=5.0,
+            )
+        if self._projection_primary_enabled and not self._is_shutting_down:
+            self._load_projected_messages_into_table()
+
+    def _on_native_message_projection_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._native_projection_thread, self._native_projection_worker)
+        self._native_projection_thread = None
+        self._native_projection_worker = None
+        if self._native_projection_pending_force and not self._is_shutting_down:
+            self._native_projection_pending_force = False
+            QTimer.singleShot(100, lambda: self._start_native_message_projection_write(force=True))
+
+    def _start_native_file_projection_write(
+        self,
+        records: Dict[str, List[FileRecord]],
+        *,
+        force: bool = False,
+    ) -> None:
+        if self._is_shutting_down:
+            return
+        db_path = self._db_path()
+        if db_path is None:
+            return
+        if self._qt_thread_running(getattr(self, "_native_file_projection_thread", None)):
+            self._native_file_projection_pending_records = {str(k or ""): list(v or []) for k, v in (records or {}).items()}
+            self._native_file_projection_pending_force = bool(self._native_file_projection_pending_force or force)
+            return
+        self._native_file_projection_generation += 1
+        generation = int(self._native_file_projection_generation)
+        self._native_file_projection_pending_records = {}
+        self._native_file_projection_pending_force = False
+        self._native_file_projection_thread = QThread(self)
+        self._native_file_projection_worker = _NativeFileProjectionWorker(
+            db_path=str(db_path),
+            records={str(k or ""): list(v or []) for k, v in (records or {}).items()},
+            generation=generation,
+            force=force,
+        )
+        self._native_file_projection_worker.moveToThread(self._native_file_projection_thread)
+        self._native_file_projection_thread.started.connect(self._native_file_projection_worker.run)
+        self._native_file_projection_worker.finished.connect(self._on_native_file_projection_finished)
+        self._native_file_projection_worker.finished.connect(self._native_file_projection_thread.quit)
+        self._native_file_projection_worker.finished.connect(self._native_file_projection_worker.deleteLater)
+        self._native_file_projection_thread.finished.connect(self._on_native_file_projection_thread_finished)
+        self._native_file_projection_thread.finished.connect(self._native_file_projection_thread.deleteLater)
+        self._native_file_projection_thread.start()
+
+    def _on_native_file_projection_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        error = str(data.get("error", "") or "")
+        if error:
+            log.warning("MessageViewer: native file projection failed: %s", error)
+            return
+        try:
+            elapsed_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        except Exception:
+            elapsed_ms = 0.0
+        if elapsed_ms > 0:
+            emit_span(
+                "messages.project_native_files",
+                elapsed_ms,
+                settings=self.settings,
+                meta={
+                    "projected": int(data.get("projected", 0) or 0),
+                    "force": bool(data.get("force", False)),
+                },
+                min_ms=5.0,
+            )
+        if self._projection_primary_enabled and not self._is_shutting_down:
+            self._load_projected_messages_into_table()
+
+    def _on_native_file_projection_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._native_file_projection_thread, self._native_file_projection_worker)
+        self._native_file_projection_thread = None
+        self._native_file_projection_worker = None
+        if self._native_file_projection_pending_records and not self._is_shutting_down:
+            pending = dict(self._native_file_projection_pending_records)
+            pending_force = bool(self._native_file_projection_pending_force)
+            self._native_file_projection_pending_records = {}
+            self._native_file_projection_pending_force = False
+            QTimer.singleShot(
+                100,
+                lambda records=pending, force=pending_force: self._start_native_file_projection_write(records, force=force),
+            )
 
     def _remember_locally_deleted_row(self, row: UnifiedMessage) -> None:
         key = MessageTableModel._row_key(row)
@@ -14518,7 +14734,7 @@ class MessageViewerTab(QWidget):
                 mark_projected_message_rows_deleted(
                     db_path,
                     [row],
-                    requested_effect="hide_fio",
+                    requested_effect="source_delete",
                     requested_by="fio",
                     source_scope="projection",
                 )
@@ -14678,6 +14894,7 @@ class MessageViewerTab(QWidget):
         spotter_rows: List[SpotterMessage] = []
         varac_rows: List[VarACMessage] = []
         file_rows: List[FileRecord] = []
+        projected_rows: List[ProjectedMessagePayload] = []
         for row in rows:
             payload = row.payload
             if isinstance(payload, JS8Message) and payload.msg_id > 0 and payload.state.upper() != "READ":
@@ -14691,6 +14908,8 @@ class MessageViewerTab(QWidget):
                 status = (self._read_state_map.get(key, ("NEW", 0.0, 0))[0] or "").upper()
                 if status != "READ":
                     file_rows.append(payload)
+            elif isinstance(payload, ProjectedMessagePayload) and str(payload.read_state or "").lower() != "read":
+                projected_rows.append(payload)
 
         if js8_rows:
             self._mark_js8_rows_read_bulk(js8_rows, ts)
@@ -14700,6 +14919,13 @@ class MessageViewerTab(QWidget):
             self._mark_varac_rows_read_bulk(varac_rows)
         if file_rows:
             self._set_read_state_bulk(file_rows, "READ", ts)
+        if projected_rows:
+            db_path = self._db_path()
+            if db_path is not None:
+                try:
+                    mark_projected_messages_read(db_path, [msg.message_id for msg in projected_rows])
+                except Exception as exc:
+                    log.debug("MessageViewer: failed to mark projected rows read in bulk: %s", exc)
 
         changed = 0
         for row in rows:
@@ -14715,8 +14941,13 @@ class MessageViewerTab(QWidget):
             elif isinstance(payload, FileRecord):
                 key = self._read_state_key(payload.origin, payload)
                 now_read = ((self._read_state_map.get(key, ("NEW", 0.0, 0))[0] or "").upper() == "READ")
+            elif isinstance(payload, ProjectedMessagePayload):
+                now_read = str(payload.read_state or "").lower() == "read" or payload in projected_rows
             if now_read:
                 row.status = "READ"
+                if isinstance(payload, ProjectedMessagePayload):
+                    payload.status = "READ"
+                    payload.read_state = "read"
                 if prev != "READ":
                     changed += 1
         return changed

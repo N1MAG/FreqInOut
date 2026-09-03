@@ -293,6 +293,54 @@ def test_mark_projected_messages_read_updates_status_and_read_state(tmp_path) ->
     assert row["read_state"] == "read"
 
 
+def test_mark_projected_messages_read_updates_source_refs(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        conn.execute(
+            """
+            CREATE TABLE js8_messages (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER,
+                state TEXT,
+                read_ts REAL
+            )
+            """
+        )
+        conn.execute("INSERT INTO js8_messages (id, source_id, state, read_ts) VALUES (1, 101, 'UNREAD', 0)")
+        conn.commit()
+    finally:
+        conn.close()
+    source = MessageSourceRecord(source_id="js8:radio-a", source_family="js8")
+    message = _message("msg-js8-read")
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=message,
+        refs=(
+            ExternalMessageRef(
+                message_id=message.message_id,
+                source_id=source.source_id,
+                external_kind="js8_message",
+                external_key="101",
+                read_capability="mark_read",
+                metadata={"row_id": "1"},
+            ),
+        ),
+    )
+
+    assert mark_projected_messages_read(db_path, [message.message_id]) == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        state, read_ts = conn.execute("SELECT state, read_ts FROM js8_messages WHERE id=1").fetchone()
+    finally:
+        conn.close()
+    assert state == "READ"
+    assert read_ts > 0
+
+
 def test_process_delete_queue_completes_hide_without_external_delete(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     upsert_projected_message(db_path, source=_source(), message=_message("msg-hide"))
@@ -313,6 +361,56 @@ def test_process_delete_queue_completes_hide_without_external_delete(tmp_path) -
         conn.close()
     assert state == "completed"
     assert audit_count == 2
+
+
+def test_process_delete_queue_deletes_source_refs(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        conn.execute(
+            """
+            CREATE TABLE spotter_traffic (
+                id INTEGER PRIMARY KEY,
+                state TEXT
+            )
+            """
+        )
+        conn.execute("INSERT INTO spotter_traffic (id, state) VALUES (42, 'UNREAD')")
+        conn.commit()
+    finally:
+        conn.close()
+    source = MessageSourceRecord(source_id="spotter:radio-a", source_family="spotter")
+    message = _message("msg-spotter-delete")
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=message,
+        refs=(
+            ExternalMessageRef(
+                message_id=message.message_id,
+                source_id=source.source_id,
+                external_kind="spotter_message",
+                external_key="42",
+                delete_capability="delete_source",
+                metadata={"row_id": "42"},
+            ),
+        ),
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            queue_message_delete(conn, message_id=message.message_id, requested_effect="source_delete")
+    finally:
+        conn.close()
+
+    assert process_message_delete_queue(db_path) == {"completed": 1, "failed": 0, "skipped": 0}
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM spotter_traffic").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_process_delete_queue_audit_only_minimizes_body_preview(tmp_path) -> None:
