@@ -1709,7 +1709,7 @@ def test_inbox_focus_selects_operator_readable_table_profiles() -> None:
     tab = MessageViewerTab.__new__(MessageViewerTab)
 
     tab._inbox_focus = "spotter"
-    assert MessageViewerTab._message_display_profile_for_current_view(tab, "MSG Type...") == "field_report"
+    assert MessageViewerTab._message_display_profile_for_current_view(tab, "MSG Type...") == "field_summary"
 
     tab._inbox_focus = "commstat"
     assert MessageViewerTab._message_display_profile_for_current_view(tab, "MSG Type...") == "intel_report"
@@ -1720,8 +1720,18 @@ def test_inbox_focus_selects_operator_readable_table_profiles() -> None:
     tab._inbox_focus = "all"
     assert MessageViewerTab._message_display_profile_for_current_view(tab, "Spotter") == "field_report"
     assert MessageViewerTab._message_display_profile_for_current_view(tab, "FLMSG/FLAMP") == "form_message"
-    assert message_display_profile_for_focus_type("spotter", "MSG Type...") == "field_report"
+    assert message_display_profile_for_focus_type("spotter", "MSG Type...") == "field_summary"
     assert message_display_profile_for_focus_type("forms", "MSG Type...") == "form_message"
+    assert message_display_profile_headers("field_summary")[1] == (
+        "",
+        "MCF",
+        "Status",
+        "From",
+        "To",
+        "Summary",
+        "Age",
+        "",
+    )
     assert message_display_profile_headers("intel_report")[1] == (
         "",
         "Kind",
@@ -2420,6 +2430,29 @@ def test_form_message_profile_puts_message_first_and_uses_form_family_type() -> 
     assert model.headerData(2, Qt.Horizontal) == "Type"
     assert model.data(model.index(0, 1), Qt.DisplayRole) == "Widemouth 2 Fire"
     assert model.data(model.index(0, 2), Qt.DisplayRole) == "General"
+
+
+def test_spotter_focus_profile_shows_intelligent_summary() -> None:
+    summary = "F!701C | K7ETC -> MR08 | UT / DM38ST | Green / No significant issues"
+    model = MessageTableModel(
+        [
+            UnifiedMessage(
+                "F!701C",
+                "NEW",
+                "K7ETC",
+                "MR08",
+                1.0,
+                "",
+                summary,
+                "spotter",
+                object(),
+            )
+        ]
+    )
+    model.set_display_profile("field_summary", "Received")
+
+    assert model.headerData(5, Qt.Horizontal) == "Summary"
+    assert model.data(model.index(0, 5), Qt.DisplayRole) == summary
 
 
 def test_form_message_type_label_normalizes_common_nbems_form_families() -> None:

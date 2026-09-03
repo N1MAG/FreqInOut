@@ -49,10 +49,12 @@ def message_row_search_text(
 
 def message_display_profile_headers(profile: object) -> tuple[str, tuple[str, ...]]:
     profile_text = str(profile or "triage").strip().lower()
-    if profile_text not in {"triage", "field_report", "intel_report", "form_message"}:
+    if profile_text not in {"triage", "field_report", "field_summary", "intel_report", "form_message"}:
         profile_text = "triage"
     if profile_text == "field_report":
         return profile_text, ("", "MCF", "Status", "From", "To", "State / Grid", "Age", "")
+    if profile_text == "field_summary":
+        return profile_text, ("", "MCF", "Status", "From", "To", "Summary", "Age", "")
     if profile_text == "intel_report":
         return profile_text, ("", "Kind", "Status", "From", "To", "State / Grid", "Age", "")
     if profile_text == "form_message":
@@ -63,7 +65,7 @@ def message_display_profile_headers(profile: object) -> tuple[str, tuple[str, ..
 def message_display_profile_for_focus_type(focus: object, type_sel: object) -> str:
     focus_text = str(focus or "all").strip().lower()
     if focus_text == "spotter":
-        return "field_report"
+        return "field_summary"
     if focus_text == "forms":
         return "form_message"
     if focus_text == "commstat":

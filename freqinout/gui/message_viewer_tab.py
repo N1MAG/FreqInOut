@@ -2075,7 +2075,7 @@ class MessageTableModel(QAbstractTableModel):
                 return None
             return Qt.Checked if key in self._selected_keys else Qt.Unchecked
         if role == Qt.DisplayRole:
-            if self._display_profile in {"field_report", "intel_report"}:
+            if self._display_profile in {"field_report", "field_summary", "intel_report"}:
                 if col == 1:
                     return self._field_report_form(row)
                 if col == 2:
@@ -2085,6 +2085,8 @@ class MessageTableModel(QAbstractTableModel):
                 if col == 4:
                     return self._field_report_group(row)
                 if col == 5:
+                    if self._display_profile == "field_summary":
+                        return row.title
                     return self._field_report_area(row)
                 if col == 6:
                     return self._relative_age(row.rcv_ts)
@@ -2181,7 +2183,7 @@ class MessageTableModel(QAbstractTableModel):
         return None
 
     def set_time_header(self, label: str) -> None:
-        idx = 6 if self._display_profile in {"field_report", "intel_report"} else 5
+        idx = 6 if self._display_profile in {"field_report", "field_summary", "intel_report"} else 5
         self._headers[idx] = "Age"
         self.headerDataChanged.emit(Qt.Horizontal, idx, idx)
 
@@ -2265,7 +2267,7 @@ class MessageTableModel(QAbstractTableModel):
         return relative_age_label(ts)
 
     def _cell_text(self, row: UnifiedMessage, field: str) -> str:
-        if self._display_profile in {"field_report", "intel_report"}:
+        if self._display_profile in {"field_report", "field_summary", "intel_report"}:
             if field == "type":
                 return self._field_report_form(row)
             if field == "status":
@@ -2277,6 +2279,8 @@ class MessageTableModel(QAbstractTableModel):
             if field == "received":
                 return row.rcv_display
             if field == "message":
+                if self._display_profile == "field_summary":
+                    return row.title
                 return self._field_report_area(row)
         if field == "type":
             if self._display_profile == "form_message":
@@ -13986,16 +13990,16 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "_messages_model"):
             return
         old = self._messages_model.display_profile()
-        old_default_col = 6 if old in {"field_report", "intel_report"} else 5 if old == "form_message" else self._default_sort_column
+        old_default_col = 6 if old in {"field_report", "field_summary", "intel_report"} else 5 if old == "form_message" else self._default_sort_column
         self._messages_model.set_display_profile(profile, self._current_messages_time_header())
         new_profile = self._messages_model.display_profile()
-        new_default_col = 6 if new_profile in {"field_report", "intel_report"} else 5 if new_profile == "form_message" else self._default_sort_column
+        new_default_col = 6 if new_profile in {"field_report", "field_summary", "intel_report"} else 5 if new_profile == "form_message" else self._default_sort_column
         if old != new_profile and self._sort_column == old_default_col:
             self._sort_column = new_default_col
         if old != new_profile and hasattr(self, "messages_table"):
             self._apply_message_table_profile_widths()
         if hasattr(self, "view_spotter_map_btn"):
-            self.view_spotter_map_btn.setVisible(new_profile == "field_report")
+            self.view_spotter_map_btn.setVisible(new_profile in {"field_report", "field_summary"})
 
     def _request_spotter_map_view(self) -> None:
         context = self._message_map_context()
@@ -14059,11 +14063,14 @@ class MessageViewerTab(QWidget):
                     header.setSectionResizeMode(idx, QHeaderView.Fixed)
                 else:
                     header.setSectionResizeMode(idx, QHeaderView.Interactive)
-            stretch_col = 1 if profile in {"field_report", "intel_report", "form_message"} else 6
+            stretch_col = 1 if profile in {"field_report", "field_summary", "intel_report", "form_message"} else 6
             header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)
         except Exception:
             pass
-        if profile == "field_report":
+        if profile == "field_summary":
+            widths = {0: 32, 1: 140, 2: 76, 3: 104, 4: 112, 5: 360, 6: 78, 7: 136}
+            min_width = 1040
+        elif profile == "field_report":
             widths = {0: 32, 1: 280, 2: 76, 3: 104, 4: 112, 5: 112, 6: 78, 7: 136}
             min_width = 930
         elif profile == "intel_report":
@@ -15851,7 +15858,7 @@ class MessageViewerTab(QWidget):
         profile = self._messages_model.display_profile() if hasattr(self, "_messages_model") else "triage"
 
         def key(row: UnifiedMessage):
-            if profile == "field_report":
+            if profile in {"field_report", "field_summary"}:
                 if col == 1:
                     return MessageTableModel._field_report_form(row)
                 if col == 2:
@@ -15861,6 +15868,8 @@ class MessageViewerTab(QWidget):
                 if col == 4:
                     return MessageTableModel._field_report_group(row)
                 if col == 5:
+                    if profile == "field_summary":
+                        return row.title or ""
                     return MessageTableModel._field_report_area(row)
                 if col == 6:
                     return row.rcv_ts or 0.0
