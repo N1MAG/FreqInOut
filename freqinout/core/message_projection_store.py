@@ -746,6 +746,7 @@ def list_projected_messages(
     db_path: str | Path,
     *,
     source_family: str = "",
+    source_families: Sequence[str] | None = None,
     group_name: str = "",
     status: str = "",
     severity: str = "",
@@ -760,9 +761,20 @@ def list_projected_messages(
         clauses.append("deleted=0")
     if not include_archived:
         clauses.append("archived=0")
+    requested_sources = [
+        str(value or "").strip().lower()
+        for value in (source_families or ())
+        if str(value or "").strip()
+    ]
     if source_family:
+        requested_sources.append(str(source_family or "").strip().lower())
+    requested_sources = sorted(set(requested_sources))
+    if len(requested_sources) == 1:
         clauses.append("source_family=?")
-        params.append(source_family)
+        params.append(requested_sources[0])
+    elif requested_sources:
+        clauses.append(f"source_family IN ({','.join('?' for _ in requested_sources)})")
+        params.extend(requested_sources)
     if group_name:
         clauses.append("group_name=?")
         params.append(group_name.lstrip("@"))

@@ -186,6 +186,52 @@ def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -
         conn.close()
 
 
+def test_projected_message_query_accepts_multiple_source_families(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    commstat_source = _source()
+    sitrep_source = MessageSourceRecord(
+        **{
+            **commstat_source.__dict__,
+            "source_id": "radio1-sitrep",
+            "source_family": "sitrep",
+            "source_label": "Radio 1 SitRep",
+        }
+    )
+    spotter_source = MessageSourceRecord(
+        **{
+            **commstat_source.__dict__,
+            "source_id": "radio1-spotter",
+            "source_family": "spotter",
+            "source_label": "Radio 1 Spotter",
+        }
+    )
+    commstat_msg = _message("msg-commstat", event_ts=300.0)
+    sitrep_msg = MessageProjectionRecord(
+        **{
+            **_message("msg-sitrep", event_ts=200.0).__dict__,
+            "primary_source_id": sitrep_source.source_id,
+            "source_family": "sitrep",
+            "source_label": sitrep_source.source_label,
+        }
+    )
+    spotter_msg = MessageProjectionRecord(
+        **{
+            **_message("msg-spotter", event_ts=400.0).__dict__,
+            "primary_source_id": spotter_source.source_id,
+            "source_family": "spotter",
+            "source_label": spotter_source.source_label,
+        }
+    )
+
+    upsert_projected_message(db_path, source=commstat_source, message=commstat_msg)
+    upsert_projected_message(db_path, source=sitrep_source, message=sitrep_msg)
+    upsert_projected_message(db_path, source=spotter_source, message=spotter_msg)
+
+    rows = list_projected_messages(db_path, source_families=("commstat", "sitrep"), limit=10)
+
+    assert [row["message_id"] for row in rows] == [commstat_msg.message_id, sitrep_msg.message_id]
+
+
 def test_projected_attention_and_geo_queries_are_bounded(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     source = _source()

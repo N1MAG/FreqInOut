@@ -5262,11 +5262,16 @@ class MessageViewerTab(QWidget):
         if focus == self._inbox_focus:
             self._sync_inbox_focus_buttons()
             self._sync_source_filter_for_inbox_focus(focus)
+            if self._reload_projected_messages_for_scope_change():
+                return
             return
         self._inbox_focus = focus
         self._sync_inbox_focus_buttons()
         self._sync_source_filter_for_inbox_focus(focus)
         self._unfreeze_table()
+        if self._reload_projected_messages_for_scope_change():
+            self._save_settings()
+            return
         self._apply_message_filters_light()
         self._save_settings()
 
@@ -5312,6 +5317,35 @@ class MessageViewerTab(QWidget):
                 source_filter.blockSignals(False)
             except Exception:
                 pass
+
+    def _projected_source_families_for_current_scope(self) -> tuple[str, ...]:
+        focus_values = self._source_values_for_inbox_focus(getattr(self, "_inbox_focus", "all"))
+        selected = self._selected_message_sources()
+        requested = list(focus_values or sorted(selected or []))
+        if not requested:
+            return ()
+        expanded: set[str] = set()
+        for value in requested:
+            source = str(value or "").strip().lower()
+            if not source:
+                continue
+            if source == "commstat":
+                expanded.update({"commstat", "sitrep"})
+            elif source in {"mesh", "meshcore", "meshtastic"}:
+                expanded.update({"mesh", "meshcore", "meshtastic"})
+            elif source == "bbs":
+                expanded.update({"bbs", "bbs_archive"})
+            else:
+                expanded.add(source)
+        return tuple(sorted(expanded))
+
+    def _reload_projected_messages_for_scope_change(self) -> bool:
+        if not self._projection_primary_enabled:
+            return False
+        if not getattr(self, "_last_projection_render_ts", 0.0) and not getattr(self, "_message_rows", []):
+            return False
+        self._unfreeze_table()
+        return self._load_projected_messages_into_table()
 
     def _toggle_advanced_filters(self) -> None:
         self._advanced_filters_visible = bool(self.advanced_filters_btn.isChecked())
@@ -12945,34 +12979,43 @@ class MessageViewerTab(QWidget):
             self._start_rows_build(force=force)
 
     def _load_projected_messages_into_table(self) -> bool:
-        rows = self._load_projected_message_rows(limit=1500)
-        if not rows:
+        if getattr(self, "_projected_table_loading", False):
             return False
-        self._message_rows = rows
-        self._last_projection_render_ts = time.time()
-        with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
-            self._refresh_message_filters(rows)
-        with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
-            self._apply_message_filters(recover_empty_stale_scope=True)
-        model_rows = 0
+        self._projected_table_loading = True
         try:
-            model_rows = len(self._messages_model.rows())
-        except Exception:
+            rows = self._load_projected_message_rows(limit=1500)
+            if not rows:
+                return False
+            self._message_rows = rows
+            self._last_projection_render_ts = time.time()
+            with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
+                self._refresh_message_filters(rows)
+            with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
+                self._apply_message_filters(recover_empty_stale_scope=True)
             model_rows = 0
-        log.info(
-            "MESSAGES|projected_table_loaded rows=%d rendered=%d scope=%s",
-            len(rows),
-            model_rows,
-            self._active_message_scope_summary(),
-        )
-        return True
+            try:
+                model_rows = len(self._messages_model.rows())
+            except Exception:
+                model_rows = 0
+            source_families = self._projected_source_families_for_current_scope()
+            log.info(
+                "MESSAGES|projected_table_loaded rows=%d rendered=%d source_scope=%s scope=%s",
+                len(rows),
+                model_rows,
+                list(source_families) if source_families else ["ALL"],
+                self._active_message_scope_summary(),
+            )
+            return True
+        finally:
+            self._projected_table_loading = False
 
     def _load_projected_message_rows(self, *, limit: int = 1500) -> List[UnifiedMessage]:
         db_path = self._db_path()
         if db_path is None or not db_path.exists():
             return []
+        source_families = self._projected_source_families_for_current_scope()
         try:
-            db_rows = list_projected_messages(db_path, limit=limit)
+            db_rows = list_projected_messages(db_path, limit=limit, source_families=source_families)
         except Exception as exc:
             log.debug("MessageViewer: failed to load projected messages: %s", exc)
             return []
@@ -13859,14 +13902,35 @@ class MessageViewerTab(QWidget):
     ) -> bool:
         if not rows:
             return False
+        configured_groups = self._configured_message_group_names()
+
+        def matches_without_source(row: UnifiedMessage) -> bool:
+            if selected_groups is not None and (
+                _core_message_group_value(row, configured_groups=configured_groups) not in selected_groups
+            ):
+                return False
+            if not self._row_matches_inbox_criteria(row, criteria):
+                return False
+            return self._row_matches_map_context_filter(row)
+
+        def matches_without_group(row: UnifiedMessage) -> bool:
+            if not _core_row_matches_source_filter(row, selected_sources):
+                return False
+            if not self._row_matches_inbox_criteria(row, criteria):
+                return False
+            return self._row_matches_map_context_filter(row)
+
         stale_source_filter = selected_sources is not None and not any(
             _core_row_matches_source_filter(row, selected_sources) for row in rows
         )
-        configured_groups = self._configured_message_group_names()
         stale_group_filter = selected_groups is not None and not any(
             _core_message_group_value(row, configured_groups=configured_groups) in selected_groups
             for row in rows
         )
+        blocking_source_filter = selected_sources is not None and any(matches_without_source(row) for row in rows)
+        blocking_group_filter = selected_groups is not None and any(matches_without_group(row) for row in rows)
+        stale_source_filter = bool(stale_source_filter or blocking_source_filter)
+        stale_group_filter = bool(stale_group_filter or blocking_group_filter)
         if not stale_source_filter and not stale_group_filter:
             return False
         if stale_source_filter and hasattr(self, "source_filter"):
@@ -14488,6 +14552,8 @@ class MessageViewerTab(QWidget):
     def _on_filter_changed(self) -> None:
         self._unfreeze_table()
         self._update_excluded_types_button_state()
+        if not getattr(self, "_projected_table_loading", False) and self._reload_projected_messages_for_scope_change():
+            return
         self._apply_message_filters_light()
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
