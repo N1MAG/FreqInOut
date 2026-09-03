@@ -190,6 +190,13 @@ from freqinout.core.message_inbox_filters import (
     row_matches_workspace_scope as _core_row_matches_workspace_scope,
     row_search_text as _core_row_search_text,
 )
+from freqinout.core.message_intel_filters import (
+    IntelFilterChip,
+    build_intel_filter_rollup,
+    focus_source_values,
+    message_status_bucket,
+    row_matches_intel_filters,
+)
 from freqinout.core.message_summary import (
     MessageSummary,
     message_summary_from_row,
@@ -2983,6 +2990,9 @@ class MessageViewerTab(QWidget):
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._map_context_filter: Dict[str, object] = {}
+        self._intel_status_filter: str = ""
+        self._intel_topic_filter: str = ""
+        self._intel_filter_buttons: List[QPushButton] = []
         self._locally_deleted_row_keys: set[tuple] = set()
         self._filters_initialized = False
         self._has_active_view = False
@@ -5048,6 +5058,17 @@ class MessageViewerTab(QWidget):
         funnel_layout.addWidget(self.received_filter)
         funnel_layout.addWidget(self.clear_filters_btn)
         funnel_layout.addWidget(self.advanced_filters_btn)
+        self.message_intel_filter_widget = QWidget()
+        self.message_intel_filter_widget.setObjectName("messageIntelFilterBar")
+        self.message_intel_filter_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.message_intel_filter_widget.setVisible(False)
+        self.message_intel_filter_layout = QHBoxLayout(self.message_intel_filter_widget)
+        self.message_intel_filter_layout.setContentsMargins(0, 0, 0, 4)
+        self.message_intel_filter_layout.setSpacing(6)
+        self.message_intel_filter_label = QLabel("Intel")
+        self.message_intel_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_intel_filter_layout.addWidget(self.message_intel_filter_label)
+        self.message_intel_filter_layout.addStretch()
         self.map_context_filter_label = QLabel("")
         self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")
         self.map_context_filter_label.setWordWrap(True)
@@ -5096,8 +5117,9 @@ class MessageViewerTab(QWidget):
         self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
-        messages_layout.insertWidget(3, self.map_context_filter_label)
-        messages_layout.insertWidget(4, self.bulk_selection_bar)
+        messages_layout.insertWidget(3, self.message_intel_filter_widget)
+        messages_layout.insertWidget(4, self.map_context_filter_label)
+        messages_layout.insertWidget(5, self.bulk_selection_bar)
 
         self._arrange_inbox_action_controls(compact=False)
         self._sync_inbox_focus_buttons()
@@ -5270,6 +5292,8 @@ class MessageViewerTab(QWidget):
                 return
             return
         self._inbox_focus = focus
+        self._intel_status_filter = ""
+        self._intel_topic_filter = ""
         self._sync_inbox_focus_buttons()
         self._sync_source_filter_for_inbox_focus(focus)
         self._unfreeze_table()
@@ -5290,16 +5314,7 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _source_values_for_inbox_focus(focus: object) -> list[str]:
-        focus_key = str(focus or "all").strip().lower()
-        return {
-            "forms": ["flmsg", "flamp"],
-            "spotter": ["spotter"],
-            "commstat": ["commstat"],
-            "js8call": ["js8"],
-            "mesh": ["mesh", "meshcore", "meshtastic"],
-            "varac": ["varac"],
-            "bbs": ["bbs"],
-        }.get(focus_key, [])
+        return list(focus_source_values(focus))
 
     def _sync_source_filter_for_inbox_focus(self, focus: object) -> None:
         source_filter = getattr(self, "source_filter", None)
@@ -13781,6 +13796,79 @@ class MessageViewerTab(QWidget):
         row.summary = summary
         return summary
 
+    def _row_matches_intel_filter(self, row: UnifiedMessage) -> bool:
+        return row_matches_intel_filters(
+            row,
+            status_bucket=getattr(self, "_intel_status_filter", ""),
+            topic=getattr(self, "_intel_topic_filter", ""),
+        )
+
+    def _refresh_intel_filter_bar(self, rows: Sequence[UnifiedMessage]) -> None:
+        widget = getattr(self, "message_intel_filter_widget", None)
+        layout = getattr(self, "message_intel_filter_layout", None)
+        if widget is None or layout is None:
+            return
+        for btn in list(getattr(self, "_intel_filter_buttons", [])):
+            layout.removeWidget(btn)
+            btn.deleteLater()
+        self._intel_filter_buttons = []
+        rollup = build_intel_filter_rollup(
+            rows,
+            active_status=getattr(self, "_intel_status_filter", ""),
+            active_topic=getattr(self, "_intel_topic_filter", ""),
+            topic_limit=8,
+        )
+        chips = list(rollup.status_chips) + list(rollup.topic_chips)
+        if not chips:
+            widget.setVisible(False)
+            return
+        insert_at = max(1, layout.count() - 1)
+        for chip in chips:
+            btn = self._intel_filter_button(chip)
+            layout.insertWidget(insert_at, btn)
+            insert_at += 1
+            self._intel_filter_buttons.append(btn)
+        widget.setVisible(True)
+
+    def _intel_filter_button(self, chip: IntelFilterChip) -> QPushButton:
+        label = f"{chip.label} {chip.count}"
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        btn.setChecked(bool(chip.active))
+        btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        btn.setToolTip(
+            f"Show {chip.count} message{'s' if chip.count != 1 else ''} "
+            f"with {chip.label} {'status' if chip.kind == 'status' else 'topic'}."
+        )
+        btn.clicked.connect(
+            lambda _checked=False, kind=chip.kind, value=chip.value: self._toggle_intel_filter(kind, value)
+        )
+        theme = resolve_theme(self.settings)
+        role = "primary" if chip.active else self._intel_filter_button_role(chip)
+        btn.setStyleSheet(button_style(role, theme))
+        return btn
+
+    @staticmethod
+    def _intel_filter_button_role(chip: IntelFilterChip) -> str:
+        bucket = str(chip.status_bucket or "").strip().lower()
+        if bucket == "red":
+            return "danger"
+        if bucket == "yellow":
+            return "eligible_warning"
+        if bucket == "green":
+            return "success"
+        return "muted"
+
+    def _toggle_intel_filter(self, kind: str, value: str) -> None:
+        kind = str(kind or "").strip().lower()
+        value = str(value or "").strip()
+        if kind == "status":
+            self._intel_status_filter = "" if self._intel_status_filter == value else value
+        elif kind == "topic":
+            self._intel_topic_filter = "" if self._intel_topic_filter == value else value
+        self._unfreeze_table()
+        self._apply_message_filters_preserve_scroll()
+
     def message_summaries(self, *, visible_only: bool = True, default_visible_only: bool = False) -> Tuple[MessageSummary, ...]:
         if visible_only and hasattr(self, "_messages_model"):
             rows = self._messages_model.rows()
@@ -13816,9 +13904,11 @@ class MessageViewerTab(QWidget):
         configured_groups = self._configured_message_group_names()
 
         filtered = []
+        intel_base_rows = []
         workspace_pass_count = 0
         criteria_pass_count = 0
         map_context_pass_count = 0
+        intel_pass_count = 0
         for row in rows:
             if not _core_row_matches_workspace_scope(
                 row,
@@ -13834,6 +13924,10 @@ class MessageViewerTab(QWidget):
             if not self._row_matches_map_context_filter(row):
                 continue
             map_context_pass_count += 1
+            intel_base_rows.append(row)
+            if not self._row_matches_intel_filter(row):
+                continue
+            intel_pass_count += 1
             filtered.append(row)
         if (
             recover_empty_stale_scope
@@ -13849,6 +13943,8 @@ class MessageViewerTab(QWidget):
             workspace_pass_count = 0
             criteria_pass_count = 0
             map_context_pass_count = 0
+            intel_pass_count = 0
+            intel_base_rows = []
             for row in rows:
                 if not _core_row_matches_workspace_scope(
                     row,
@@ -13864,6 +13960,10 @@ class MessageViewerTab(QWidget):
                 if not self._row_matches_map_context_filter(row):
                     continue
                 map_context_pass_count += 1
+                intel_base_rows.append(row)
+                if not self._row_matches_intel_filter(row):
+                    continue
+                intel_pass_count += 1
                 filtered.append(row)
         self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
         if (
@@ -13875,6 +13975,7 @@ class MessageViewerTab(QWidget):
         else:
             filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
+        self._refresh_intel_filter_bar(intel_base_rows)
         self._update_clear_filters_style()
         self._update_map_context_filter_label()
         self._update_mark_all_read_style()
@@ -13897,19 +13998,22 @@ class MessageViewerTab(QWidget):
         )
         log.info(
             (
-                "MESSAGES|inbox_filter_result loaded=%d workspace=%d criteria=%d map=%d rendered=%d "
-                "focus=%s sources=%s groups=%s type=%s status=%s hidden=%s search=%s map_context=%s"
+                "MESSAGES|inbox_filter_result loaded=%d workspace=%d criteria=%d map=%d intel=%d rendered=%d "
+                "focus=%s sources=%s groups=%s type=%s status=%s intel_status=%s intel_topic=%s hidden=%s search=%s map_context=%s"
             ),
             len(rows),
             workspace_pass_count,
             criteria_pass_count,
             map_context_pass_count,
+            intel_pass_count,
             len(filtered),
             criteria.focus,
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             sorted(display_groups) if display_groups is not None else ["ALL"],
             criteria.type_sel,
             criteria.status_sel,
+            getattr(self, "_intel_status_filter", "") or "ALL",
+            getattr(self, "_intel_topic_filter", "") or "ALL",
             sorted(criteria.excluded_types) if criteria.excluded_types else ["NONE"],
             criteria.search_query or "ALL",
             getattr(self, "_map_context_filter", {}) or {},
@@ -14146,7 +14250,11 @@ class MessageViewerTab(QWidget):
             )
 
     def _message_source_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
-        return _core_message_source_options(rows)
+        options = _core_message_source_options(rows)
+        focus_values = set(self._source_values_for_inbox_focus(getattr(self, "_inbox_focus", "all")))
+        if focus_values:
+            options = [(value, label) for value, label in options if value in focus_values]
+        return options
 
     def _message_group_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
         options: list[tuple[str, str]] = []
@@ -14445,6 +14553,8 @@ class MessageViewerTab(QWidget):
             return True
         if self._message_group_filter_active():
             return True
+        if getattr(self, "_intel_status_filter", "") or getattr(self, "_intel_topic_filter", ""):
+            return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
         if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != 0:
@@ -14526,6 +14636,8 @@ class MessageViewerTab(QWidget):
             and self.to_filter.currentText() in ("",)
             and not self._source_filter_refinement_active()
             and self._selected_message_groups() is None
+            and not getattr(self, "_intel_status_filter", "")
+            and not getattr(self, "_intel_topic_filter", "")
             and not (getattr(self, "_map_context_filter", {}) or {})
             and int(self.received_filter.currentData() or 0) == 0
             and not self.rcv_search.text().strip()
@@ -14541,6 +14653,8 @@ class MessageViewerTab(QWidget):
             self.show_all_message_groups_chk.blockSignals(True)
             self.show_all_message_groups_chk.setChecked(False)
         self._map_context_filter = {}
+        self._intel_status_filter = ""
+        self._intel_topic_filter = ""
         self._sync_inbox_focus_buttons()
         self.received_filter.setCurrentIndex(0)
         self.type_filter.setCurrentText("MSG Type...")
@@ -14783,6 +14897,11 @@ class MessageViewerTab(QWidget):
             to_sel=self.to_filter.currentText() if hasattr(self, "to_filter") else "",
         )
         context = getattr(self, "_map_context_filter", {}) or {}
+        intel_parts = []
+        if getattr(self, "_intel_status_filter", ""):
+            intel_parts.append(f"Status {str(self._intel_status_filter).title()}")
+        if getattr(self, "_intel_topic_filter", ""):
+            intel_parts.append(f"Topic {self._intel_topic_filter}")
         if isinstance(context, dict) and context.get("concern_only"):
             geo_parts = []
             state_filter = str(context.get("state_filter") or "").strip().upper()
@@ -14792,8 +14911,11 @@ class MessageViewerTab(QWidget):
             if fema_region_filter:
                 geo_parts.append(f"Map FEMA Region {fema_region_filter}")
             geo_parts.append("non-green/status evidence only")
-            map_summary = " ".join(geo_parts)
+            map_summary = "; ".join([" ".join(geo_parts), *intel_parts])
             return f"{summary}; {map_summary}" if summary else map_summary
+        if intel_parts:
+            intel_summary = "; ".join(intel_parts)
+            return f"{summary}; {intel_summary}" if summary else intel_summary
         return summary
 
     def _update_map_context_filter_label(self) -> None:
@@ -15755,6 +15877,8 @@ class MessageViewerTab(QWidget):
             or self.to_filter.currentText() not in ("",)
             or self._source_filter_refinement_active()
             or self._message_group_filter_active()
+            or bool(getattr(self, "_intel_status_filter", ""))
+            or bool(getattr(self, "_intel_topic_filter", ""))
             or int(self.received_filter.currentData() or 0) != 0
             or bool(getattr(self, "_map_context_filter", {}) or {})
             or bool(self.rcv_search.text().strip())

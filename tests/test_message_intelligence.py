@@ -1592,7 +1592,8 @@ def test_inbox_focus_filters_operator_oriented_message_sets() -> None:
     assert row_matches_inbox_focus(flmsg, "commstat") is False
 
     assert row_matches_inbox_focus(js8, "js8call") is True
-    assert row_matches_inbox_focus(spotter, "js8call") is False
+    assert row_matches_inbox_focus(spotter, "js8call") is True
+    assert row_matches_inbox_focus(commstat, "js8call") is True
 
     assert row_matches_inbox_focus(meshcore, "mesh") is True
     assert row_matches_inbox_focus(meshtastic, "mesh") is True
@@ -1898,6 +1899,19 @@ def test_message_group_filter_all_selected_disables_group_scope() -> None:
     )()
 
     assert MessageViewerTab._selected_message_groups(tab) is None
+
+
+def test_message_source_options_are_limited_by_inbox_focus() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._inbox_focus = "js8call"
+
+    options = MessageViewerTab._message_source_options(tab, [])
+
+    assert options == [
+        ("commstat", "CommStat"),
+        ("js8", "JS8Call"),
+        ("spotter", "FIOSpotter"),
+    ]
 
 
 def test_message_group_option_sections_prioritize_configured_then_active_groups() -> None:

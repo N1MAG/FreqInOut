@@ -2599,7 +2599,7 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
 
         assert tab._inbox_focus == "js8call"
         assert tab.operating_group_filter.all_selected() is True
-        assert tab.source_filter.selected_values() == {"js8"}
+        assert tab.source_filter.selected_values() == {"commstat", "js8", "spotter"}
         assert tab._filters_active() is False
     finally:
         tab.deleteLater()

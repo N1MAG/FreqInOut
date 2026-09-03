@@ -524,7 +524,7 @@ def row_matches_inbox_focus(row: MessageRowLike, focus: str) -> bool:
     if focus == "commstat":
         return row_matches_type_filter(row, "CommStat")
     if focus == "js8call":
-        return row_matches_type_filter(row, "JS8Call")
+        return bool(message_source_aliases(row) & {"js8", "commstat", "spotter"})
     if focus == "mesh":
         origin = str(getattr(row, "origin", "") or "").strip().lower()
         if origin not in {"mesh", "meshcore", "meshtastic", "mesh_client", "local_mesh"}:
