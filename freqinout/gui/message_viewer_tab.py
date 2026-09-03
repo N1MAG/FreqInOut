@@ -14247,6 +14247,19 @@ class MessageViewerTab(QWidget):
             return self.source_filter.selected_values()
         return None
 
+    def _source_filter_refinement_active(self) -> bool:
+        selected = self._selected_message_sources()
+        if selected is None:
+            return False
+        focus_sources = {
+            str(value or "").strip().lower()
+            for value in self._source_values_for_inbox_focus(getattr(self, "_inbox_focus", "all"))
+            if str(value or "").strip()
+        }
+        if focus_sources and {str(value or "").strip().lower() for value in selected} == focus_sources:
+            return False
+        return True
+
     def _selected_message_groups(self) -> Optional[Set[str]]:
         if hasattr(self, "operating_group_filter"):
             if self.operating_group_filter.all_selected():
@@ -14386,15 +14399,13 @@ class MessageViewerTab(QWidget):
             return True
         if to_sel:
             return True
-        if self._selected_message_sources() is not None:
+        if self._source_filter_refinement_active():
             return True
         if self._message_group_filter_active():
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
         if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != 0:
-            return True
-        if str(getattr(self, "_inbox_focus", "all") or "all") != "all":
             return True
         if getattr(self, "_map_context_filter", {}) or {}:
             return True
@@ -14471,9 +14482,8 @@ class MessageViewerTab(QWidget):
             and self.status_filter.currentText() in ("", "Status...")
             and self.from_filter.currentText() in ("",)
             and self.to_filter.currentText() in ("",)
-            and self._selected_message_sources() is None
+            and not self._source_filter_refinement_active()
             and self._selected_message_groups() is None
-            and str(getattr(self, "_inbox_focus", "all") or "all") == "all"
             and not (getattr(self, "_map_context_filter", {}) or {})
             and int(self.received_filter.currentData() or 0) == 0
             and not self.rcv_search.text().strip()
@@ -14488,7 +14498,6 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "show_all_message_groups_chk"):
             self.show_all_message_groups_chk.blockSignals(True)
             self.show_all_message_groups_chk.setChecked(False)
-        self._inbox_focus = "all"
         self._map_context_filter = {}
         self._sync_inbox_focus_buttons()
         self.received_filter.setCurrentIndex(0)
@@ -14498,9 +14507,7 @@ class MessageViewerTab(QWidget):
         self.to_filter.setCurrentText("")
         self.rcv_search.clear()
         if hasattr(self, "source_filter"):
-            self.source_filter.set_selected_values(
-                [value for value, _label in self._message_source_options(self._message_rows)]
-            )
+            self._sync_source_filter_for_inbox_focus(getattr(self, "_inbox_focus", "all"))
         if hasattr(self, "operating_group_filter"):
             self.operating_group_filter.set_grouped_options(
                 self._message_group_option_sections(self._message_rows),
@@ -15704,7 +15711,7 @@ class MessageViewerTab(QWidget):
             or self.status_filter.currentText() not in ("", "Status...")
             or self.from_filter.currentText() not in ("",)
             or self.to_filter.currentText() not in ("",)
-            or self._selected_message_sources() is not None
+            or self._source_filter_refinement_active()
             or self._message_group_filter_active()
             or int(self.received_filter.currentData() or 0) != 0
             or bool(getattr(self, "_map_context_filter", {}) or {})

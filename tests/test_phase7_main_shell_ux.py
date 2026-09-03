@@ -2578,6 +2578,23 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.source_filter.all_selected() is True
         assert tab.operating_group_filter.all_selected() is True
         assert tab.show_all_message_groups_chk.text() == "Configured"
+
+        tab._set_inbox_focus("js8call")
+        app.processEvents()
+
+        assert tab._inbox_focus == "js8call"
+        assert tab._filters_active() is False
+        assert tab.clear_filters_btn.toolTip() == "No message filters are active."
+
+        tab.operating_group_filter.set_selected_values(["HF NETS"])
+        assert tab._filters_active() is True
+
+        tab._clear_filters()
+
+        assert tab._inbox_focus == "js8call"
+        assert tab.operating_group_filter.all_selected() is True
+        assert tab.source_filter.selected_values() == {"js8"}
+        assert tab._filters_active() is False
     finally:
         tab.deleteLater()
         app.processEvents()
