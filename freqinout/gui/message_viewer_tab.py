@@ -3016,7 +3016,7 @@ class MessageViewerTab(QWidget):
         self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
-        self._loading_text: str = "Checking Messages..."
+        self._loading_text: str = "Indexing messages..."
         self._loading_progress: QProgressBar | None = None
         self.utc_label: QLabel | None = None
         self.local_label: QLabel | None = None
@@ -4599,7 +4599,7 @@ class MessageViewerTab(QWidget):
         self.message_check_status_label.setToolTip("Shows when FIO will next check for new messages while this tab is open.")
 
         loading_row = QHBoxLayout()
-        self.loading_label = QLabel("Checking Messages...")
+        self.loading_label = QLabel("Indexing messages...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         loading_row.addWidget(self.loading_label)
@@ -10635,14 +10635,15 @@ class MessageViewerTab(QWidget):
         else:
             self._initial_populate_deferred = True
             self._deferred_refresh = True
-            log.info("MESSAGES|initial_table_populate_deferred reason=hidden_prewarm")
+            self._message_check_status_text = "Indexing messages..."
+            log.info("MESSAGES|initial_table_populate_deferred reason=hidden_startup_index")
             # Hidden startup lazy-prewarm should not launch GPG verification; defer
             # until the Messages tab is first shown.
             self._signature_verify_deferred_until_active = True
         self._refresh_pending_backlog()
         self._last_activation_refresh_ts = time.time()
 
-    def _set_loading(self, active: bool, text: str = "Checking Messages...") -> None:
+    def _set_loading(self, active: bool, text: str = "Indexing messages...") -> None:
         if not self.loading_label:
             return
         if self._loading_timer and self._loading_timer.isActive():
@@ -10652,7 +10653,7 @@ class MessageViewerTab(QWidget):
         if self._loading_progress is not None:
             self._loading_progress.setVisible(bool(active))
 
-    def _schedule_loading(self, text: str = "Checking Messages...", delay_ms: int = 350) -> None:
+    def _schedule_loading(self, text: str = "Indexing messages...", delay_ms: int = 350) -> None:
         if not self.loading_label:
             return
         if self._loading_timer is None:
@@ -10697,7 +10698,7 @@ class MessageViewerTab(QWidget):
                 return
             self._activation_refresh_pending = True
             self._emit_message_refresh_busy()
-            self._schedule_loading("Checking Messages...")
+            self._schedule_loading("Indexing messages...")
             QTimer.singleShot(0, lambda: self._run_activation_refresh(force=False))
 
     def _run_activation_refresh(self, force: bool = False) -> None:
@@ -10775,9 +10776,11 @@ class MessageViewerTab(QWidget):
             if self._initial_populate_deferred:
                 self._initial_populate_deferred = False
                 self._deferred_refresh = False
+                self._schedule_loading("Indexing messages...")
                 QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
                 return
             if self._deferred_refresh:
+                self._schedule_loading("Indexing messages...")
                 QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
                 return
             return

@@ -824,7 +824,7 @@ class MainWindow(QMainWindow):
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._active_tab_index = None
-        self._lazy_prewarm_labels = ["FreqPlanner"]
+        self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
         self._lazy_prewarm_index = 0
         self._webengine_warmup_widget = None
         self._webengine_warmup_done = False
@@ -5022,7 +5022,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _runtime_lazy_prewarm_labels(suppressed_labels: set[str]) -> list[str]:
-        return [label for label in ("FreqPlanner",) if label not in suppressed_labels]
+        return [label for label in ("Messages", "FreqPlanner") if label not in suppressed_labels]
 
     @staticmethod
     def _runtime_banner_text(profile: object, policy: object) -> str:
