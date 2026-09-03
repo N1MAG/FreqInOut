@@ -15,6 +15,7 @@ from freqinout.core.message_projection_store import (
     mark_projected_messages_read,
     upsert_projected_message,
 )
+from freqinout.core.message_inbox_filters import InboxFilterCriteria, row_matches_inbox_criteria
 from freqinout.core.message_row_identity import message_payload_identity
 from freqinout.core.message_row_presentation import (
     field_report_area_label,
@@ -110,6 +111,22 @@ def test_projected_payload_is_selectable_and_delete_policy_is_projection_hide(tm
     assert message_payload_identity(payload) == ("projected", message_id)
     assert delete_effect_label_for_row(row) == "Hide from FIO projection"
     assert message_delete_result_detail(payload, "hidden") == "projected message hidden from FIO views"
+
+
+def test_hidden_default_types_do_not_blank_explicit_commstat_focus(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    _insert_projected(db_path)
+    payload = projected_payload_from_row(list_projected_messages(db_path, limit=1)[0])
+    row = _Row(payload)
+
+    assert not row_matches_inbox_criteria(
+        row,
+        InboxFilterCriteria(focus="all", excluded_types=frozenset({"CommStat"})),
+    )
+    assert row_matches_inbox_criteria(
+        row,
+        InboxFilterCriteria(focus="commstat", excluded_types=frozenset({"CommStat"})),
+    )
 
 
 def test_mark_projected_messages_read_updates_hot_projection(tmp_path) -> None:

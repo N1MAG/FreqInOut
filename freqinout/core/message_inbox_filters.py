@@ -653,7 +653,13 @@ def row_matches_inbox_criteria(row: MessageRowLike, criteria: InboxFilterCriteri
         return False
     if not row_matches_type_filter(row, criteria.type_sel):
         return False
-    if criteria.applies_hidden_types and criteria.excluded_types and row_matches_excluded_types(row, criteria.excluded_types):
+    hidden_types_apply = str(criteria.focus or "all").strip().lower() in {"", "all", "new"}
+    if (
+        hidden_types_apply
+        and criteria.applies_hidden_types
+        and criteria.excluded_types
+        and row_matches_excluded_types(row, criteria.excluded_types)
+    ):
         return False
     if not row_matches_status_filter(row, criteria.status_sel):
         return False

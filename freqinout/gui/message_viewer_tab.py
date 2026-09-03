@@ -13816,6 +13816,9 @@ class MessageViewerTab(QWidget):
         configured_groups = self._configured_message_group_names()
 
         filtered = []
+        workspace_pass_count = 0
+        criteria_pass_count = 0
+        map_context_pass_count = 0
         for row in rows:
             if not _core_row_matches_workspace_scope(
                 row,
@@ -13824,10 +13827,13 @@ class MessageViewerTab(QWidget):
                 configured_groups=configured_groups,
             ):
                 continue
+            workspace_pass_count += 1
             if not self._row_matches_inbox_criteria(row, criteria):
                 continue
+            criteria_pass_count += 1
             if not self._row_matches_map_context_filter(row):
                 continue
+            map_context_pass_count += 1
             filtered.append(row)
         if (
             recover_empty_stale_scope
@@ -13840,6 +13846,9 @@ class MessageViewerTab(QWidget):
             selected_sources = self._selected_message_sources()
             selected_groups = self._expanded_selected_message_groups()
             configured_groups = self._configured_message_group_names()
+            workspace_pass_count = 0
+            criteria_pass_count = 0
+            map_context_pass_count = 0
             for row in rows:
                 if not _core_row_matches_workspace_scope(
                     row,
@@ -13848,10 +13857,13 @@ class MessageViewerTab(QWidget):
                     configured_groups=configured_groups,
                 ):
                     continue
+                workspace_pass_count += 1
                 if not self._row_matches_inbox_criteria(row, criteria):
                     continue
+                criteria_pass_count += 1
                 if not self._row_matches_map_context_filter(row):
                     continue
+                map_context_pass_count += 1
                 filtered.append(row)
         self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
         if (
@@ -13884,15 +13896,23 @@ class MessageViewerTab(QWidget):
             len(filtered),
         )
         log.info(
-            "MESSAGES|inbox_filter_result loaded=%d rendered=%d focus=%s sources=%s groups=%s type=%s status=%s search=%s",
+            (
+                "MESSAGES|inbox_filter_result loaded=%d workspace=%d criteria=%d map=%d rendered=%d "
+                "focus=%s sources=%s groups=%s type=%s status=%s hidden=%s search=%s map_context=%s"
+            ),
             len(rows),
+            workspace_pass_count,
+            criteria_pass_count,
+            map_context_pass_count,
             len(filtered),
             criteria.focus,
             sorted(selected_sources) if selected_sources is not None else ["ALL"],
             sorted(display_groups) if display_groups is not None else ["ALL"],
             criteria.type_sel,
             criteria.status_sel,
+            sorted(criteria.excluded_types) if criteria.excluded_types else ["NONE"],
             criteria.search_query or "ALL",
+            getattr(self, "_map_context_filter", {}) or {},
         )
 
     def _recover_empty_message_filter_state(
