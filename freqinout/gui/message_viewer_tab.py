@@ -193,6 +193,10 @@ from freqinout.core.message_summary import (
     message_summary_from_row,
     normalize_message_source_family,
 )
+from freqinout.core.message_projection_projector import (
+    mark_projected_message_rows_deleted,
+    project_unified_message_rows,
+)
 from freqinout.core.source_view_contracts import (
     contract_gate_failures,
     source_contract_for,
@@ -1564,6 +1568,36 @@ class _RowsBuildWorker(QObject):
         )
 
 
+class _MessageProjectionWriteWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(self, *, db_path: str, rows: List[object], generation: int):
+        super().__init__()
+        self._db_path = str(db_path or "")
+        self._rows = list(rows or [])
+        self._generation = int(generation)
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        projected = 0
+        error = ""
+        try:
+            if self._db_path and self._rows:
+                projected = project_unified_message_rows(self._db_path, self._rows)
+        except Exception as exc:
+            error = str(exc)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "rows": len(self._rows),
+                "projected": projected,
+                "elapsed_ms": elapsed_ms,
+                "error": error,
+            }
+        )
+
+
 @dataclass
 class FileSignatureState:
     status: str = "unsigned"
@@ -2850,6 +2884,10 @@ class MessageViewerTab(QWidget):
         self._rows_build_pending: bool = False
         self._rows_build_pending_force: bool = False
         self._rows_build_active_fp: Optional[Tuple[object, ...]] = None
+        self._projection_write_thread: QThread | None = None
+        self._projection_write_worker: _MessageProjectionWriteWorker | None = None
+        self._projection_write_generation: int = 0
+        self._projection_write_pending_rows: List[UnifiedMessage] = []
         self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
@@ -12132,6 +12170,7 @@ class MessageViewerTab(QWidget):
             pass
         self._request_worker_thread_stop(self._file_scan_thread)
         self._request_worker_thread_stop(self._rows_build_thread)
+        self._request_worker_thread_stop(self._projection_write_thread)
         self._request_worker_thread_stop(self._signature_verify_thread)
         self._request_worker_thread_stop(self._bbs_auto_archive_thread)
 
@@ -13034,6 +13073,7 @@ class MessageViewerTab(QWidget):
         self._retag_bbs_archive_rows(rows)
         self._message_rows = rows
         self._save_message_file_metadata_from_rows(rows)
+        self._start_message_projection_write(rows)
         sender_updates = data.get("sender_cache_updates", {})
         if isinstance(sender_updates, dict):
             self._sender_cache.update(sender_updates)
@@ -13069,6 +13109,64 @@ class MessageViewerTab(QWidget):
             self._apply_message_filters()
         self._start_signature_verification(force=bool(data.get("force", False)))
         log.debug("MessageViewer: built %d unified messages", len(rows))
+
+    def _start_message_projection_write(self, rows: Sequence[UnifiedMessage]) -> None:
+        if self._is_shutting_down:
+            return
+        db_path = self._db_path()
+        if db_path is None or not rows:
+            return
+        if self._qt_thread_running(getattr(self, "_projection_write_thread", None)):
+            self._projection_write_pending_rows = list(rows)
+            return
+        self._projection_write_generation += 1
+        generation = int(self._projection_write_generation)
+        self._projection_write_pending_rows = []
+        self._projection_write_thread = QThread(self)
+        self._projection_write_worker = _MessageProjectionWriteWorker(
+            db_path=str(db_path),
+            rows=list(rows),
+            generation=generation,
+        )
+        self._projection_write_worker.moveToThread(self._projection_write_thread)
+        self._projection_write_thread.started.connect(self._projection_write_worker.run)
+        self._projection_write_worker.finished.connect(self._on_message_projection_write_finished)
+        self._projection_write_worker.finished.connect(self._projection_write_thread.quit)
+        self._projection_write_worker.finished.connect(self._projection_write_worker.deleteLater)
+        self._projection_write_thread.finished.connect(self._on_message_projection_write_thread_finished)
+        self._projection_write_thread.finished.connect(self._projection_write_thread.deleteLater)
+        self._projection_write_thread.start()
+
+    def _on_message_projection_write_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        error = str(data.get("error", "") or "")
+        if error:
+            log.warning("MessageViewer: message projection write failed: %s", error)
+            return
+        try:
+            elapsed_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        except Exception:
+            elapsed_ms = 0.0
+        if elapsed_ms > 0:
+            emit_span(
+                "messages.project_rows",
+                elapsed_ms,
+                settings=self.settings,
+                meta={
+                    "rows": int(data.get("rows", 0) or 0),
+                    "projected": int(data.get("projected", 0) or 0),
+                },
+                min_ms=5.0,
+            )
+
+    def _on_message_projection_write_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._projection_write_thread, self._projection_write_worker)
+        self._projection_write_thread = None
+        self._projection_write_worker = None
+        if self._projection_write_pending_rows and not self._is_shutting_down:
+            pending = list(self._projection_write_pending_rows)
+            self._projection_write_pending_rows = []
+            QTimer.singleShot(100, lambda rows=pending: self._start_message_projection_write(rows))
 
     def _remember_locally_deleted_row(self, row: UnifiedMessage) -> None:
         key = MessageTableModel._row_key(row)
@@ -14141,6 +14239,7 @@ class MessageViewerTab(QWidget):
             detail=message_delete_result_detail(row.payload, outcome.detail_key),
             batch_id="single",
         )
+        self._mark_projection_rows_deleted([row], source_scope="single")
         self._remember_locally_deleted_row(row)
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -14345,6 +14444,7 @@ class MessageViewerTab(QWidget):
                 self._record_message_delete_audit(row, result="failed", detail=message_delete_result_detail(payload, outcome.detail_key), batch_id=batch_id)
         for row in deleted_rows:
             self._remember_locally_deleted_row(row)
+        self._mark_projection_rows_deleted(deleted_rows, source_scope="bulk")
         self._messages_model.clear_selection()
         self._unfreeze_table()
         self._remove_deleted_rows_from_current_view(deleted_rows)
@@ -14358,6 +14458,21 @@ class MessageViewerTab(QWidget):
             detail_counts=detail_counts,
         )
         QMessageBox.information(self, "Delete Messages", details)
+
+    def _mark_projection_rows_deleted(self, rows: Sequence[UnifiedMessage], *, source_scope: str) -> None:
+        db_path = self._db_path()
+        if db_path is None or not rows:
+            return
+        try:
+            mark_projected_message_rows_deleted(
+                db_path,
+                rows,
+                requested_effect="source_delete",
+                requested_by="fio",
+                source_scope=source_scope,
+            )
+        except Exception as e:
+            log.debug("MessageViewer: failed to mark projected messages deleted: %s", e)
 
     def _mark_rows_read_bulk(self, rows: List[UnifiedMessage]) -> int:
         ts = time.time()

@@ -399,10 +399,13 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
             intelligence_version=excluded.intelligence_version,
             intelligence_utc=excluded.intelligence_utc,
             intelligence_json=excluded.intelligence_json,
-            pinned=excluded.pinned,
-            archived=excluded.archived,
-            deleted=excluded.deleted,
-            deleted_utc=excluded.deleted_utc,
+            pinned=CASE WHEN message_projection.pinned=1 THEN 1 ELSE excluded.pinned END,
+            archived=CASE WHEN message_projection.archived=1 THEN 1 ELSE excluded.archived END,
+            deleted=CASE WHEN message_projection.deleted=1 THEN 1 ELSE excluded.deleted END,
+            deleted_utc=CASE
+                WHEN message_projection.deleted=1 AND COALESCE(message_projection.deleted_utc, '') != '' THEN message_projection.deleted_utc
+                ELSE excluded.deleted_utc
+            END,
             retention_class=excluded.retention_class,
             search_text=excluded.search_text,
             projection_version=excluded.projection_version,

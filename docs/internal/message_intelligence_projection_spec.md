@@ -153,7 +153,15 @@ Rules:
 - Add idempotent source, message, external ref, artifact, and delete queue/audit
   helpers.
 - Ensure schema during cold-start database initialization.
+- Project existing unified message rows into the normalized FIO tables on a
+  coalesced background worker.
+- Preserve external references for JS8Call, FIOSpotter, CommStat, SitRep,
+  VarAC, FLMsg, FLAmp, and BBS rows.
+- Preserve file-backed artifact metadata, including FLAmp Q IDs and block ids.
+- Mark projected rows deleted when existing source-specific delete actions
+  succeed.
 - Add contract tests for uniqueness, bounded queries, external refs, artifacts,
   and delete queue/audit behavior.
 - Migrate the Messages tab to query this projection in a follow-up slice, then
-  move source-specific ingestion into incremental projection writers.
+  move source-specific ingestion into incremental checkpointed projection
+  writers.

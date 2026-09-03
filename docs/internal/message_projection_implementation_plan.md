@@ -29,8 +29,27 @@ Acceptance:
 
 ## Phase 2: Incremental Projectors
 
-Implement source-specific projectors that populate the projection spine without
-changing the UI yet.
+Status: row-backed all-source projector implemented; source-native incremental
+checkpoints remain.
+
+Populate the projection spine from the existing unified message row builder
+without changing the UI read path yet. This gives every currently rendered
+message a durable FIO `message_id`, source record, external reference, and
+message intelligence row while keeping external sources authoritative.
+
+Implemented:
+
+- All current Messages row families project into `message_projection`.
+- JS8Call, FIOSpotter, CommStat, SitRep, VarAC, FLMsg, FLAmp, and BBS rows get
+  stable external reference keys.
+- FLMsg/FLAmp/BBS file rows get linked artifact rows; FLAmp captures Q ID,
+  block id, transfer id, transfer state, path, mtime, size, and content hash.
+- Projection writes run on a coalesced background Qt worker after row build.
+- Existing source-side delete success marks projected rows deleted and queues an
+  auditable projection delete entry.
+- Perf telemetry separates `messages.project_rows` from row build and rendering.
+
+Remaining source-native projectors:
 
 - JS8Call projector: inbox rows and raw directed traffic.
 - FIOSpotter projector: decoded forms, report keys, Expect/auth metadata.
@@ -42,10 +61,11 @@ changing the UI yet.
 
 Acceptance:
 
-- Projectors are idempotent by external ref and content hash.
-- Checkpoints avoid full rescans when no source changed.
-- Enrichment jobs rerun only when content hash or intelligence version changes.
+- Projected row writes are idempotent by external ref and content hash.
 - Existing source tables/files remain authoritative and are not deleted.
+- Delete success hides projection rows immediately and retains audit.
+- Source-native checkpoints avoid full rescans when no source changed.
+- Enrichment jobs rerun only when content hash or intelligence version changes.
 
 ## Phase 3: Message UI Read Path
 
