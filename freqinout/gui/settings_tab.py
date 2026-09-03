@@ -323,6 +323,14 @@ from freqinout.core.varac_bbs_vault import (
     vault_locations_to_data,
     vault_runtime_state_to_data,
 )
+from freqinout.core.varac_bbs_library_store import (
+    bbs_location_catalog_source_dir,
+    bbs_library_db_path_from_settings,
+    ensure_bbs_library_schema,
+    list_bbs_location_manifest_rows,
+    location_has_bbs_catalog,
+    sync_bbs_locations_from_folders,
+)
 from freqinout.core.varac_bbs_sweeper import (
     BbsSweeperRule,
     bbs_sweeper_rules_to_data,
@@ -2244,7 +2252,7 @@ class SettingsTab(QWidget):
                 ]
             )
             if bool(row.get("enabled", True)) and visibility != "Hidden":
-                lines.append("  Visitor files:")
+                lines.append("  Visitor files: published mapping")
                 lines.append(f"  - 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt")
                 lines.append("  - 01 COMMANDS - type one command below.txt")
                 if location_id != DEFAULT_LOCATION_ID:
@@ -2270,6 +2278,34 @@ class SettingsTab(QWidget):
         empty_text: str = "No files are present.",
         max_files: int = 12,
     ) -> List[str]:
+        location_id = str(row.get("id", "") or "").strip()
+        if location_id:
+            try:
+                db_path = bbs_library_db_path_from_settings(getattr(self, "settings", None))
+                if db_path.exists():
+                    conn = sqlite3.connect(db_path)
+                    try:
+                        ensure_bbs_library_schema(conn)
+                        if location_has_bbs_catalog(conn, location_id):
+                            catalog_source = bbs_location_catalog_source_dir(conn, location_id)
+                            configured_source = str(row.get("source_dir", "") or "").strip()
+                            if configured_source and catalog_source:
+                                if str(Path(catalog_source).expanduser()) != str(Path(configured_source).expanduser()):
+                                    raise ValueError("catalog source does not match selected location")
+                            rows = list_bbs_location_manifest_rows(conn, location_id)
+                            if not rows:
+                                return [f"{prefix}- No files are published to this location in the BBS catalog."]
+                            lines: List[str] = []
+                            for item in rows[: max(1, int(max_files))]:
+                                lines.append(f"{prefix}- {item.live_name or item.display_name} ({int(item.size or 0)} bytes)")
+                            remaining = len(rows) - len(lines)
+                            if remaining > 0:
+                                lines.append(f"{prefix}- +{remaining} more DB-mapped file(s)")
+                            return lines
+                    finally:
+                        conn.close()
+            except Exception:
+                pass
         source_txt = str(row.get("source_dir", "") or "").strip()
         if not source_txt:
             return [f"{prefix}- {empty_text}"]
@@ -3088,6 +3124,13 @@ class SettingsTab(QWidget):
             default_row["open_rule"] = "Public"
         self._varac_bbs_vault_locations_cache = [self._normalize_varac_bbs_vault_location(row) for row in locations]
         self._varac_bbs_vault_selected_location_id = DEFAULT_LOCATION_ID
+        try:
+            sync_bbs_locations_from_folders(
+                bbs_library_db_path_from_settings(getattr(self, "settings", None)),
+                self._varac_bbs_vault_locations_cache,
+            )
+        except Exception:
+            pass
         if hasattr(self, "varac_bbs_vault_default_location_combo"):
             self.varac_bbs_vault_default_location_combo.blockSignals(True)
             self.varac_bbs_vault_default_location_combo.clear()

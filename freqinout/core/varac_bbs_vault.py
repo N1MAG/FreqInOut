@@ -19,6 +19,16 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
+from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.varac_bbs_library_store import (
+    bbs_location_catalog_source_dir,
+    bbs_library_db_path_from_settings,
+    ensure_bbs_library_schema,
+    list_bbs_location_manifest_rows,
+    location_has_bbs_catalog,
+    log_bbs_library_sync_failure,
+    sync_bbs_locations_from_folders,
+)
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
 from freqinout.core.varac_bbs_config import normalize_callsign, parse_callsign_list
 from freqinout.core.varac_guard import resolve_varac_traffic_log_paths
@@ -131,6 +141,7 @@ class VaultPublishManifestEntry:
     size: int
     mtime_ns: int
     sha256: str = ""
+    source_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -1092,6 +1103,7 @@ def read_publish_manifest(path: object) -> List[VaultPublishManifestEntry]:
                 size=size,
                 mtime_ns=mtime_ns,
                 sha256=str(item.get("sha256", "") or "").strip(),
+                source_path=str(item.get("source_path", "") or "").strip(),
             )
         )
     return entries
@@ -1288,8 +1300,16 @@ def _is_fio_bbs_generated_listing(name: object) -> bool:
     return clean.startswith((DEFAULT_FLAMP_QUEUE_HELPER_NAME.upper(), f"{DEFAULT_FLAMP_BLOCK_PREFIX}_"))
 
 
+def _source_path_for_entry(entry: VaultPublishManifestEntry, src_root: Optional[Path]) -> Optional[Path]:
+    if str(entry.source_path or "").strip():
+        return _resolve_path(entry.source_path)
+    if src_root is None:
+        return None
+    return src_root / entry.source_name
+
+
 def _entries_equal(a: VaultPublishManifestEntry, b: VaultPublishManifestEntry, *, src_root: Optional[Path] = None, dst_root: Optional[Path] = None) -> bool:
-    if a.size != b.size or a.mtime_ns != b.mtime_ns or a.source_name != b.source_name:
+    if a.size != b.size or a.mtime_ns != b.mtime_ns or a.source_name != b.source_name or a.source_path != b.source_path:
         return False
     if a.sha256 and b.sha256:
         return a.sha256 == b.sha256
@@ -1298,11 +1318,83 @@ def _entries_equal(a: VaultPublishManifestEntry, b: VaultPublishManifestEntry, *
     if src_root is None or dst_root is None:
         return True
     try:
-        src_hash = _hash_file(src_root / a.source_name)
+        source_path = _source_path_for_entry(a, src_root)
+        if source_path is None:
+            return False
+        src_hash = _hash_file(source_path)
         dst_hash = _hash_file(dst_root / a.live_name)
     except Exception:
         return False
     return src_hash == dst_hash
+
+
+def _db_backed_manifest_entries(
+    location: VaultLocation,
+    *,
+    manifest_db_path: object = "",
+    virtual_files: Sequence[_VirtualFile] = (),
+) -> Optional[List[VaultPublishManifestEntry]]:
+    db_path = _resolve_path(manifest_db_path or bbs_library_db_path_from_settings(None))
+    if db_path is None or not db_path.exists():
+        return None
+    try:
+        with connect_sqlite(db_path) as conn:
+            ensure_bbs_library_schema(conn)
+            if not location_has_bbs_catalog(conn, location.id):
+                return None
+            configured_source = str(_effective_location_source_dir(location, "") or "").strip()
+            catalog_source = bbs_location_catalog_source_dir(conn, location.id)
+            if configured_source and catalog_source and str(Path(catalog_source).expanduser()) != str(Path(configured_source).expanduser()):
+                return None
+            rows = list_bbs_location_manifest_rows(conn, location.id)
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
+        return None
+
+    entries: List[VaultPublishManifestEntry] = []
+    used_names: set[str] = set()
+
+    def _unique_name(raw_name: str) -> str:
+        safe_name = safe_varac_bbs_filename(raw_name, max_len=MAX_MANIFEST_FILENAME_LENGTH)
+        if safe_name not in used_names:
+            used_names.add(safe_name)
+            return safe_name
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
+        counter = 2
+        candidate = f"{stem}-{counter}{suffix}"
+        while candidate in used_names:
+            counter += 1
+            candidate = f"{stem}-{counter}{suffix}"
+        used_names.add(candidate)
+        return candidate
+
+    for row in rows:
+        source_path = _resolve_path(row.source_path)
+        if source_path is None or not source_path.exists() or not source_path.is_file():
+            continue
+        entries.append(
+            VaultPublishManifestEntry(
+                source_name=f"@artifact/{row.artifact_id}",
+                live_name=_unique_name(row.live_name or row.display_name or source_path.name),
+                size=int(row.size or 0),
+                mtime_ns=int(row.mtime_ns or 0),
+                sha256=str(row.content_hash or ""),
+                source_path=str(source_path),
+            )
+        )
+    for virtual in virtual_files:
+        content = str(virtual.content or "")
+        entries.append(
+            VaultPublishManifestEntry(
+                source_name=f"@virtual/{virtual.name}",
+                live_name=_unique_name(virtual.name),
+                size=len(content.encode("utf-8")),
+                mtime_ns=0,
+                sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+        )
+    return entries
 
 
 def _publish_manifest_entries(
@@ -1338,9 +1430,10 @@ def _publish_manifest_entries(
                 continue
             tmp_path.write_text(str(virtual.content or ""), encoding="utf-8")
         else:
-            if src_root is None:
+            source_path = _source_path_for_entry(entry, src_root)
+            if source_path is None:
                 raise ValueError("Location source directory is required")
-            shutil.copy2(src_root / entry.source_name, tmp_path)
+            shutil.copy2(source_path, tmp_path)
         os.replace(tmp_path, dst)
         published += 1
 
@@ -1401,9 +1494,20 @@ def _publish_manifest_entries(
     )
 
 
-def publish_location(location: VaultLocation, *, live_bbs_dir: object, managed_root: object) -> VaultPublishResult:
+def publish_location(
+    location: VaultLocation,
+    *,
+    live_bbs_dir: object,
+    managed_root: object,
+    manifest_db_path: object = "",
+) -> VaultPublishResult:
     source_dir = _effective_location_source_dir(location, managed_root)
-    entries, ignored_dirs = build_publish_manifest(source_dir)
+    db_entries = _db_backed_manifest_entries(location, manifest_db_path=manifest_db_path)
+    if db_entries is not None:
+        entries = db_entries
+        ignored_dirs = 0
+    else:
+        entries, ignored_dirs = build_publish_manifest(source_dir)
     result = _publish_manifest_entries(
         entries,
         source_dir=source_dir,
@@ -1824,6 +1928,7 @@ def publish_root_view(
     managed_root: object,
     flamp_enabled: bool = False,
     include_enabled_fallback: bool = False,
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     default_location = _location_by_id(locations, default_location_id)
     if default_location is None:
@@ -1844,10 +1949,16 @@ def publish_root_view(
         # _root_virtual_files; raw folders left on disk must not resurrect a
         # location after it is deleted from FIO Settings.
         virtual_files = []
-    manifest, ignored_dirs = build_publish_manifest(default_location.source_dir, virtual_files=virtual_files)
+    source_dir = _effective_location_source_dir(default_location, managed_root)
+    db_entries = _db_backed_manifest_entries(default_location, manifest_db_path=manifest_db_path, virtual_files=virtual_files)
+    if db_entries is not None:
+        manifest = db_entries
+        ignored_dirs = 0
+    else:
+        manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=default_location.source_dir,
+        source_dir=source_dir,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -1867,10 +1978,16 @@ def publish_location_view(
     *,
     live_bbs_dir: object,
     managed_root: object,
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     virtual_files = _location_virtual_files(include_root=True)
     source_dir = _effective_location_source_dir(location, managed_root)
-    manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
+    db_entries = _db_backed_manifest_entries(location, manifest_db_path=manifest_db_path, virtual_files=virtual_files)
+    if db_entries is not None:
+        manifest = db_entries
+        ignored_dirs = 0
+    else:
+        manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
         source_dir=source_dir,
@@ -3440,6 +3557,28 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         error_state = _update_state(runtime_state, last_action=summary, last_error=str(exc))
         _persist_runtime_state(settings, error_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, error_state.current_location_id, error_state.current_session_callsign, summary)
+
+    manifest_db_path = bbs_library_db_path_from_settings(settings)
+    try:
+        sync_bbs_locations_from_folders(
+            manifest_db_path,
+            [
+                {
+                    "id": location.id,
+                    "name": location.name,
+                    "source_dir": _effective_location_source_dir(location, managed_root),
+                    "enabled": location.enabled,
+                    "alias": location.alias,
+                    "visibility_rule": location.visibility_rule,
+                    "open_rule": location.open_rule,
+                    "retention_policy": location.retention_policy,
+                    "retention_days": location.retention_days,
+                }
+                for location in locations
+            ],
+        )
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
 
     alias_map, alias_collisions = _build_alias_map(locations, default_location_id=default_location_id)
     _record_alias_health(alias_collisions)
