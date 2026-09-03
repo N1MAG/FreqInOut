@@ -1077,7 +1077,7 @@ def _topics(*values: object) -> tuple[str, ...]:
         ("Water", ("water",)),
         ("Medical", ("medical", "med", "injury", "health")),
         ("Comms", ("comm", "radio", "internet", "phone")),
-        ("Travel", ("travel", "road", "route")),
+        ("Travel/Roads", ("travel", "road", "route")),
         ("Safety", ("crime", "civil", "unrest", "security")),
         ("BBS", ("bbs", "vmail", "mailbox")),
     )

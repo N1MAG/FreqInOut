@@ -2354,6 +2354,28 @@ def test_phase7_dropdown_checklist_summarizes_multi_select(monkeypatch) -> None:
         app.processEvents()
 
 
+def test_phase7_dropdown_checklist_supports_prefix_actions(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.dropdown_checklist import DropdownChecklist
+
+    calls: list[str] = []
+    widget = DropdownChecklist("Groups")
+    try:
+        widget.set_prefix_actions([("Show all discovered groups", lambda: calls.append("toggle"))])
+        widget.set_options([("MAGNET", "MAGNET")])
+
+        action = widget.menu().actions()[0]
+        assert action.text() == "Show all discovered groups"
+        action.trigger()
+
+        assert calls == ["toggle"]
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
 def test_phase7_dropdown_checklist_supports_grouped_sections(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
@@ -2411,8 +2433,8 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "self.messages_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.inbox_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in source
     assert "self.inbox_controls_panel.setMinimumHeight(max(420, int(layout.sizeHint().height())))" in source
-    assert 'self.operating_group_filter = DropdownChecklist("")' in source
-    assert 'self.source_filter = DropdownChecklist("Source")' in source
+    assert 'self.operating_group_filter = DropdownChecklist("Groups")' in source
+    assert 'self.source_filter = DropdownChecklist("Sources")' in source
     assert 'self._make_combo_searchable(self.type_filter, "Message Type")' in source
     assert 'self.operating_group_filter.setObjectName("messageOperatingGroupFilter")' in source
     assert 'self.source_filter.setObjectName("messageSourceFilter")' in source
@@ -2422,6 +2444,10 @@ def test_phase7_messages_workspace_filters_are_below_title_without_context_sente
     assert "self.message_funnel_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)" in source
     assert "funnel_layout.addWidget(self.operating_group_filter, 2)" in source
     assert "funnel_layout.addWidget(self.source_filter, 2)" in source
+    assert "funnel_layout.addWidget(self.message_age_filter_label)" in source
+    assert source.index("funnel_layout.addWidget(self.message_age_filter_label)") < source.index(
+        "funnel_layout.addWidget(self.operating_group_filter, 2)"
+    )
     assert "self.received_filter.setFixedWidth(150)" in source
     assert "self.advanced_filters_btn.setFixedWidth(125)" in source
     assert "funnel_layout.addWidget(self.received_filter)" in source
@@ -2524,6 +2550,8 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.messages_header.isVisible() is False
         assert tab.show_all_message_groups_chk.isCheckable()
         assert tab.show_all_message_groups_chk.text() == "Configured"
+        assert tab.show_all_message_groups_chk.isVisible() is False
+        assert tab.received_filter.currentData() == msg_mod.DEFAULT_RECEIVED_FILTER_SECONDS
 
         tab.show_compose_from_navigation()
         app.processEvents()
@@ -2551,13 +2579,14 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         tab._message_rows = rows
         tab._refresh_message_filters(rows)
 
-        assert tab.source_filter.text() == "Source: All"
-        assert tab.operating_group_filter.text() == "All"
+        assert tab.source_filter.text() == "Sources: All"
+        assert tab.operating_group_filter.text() == "Groups: Configured"
         assert tab._is_filter_active() is False
         assert tab._filters_active() is False
-        tab.show_all_message_groups_chk.setChecked(True)
+        tab._toggle_message_groups_mode_from_menu()
         app.processEvents()
         assert tab.show_all_message_groups_chk.text() == "All Groups"
+        assert tab.operating_group_filter.text() == "Groups: All"
         source_values = {value for value, _label in tab._message_source_options([])}
         assert {"js8", "varac"} <= source_values
         assert tab._row_matches_workspace_filters(rows[0]) is True
@@ -2584,6 +2613,8 @@ def test_phase7_messages_workspace_filters_source_and_group(monkeypatch, tmp_pat
         assert tab.source_filter.all_selected() is True
         assert tab.operating_group_filter.all_selected() is True
         assert tab.show_all_message_groups_chk.text() == "Configured"
+        assert tab.operating_group_filter.text() == "Groups: Configured"
+        assert tab.received_filter.currentData() == msg_mod.DEFAULT_RECEIVED_FILTER_SECONDS
 
         tab._set_inbox_focus("js8call")
         app.processEvents()
@@ -2653,7 +2684,7 @@ def test_phase7_messages_group_filter_prioritizes_configured_groups_without_call
         assert "W0IFM" not in focused_options
         assert "W9BVM" not in focused_options
 
-        tab.show_all_message_groups_chk.setChecked(True)
+        tab._toggle_message_groups_mode_from_menu()
         app.processEvents()
 
         expanded_sections = tab._message_group_option_sections(rows)
@@ -2730,6 +2761,7 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert tab.operating_group_filter.minimumWidth() >= 160
         assert tab.source_filter.minimumWidth() >= 160
         assert tab.show_all_message_groups_chk.minimumWidth() >= 96
+        assert tab.show_all_message_groups_chk.isVisible() is False
         assert tab.advanced_filters_btn.minimumWidth() >= 125
         assert tab._inbox_focus_buttons["forms"].minimumWidth() >= 120
         assert tab._inbox_focus_buttons["commstat"].minimumWidth() >= 100

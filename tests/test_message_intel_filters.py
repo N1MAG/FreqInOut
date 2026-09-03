@@ -7,6 +7,8 @@ from freqinout.core.message_intel_filters import (
     build_intel_filter_rollup,
     focus_source_values,
     message_status_bucket,
+    message_topics,
+    normalize_intel_topic,
     row_matches_intel_filters,
 )
 
@@ -60,6 +62,11 @@ def test_intel_filters_match_exact_topic_and_status_bucket() -> None:
     assert row_matches_intel_filters(row, status_bucket="yellow", topic="Power") is True
     assert row_matches_intel_filters(row, status_bucket="red", topic="Power") is False
     assert row_matches_intel_filters(row, status_bucket="yellow", topic="Fuel") is False
+
+
+def test_travel_topic_aliases_collapse_to_travel_roads() -> None:
+    assert normalize_intel_topic("Travel") == "Travel/Roads"
+    assert message_topics(_row("INFO", ("Travel", "Travel/Roads"))) == ("Travel/Roads",)
 
 
 def test_focus_source_values_are_operator_domain_refinements() -> None:

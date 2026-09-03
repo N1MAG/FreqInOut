@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QAction
@@ -18,10 +18,36 @@ class DropdownChecklist(QPushButton):
         self._options: list[tuple[str, str]] = []
         self._selected: set[str] = set()
         self._checkboxes: dict[str, QCheckBox] = {}
+        self._prefix_actions: list[tuple[str, Callable[[], None]]] = []
         self._menu = QMenu(self)
         self.setMenu(self._menu)
         self.setMinimumWidth(132)
         self._update_text()
+
+    def set_label(self, label: str) -> None:
+        self._label = str(label or "").strip()
+        self._update_text()
+
+    def refresh_text(self) -> None:
+        self._update_text()
+
+    def option_label(self, value: object) -> str:
+        wanted = str(value or "").strip()
+        for option_value, label in self._options:
+            if option_value == wanted:
+                return label
+        return wanted
+
+    def set_prefix_actions(self, actions: Iterable[tuple[str, Callable[[], None]]]) -> None:
+        normalized = [
+            (str(label or "").strip(), callback)
+            for label, callback in actions
+            if str(label or "").strip() and callable(callback)
+        ]
+        if normalized == self._prefix_actions:
+            return
+        self._prefix_actions = normalized
+        self._rebuild_menu()
 
     def set_options(
         self,
@@ -106,6 +132,12 @@ class DropdownChecklist(QPushButton):
     def _rebuild_menu(self) -> None:
         self._menu.clear()
         self._checkboxes = {}
+        if self._prefix_actions:
+            for label, callback in self._prefix_actions:
+                action = QAction(label, self._menu)
+                action.triggered.connect(callback)
+                self._menu.addAction(action)
+            self._menu.addSeparator()
         labels = {value: label for value, label in self._options}
         all_action = QAction("All", self._menu)
         all_action.triggered.connect(self._select_all)

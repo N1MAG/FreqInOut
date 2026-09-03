@@ -45,6 +45,15 @@ def normalize_intel_topic(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    aliases = {
+        "travel": "Travel/Roads",
+        "roads": "Travel/Roads",
+        "travel roads": "Travel/Roads",
+        "travel/road": "Travel/Roads",
+    }
+    alias = aliases.get(text.casefold())
+    if alias:
+        return alias
     for topic in TOPIC_TAXONOMY:
         if topic.casefold() == text.casefold():
             return topic

@@ -451,6 +451,7 @@ JS8_SAFE_CALL_LIMIT = 32
 JS8_BAD_PREVIEW_LIMIT = 1024
 BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
+DEFAULT_RECEIVED_FILTER_SECONDS = 7 * 24 * 60 * 60
 RECEIVED_FILTER_CHOICES = [
     ("Any time", 0),
     ("Last 15 min", 15 * 60),
@@ -4681,20 +4682,27 @@ class MessageViewerTab(QWidget):
         self.received_filter = QComboBox()
         for label, seconds in RECEIVED_FILTER_CHOICES:
             self.received_filter.addItem(label, seconds)
+        default_age_idx = self.received_filter.findData(DEFAULT_RECEIVED_FILTER_SECONDS)
+        if default_age_idx >= 0:
+            self.received_filter.setCurrentIndex(default_age_idx)
         self.received_filter.setToolTip(
             "Filter by message age. Use recent windows for triage or older-than windows before cleanup/delete."
         )
         self.received_filter.currentIndexChanged.connect(self._on_filter_changed)
         fit_combo_box_to_contents(self.received_filter)
 
-        self.operating_group_filter = DropdownChecklist("")
+        self.operating_group_filter = DropdownChecklist("Groups")
         self.operating_group_filter.setObjectName("messageOperatingGroupFilter")
         self.operating_group_filter.setToolTip("Show messages for all or selected operating groups.")
         self.operating_group_filter.selectionChanged.connect(self._on_filter_changed)
         self.operating_group_filter.set_options([("unassigned", "Unassigned")])
+        self.operating_group_filter.set_prefix_actions(
+            [("Show all discovered groups", self._toggle_message_groups_mode_from_menu)]
+        )
         self.show_all_message_groups_chk = QPushButton("All Groups")
         self.show_all_message_groups_chk.setObjectName("messageShowAllGroups")
         self.show_all_message_groups_chk.setCheckable(True)
+        self.show_all_message_groups_chk.setVisible(False)
         self.show_all_message_groups_chk.setToolTip(
             "Expand Operating Group to every discovered group. Leave off to focus on FIO and CommStat configured groups."
         )
@@ -4702,7 +4710,7 @@ class MessageViewerTab(QWidget):
         self.show_all_message_groups_chk.toggled.connect(self._on_show_all_message_groups_changed)
         self._update_show_all_message_groups_style()
 
-        self.source_filter = DropdownChecklist("Source")
+        self.source_filter = DropdownChecklist("Sources")
         self.source_filter.setObjectName("messageSourceFilter")
         self.source_filter.setToolTip("Show messages from all or selected message sources.")
         self.source_filter.selectionChanged.connect(self._on_filter_changed)
@@ -5026,8 +5034,10 @@ class MessageViewerTab(QWidget):
         funnel_layout.setSpacing(8)
         self.message_group_filter_label = QLabel("Groups")
         self.message_group_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_group_filter_label.setVisible(False)
         self.message_source_filter_label = QLabel("Sources")
         self.message_source_filter_label.setStyleSheet("font-weight: bold;")
+        self.message_source_filter_label.setVisible(False)
         self.message_age_filter_label = QLabel("Age")
         self.message_age_filter_label.setStyleSheet("font-weight: bold;")
         self.operating_group_filter.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
@@ -5049,13 +5059,12 @@ class MessageViewerTab(QWidget):
         self.advanced_filters_btn.setFixedWidth(125)
         self.message_funnel_widget.setMinimumWidth(MESSAGE_INBOX_FUNNEL_MIN_WIDTH)
         self.message_funnel_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
-        funnel_layout.addWidget(self.message_group_filter_label)
-        funnel_layout.addWidget(self.operating_group_filter, 2)
-        funnel_layout.addWidget(self.show_all_message_groups_chk)
-        funnel_layout.addWidget(self.message_source_filter_label)
-        funnel_layout.addWidget(self.source_filter, 2)
         funnel_layout.addWidget(self.message_age_filter_label)
         funnel_layout.addWidget(self.received_filter)
+        funnel_layout.addWidget(self.message_group_filter_label)
+        funnel_layout.addWidget(self.operating_group_filter, 2)
+        funnel_layout.addWidget(self.message_source_filter_label)
+        funnel_layout.addWidget(self.source_filter, 2)
         funnel_layout.addWidget(self.clear_filters_btn)
         funnel_layout.addWidget(self.advanced_filters_btn)
         self.message_intel_filter_widget = QWidget()
@@ -5123,6 +5132,7 @@ class MessageViewerTab(QWidget):
 
         self._arrange_inbox_action_controls(compact=False)
         self._sync_inbox_focus_buttons()
+        self._refresh_basic_filter_button_texts()
         self._build_messages_header()
         self._apply_accessibility_width_guards()
         fit_child_combo_boxes(self)
@@ -8990,7 +9000,6 @@ class MessageViewerTab(QWidget):
             self.received_filter,
             self.message_check_combo,
             self.operating_group_filter,
-            self.show_all_message_groups_chk,
             self.source_filter,
             self.message_check_status_label,
             self.refresh_btn,
@@ -14281,6 +14290,7 @@ class MessageViewerTab(QWidget):
                 selected_values=selected_sources,
                 select_all_when_empty=selected_sources is None,
             )
+        self._refresh_basic_filter_button_texts()
 
     def _message_source_options(self, rows: List[UnifiedMessage]) -> list[tuple[str, str]]:
         options = _core_message_source_options(rows)
@@ -14590,7 +14600,7 @@ class MessageViewerTab(QWidget):
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
-        if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != 0:
+        if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS:
             return True
         if getattr(self, "_map_context_filter", {}) or {}:
             return True
@@ -14672,7 +14682,7 @@ class MessageViewerTab(QWidget):
             and not getattr(self, "_intel_status_filter", "")
             and not getattr(self, "_intel_topic_filter", "")
             and not (getattr(self, "_map_context_filter", {}) or {})
-            and int(self.received_filter.currentData() or 0) == 0
+            and int(self.received_filter.currentData() or 0) == DEFAULT_RECEIVED_FILTER_SECONDS
             and not self.rcv_search.text().strip()
         ):
             return
@@ -14689,7 +14699,8 @@ class MessageViewerTab(QWidget):
         self._intel_status_filter = ""
         self._intel_topic_filter = ""
         self._sync_inbox_focus_buttons()
-        self.received_filter.setCurrentIndex(0)
+        default_age_idx = self.received_filter.findData(DEFAULT_RECEIVED_FILTER_SECONDS)
+        self.received_filter.setCurrentIndex(default_age_idx if default_age_idx >= 0 else 0)
         self.type_filter.setCurrentText("MSG Type...")
         self.status_filter.setCurrentText("Status...")
         self.from_filter.setCurrentText("")
@@ -14712,7 +14723,13 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "show_all_message_groups_chk"):
             self.show_all_message_groups_chk.blockSignals(False)
             self._update_show_all_message_groups_style()
+        self._refresh_basic_filter_button_texts()
         self._apply_message_filters()
+
+    def _toggle_message_groups_mode_from_menu(self) -> None:
+        if not hasattr(self, "show_all_message_groups_chk"):
+            return
+        self.show_all_message_groups_chk.setChecked(not self._show_all_message_groups_enabled())
 
     def _on_show_all_message_groups_changed(self, *_args) -> None:
         self._update_show_all_message_groups_style()
@@ -14734,10 +14751,12 @@ class MessageViewerTab(QWidget):
                 selected_values=selected_values,
                 select_all_when_empty=select_all_when_empty,
             )
+        self._refresh_basic_filter_button_texts()
         self._on_filter_changed()
 
     def _update_show_all_message_groups_style(self) -> None:
         if not hasattr(self, "show_all_message_groups_chk"):
+            self._refresh_basic_filter_button_texts()
             return
         theme = resolve_theme(self.settings)
         role = "secondary" if self._show_all_message_groups_enabled() else "muted"
@@ -14748,10 +14767,46 @@ class MessageViewerTab(QWidget):
             if self._show_all_message_groups_enabled()
             else "Operating Group list is focused on configured and CommStat active groups."
         )
+        self.show_all_message_groups_chk.setVisible(False)
+        self._refresh_basic_filter_button_texts()
+
+    def _refresh_basic_filter_button_texts(self) -> None:
+        group_filter = getattr(self, "operating_group_filter", None)
+        if group_filter is not None:
+            try:
+                group_filter.refresh_text()
+                if group_filter.all_selected():
+                    text = "Groups: All" if self._show_all_message_groups_enabled() else "Groups: Configured"
+                    group_filter.setText(text)
+                    group_filter.setToolTip(
+                        "Showing every discovered group."
+                        if self._show_all_message_groups_enabled()
+                        else "Showing configured and CommStat active groups."
+                    )
+                action_label = (
+                    "Show configured groups only"
+                    if self._show_all_message_groups_enabled()
+                    else "Show all discovered groups"
+                )
+                group_filter.set_prefix_actions([(action_label, self._toggle_message_groups_mode_from_menu)])
+            except Exception:
+                pass
+        source_filter = getattr(self, "source_filter", None)
+        if source_filter is not None:
+            try:
+                source_filter.refresh_text()
+                selected = source_filter.selected_values()
+                if len(selected) == 1:
+                    only = next(iter(selected))
+                    source_filter.setText(f"Sources: {source_filter.option_label(only)}")
+                    source_filter.setToolTip(f"Sources: {source_filter.option_label(only)}")
+            except Exception:
+                pass
 
     def _on_filter_changed(self) -> None:
         self._unfreeze_table()
         self._update_excluded_types_button_state()
+        self._refresh_basic_filter_button_texts()
         if not getattr(self, "_projected_table_loading", False) and self._reload_projected_messages_for_scope_change():
             return
         self._apply_message_filters_light()
@@ -14908,7 +14963,7 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "received_filter"):
             return ""
         try:
-            if int(self.received_filter.currentData() or 0) == 0:
+            if int(self.received_filter.currentData() or 0) == DEFAULT_RECEIVED_FILTER_SECONDS:
                 return ""
         except Exception:
             return ""
@@ -15912,7 +15967,7 @@ class MessageViewerTab(QWidget):
             or self._message_group_filter_active()
             or bool(getattr(self, "_intel_status_filter", ""))
             or bool(getattr(self, "_intel_topic_filter", ""))
-            or int(self.received_filter.currentData() or 0) != 0
+            or int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS
             or bool(getattr(self, "_map_context_filter", {}) or {})
             or bool(self.rcv_search.text().strip())
         )
