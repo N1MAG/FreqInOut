@@ -1829,12 +1829,27 @@ def test_message_workspace_scope_core_matches_selected_source_and_group() -> Non
 def test_message_group_filter_core_normalizes_groups_without_promoting_callsigns() -> None:
     assert normalize_message_group_filter_value(" MAGNET * ") == "MAGNET"
     assert normalize_message_group_filter_value("@MR08") == "MR08"
+    assert normalize_message_group_filter_value("UNASSIGNED") == "unassigned"
     assert is_message_group_candidate("MR08")
     assert is_message_group_candidate("MAGNET")
     assert not is_message_group_candidate("W0IFM")
     assert is_message_group_candidate("W0IFM", configured_groups={"W0IFM"})
     assert not is_message_group_candidate("K7RIE>")
     assert message_group_candidate_set(["MAGNET *", "W0IFM", "@MR08", ""]) == {"MAGNET", "MR08"}
+
+
+def test_message_group_filter_all_selected_disables_group_scope() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.operating_group_filter = type(
+        "GroupFilter",
+        (),
+        {
+            "all_selected": lambda _self: True,
+            "selected_values": lambda _self: {"UNASSIGNED"},
+        },
+    )()
+
+    assert MessageViewerTab._selected_message_groups(tab) is None
 
 
 def test_message_group_option_sections_prioritize_configured_then_active_groups() -> None:

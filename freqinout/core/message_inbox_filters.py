@@ -239,6 +239,8 @@ def normalize_message_group_filter_value(value: object) -> str:
     group = normalize_group_name(value)
     group = re.sub(r"\s+\*$", "", group).strip()
     group = re.sub(r"\s+", " ", group).strip()
+    if group.lower() == "unassigned":
+        return "unassigned"
     return group
 
 

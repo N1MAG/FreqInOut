@@ -14249,9 +14249,13 @@ class MessageViewerTab(QWidget):
 
     def _selected_message_groups(self) -> Optional[Set[str]]:
         if hasattr(self, "operating_group_filter"):
-            if self.operating_group_filter.all_selected() and self._show_all_message_groups_enabled():
+            if self.operating_group_filter.all_selected():
                 return None
-            return self.operating_group_filter.selected_values()
+            return {
+                group
+                for value in self.operating_group_filter.selected_values()
+                if (group := self._normalize_message_group_filter_value(value))
+            }
         return None
 
     def _message_group_filter_active(self) -> bool:
