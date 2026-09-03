@@ -55,6 +55,8 @@ from freqinout.core.message_row_presentation import (
     spotter_message_row_presentation,
     varac_message_row_presentation,
 )
+from freqinout.core.message_projection_store import ensure_message_projection_schema, list_projected_messages
+from freqinout.core.message_source_projectors import project_native_file_records
 from freqinout.core.observation_projection import Observation
 from freqinout.core.message_inbox_filters import (
     InboxFilterCriteria,
@@ -228,6 +230,18 @@ Situation Report
     assert info.subject == "Green / No significant issues"
     assert info.summary == "F!701C | K7ETC -> @MR08 | UT / DM38ST | Green / No significant issues"
     assert "State (2-letter code)" not in info.summary
+
+
+def test_spotter_mcf_summary_ignores_form_box_labels() -> None:
+    info = analyze_spotter_text(
+        "F!701C TO[@MR08] FR[K7ETC] ST[UT] GR[DM38ST] NA[Box 1 - TO] DA[260729-0354z]\n"
+        "Current Operational Status (QTH)\n"
+        "*Operations steady, no significant issues or noteworthy activity - Green",
+        form_name="F!701C",
+    )
+
+    assert info.summary == "F!701C | K7ETC -> @MR08 | UT / DM38ST | Green / No significant issues | 260729-0354z"
+    assert "Box 1" not in info.summary
 
 
 def test_flmsg_form_extracts_common_fields_and_human_first_summary() -> None:
@@ -2453,6 +2467,14 @@ def test_spotter_focus_profile_shows_intelligent_summary() -> None:
 
     assert model.headerData(5, Qt.Horizontal) == "Summary"
     assert model.data(model.index(0, 5), Qt.DisplayRole) == summary
+
+
+def test_commstat_focus_projects_only_commstat_source_family() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._inbox_focus = "commstat"
+    tab._selected_message_sources = lambda: {"commstat", "sitrep", "spotter"}
+
+    assert MessageViewerTab._projected_source_families_for_current_scope(tab) == ("commstat",)
 
 
 def test_form_message_type_label_normalizes_common_nbems_form_families() -> None:
@@ -6492,6 +6514,65 @@ def test_local_projection_fingerprint_tracks_text_source_id_changes(tmp_path) ->
     after = MessageViewerTab._local_projection_fingerprint(tab, ("file_messages",))
 
     assert before != after
+
+
+def test_message_projection_schema_repairs_existing_partial_tables(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE message_external_refs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+    conn.execute("CREATE TABLE message_artifacts (artifact_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE message_delete_queue (delete_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE message_delete_audit (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+
+    ensure_message_projection_schema(conn)
+    ensure_message_projection_schema(conn)
+
+    refs_columns = {row[1] for row in conn.execute("PRAGMA table_info(message_external_refs)").fetchall()}
+    artifacts_columns = {row[1] for row in conn.execute("PRAGMA table_info(message_artifacts)").fetchall()}
+    delete_columns = {row[1] for row in conn.execute("PRAGMA table_info(message_delete_queue)").fetchall()}
+    audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(message_delete_audit)").fetchall()}
+    conn.close()
+
+    assert "message_id" in refs_columns
+    assert "message_id" in artifacts_columns
+    assert "message_id" in delete_columns
+    assert "message_id" in audit_columns
+
+
+def test_native_file_projection_uses_cached_report_timestamp_for_age(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    msg_path = tmp_path / "copied-now.b2f"
+    msg_path.write_text("CUSTOM_FORM,missing.html\nL01,MR08\nL02,K7ETC", encoding="utf-8")
+    now_ts = time.time()
+    report_ts = datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp()
+    os.utime(msg_path, (now_ts, now_ts))
+    stat = msg_path.stat()
+    rec = FileRecord(path=msg_path, origin="flmsg", size=stat.st_size, mtime=stat.st_mtime)
+
+    conn = sqlite3.connect(db_path)
+    ensure_message_file_metadata_table(conn)
+    conn.execute(
+        """
+        INSERT INTO message_file_metadata (
+            origin, path, mtime, size, source_family, msg_type, display_type, status,
+            from_call, to_call, title, report_ts, age_ts_source, topics_json,
+            actionable, search_text, parser_version, indexed_ts
+        )
+        VALUES (?, ?, ?, ?, 'flmsg', 'FLMSG', 'General', 'NEW',
+                'K7ETC', 'MR08', 'Copied Report', ?, 'report', '[]',
+                0, 'Copied Report K7ETC MR08', ?, ?)
+        """,
+        ("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size), report_ts, FILE_METADATA_PARSER_VERSION, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    assert project_native_file_records(db_path, {"flmsg": [rec]}, force=True) == 1
+    rows = list_projected_messages(db_path, source_family="flmsg", limit=10)
+
+    assert len(rows) == 1
+    assert rows[0]["received_ts"] == report_ts
+    assert rows[0]["subject"] == "Copied Report"
 
 
 def test_sqlite_identifier_rejects_non_table_names() -> None:

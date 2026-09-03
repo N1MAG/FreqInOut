@@ -3810,7 +3810,26 @@ class MainWindow(QMainWindow):
                     tab.prefill_compose_intent(intent)
             elif hasattr(tab, "show_inbox_with_context"):
                 context = dict(getattr(self, "_messages_nav_filter_context", {}) or {})
-                if any(str(value or "").strip() for value in context.values()):
+                context.pop("compose_intent", None)
+                has_context = False
+                for key, value in context.items():
+                    if key == "source_family" and str(value or "").strip().lower() in {"", "message"}:
+                        continue
+                    if key == "age_filter_seconds":
+                        try:
+                            if int(value or 0) in {0, 7 * 24 * 60 * 60}:
+                                continue
+                        except Exception:
+                            continue
+                    active = (
+                        bool(value) if isinstance(value, bool)
+                        else bool(value) if isinstance(value, (int, float))
+                        else bool(str(value or "").strip())
+                    )
+                    if active:
+                        has_context = True
+                        break
+                if has_context:
                     tab.show_inbox_with_context(**context)
                 elif hasattr(tab, "show_inbox_from_navigation"):
                     tab.show_inbox_from_navigation()

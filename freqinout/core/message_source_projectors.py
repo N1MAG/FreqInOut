@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.message_file_metadata import cached_message_file_row_summary, ensure_message_file_metadata_table
 from freqinout.core.message_file_scanner import FileRecord
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
@@ -31,6 +32,58 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 PROJECTOR_VERSION = 2
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
+
+
+def _file_metadata_key(rec: FileRecord) -> tuple[str, str, float, int]:
+    return (
+        _text(rec.origin).lower(),
+        str(rec.path),
+        float(rec.mtime or 0.0),
+        int(rec.size or 0),
+    )
+
+
+def _load_file_projection_metadata(
+    conn: sqlite3.Connection,
+    records: Sequence[FileRecord],
+) -> dict[tuple[str, str, float, int], dict[str, object]]:
+    if not records:
+        return {}
+    try:
+        ensure_message_file_metadata_table(conn)
+    except Exception:
+        return {}
+    keys = {_file_metadata_key(rec) for rec in records}
+    if not keys:
+        return {}
+    out: dict[tuple[str, str, float, int], dict[str, object]] = {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT origin, path, mtime, size, source_id, source_label, source_family,
+                   msg_type, display_type, status, from_call, to_call, title,
+                   rcv_display, report_ts, age_ts_source, topics_json, actionable,
+                   search_text
+              FROM message_file_metadata
+             WHERE origin IN ('flmsg', 'flamp', 'bbs', 'bbs_archive')
+            """
+        ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        try:
+            key = (
+                _text(row["origin"]).lower(),
+                _text(row["path"]),
+                float(row["mtime"] or 0.0),
+                int(row["size"] or 0),
+            )
+        except Exception:
+            continue
+        if key not in keys:
+            continue
+        out[key] = {str(name): row[name] for name in row.keys()}
+    return out
 
 
 def project_native_message_sources(
@@ -105,6 +158,27 @@ def project_native_file_records(
         conn = connect_sqlite(db_path, timeout=15.0, row_factory=sqlite3.Row, busy_timeout_ms=15000)
         try:
             ensure_message_projection_schema(conn)
+            file_metadata = _load_file_projection_metadata(conn, flattened)
+            fingerprint = content_hash(
+                fingerprint,
+                "metadata",
+                "\n".join(
+                    sorted(
+                        "|".join(
+                            (
+                                key[0],
+                                key[1],
+                                f"{key[2]:.6f}",
+                                str(key[3]),
+                                _text(meta.get("title", "")),
+                                _text(meta.get("report_ts", "")),
+                                _text(meta.get("age_ts_source", "")),
+                            )
+                        )
+                        for key, meta in file_metadata.items()
+                    )
+                ),
+            )
             checkpoint_id = "native:file_records"
             if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
                 return 0
@@ -112,12 +186,27 @@ def project_native_file_records(
             with conn:
                 for rec in sorted(flattened, key=lambda item: float(item.mtime or 0.0), reverse=True):
                     origin = _text(rec.origin).lower() or "file"
+                    meta = cached_message_file_row_summary(
+                        rec,
+                        file_metadata.get(_file_metadata_key(rec)),
+                        fallback_origin=origin,
+                        fallback_title=rec.path.name,
+                        title_limit=240,
+                    )
+                    event_ts = float(getattr(meta, "rcv_ts", 0.0) or rec.mtime or 0.0)
+                    title = _text(getattr(meta, "title", "")) or rec.path.name
+                    message_type = _text(getattr(meta, "msg_type", "")) or _file_message_type(origin, rec.path)
+                    display_type = _text(getattr(meta, "display_type", "")) or _file_source_base_label(origin)
+                    from_call = _upper(getattr(meta, "from_call", ""))
+                    to_call = _upper(getattr(meta, "to_call", ""))
+                    search_text = _text(getattr(meta, "search_text", "")) or _search_text(origin, title, rec.path)
+                    topics = tuple(getattr(meta, "topics", ()) or ()) or _topics(title, origin)
                     source_id = _text(rec.source_id) or f"{origin}:{rec.path.parent}"
                     source_label = _text(rec.source_label) or _source_label(_file_source_base_label(origin), "")
                     external_kind = f"{origin}_file"
                     external_key = f"{rec.path}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
                     message_id = stable_message_id(source_id, external_kind, external_key)
-                    body = rec.path.name
+                    body = title
                     source = MessageSourceRecord(
                         source_id=source_id,
                         source_family=origin,
@@ -125,7 +214,7 @@ def project_native_file_records(
                         endpoint_or_path=str(rec.path.parent),
                         capabilities={"read": True, "delete": True, "native_open": True},
                         provenance={"source": "file_scan", "origin": origin},
-                        last_seen_utc=_utc_from_ts(rec.mtime),
+                        last_seen_utc=_utc_from_ts(event_ts),
                         last_ingested_utc=_utc_now(),
                     )
                     projection = MessageProjectionRecord(
@@ -135,27 +224,31 @@ def project_native_file_records(
                         primary_source_id=source_id,
                         source_family=origin,
                         source_label=source.source_label,
-                        message_type=_file_message_type(origin, rec.path),
-                        display_type=_file_source_base_label(origin),
+                        message_type=message_type,
+                        display_type=display_type,
                         status="INFO",
                         severity="info",
                         read_state="info",
-                        event_ts=float(rec.mtime or 0.0),
-                        received_ts=float(rec.mtime or 0.0),
-                        event_utc=_utc_from_ts(rec.mtime),
-                        received_utc=_utc_from_ts(rec.mtime),
-                        subject=rec.path.name,
-                        summary=rec.path.name,
+                        from_call=from_call,
+                        to_call=to_call,
+                        group_name=_group(to_call),
+                        event_ts=event_ts,
+                        received_ts=event_ts,
+                        event_utc=_utc_from_ts(event_ts),
+                        received_utc=_utc_from_ts(event_ts),
+                        subject=title,
+                        summary=title,
                         body_preview=body,
-                        topics=_topics(rec.path.name, origin),
+                        topics=topics,
                         entities={
                             "origin": origin,
                             "path": str(rec.path),
                             "extension": rec.path.suffix.lower(),
                             "q_id": _q_id_from_path(rec.path),
+                            "age_ts_source": _text(getattr(meta, "age_ts_source", "")) or "received",
                         },
                         retention_class="artifact",
-                        search_text=_search_text(origin, rec.path.name, rec.path),
+                        search_text=search_text,
                         projection_version=PROJECTOR_VERSION,
                     )
                     artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(

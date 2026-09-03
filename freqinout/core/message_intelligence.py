@@ -536,14 +536,22 @@ def _clean_spotter_summary_subject(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    text = re.sub(r"^box\s+\d+\s*[-:]\s*", "", text, flags=re.IGNORECASE).strip()
+    if not text:
+        return ""
     lower = text.lower()
     noisy_prefixes = (
+        "to",
+        "from",
         "state (2-letter code)",
         "state",
         "maidenhead grid square",
         "grid",
+        "date/msg id",
+        "date/time/msg id",
+        "date",
     )
-    if any(lower.startswith(prefix) for prefix in noisy_prefixes):
+    if any(lower == prefix or lower.startswith(f"{prefix}:") for prefix in noisy_prefixes):
         return ""
     return re.sub(r"\s+", " ", text)
 

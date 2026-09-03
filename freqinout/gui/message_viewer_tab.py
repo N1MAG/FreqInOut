@@ -5333,9 +5333,7 @@ class MessageViewerTab(QWidget):
             source = str(value or "").strip().lower()
             if not source:
                 continue
-            if source == "commstat":
-                expanded.update({"commstat", "sitrep"})
-            elif source in {"mesh", "meshcore", "meshtastic"}:
+            if source in {"mesh", "meshcore", "meshtastic"}:
                 expanded.update({"mesh", "meshcore", "meshtastic"})
             elif source == "bbs":
                 expanded.update({"bbs", "bbs_archive"})

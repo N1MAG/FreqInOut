@@ -255,6 +255,12 @@ def test_main_messages_navigation_routes_to_requested_surface(monkeypatch) -> No
     assert tab.compose_count == 1
     assert tab.compose_intents[-1]["target_callsign"] == "KI6QDB"
 
+    MainWindow.open_messages_section(window, "inbox")
+    assert selected_screens == [7, 7, 7]
+    assert len(callbacks) == 1
+    callbacks.pop()()
+    assert tab.inbox_plain_count == 1
+
 
 def test_main_map_routes_focus_expected_report_surfaces(monkeypatch) -> None:
     from freqinout.gui import main_window as main_window_module
