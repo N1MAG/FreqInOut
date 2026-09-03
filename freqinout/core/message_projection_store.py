@@ -600,6 +600,40 @@ def list_projected_messages(
         conn.close()
 
 
+def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[str, Any]:
+    clean_id = str(message_id or "").strip()
+    if not clean_id:
+        return {"message": None, "refs": [], "artifacts": []}
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        message = conn.execute(
+            "SELECT * FROM message_projection WHERE message_id=?",
+            (clean_id,),
+        ).fetchone()
+        refs = conn.execute(
+            """
+            SELECT *
+              FROM message_external_refs
+             WHERE message_id=?
+             ORDER BY source_id, external_kind, external_key
+            """,
+            (clean_id,),
+        ).fetchall()
+        artifacts = conn.execute(
+            """
+            SELECT *
+              FROM message_artifacts
+             WHERE message_id=?
+             ORDER BY artifact_type, q_id, block_id, path
+            """,
+            (clean_id,),
+        ).fetchall()
+        return {"message": message, "refs": list(refs), "artifacts": list(artifacts)}
+    finally:
+        conn.close()
+
+
 def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]) -> int:
     clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
     if not clean_ids:
@@ -625,6 +659,139 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
             return count
     finally:
         conn.close()
+
+
+def process_message_delete_queue(db_path: str | Path, *, limit: int = 50) -> dict[str, int]:
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        rows = list(
+            conn.execute(
+                """
+                SELECT *
+                  FROM message_delete_queue
+                 WHERE state='queued'
+                 ORDER BY requested_utc
+                 LIMIT ?
+                """,
+                (max(1, min(500, int(limit or 50))),),
+            )
+        )
+        counts = {"completed": 0, "failed": 0, "skipped": 0}
+        for row in rows:
+            result = _process_delete_queue_row(conn, row)
+            counts[result] = counts.get(result, 0) + 1
+        return counts
+    finally:
+        conn.close()
+
+
+def _process_delete_queue_row(conn: sqlite3.Connection, row: sqlite3.Row) -> str:
+    delete_id = str(row["delete_id"] or "")
+    message_id = str(row["message_id"] or "")
+    effect = str(row["requested_effect"] or "").strip().lower()
+    stamp = utc_now_iso()
+    if not delete_id or not message_id:
+        return "skipped"
+    try:
+        if effect in {"hide_fio", "source_delete"}:
+            _complete_delete_queue_row(conn, delete_id, message_id, effect, "completed", "Projection hidden")
+            return "completed"
+        if effect == "audit_only":
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE message_projection
+                       SET body_preview='', search_text=LOWER(TRIM(COALESCE(subject, '') || ' ' || COALESCE(summary, ''))),
+                           retention_class='audit_only', projected_utc=?
+                     WHERE message_id=?
+                    """,
+                    (stamp, message_id),
+                )
+            _complete_delete_queue_row(conn, delete_id, message_id, effect, "completed", "Raw preview minimized")
+            return "completed"
+        if effect in {"delete_external", "delete_all_external_refs"}:
+            return _process_file_external_delete(conn, delete_id, message_id, effect)
+        _complete_delete_queue_row(conn, delete_id, message_id, effect, "failed", f"Unsupported delete effect: {effect}")
+        return "failed"
+    except Exception as exc:
+        _complete_delete_queue_row(conn, delete_id, message_id, effect, "failed", str(exc))
+        return "failed"
+
+
+def _process_file_external_delete(
+    conn: sqlite3.Connection,
+    delete_id: str,
+    message_id: str,
+    effect: str,
+) -> str:
+    refs = list(
+        conn.execute(
+            """
+            SELECT *
+              FROM message_external_refs
+             WHERE message_id=? AND delete_capability='file_delete'
+             ORDER BY external_path
+            """,
+            (message_id,),
+        )
+    )
+    if not refs:
+        _complete_delete_queue_row(conn, delete_id, message_id, effect, "failed", "No file-delete capable refs")
+        return "failed"
+    deleted = 0
+    missing = 0
+    errors: list[str] = []
+    for ref in refs:
+        path_text = str(ref["external_path"] or "").strip()
+        if not path_text:
+            missing += 1
+            continue
+        path = Path(path_text)
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                deleted += 1
+            else:
+                missing += 1
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+    detail = f"Deleted {deleted} file ref(s); missing {missing}"
+    if errors:
+        detail += "; errors: " + "; ".join(errors[:3])
+    state = "failed" if errors and deleted == 0 else "completed"
+    _complete_delete_queue_row(conn, delete_id, message_id, effect, state, detail)
+    return "failed" if state == "failed" else "completed"
+
+
+def _complete_delete_queue_row(
+    conn: sqlite3.Connection,
+    delete_id: str,
+    message_id: str,
+    effect: str,
+    state: str,
+    detail: str,
+) -> None:
+    stamp = utc_now_iso()
+    payload = {"detail": str(detail or ""), "completed_utc": stamp}
+    with conn:
+        conn.execute(
+            """
+            UPDATE message_delete_queue
+               SET state=?, completed_utc=?, result_json=?
+             WHERE delete_id=?
+            """,
+            (state, stamp, _json(payload, "{}"), delete_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_delete_audit (
+                delete_id, message_id, effect, state, detail, audit_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (delete_id, message_id, effect, state, detail, stamp),
+        )
 
 
 def _message_values(message: MessageProjectionRecord, projected_utc: str) -> tuple[object, ...]:

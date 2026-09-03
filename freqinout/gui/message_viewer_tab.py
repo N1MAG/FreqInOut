@@ -198,7 +198,12 @@ from freqinout.core.message_projection_projector import (
     project_unified_message_rows,
 )
 from freqinout.core.message_projection_payload import ProjectedMessagePayload, projected_payload_from_row
-from freqinout.core.message_projection_store import list_projected_messages, mark_projected_messages_read
+from freqinout.core.message_projection_store import (
+    list_projected_messages,
+    load_projected_message_detail,
+    mark_projected_messages_read,
+    process_message_delete_queue,
+)
 from freqinout.core.source_view_contracts import (
     contract_gate_failures,
     source_contract_for,
@@ -14442,6 +14447,7 @@ class MessageViewerTab(QWidget):
                     requested_by="fio",
                     source_scope="projection",
                 )
+                process_message_delete_queue(db_path, limit=25)
                 return delete_success_result("hidden", hidden=True)
             except Exception as exc:
                 log.debug("MessageViewer: projected message delete failed: %s", exc)
@@ -15653,12 +15659,80 @@ class MessageViewerTab(QWidget):
             topics = ", ".join(msg.topics)
             if topics:
                 self._append_detail_section(lines, "Intelligence", (("Topics", topics),))
+            detail = self._projected_message_detail(msg.message_id)
+            refs = detail.get("refs", []) if isinstance(detail, dict) else []
+            artifacts = detail.get("artifacts", []) if isinstance(detail, dict) else []
+            ref_lines = self._projected_ref_lines(refs)
+            if ref_lines:
+                self._append_text_body(lines, "Source References", "\n".join(ref_lines))
+            artifact_lines = self._projected_artifact_lines(artifacts)
+            if artifact_lines:
+                self._append_text_body(lines, "Artifacts", "\n".join(artifact_lines))
             self._append_text_body(lines, "Message", msg.body_preview or msg.summary or msg.subject or "--")
             self.info_label.setText(
                 f"{msg.source_label or msg.source_family or 'Message'} {msg.from_call} -> {msg.to_call}"
             )
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(lines))
+
+    def _projected_message_detail(self, message_id: str) -> Dict[str, object]:
+        db_path = self._db_path()
+        if db_path is None or not message_id:
+            return {}
+        try:
+            return load_projected_message_detail(db_path, message_id)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load projected detail for %s: %s", message_id, exc)
+            return {}
+
+    @staticmethod
+    def _projected_ref_lines(refs: object) -> List[str]:
+        lines: List[str] = []
+        try:
+            iterator = iter(refs or [])
+        except TypeError:
+            return lines
+        for ref in iterator:
+            try:
+                kind = str(ref["external_kind"] or "").strip()
+                key = str(ref["external_key"] or "").strip()
+                path = str(ref["external_path"] or "").strip()
+                delete_cap = str(ref["delete_capability"] or "").strip()
+            except Exception:
+                kind = str(getattr(ref, "external_kind", "") or "").strip()
+                key = str(getattr(ref, "external_key", "") or "").strip()
+                path = str(getattr(ref, "external_path", "") or "").strip()
+                delete_cap = str(getattr(ref, "delete_capability", "") or "").strip()
+            parts = [part for part in (kind, key, path, f"delete={delete_cap}" if delete_cap else "") if part]
+            if parts:
+                lines.append(" | ".join(parts))
+        return lines
+
+    @staticmethod
+    def _projected_artifact_lines(artifacts: object) -> List[str]:
+        lines: List[str] = []
+        try:
+            iterator = iter(artifacts or [])
+        except TypeError:
+            return lines
+        for artifact in iterator:
+            try:
+                artifact_type = str(artifact["artifact_type"] or "").strip()
+                q_id = str(artifact["q_id"] or "").strip()
+                block_id = str(artifact["block_id"] or "").strip()
+                state = str(artifact["transfer_state"] or "").strip()
+                path = str(artifact["path"] or "").strip()
+            except Exception:
+                artifact_type = str(getattr(artifact, "artifact_type", "") or "").strip()
+                q_id = str(getattr(artifact, "q_id", "") or "").strip()
+                block_id = str(getattr(artifact, "block_id", "") or "").strip()
+                state = str(getattr(artifact, "transfer_state", "") or "").strip()
+                path = str(getattr(artifact, "path", "") or "").strip()
+            q_part = " ".join(part for part in (q_id, f"block {block_id}" if block_id else "") if part)
+            parts = [part for part in (artifact_type, q_part, state, path) if part]
+            if parts:
+                lines.append(" | ".join(parts))
+        return lines
 
     def _mark_projected_read(self, msg: ProjectedMessagePayload, row_ref: Optional[UnifiedMessage] = None) -> None:
         if not msg or str(msg.read_state or "").strip().lower() == "read":

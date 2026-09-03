@@ -11,6 +11,9 @@ from freqinout.core.message_projection_store import (
     content_hash,
     ensure_message_projection_schema,
     list_projected_messages,
+    load_projected_message_detail,
+    mark_projected_messages_read,
+    process_message_delete_queue,
     queue_message_delete,
     stable_message_id,
     upsert_external_ref,
@@ -192,6 +195,126 @@ def test_delete_queue_tombstones_projection_without_losing_audit() -> None:
         assert conn.execute("SELECT COUNT(*) FROM message_delete_audit WHERE delete_id=?", (delete_id,)).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_load_projected_message_detail_returns_refs_and_artifacts(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = _source()
+    message = _message("msg-detail")
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=message,
+        refs=(
+            ExternalMessageRef(
+                message_id=message.message_id,
+                source_id=source.source_id,
+                external_kind="commstat_artifact",
+                external_key="abc",
+                external_path="/tmp/abc.json",
+            ),
+        ),
+        artifacts=(
+            MessageArtifactRecord(
+                artifact_id="artifact-detail",
+                message_id=message.message_id,
+                artifact_type="flamp_transfer",
+                source_id=source.source_id,
+                external_key="abc",
+                path="/tmp/Q123.k2s",
+                q_id="Q123",
+                block_id="04",
+            ),
+        ),
+    )
+
+    detail = load_projected_message_detail(db_path, message.message_id)
+
+    assert detail["message"]["message_id"] == message.message_id
+    assert detail["refs"][0]["external_key"] == "abc"
+    assert detail["artifacts"][0]["q_id"] == "Q123"
+
+
+def test_mark_projected_messages_read_updates_status_and_read_state(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    upsert_projected_message(db_path, source=_source(), message=_message("msg-read"))
+
+    assert mark_projected_messages_read(db_path, ["msg-read"]) == 1
+
+    row = list_projected_messages(db_path, include_deleted=True, limit=1)[0]
+    assert row["status"] == "YELLOW"
+    assert row["read_state"] == "read"
+
+
+def test_process_delete_queue_completes_hide_without_external_delete(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    upsert_projected_message(db_path, source=_source(), message=_message("msg-hide"))
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            queue_message_delete(conn, message_id="msg-hide", requested_effect="hide_fio")
+    finally:
+        conn.close()
+
+    assert process_message_delete_queue(db_path) == {"completed": 1, "failed": 0, "skipped": 0}
+
+    conn = sqlite3.connect(db_path)
+    try:
+        state = conn.execute("SELECT state FROM message_delete_queue").fetchone()[0]
+        audit_count = conn.execute("SELECT COUNT(*) FROM message_delete_audit").fetchone()[0]
+    finally:
+        conn.close()
+    assert state == "completed"
+    assert audit_count == 2
+
+
+def test_process_delete_queue_audit_only_minimizes_body_preview(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    upsert_projected_message(db_path, source=_source(), message=_message("msg-audit"))
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            queue_message_delete(conn, message_id="msg-audit", requested_effect="audit_only")
+    finally:
+        conn.close()
+
+    assert process_message_delete_queue(db_path)["completed"] == 1
+
+    row = list_projected_messages(db_path, include_deleted=True, limit=1)[0]
+    assert row["body_preview"] == ""
+    assert row["retention_class"] == "audit_only"
+
+
+def test_process_delete_queue_deletes_file_refs(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    file_path = tmp_path / "message.k2s"
+    file_path.write_text("payload", encoding="utf-8")
+    source = MessageSourceRecord(source_id="flamp-r1", source_family="flamp")
+    message = _message("msg-file")
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=message,
+        refs=(
+            ExternalMessageRef(
+                message_id=message.message_id,
+                source_id=source.source_id,
+                external_kind="flamp_file",
+                external_key="Q123",
+                external_path=str(file_path),
+                delete_capability="file_delete",
+            ),
+        ),
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            queue_message_delete(conn, message_id=message.message_id, requested_effect="delete_external")
+    finally:
+        conn.close()
+
+    assert process_message_delete_queue(db_path)["completed"] == 1
+    assert not file_path.exists()
 
 
 def test_db_initializer_ensures_message_projection_tables(monkeypatch, tmp_path) -> None:

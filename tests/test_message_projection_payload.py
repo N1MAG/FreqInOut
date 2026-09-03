@@ -88,6 +88,19 @@ def test_projected_payload_restores_hot_table_fields(tmp_path) -> None:
     assert payload.topics == ("Power", "Fuel")
 
 
+def test_projected_payload_can_carry_lazy_loaded_refs(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    _insert_projected(db_path)
+    db_row = list_projected_messages(db_path, limit=1)[0]
+
+    payload = projected_payload_from_row(
+        db_row,
+        external_refs=({"external_kind": "commstat_artifact", "external_key": "abc"},),
+    )
+
+    assert payload.external_refs == ({"external_kind": "commstat_artifact", "external_key": "abc"},)
+
+
 def test_projected_payload_is_selectable_and_delete_policy_is_projection_hide(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     message_id = _insert_projected(db_path)

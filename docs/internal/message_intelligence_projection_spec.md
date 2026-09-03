@@ -163,6 +163,9 @@ Rules:
 - Mark projected rows deleted when existing source-specific delete actions
   succeed.
 - Mark projection-only rows read/hidden directly in the FIO projection tables.
+- Lazy-load projected detail refs/artifacts by `message_id`.
+- Process queued hide/source tombstone, audit-only, and file-backed external
+  delete effects with audit results.
 - Add contract tests for uniqueness, bounded queries, external refs, artifacts,
   and delete queue/audit behavior.
 - Migrate the Messages tab to query this projection in a follow-up slice, then

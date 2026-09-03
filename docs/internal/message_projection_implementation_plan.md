@@ -80,13 +80,14 @@ Implemented:
 - Convert projected rows into the existing `UnifiedMessage` table model without
   reparsing external message stores.
 - Render normalized projected detail text from hot projection fields.
+- Lazy-load linked source refs and artifacts by `message_id` for projected detail
+  panes.
 - Mark projected messages read directly in the hot projection table.
 - Hide/delete projected rows through the projection delete queue and audit path.
 - Keep source row building as a background projection refresh feeder.
 
 Remaining:
 
-- Lazy-load raw bodies/artifacts by `message_id` for richer detail panes.
 - Use source refs for open-source, source-native mark-read, external delete,
   archive, and compose handoff when the row is loaded only from projection.
 - Keep bounded live views, with explicit history/search controls for older
@@ -102,13 +103,19 @@ Acceptance:
 
 ## Phase 4: Intelligence And Purge Workers
 
+Status: core queue processor implemented for FIO hide/source tombstones,
+audit-only minimization, and file-delete capable external refs; app-level
+background scheduling and every source-native external delete handler remain.
+
 Move rich intelligence and destructive source actions into background services.
 
 - Materialize topics, entities, geography, severity, actionable state, and
   recommended actions.
-- Preserve operator overrides and re-enrichment versioning.
-- Process delete queue in source-capability-gated batches.
-- Record external delete/archive results in audit rows.
+- Preserve operator overrides and re-enrichment versioning. Remaining.
+- Process delete queue in source-capability-gated batches. Implemented for
+  `hide_fio`, `source_delete`, `audit_only`, and file-backed `delete_external`.
+- Record external delete/archive results in audit rows. Implemented for
+  supported effects.
 
 Acceptance:
 

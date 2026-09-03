@@ -36,7 +36,11 @@ class ProjectedMessagePayload:
     flag_state: int = 0
 
 
-def projected_payload_from_row(row: object) -> ProjectedMessagePayload:
+def projected_payload_from_row(
+    row: object,
+    *,
+    external_refs: Sequence[Mapping[str, object]] = (),
+) -> ProjectedMessagePayload:
     message_id = _text(_get(row, "message_id"))
     group = _text(_get(row, "group_name")).lstrip("@").upper()
     family = _text(_get(row, "source_family")).lower() or "message"
@@ -75,6 +79,7 @@ def projected_payload_from_row(row: object) -> ProjectedMessagePayload:
         entities=entities,
         intelligence=intelligence,
         provenance=provenance,
+        external_refs=tuple(external_refs or ()),
         flag_state=1 if bool(_get(row, "operator_attention")) else 0,
     )
 
