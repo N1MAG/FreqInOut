@@ -3880,7 +3880,7 @@ def test_refresh_js8_messages_loads_cached_projection_before_background_request(
     assert "populate" not in calls
 
 
-def test_refresh_js8_messages_fallback_ingest_reloads_projection_after_local_ingest(monkeypatch) -> None:
+def test_refresh_js8_messages_defers_fallback_ingest_during_normal_refresh(monkeypatch) -> None:
     from freqinout.gui.message_viewer_tab import MessageViewerTab
 
     calls: list[str] = []
@@ -3900,7 +3900,8 @@ def test_refresh_js8_messages_fallback_ingest_reloads_projection_after_local_ing
 
     MessageViewerTab._refresh_js8_messages(tab, force=False, rebuild=False)
 
-    assert calls[:3] == ["load", "ingest", "load"]
+    assert calls == ["load"]
+    assert "ingest" not in calls
     assert "populate" not in calls
 
 

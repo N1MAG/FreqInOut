@@ -4290,7 +4290,7 @@ class MessageViewerTab(QWidget):
         return out
 
     def _start_signature_verification(self, *, force: bool = False) -> None:
-        if self._is_shutting_down:
+        if getattr(self, "_is_shutting_down", False):
             return
         try:
             self.settings.reload()
@@ -10359,7 +10359,7 @@ class MessageViewerTab(QWidget):
         if self._js8_timer:
             self._js8_timer.stop()
         self._js8_timer = QTimer(self)
-        self._js8_timer.timeout.connect(self._refresh_js8_messages)
+        self._js8_timer.timeout.connect(lambda: self._refresh_js8_messages(force=False, rebuild=False))
         if self._has_active_view and self._app_active and not self._is_shutting_down:
             self._js8_timer.start(JS8_POLL_SECONDS * 1000)
 
@@ -10557,6 +10557,8 @@ class MessageViewerTab(QWidget):
         )
 
     def _on_visible_message_check_timer(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
         if (
             bool(getattr(self, "_visible_message_check_inflight", False))
             or bool(getattr(self, "_refresh_files_inflight", False))
@@ -10574,12 +10576,19 @@ class MessageViewerTab(QWidget):
         self._message_check_status_text = "Checking..."
         self._update_message_check_status()
         try:
-            self._refresh_js8_messages(force=False, rebuild=False)
-            self._refresh_varac_messages(force=False, rebuild=False)
-            self._load_message_sources_from_local(force=False)
-            after_fp = self._message_sources_fingerprint()
-            if after_fp != before_fp:
-                self._populate_messages_table(force=False)
+            if getattr(self, "_projection_primary_enabled", False):
+                self._request_projected_source_ingest(force=False)
+                loaded = self._load_projected_messages_into_table()
+                self._start_native_message_projection_write(force=False)
+                if not loaded:
+                    self._populate_messages_table(force=False)
+            else:
+                self._refresh_js8_messages(force=False, rebuild=False)
+                self._refresh_varac_messages(force=False, rebuild=False)
+                self._load_message_sources_from_local(force=False)
+                after_fp = self._message_sources_fingerprint()
+                if after_fp != before_fp:
+                    self._populate_messages_table(force=False)
             self._refresh_pending_backlog()
             after_count = self._message_source_count()
             delta = max(0, int(after_count - before_count))
@@ -10682,6 +10691,8 @@ class MessageViewerTab(QWidget):
         self._save_settings()
 
     def _initial_refresh(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
         self._set_loading(False)
         self._load_paths_lists()
         if not self._scan_cache_loaded:
@@ -10690,8 +10701,12 @@ class MessageViewerTab(QWidget):
             # Cache-first startup: keep first paint fast, then reconcile in background.
             self._last_file_refresh_ts = time.time()
             QTimer.singleShot(1500, lambda: self._refresh_files(force=False))
-        self._refresh_js8_messages(rebuild=False)
-        self._refresh_varac_messages(force=False, rebuild=False)
+        if getattr(self, "_projection_primary_enabled", False):
+            self._request_projected_source_ingest(force=False)
+            self._start_native_message_projection_write(force=False)
+        else:
+            self._refresh_js8_messages(rebuild=False)
+            self._refresh_varac_messages(force=False, rebuild=False)
         if self._has_active_view:
             self._populate_messages_table(force=False)
             QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
@@ -10765,6 +10780,9 @@ class MessageViewerTab(QWidget):
             QTimer.singleShot(0, lambda: self._run_activation_refresh(force=False))
 
     def _run_activation_refresh(self, force: bool = False) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            self._activation_refresh_pending = False
+            return
         if self._message_scan_or_build_active():
             self._activation_refresh_pending = False
             self._last_activation_refresh_ts = time.time()
@@ -10785,12 +10803,19 @@ class MessageViewerTab(QWidget):
                 )
                 if should_refresh_files:
                     self._refresh_files(force=force)
-                before_fp = self._message_sources_fingerprint()
-                self._refresh_js8_messages(force=force, rebuild=False)
-                self._refresh_varac_messages(force=force, rebuild=False)
-                after_fp = self._message_sources_fingerprint()
-                if after_fp != before_fp or force or not self._message_rows:
-                    self._populate_messages_table(force=force)
+                if getattr(self, "_projection_primary_enabled", False):
+                    self._request_projected_source_ingest(force=force)
+                    loaded = self._load_projected_messages_into_table()
+                    self._start_native_message_projection_write(force=force)
+                    if not loaded:
+                        self._populate_messages_table(force=force)
+                else:
+                    before_fp = self._message_sources_fingerprint()
+                    self._refresh_js8_messages(force=force, rebuild=False)
+                    self._refresh_varac_messages(force=force, rebuild=False)
+                    after_fp = self._message_sources_fingerprint()
+                    if after_fp != before_fp or force or not self._message_rows:
+                        self._populate_messages_table(force=force)
                 self._refresh_pending_backlog()
                 self._last_activation_refresh_ts = time.time()
             finally:
@@ -11642,12 +11667,15 @@ class MessageViewerTab(QWidget):
             if should_ingest:
                 background_requested = self._request_background_ingest("message_cache", force=force)
                 if not background_requested:
-                    try:
-                        self._ingest_js8_runtime_messages()
-                    except Exception as e:
-                        log.debug("MessageViewer: JS8 runtime message ingest failed: %s", e)
+                    if force:
+                        try:
+                            self._ingest_js8_runtime_messages()
+                        except Exception as e:
+                            log.debug("MessageViewer: JS8 runtime message ingest failed: %s", e)
+                    else:
+                        log.debug("MessageViewer: JS8 runtime ingest deferred; background ingest unavailable")
                 self._last_js8_ingest_ts = now
-                if not background_requested:
+                if force and not background_requested:
                     self._load_structured_message_projections(force=True, rebuild=False)
             display_fp_after = self._js8_display_fingerprint()
             if not force and self._js8_display_snapshot_fp == display_fp_after and loaded_fp == display_fp_before:
@@ -11781,18 +11809,21 @@ class MessageViewerTab(QWidget):
         )
         background_requested = False
         if should_ingest:
-            background_requested = self._request_background_ingest("varac")
+            background_requested = self._request_background_ingest("varac", force=force)
             if not background_requested:
-                try:
-                    result = ingest_varac_for_runtime_sources(self.settings)
-                    if result.used_runtime_sources:
-                        log.debug(
-                            "MessageViewer: VarAC runtime ingest refreshed %s/%s source(s)",
-                            result.sources_succeeded,
-                            result.sources_attempted,
-                        )
-                except Exception as e:
-                    log.debug("MessageViewer: VarAC ingest failed: %s", e)
+                if force:
+                    try:
+                        result = ingest_varac_for_runtime_sources(self.settings)
+                        if result.used_runtime_sources:
+                            log.debug(
+                                "MessageViewer: VarAC runtime ingest refreshed %s/%s source(s)",
+                                result.sources_succeeded,
+                                result.sources_attempted,
+                            )
+                    except Exception as e:
+                        log.debug("MessageViewer: VarAC ingest failed: %s", e)
+                else:
+                    log.debug("MessageViewer: VarAC runtime ingest deferred; background ingest unavailable")
             self._last_varac_ingest_ts = now
         try:
             self._load_varac_from_local(force=force, rebuild=False)
@@ -13850,13 +13881,15 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _intel_filter_button_role(chip: IntelFilterChip) -> str:
+        if str(chip.kind or "").strip().lower() != "status":
+            return "muted"
         bucket = str(chip.status_bucket or "").strip().lower()
         if bucket == "red":
-            return "danger"
+            return "eligible_danger"
         if bucket == "yellow":
             return "eligible_warning"
         if bucket == "green":
-            return "success"
+            return "eligible_success"
         return "muted"
 
     def _toggle_intel_filter(self, kind: str, value: str) -> None:
@@ -20314,6 +20347,16 @@ class MessageViewerTab(QWidget):
         except Exception as exc:
             log.debug("MessageViewer: background ingest request failed: %s", exc)
         return False
+
+    def _request_projected_source_ingest(self, *, force: bool = False) -> bool:
+        messages_requested = self._request_background_ingest("message_cache", force=force)
+        varac_requested = self._request_background_ingest("varac", force=force)
+        now = time.time()
+        if messages_requested:
+            self._last_js8_ingest_ts = now
+        if varac_requested:
+            self._last_varac_ingest_ts = now
+        return bool(messages_requested or varac_requested)
 
     def _connect_background_ingest_notifications(self, controller: object) -> None:
         if self._background_ingest_controller is controller:

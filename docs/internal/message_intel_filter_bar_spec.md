@@ -59,10 +59,21 @@ keywords.
 - It uses compact clickable chips, not a large taxonomy panel.
 - Status chips appear first and use stable labels: `Red`, `Yellow`, `Green`, `Info`.
 - Topic chips show only active topics in the current view context. They are ordered
-  by worst status, then count, then taxonomy order.
+  by worst status, then count, then taxonomy order, but the topic chip itself is a
+  discovery lens rather than an alarm.
 - Chip labels include counts, for example `Yellow 4` and `Power 7`.
-- Active chips use primary styling. Red/yellow/green chips retain their semantic
-  color role.
+- Active chips use primary styling.
+- Status chips may use subdued semantic color roles so true red/yellow/green
+  status counts stand out without turning the whole toolbar into an alarm strip.
+- Topic chips use neutral styling unless selected. Their worst-status metadata is
+  retained in the reusable rollup for ordering, tooltips, Ops Center summaries, and
+  future map actions, but a topic such as `Comms` or `Travel/Roads` must not render
+  as red merely because one matching report is red.
+- Normal timed refresh and tab activation must render from FIO's projected database
+  and request background ingest when fresh source data is needed. They must not run
+  source-native JS8Call or VarAC ingest synchronously on the GUI thread. Explicit
+  operator actions such as Refresh Now may fall back to synchronous source ingest
+  only when background ingest is unavailable.
 - If there is no projected intelligence in the current context, the bar collapses.
 - Search remains available for exact keyword/callsign/grid work, but it is not the
   primary discovery path.
@@ -90,3 +101,7 @@ Ops Center should reuse this contract for summary tiles:
   refinements.
 - Selecting focus `Mesh` offers only mesh-family refinements when present.
 - Clear Filters clears selected topic/status chips without changing focus.
+- Topic chips are visually neutral when not selected, even when their rollup
+  metadata reports a red or yellow worst status.
+- Startup, visible-message checks, and tab activation do not block the GUI thread
+  on source-native message ingest.
