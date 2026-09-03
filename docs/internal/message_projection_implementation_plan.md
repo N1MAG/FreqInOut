@@ -142,11 +142,16 @@ Acceptance:
 
 ## Phase 5: Cross-View Use
 
+Status: shared projection query APIs implemented; downstream views can consume
+the same bounded hot table without source-specific inbox scans.
+
 Use the same projection for operational awareness, map context, needs tracking,
 operator history, and future protocol adapters.
 
-- Map reads geo-capable projected messages.
-- Attention queue reads actionable/operator-attention rows.
+- Map reads geo-capable projected messages through
+  `list_projected_geo_messages`.
+- Attention queue reads actionable/operator-attention rows through
+  `list_projected_attention_messages`.
 - Compose handoff uses source refs and routing metadata.
 - Operator history links messages, reports, NCS activity, and purge audit.
 

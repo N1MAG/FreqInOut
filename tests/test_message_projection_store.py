@@ -12,6 +12,8 @@ from freqinout.core.message_projection_store import (
     content_hash,
     ensure_message_projection_schema,
     get_message_projection_checkpoint,
+    list_projected_attention_messages,
+    list_projected_geo_messages,
     list_projected_messages,
     load_projected_external_refs_for_messages,
     load_projected_message_detail,
@@ -131,6 +133,43 @@ def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -
         assert conn.execute("SELECT COUNT(*) FROM message_external_refs").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_projected_attention_and_geo_queries_are_bounded(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = _source()
+    attention_base = _message("msg-attention", group="MR08", event_ts=300.0)
+    quiet_base = _message("msg-quiet", group="MR08", event_ts=400.0)
+    attention = MessageProjectionRecord(
+        **{
+            **attention_base.__dict__,
+            "status": "YELLOW",
+            "severity": "warning",
+            "actionable": True,
+            "operator_attention": True,
+            "state_code": "ut",
+            "grid": "DN40",
+        }
+    )
+    quiet = MessageProjectionRecord(
+        **{
+            **quiet_base.__dict__,
+            "status": "GREEN",
+            "severity": "info",
+            "actionable": False,
+            "operator_attention": False,
+            "state_code": "ut",
+            "grid": "DN40",
+        }
+    )
+    upsert_projected_message(db_path, source=source, message=quiet)
+    upsert_projected_message(db_path, source=source, message=attention)
+
+    attention_rows = list_projected_attention_messages(db_path, limit=10)
+    geo_rows = list_projected_geo_messages(db_path, state_code="UT", group_name="@MR08", limit=10)
+
+    assert [row["message_id"] for row in attention_rows] == ["msg-attention"]
+    assert {row["message_id"] for row in geo_rows} == {"msg-attention", "msg-quiet"}
 
 
 def test_flamp_artifact_preserves_qid_and_transfer_state() -> None:

@@ -610,6 +610,75 @@ def list_projected_messages(
         conn.close()
 
 
+def list_projected_attention_messages(
+    db_path: str | Path,
+    *,
+    limit: int = 250,
+) -> list[sqlite3.Row]:
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        return list(
+            conn.execute(
+                """
+                SELECT *
+                  FROM message_projection
+                 WHERE deleted=0
+                   AND archived=0
+                   AND (operator_attention=1 OR actionable=1 OR severity IN ('critical', 'warning'))
+                 ORDER BY
+                   CASE severity
+                       WHEN 'critical' THEN 0
+                       WHEN 'warning' THEN 1
+                       WHEN 'watch' THEN 2
+                       ELSE 3
+                   END,
+                   event_ts DESC,
+                   received_ts DESC
+                 LIMIT ?
+                """,
+                (max(1, min(1000, int(limit or 250))),),
+            )
+        )
+    finally:
+        conn.close()
+
+
+def list_projected_geo_messages(
+    db_path: str | Path,
+    *,
+    state_code: str = "",
+    group_name: str = "",
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    clauses = ["deleted=0", "archived=0", "(COALESCE(state_code, '') != '' OR COALESCE(grid, '') != '' OR (lat IS NOT NULL AND lon IS NOT NULL))"]
+    params: list[object] = []
+    if state_code:
+        clauses.append("UPPER(state_code)=?")
+        params.append(str(state_code or "").strip().upper())
+    if group_name:
+        clauses.append("UPPER(group_name)=?")
+        params.append(str(group_name or "").strip().lstrip("@").upper())
+    params.append(max(1, min(2000, int(limit or 500))))
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        return list(
+            conn.execute(
+                f"""
+                SELECT *
+                  FROM message_projection
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY event_ts DESC, received_ts DESC
+                 LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+    finally:
+        conn.close()
+
+
 def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[str, Any]:
     clean_id = str(message_id or "").strip()
     if not clean_id:
