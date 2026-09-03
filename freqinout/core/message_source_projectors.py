@@ -4,6 +4,7 @@ import datetime
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -28,6 +29,7 @@ from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 1
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
+_PROJECTION_WRITE_LOCK = threading.Lock()
 
 
 def project_native_message_sources(
@@ -42,25 +44,26 @@ def project_native_message_sources(
     if not clean_sources:
         return {}
     bounded_limit = max(1, min(int(limit or DEFAULT_SOURCE_NATIVE_LIMIT), 50000))
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
-    try:
-        ensure_message_projection_schema(conn)
-        out: dict[str, int] = {}
-        projectors: dict[str, Callable[[sqlite3.Connection, int, bool], int]] = {
-            "js8": _project_js8_messages,
-            "spotter": _project_spotter_traffic,
-            "varac": _project_varac_messages,
-            "sitrep": _project_sitrep_events,
-            "commstat": _project_commstat_artifacts,
-        }
-        for source in clean_sources:
-            projector = projectors.get(source)
-            if projector is None:
-                continue
-            out[source] = projector(conn, bounded_limit, bool(force))
-        return out
-    finally:
-        conn.close()
+    with _PROJECTION_WRITE_LOCK:
+        conn = connect_sqlite(db_path, timeout=15.0, row_factory=sqlite3.Row, busy_timeout_ms=15000)
+        try:
+            ensure_message_projection_schema(conn)
+            out: dict[str, int] = {}
+            projectors: dict[str, Callable[[sqlite3.Connection, int, bool], int]] = {
+                "js8": _project_js8_messages,
+                "spotter": _project_spotter_traffic,
+                "varac": _project_varac_messages,
+                "sitrep": _project_sitrep_events,
+                "commstat": _project_commstat_artifacts,
+            }
+            for source in clean_sources:
+                projector = projectors.get(source)
+                if projector is None:
+                    continue
+                out[source] = projector(conn, bounded_limit, bool(force))
+            return out
+        finally:
+            conn.close()
 
 
 def project_native_file_records(
@@ -97,105 +100,106 @@ def project_native_file_records(
             )
         ),
     )
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
-    try:
-        ensure_message_projection_schema(conn)
-        checkpoint_id = "native:file_records"
-        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-            return 0
-        projected = 0
-        with conn:
-            for rec in sorted(flattened, key=lambda item: float(item.mtime or 0.0), reverse=True):
-                origin = _text(rec.origin).lower() or "file"
-                source_id = _text(rec.source_id) or f"{origin}:{rec.path.parent}"
-                source_label = _text(rec.source_label) or _source_label(_file_source_base_label(origin), "")
-                external_kind = f"{origin}_file"
-                external_key = f"{rec.path}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
-                message_id = stable_message_id(source_id, external_kind, external_key)
-                body = rec.path.name
-                source = MessageSourceRecord(
-                    source_id=source_id,
-                    source_family=origin,
-                    source_label=source_label,
-                    endpoint_or_path=str(rec.path.parent),
-                    capabilities={"read": True, "delete": True, "native_open": True},
-                    provenance={"source": "file_scan", "origin": origin},
-                    last_seen_utc=_utc_from_ts(rec.mtime),
-                    last_ingested_utc=_utc_now(),
-                )
-                projection = MessageProjectionRecord(
-                    message_id=message_id,
-                    canonical_key=f"{source_id}:{external_kind}:{external_key}",
-                    content_hash=content_hash(PROJECTOR_VERSION, "file", external_key),
-                    primary_source_id=source_id,
-                    source_family=origin,
-                    source_label=source.source_label,
-                    message_type=_file_message_type(origin, rec.path),
-                    display_type=_file_source_base_label(origin),
-                    status="INFO",
-                    severity="info",
-                    read_state="info",
-                    event_ts=float(rec.mtime or 0.0),
-                    received_ts=float(rec.mtime or 0.0),
-                    event_utc=_utc_from_ts(rec.mtime),
-                    received_utc=_utc_from_ts(rec.mtime),
-                    subject=rec.path.name,
-                    summary=rec.path.name,
-                    body_preview=body,
-                    topics=_topics(rec.path.name, origin),
-                    entities={
-                        "origin": origin,
-                        "path": str(rec.path),
-                        "extension": rec.path.suffix.lower(),
-                        "q_id": _q_id_from_path(rec.path),
-                    },
-                    retention_class="artifact",
-                    search_text=_search_text(origin, rec.path.name, rec.path),
-                    projection_version=PROJECTOR_VERSION,
-                )
-                artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(
-                    origin,
-                    f"{origin}_file",
-                )
-                q_id = _q_id_from_path(rec.path)
-                _upsert_bundle(
-                    conn,
-                    source,
-                    projection,
-                    ExternalMessageRef(
-                        message_id=message_id,
+    with _PROJECTION_WRITE_LOCK:
+        conn = connect_sqlite(db_path, timeout=15.0, row_factory=sqlite3.Row, busy_timeout_ms=15000)
+        try:
+            ensure_message_projection_schema(conn)
+            checkpoint_id = "native:file_records"
+            if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+                return 0
+            projected = 0
+            with conn:
+                for rec in sorted(flattened, key=lambda item: float(item.mtime or 0.0), reverse=True):
+                    origin = _text(rec.origin).lower() or "file"
+                    source_id = _text(rec.source_id) or f"{origin}:{rec.path.parent}"
+                    source_label = _text(rec.source_label) or _source_label(_file_source_base_label(origin), "")
+                    external_kind = f"{origin}_file"
+                    external_key = f"{rec.path}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
+                    message_id = stable_message_id(source_id, external_kind, external_key)
+                    body = rec.path.name
+                    source = MessageSourceRecord(
                         source_id=source_id,
-                        external_kind=external_kind,
-                        external_key=external_key,
-                        external_path=str(rec.path),
-                        external_mtime=float(rec.mtime or 0.0),
-                        external_size=int(rec.size or 0),
-                        delete_capability="file_delete",
-                        read_capability="fio_read_state",
-                        metadata={"origin": origin, "source": "file_scan"},
-                    ),
-                    artifacts=(
-                        MessageArtifactRecord(
-                            artifact_id=stable_message_id(message_id, artifact_type, rec.path, rec.mtime, rec.size),
+                        source_family=origin,
+                        source_label=source_label,
+                        endpoint_or_path=str(rec.path.parent),
+                        capabilities={"read": True, "delete": True, "native_open": True},
+                        provenance={"source": "file_scan", "origin": origin},
+                        last_seen_utc=_utc_from_ts(rec.mtime),
+                        last_ingested_utc=_utc_now(),
+                    )
+                    projection = MessageProjectionRecord(
+                        message_id=message_id,
+                        canonical_key=f"{source_id}:{external_kind}:{external_key}",
+                        content_hash=content_hash(PROJECTOR_VERSION, "file", external_key),
+                        primary_source_id=source_id,
+                        source_family=origin,
+                        source_label=source.source_label,
+                        message_type=_file_message_type(origin, rec.path),
+                        display_type=_file_source_base_label(origin),
+                        status="INFO",
+                        severity="info",
+                        read_state="info",
+                        event_ts=float(rec.mtime or 0.0),
+                        received_ts=float(rec.mtime or 0.0),
+                        event_utc=_utc_from_ts(rec.mtime),
+                        received_utc=_utc_from_ts(rec.mtime),
+                        subject=rec.path.name,
+                        summary=rec.path.name,
+                        body_preview=body,
+                        topics=_topics(rec.path.name, origin),
+                        entities={
+                            "origin": origin,
+                            "path": str(rec.path),
+                            "extension": rec.path.suffix.lower(),
+                            "q_id": _q_id_from_path(rec.path),
+                        },
+                        retention_class="artifact",
+                        search_text=_search_text(origin, rec.path.name, rec.path),
+                        projection_version=PROJECTOR_VERSION,
+                    )
+                    artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(
+                        origin,
+                        f"{origin}_file",
+                    )
+                    q_id = _q_id_from_path(rec.path)
+                    _upsert_bundle(
+                        conn,
+                        source,
+                        projection,
+                        ExternalMessageRef(
                             message_id=message_id,
-                            artifact_type=artifact_type,
                             source_id=source_id,
+                            external_kind=external_kind,
                             external_key=external_key,
-                            path=str(rec.path),
-                            content_hash=content_hash(rec.path, rec.mtime, rec.size),
-                            q_id=q_id,
-                            block_id=_block_id_from_path(rec.path),
-                            transfer_id=q_id,
-                            transfer_state="seen" if q_id else "",
-                            metadata={"mtime": float(rec.mtime or 0.0), "size": int(rec.size or 0)},
+                            external_path=str(rec.path),
+                            external_mtime=float(rec.mtime or 0.0),
+                            external_size=int(rec.size or 0),
+                            delete_capability="file_delete",
+                            read_capability="fio_read_state",
+                            metadata={"origin": origin, "source": "file_scan"},
                         ),
-                    ),
-                )
-                projected += 1
-            _set_checkpoint(conn, checkpoint_id, fingerprint, flattened)
-        return projected
-    finally:
-        conn.close()
+                        artifacts=(
+                            MessageArtifactRecord(
+                                artifact_id=stable_message_id(message_id, artifact_type, rec.path, rec.mtime, rec.size),
+                                message_id=message_id,
+                                artifact_type=artifact_type,
+                                source_id=source_id,
+                                external_key=external_key,
+                                path=str(rec.path),
+                                content_hash=content_hash(rec.path, rec.mtime, rec.size),
+                                q_id=q_id,
+                                block_id=_block_id_from_path(rec.path),
+                                transfer_id=q_id,
+                                transfer_state="seen" if q_id else "",
+                                metadata={"mtime": float(rec.mtime or 0.0), "size": int(rec.size or 0)},
+                            ),
+                        ),
+                    )
+                    projected += 1
+                _set_checkpoint(conn, checkpoint_id, fingerprint, flattened)
+            return projected
+        finally:
+            conn.close()
 
 
 def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> int:

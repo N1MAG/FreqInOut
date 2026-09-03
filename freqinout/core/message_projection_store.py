@@ -172,6 +172,14 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Mapping[str, 
 
 
 def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
+    try:
+        ready = conn.execute(
+            "SELECT name FROM sqlite_temp_master WHERE type='table' AND name='fio_message_projection_schema_ready'"
+        ).fetchone()
+        if ready:
+            return
+    except Exception:
+        pass
     cur = conn.cursor()
     cur.execute(
         """
@@ -487,6 +495,10 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_artifacts_flamp_qid ON message_artifacts(q_id, transfer_state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_delete_queue_state ON message_delete_queue(state, requested_utc)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_delete_audit_message ON message_delete_audit(message_id, audit_utc)")
+    try:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS fio_message_projection_schema_ready (ready INTEGER)")
+    except Exception:
+        pass
 
 
 def upsert_message_source(conn: sqlite3.Connection, source: MessageSourceRecord, *, updated_utc: str | None = None) -> str:
