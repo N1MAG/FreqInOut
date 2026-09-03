@@ -42,11 +42,15 @@ def load_commstat_group_state(settings: Any) -> CommStatGroupState:
     )
 
 
-def _resolve_commstat_db_path(settings: Any) -> Path | None:
+def resolve_commstat_db_path(settings: Any) -> Path | None:
     candidates: list[Path] = []
-    for key in ("commstat3_db_path", "commstat_db_path", "commstat23_db_path", "path_commstat"):
+    for key in ("commstat3_db_path", "commstat_db_path", "commstat23_db_path", "path_commstat", "commstat_launch_path"):
         candidates.extend(_candidate_db_paths(_settings_get(settings, key, ""), "traffic.db3"))
     return _pick_existing_file(candidates)
+
+
+def _resolve_commstat_db_path(settings: Any) -> Path | None:
+    return resolve_commstat_db_path(settings)
 
 
 def _resolve_commstat_config_path(settings: Any, db_path: Path | None) -> Path | None:
@@ -54,7 +58,7 @@ def _resolve_commstat_config_path(settings: Any, db_path: Path | None) -> Path |
     explicit = _settings_get(settings, "commstat_config_path", "")
     if explicit:
         candidates.extend(_candidate_config_paths(explicit))
-    for key in ("path_commstat", "commstat3_db_path", "commstat_db_path", "commstat23_db_path"):
+    for key in ("path_commstat", "commstat_launch_path", "commstat3_db_path", "commstat_db_path", "commstat23_db_path"):
         candidates.extend(_candidate_config_paths(_settings_get(settings, key, "")))
     if db_path is not None:
         candidates.append(db_path.parent / "config.ini")

@@ -10,8 +10,11 @@ from freqinout.core.ingest_source_model import IngestSourceDescriptor, IngestSou
 
 
 class _Settings:
-    def get(self, _key, default=None):
-        return default
+    def __init__(self, values=None):
+        self._values = dict(values or {})
+
+    def get(self, key, default=None):
+        return self._values.get(key, default)
 
 
 class _PlannerOnlyController(BackgroundIngestController):
@@ -283,6 +286,24 @@ def test_commstat_source_sitrep_ingest_skips_unchanged_source_fingerprint(tmp_pa
     assert decision1.should_run is True
     assert decision2.should_run is False
     assert decision2.reason == "unchanged"
+
+
+def test_commstat_source_ingest_batch_limit_defaults_to_initial_import_size():
+    controller = _PlannerOnlyController(IngestSourceInventory())
+
+    assert controller._commstat_source_ingest_batch_limit(_Settings()) == 50000
+
+
+def test_commstat_source_ingest_batch_limit_is_bounded():
+    controller = _PlannerOnlyController(IngestSourceInventory())
+
+    assert controller._commstat_source_ingest_batch_limit(_Settings({"commstat_source_ingest_batch_limit": 5})) == 1000
+    assert (
+        controller._commstat_source_ingest_batch_limit(
+            _Settings({"commstat_source_ingest_batch_limit": 999999})
+        )
+        == 250000
+    )
 
 
 def test_runtime_ingest_inventory_is_cached_and_cleared_on_settings_refresh(monkeypatch, tmp_path):

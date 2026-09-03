@@ -119,6 +119,7 @@ from freqinout.core.launch_orchestrator import (
 from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.software_path_detector import SoftwarePathDetector, PathDetectionResult
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.commstat_config import resolve_commstat_db_path
 from freqinout.core.gpg_tools import (
     clearsign_file,
     gpg_detail_indicates_passphrase_needed,
@@ -3581,6 +3582,12 @@ class SettingsTab(QWidget):
         )
         self.selector_edit_apps_btn.setAccessibleName("Edit selected radio apps")
         self.selector_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)
+        self.selector_software_details_btn = QPushButton("Software Details")
+        self.selector_software_details_btn.setToolTip(
+            "Open detailed paths, endpoints, message folders, and BBS settings for the selected radio."
+        )
+        self.selector_software_details_btn.setAccessibleName("Open selected radio software details")
+        self.selector_software_details_btn.clicked.connect(self._open_selected_radio_software_details)
         self.selector_remove_device_profile_btn = QPushButton("Remove Radio")
         self.selector_remove_device_profile_btn.setToolTip(
             "Remove the selected inactive radio profile from FIO. External app profiles and files are not deleted."
@@ -3596,6 +3603,7 @@ class SettingsTab(QWidget):
         radio_selector_actions.addWidget(self.selector_deactivate_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_set_default_device_profile_btn)
         radio_selector_actions.addWidget(self.selector_edit_apps_btn)
+        radio_selector_actions.addWidget(self.selector_software_details_btn)
         radio_selector_actions.addWidget(self.selector_remove_device_profile_btn)
         radio_selector_actions.addStretch(1)
         configured_radios_layout.addLayout(radio_selector_actions)
@@ -3935,9 +3943,14 @@ class SettingsTab(QWidget):
         )
         self.profile_edit_apps_btn.setAccessibleName("Edit selected radio apps from profile")
         self.profile_edit_apps_btn.clicked.connect(self._open_selected_radio_apps_task)
+        self.profile_software_details_btn = QPushButton("Software Details")
+        self.profile_software_details_btn.setToolTip("Open detailed software configuration for this radio.")
+        self.profile_software_details_btn.setAccessibleName("Open selected radio software details from profile")
+        self.profile_software_details_btn.clicked.connect(self._open_selected_radio_software_details)
         detail_actions.addWidget(self.profile_activate_device_profile_btn)
         detail_actions.addWidget(self.profile_deactivate_device_profile_btn)
         detail_actions.addWidget(self.profile_edit_apps_btn)
+        detail_actions.addWidget(self.profile_software_details_btn)
         detail_actions.addStretch(1)
         detail_layout.addLayout(detail_actions)
 
@@ -8795,6 +8808,16 @@ class SettingsTab(QWidget):
         self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
         self._select_radio_profile_guided_task("apps")
         QTimer.singleShot(0, self._refresh_radio_profile_software_chips)
+        QTimer.singleShot(0, self._sync_current_section_scroll_size)
+
+    def _open_selected_radio_software_details(self) -> None:
+        profile = self._selected_settings_radio_profile()
+        if not profile:
+            QMessageBox.information(self, "Software Details", "Select one radio before reviewing its software configuration.")
+            return
+        self._sync_software_radio_to_device_focus()
+        self._select_settings_section_group(getattr(self, "radio_software_scope_section_group", None))
+        QTimer.singleShot(0, self._refresh_software_radio_selector)
         QTimer.singleShot(0, self._sync_current_section_scroll_size)
 
     def _radio_profile_guided_task_role(
@@ -16495,10 +16518,26 @@ class SettingsTab(QWidget):
             if isinstance(profile, dict):
                 summary = self._device_software_summary(profile)
                 endpoint = self._device_endpoint_summary(profile)
+                commstat_db = resolve_commstat_db_path(
+                    {
+                        "path_commstat": str(profile.get("commstat_launch_path", "") or "").strip(),
+                        "commstat_launch_path": str(profile.get("commstat_launch_path", "") or "").strip(),
+                        "commstat_db_path": str(profile.get("commstat_db_path", "") or "").strip(),
+                        "commstat3_db_path": str(profile.get("commstat3_db_path", "") or "").strip(),
+                        "commstat23_db_path": str(profile.get("commstat23_db_path", "") or "").strip(),
+                    }
+                )
+                detail_bits: List[str] = []
+                if self._radio_software_enabled(profile, "commstat"):
+                    detail_bits.append(f"CommStat DB: {commstat_db if commstat_db else 'not found'}")
+                if self._radio_software_enabled(profile, "varac"):
+                    varac_db = str(profile.get("varac_db_path", "") or "").strip()
+                    detail_bits.append(f"VarAC DB: {varac_db or 'not set'}")
+                detail_text = (" " + " ".join(detail_bits)) if detail_bits else ""
                 self.software_scope_status_label.setText(
                     f"Selected radio: {radio_name}. These JS8Call, Fast Light, and VarAC pages now edit this radio's software bundle. "
                     f"Current software summary: {summary}. Endpoint summary: {endpoint}. "
-                    "Launch Control also follows this selected radio bundle."
+                    f"Launch Control also follows this selected radio bundle.{detail_text}"
                 )
             else:
                 self.software_scope_status_label.setText(
@@ -18581,10 +18620,17 @@ class SettingsTab(QWidget):
         if hasattr(self, "selector_edit_apps_btn"):
             self.selector_edit_apps_btn.setEnabled(can_edit)
             self.selector_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        if hasattr(self, "selector_software_details_btn"):
+            self.selector_software_details_btn.setEnabled(can_edit)
+            self.selector_software_details_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         if hasattr(self, "profile_edit_apps_btn"):
             self.profile_edit_apps_btn.setEnabled(can_edit)
             self.profile_edit_apps_btn.setVisible(count == 1)
             self.profile_edit_apps_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        if hasattr(self, "profile_software_details_btn"):
+            self.profile_software_details_btn.setEnabled(can_edit)
+            self.profile_software_details_btn.setVisible(count == 1)
+            self.profile_software_details_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
         self.activate_device_profile_btn.setEnabled(can_activate)
         self.activate_device_profile_btn.setStyleSheet(button_style("info" if can_activate else "muted", theme))
         if hasattr(self, "selector_activate_device_profile_btn"):

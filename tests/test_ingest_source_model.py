@@ -412,6 +412,19 @@ def test_inventory_includes_commstat_db_source_with_group_state(tmp_path: Path) 
     assert source.metadata["active_groups"] == ("MAGNET",)
 
 
+def test_commstat_config_resolves_db_from_multi_rig_launch_path(tmp_path: Path) -> None:
+    from freqinout.core.commstat_config import resolve_commstat_db_path
+
+    commstat_dir = tmp_path / "commstat-4.7"
+    commstat_dir.mkdir()
+    db_path = commstat_dir / "traffic.db3"
+    db_path.write_bytes(b"")
+
+    resolved = resolve_commstat_db_path({"commstat_launch_path": str(commstat_dir / "commstat.py")})
+
+    assert resolved == db_path.resolve()
+
+
 def test_js8_link_indexer_offsets_are_source_scoped(tmp_path: Path) -> None:
     source_a = tmp_path / "a" / "DIRECTED.TXT"
     source_b = tmp_path / "b" / "DIRECTED.TXT"

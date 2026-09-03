@@ -306,18 +306,20 @@ def _resolve_commstat_db_path(settings, *, prefer_v3: bool) -> Optional[Path]:
     v3 = (settings.get("commstat3_db_path", "") or "").strip()
     v23 = (settings.get("commstat23_db_path", "") or "").strip()
     launch = (settings.get("path_commstat", "") or "").strip()
+    multi_rig_launch = (settings.get("commstat_launch_path", "") or "").strip()
 
     if prefer_v3:
-        for raw in (v3, common, launch):
+        for raw in (v3, common, launch, multi_rig_launch):
             candidates.extend(_candidate_db_paths(raw, "traffic.db3"))
         # Ignore template DB when looking for live data.
     else:
-        for raw in (v23, common, launch):
+        for raw in (v23, common, launch, multi_rig_launch):
             candidates.extend(_candidate_db_paths(raw, "traffic.db3"))
 
     path = _pick_existing_path(candidates)
     if not path:
         return None
+    log.info("SitrepIngest: resolved CommStat traffic DB: %s", path)
     return path
 
 

@@ -67,18 +67,19 @@ The Managed BBS preview shows the operator the catalog mapping for each location
 - A clear empty state when a location has a catalog row but no published memberships.
 - A fallback source-folder preview only when no DB catalog has been seeded yet.
 
-Future UI controls should operate on memberships:
+Messages and Settings share the same membership model. Any file-backed message artifact that can be published to VarAC BBS opens the shared publish workflow:
 
-- `Publish to Location`: add or enable one `bbs_location_artifacts` row.
-- `Unpublish from Location`: disable or remove one mapping row.
-- `Publish to Multiple`: create multiple mapping rows for one artifact.
+- `Publish to BBS`: show all valid live and managed BBS targets with checkbox selection.
+- Managed target selection must add or enable one `bbs_location_artifacts` row without copying into durable managed folders.
+- Live target selection may still copy directly to the VarAC live BBS folder for compatibility.
+- Already-published managed targets must be preselected from the database mapping.
+- `Remove from BBS` must disable managed membership rows and delete only direct live copies created by FIO.
 - `Purge`: apply the selected policy to mapping rows, FIO catalog rows, archives, and optional external source deletion.
 
 The live VarAC BBS folder should be treated as generated output. It is reconciled from the DB manifest during active BBS publishing and should not be used as the user's durable file-management surface.
 
 ## Future Extensions
 
-- Message UI can add an existing message artifact to one or more BBS locations by inserting mapping rows only.
 - FLAmp queue listings can be backed by indexed artifact rows instead of glob/stat scans.
 - Per-callsign and per-group visibility can be applied at manifest query time.
 - Purge can remove only membership, remove FIO catalog rows, archive files, or delete external source files according to policy.

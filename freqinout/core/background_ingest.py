@@ -1652,6 +1652,17 @@ class BackgroundIngestController(QObject):
         self._job_refresh_decisions["sitreps:legacy"] = decision.as_dict()
         return False
 
+    @staticmethod
+    def _commstat_source_ingest_batch_limit(settings: SettingsManager) -> int:
+        try:
+            raw = settings.get("commstat_source_ingest_batch_limit", 50000)
+        except Exception:
+            raw = 50000
+        try:
+            return max(1000, min(250000, int(raw or 50000)))
+        except Exception:
+            return 50000
+
     def _run_commstat_source_sitrep_ingest(self, worker_settings: SettingsManager, *, force: bool = False) -> None:
         inventory = self._runtime_ingest_inventory()
         commstat_sources = list(inventory.sources_for_family("commstat"))
@@ -1671,6 +1682,7 @@ class BackgroundIngestController(QObject):
             return
         store = MultiRadioStore()
         profiles_by_id = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in store.list_runtime_active_device_profiles()}
+        batch_limit = self._commstat_source_ingest_batch_limit(worker_settings)
         for source in commstat_sources:
             profile = dict(profiles_by_id.get(str(source.radio_id or ""), {}) or {})
             if not profile:
@@ -1694,8 +1706,16 @@ class BackgroundIngestController(QObject):
             try:
                 stats = ingest_sitreps(
                     profile_settings,
-                    max_rows_per_source=500,
+                    max_rows_per_source=batch_limit,
                     ingest_scope_key=source.source_id,
+                )
+                log.info(
+                    "BackgroundIngest: CommStat source ingest path=%s label=%s scanned=%s inserted=%s batch_limit=%s",
+                    source.path,
+                    source.label,
+                    int(stats.get("rows_scanned", 0) or 0),
+                    int(stats.get("events_inserted", 0) or 0),
+                    batch_limit,
                 )
                 self._health.record_success(
                     health_key,

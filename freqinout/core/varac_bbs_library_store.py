@@ -190,6 +190,41 @@ def set_bbs_location_artifact(
     )
 
 
+def unpublish_bbs_artifact_path_from_location(
+    conn: sqlite3.Connection,
+    *,
+    source_path: object,
+    location_id: object,
+) -> int:
+    ensure_bbs_library_schema(conn)
+    location_key = str(location_id or "").strip()
+    if not location_key:
+        return 0
+    try:
+        resolved = str(Path(str(source_path or "")).expanduser().resolve())
+    except Exception:
+        resolved = str(source_path or "").strip()
+    row = conn.execute(
+        "SELECT artifact_id FROM bbs_artifacts WHERE source_path=? LIMIT 1",
+        (resolved,),
+    ).fetchone()
+    if not row:
+        return 0
+    now = utc_now_iso()
+    cur = conn.execute(
+        """
+        UPDATE bbs_location_artifacts
+           SET publish_enabled=0,
+               updated_utc=?
+         WHERE location_id=?
+           AND artifact_id=?
+           AND publish_enabled=1
+        """,
+        (now, location_key, str(row[0] or "")),
+    )
+    return int(cur.rowcount or 0)
+
+
 def _json(value: object, default: str = "{}") -> str:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
