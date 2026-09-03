@@ -155,6 +155,7 @@ Rules:
 - Ensure schema during cold-start database initialization.
 - Project existing unified message rows into the normalized FIO tables on a
   coalesced background worker.
+- Skip unchanged projection refreshes through durable projection checkpoints.
 - Render the Messages tab projection-first when projected rows exist, keeping
   source row building as a background refresh/projection feeder.
 - Preserve external references for JS8Call, FIOSpotter, CommStat, SitRep,
@@ -165,7 +166,7 @@ Rules:
 - Mark projection-only rows read/hidden directly in the FIO projection tables.
 - Lazy-load projected detail refs/artifacts by `message_id`.
 - Process queued hide/source tombstone, audit-only, and file-backed external
-  delete effects with audit results.
+  delete effects with audit results on a bounded Messages-tab queue timer.
 - Add contract tests for uniqueness, bounded queries, external refs, artifacts,
   and delete queue/audit behavior.
 - Migrate the Messages tab to query this projection in a follow-up slice, then

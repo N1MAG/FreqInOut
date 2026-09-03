@@ -127,6 +127,15 @@ class MessageArtifactRecord:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class MessageProjectionCheckpoint:
+    source_id: str
+    last_external_key: str = ""
+    last_event_ts: float = 0.0
+    content_fingerprint: str = ""
+    updated_utc: str = ""
+
+
 def _json(value: object, default: str) -> str:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -659,6 +668,71 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
             return count
     finally:
         conn.close()
+
+
+def get_message_projection_checkpoint(
+    db_path: str | Path,
+    source_id: str,
+) -> MessageProjectionCheckpoint:
+    clean_source = str(source_id or "").strip()
+    if not clean_source:
+        return MessageProjectionCheckpoint(source_id="")
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        row = conn.execute(
+            """
+            SELECT source_id, last_external_key, last_event_ts, content_fingerprint, updated_utc
+              FROM message_projection_checkpoint
+             WHERE source_id=?
+            """,
+            (clean_source,),
+        ).fetchone()
+        if row is None:
+            return MessageProjectionCheckpoint(source_id=clean_source)
+        return MessageProjectionCheckpoint(
+            source_id=str(row["source_id"] or ""),
+            last_external_key=str(row["last_external_key"] or ""),
+            last_event_ts=float(row["last_event_ts"] or 0.0),
+            content_fingerprint=str(row["content_fingerprint"] or ""),
+            updated_utc=str(row["updated_utc"] or ""),
+        )
+    finally:
+        conn.close()
+
+
+def set_message_projection_checkpoint(
+    conn: sqlite3.Connection,
+    checkpoint: MessageProjectionCheckpoint,
+    *,
+    updated_utc: str | None = None,
+) -> str:
+    ensure_message_projection_schema(conn)
+    clean_source = str(checkpoint.source_id or "").strip()
+    if not clean_source:
+        return ""
+    stamp = updated_utc or checkpoint.updated_utc or utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO message_projection_checkpoint (
+            source_id, last_external_key, last_event_ts, content_fingerprint, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+            last_external_key=excluded.last_external_key,
+            last_event_ts=excluded.last_event_ts,
+            content_fingerprint=excluded.content_fingerprint,
+            updated_utc=excluded.updated_utc
+        """,
+        (
+            clean_source,
+            str(checkpoint.last_external_key or ""),
+            float(checkpoint.last_event_ts or 0.0),
+            str(checkpoint.content_fingerprint or ""),
+            stamp,
+        ),
+    )
+    return clean_source
 
 
 def process_message_delete_queue(db_path: str | Path, *, limit: int = 50) -> dict[str, int]:

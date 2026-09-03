@@ -71,6 +71,7 @@ from reportlab.pdfgen import canvas
 MESSAGE_INBOX_BODY_MIN_WIDTH = 900
 MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 0
 MESSAGE_INBOX_FOCUS_MIN_WIDTH = 680
+MESSAGE_PROJECTION_QUEUE_POLL_SECONDS = 30
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -1578,11 +1579,12 @@ class _RowsBuildWorker(QObject):
 class _MessageProjectionWriteWorker(QObject):
     finished = Signal(object)
 
-    def __init__(self, *, db_path: str, rows: List[object], generation: int):
+    def __init__(self, *, db_path: str, rows: List[object], generation: int, force: bool = False):
         super().__init__()
         self._db_path = str(db_path or "")
         self._rows = list(rows or [])
         self._generation = int(generation)
+        self._force = bool(force)
 
     def run(self) -> None:
         started = time.perf_counter()
@@ -1590,7 +1592,7 @@ class _MessageProjectionWriteWorker(QObject):
         error = ""
         try:
             if self._db_path and self._rows:
-                projected = project_unified_message_rows(self._db_path, self._rows)
+                projected = project_unified_message_rows(self._db_path, self._rows, force=self._force)
         except Exception as exc:
             error = str(exc)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -1601,6 +1603,7 @@ class _MessageProjectionWriteWorker(QObject):
                 "projected": projected,
                 "elapsed_ms": elapsed_ms,
                 "error": error,
+                "force": self._force,
             }
         )
 
@@ -2837,6 +2840,7 @@ class MessageViewerTab(QWidget):
         self._pending_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
         self._message_check_timer: QTimer | None = None
+        self._projection_delete_queue_timer: QTimer | None = None
         self._pending_rows: List[Dict[str, str | float]] = []
         self._pending_rows_signature: str = ""
         self._form_cache: Dict[str, List[Dict]] = {}
@@ -3008,6 +3012,7 @@ class MessageViewerTab(QWidget):
         self._setup_js8_timer()
         self._setup_pending_timer()
         self._setup_message_check_timer()
+        self._setup_projection_delete_queue_timer()
 
     def _retain_finished_worker_refs(self, *refs: object) -> None:
         """Keep PySide wrappers alive until queued Qt deletions have safely drained."""
@@ -10225,6 +10230,28 @@ class MessageViewerTab(QWidget):
         self._message_check_timer.timeout.connect(self._on_visible_message_check_timer)
         self._sync_message_check_timer()
 
+    def _setup_projection_delete_queue_timer(self) -> None:
+        if self._projection_delete_queue_timer:
+            self._projection_delete_queue_timer.stop()
+        self._projection_delete_queue_timer = QTimer(self)
+        self._projection_delete_queue_timer.timeout.connect(self._process_projection_delete_queue)
+        if self._has_active_view and self._app_active and not self._is_shutting_down:
+            self._projection_delete_queue_timer.start(MESSAGE_PROJECTION_QUEUE_POLL_SECONDS * 1000)
+
+    def _process_projection_delete_queue(self) -> None:
+        if self._is_shutting_down:
+            return
+        db_path = self._db_path()
+        if db_path is None or not db_path.exists():
+            return
+        try:
+            counts = process_message_delete_queue(db_path, limit=25)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to process message delete queue: %s", exc)
+            return
+        if any(int(value or 0) for value in counts.values()):
+            log.debug("MessageViewer: processed message delete queue %s", counts)
+
     def _sync_message_check_timer(self) -> None:
         if self._message_check_timer is None:
             self._message_check_timer = QTimer(self)
@@ -10644,6 +10671,7 @@ class MessageViewerTab(QWidget):
             self._setup_js8_timer()
             self._setup_pending_timer()
             self._sync_message_check_timer()
+            self._setup_projection_delete_queue_timer()
             self._setup_bbs_auto_archive_timer()
             if self._signature_verify_deferred_until_active:
                 self._signature_verify_deferred_until_active = False
@@ -10657,7 +10685,15 @@ class MessageViewerTab(QWidget):
                 QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
                 return
             return
-        for timer in (self._clock_timer, self._timer, self._js8_timer, self._pending_timer, self._message_check_timer, self._bbs_auto_archive_timer):
+        for timer in (
+            self._clock_timer,
+            self._timer,
+            self._js8_timer,
+            self._pending_timer,
+            self._message_check_timer,
+            self._projection_delete_queue_timer,
+            self._bbs_auto_archive_timer,
+        ):
             if timer:
                 timer.stop()
         self._next_visible_message_check_ts = 0.0
@@ -10673,6 +10709,7 @@ class MessageViewerTab(QWidget):
                 self._js8_timer,
                 self._pending_timer,
                 self._message_check_timer,
+                self._projection_delete_queue_timer,
                 self._bbs_auto_archive_timer,
             ):
                 if timer:
@@ -12189,6 +12226,11 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         try:
+            if self._projection_delete_queue_timer:
+                self._projection_delete_queue_timer.stop()
+        except Exception:
+            pass
+        try:
             if self._filter_timer:
                 self._filter_timer.stop()
         except Exception:
@@ -13156,7 +13198,7 @@ class MessageViewerTab(QWidget):
         )
         self._message_rows = rows
         self._save_message_file_metadata_from_rows(rows)
-        self._start_message_projection_write(rows)
+        self._start_message_projection_write(rows, force=bool(data.get("force", False)))
         sender_updates = data.get("sender_cache_updates", {})
         if isinstance(sender_updates, dict):
             self._sender_cache.update(sender_updates)
@@ -13199,7 +13241,7 @@ class MessageViewerTab(QWidget):
         self._start_signature_verification(force=bool(data.get("force", False)))
         log.debug("MessageViewer: built %d unified messages", len(rows))
 
-    def _start_message_projection_write(self, rows: Sequence[UnifiedMessage]) -> None:
+    def _start_message_projection_write(self, rows: Sequence[UnifiedMessage], *, force: bool = False) -> None:
         if self._is_shutting_down:
             return
         db_path = self._db_path()
@@ -13216,6 +13258,7 @@ class MessageViewerTab(QWidget):
             db_path=str(db_path),
             rows=list(rows),
             generation=generation,
+            force=force,
         )
         self._projection_write_worker.moveToThread(self._projection_write_thread)
         self._projection_write_thread.started.connect(self._projection_write_worker.run)

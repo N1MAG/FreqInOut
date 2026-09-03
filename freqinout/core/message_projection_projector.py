@@ -9,12 +9,15 @@ from typing import Any, Iterable, Mapping
 from freqinout.core.message_file_scanner import FileRecord
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
+    MessageProjectionCheckpoint,
     MessageArtifactRecord,
     MessageProjectionRecord,
     MessageSourceRecord,
     content_hash,
     ensure_message_projection_schema,
+    get_message_projection_checkpoint,
     stable_message_id,
+    set_message_projection_checkpoint,
     upsert_external_ref,
     upsert_message_artifact,
     upsert_message_projection,
@@ -25,13 +28,26 @@ from freqinout.core.message_summary import MessageSummary, message_summary_from_
 from freqinout.core.sqlite_utils import connect_sqlite
 
 PROJECTOR_VERSION = 1
+UNIFIED_ROWS_CHECKPOINT_SOURCE = "messages:unified_rows"
 
 
-def project_unified_message_rows(db_path: str | Path, rows: Iterable[object]) -> int:
+def project_unified_message_rows(
+    db_path: str | Path,
+    rows: Iterable[object],
+    *,
+    checkpoint_source_id: str = UNIFIED_ROWS_CHECKPOINT_SOURCE,
+    force: bool = False,
+) -> int:
     """Persist unified message rows into the normalized message projection tables."""
     row_list = list(rows or [])
     if not row_list:
         return 0
+    checkpoint_key = str(checkpoint_source_id or "").strip()
+    fingerprint, last_external_key, last_event_ts = projection_rows_fingerprint(row_list)
+    if checkpoint_key and not force:
+        existing = get_message_projection_checkpoint(db_path, checkpoint_key)
+        if existing.content_fingerprint == fingerprint:
+            return 0
     conn = connect_sqlite(db_path)
     try:
         ensure_message_projection_schema(conn)
@@ -48,9 +64,47 @@ def project_unified_message_rows(db_path: str | Path, rows: Iterable[object]) ->
                 for artifact in artifacts:
                     upsert_message_artifact(conn, artifact)
                 projected += 1
+            if checkpoint_key:
+                set_message_projection_checkpoint(
+                    conn,
+                    MessageProjectionCheckpoint(
+                        source_id=checkpoint_key,
+                        last_external_key=last_external_key,
+                        last_event_ts=last_event_ts,
+                        content_fingerprint=fingerprint,
+                    ),
+                )
         return projected
     finally:
         conn.close()
+
+
+def projection_rows_fingerprint(rows: Iterable[object]) -> tuple[str, str, float]:
+    parts: list[str] = []
+    last_external_key = ""
+    last_event_ts = 0.0
+    for row in rows or ():
+        bundle = _projection_bundle(row)
+        if bundle is None:
+            continue
+        _source, message, ref, _artifacts = bundle
+        last_event_ts = max(last_event_ts, float(message.event_ts or message.received_ts or 0.0))
+        if float(message.event_ts or message.received_ts or 0.0) >= last_event_ts:
+            last_external_key = ref.external_key
+        parts.append(
+            "|".join(
+                (
+                    message.message_id,
+                    message.content_hash,
+                    str(message.event_ts or 0.0),
+                    str(message.received_ts or 0.0),
+                    str(message.status or ""),
+                    str(message.read_state or ""),
+                )
+            )
+        )
+    parts.sort()
+    return content_hash(PROJECTOR_VERSION, len(parts), "\n".join(parts)), last_external_key, last_event_ts
 
 
 def projected_message_id_for_row(row: object) -> str:

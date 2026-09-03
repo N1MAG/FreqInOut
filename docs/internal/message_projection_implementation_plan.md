@@ -29,8 +29,8 @@ Acceptance:
 
 ## Phase 2: Incremental Projectors
 
-Status: row-backed all-source projector implemented; source-native incremental
-checkpoints remain.
+Status: checkpointed row-backed all-source projector implemented; source-native
+incremental checkpoints remain.
 
 Populate the projection spine from the existing unified message row builder
 without changing the UI read path yet. This gives every currently rendered
@@ -45,6 +45,8 @@ Implemented:
 - FLMsg/FLAmp/BBS file rows get linked artifact rows; FLAmp captures Q ID,
   block id, transfer id, transfer state, path, mtime, size, and content hash.
 - Projection writes run on a coalesced background Qt worker after row build.
+- Projection batches store a durable `message_projection_checkpoint` fingerprint
+  and skip unchanged refreshes unless the operator forces refresh.
 - Existing source-side delete success marks projected rows deleted and queues an
   auditable projection delete entry.
 - Perf telemetry separates `messages.project_rows` from row build and rendering.
@@ -103,9 +105,10 @@ Acceptance:
 
 ## Phase 4: Intelligence And Purge Workers
 
-Status: core queue processor implemented for FIO hide/source tombstones,
-audit-only minimization, and file-delete capable external refs; app-level
-background scheduling and every source-native external delete handler remain.
+Status: core queue processor and Messages-tab bounded queue scheduling
+implemented for FIO hide/source tombstones, audit-only minimization, and
+file-delete capable external refs; every source-native external delete handler
+remains.
 
 Move rich intelligence and destructive source actions into background services.
 
@@ -113,7 +116,8 @@ Move rich intelligence and destructive source actions into background services.
   recommended actions.
 - Preserve operator overrides and re-enrichment versioning. Remaining.
 - Process delete queue in source-capability-gated batches. Implemented for
-  `hide_fio`, `source_delete`, `audit_only`, and file-backed `delete_external`.
+  scheduled `hide_fio`, `source_delete`, `audit_only`, and file-backed
+  `delete_external`.
 - Record external delete/archive results in audit rows. Implemented for
   supported effects.
 

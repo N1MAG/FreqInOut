@@ -6,10 +6,12 @@ import sqlite3
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
     MessageArtifactRecord,
+    MessageProjectionCheckpoint,
     MessageProjectionRecord,
     MessageSourceRecord,
     content_hash,
     ensure_message_projection_schema,
+    get_message_projection_checkpoint,
     list_projected_messages,
     load_projected_message_detail,
     mark_projected_messages_read,
@@ -21,6 +23,7 @@ from freqinout.core.message_projection_store import (
     upsert_message_projection,
     upsert_message_source,
     upsert_projected_message,
+    set_message_projection_checkpoint,
 )
 
 
@@ -315,6 +318,33 @@ def test_process_delete_queue_deletes_file_refs(tmp_path) -> None:
 
     assert process_message_delete_queue(db_path)["completed"] == 1
     assert not file_path.exists()
+
+
+def test_message_projection_checkpoint_round_trips(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        with conn:
+            set_message_projection_checkpoint(
+                conn,
+                MessageProjectionCheckpoint(
+                    source_id="messages:unified_rows",
+                    last_external_key="abc",
+                    last_event_ts=123.4,
+                    content_fingerprint="fp-1",
+                    updated_utc="2026-09-02T00:00:00+00:00",
+                ),
+            )
+    finally:
+        conn.close()
+
+    checkpoint = get_message_projection_checkpoint(db_path, "messages:unified_rows")
+
+    assert checkpoint.source_id == "messages:unified_rows"
+    assert checkpoint.last_external_key == "abc"
+    assert checkpoint.last_event_ts == 123.4
+    assert checkpoint.content_fingerprint == "fp-1"
 
 
 def test_db_initializer_ensures_message_projection_tables(monkeypatch, tmp_path) -> None:

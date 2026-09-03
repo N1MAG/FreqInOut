@@ -167,3 +167,12 @@ def test_projection_refresh_does_not_resurrect_deleted_row(tmp_path: Path) -> No
     assert len(deleted_rows) == 1
     assert deleted_rows[0]["deleted"] == 1
     assert deleted_rows[0]["subject"] == "After delete source refresh"
+
+
+def test_project_unified_message_rows_skips_unchanged_checkpointed_batch(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    row = _row()
+
+    assert project_unified_message_rows(db_path, [row]) == 1
+    assert project_unified_message_rows(db_path, [row]) == 0
+    assert project_unified_message_rows(db_path, [row], force=True) == 1
