@@ -82,7 +82,13 @@ def test_source_native_projectors_populate_projection_without_qt_rows(tmp_path) 
                  read_ts, source_key, source_id, source_radio_id, js8_instance_id, source_path)
             VALUES
                 (1, 'N1AAA', '@MR08', 'MSG', '2026-09-02 10:00:00', 1788352800,
-                 'Power report', 'Power report decoded', 'UNREAD', 0, 'radio-a', 101, '7', 'js8-a', '/tmp/js8.db')
+                 'F!701C 100 ST[UT] GR[DN40] #ABCD',
+                 'State (2-letter code): UT
+Maidenhead Grid Square: DN40
+
+Current Operational Status (QTH)
+*Operations steady, no significant issues or noteworthy activity - Green',
+                 'UNREAD', 0, 'radio-a', 101, '7', 'js8-a', '/tmp/js8.db')
             """
         )
         conn.execute(
@@ -92,7 +98,7 @@ def test_source_native_projectors_populate_projection_without_qt_rows(tmp_path) 
                  decoded_text, state, read_ts, relay_via, source_radio_id, js8_instance_id)
             VALUES
                 (2, '2026-09-02 10:01:00', 1788352860, 'N1BBB', '@MR08', '104',
-                 'tok', 'F!104 GREEN', 'Spotter decoded', 'UNREAD', 0, 'N1RELAY', '8', 'js8-b')
+                 'tok', 'F!104 ST[UT] GR[DN40] NA[Water outage]', 'Spotter decoded', 'UNREAD', 0, 'N1RELAY', '8', 'js8-b')
             """
         )
         conn.execute(
@@ -155,6 +161,22 @@ def test_source_native_projectors_populate_projection_without_qt_rows(tmp_path) 
             ).fetchall()
         }
         assert families == {"commstat": 1, "js8": 1, "sitrep": 1, "spotter": 1, "varac": 1}
+        js8_row = conn.execute(
+            "SELECT state_code, grid, summary FROM message_projection WHERE source_family='js8'"
+        ).fetchone()
+        assert dict(js8_row) == {
+            "state_code": "UT",
+            "grid": "DN40",
+            "summary": "F!701C | N1AAA -> @MR08 | UT / DN40 | Green / No significant issues",
+        }
+        spotter_row = conn.execute(
+            "SELECT state_code, grid, summary FROM message_projection WHERE source_family='spotter'"
+        ).fetchone()
+        assert dict(spotter_row) == {
+            "state_code": "UT",
+            "grid": "DN40",
+            "summary": "F!104 | N1BBB -> @MR08 | UT / DN40 | Water outage",
+        }
         assert conn.execute("SELECT COUNT(*) FROM message_external_refs").fetchone()[0] == 5
         assert conn.execute("SELECT COUNT(*) FROM message_artifacts").fetchone()[0] == 2
     finally:

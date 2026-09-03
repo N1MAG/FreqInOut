@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.message_file_scanner import FileRecord
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
@@ -27,7 +28,7 @@ from freqinout.core.message_projection_store import (
 )
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
-PROJECTOR_VERSION = 1
+PROJECTOR_VERSION = 2
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
 
@@ -236,8 +237,20 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
             external_key = _text(row["source_id"]) or _text(row["id"])
             message_id = stable_message_id(source_id, "js8_message", external_key)
             status = _upper(row["state"]) or "UNREAD"
-            body = _text(row["decoded_text"]) or _text(row["raw_text"])
+            raw_body = _text(row["raw_text"])
+            body = _text(row["decoded_text"]) or raw_body
+            analysis_body = "\n".join(part for part in (raw_body, body) if part)
             event_ts = _float(row["utc_ts"])
+            form_name = _text(row["msg_type"])
+            if not form_name.upper().startswith("F!"):
+                form_name = ""
+            intelligence = analyze_spotter_text(
+                analysis_body,
+                form_name=form_name,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+                source_type="js8",
+            )
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="js8",
@@ -267,15 +280,22 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
                 from_call=_upper(row["from_call"]),
                 to_call=_upper(row["to_call"]),
                 group_name=_group(row["to_call"]),
+                state_code=_upper(intelligence.state),
+                grid=_upper(intelligence.grid),
                 event_ts=event_ts,
                 received_ts=event_ts,
                 event_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
                 received_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
-                subject=_subject(body),
-                summary=body[:240],
+                subject=intelligence.subject or _subject(body),
+                summary=(intelligence.summary or body)[:240],
                 body_preview=body[:1200],
-                topics=_topics(body),
-                entities={"from_call": _upper(row["from_call"]), "to_call": _upper(row["to_call"])},
+                topics=tuple(intelligence.topics) or _topics(body),
+                entities={
+                    "from_call": _upper(row["from_call"]),
+                    "to_call": _upper(row["to_call"]),
+                    "state": _upper(intelligence.state),
+                    "grid": _upper(intelligence.grid),
+                },
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], row["msg_type"], body),
                 projection_version=PROJECTOR_VERSION,
@@ -333,11 +353,19 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) 
             external_key = _text(row["id"])
             message_id = stable_message_id(source_id, "spotter_message", external_key)
             status = _upper(row["state"]) or "UNREAD"
-            body = _text(row["decoded_text"]) or _text(row["raw_text"])
+            raw_body = _text(row["raw_text"])
+            body = _text(row["decoded_text"]) or raw_body
+            analysis_body = "\n".join(part for part in (raw_body, body) if part)
             event_ts = _float(row["utc_ts"])
             msg_type = _text(row["form_id"])
             if msg_type and not msg_type.startswith("F!"):
                 msg_type = f"F!{msg_type}"
+            intelligence = analyze_spotter_text(
+                analysis_body,
+                form_name=msg_type,
+                from_call=row["from_call"],
+                to_call=row["to_call"],
+            )
             source = MessageSourceRecord(
                 source_id=source_id,
                 source_family="spotter",
@@ -366,15 +394,22 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) 
                 from_call=_upper(row["from_call"]),
                 to_call=_upper(row["to_call"]),
                 group_name=_group(row["to_call"]),
+                state_code=_upper(intelligence.state),
+                grid=_upper(intelligence.grid),
                 event_ts=event_ts,
                 received_ts=event_ts,
                 event_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
                 received_utc=_text(row["utc_str"]) or _utc_from_ts(event_ts),
-                subject=_subject(body),
-                summary=body[:240],
+                subject=intelligence.subject or _subject(body),
+                summary=(intelligence.summary or body)[:240],
                 body_preview=body[:1200],
-                topics=_topics(body),
-                entities={"relay_via": _upper(row["relay_via"]), "spotter_token": _text(row["spotter_token"])},
+                topics=tuple(intelligence.topics) or _topics(body),
+                entities={
+                    "relay_via": _upper(row["relay_via"]),
+                    "spotter_token": _text(row["spotter_token"]),
+                    "state": _upper(intelligence.state),
+                    "grid": _upper(intelligence.grid),
+                },
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], msg_type, body),
                 projection_version=PROJECTOR_VERSION,

@@ -13045,7 +13045,7 @@ class MessageViewerTab(QWidget):
                     to_call=str(db_row["to_call"] or ""),
                     rcv_ts=received_ts,
                     rcv_display=self._format_rcv_display(received_ts, event_utc),
-                    title=str(db_row["subject"] or db_row["summary"] or payload.body_preview or ""),
+                    title=str(db_row["summary"] or db_row["subject"] or payload.body_preview or ""),
                     origin=str(db_row["source_family"] or payload.source_family or "message"),
                     payload=payload,
                     search_text=str(db_row["search_text"] or ""),
@@ -14146,7 +14146,24 @@ class MessageViewerTab(QWidget):
             group = _core_message_group_value(row, configured_groups=configured_groups)
             if group:
                 pairs.append((group, self._message_source_value(row)))
-        return _core_message_group_source_map(pairs, family_map=self._operator_group_family_map())
+        group_sources = _core_message_group_source_map(pairs, family_map=self._operator_group_family_map())
+        self._add_commstat_group_options_for_current_scope(group_sources)
+        return group_sources
+
+    def _add_commstat_group_options_for_current_scope(self, group_sources: dict[str, set[str]]) -> None:
+        selected_sources = self._selected_message_sources()
+        focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
+        includes_commstat = focus in {"all", "commstat"} or selected_sources is None or "commstat" in selected_sources
+        if not includes_commstat:
+            return
+        try:
+            commstat_state = self._commstat_group_state()
+        except Exception:
+            return
+        groups = set(commstat_state.active_groups or ()) or set(commstat_state.configured_groups or ())
+        for group in self._message_group_candidate_set(groups):
+            if group and group != "unassigned":
+                group_sources.setdefault(group, set()).add("commstat")
 
     def _message_group_option_sections(self, rows: List[UnifiedMessage]) -> list[tuple[str, list[tuple[str, str]]]]:
         return self._message_group_option_sections_from_sources(self._message_group_source_map(rows))

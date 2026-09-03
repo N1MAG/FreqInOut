@@ -220,8 +220,22 @@ def js8_message_row_presentation(
     title = ""
     if raw_type.startswith("F!"):
         title = _lookup_form_title(form_title_lookup, raw_type[2:].strip())
-    if not title:
-        title = str(getattr(msg, "decoded_text", "") or getattr(msg, "raw_text", "") or "").strip()
+    raw_text = str(getattr(msg, "raw_text", "") or "").strip()
+    body = str(getattr(msg, "decoded_text", "") or raw_text).strip()
+    analysis_text = "\n".join(part for part in (raw_text, body) if part)
+    intelligence = None
+    if raw_type.startswith("F!") or analysis_text.upper().lstrip().startswith("F!"):
+        intelligence = analyze_spotter_text(
+            analysis_text,
+            form_name=title or (raw_type if raw_type.startswith("F!") else ""),
+            from_call=getattr(msg, "from_call", ""),
+            to_call=getattr(msg, "to_call", ""),
+            source_type="js8",
+        )
+    if intelligence is not None and intelligence.summary:
+        title = intelligence.summary
+    elif not title:
+        title = body
     title = _table_title(title)
     return MessageRowPresentation(
         msg_type=msg_type,
@@ -231,7 +245,19 @@ def js8_message_row_presentation(
         rcv_ts=float(getattr(msg, "utc_ts", 0.0) or 0.0),
         title=title,
         origin="js8",
-        search_detail=title,
+        topics=tuple(intelligence.topics) if intelligence is not None else (),
+        actionable=bool(intelligence.actionable) if intelligence is not None else False,
+        search_detail=" ".join(
+            part
+            for part in (
+                title,
+                " ".join(intelligence.topics) if intelligence is not None else "",
+                intelligence.state if intelligence is not None else "",
+                intelligence.grid if intelligence is not None else "",
+            )
+            if str(part or "").strip()
+        ),
+        intelligence=intelligence,
     )
 
 
@@ -249,8 +275,10 @@ def spotter_message_row_presentation(
     if msg_type.startswith("F!"):
         title = _lookup_form_title(form_title_lookup, msg_type[2:].strip())
     raw_text = str(getattr(msg, "raw_text", "") or "")
+    decoded_text = str(getattr(msg, "decoded_text", "") or "")
+    analysis_text = "\n".join(part for part in (raw_text, decoded_text) if part)
     intelligence = analyze_spotter_text(
-        raw_text,
+        analysis_text or raw_text,
         form_name=title or msg_type,
         from_call=getattr(msg, "from_call", ""),
         to_call=getattr(msg, "to_call", ""),

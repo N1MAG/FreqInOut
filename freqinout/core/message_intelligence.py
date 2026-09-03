@@ -134,6 +134,18 @@ def summarize_intelligence(info: MessageIntelligence) -> str:
     return summary or info.subject or info.form_name or info.body[:80].strip()
 
 
+def summarize_spotter_intelligence(info: MessageIntelligence) -> str:
+    form = str(info.form_name or "").strip()
+    route = " -> ".join(part for part in (info.from_call, info.to_call) if part)
+    area = " / ".join(part for part in (info.state, info.grid) if part)
+    subject = str(info.subject or "").strip()
+    subject = _clean_spotter_summary_subject(subject)
+    if not subject:
+        subject = _spotter_status_summary(info.body)
+    parts = [part for part in (form, route, area, subject, info.date_summary) if part]
+    return " | ".join(parts).strip() or summarize_intelligence(info)
+
+
 def analyze_spotter_text(
     text: object,
     *,
@@ -144,9 +156,16 @@ def analyze_spotter_text(
 ) -> MessageIntelligence:
     raw = str(text or "").strip()
     fields = parse_spotter_bracket_fields(raw)
-    subject = _first_nonempty(fields.get("NA"), fields.get("CM"), fields.get("DE"), fields.get("AV"), fields.get("NE"))
-    state = str(fields.get("ST", "") or "").strip().upper()
-    grid = str(fields.get("GR", "") or "").strip().upper()
+    subject = _first_nonempty(
+        fields.get("NA"),
+        fields.get("CM"),
+        fields.get("DE"),
+        fields.get("AV"),
+        fields.get("NE"),
+        _spotter_status_summary(raw),
+    )
+    state = _clean_state(_first_nonempty(fields.get("ST"), _field_after_label(raw, "State (2-letter code)"), _field_after_label(raw, "State")))
+    grid = _clean_grid(_first_nonempty(fields.get("GR"), _field_after_label(raw, "Maidenhead Grid Square"), _field_after_label(raw, "Grid")))
     to_value = _clean_group_or_call(_first_nonempty(to_call, fields.get("TO")))
     from_value = _clean_call(_first_nonempty(from_call, fields.get("FR")))
     date_summary = _form_date_summary(fields.get("DA", ""))
@@ -184,7 +203,28 @@ def analyze_spotter_text(
         confidence=0.82 if fields else 0.45,
         metadata=metadata,
     )
-    return _with_summary(info)
+    info = _with_summary(info)
+    return MessageIntelligence(
+        source_type=info.source_type,
+        form_name=info.form_name,
+        from_call=info.from_call,
+        to_call=info.to_call,
+        subject=info.subject,
+        date_summary=info.date_summary,
+        state=info.state,
+        grid=info.grid,
+        groups=info.groups,
+        body=info.body,
+        topics=info.topics,
+        topic_evidence=info.topic_evidence,
+        actionable=info.actionable,
+        operator_attention=info.operator_attention,
+        routing_candidate=info.routing_candidate,
+        routing_reasons=info.routing_reasons,
+        summary=summarize_spotter_intelligence(info),
+        confidence=info.confidence,
+        metadata=info.metadata,
+    )
 
 
 def analyze_form_text(
@@ -490,6 +530,70 @@ def _routing_candidate(
     has_content = bool(topics or str(subject or "").strip() or str(body or "").strip())
     has_scope = bool(str(grid or "").strip() or str(state or "").strip() or groups)
     return bool(has_source and has_content and has_scope), tuple(reasons)
+
+
+def _clean_spotter_summary_subject(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    noisy_prefixes = (
+        "state (2-letter code)",
+        "state",
+        "maidenhead grid square",
+        "grid",
+    )
+    if any(lower.startswith(prefix) for prefix in noisy_prefixes):
+        return ""
+    return re.sub(r"\s+", " ", text)
+
+
+def _spotter_status_summary(text: object) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    status_blocks = (
+        ("Current Operational Status", "overall"),
+        ("Power", "power"),
+        ("Water", "water"),
+        ("Medical", "medical"),
+        ("Communications", "communications"),
+        ("Internet", "internet"),
+        ("Travel", "travel"),
+        ("Food", "food"),
+        ("Fuel", "fuel"),
+        ("Crime", "crime"),
+        ("Civil Unrest", "civil unrest"),
+        ("Political", "political"),
+    )
+    values: list[tuple[str, str, str]] = []
+    for label, name in status_blocks:
+        value = _block_after_label(raw, label)
+        if value:
+            state = _condition_state(value)
+            if state:
+                values.append((name, state, value))
+    non_green = [(name, state) for name, state, _value in values if state not in {"green", "ok", "normal"}]
+    if non_green:
+        return "Non-green: " + ", ".join(f"{name} {state.upper()}" for name, state in non_green[:4])
+    if values and all(state in {"green", "ok", "normal"} for _name, state, _value in values):
+        return "Green / No significant issues"
+    if re.search(r"\b(no significant issues|operational steady|all clear|green)\b", raw, flags=re.IGNORECASE):
+        return "Green / No significant issues"
+    return ""
+
+
+def _condition_state(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if re.search(r"\b(red|critical|severe|emergency)\b", text):
+        return "red"
+    if re.search(r"\b(yellow|warning|watch|degraded|limited|shortage|outage|offline|down)\b", text):
+        return "yellow"
+    if re.search(r"\b(green|normal|ok|okay|steady|all clear|no significant)\b", text):
+        return "green"
+    return ""
 
 
 def _commstat_kind_label(value: object) -> str:

@@ -203,7 +203,31 @@ def test_spotter_mcf_extracts_operator_routing_area_topics_and_actionable_summar
     assert info.operator_attention is True
     assert info.routing_candidate is True
     assert "location:grid" in info.routing_reasons
-    assert info.summary == "MCF701 Field Report | W0IFM -> @MAGNET | FORM POSTED FOR WILDFIRE EVACUATION UPDATE | 260429-1839z"
+    assert info.summary == "MCF701 Field Report | W0IFM -> @MAGNET | MO / EM48EQ | FORM POSTED FOR WILDFIRE EVACUATION UPDATE | 260429-1839z"
+
+
+def test_spotter_mcf_summary_uses_operational_intelligence_not_raw_labels() -> None:
+    info = analyze_spotter_text(
+        """
+State (2-letter code): UT
+Maidenhead Grid Square: DM38ST
+
+Current Operational Status (QTH)
+*Operations steady, no significant issues or noteworthy activity - Green
+
+Situation Report
+*No significant issues or noteworthy activity
+""",
+        form_name="F!701C",
+        from_call="K7ETC",
+        to_call="@MR08",
+    )
+
+    assert info.state == "UT"
+    assert info.grid == "DM38ST"
+    assert info.subject == "Green / No significant issues"
+    assert info.summary == "F!701C | K7ETC -> @MR08 | UT / DM38ST | Green / No significant issues"
+    assert "State (2-letter code)" not in info.summary
 
 
 def test_flmsg_form_extracts_common_fields_and_human_first_summary() -> None:
@@ -2335,6 +2359,37 @@ def test_inbox_focus_aligns_source_filter_to_commstat() -> None:
     MessageViewerTab._sync_source_filter_for_inbox_focus(tab, "commstat")
 
     assert tab.source_filter.selected == ["commstat"]
+
+
+def test_commstat_focus_group_options_include_configured_commstat_groups_without_rows() -> None:
+    class FakeSourceFilter:
+        def all_selected(self) -> bool:
+            return False
+
+        def selected_values(self) -> set[str]:
+            return {"commstat"}
+
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab.settings = {}
+    tab._inbox_focus = "commstat"
+    tab.source_filter = FakeSourceFilter()
+    tab._configured_message_group_names = lambda: set()
+    tab._operator_group_family_map = lambda: {}
+    tab._commstat_group_state = lambda: CommStatGroupState(
+        configured_groups=frozenset({"AMRRON", "MAGNET", "MR08", "MRHUB"}),
+        active_groups=frozenset({"AMRRON", "MAGNET", "MR08", "MRHUB"}),
+        unchecked_groups=frozenset(),
+        show_other_groups=False,
+    )
+
+    group_sources = MessageViewerTab._message_group_source_map(tab, [])
+
+    assert group_sources == {
+        "AMRRON": {"commstat"},
+        "MAGNET": {"commstat"},
+        "MR08": {"commstat"},
+        "MRHUB": {"commstat"},
+    }
 
 
 def test_js8_relay_route_display_is_not_group_or_destination_noise() -> None:
