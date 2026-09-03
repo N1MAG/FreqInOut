@@ -155,11 +155,14 @@ Rules:
 - Ensure schema during cold-start database initialization.
 - Project existing unified message rows into the normalized FIO tables on a
   coalesced background worker.
+- Render the Messages tab projection-first when projected rows exist, keeping
+  source row building as a background refresh/projection feeder.
 - Preserve external references for JS8Call, FIOSpotter, CommStat, SitRep,
   VarAC, FLMsg, FLAmp, and BBS rows.
 - Preserve file-backed artifact metadata, including FLAmp Q IDs and block ids.
 - Mark projected rows deleted when existing source-specific delete actions
   succeed.
+- Mark projection-only rows read/hidden directly in the FIO projection tables.
 - Add contract tests for uniqueness, bounded queries, external refs, artifacts,
   and delete queue/audit behavior.
 - Migrate the Messages tab to query this projection in a follow-up slice, then

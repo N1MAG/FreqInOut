@@ -197,6 +197,8 @@ from freqinout.core.message_projection_projector import (
     mark_projected_message_rows_deleted,
     project_unified_message_rows,
 )
+from freqinout.core.message_projection_payload import ProjectedMessagePayload, projected_payload_from_row
+from freqinout.core.message_projection_store import list_projected_messages, mark_projected_messages_read
 from freqinout.core.source_view_contracts import (
     contract_gate_failures,
     source_contract_for,
@@ -2029,7 +2031,7 @@ class MessageTableModel(QAbstractTableModel):
                     return "View | Archive | Delete"
                 if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs_archive":
                     return "View | Delete"
-                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage, CommStatArtifact)):
+                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage, CommStatArtifact, ProjectedMessagePayload)):
                     return "View | Delete"
                 return "View"
         if role == Qt.UserRole:
@@ -2058,6 +2060,14 @@ class MessageTableModel(QAbstractTableModel):
             if row.status == "NEW":
                 return QColor(Qt.red)
             payload = row.payload
+            if isinstance(payload, ProjectedMessagePayload):
+                severity = str(payload.severity or "").strip().lower()
+                if severity == "critical":
+                    return QColor("#d32f2f")
+                if severity == "warning":
+                    return QColor("#ed8b00")
+                if severity == "watch":
+                    return QColor(Qt.red)
             if isinstance(payload, CommStatArtifact):
                 color = str(payload.alert_color or "").strip().lower()
                 if color == "red":
@@ -2471,7 +2481,7 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        if isinstance(row.payload, SitrepMessage):
+        if isinstance(row.payload, (SitrepMessage, ProjectedMessagePayload)):
             painter.setPen(self._danger)
             painter.setFont(option.font)
             painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
@@ -2632,6 +2642,11 @@ class MessageActionDelegate(QStyledItemDelegate):
                 self.parent()._delete_commstat_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
+        elif isinstance(row.payload, ProjectedMessagePayload):
+            if del_rect.contains(pos):
+                self.parent()._delete_projected_message(row)
+            else:
+                self.parent()._on_view_message(row)
         else:
             self.parent()._on_view_message(row)
         return True
@@ -2769,6 +2784,9 @@ class MessageViewerTab(QWidget):
             self._inbox_focus = "all"
         self._advanced_filters_visible: bool = bool(cfg.get("advanced_filters_visible", False))
         self._inbox_tools_visible: bool = bool(cfg.get("inbox_tools_visible", True))
+        self._projection_primary_enabled: bool = self._is_truthy(
+            cfg.get("projection_primary_enabled", True), True
+        )
         self._available_type_filters: List[str] = []
         self._responsive_layout_mode = "wide"
         self._responsive_compact_width = 1200
@@ -2888,6 +2906,8 @@ class MessageViewerTab(QWidget):
         self._projection_write_worker: _MessageProjectionWriteWorker | None = None
         self._projection_write_generation: int = 0
         self._projection_write_pending_rows: List[UnifiedMessage] = []
+        self._last_source_rows_build_ts: float = 0.0
+        self._last_projection_render_ts: float = 0.0
         self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
@@ -12750,7 +12770,60 @@ class MessageViewerTab(QWidget):
                 log.debug("MessageViewer: table refresh deferred (freeze active)")
                 return
             self._deferred_refresh = False
+            if self._projection_primary_enabled and self._load_projected_messages_into_table():
+                if not force and (time.time() - float(getattr(self, "_last_source_rows_build_ts", 0.0) or 0.0)) < 60.0:
+                    return
             self._start_rows_build(force=force)
+
+    def _load_projected_messages_into_table(self) -> bool:
+        rows = self._load_projected_message_rows(limit=1500)
+        if not rows:
+            return False
+        self._message_rows = rows
+        self._last_projection_render_ts = time.time()
+        with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
+            self._refresh_message_filters(rows)
+        with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
+            self._apply_message_filters()
+        log.debug("MessageViewer: loaded %d projected messages", len(rows))
+        return True
+
+    def _load_projected_message_rows(self, *, limit: int = 1500) -> List[UnifiedMessage]:
+        db_path = self._db_path()
+        if db_path is None or not db_path.exists():
+            return []
+        try:
+            db_rows = list_projected_messages(db_path, limit=limit)
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load projected messages: %s", exc)
+            return []
+        rows: List[UnifiedMessage] = []
+        for db_row in db_rows:
+            try:
+                payload = projected_payload_from_row(db_row)
+                received_ts = float(db_row["received_ts"] or db_row["event_ts"] or 0.0)
+                event_utc = str(db_row["received_utc"] or db_row["event_utc"] or "")
+                status = str(db_row["status"] or "INFO").strip().upper()
+                row = UnifiedMessage(
+                    msg_type=str(db_row["message_type"] or payload.message_type or payload.source_label or "Message"),
+                    status=status,
+                    from_call=str(db_row["from_call"] or ""),
+                    to_call=str(db_row["to_call"] or ""),
+                    rcv_ts=received_ts,
+                    rcv_display=self._format_rcv_display(received_ts, event_utc),
+                    title=str(db_row["subject"] or db_row["summary"] or payload.body_preview or ""),
+                    origin=str(db_row["source_family"] or payload.source_family or "message"),
+                    payload=payload,
+                    search_text=str(db_row["search_text"] or ""),
+                    topics=payload.topics,
+                    actionable=bool(db_row["actionable"] or db_row["operator_attention"]),
+                    display_type=str(db_row["display_type"] or payload.display_type or ""),
+                )
+                row.summary = message_summary_from_row(row)
+                rows.append(row)
+            except Exception as exc:
+                log.debug("MessageViewer: skipped projected message row: %s", exc)
+        return rows
 
     def _spotter_msg_auth_state_for_message(
         self,
@@ -13071,6 +13144,11 @@ class MessageViewerTab(QWidget):
         if self._locally_deleted_row_keys:
             rows = _core_filter_rows_excluding_identities(rows, self._locally_deleted_row_keys)
         self._retag_bbs_archive_rows(rows)
+        self._last_source_rows_build_ts = time.time()
+        projection_render_active = bool(
+            self._projection_primary_enabled
+            and float(getattr(self, "_last_projection_render_ts", 0.0) or 0.0) > 0.0
+        )
         self._message_rows = rows
         self._save_message_file_metadata_from_rows(rows)
         self._start_message_projection_write(rows)
@@ -13100,6 +13178,12 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
+        if projection_render_active:
+            log.debug(
+                "MessageViewer: built %d source rows for projection refresh; keeping projection-primary table",
+                len(rows),
+            )
+            return
         if self._freeze_messages_table and not bool(data.get("force", False)):
             self._deferred_refresh = True
             return
@@ -13158,6 +13242,8 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
+        if self._projection_primary_enabled and not self._is_shutting_down:
+            self._load_projected_messages_into_table()
 
     def _on_message_projection_write_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._projection_write_thread, self._projection_write_worker)
@@ -14239,7 +14325,8 @@ class MessageViewerTab(QWidget):
             detail=message_delete_result_detail(row.payload, outcome.detail_key),
             batch_id="single",
         )
-        self._mark_projection_rows_deleted([row], source_scope="single")
+        if not isinstance(row.payload, ProjectedMessagePayload):
+            self._mark_projection_rows_deleted([row], source_scope="single")
         self._remember_locally_deleted_row(row)
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -14343,6 +14430,22 @@ class MessageViewerTab(QWidget):
 
     def _execute_message_delete(self, row: UnifiedMessage) -> MessageDeleteExecutionResult:
         payload = row.payload
+        if isinstance(payload, ProjectedMessagePayload):
+            db_path = self._db_path()
+            if db_path is None or not payload.message_id:
+                return missing_identity_delete_result()
+            try:
+                mark_projected_message_rows_deleted(
+                    db_path,
+                    [row],
+                    requested_effect="hide_fio",
+                    requested_by="fio",
+                    source_scope="projection",
+                )
+                return delete_success_result("hidden", hidden=True)
+            except Exception as exc:
+                log.debug("MessageViewer: projected message delete failed: %s", exc)
+                return failed_source_delete_result(payload)
         if isinstance(payload, JS8Message):
             msg_id = int(getattr(payload, "msg_id", 0) or 0)
             if msg_id <= 0:
@@ -14420,6 +14523,17 @@ class MessageViewerTab(QWidget):
             return delete_success_result()
         return missing_identity_delete_result()
 
+    def _delete_projected_message(self, row: UnifiedMessage) -> None:
+        if not isinstance(getattr(row, "payload", None), ProjectedMessagePayload):
+            return
+        if not self._confirm_single_delete(row):
+            return
+        outcome = self._execute_message_delete(row)
+        if outcome.result != "deleted":
+            QMessageBox.warning(self, "Delete Message", single_delete_failure_warning(row, outcome.warning))
+            return
+        self._finalize_single_delete_success(row, outcome)
+
     def _bulk_delete_rows(self, rows: List[UnifiedMessage]) -> None:
         batch_id = f"bulk-{int(time.time() * 1000)}-{len(rows)}"
         deleted = 0
@@ -14444,7 +14558,10 @@ class MessageViewerTab(QWidget):
                 self._record_message_delete_audit(row, result="failed", detail=message_delete_result_detail(payload, outcome.detail_key), batch_id=batch_id)
         for row in deleted_rows:
             self._remember_locally_deleted_row(row)
-        self._mark_projection_rows_deleted(deleted_rows, source_scope="bulk")
+        source_deleted_rows = [
+            row for row in deleted_rows if not isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
+        ]
+        self._mark_projection_rows_deleted(source_deleted_rows, source_scope="bulk")
         self._messages_model.clear_selection()
         self._unfreeze_table()
         self._remove_deleted_rows_from_current_view(deleted_rows)
@@ -15492,6 +15609,14 @@ class MessageViewerTab(QWidget):
                 self.current_observation = None
                 self.current_commstat = row.payload
                 self._load_commstat_content(row.payload)
+            elif isinstance(row.payload, ProjectedMessagePayload):
+                self.current_js8 = None
+                self.current_record = None
+                self.current_sitrep = None
+                self.current_commstat = None
+                self.current_observation = None
+                self._load_projected_content(row.payload)
+                self._mark_projected_read(row.payload, row_ref=row)
             elif isinstance(row.payload, Observation):
                 self.current_js8 = None
                 self.current_record = None
@@ -15499,6 +15624,60 @@ class MessageViewerTab(QWidget):
                 self.current_commstat = None
                 self.current_observation = row.payload
                 self._load_observation_content(row.payload)
+
+    def _load_projected_content(self, msg: ProjectedMessagePayload) -> None:
+        with perf_span(
+            "messages.load_projected_content",
+            settings=self.settings,
+            meta={"source_family": msg.source_family},
+            min_ms=2.0,
+        ):
+            lines = [
+                f"{msg.source_label or msg.source_family or 'Message'} | {msg.from_call} -> {msg.to_call}",
+            ]
+            self._append_detail_section(
+                lines,
+                "Key Fields",
+                (
+                    ("From", msg.from_call),
+                    ("To", msg.to_call),
+                    ("Group", msg.report_group or msg.group),
+                    ("Type", msg.message_type),
+                    ("Status", msg.status),
+                    ("Severity", msg.severity),
+                    ("State/Grid", " / ".join(part for part in (msg.state_code, msg.grid) if part)),
+                    ("Source", msg.source_label or msg.source_family),
+                    ("Reference", msg.source_ref),
+                ),
+            )
+            topics = ", ".join(msg.topics)
+            if topics:
+                self._append_detail_section(lines, "Intelligence", (("Topics", topics),))
+            self._append_text_body(lines, "Message", msg.body_preview or msg.summary or msg.subject or "--")
+            self.info_label.setText(
+                f"{msg.source_label or msg.source_family or 'Message'} {msg.from_call} -> {msg.to_call}"
+            )
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText("\n".join(lines))
+
+    def _mark_projected_read(self, msg: ProjectedMessagePayload, row_ref: Optional[UnifiedMessage] = None) -> None:
+        if not msg or str(msg.read_state or "").strip().lower() == "read":
+            return
+        db_path = self._db_path()
+        if db_path is None:
+            return
+        try:
+            mark_projected_messages_read(db_path, [msg.message_id])
+            msg.read_state = "read"
+            msg.status = "READ"
+        except Exception as exc:
+            log.debug("MessageViewer: failed to mark projected message read: %s", exc)
+            return
+        self._refresh_table_after_read(
+            lambda row: isinstance(row.payload, ProjectedMessagePayload)
+            and row.payload.message_id == msg.message_id,
+            row_ref=row_ref,
+        )
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:

@@ -34,6 +34,9 @@ def message_payload_identity(payload: Any) -> tuple | None:
     if cls == "CommStatArtifact":
         artifact_key = normalize_commstat_artifact_key(getattr(payload, "artifact_key", ""))
         return ("commstat", artifact_key) if artifact_key else None
+    if cls == "ProjectedMessagePayload":
+        message_id = str(getattr(payload, "message_id", "") or "").strip()
+        return ("projected", message_id) if message_id else None
     return None
 
 

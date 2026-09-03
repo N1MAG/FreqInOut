@@ -66,6 +66,13 @@ def message_delete_capability(payload: Any, *, origin: object = "", msg_type: ob
             effect_label="Delete source row when safe; otherwise hide from FIO Messages",
             audit_action="CommStat source delete or FIO hide",
         )
+    if cls == "ProjectedMessagePayload":
+        return MessageDeleteCapability(
+            source_label=source_label,
+            effect_label="Hide from FIO projection",
+            audit_action="Hide from FIO projection",
+            requires_source_identity=False,
+        )
     if cls == "VarACMessage":
         return MessageDeleteCapability(
             source_label="VarAC",
@@ -104,6 +111,12 @@ def message_delete_result_detail(payload: Any, result: str) -> str:
         if result_key == "skipped":
             return "CommStat artifact has no stable identity"
         return "CommStat item not deleted"
+    if cls == "ProjectedMessagePayload":
+        if result_key == "hidden":
+            return "projected message hidden from FIO views"
+        if result_key == "skipped":
+            return "missing projected message id"
+        return "projected message not hidden"
     if isinstance(payload, FileRecord):
         if result_key == "deleted":
             return "file moved to Recycle Bin"

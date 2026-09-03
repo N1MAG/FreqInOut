@@ -133,8 +133,11 @@ def spotter_mcf_display_label(code: object, title: object = "") -> str:
 def field_report_form_label(row: object) -> str:
     payload = getattr(row, "payload", None)
     kind = payload.__class__.__name__ if payload is not None else ""
+    family = str(getattr(payload, "source_family", "") or "").strip().lower()
     if kind == "SitrepMessage":
         return str(getattr(payload, "subtype_label", "") or getattr(payload, "subtype", "") or getattr(row, "msg_type", "") or "")
+    if kind == "ProjectedMessagePayload" and family in {"sitrep", "commstat"}:
+        return str(getattr(payload, "display_type", "") or getattr(payload, "message_type", "") or getattr(row, "msg_type", "") or "")
     if kind == "SpotterMessage":
         return spotter_mcf_display_label(getattr(row, "msg_type", ""), getattr(row, "title", ""))
     if kind == "CommStatArtifact":
@@ -145,9 +148,14 @@ def field_report_form_label(row: object) -> str:
 def field_report_status_label(row: object) -> str:
     payload = getattr(row, "payload", None)
     kind = payload.__class__.__name__ if payload is not None else ""
+    family = str(getattr(payload, "source_family", "") or "").strip().lower()
     if kind == "SitrepMessage":
         overall = str(getattr(payload, "overall_status", "") or "").strip()
         return overall.upper() if overall else str(getattr(row, "status", "") or "")
+    if kind == "ProjectedMessagePayload" and family in {"sitrep", "commstat"}:
+        severity = str(getattr(payload, "severity", "") or "").strip().upper()
+        if severity in {"CRITICAL", "WARNING", "WATCH"}:
+            return severity
     if kind == "CommStatArtifact":
         alert = str(getattr(payload, "alert_color", "") or "").strip().upper()
         if alert:
@@ -163,6 +171,8 @@ def field_report_group_label(row: object, display_to: Callable[[object, object |
         value = getattr(payload, "report_group", "") or getattr(payload, "target", "") or getattr(row, "to_call", "")
     elif kind == "CommStatArtifact":
         value = getattr(payload, "report_group", "") or getattr(payload, "target", "") or getattr(row, "to_call", "")
+    elif kind == "ProjectedMessagePayload":
+        value = getattr(payload, "report_group", "") or getattr(payload, "group", "") or getattr(payload, "target", "") or getattr(row, "to_call", "")
     if callable(display_to):
         return display_to(row, value)
     return strip_group_marker(getattr(row, "to_call", "") if value is None else value)
@@ -171,6 +181,7 @@ def field_report_group_label(row: object, display_to: Callable[[object, object |
 def field_report_area_label(row: object) -> str:
     payload = getattr(row, "payload", None)
     kind = payload.__class__.__name__ if payload is not None else ""
+    family = str(getattr(payload, "source_family", "") or "").strip().lower()
     if kind == "SitrepMessage":
         return _state_grid_scope_area(
             getattr(payload, "state_code", ""),
@@ -181,6 +192,12 @@ def field_report_area_label(row: object) -> str:
         fields = parse_spotter_bracket_fields(getattr(payload, "raw_text", ""))
         return _state_grid_scope_area(fields.get("ST", ""), fields.get("GR", ""), fields.get("CC", "") or fields.get("CO", ""))
     if kind == "CommStatArtifact":
+        return _state_grid_scope_area(
+            getattr(payload, "state_code", ""),
+            getattr(payload, "grid", ""),
+            getattr(payload, "scope", ""),
+        )
+    if kind == "ProjectedMessagePayload" and family in {"sitrep", "commstat", "spotter"}:
         return _state_grid_scope_area(
             getattr(payload, "state_code", ""),
             getattr(payload, "grid", ""),

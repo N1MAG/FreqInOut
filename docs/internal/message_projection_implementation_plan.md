@@ -69,12 +69,26 @@ Acceptance:
 
 ## Phase 3: Message UI Read Path
 
+Status: projection-first Messages read path implemented; rich source-native
+detail remains a background refresh/fallback behavior.
+
 Move the Messages tab from source-list row building to projection queries.
 
+Implemented:
+
 - Query `message_projection` for the default inbox.
-- Lazy-load raw bodies/artifacts by `message_id` for detail panes.
-- Use source refs for open-source, mark-read, delete, archive, and compose
-  handoff.
+- Convert projected rows into the existing `UnifiedMessage` table model without
+  reparsing external message stores.
+- Render normalized projected detail text from hot projection fields.
+- Mark projected messages read directly in the hot projection table.
+- Hide/delete projected rows through the projection delete queue and audit path.
+- Keep source row building as a background projection refresh feeder.
+
+Remaining:
+
+- Lazy-load raw bodies/artifacts by `message_id` for richer detail panes.
+- Use source refs for open-source, source-native mark-read, external delete,
+  archive, and compose handoff when the row is loaded only from projection.
 - Keep bounded live views, with explicit history/search controls for older
   traffic.
 

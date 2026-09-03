@@ -54,6 +54,10 @@ def project_unified_message_rows(db_path: str | Path, rows: Iterable[object]) ->
 
 
 def projected_message_id_for_row(row: object) -> str:
+    payload = getattr(row, "payload", None)
+    message_id = str(getattr(payload, "message_id", "") or "").strip()
+    if message_id:
+        return message_id
     bundle = _projection_bundle(row)
     if bundle is None:
         return ""
@@ -78,6 +82,18 @@ def mark_projected_message_rows_deleted(
         marked = 0
         with conn:
             for row in row_list:
+                projected_id = projected_message_id_for_row(row)
+                payload = getattr(row, "payload", None)
+                if projected_id and payload.__class__.__name__ == "ProjectedMessagePayload":
+                    queue_message_delete(
+                        conn,
+                        message_id=projected_id,
+                        requested_effect=requested_effect,
+                        requested_by=requested_by,
+                        source_scope=source_scope,
+                    )
+                    marked += 1
+                    continue
                 bundle = _projection_bundle(row)
                 if bundle is None:
                     continue

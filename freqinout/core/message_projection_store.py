@@ -600,6 +600,33 @@ def list_projected_messages(
         conn.close()
 
 
+def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]) -> int:
+    clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
+    if not clean_ids:
+        return 0
+    conn = connect_sqlite(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        stamp = utc_now_iso()
+        with conn:
+            count = 0
+            for message_id in clean_ids:
+                cur = conn.execute(
+                    """
+                    UPDATE message_projection
+                       SET read_state='read',
+                           status=CASE WHEN status IN ('NEW', 'UNREAD', 'ALERT') THEN 'READ' ELSE status END,
+                           projected_utc=?
+                     WHERE message_id=? AND deleted=0
+                    """,
+                    (stamp, message_id),
+                )
+                count += int(cur.rowcount or 0)
+            return count
+    finally:
+        conn.close()
+
+
 def _message_values(message: MessageProjectionRecord, projected_utc: str) -> tuple[object, ...]:
     return (
         str(message.message_id or ""),
