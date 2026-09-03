@@ -20,12 +20,12 @@ def utc_now_iso() -> str:
 
 
 def stable_message_id(*parts: object) -> str:
-    text = "|".join(str(part or "").strip() for part in parts)
+    text = "|".join(_sanitize_sql_text(part).strip() for part in parts)
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 def content_hash(*parts: object) -> str:
-    text = "\n".join(str(part or "") for part in parts)
+    text = "\n".join(_sanitize_sql_text(part) for part in parts)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -139,9 +139,36 @@ class MessageProjectionCheckpoint:
 
 def _json(value: object, default: str) -> str:
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return json.dumps(_sanitize_sql_value(value), sort_keys=True, separators=(",", ":"))
     except Exception:
         return default
+
+
+def _sanitize_sql_text(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _sanitize_sql_value(value: object) -> object:
+    if isinstance(value, str):
+        return _sanitize_sql_text(value)
+    if isinstance(value, dict):
+        return {_sanitize_sql_text(key): _sanitize_sql_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_sql_value(item) for item in value]
+    return value
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Mapping[str, str]) -> None:
+    existing = {
+        str(row[1] or "")
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, declaration in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
 
 def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
@@ -300,6 +327,153 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        conn,
+        "message_sources",
+        {
+            "source_family": "TEXT NOT NULL DEFAULT 'message'",
+            "source_label": "TEXT",
+            "radio_id": "INTEGER",
+            "app_instance_id": "TEXT",
+            "endpoint_or_path": "TEXT",
+            "capabilities_json": "TEXT NOT NULL DEFAULT '{}'",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "last_seen_utc": "TEXT",
+            "last_ingested_utc": "TEXT",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_projection",
+        {
+            "message_id": "TEXT",
+            "canonical_key": "TEXT",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+            "primary_source_id": "TEXT NOT NULL DEFAULT ''",
+            "source_family": "TEXT NOT NULL DEFAULT 'message'",
+            "source_label": "TEXT",
+            "radio_id": "INTEGER",
+            "app_instance_id": "TEXT",
+            "message_type": "TEXT",
+            "display_type": "TEXT",
+            "status": "TEXT",
+            "severity": "TEXT",
+            "read_state": "TEXT",
+            "from_call": "TEXT",
+            "to_call": "TEXT",
+            "group_name": "TEXT",
+            "scope": "TEXT",
+            "state_code": "TEXT",
+            "grid": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "event_ts": "REAL",
+            "received_ts": "REAL",
+            "event_utc": "TEXT",
+            "received_utc": "TEXT",
+            "subject": "TEXT",
+            "summary": "TEXT",
+            "body_preview": "TEXT",
+            "topics_json": "TEXT NOT NULL DEFAULT '[]'",
+            "entities_json": "TEXT NOT NULL DEFAULT '{}'",
+            "actionable": "INTEGER NOT NULL DEFAULT 0",
+            "operator_attention": "INTEGER NOT NULL DEFAULT 0",
+            "confidence": "REAL NOT NULL DEFAULT 0",
+            "recommended_action": "TEXT",
+            "intelligence_version": "INTEGER NOT NULL DEFAULT 0",
+            "intelligence_utc": "TEXT",
+            "intelligence_json": "TEXT NOT NULL DEFAULT '{}'",
+            "pinned": "INTEGER NOT NULL DEFAULT 0",
+            "archived": "INTEGER NOT NULL DEFAULT 0",
+            "deleted": "INTEGER NOT NULL DEFAULT 0",
+            "deleted_utc": "TEXT",
+            "retention_class": "TEXT NOT NULL DEFAULT 'normal'",
+            "search_text": "TEXT",
+            "projection_version": "INTEGER NOT NULL DEFAULT 1",
+            "projected_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_external_refs",
+        {
+            "message_id": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT NOT NULL DEFAULT ''",
+            "external_kind": "TEXT NOT NULL DEFAULT ''",
+            "external_key": "TEXT NOT NULL DEFAULT ''",
+            "external_path": "TEXT",
+            "external_mtime": "REAL",
+            "external_size": "INTEGER",
+            "external_hash": "TEXT",
+            "delete_capability": "TEXT",
+            "read_capability": "TEXT",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_artifacts",
+        {
+            "message_id": "TEXT NOT NULL DEFAULT ''",
+            "artifact_type": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT",
+            "external_key": "TEXT",
+            "path": "TEXT",
+            "content_hash": "TEXT",
+            "q_id": "TEXT",
+            "block_id": "TEXT",
+            "transfer_id": "TEXT",
+            "block_count": "INTEGER NOT NULL DEFAULT 0",
+            "missing_blocks_json": "TEXT NOT NULL DEFAULT '[]'",
+            "transfer_state": "TEXT",
+            "signature_state": "TEXT",
+            "verified_utc": "TEXT",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_delete_queue",
+        {
+            "message_id": "TEXT NOT NULL DEFAULT ''",
+            "requested_effect": "TEXT NOT NULL DEFAULT 'delete'",
+            "requested_by": "TEXT",
+            "source_scope": "TEXT NOT NULL DEFAULT 'selected'",
+            "state": "TEXT NOT NULL DEFAULT 'queued'",
+            "requested_utc": "TEXT NOT NULL DEFAULT ''",
+            "completed_utc": "TEXT",
+            "result_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_delete_audit",
+        {
+            "delete_id": "TEXT",
+            "message_id": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT",
+            "external_kind": "TEXT",
+            "external_key": "TEXT",
+            "effect": "TEXT NOT NULL DEFAULT 'delete'",
+            "state": "TEXT NOT NULL DEFAULT ''",
+            "detail": "TEXT",
+            "audit_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_projection_checkpoint",
+        {
+            "last_external_key": "TEXT",
+            "last_event_ts": "REAL",
+            "content_fingerprint": "TEXT",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_default ON message_projection(deleted, archived, event_ts DESC, received_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_source ON message_projection(source_family, event_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_group ON message_projection(group_name, event_ts DESC)")
@@ -340,18 +514,18 @@ def upsert_message_source(conn: sqlite3.Connection, source: MessageSourceRecord,
             updated_utc=excluded.updated_utc
         """,
         (
-            source.source_id,
-            source.source_family,
-            source.source_label,
+            _sanitize_sql_text(source.source_id),
+            _sanitize_sql_text(source.source_family),
+            _sanitize_sql_text(source.source_label),
             source.radio_id,
-            source.app_instance_id,
-            source.endpoint_or_path,
+            _sanitize_sql_text(source.app_instance_id),
+            _sanitize_sql_text(source.endpoint_or_path),
             _json(source.capabilities, "{}"),
             _json(source.provenance, "{}"),
             1 if source.enabled else 0,
-            source.last_seen_utc,
-            source.last_ingested_utc,
-            stamp,
+            _sanitize_sql_text(source.last_seen_utc),
+            _sanitize_sql_text(source.last_ingested_utc),
+            _sanitize_sql_text(stamp),
         ),
     )
     return source.source_id
@@ -449,18 +623,18 @@ def upsert_external_ref(conn: sqlite3.Connection, ref: ExternalMessageRef, *, up
             updated_utc=excluded.updated_utc
         """,
         (
-            ref.message_id,
-            ref.source_id,
-            ref.external_kind,
-            ref.external_key,
-            ref.external_path,
+            _sanitize_sql_text(ref.message_id),
+            _sanitize_sql_text(ref.source_id),
+            _sanitize_sql_text(ref.external_kind),
+            _sanitize_sql_text(ref.external_key),
+            _sanitize_sql_text(ref.external_path),
             float(ref.external_mtime or 0.0),
             int(ref.external_size or 0),
-            ref.external_hash,
-            ref.delete_capability,
-            ref.read_capability,
+            _sanitize_sql_text(ref.external_hash),
+            _sanitize_sql_text(ref.delete_capability),
+            _sanitize_sql_text(ref.read_capability),
             _json(ref.metadata, "{}"),
-            stamp,
+            _sanitize_sql_text(stamp),
         ),
     )
     return ref.message_id
@@ -496,23 +670,23 @@ def upsert_message_artifact(conn: sqlite3.Connection, artifact: MessageArtifactR
             updated_utc=excluded.updated_utc
         """,
         (
-            artifact.artifact_id,
-            artifact.message_id,
-            artifact.artifact_type,
-            artifact.source_id,
-            artifact.external_key,
-            artifact.path,
-            artifact.content_hash,
-            artifact.q_id,
-            artifact.block_id,
-            artifact.transfer_id,
+            _sanitize_sql_text(artifact.artifact_id),
+            _sanitize_sql_text(artifact.message_id),
+            _sanitize_sql_text(artifact.artifact_type),
+            _sanitize_sql_text(artifact.source_id),
+            _sanitize_sql_text(artifact.external_key),
+            _sanitize_sql_text(artifact.path),
+            _sanitize_sql_text(artifact.content_hash),
+            _sanitize_sql_text(artifact.q_id),
+            _sanitize_sql_text(artifact.block_id),
+            _sanitize_sql_text(artifact.transfer_id),
             int(artifact.block_count or 0),
-            artifact.missing_blocks_json,
-            artifact.transfer_state,
-            artifact.signature_state,
-            artifact.verified_utc,
+            _sanitize_sql_text(artifact.missing_blocks_json),
+            _sanitize_sql_text(artifact.transfer_state),
+            _sanitize_sql_text(artifact.signature_state),
+            _sanitize_sql_text(artifact.verified_utc),
             _json(artifact.metadata, "{}"),
-            stamp,
+            _sanitize_sql_text(stamp),
         ),
     )
     return artifact.artifact_id
@@ -1168,51 +1342,51 @@ def _complete_delete_queue_row(
 
 def _message_values(message: MessageProjectionRecord, projected_utc: str) -> tuple[object, ...]:
     return (
-        str(message.message_id or ""),
-        str(message.canonical_key or ""),
-        str(message.content_hash or ""),
-        str(message.primary_source_id or ""),
-        str(message.source_family or ""),
-        str(message.source_label or ""),
+        _sanitize_sql_text(message.message_id),
+        _sanitize_sql_text(message.canonical_key),
+        _sanitize_sql_text(message.content_hash),
+        _sanitize_sql_text(message.primary_source_id),
+        _sanitize_sql_text(message.source_family),
+        _sanitize_sql_text(message.source_label),
         message.radio_id,
-        str(message.app_instance_id or ""),
-        str(message.message_type or ""),
-        str(message.display_type or ""),
-        str(message.status or ""),
-        str(message.severity or ""),
-        str(message.read_state or ""),
-        str(message.from_call or "").upper(),
-        str(message.to_call or "").upper(),
-        str(message.group_name or "").lstrip("@").upper(),
-        str(message.scope or ""),
-        str(message.state_code or "").upper(),
-        str(message.grid or "").upper(),
+        _sanitize_sql_text(message.app_instance_id),
+        _sanitize_sql_text(message.message_type),
+        _sanitize_sql_text(message.display_type),
+        _sanitize_sql_text(message.status),
+        _sanitize_sql_text(message.severity),
+        _sanitize_sql_text(message.read_state),
+        _sanitize_sql_text(message.from_call).upper(),
+        _sanitize_sql_text(message.to_call).upper(),
+        _sanitize_sql_text(message.group_name).lstrip("@").upper(),
+        _sanitize_sql_text(message.scope),
+        _sanitize_sql_text(message.state_code).upper(),
+        _sanitize_sql_text(message.grid).upper(),
         message.lat,
         message.lon,
         float(message.event_ts or 0.0),
         float(message.received_ts or 0.0),
-        str(message.event_utc or ""),
-        str(message.received_utc or ""),
-        str(message.subject or ""),
-        str(message.summary or ""),
-        str(message.body_preview or ""),
+        _sanitize_sql_text(message.event_utc),
+        _sanitize_sql_text(message.received_utc),
+        _sanitize_sql_text(message.subject),
+        _sanitize_sql_text(message.summary),
+        _sanitize_sql_text(message.body_preview),
         _json(list(message.topics), "[]"),
         _json(message.entities, "{}"),
         1 if message.actionable else 0,
         1 if message.operator_attention else 0,
         float(message.confidence or 0.0),
-        str(message.recommended_action or ""),
+        _sanitize_sql_text(message.recommended_action),
         int(message.intelligence_version or 0),
-        str(message.intelligence_utc or ""),
+        _sanitize_sql_text(message.intelligence_utc),
         _json(message.intelligence, "{}"),
         1 if message.pinned else 0,
         1 if message.archived else 0,
         1 if message.deleted else 0,
-        str(message.deleted_utc or ""),
-        str(message.retention_class or "normal"),
-        str(message.search_text or "").lower(),
+        _sanitize_sql_text(message.deleted_utc),
+        _sanitize_sql_text(message.retention_class or "normal"),
+        _sanitize_sql_text(message.search_text).lower(),
         int(message.projection_version or PROJECTION_SCHEMA_VERSION),
-        projected_utc,
+        _sanitize_sql_text(projected_utc),
     )
 
 

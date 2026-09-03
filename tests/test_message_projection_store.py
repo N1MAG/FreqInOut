@@ -100,6 +100,57 @@ def test_message_projection_schema_covers_contract_tables_and_indexes() -> None:
         conn.close()
 
 
+def test_message_projection_schema_repairs_legacy_delete_tables() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE message_delete_queue (
+                delete_id TEXT PRIMARY KEY,
+                state TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE message_delete_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                delete_id TEXT
+            )
+            """
+        )
+
+        ensure_message_projection_schema(conn)
+
+        assert {"message_id", "requested_effect", "requested_utc", "result_json"} <= _columns(
+            conn, "message_delete_queue"
+        )
+        assert {"message_id", "effect", "audit_utc"} <= _columns(conn, "message_delete_audit")
+    finally:
+        conn.close()
+
+
+def test_projection_write_sanitizes_invalid_external_unicode(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = _source()
+    message = _message("msg-surrogate")
+    message = MessageProjectionRecord(
+        **{
+            **message.__dict__,
+            "subject": "Broken \udcf4 subject",
+            "body_preview": "Broken \udcf4 body",
+            "topics": ("bad\udcf4topic",),
+            "entities": {"bad\udcf4key": "bad\udcf4value"},
+        }
+    )
+
+    upsert_projected_message(db_path, source=source, message=message)
+    rows = list_projected_messages(db_path, limit=10)
+
+    assert len(rows) == 1
+    assert "\udcf4" not in rows[0]["subject"]
+
+
 def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     source = _source()
