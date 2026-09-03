@@ -978,6 +978,20 @@ class _RowsBuildWorker(QObject):
         return ""
 
     @staticmethod
+    def _trim_title(value: object, *, limit: int = 60) -> str:
+        text = str(value or "").strip()
+        if len(text) > limit:
+            return text[: max(0, limit - 3)].rstrip() + "..."
+        return text
+
+    @staticmethod
+    def _display_target(target: object, report_group: object = "") -> str:
+        group = str(report_group or "").strip()
+        if group:
+            return group.lstrip("@")
+        return str(target or "").strip().lstrip("@")
+
+    @staticmethod
     def _canonicalize_value(value: object) -> str:
         txt = str(value or "").strip().lower()
         if not txt:
@@ -1400,24 +1414,91 @@ class _RowsBuildWorker(QObject):
                     continue
                 if ui_key:
                     sitrep_render_keys.add(ui_key)
-            presentation = sitrep_message_row_presentation(msg)
-            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
+            rcv_ts = float(getattr(msg, "event_ts", 0.0) or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, getattr(msg, "event_ts_utc", ""))
+            from_call = str(getattr(msg, "from_call", "") or "").strip().upper()
+            to_call = self._display_target(getattr(msg, "target", ""), getattr(msg, "report_group", ""))
+            overall = str(getattr(msg, "overall_status", "") or "").strip().upper()
+            title = self._trim_title(
+                " | ".join(
+                    part
+                    for part in (
+                        getattr(msg, "subtype_label", "") or getattr(msg, "subtype", ""),
+                        getattr(msg, "scope", ""),
+                        overall,
+                    )
+                    if str(part or "").strip()
+                )
+                or "SitRep"
+            )
+            search_detail = " ".join(
+                part
+                for part in (
+                    title,
+                    getattr(msg, "subtype_label", ""),
+                    getattr(msg, "source_family_label", ""),
+                    getattr(msg, "transport_label", ""),
+                    getattr(msg, "report_group", ""),
+                    getattr(msg, "state_code", ""),
+                    getattr(msg, "grid", ""),
+                    getattr(msg, "remarks_text", ""),
+                    getattr(msg, "brevity_code", ""),
+                    getattr(msg, "brevity_summary", ""),
+                )
+                if str(part or "").strip()
+            )
             rows.append(
-                unified_message_from_presentation(
-                    presentation,
-                    payload=msg,
+                UnifiedMessage(
+                    msg_type="SitRep",
+                    status="INFO",
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
+                    title=title,
+                    origin="sitrep",
+                    payload=msg,
+                    search_text=message_row_search_text("SitRep", "INFO", from_call, to_call, rcv_display, search_detail),
                 )
             )
 
         for msg in self._commstat_messages:
-            presentation = commstat_message_row_presentation(msg)
-            rcv_display = self._format_rcv_display(presentation.rcv_ts, msg.event_ts_utc)
+            rcv_ts = float(getattr(msg, "event_ts", 0.0) or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, getattr(msg, "event_ts_utc", ""))
+            from_call = str(getattr(msg, "from_call", "") or "").strip().upper()
+            to_call = self._display_target(getattr(msg, "target", ""), getattr(msg, "report_group", ""))
+            msg_type = artifact_kind_label(getattr(msg, "artifact_kind", ""))
+            status = str(getattr(msg, "status_label", "") or "INFO").strip().upper() or "INFO"
+            title = self._trim_title(getattr(msg, "title", "") or msg_type)
+            search_detail = " ".join(
+                part
+                for part in (
+                    title,
+                    getattr(msg, "report_group", ""),
+                    getattr(msg, "transport_label", ""),
+                    getattr(msg, "reach_label", ""),
+                    getattr(msg, "source_family_label", ""),
+                    getattr(msg, "body_text", ""),
+                    getattr(msg, "remarks_text", ""),
+                    getattr(msg, "alert_color", ""),
+                    getattr(msg, "status_label", ""),
+                    getattr(msg, "grid", ""),
+                    getattr(msg, "state_code", ""),
+                )
+                if str(part or "").strip()
+            )
             rows.append(
-                unified_message_from_presentation(
-                    presentation,
-                    payload=msg,
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
                     rcv_display=rcv_display,
+                    title=title,
+                    origin="commstat",
+                    payload=msg,
+                    search_text=message_row_search_text(msg_type, status, from_call, to_call, rcv_display, search_detail),
                 )
             )
 
@@ -4032,6 +4113,13 @@ class MessageViewerTab(QWidget):
         records = self._signature_candidates_to_verify(force=force)
         if not records:
             return
+        try:
+            batch_limit = int(self.settings.get("message_signature_verify_batch_limit", 50) or 50)
+        except Exception:
+            batch_limit = 50
+        batch_limit = max(10, min(500, batch_limit))
+        if len(records) > batch_limit:
+            records = records[:batch_limit]
         if self._signature_verify_thread:
             try:
                 if self._signature_verify_thread.isRunning():
@@ -11655,6 +11743,12 @@ class MessageViewerTab(QWidget):
         fingerprint = self._local_projection_fingerprint(("sitrep_events",))
         if self._can_skip_local_projection_load("_sitrep_local_snapshot_fp", fingerprint, force=force):
             return
+        started = time.perf_counter()
+        try:
+            limit = int(self.settings.get("sitrep_message_load_limit", 1000) or 1000)
+        except Exception:
+            limit = 1000
+        limit = max(250, min(50000, limit))
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -11668,8 +11762,9 @@ class MessageViewerTab(QWidget):
                        source_first, source_last, source_count, sources_json, source_refs_json, raw_payload_json, updated_ts
                 FROM sitrep_events
                 ORDER BY event_ts DESC, id DESC
-                LIMIT 5000
-                """
+                LIMIT ?
+                """,
+                (limit,),
             )
             rows = cur.fetchall()
             conn.close()
@@ -11728,6 +11823,13 @@ class MessageViewerTab(QWidget):
         self._sitrep_local_snapshot_fp = fingerprint or None
         if rebuild:
             self._populate_messages_table(force=force)
+        emit_span(
+            "messages.load_sitrep_from_local",
+            (time.perf_counter() - started) * 1000.0,
+            settings=self.settings,
+            meta={"rows": len(msgs), "limit": limit, "force": bool(force), "rebuild": bool(rebuild)},
+            min_ms=5.0,
+        )
 
     def _load_commstat_from_local(self, force: bool = False, rebuild: bool = True) -> None:
         db_path = self._db_path()
@@ -11742,10 +11844,10 @@ class MessageViewerTab(QWidget):
             return
         started = time.perf_counter()
         try:
-            limit = int(self.settings.get("commstat_message_load_limit", 20000) or 20000)
+            limit = int(self.settings.get("commstat_message_load_limit", 1000) or 1000)
         except Exception:
-            limit = 20000
-        limit = max(1000, min(50000, limit))
+            limit = 1000
+        limit = max(250, min(50000, limit))
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()

@@ -1351,7 +1351,7 @@ class MainWindow(QMainWindow):
         self._station_command_refresh_force = False
         now = time.monotonic()
         last_refresh = float(getattr(self, "_station_command_last_refresh_monotonic", 0.0) or 0.0)
-        min_interval_sec = 5.0
+        min_interval_sec = 15.0
         if not force and last_refresh > 0.0 and now - last_refresh < min_interval_sec:
             self._station_command_refresh_pending = True
             delay_ms = max(40, int((min_interval_sec - (now - last_refresh)) * 1000.0))
@@ -5641,7 +5641,7 @@ class MainWindow(QMainWindow):
                 plans_by_id = {}
         cache = (assignments_by_radio, plans_by_id)
         self._station_command_plan_cache_data = cache
-        self._station_command_plan_cache_expires = now + 5.0
+        self._station_command_plan_cache_expires = now + 15.0
         return cache
 
     def _invalidate_station_command_plan_cache(self) -> None:
@@ -5715,7 +5715,7 @@ class MainWindow(QMainWindow):
                 log.debug("MainWindow: failed to load station command schedule lanes: %s", exc)
                 lanes = {}
         self._station_command_lane_cache_data = lanes
-        self._station_command_lane_cache_expires = now + 5.0
+        self._station_command_lane_cache_expires = now + 15.0
         return lanes
 
     def _invalidate_station_command_lane_cache(self) -> None:
