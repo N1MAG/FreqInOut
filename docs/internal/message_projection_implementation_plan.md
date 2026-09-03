@@ -84,14 +84,20 @@ Implemented:
 - Render normalized projected detail text from hot projection fields.
 - Lazy-load linked source refs and artifacts by `message_id` for projected detail
   panes.
+- Bulk-load projected external refs with the inbox query so file-backed FLMsg,
+  FLAmp, VarAC/BBS, and related rows can open through the native file renderer
+  without per-row database calls.
 - Mark projected messages read directly in the hot projection table.
 - Hide/delete projected rows through the projection delete queue and audit path.
+- Use loaded file refs for projection-only file open, live BBS archive, and file
+  delete actions while keeping table paint/click handling in-memory.
 - Keep source row building as a background projection refresh feeder.
 
 Remaining:
 
-- Use source refs for open-source, source-native mark-read, external delete,
-  archive, and compose handoff when the row is loaded only from projection.
+- Use non-file source refs for JS8, Spotter, CommStat, SitRep, and VarAC
+  source-native open, source-native mark-read/delete, and compose handoff when
+  the row is loaded only from projection.
 - Keep bounded live views, with explicit history/search controls for older
   traffic.
 

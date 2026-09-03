@@ -150,3 +150,40 @@ def test_safe_varac_bbs_filename_preserves_signature_pairing_shape() -> None:
     assert MessageViewerTab._safe_varac_bbs_filename("Report .k2s.sig") == "Report.k2s.sig"
     assert MessageViewerTab._safe_varac_bbs_filename("Report .b2s") == "Report.b2s"
     assert MessageViewerTab._safe_varac_bbs_filename("Report .b2s.sig") == "Report.b2s.sig"
+
+
+def test_projected_file_refs_convert_to_file_records(tmp_path: Path) -> None:
+    message_path = tmp_path / "incoming.k2s"
+    message_path.write_text("payload", encoding="utf-8")
+
+    rec = MessageViewerTab._file_record_from_projected_refs(
+        (
+            {
+                "external_kind": "flamp_file",
+                "external_path": str(message_path),
+                "external_mtime": message_path.stat().st_mtime,
+                "external_size": message_path.stat().st_size,
+            },
+        ),
+        origin="flamp",
+    )
+
+    assert isinstance(rec, FileRecord)
+    assert rec.path == message_path
+    assert rec.origin == "flamp"
+    assert rec.size == message_path.stat().st_size
+
+
+def test_projected_artifacts_convert_to_file_records(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "transfer"
+    artifact_path.write_text("blocks", encoding="utf-8")
+
+    rec = MessageViewerTab._file_record_from_projected_artifacts(
+        (SimpleNamespace(path=str(artifact_path)),),
+        origin="flamp",
+    )
+
+    assert isinstance(rec, FileRecord)
+    assert rec.path == artifact_path
+    assert rec.origin == "flamp"
+    assert rec.size == artifact_path.stat().st_size

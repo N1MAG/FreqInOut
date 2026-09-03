@@ -201,6 +201,7 @@ from freqinout.core.message_projection_projector import (
 from freqinout.core.message_projection_payload import ProjectedMessagePayload, projected_payload_from_row
 from freqinout.core.message_projection_store import (
     list_projected_messages,
+    load_projected_external_refs_for_messages,
     load_projected_message_detail,
     mark_projected_messages_read,
     process_message_delete_queue,
@@ -2417,15 +2418,20 @@ class MessageActionDelegate(QStyledItemDelegate):
         row = index.data(Qt.UserRole)
         if row is None:
             return
+        parent_widget = self.parent()
+        projected_file_row = bool(
+            hasattr(parent_widget, "_projected_file_record")
+            and isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
+            and parent_widget._projected_file_record(row.payload, allow_detail_lookup=False) is not None
+        )
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, False)
         rect = option.rect
         link_color = option.palette.color(QPalette.Link)
         painter.setPen(link_color)
         fm = option.fontMetrics
-        parent_widget = self.parent()
         live_bbs_row = bool(
-            isinstance(row.payload, FileRecord)
+            (isinstance(row.payload, FileRecord) or projected_file_row)
             and hasattr(parent_widget, "_is_bbs_manageable_file_row")
             and parent_widget._is_bbs_manageable_file_row(row)
         )
@@ -2554,8 +2560,13 @@ class MessageActionDelegate(QStyledItemDelegate):
             pos = event.pos()
         fm = option.fontMetrics
         parent_widget = self.parent()
+        projected_file_row = bool(
+            hasattr(parent_widget, "_projected_file_record")
+            and isinstance(getattr(row, "payload", None), ProjectedMessagePayload)
+            and parent_widget._projected_file_record(row.payload, allow_detail_lookup=False) is not None
+        )
         live_bbs_row = bool(
-            isinstance(row.payload, FileRecord)
+            (isinstance(row.payload, FileRecord) or projected_file_row)
             and hasattr(parent_widget, "_is_bbs_manageable_file_row")
             and parent_widget._is_bbs_manageable_file_row(row)
         )
@@ -2613,6 +2624,13 @@ class MessageActionDelegate(QStyledItemDelegate):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_file_record(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        elif isinstance(row.payload, ProjectedMessagePayload) and projected_file_row:
+            if live_bbs_row and aux_rect.contains(pos):
+                self.parent()._archive_projected_file_message(row)
+            elif del_rect.contains(pos):
+                self.parent()._delete_projected_file_message(row)
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, JS8Message):
@@ -11103,6 +11121,8 @@ class MessageViewerTab(QWidget):
 
     def _is_bbs_manageable_file_row(self, row: UnifiedMessage | None) -> bool:
         payload = getattr(row, "payload", None) if row is not None else None
+        if isinstance(payload, ProjectedMessagePayload):
+            payload = self._projected_file_record(payload, allow_detail_lookup=False)
         return isinstance(payload, FileRecord) and self._is_bbs_manageable_file_record(payload)
 
     def _retag_bbs_archive_rows(self, rows: List[UnifiedMessage]) -> None:
@@ -12844,10 +12864,22 @@ class MessageViewerTab(QWidget):
         except Exception as exc:
             log.debug("MessageViewer: failed to load projected messages: %s", exc)
             return []
+        try:
+            refs_by_message = load_projected_external_refs_for_messages(
+                db_path,
+                [str(row["message_id"] or "") for row in db_rows],
+            )
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load projected refs: %s", exc)
+            refs_by_message = {}
         rows: List[UnifiedMessage] = []
         for db_row in db_rows:
             try:
-                payload = projected_payload_from_row(db_row)
+                message_id = str(db_row["message_id"] or "")
+                payload = projected_payload_from_row(
+                    db_row,
+                    external_refs=tuple(refs_by_message.get(message_id, ())),
+                )
                 received_ts = float(db_row["received_ts"] or db_row["event_ts"] or 0.0)
                 event_utc = str(db_row["received_utc"] or db_row["event_utc"] or "")
                 status = str(db_row["status"] or "INFO").strip().upper()
@@ -15660,11 +15692,16 @@ class MessageViewerTab(QWidget):
                 self._load_commstat_content(row.payload)
             elif isinstance(row.payload, ProjectedMessagePayload):
                 self.current_js8 = None
-                self.current_record = None
                 self.current_sitrep = None
                 self.current_commstat = None
                 self.current_observation = None
-                self._load_projected_content(row.payload)
+                file_record = self._projected_file_record(row.payload)
+                if file_record is not None and file_record.path.exists():
+                    self.current_record = file_record
+                    self._load_content(file_record)
+                else:
+                    self.current_record = None
+                    self._load_projected_content(row.payload)
                 self._mark_projected_read(row.payload, row_ref=row)
             elif isinstance(row.payload, Observation):
                 self.current_js8 = None
@@ -15727,6 +15764,70 @@ class MessageViewerTab(QWidget):
         except Exception as exc:
             log.debug("MessageViewer: failed to load projected detail for %s: %s", message_id, exc)
             return {}
+
+    def _projected_file_record(
+        self,
+        msg: ProjectedMessagePayload,
+        *,
+        allow_detail_lookup: bool = True,
+    ) -> FileRecord | None:
+        record = self._file_record_from_projected_refs(msg.external_refs, origin=msg.source_family)
+        if record is not None:
+            return record
+        if not allow_detail_lookup:
+            return None
+        detail = self._projected_message_detail(msg.message_id)
+        refs = detail.get("refs", []) if isinstance(detail, dict) else []
+        record = self._file_record_from_projected_refs(refs, origin=msg.source_family)
+        if record is not None:
+            return record
+        artifacts = detail.get("artifacts", []) if isinstance(detail, dict) else []
+        return self._file_record_from_projected_artifacts(artifacts, origin=msg.source_family)
+
+    @staticmethod
+    def _file_record_from_projected_refs(refs: object, *, origin: str) -> FileRecord | None:
+        try:
+            iterator = iter(refs or [])
+        except TypeError:
+            return None
+        for ref in iterator:
+            try:
+                path_text = str(ref["external_path"] or "").strip()
+                mtime = float(ref["external_mtime"] or 0.0)
+                size = int(ref["external_size"] or 0)
+                kind = str(ref["external_kind"] or "").strip().lower()
+            except Exception:
+                path_text = str(getattr(ref, "external_path", "") or "").strip()
+                mtime = float(getattr(ref, "external_mtime", 0.0) or 0.0)
+                size = int(getattr(ref, "external_size", 0) or 0)
+                kind = str(getattr(ref, "external_kind", "") or "").strip().lower()
+            if not path_text or not (kind.endswith("_file") or "file" in kind):
+                continue
+            return FileRecord(path=Path(path_text), origin=str(origin or "file"), mtime=mtime, size=size)
+        return None
+
+    @staticmethod
+    def _file_record_from_projected_artifacts(artifacts: object, *, origin: str) -> FileRecord | None:
+        try:
+            iterator = iter(artifacts or [])
+        except TypeError:
+            return None
+        for artifact in iterator:
+            try:
+                path_text = str(artifact["path"] or "").strip()
+            except Exception:
+                path_text = str(getattr(artifact, "path", "") or "").strip()
+            if path_text:
+                path = Path(path_text)
+                try:
+                    stat = path.stat()
+                    mtime = float(stat.st_mtime)
+                    size = int(stat.st_size)
+                except Exception:
+                    mtime = 0.0
+                    size = 0
+                return FileRecord(path=path, origin=str(origin or "file"), mtime=mtime, size=size)
+        return None
 
     @staticmethod
     def _projected_ref_lines(refs: object) -> List[str]:
@@ -16427,6 +16528,32 @@ class MessageViewerTab(QWidget):
             )
         self._unfreeze_table()
         self._populate_messages_table(force=True)
+
+    def _delete_projected_file_message(self, row: UnifiedMessage) -> None:
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, ProjectedMessagePayload):
+            return
+        rec = self._projected_file_record(payload)
+        if rec is None:
+            self._delete_projected_message(row)
+            return
+        before_exists = rec.path.exists()
+        self._delete_file_record(rec)
+        if before_exists and not rec.path.exists():
+            self._mark_projection_rows_deleted([row], source_scope="projected_file")
+
+    def _archive_projected_file_message(self, row: UnifiedMessage) -> None:
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, ProjectedMessagePayload):
+            return
+        rec = self._projected_file_record(payload)
+        if rec is None:
+            QMessageBox.warning(self, "Archive BBS File", "The projected file reference is no longer available.")
+            return
+        before_exists = rec.path.exists()
+        self._archive_file_record(rec)
+        if before_exists and not rec.path.exists():
+            self._mark_projection_rows_deleted([row], source_scope="projected_file_archive")
 
     def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         if row is None:

@@ -643,6 +643,36 @@ def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[
         conn.close()
 
 
+def load_projected_external_refs_for_messages(
+    db_path: str | Path,
+    message_ids: Sequence[str],
+) -> dict[str, list[sqlite3.Row]]:
+    clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
+    if not clean_ids:
+        return {}
+    out: dict[str, list[sqlite3.Row]] = {message_id: [] for message_id in clean_ids}
+    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    try:
+        ensure_message_projection_schema(conn)
+        for start in range(0, len(clean_ids), 250):
+            chunk = clean_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                  FROM message_external_refs
+                 WHERE message_id IN ({placeholders})
+                 ORDER BY source_id, external_kind, external_key
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                out.setdefault(str(row["message_id"] or ""), []).append(row)
+        return out
+    finally:
+        conn.close()
+
+
 def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]) -> int:
     clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
     if not clean_ids:

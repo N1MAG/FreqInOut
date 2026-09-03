@@ -13,6 +13,7 @@ from freqinout.core.message_projection_store import (
     ensure_message_projection_schema,
     get_message_projection_checkpoint,
     list_projected_messages,
+    load_projected_external_refs_for_messages,
     load_projected_message_detail,
     mark_projected_messages_read,
     process_message_delete_queue,
@@ -236,6 +237,49 @@ def test_load_projected_message_detail_returns_refs_and_artifacts(tmp_path) -> N
     assert detail["message"]["message_id"] == message.message_id
     assert detail["refs"][0]["external_key"] == "abc"
     assert detail["artifacts"][0]["q_id"] == "Q123"
+
+
+def test_load_projected_external_refs_for_messages_bulk_loads_by_message(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = _source()
+    first = _message("msg-ref-1")
+    second = _message("msg-ref-2")
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=first,
+        refs=(
+            ExternalMessageRef(
+                message_id=first.message_id,
+                source_id=source.source_id,
+                external_kind="flmsg_file",
+                external_key="first",
+                external_path="/traffic/first.k2s",
+            ),
+        ),
+    )
+    upsert_projected_message(
+        db_path,
+        source=source,
+        message=second,
+        refs=(
+            ExternalMessageRef(
+                message_id=second.message_id,
+                source_id=source.source_id,
+                external_kind="commstat_artifact",
+                external_key="second",
+                external_path="/traffic/second.json",
+            ),
+        ),
+    )
+
+    refs_by_message = load_projected_external_refs_for_messages(
+        db_path,
+        [first.message_id, "", second.message_id],
+    )
+
+    assert refs_by_message[first.message_id][0]["external_key"] == "first"
+    assert refs_by_message[second.message_id][0]["external_key"] == "second"
 
 
 def test_mark_projected_messages_read_updates_status_and_read_state(tmp_path) -> None:
