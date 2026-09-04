@@ -90,6 +90,20 @@ def test_compact_navigation_keeps_a_restore_control(monkeypatch) -> None:
     app.processEvents()
 
 
+def test_compact_navigation_buttons_fit_inside_nested_rail_margins() -> None:
+    from freqinout.gui.main_window import MainWindow
+
+    normal = MainWindow.__new__(MainWindow)
+    normal.settings = {"ui_text_size": "normal"}
+    assert MainWindow._compact_navigation_width(normal) == 74
+    assert MainWindow._compact_navigation_button_width(normal) == 60
+
+    large = MainWindow.__new__(MainWindow)
+    large.settings = {"ui_text_size": "large"}
+    assert MainWindow._compact_navigation_width(large) == 88
+    assert MainWindow._compact_navigation_button_width(large) == 74
+
+
 def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None:
     from freqinout.gui.main_window import MainWindow
 

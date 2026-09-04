@@ -424,6 +424,13 @@ an assigned plan with no remaining destination reports `No alternate QSY targets
 Frequency comparison uses the runtime MHz label when available and falls back to
 the runtime Hz value. No RF action, persistence, or schema behavior changed.
 
+Compact-navigation clipping follow-up: macOS and Linux screenshots showed every
+compact button/icon losing its right edge. The fixed button width subtracted the
+outer navigation margins but not the compact widget's inner margins, leaving the
+button six logical pixels wider than its paint area. Button width now subtracts
+both nested margin pairs (60px inside a 74px Normal rail and 74px inside an 88px
+Large Text rail), with a regression test for both densities.
+
 Known unrelated test state: `test_phase7_main_window_does_not_prewarm_messages_tab`
 expects only FreqPlanner prewarming, while the existing runtime helper currently
 returns Messages and FreqPlanner. This shell work did not change that behavior.

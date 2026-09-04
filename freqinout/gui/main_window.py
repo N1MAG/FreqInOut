@@ -3284,6 +3284,12 @@ class MainWindow(QMainWindow):
             scale = 1.0
         return max(74, min(88, int(round(74 * scale))))
 
+    def _compact_navigation_button_width(self) -> int:
+        # The button sits inside both the 4px-per-side main navigation margins
+        # and the 3px-per-side compact-widget margins. Subtract both so Qt does
+        # not clip the button's right border/icon paint area on macOS or Linux.
+        return max(56, self._compact_navigation_width() - 14)
+
     @staticmethod
     def _compact_navigation_specs() -> tuple[tuple[str, str, str, str], ...]:
         """Visible label, accessible label, route/group key, owned icon name."""
@@ -3352,7 +3358,7 @@ class MainWindow(QMainWindow):
         self.nav_compact_button_group = QButtonGroup(self)
         self.nav_compact_button_group.setExclusive(True)
         grouped_keys = set(getattr(self, "_nav_group_order", ()))
-        button_width = self._compact_navigation_width() - 8
+        button_width = self._compact_navigation_button_width()
         try:
             button_height = control_height_for_font(widget, vertical_padding=26, floor=48)
         except Exception:

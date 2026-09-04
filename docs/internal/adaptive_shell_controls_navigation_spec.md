@@ -77,7 +77,10 @@ navigation buttons, preserving Messages and Settings sub-context behavior.
 
 The compact rail is approximately 72--88 logical pixels wide depending on the
 selected text scale. It must retain the visible expand-navigation control and
-must immediately trigger command-bar reflow when expanded or collapsed.
+must immediately trigger command-bar reflow when expanded or collapsed. Button
+geometry must subtract both the navigation container margins and compact-widget
+margins; icons, focus treatment, and the complete button border must remain
+inside the available paint area on macOS and Linux.
 
 ## Acceptance Checks
 
