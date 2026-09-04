@@ -663,3 +663,34 @@ the focused regression set.
 Synthetic autocomplete timing over a 5,000-entity compact index measured a
 0.36 ms warm p95 on the development Mac, comfortably inside the 50 ms warm
 target; production telemetry remains the authority for Linux hardware.
+
+## 2026-09-04 — Ops Center peer schedule scale and rendering stability
+
+Production review exposed stale/overpainted peer rows while scrolling and
+clicking, duplicate rows for the same operator on different bands, a redundant
+peer detail table, and uneven vertical spacing between the left and right
+dashboard columns.
+
+Peer Schedule Finder now uses one bounded native item-view viewport with one
+row per operator. Every matching band/frequency window is retained in that row,
+rendered on up to three distinct timeline lanes, and available in the tooltip.
+The repeated peer table and nested row widgets were removed. Callsign, operating
+group, region, and role filters are populated from operator identity data and
+are applied before rendering; a 150-operator roster remains six visible rows
+high and scrolls internally. Actions are available from each row's ellipsis or
+context menu.
+
+Operational Awareness and peer/schedule cards now use top alignment and
+content-derived fixed geometry inside their splitters. Empty action rows are
+removed from layout flow, high-frequency view/filter changes no longer animate
+nested card heights, and dynamic card containers declare fixed vertical size
+policies. Schedule details remain an explicit, hidden-by-default disclosure.
+
+Verification includes consolidated multi-band projection coverage, combined
+group/region/role filtering across a synthetic 150-operator roster, repeated
+reverse-order redraws, bounded viewport geometry, internal item scrolling, and
+source checks ensuring the former duplicate tables are absent. The focused Ops,
+awareness, focus-search, traffic-actionability, and shell regression set passes
+188 tests with the pre-existing Messages-prewarm assertion deselected. Offscreen
+visual QA covered Light/Normal at 1400x900 and 900x700 plus Dark/Large Text at
+1200x800, including mid-list scrolling and concurrent 20m/40m lanes.

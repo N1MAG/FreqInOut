@@ -176,6 +176,8 @@ TRAFFIC_CHART_CURRENT_ROLE = int(Qt.UserRole) + 1
 TRAFFIC_CHART_PREVIOUS_ROLE = int(Qt.UserRole) + 2
 TRAFFIC_CHART_SCALE_ROLE = int(Qt.UserRole) + 3
 TRAFFIC_CHART_TREND_ROLE = int(Qt.UserRole) + 4
+PEER_TIMELINE_WINDOWS_ROLE = int(Qt.UserRole) + 11
+PEER_TIMELINE_HORIZON_ROLE = int(Qt.UserRole) + 12
 
 
 class TrafficVolumeBarDelegate(QStyledItemDelegate):
@@ -275,6 +277,90 @@ class TrafficVolumeBarDelegate(QStyledItemDelegate):
         return QSize(base.width(), max(base.height(), option.fontMetrics.height() + 18))
 
 
+class PeerRendezvousDelegate(QStyledItemDelegate):
+    """Paint consolidated peer rendezvous windows in one stable viewport row."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._theme: Dict[str, str] = {
+            "surface_alt": "#DDE1E6",
+            "border": "#D3D7DD",
+            "text_muted": "#5B6570",
+            "accent": "#2E6F9E",
+            "text": "#1C1F21",
+        }
+
+    def apply_theme(self, theme: Dict[str, str]) -> None:
+        self._theme = dict(theme or {})
+        parent = self.parent()
+        if isinstance(parent, QTableWidget):
+            parent.viewport().update()
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # type: ignore[override]
+        painter.save()
+        try:
+            selected = bool(option.state & QStyle.State_Selected)
+            painter.fillRect(
+                option.rect,
+                option.palette.highlight().color() if selected else option.palette.base().color(),
+            )
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            windows = tuple(index.data(PEER_TIMELINE_WINDOWS_ROLE) or ())
+            horizon = max(1, int(index.data(PEER_TIMELINE_HORIZON_ROLE) or 120))
+            label = str(index.data(Qt.DisplayRole) or "No matching window")
+            outer = option.rect.adjusted(8, 4, -8, -4)
+            text_color = (
+                option.palette.highlightedText().color()
+                if selected
+                else QColor(self._theme.get("text", "#1C1F21"))
+            )
+            painter.setPen(text_color)
+            painter.drawText(
+                outer.adjusted(0, 0, 0, -14),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                option.fontMetrics.elidedText(label, Qt.ElideRight, max(20, outer.width())),
+            )
+
+            track_rect = QRectF(float(outer.x()), float(outer.bottom() - 11), float(max(12, outer.width())), 10.0)
+            painter.setPen(QPen(QColor(self._theme.get("border", "#D3D7DD")), 1))
+            painter.setBrush(QColor(self._theme.get("surface_alt", "#DDE1E6")))
+            painter.drawRoundedRect(track_rect, 3.0, 3.0)
+            accent = QColor(self._theme.get("accent", "#2E6F9E"))
+            painter.setPen(Qt.NoPen)
+            visible_windows = windows[:8]
+            lane_count = max(1, min(3, len(visible_windows)))
+            lane_height = max(2.0, (track_rect.height() - 2.0) / lane_count)
+            for window_index, window in enumerate(visible_windows):
+                try:
+                    start = max(0, min(horizon, int(window.get("start_offset_minutes") or 0)))
+                    end = max(start + 1, min(horizon, int(window.get("end_offset_minutes") or start + 1)))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                x = track_rect.x() + (track_rect.width() * start / horizon)
+                width = max(4.0, track_rect.width() * (end - start) / horizon)
+                lane = window_index % lane_count
+                lane_color = QColor(accent)
+                if lane:
+                    lane_color = lane_color.lighter(112 + (lane * 10))
+                painter.setBrush(lane_color)
+                painter.drawRoundedRect(
+                    QRectF(
+                        x,
+                        track_rect.y() + 1.0 + (lane * lane_height),
+                        width,
+                        max(2.0, lane_height - 1.0),
+                    ),
+                    2.0,
+                    2.0,
+                )
+        finally:
+            painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # type: ignore[override]
+        base = super().sizeHint(option, index)
+        return QSize(base.width(), max(base.height(), option.fontMetrics.height() + 24))
+
+
 class ControlFreqTab(QWidget):
     """
     ControlFreq: summary/console view for activity and operational status.
@@ -299,9 +385,6 @@ class ControlFreqTab(QWidget):
         self._status_timer: Optional[QTimer] = None
         self._clock_timer: Optional[QTimer] = None
         self._show_local = True
-        self._intersection_cache_ts = 0.0
-        self._intersection_cache_key: Tuple[Any, ...] = ()
-        self._intersection_cache_rows: List[List[str]] = []
         self._prop_target_syncing = False
         self._prop_operator_geo: Dict[str, Dict[str, str]] = {}
         self._focus_mode = False
@@ -327,6 +410,9 @@ class ControlFreqTab(QWidget):
         self._operator_groups_cache_ts = 0.0
         self._operator_groups_cache_mtime = 0.0
         self._operator_groups_cache_ttl_sec = 20.0
+        self._operator_peer_meta_cache: Dict[str, Dict[str, object]] = {}
+        self._operator_peer_meta_cache_ts = 0.0
+        self._operator_peer_meta_cache_mtime = 0.0
         self._activity_cache_key: Tuple[Any, ...] = ()
         self._activity_cache_rows: List[List[str]] = []
         self._activity_cache_ts = 0.0
@@ -396,6 +482,10 @@ class ControlFreqTab(QWidget):
         self._filter_refresh_timer = QTimer(self)
         self._filter_refresh_timer.setSingleShot(True)
         self._filter_refresh_timer.timeout.connect(self._run_filter_refresh)
+        self._peer_filter_timer = QTimer(self)
+        self._peer_filter_timer.setSingleShot(True)
+        self._peer_filter_timer.setInterval(150)
+        self._peer_filter_timer.timeout.connect(self._on_peer_filters_changed)
         self._activation_refresh_pending = False
         self._activation_refresh_interval_sec = 60.0
         self._secondary_refresh_pending = False
@@ -687,9 +777,11 @@ class ControlFreqTab(QWidget):
         left_layout = QVBoxLayout(self.left_col)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
+        left_layout.setAlignment(Qt.AlignTop)
 
         self.activity_box = QGroupBox("Operational Awareness")
         act_layout = QVBoxLayout(self.activity_box)
+        act_layout.setAlignment(Qt.AlignTop)
         act_header = QHBoxLayout()
         act_header.addWidget(QLabel("Window"))
         self.activity_window_combo = QComboBox()
@@ -736,6 +828,7 @@ class ControlFreqTab(QWidget):
         source_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.source_lanes_table.itemSelectionChanged.connect(self._set_source_lane_focus_from_selection)
         self.source_lane_cards_container = QWidget()
+        self.source_lane_cards_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.source_lane_cards_layout = QVBoxLayout(self.source_lane_cards_container)
         self.source_lane_cards_layout.setContentsMargins(0, 0, 0, 0)
         self.source_lane_cards_layout.setSpacing(5)
@@ -764,6 +857,7 @@ class ControlFreqTab(QWidget):
         self.situation_detail_label.setVisible(False)
         act_layout.addWidget(self.situation_detail_label)
         self.situation_cards_container = QWidget()
+        self.situation_cards_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.situation_cards_layout = QVBoxLayout(self.situation_cards_container)
         self.situation_cards_layout.setContentsMargins(0, 0, 0, 0)
         self.situation_cards_layout.setSpacing(6)
@@ -783,6 +877,7 @@ class ControlFreqTab(QWidget):
         self.operational_topics_label.setStyleSheet("color: #5b6875;")
         act_layout.addWidget(self.operational_topics_label)
         self.awareness_topic_chip_container = QWidget()
+        self.awareness_topic_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.awareness_topic_chip_layout = QHBoxLayout(self.awareness_topic_chip_container)
         self.awareness_topic_chip_layout.setContentsMargins(0, 0, 0, 0)
         self.awareness_topic_chip_layout.setSpacing(6)
@@ -808,6 +903,7 @@ class ControlFreqTab(QWidget):
         self.awareness_pins_label.setStyleSheet("color: #5b6875;")
         act_layout.addWidget(self.awareness_pins_label)
         self.awareness_pin_chip_container = QWidget()
+        self.awareness_pin_chip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.awareness_pin_chip_layout = QHBoxLayout(self.awareness_pin_chip_container)
         self.awareness_pin_chip_layout.setContentsMargins(0, 0, 0, 0)
         self.awareness_pin_chip_layout.setSpacing(6)
@@ -818,7 +914,9 @@ class ControlFreqTab(QWidget):
         self.more_traffic_label.setWordWrap(True)
         self.more_traffic_label.setStyleSheet("color: #5b6875;")
         act_layout.addWidget(self.more_traffic_label)
-        activity_actions = QHBoxLayout()
+        self.activity_actions_widget = QWidget()
+        self.activity_actions_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        activity_actions = QHBoxLayout(self.activity_actions_widget)
         activity_actions.setContentsMargins(0, 0, 0, 0)
         activity_actions.setSpacing(6)
         self.operational_messages_btn = QPushButton("Inbox")
@@ -856,7 +954,8 @@ class ControlFreqTab(QWidget):
             action_btn.setMaximumWidth(104)
             action_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         activity_actions.addStretch(1)
-        act_layout.addLayout(activity_actions)
+        self.activity_actions_widget.setVisible(False)
+        act_layout.addWidget(self.activity_actions_widget)
         self.activity_table = QTableWidget(0, 4)
         self.activity_table.setHorizontalHeaderLabels(
             ["Group", "Band/Freq", "Callsigns Seen", "Traffic"]
@@ -889,40 +988,68 @@ class ControlFreqTab(QWidget):
         self.intersection_window_combo.currentIndexChanged.connect(self._schedule_persist_ui_state)
         inter_header_row.addWidget(self.intersection_window_combo, alignment=Qt.AlignVCenter)
         inter_header_row.addStretch(1)
-        self.peer_details_btn = QToolButton()
-        self.peer_details_btn.setText("Details")
-        self.peer_details_btn.setCheckable(True)
-        self.peer_details_btn.setToolTip("Show the detailed peer overlap tables.")
-        self.peer_details_btn.toggled.connect(self._set_peer_details_visible)
-        inter_header_row.addWidget(self.peer_details_btn)
         intersection_layout.addLayout(inter_header_row)
-        self.intersection_table = QTableWidget(0, 3)
-        self.intersection_table.setHorizontalHeaderLabels(["When", "Peers", "Net/Band/Freq"])
-        self._setup_table_defaults(self.intersection_table)
-        inter_header = self.intersection_table.horizontalHeader()
-        inter_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        inter_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        inter_header.setSectionResizeMode(2, QHeaderView.Stretch)
-        intersection_layout.addWidget(self.intersection_table)
-        self.intersection_table.setVisible(False)
-        self.peer_timeline_container = QWidget()
-        self.peer_timeline_layout = QVBoxLayout(self.peer_timeline_container)
-        self.peer_timeline_layout.setContentsMargins(0, 0, 0, 0)
-        self.peer_timeline_layout.setSpacing(5)
-        intersection_layout.addWidget(self.peer_timeline_container)
-        self.peer_finder_table = QTableWidget(0, 5)
-        self.peer_finder_table.setObjectName("controlfreqPeerScheduleFinderTable")
-        self.peer_finder_table.setHorizontalHeaderLabels(["Peer", "When", "Net/Band", "Heard", "Actions"])
-        self._setup_table_defaults(self.peer_finder_table)
-        self.peer_finder_table.setWordWrap(True)
-        peer_header = self.peer_finder_table.horizontalHeader()
+
+        peer_filters = QGridLayout()
+        peer_filters.setContentsMargins(0, 0, 0, 0)
+        peer_filters.setHorizontalSpacing(6)
+        peer_filters.setVerticalSpacing(4)
+        self.peer_callsign_filter = QLineEdit()
+        self.peer_callsign_filter.setPlaceholderText("Filter callsign…")
+        self.peer_callsign_filter.setClearButtonEnabled(True)
+        self.peer_callsign_filter.setAccessibleName("Filter peer schedules by callsign")
+        self.peer_callsign_filter.textChanged.connect(lambda *_args: self._peer_filter_timer.start())
+        peer_filters.addWidget(self.peer_callsign_filter, 0, 0, 1, 2)
+        self.peer_group_filter = QComboBox()
+        self.peer_group_filter.addItem("All groups", "")
+        self.peer_group_filter.currentIndexChanged.connect(self._on_peer_filters_changed)
+        peer_filters.addWidget(self.peer_group_filter, 0, 2)
+        self.peer_region_filter = QComboBox()
+        self.peer_region_filter.addItem("All regions", "")
+        self.peer_region_filter.currentIndexChanged.connect(self._on_peer_filters_changed)
+        peer_filters.addWidget(self.peer_region_filter, 1, 0)
+        self.peer_role_filter = QComboBox()
+        self.peer_role_filter.addItem("All roles", "")
+        self.peer_role_filter.currentIndexChanged.connect(self._on_peer_filters_changed)
+        peer_filters.addWidget(self.peer_role_filter, 1, 1)
+        self.peer_result_label = QLabel("0 operators")
+        self.peer_result_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.peer_result_label.setStyleSheet("color: #5b6875;")
+        peer_filters.addWidget(self.peer_result_label, 1, 2)
+        for column in range(3):
+            peer_filters.setColumnStretch(column, 1)
+        intersection_layout.addLayout(peer_filters)
+
+        self.peer_summary_label = QLabel("Now 0 · Next 2h 0")
+        self.peer_summary_label.setStyleSheet("font-weight: 600;")
+        self.peer_summary_label.setWordWrap(True)
+        intersection_layout.addWidget(self.peer_summary_label)
+
+        self.peer_chart_table = QTableWidget(0, 3)
+        self.peer_chart_table.setObjectName("controlfreqPeerRendezvousChart")
+        self.peer_chart_table.setAccessibleName("Peer rendezvous chart")
+        self.peer_chart_table.setAccessibleDescription(
+            "One row per operator. Timeline segments combine all matching band and frequency windows."
+        )
+        self.peer_chart_table.setHorizontalHeaderLabels(["Operator", "Rendezvous", "Actions"])
+        self._setup_table_defaults(self.peer_chart_table)
+        self.peer_chart_table.horizontalHeader().setVisible(False)
+        self.peer_chart_table.setAlternatingRowColors(False)
+        self.peer_chart_table.setShowGrid(False)
+        self.peer_chart_table.setWordWrap(True)
+        self.peer_chart_table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
+        self.peer_chart_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.peer_chart_table.customContextMenuRequested.connect(self._show_peer_finder_context_menu)
+        self.peer_chart_table.itemActivated.connect(self._activate_peer_chart_item)
+        self.peer_chart_table.itemClicked.connect(self._activate_peer_chart_item)
+        peer_header = self.peer_chart_table.horizontalHeader()
         peer_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        peer_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        peer_header.setSectionResizeMode(2, QHeaderView.Stretch)
-        peer_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        peer_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        intersection_layout.addWidget(self.peer_finder_table)
-        self.peer_finder_table.setVisible(False)
+        peer_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        peer_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.peer_rendezvous_delegate = PeerRendezvousDelegate(self.peer_chart_table)
+        self.peer_chart_table.setItemDelegateForColumn(1, self.peer_rendezvous_delegate)
+        intersection_layout.addWidget(self.peer_chart_table)
+        self._fit_table_height_to_rows(self.peer_chart_table, min_rows=1, max_rows=6, empty_rows=1)
         self._peer_finder_contexts: List[Dict[str, str]] = []
 
         self.inbox_box = QGroupBox("Traffic Intelligence")
@@ -1000,7 +1127,9 @@ class ControlFreqTab(QWidget):
         self.left_splitter = QSplitter(Qt.Vertical)
         style_splitter_handles(self.left_splitter, self._theme(), width=12)
         self.left_splitter.addWidget(self.activity_box)
+        self.left_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         left_layout.addWidget(self.left_splitter)
+        left_layout.addStretch(1)
         self.top_splitter.addWidget(self.left_col)
 
         self.right_col = QWidget()
@@ -1122,6 +1251,7 @@ class ControlFreqTab(QWidget):
         schedule_header.addWidget(self.schedule_details_btn)
         schedule_layout.addLayout(schedule_header)
         self.schedule_timeline_container = QWidget()
+        self.schedule_timeline_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.schedule_timeline_layout = QVBoxLayout(self.schedule_timeline_container)
         self.schedule_timeline_layout.setContentsMargins(0, 0, 0, 0)
         self.schedule_timeline_layout.setSpacing(5)
@@ -1356,8 +1486,7 @@ class ControlFreqTab(QWidget):
             (getattr(self, "source_lanes_table", None), ("contents", "stretch", "stretch", "stretch")),
             (getattr(self, "awareness_table", None), ("contents", "contents", "stretch", "contents")),
             (getattr(self, "activity_table", None), ("contents", "stretch", "stretch", "stretch")),
-            (getattr(self, "intersection_table", None), ("contents", "contents", "stretch")),
-            (getattr(self, "peer_finder_table", None), ("contents", "contents", "stretch", "stretch", "contents")),
+            (getattr(self, "peer_chart_table", None), ("contents", "stretch", "contents")),
             (getattr(self, "traffic_group_table", None), ("contents", "stretch", "stretch")),
             (getattr(self, "inbox_table", None), ("contents", "contents", "stretch")),
         )
@@ -1394,6 +1523,7 @@ class ControlFreqTab(QWidget):
 
     def _sync_top_panel_heights(self) -> None:
         try:
+            self._set_left_activity_content_height()
             if not bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)()):
                 self.inbox_box.setMinimumHeight(
                     self._content_fit_group_height(self.inbox_box, floor=150)
@@ -1405,7 +1535,7 @@ class ControlFreqTab(QWidget):
                         (self.schedule_box, self._content_fit_group_height(self.schedule_box, floor=120)),
                     ):
                         widget.setMinimumHeight(height)
-                        widget.setMaximumHeight(16777215)
+                        widget.setMaximumHeight(height)
                 return
             if getattr(self, "_responsive_layout_mode", "wide") == "compact":
                 freq_h = max(170, int(self.freq_ctrl_box.sizeHint().height()))
@@ -1427,8 +1557,7 @@ class ControlFreqTab(QWidget):
                     widget.setMinimumHeight(height)
                     widget.setMaximumHeight(16777215)
                 return
-            self.activity_box.setMinimumHeight(0)
-            self.activity_box.setMaximumHeight(16777215)
+            self._set_left_activity_content_height()
             h_freq = max(140, int(self.freq_ctrl_box.sizeHint().height()))
             h_inbox = max(
                 140,
@@ -1724,7 +1853,7 @@ class ControlFreqTab(QWidget):
         self.top_splitter.setVisible(left_visible or right_visible)
         self._sync_inbox_summary_visibility()
         if left_visible:
-            self.left_splitter.setSizes([1])
+            self._set_left_activity_content_height()
         if right_visible:
             if left_intersections and right_schedule:
                 self._set_schedule_splitter_content_sizes()
@@ -1768,6 +1897,20 @@ class ControlFreqTab(QWidget):
                 total_h += 12
             self.right_splitter.setMinimumHeight(total_h)
             self.right_splitter.setMaximumHeight(total_h)
+        except Exception:
+            pass
+
+    def _set_left_activity_content_height(self) -> None:
+        if not hasattr(self, "left_splitter") or not hasattr(self, "activity_box"):
+            return
+        try:
+            height = self._content_fit_group_height(self.activity_box, floor=180)
+            self.activity_box.setMinimumHeight(height)
+            self.activity_box.setMaximumHeight(height)
+            self.left_splitter.setSizes([height])
+            self.left_splitter.setMinimumHeight(height)
+            self.left_splitter.setMaximumHeight(height)
+            self.left_splitter.updateGeometry()
         except Exception:
             pass
 
@@ -1842,7 +1985,10 @@ class ControlFreqTab(QWidget):
         self._view_cards = self._normalized_view_cards(preset_cards)
         self._view_preset = preset
         self._sync_view_controls_from_state()
-        self._apply_view_state(animated=True)
+        # Height animation inside the outer scroll area caused stale paint
+        # regions during rapid card toggles. Apply the deterministic final
+        # geometry directly; the dashboard is a working surface, not a reveal.
+        self._apply_view_state(animated=False)
         self._refresh_newly_visible_cards(previous_cards)
         self._schedule_persist_ui_state()
 
@@ -1864,7 +2010,7 @@ class ControlFreqTab(QWidget):
         self._view_cards = self._normalized_view_cards(next_cards)
         self._view_preset = self._preset_for_view_cards(self._view_cards)
         self._sync_view_controls_from_state()
-        self._apply_view_state(animated=True)
+        self._apply_view_state(animated=False)
         self._refresh_newly_visible_cards(previous_cards)
         self._schedule_persist_ui_state()
 
@@ -2000,6 +2146,12 @@ class ControlFreqTab(QWidget):
                 self.traffic_source_detail_btn.setStyleSheet(button_style("muted", theme))
             if hasattr(self, "traffic_group_bar_delegate"):
                 self.traffic_group_bar_delegate.apply_theme(theme)
+            if hasattr(self, "peer_rendezvous_delegate"):
+                self.peer_rendezvous_delegate.apply_theme(theme)
+            if hasattr(self, "peer_result_label"):
+                self.peer_result_label.setStyleSheet(
+                    f"color: {theme.get('text_muted', '#5b6875')};"
+                )
             if hasattr(self, "traffic_group_hint"):
                 self.traffic_group_hint.setStyleSheet(
                     f"color: {theme.get('text_muted', '#5b6875')};"
@@ -2602,6 +2754,12 @@ class ControlFreqTab(QWidget):
                 self.traffic_source_combo.blockSignals(previous)
         if hasattr(self, "source_lanes_table"):
             self.source_lanes_table.clearSelection()
+        if hasattr(self, "peer_callsign_filter"):
+            self.peer_callsign_filter.clear()
+        for combo_name in ("peer_group_filter", "peer_region_filter", "peer_role_filter"):
+            combo = getattr(self, combo_name, None)
+            if isinstance(combo, QComboBox) and combo.count() > 0:
+                combo.setCurrentIndex(0)
         self._awareness_topic_filter = ""
         self._operational_awareness_context = {}
         self._update_clear_filters_style()
@@ -2615,7 +2773,22 @@ class ControlFreqTab(QWidget):
         intersection_window_active = int(intersection_combo.currentData() or 120) != 120
         source_active = bool(str(getattr(self, "_source_family_filter", "") or "").strip())
         topic_active = bool(str(getattr(self, "_awareness_topic_filter", "") or "").strip())
-        return search_active or group_active or window_active or intersection_window_active or source_active or topic_active
+        peer_filter_active = bool(
+            str(getattr(getattr(self, "peer_callsign_filter", None), "text", lambda: "")() or "").strip()
+            or any(
+                str(getattr(getattr(self, name, None), "currentData", lambda: "")() or "").strip()
+                for name in ("peer_group_filter", "peer_region_filter", "peer_role_filter")
+            )
+        )
+        return (
+            search_active
+            or group_active
+            or window_active
+            or intersection_window_active
+            or source_active
+            or topic_active
+            or peer_filter_active
+        )
 
     def _show_app_search_results(self) -> None:
         """Backward-compatible route for the navigation command search."""
@@ -3970,6 +4143,95 @@ class ControlFreqTab(QWidget):
         self._operator_groups_cache_mtime = db_mtime
         return mapping
 
+    def _load_operator_peer_meta(self) -> Dict[str, Dict[str, object]]:
+        """Load the compact roster fields used by peer filters and row labels."""
+        db_path = self._db_path()
+        now_ts = time.time()
+        db_mtime = self._safe_db_mtime(db_path)
+        if (
+            self._operator_peer_meta_cache
+            and now_ts - float(self._operator_peer_meta_cache_ts) < self._operator_groups_cache_ttl_sec
+            and abs(float(self._operator_peer_meta_cache_mtime) - db_mtime) < 0.0001
+        ):
+            return self._operator_peer_meta_cache
+        mapping: Dict[str, Dict[str, object]] = {}
+        if not db_path.exists():
+            return mapping
+        try:
+            rows = fetch_all(
+                db_path,
+                """
+                SELECT callsign, group1, group2, group3, groups_json,
+                       group_role, roster_region, state
+                  FROM operator_checkins
+                """,
+                timeout=1.5,
+                row_factory=sqlite3.Row,
+                span_name="controlfreq.load_operator_peer_meta",
+            )
+        except Exception as e:
+            log.debug("ControlFreq: failed to load peer filter metadata: %s", e)
+            return mapping
+        for row in rows:
+            callsign = str(row["callsign"] or "").strip().upper()
+            if not callsign:
+                continue
+            groups: Set[str] = set()
+            for key in ("group1", "group2", "group3"):
+                group = normalize_group_name(row[key])
+                if group:
+                    groups.add(group)
+            try:
+                parsed = json.loads(row["groups_json"] or "[]")
+                for raw_group in parsed if isinstance(parsed, list) else ():
+                    group = normalize_group_name(raw_group)
+                    if group:
+                        groups.add(group)
+            except Exception:
+                pass
+            mapping[callsign] = {
+                "groups": groups,
+                "role": str(row["group_role"] or "").strip().upper(),
+                "region": str(row["roster_region"] or row["state"] or "").strip().upper(),
+            }
+        self._operator_peer_meta_cache = mapping
+        self._operator_peer_meta_cache_ts = now_ts
+        self._operator_peer_meta_cache_mtime = db_mtime
+        return mapping
+
+    @staticmethod
+    def _replace_combo_options(combo: QComboBox, all_label: str, values: Sequence[str]) -> None:
+        current = str(combo.currentData() or "").strip().upper()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(all_label, "")
+            for value in sorted({str(item or "").strip().upper() for item in values if str(item or "").strip()}):
+                combo.addItem(value, value)
+            index = combo.findData(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(False)
+
+    def _refresh_peer_filter_options(self, operator_meta: Dict[str, Dict[str, object]]) -> None:
+        scheduled_calls = {
+            str(row.get("owner_callsign") or "").strip().upper()
+            for row in self._peer_schedule_rows()
+            if str(row.get("owner_callsign") or "").strip()
+        }
+        scheduled_meta = [operator_meta.get(callsign, {}) for callsign in scheduled_calls]
+        groups = {
+            str(group or "").strip().upper()
+            for meta in scheduled_meta
+            for group in tuple(meta.get("groups") or ())
+            if str(group or "").strip()
+        }
+        regions = {str(meta.get("region") or "").strip().upper() for meta in scheduled_meta}
+        roles = {str(meta.get("role") or "").strip().upper() for meta in scheduled_meta}
+        self._replace_combo_options(self.peer_group_filter, "All groups", tuple(groups))
+        self._replace_combo_options(self.peer_region_filter, "All regions", tuple(regions))
+        self._replace_combo_options(self.peer_role_filter, "All roles", tuple(roles))
+
     def _activity_cache_token(self) -> Tuple[float, float]:
         return (
             self._safe_db_mtime(self._settings_db_path()),
@@ -4114,6 +4376,7 @@ class ControlFreqTab(QWidget):
             and self._activity_cache_rows
         ):
             self._set_table_rows(self.activity_table, self._activity_cache_rows)
+            self._set_left_activity_content_height()
             return
         with perf_span("controlfreq.refresh_activity", settings=self.settings, min_ms=5.0):
             rows_out = self._compute_activity_rows(window_minutes, search, str(group_filter).strip().upper())
@@ -4121,6 +4384,7 @@ class ControlFreqTab(QWidget):
         self._activity_cache_ts = time.time()
         self._activity_cache_rows = [list(row) for row in rows_out]
         self._set_table_rows(self.activity_table, rows_out)
+        self._set_left_activity_content_height()
 
     def _refresh_operational_activity(
         self,
@@ -4313,6 +4577,7 @@ class ControlFreqTab(QWidget):
         self.awareness_table.setVisible(bool(visible))
         self.activity_table.setVisible(bool(visible))
         self._fit_group_box_to_contents(self.activity_box)
+        self._set_left_activity_content_height()
 
     @staticmethod
     def _clear_widget_layout(layout: QBoxLayout) -> None:
@@ -5428,6 +5693,11 @@ class ControlFreqTab(QWidget):
             enabled = bool(available and allowed)
             button.setEnabled(enabled)
             button.setToolTip(enabled_tip if enabled else disabled_tip if available else enabled_tip)
+        actions_widget = getattr(self, "activity_actions_widget", None)
+        if actions_widget is not None:
+            buttons = [rule[0] for rule in button_rules]
+            buttons.append(getattr(self, "operational_clear_pins_btn", None))
+            actions_widget.setVisible(any(bool(button and button.isEnabled()) for button in buttons))
 
     @staticmethod
     def _activity_context_from_snapshot(snapshot: object, group_filter: str = "") -> Dict[str, str]:
@@ -5802,152 +6072,141 @@ class ControlFreqTab(QWidget):
         if include_intersections:
             self._refresh_intersections()
 
+    def _on_peer_filters_changed(self, *_args) -> None:
+        self._refresh_intersections()
+        self._update_clear_filters_style()
+
     def _refresh_intersections(self) -> None:
         if not bool(self._view_cards.get("intersections", True)):
             return
-        now_ts = time.time()
         group_filter = normalize_group_name(self.group_combo.currentData())
         search = (self.search_edit.text() or "").strip().upper()
         intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
         horizon_minutes = int(intersection_combo.currentData() or 120)
-        cache_key = (group_filter, search, horizon_minutes)
-        if (
-            cache_key == self._intersection_cache_key
-            and now_ts - self._intersection_cache_ts < 30
-        ):
-            self._set_table_rows(self.intersection_table, self._intersection_cache_rows)
-            self._style_intersection_rows()
-            self._refresh_peer_finder_rows(group_filter, search, horizon_minutes=horizon_minutes)
-            self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)
-            self._fit_table_height_to_rows(self.peer_finder_table, min_rows=0, max_rows=6, empty_rows=1)
-            self._fit_group_box_to_contents(self.intersection_box)
-            self._set_schedule_splitter_content_sizes()
-            return
-
-        rows = self._compute_intersection_summary_rows(group_filter, search, horizon_minutes=horizon_minutes)
-        if not rows:
-            rows = [
-                ["Now", "0", "No exact-frequency overlaps"],
-                [f"Next {self._format_window_label(horizon_minutes)}", "0", "--"],
-            ]
-        self._intersection_cache_ts = now_ts
-        self._intersection_cache_key = cache_key
-        self._intersection_cache_rows = rows
-        self._set_table_rows(self.intersection_table, rows)
-        self._style_intersection_rows()
-        self._refresh_peer_finder_rows(group_filter, search, horizon_minutes=horizon_minutes)
-        self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)
-        self._fit_table_height_to_rows(self.peer_finder_table, min_rows=0, max_rows=6, empty_rows=1)
+        operator_meta = self._load_operator_peer_meta()
+        self._refresh_peer_filter_options(operator_meta)
+        rows = self._compute_peer_finder_rows(
+            group_filter,
+            search,
+            horizon_minutes=horizon_minutes,
+            peer_callsign=(self.peer_callsign_filter.text() or "").strip().upper(),
+            peer_group=normalize_group_name(self.peer_group_filter.currentData()),
+            peer_region=str(self.peer_region_filter.currentData() or "").strip().upper(),
+            peer_role=str(self.peer_role_filter.currentData() or "").strip().upper(),
+            operator_meta=operator_meta,
+        )
+        now_count = sum(
+            1
+            for row in rows
+            if any(int(window.get("start_offset_minutes") or 0) <= 0 for window in tuple(row.get("windows") or ()))
+        )
+        next_count = sum(
+            1
+            for row in rows
+            if any(int(window.get("start_offset_minutes") or 0) > 0 for window in tuple(row.get("windows") or ()))
+        )
+        summary = f"Now {now_count} · Next {self._format_window_label(horizon_minutes)} {next_count}"
+        self.peer_summary_label.setText(summary)
+        self.peer_summary_label.setToolTip(
+            f"Distinct operators with an exact-frequency overlap: {summary}. "
+            "One operator may have both a current and later window."
+        )
+        self._refresh_peer_finder_rows(rows, horizon_minutes=horizon_minutes)
         self._fit_group_box_to_contents(self.intersection_box)
         self._set_schedule_splitter_content_sizes()
 
-    def _refresh_peer_finder_rows(self, group_filter: str, search: str, *, horizon_minutes: int = 120) -> None:
-        table = getattr(self, "peer_finder_table", None)
-        if not isinstance(table, QTableWidget):
-            return
-        rows = self._compute_peer_finder_rows(group_filter, search, horizon_minutes=horizon_minutes)
-        self._peer_finder_contexts = [dict(row.get("context") or {}) for row in rows]
-        table.setRowCount(0)
-        if not rows:
-            self._set_table_rows(table, [["-", "Now", "No peer schedule matches", "-", ""]])
-            self._peer_finder_contexts = [{}]
-            self._render_peer_timeline((), horizon_minutes=horizon_minutes)
-            return
-        for row_idx, row in enumerate(rows[:6]):
-            table.insertRow(row_idx)
-            values = [
-                str(row.get("peer") or "-"),
-                str(row.get("when") or "-"),
-                str(row.get("net_band") or "-"),
-                str(row.get("heard") or "schedule"),
-                "",
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-                table.setItem(row_idx, col, item)
-            table.setCellWidget(row_idx, 4, self._peer_finder_action_widget(row_idx))
-        self._apply_elide_tooltips(table, 2)
-        self._render_peer_timeline(rows[:6], horizon_minutes=horizon_minutes)
-
-    def _set_peer_details_visible(self, visible: bool) -> None:
-        self.intersection_table.setVisible(bool(visible))
-        self.peer_finder_table.setVisible(bool(visible))
-        self._fit_group_box_to_contents(self.intersection_box)
-
-    def _render_peer_timeline(
+    def _refresh_peer_finder_rows(
         self,
         rows: Sequence[Dict[str, object]],
         *,
-        horizon_minutes: int,
+        horizon_minutes: int = 120,
     ) -> None:
-        layout = getattr(self, "peer_timeline_layout", None)
-        if layout is None:
+        table = getattr(self, "peer_chart_table", None)
+        if not isinstance(table, QTableWidget):
             return
-        self._clear_widget_layout(layout)
-        if not rows:
-            empty = QLabel(f"No peer overlap in the next {self._format_window_label(horizon_minutes)}")
-            empty.setWordWrap(True)
-            layout.addWidget(empty)
-            return
-        theme = self._theme()
-        for index, row in enumerate(rows):
-            frame = QFrame(self.peer_timeline_container)
-            frame.setObjectName("controlfreqPeerTimelineRow")
-            bg, fg, border = self._semantic_panel_colors("panel")
-            frame.setStyleSheet(
-                f"QFrame#controlfreqPeerTimelineRow {{ background: {bg}; color: {fg}; "
-                f"border: 1px solid {border}; border-radius: 6px; }}"
-            )
-            row_layout = QHBoxLayout(frame)
-            row_layout.setContentsMargins(8, 5, 8, 5)
-            row_layout.setSpacing(8)
-            peer = str(row.get("peer") or "-")
-            peer_label = QLabel(f"<b>{peer}</b>")
-            peer_label.setTextFormat(Qt.RichText)
-            peer_label.setMinimumWidth(78)
-            row_layout.addWidget(peer_label)
-            offset = max(0, int(row.get("start_offset_minutes") or 0))
-            track = QProgressBar()
-            track.setRange(0, max(1, int(horizon_minutes)))
-            track.setValue(max(1, min(int(horizon_minutes), offset)))
-            track.setFormat(f"{row.get('when') or 'Now'} · {row.get('net_band') or '-'}")
-            track.setTextVisible(True)
-            track.setAccessibleName(f"Peer rendezvous with {peer}")
-            track.setAccessibleDescription(
-                f"{row.get('when') or 'Now'} on {row.get('net_band') or 'unknown band'}; "
-                f"heard status {row.get('heard') or 'unknown'}"
-            )
-            track.setStyleSheet(
-                "QProgressBar { text-align: center; border: 1px solid "
-                f"{theme.get('border', '#D3D7DD')}; border-radius: 5px; "
-                f"background: {theme.get('surface_alt', '#E9EDF2')}; color: {theme.get('text', '#1C1F21')}; }}"
-                f"QProgressBar::chunk {{ background: {theme.get('accent', '#2E6F9E')}; border-radius: 4px; }}"
-            )
-            row_layout.addWidget(track, 1)
-            heard = QLabel(str(row.get("heard") or "schedule"))
-            heard.setToolTip("Most recent heard evidence, or schedule-only when no observation is available.")
-            row_layout.addWidget(heard)
-            row_layout.addWidget(self._peer_finder_action_widget(index, parent=frame))
-            layout.addWidget(frame)
+        self._peer_finder_contexts = [dict(row.get("context") or {}) for row in rows]
+        old_scroll = int(table.verticalScrollBar().value())
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.clearSpans()
+            table.setRowCount(0)
+            if not rows:
+                table.insertRow(0)
+                empty = QTableWidgetItem(
+                    f"No peer overlap in the next {self._format_window_label(horizon_minutes)}"
+                )
+                empty.setFlags(empty.flags() ^ Qt.ItemIsEditable)
+                table.setItem(0, 0, empty)
+                table.setSpan(0, 0, 1, 3)
+                self._peer_finder_contexts = []
+            else:
+                for row_idx, row in enumerate(rows):
+                    table.insertRow(row_idx)
+                    peer = str(row.get("peer") or "-")
+                    groups = tuple(str(group) for group in tuple(row.get("groups") or ()) if str(group))
+                    meta_parts = [
+                        str(row.get("role") or "").strip(),
+                        str(row.get("region") or "").strip(),
+                        "/".join(groups[:2]),
+                    ]
+                    operator_text = peer
+                    meta_text = " · ".join(part for part in meta_parts if part)
+                    if meta_text:
+                        operator_text += f"\n{meta_text}"
+                    operator_item = QTableWidgetItem(operator_text)
+                    operator_item.setFlags(operator_item.flags() ^ Qt.ItemIsEditable)
+                    operator_item.setToolTip(operator_text.replace("\n", " · "))
+                    table.setItem(row_idx, 0, operator_item)
 
-    def _peer_finder_action_widget(self, row: int, *, parent: QWidget | None = None) -> QWidget:
-        wrap = QWidget(parent or self.peer_finder_table)
-        layout = QHBoxLayout(wrap)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        for label, callback, tip in (
-            ("Msg", self._open_peer_finder_compose, "Compose a message to this peer."),
-            ("Map", self._open_peer_finder_map, "Open map context for this peer if location is known."),
-            ("Pin", self._pin_peer_finder_row, "Pin this peer in Operational Awareness."),
-        ):
-            btn = QPushButton(label)
-            btn.setMaximumWidth(58)
-            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            btn.setToolTip(tip)
-            btn.clicked.connect(lambda _checked=False, r=row, cb=callback: cb(r))
-            layout.addWidget(btn)
-        return wrap
+                    windows = tuple(row.get("windows") or ())
+                    window_labels = [
+                        f"{window.get('when') or 'Now'} · {window.get('net_band') or '-'}"
+                        for window in windows
+                    ]
+                    timeline_text = "  •  ".join(window_labels[:3])
+                    if len(window_labels) > 3:
+                        timeline_text += f"  •  +{len(window_labels) - 3} more"
+                    timeline_item = QTableWidgetItem(timeline_text)
+                    timeline_item.setFlags(timeline_item.flags() ^ Qt.ItemIsEditable)
+                    timeline_item.setData(PEER_TIMELINE_WINDOWS_ROLE, windows)
+                    timeline_item.setData(PEER_TIMELINE_HORIZON_ROLE, int(horizon_minutes))
+                    timeline_item.setToolTip("\n".join(window_labels))
+                    table.setItem(row_idx, 1, timeline_item)
+
+                    action_item = QTableWidgetItem("⋯")
+                    action_item.setFlags(action_item.flags() ^ Qt.ItemIsEditable)
+                    action_item.setTextAlignment(Qt.AlignCenter)
+                    action_item.setToolTip("Message, map, or pin this operator")
+                    table.setItem(row_idx, 2, action_item)
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+        table.resizeRowsToContents()
+        self._fit_table_height_to_rows(table, min_rows=1, max_rows=6, empty_rows=1)
+        table.verticalScrollBar().setValue(min(old_scroll, table.verticalScrollBar().maximum()))
+        table.viewport().update()
+        count = len(rows)
+        self.peer_result_label.setText(f"{count} operator{'s' if count != 1 else ''}")
+
+    def _activate_peer_chart_item(self, item: QTableWidgetItem) -> None:
+        if item is None or item.column() != 2 or item.row() >= len(self._peer_finder_contexts):
+            return
+        rect = self.peer_chart_table.visualItemRect(item)
+        self._show_peer_finder_actions(item.row(), self.peer_chart_table.viewport().mapToGlobal(rect.bottomLeft()))
+
+    def _show_peer_finder_context_menu(self, pos) -> None:
+        item = self.peer_chart_table.itemAt(pos)
+        if item is None or item.row() >= len(self._peer_finder_contexts):
+            return
+        self._show_peer_finder_actions(item.row(), self.peer_chart_table.viewport().mapToGlobal(pos))
+
+    def _show_peer_finder_actions(self, row: int, global_pos) -> None:
+        menu = QMenu(self.peer_chart_table)
+        menu.addAction("Message", lambda: self._open_peer_finder_compose(row))
+        menu.addAction("Show on Map", lambda: self._open_peer_finder_map(row))
+        menu.addAction("Pin in Operational Awareness", lambda: self._pin_peer_finder_row(row))
+        menu.exec(global_pos)
 
     def _peer_finder_context(self, row: int) -> Dict[str, str]:
         contexts = list(getattr(self, "_peer_finder_contexts", []) or [])
@@ -5994,82 +6253,18 @@ class ControlFreqTab(QWidget):
         self._operational_snapshot_cache_key = ()
         self._refresh_activity()
 
-    def _compute_intersection_summary_rows(
-        self, group_filter: str, search: str, *, horizon_minutes: int = 120
-    ) -> List[List[str]]:
-        rows: List[List[str]] = []
-        now_utc = dt.datetime.now(dt.timezone.utc)
-        now_min = now_utc.hour * 60 + now_utc.minute
-        now_day_idx = (now_utc.weekday() + 1) % 7  # Sunday=0
-        now_week_min = now_day_idx * 1440 + now_min
-        horizon_minutes = max(1, int(horizon_minutes or 120))
-
-        my_entries = self._load_my_schedule_entries()
-        if not my_entries:
-            return rows
-        operator_groups = self._load_operator_group_map()
-        peer_rows = self._peer_schedule_rows()
-        if not peer_rows:
-            return rows
-
-        now_calls: Set[str] = set()
-        next_calls: Set[str] = set()
-        now_labels: Set[str] = set()
-        next_labels: Set[str] = set()
-        for r in peer_rows:
-            cs = str(r.get("owner_callsign") or "").strip().upper()
-            if not cs:
-                continue
-            groups = operator_groups.get(cs, set())
-            if group_filter:
-                if group_filter not in groups:
-                    continue
-            if search and search not in cs and not any(search in g for g in groups):
-                continue
-            peer_start = self._parse_time_minutes(str(r.get("start_utc") or ""))
-            peer_end = self._parse_time_minutes(str(r.get("end_utc") or ""))
-            if peer_start is None or peer_end is None:
-                continue
-            peer_segments = self._expand_week_segments(str(r.get("day_utc") or "ALL"), peer_start, peer_end)
-            if not peer_segments:
-                continue
-            peer_freq = self._parse_frequency_mhz(r.get("frequency"))
-            if peer_freq is None:
-                continue
-
-            for entry in my_entries:
-                if abs(entry["freq"] - peer_freq) > 0.001:
-                    continue
-                overlaps = self._next_horizon_overlaps(
-                    entry.get("segments", []),
-                    peer_segments,
-                    now_week_min=now_week_min,
-                    horizon_minutes=horizon_minutes,
-                )
-                if not overlaps:
-                    continue
-                has_now = any(start <= now_week_min < end for start, end in overlaps)
-                if has_now:
-                    now_calls.add(cs)
-                    now_labels.add(self._format_group_band_freq_label(entry))
-                else:
-                    next_calls.add(cs)
-                    next_labels.add(self._format_group_band_freq_label(entry))
-
-        rows.append(["Now", str(len(now_calls)), self._summarize_labels(now_labels)])
-        rows.append(
-            [
-                f"Next {self._format_window_label(horizon_minutes)}",
-                str(len(next_calls)),
-                self._summarize_labels(next_labels),
-            ]
-        )
-        return rows
-
     def _compute_peer_finder_rows(
-        self, group_filter: str, search: str, *, horizon_minutes: int = 120
+        self,
+        group_filter: str,
+        search: str,
+        *,
+        horizon_minutes: int = 120,
+        peer_callsign: str = "",
+        peer_group: str = "",
+        peer_region: str = "",
+        peer_role: str = "",
+        operator_meta: Optional[Dict[str, Dict[str, object]]] = None,
     ) -> List[Dict[str, object]]:
-        rows: List[Dict[str, object]] = []
         now_utc = dt.datetime.now(dt.timezone.utc)
         now_min = now_utc.hour * 60 + now_utc.minute
         now_day_idx = (now_utc.weekday() + 1) % 7
@@ -6077,20 +6272,37 @@ class ControlFreqTab(QWidget):
         horizon_minutes = max(1, int(horizon_minutes or 120))
         my_entries = self._load_my_schedule_entries()
         if not my_entries:
-            return rows
+            return []
+        operator_meta = operator_meta if operator_meta is not None else self._load_operator_peer_meta()
         operator_groups = self._load_operator_group_map()
         peer_rows = self._peer_schedule_rows()
         if not peer_rows:
-            return rows
-        seen: Set[Tuple[str, str, str]] = set()
+            return []
+        peer_callsign = str(peer_callsign or "").strip().upper()
+        peer_group = normalize_group_name(peer_group)
+        peer_region = str(peer_region or "").strip().upper()
+        peer_role = str(peer_role or "").strip().upper()
+        by_peer: Dict[str, Dict[str, object]] = {}
+        seen_windows: Set[Tuple[str, int, int, str]] = set()
         for r in peer_rows:
             cs = str(r.get("owner_callsign") or "").strip().upper()
             if not cs:
                 continue
-            groups = operator_groups.get(cs, set())
+            meta = dict(operator_meta.get(cs, {}) or {})
+            groups = set(meta.get("groups") or operator_groups.get(cs, set()) or set())
+            role = str(meta.get("role") or "").strip().upper()
+            region = str(meta.get("region") or "").strip().upper()
             if group_filter and group_filter not in groups:
                 continue
             if search and search not in cs and not any(search in g for g in groups):
+                continue
+            if peer_callsign and peer_callsign not in cs:
+                continue
+            if peer_group and peer_group not in groups:
+                continue
+            if peer_region and peer_region != region:
+                continue
+            if peer_role and peer_role != role:
                 continue
             peer_start = self._parse_time_minutes(str(r.get("start_utc") or ""))
             peer_end = self._parse_time_minutes(str(r.get("end_utc") or ""))
@@ -6117,20 +6329,22 @@ class ControlFreqTab(QWidget):
                 end_abs = max(end for start, end in overlaps if start == start_abs)
                 when = self._format_peer_overlap_when(start_abs, now_week_min=now_week_min, now_utc=now_utc)
                 net_band = self._format_group_band_freq_label(entry)
-                key = (cs, when, net_band)
-                if key in seen:
+                start_offset = max(0, int(start_abs - now_week_min))
+                end_offset = max(start_offset + 1, int(end_abs - now_week_min))
+                key = (cs, start_offset, end_offset, net_band)
+                if key in seen_windows:
                     continue
-                seen.add(key)
+                seen_windows.add(key)
                 group = str(entry.get("group") or next(iter(groups), "") or "").strip().upper()
-                rows.append(
+                peer = by_peer.setdefault(
+                    cs,
                     {
                         "peer": cs,
-                        "when": when,
-                        "net_band": net_band,
-                        "heard": "peer schedule",
-                        "start_offset_minutes": max(0, int(start_abs - now_week_min)),
-                        "end_offset_minutes": max(0, int(end_abs - now_week_min)),
-                        "sort": (0 if when == "Now" else 1, start_abs, cs),
+                        "groups": tuple(sorted(groups)),
+                        "role": role,
+                        "region": region,
+                        "windows": [],
+                        "sort": (9, 10**9, cs),
                         "context": {
                             "callsign": cs,
                             "group_filter": group,
@@ -6138,7 +6352,30 @@ class ControlFreqTab(QWidget):
                             "compose_mode": "js8call",
                             "search_query": cs,
                         },
-                    }
+                    },
+                )
+                windows = peer["windows"]
+                if isinstance(windows, list):
+                    windows.append(
+                        {
+                            "when": when,
+                            "net_band": net_band,
+                            "start_offset_minutes": start_offset,
+                            "end_offset_minutes": end_offset,
+                        }
+                    )
+                candidate_sort = (0 if start_offset <= 0 else 1, start_offset, cs)
+                if candidate_sort < tuple(peer.get("sort") or (9, 10**9, cs)):
+                    peer["sort"] = candidate_sort
+        rows = list(by_peer.values())
+        for row in rows:
+            windows = row.get("windows")
+            if isinstance(windows, list):
+                windows.sort(
+                    key=lambda window: (
+                        int(window.get("start_offset_minutes") or 0),
+                        str(window.get("net_band") or ""),
+                    )
                 )
         rows.sort(key=lambda row: row.get("sort", (9, 0, "")))
         return rows
@@ -6183,44 +6420,6 @@ class ControlFreqTab(QWidget):
         except Exception:
             freq_txt = "--"
         return f"{grp} {band} {freq_txt}"
-
-    def _summarize_labels(self, labels: Set[str]) -> str:
-        if not labels:
-            return "--"
-        ordered = sorted(labels)
-        if len(ordered) <= 2:
-            return ", ".join(ordered)
-        return f"{ordered[0]}, {ordered[1]} +{len(ordered) - 2} more"
-
-    def _style_intersection_rows(self) -> None:
-        # Emphasize "Now" and de-emphasize "Next hour"
-        if self.intersection_table.rowCount() < 2:
-            return
-        palette = self._urgency_palette()
-        try:
-            now_item = self.intersection_table.item(0, 0)
-            now_overlaps = 0
-            try:
-                now_overlaps = int((self.intersection_table.item(0, 1).text() if self.intersection_table.item(0, 1) else "0") or "0")
-            except Exception:
-                now_overlaps = 0
-            if now_item:
-                now_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                font = now_item.font()
-                font.setBold(True)
-                now_item.setFont(font)
-            if now_overlaps > 0:
-                for col in range(self.intersection_table.columnCount()):
-                    it = self.intersection_table.item(0, col)
-                    if it:
-                        it.setBackground(palette["warn"])
-                        it.setForeground(palette["text"])
-            for col in range(self.intersection_table.columnCount()):
-                item = self.intersection_table.item(1, col)
-                if item:
-                    item.setForeground(palette["muted_text"])
-        except Exception:
-            pass
 
     def _format_current_schedule_label(self) -> str:
         sched_freq = current_scheduler_freq(self.window())

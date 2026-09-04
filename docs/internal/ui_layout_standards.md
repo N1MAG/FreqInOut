@@ -30,6 +30,13 @@ Required behavior:
   and recover without assuming the UI is broken.
 - Dense workspaces with many categories should use a stable left navigation rail
   with scrollable category content instead of long horizontal button rows.
+- Dashboard collections that can exceed 50 rows must use one bounded native
+  item-view viewport with internal scrolling and filtering. Do not compose large
+  result sets from nested row widgets or retain a second table that repeats the
+  same records.
+- Nested dashboard cards must have deterministic, content-derived geometry.
+  Avoid animating fixed-height cards inside splitters or outer scroll areas;
+  rapid filter, click, and scroll updates must not expose stale paint regions.
 - Settings-style views should keep the left rail bounded and scrollable, with the
   selected content pane owning the remaining width.
 - Resizable split panels must advertise that they are resizable. Use the shared

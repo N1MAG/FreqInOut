@@ -155,13 +155,27 @@ Use a compact rendezvous timeline:
 
 - fixed Now marker
 - look-ahead horizon from the existing 30m/1h/2h/6h control
-- one row per peer, with the likely overlap window shown as a segment
-- band/frequency label on the segment
+- exactly one row per operator identity/callsign, with every matching overlap
+  window represented as a segment in that row
+- combined band/frequency labels above the timeline; an operator scheduled on
+  20m and 40m must not appear as two peer rows
 - observed `heard` freshness/confidence marker when available
-- Msg, Map, and Pin actions at the trailing edge
+- a compact actions affordance for Message, Map, and Pin
+- visible, peer-local filters for callsign, configured group membership,
+  roster region, and duty role
 
-The existing table remains the detailed fallback when timeline density exceeds
-the useful compact range.
+The chart uses one native item-view viewport with a paint delegate rather than
+rebuilding nested row widgets. It shows at most six rows in its card height and
+scrolls internally when more operators match. This keeps the Ops page bounded
+for 150-plus-operator rosters. The former peer detail table is not retained:
+it duplicated the timeline, consumed space, and created competing scroll and
+paint surfaces. Filter controls and the result count remain visible while the
+chart scrolls.
+
+Changing filters, the look-ahead window, card visibility, or outer-page scroll
+must not leave stale row widgets or painted content. Ops card visibility changes
+use deterministic final geometry inside the outer scroll area; height animation
+is not used there.
 
 ### Schedule Outlook
 
@@ -532,7 +546,8 @@ Do not log complete message bodies or other unnecessary sensitive content.
 - Convert Peer Schedule Finder to the rendezvous timeline.
 - Convert Source Lanes to stable lane cards.
 - Demote dense evidence tables behind Details after action and route parity is
-  verified for each replacement.
+  verified for each replacement. The peer table is removed entirely once the
+  consolidated chart carries its filters, labels, count, and actions.
 
 This sequence builds the reusable focus/data path before introducing several
 new visual renderers, minimizing duplicate queries and rework.
@@ -568,6 +583,11 @@ new visual renderers, minimizing duplicate queries and rework.
 - Empty or missing data is explicit rather than silently omitted.
 - Default Operations view contains visually distinct bars, cards, lanes, and
   timelines; detailed tables remain available without dominating the page.
+- Peer Schedule Finder remains bounded with a 150-operator roster, exposes
+  callsign/group/region/role filters, and renders one row per operator even when
+  several bands or windows match.
+- Scrolling and repeated card/filter clicks do not produce stale or overlapping
+  peer rows, and left-column content stays top-aligned at its natural height.
 - Light/Dark and Normal/Large Text layouts pass at 1920x1080, approximately
   1000x700, and approximately 900x560 without important horizontal scrolling.
 

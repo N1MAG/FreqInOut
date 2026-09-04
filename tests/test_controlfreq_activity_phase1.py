@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui.controlfreq_tab import (
     ControlFreqTab,
+    PeerRendezvousDelegate,
     TrafficVolumeBarDelegate,
     TRAFFIC_CHART_CURRENT_ROLE,
     TRAFFIC_CHART_PREVIOUS_ROLE,
@@ -110,6 +111,28 @@ def test_controlfreq_dark_chart_uses_contrasting_warning_palette() -> None:
 
     assert QColor(tab.traffic_group_bar_delegate._theme["warning"]).name().upper() == "#D1A000"
     assert QColor(tab.traffic_group_bar_delegate._theme["text"]).name().upper() == "#E7EBF0"
+
+
+def test_peer_rendezvous_delegate_accepts_dark_theme_palette() -> None:
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QTableWidget
+
+    _app()
+    table = QTableWidget(1, 1)
+    delegate = PeerRendezvousDelegate(table)
+    delegate.apply_theme(
+        {
+            "surface_alt": "#202632",
+            "border": "#38414D",
+            "text_muted": "#AAB4C0",
+            "accent": "#4EA7E5",
+            "text": "#E7EBF0",
+        }
+    )
+
+    assert QColor(delegate._theme["surface_alt"]).name().upper() == "#202632"
+    assert QColor(delegate._theme["accent"]).name().upper() == "#4EA7E5"
+    assert QColor(delegate._theme["text"]).name().upper() == "#E7EBF0"
 
 
 def test_controlfreq_traffic_group_source_summary_is_compact() -> None:
@@ -995,10 +1018,14 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert 'self.intersection_box = QGroupBox("Peer Schedule Finder")' in controlfreq_source
     assert "self.intersection_window_combo = QComboBox()" in controlfreq_source
     assert 'self.intersection_label = QLabel("Overlap Window")' in controlfreq_source
-    assert 'self.peer_finder_table.setHorizontalHeaderLabels(["Peer", "When", "Net/Band", "Heard", "Actions"])' in controlfreq_source
-    assert '("Msg", self._open_peer_finder_compose' in controlfreq_source
-    assert '("Map", self._open_peer_finder_map' in controlfreq_source
-    assert '("Pin", self._pin_peer_finder_row' in controlfreq_source
+    assert 'self.peer_chart_table.setHorizontalHeaderLabels(["Operator", "Rendezvous", "Actions"])' in controlfreq_source
+    assert "self.peer_callsign_filter = QLineEdit()" in controlfreq_source
+    assert 'self.peer_group_filter.addItem("All groups", "")' in controlfreq_source
+    assert 'self.peer_region_filter.addItem("All regions", "")' in controlfreq_source
+    assert 'self.peer_role_filter.addItem("All roles", "")' in controlfreq_source
+    assert 'menu.addAction("Message"' in controlfreq_source
+    assert 'menu.addAction("Show on Map"' in controlfreq_source
+    assert 'menu.addAction("Pin in Operational Awareness"' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("30m", 30)' in controlfreq_source
     assert 'self.intersection_window_combo.addItem("6h", 360)' in controlfreq_source
     assert "self.intersection_window_combo.currentIndexChanged.connect(self._refresh_intersections)" in controlfreq_source
@@ -1008,8 +1035,7 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "_content_fit_group_height(self.schedule_box, floor=120)" in controlfreq_source
     assert "group_box.setMinimumHeight(height)" in controlfreq_source
     assert "group_box.updateGeometry()" in controlfreq_source
-    assert "self._fit_table_height_to_rows(self.intersection_table, min_rows=0, max_rows=2, empty_rows=1)" in controlfreq_source
-    assert "self._fit_table_height_to_rows(self.peer_finder_table, min_rows=0, max_rows=6, empty_rows=1)" in controlfreq_source
+    assert "self._fit_table_height_to_rows(table, min_rows=1, max_rows=6, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=8, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
     assert "box.setMaximumHeight(min(height, 460 if details_visible else 230))" in controlfreq_source
@@ -1022,8 +1048,8 @@ def test_controlfreq_dashboard_uses_distinct_visual_grammars_and_details_disclos
 
     assert "self.source_lane_cards_container = QWidget()" in source
     assert "def _render_source_lane_cards" in source
-    assert "self.peer_timeline_container = QWidget()" in source
-    assert "def _render_peer_timeline" in source
+    assert "self.peer_chart_table = QTableWidget(0, 3)" in source
+    assert "self.peer_rendezvous_delegate = PeerRendezvousDelegate" in source
     assert "self.schedule_timeline_container = QWidget()" in source
     assert "def _render_schedule_timeline" in source
     assert "self.prop_band_ladder_container = QWidget()" in source
@@ -1031,9 +1057,130 @@ def test_controlfreq_dashboard_uses_distinct_visual_grammars_and_details_disclos
     assert "self.awareness_table.setVisible(False)" in source
     assert "self.activity_table.setVisible(False)" in source
     assert "def _set_awareness_details_visible" in source
-    assert "self.intersection_table.setVisible(False)" in source
-    assert "self.peer_finder_table.setVisible(False)" in source
+    assert "self.peer_finder_table" not in source
+    assert "self.intersection_table" not in source
     assert "self.schedule_table.setVisible(False)" in source
+
+
+def test_peer_finder_consolidates_multiple_bands_into_one_operator_row() -> None:
+    tab = SimpleNamespace(
+        _show_local=False,
+        _load_my_schedule_entries=lambda: [
+            {"freq": 14.115, "group": "MAGNET", "band": "20M", "segments": ()},
+            {"freq": 7.115, "group": "MAGNET", "band": "40M", "segments": ()},
+        ],
+        _load_operator_peer_meta=lambda: {
+            "K1ABC": {"groups": {"MAGNET", "MR08"}, "role": "HUB", "region": "R8"}
+        },
+        _load_operator_group_map=lambda: {"K1ABC": {"MAGNET", "MR08"}},
+        _peer_schedule_rows=lambda: [
+            {"owner_callsign": "K1ABC", "day_utc": "ALL", "start_utc": "00:00", "end_utc": "23:59", "frequency": 14.115},
+            {"owner_callsign": "K1ABC", "day_utc": "ALL", "start_utc": "00:00", "end_utc": "23:59", "frequency": 7.115},
+        ],
+        _parse_time_minutes=lambda value: 0 if value == "00:00" else 1439,
+        _parse_frequency_mhz=lambda value: float(value),
+        _expand_week_segments=lambda *_args: ((0, 1),),
+        _next_horizon_overlaps=lambda *_args, now_week_min, horizon_minutes: ((now_week_min, now_week_min + 30),),
+        _format_peer_overlap_when=lambda *_args, **_kwargs: "Now",
+        _format_group_band_freq_label=lambda entry: f"{entry['group']} {entry['band']} {entry['freq']:.3f} MHz",
+    )
+
+    rows = ControlFreqTab._compute_peer_finder_rows(tab, "", "", horizon_minutes=120)
+
+    assert len(rows) == 1
+    assert rows[0]["peer"] == "K1ABC"
+    assert rows[0]["role"] == "HUB"
+    assert rows[0]["region"] == "R8"
+    assert [window["net_band"] for window in rows[0]["windows"]] == [
+        "MAGNET 20M 14.115 MHz",
+        "MAGNET 40M 7.115 MHz",
+    ]
+
+
+def test_peer_finder_filters_large_roster_before_rendering() -> None:
+    peer_rows = [
+        {"owner_callsign": f"K{i:03d}AA", "day_utc": "ALL", "start_utc": "00:00", "end_utc": "23:59", "frequency": 7.115}
+        for i in range(150)
+    ]
+    meta = {
+        f"K{i:03d}AA": {
+            "groups": {"MAGNET", "MR08" if i % 2 == 0 else "MR09"},
+            "role": "HUB" if i % 3 == 0 else "PEER",
+            "region": "R8" if i < 75 else "R9",
+        }
+        for i in range(150)
+    }
+    tab = SimpleNamespace(
+        _show_local=False,
+        _load_my_schedule_entries=lambda: [
+            {"freq": 7.115, "group": "MAGNET", "band": "40M", "segments": ()}
+        ],
+        _load_operator_peer_meta=lambda: meta,
+        _load_operator_group_map=lambda: {callsign: set(row["groups"]) for callsign, row in meta.items()},
+        _peer_schedule_rows=lambda: peer_rows,
+        _parse_time_minutes=lambda value: 0 if value == "00:00" else 1439,
+        _parse_frequency_mhz=lambda value: float(value),
+        _expand_week_segments=lambda *_args: ((0, 1),),
+        _next_horizon_overlaps=lambda *_args, now_week_min, horizon_minutes: ((now_week_min, now_week_min + 30),),
+        _format_peer_overlap_when=lambda *_args, **_kwargs: "Now",
+        _format_group_band_freq_label=lambda entry: f"{entry['group']} {entry['band']} {entry['freq']:.3f} MHz",
+    )
+
+    rows = ControlFreqTab._compute_peer_finder_rows(
+        tab,
+        "",
+        "",
+        horizon_minutes=120,
+        peer_group="MR08",
+        peer_region="R8",
+        peer_role="HUB",
+        operator_meta=meta,
+    )
+
+    assert rows
+    assert len(rows) < 150
+    assert all("MR08" in row["groups"] and row["region"] == "R8" and row["role"] == "HUB" for row in rows)
+
+
+def test_peer_chart_keeps_large_roster_in_bounded_stable_viewport(monkeypatch, tmp_path) -> None:
+    from PySide6.QtWidgets import QAbstractItemView
+
+    _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+    tab = ControlFreqTab()
+    rows = [
+        {
+            "peer": f"K{i:03d}AA",
+            "groups": ("MAGNET", "MR08"),
+            "role": "HUB" if i % 3 == 0 else "PEER",
+            "region": "R8",
+            "windows": (
+                {
+                    "when": "Now" if i % 2 == 0 else "17:00",
+                    "net_band": "MAGNET 40M 7.115 MHz",
+                    "start_offset_minutes": 0 if i % 2 == 0 else 30,
+                    "end_offset_minutes": 60,
+                },
+            ),
+            "context": {"callsign": f"K{i:03d}AA"},
+        }
+        for i in range(150)
+    ]
+    try:
+        tab._refresh_peer_finder_rows(rows, horizon_minutes=120)
+        first_height = tab.peer_chart_table.maximumHeight()
+        tab._refresh_peer_finder_rows(tuple(reversed(rows)), horizon_minutes=120)
+
+        assert tab.peer_chart_table.rowCount() == 150
+        assert len(tab._peer_finder_contexts) == 150
+        assert tab.peer_chart_table.maximumHeight() == first_height
+        assert first_height < 400
+        assert tab.peer_chart_table.verticalScrollMode() == QAbstractItemView.ScrollPerItem
+        assert tab.peer_chart_table.cellWidget(0, 2) is None
+        assert tab.peer_chart_table.item(0, 0).text().startswith("K149AA")
+    finally:
+        tab.deleteLater()
 
 
 def test_controlfreq_focus_search_is_explicit_bounded_and_accessible() -> None:
