@@ -2968,11 +2968,11 @@ def test_phase7_station_command_bar_refresh_selects_primary_radio(monkeypatch) -
     assert [button.text() for button in source_chips] == ["DX10", "icom"]
     assert [button.isChecked() for button in source_chips] == [False, True]
     assert window.station_command_qsy_btn.isEnabled() is True
-    assert window.station_command_freq_combo.currentText() == "MAGNET 20M"
+    assert window.station_command_freq_combo.currentText() == "MAGNET 40M"
     assert window.station_command_freq_combo.itemData(
         window.station_command_freq_combo.currentIndex(),
         Qt.ToolTipRole,
-    ) == "MAGNET 20M: 14.115.000 Digi"
+    ) == "MAGNET 40M: 7.115.000 Digi"
     assert "Command target: icom" in window.station_command_qsy_btn.toolTip()
 
     window.station_command_radio_combo.setCurrentIndex(0)
@@ -4342,22 +4342,16 @@ def test_phase7_station_command_tiles_arm_first_card_and_keep_each_plan_scoped(m
         assert first_combo is not None
 
         first_labels = [first_combo.itemText(index) for index in range(first_combo.count())]
-        assert first_labels == ["MAGNET 20M", "MAGNET 40M"]
+        assert first_labels == ["MAGNET 20M"]
         assert MainWindow._station_command_now_text_for_summary(window, snapshots[1], selected_id=1) == "AMRRON 20M"
 
         first_qsy = next(btn for btn in tiles[0].findChildren(QPushButton) if btn.text() == "QSY")
         first_timed = tiles[0].findChild(QToolButton, "stationCommandRadioTileTimedSuspend")
         assert first_timed is not None
-        assert first_qsy.isEnabled() is False
-        assert first_timed.isEnabled() is False
-
-        first_combo.setCurrentIndex(0)
-        app.processEvents()
-
-        assert first_combo.currentText() == "MAGNET 20M"
         assert first_qsy.isEnabled() is True
         assert first_timed.isEnabled() is True
-        assert window._station_command_card_qsy_pending_keys[1] == "14.115000"
+        assert first_combo.currentText() == "MAGNET 20M"
+        assert 1 not in window._station_command_card_qsy_pending_keys
 
         window.station_command_radio_summary_widget.deleteLater()
         window.station_command_radio_summary_widget = QWidget()

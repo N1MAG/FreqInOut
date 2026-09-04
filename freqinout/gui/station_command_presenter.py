@@ -1,7 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Literal, Mapping
+
+
+ShellDensity = Literal["condensed", "compact", "roomy"]
+ScheduleProminence = Literal["calm", "upcoming", "urgent", "overdue"]
+
+
+@dataclass(frozen=True)
+class ShellLayoutState:
+    density: ShellDensity
+    show_source_context: bool
+    show_clock_seconds: bool
+    stack_primary_context: bool
+
+
+@dataclass(frozen=True)
+class NextActionState:
+    text: str
+    prominence: ScheduleProminence
+    role: str
 
 
 @dataclass(frozen=True)
@@ -17,6 +36,82 @@ class SchedulerActionState:
     timed_suspend_text: str
     timed_suspend_role: str
     resume_role: str
+
+
+def shell_layout_state(
+    width: object,
+    *,
+    source_count: int = 1,
+    large_text: bool = False,
+) -> ShellLayoutState:
+    """Return a deterministic shell density without inspecting Qt widgets."""
+    try:
+        available = max(0, int(width))
+    except Exception:
+        available = 0
+    pressure = max(0, int(source_count or 0) - 1) * 90
+    if large_text:
+        pressure += 140
+    effective = available - pressure
+    if effective < 720:
+        return ShellLayoutState("condensed", False, False, True)
+    if effective < 1120:
+        return ShellLayoutState("compact", False, False, False)
+    return ShellLayoutState("roomy", True, True, False)
+
+
+def schedule_prominence(remaining_minutes: object | None) -> ScheduleProminence:
+    if remaining_minutes is None:
+        return "calm"
+    try:
+        minutes = float(remaining_minutes)
+    except Exception:
+        return "calm"
+    if minutes < 0:
+        return "overdue"
+    if minutes <= 15:
+        return "urgent"
+    if minutes <= 30:
+        return "upcoming"
+    return "calm"
+
+
+def next_action_state(label: object, remaining_minutes: object | None) -> NextActionState:
+    text = str(label or "").strip() or "No scheduled action"
+    prominence = schedule_prominence(remaining_minutes)
+    if remaining_minutes is not None:
+        try:
+            minutes = int(float(remaining_minutes))
+        except Exception:
+            minutes = -1
+        if minutes >= 0:
+            text = f"{text} in {minutes}m"
+    role = {
+        "calm": "muted",
+        "upcoming": "info",
+        "urgent": "warning",
+        "overdue": "danger",
+    }[prominence]
+    return NextActionState(text=text, prominence=prominence, role=role)
+
+
+def source_chip_text(
+    name: object,
+    now_text: object,
+    *,
+    density: ShellDensity,
+) -> str:
+    radio_name = str(name or "Radio").strip() or "Radio"
+    context = str(now_text or "").strip()
+    if density == "roomy" and context:
+        return f"{radio_name}  ·  {context}"
+    return radio_name
+
+
+def primary_context_text(radio_name: object, now_text: object) -> str:
+    name = str(radio_name or "Radio").strip() or "Radio"
+    destination = str(now_text or "Unavailable").strip() or "Unavailable"
+    return f"{name}  ·  {destination}"
 
 
 def qsy_key(meta: Mapping[str, object] | None) -> str:

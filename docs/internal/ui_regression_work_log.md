@@ -337,3 +337,93 @@ Verification: `uv run pytest -q tests/test_station_health_scheduler_filter_1_2_7
 `uv run pytest -q tests/test_release_1_2_2_followup.py -q`, `uv run python -m
 py_compile freqinout/core/station_health_summary.py`, and `git diff --check`
 pass.
+
+## 2026-09-04
+
+### Adaptive Multi-Rig Shell And Navigation
+
+Status: implemented; focused automated verification passed; production Linux
+visual feedback incorporated.
+
+Objective: keep Where and When continuously visible while returning most of the
+window to each tab's What/Why workspace. One radio is common, two radios plus Mesh
+is a realistic maximum, and three radios must remain usable. Normal Text on the
+1920x1080 Linux production display is the density baseline; Large Text remains an
+accessibility requirement.
+
+Implementation:
+
+- Added a Qt-free shell presenter with roomy, compact, and condensed densities.
+- Added calm, upcoming, urgent, and overdue schedule prominence, with transitions
+  at 30 and 15 minutes.
+- Replaced permanently expanded per-radio cards with a source-awareness rail,
+  one selected-radio context row, QSY, Hold/Resume, primary SOP, and Controls.
+- Kept infrequent frequency, timed-QSY, suspend, health, and plan controls in an
+  on-demand selected-radio panel using the existing RF-safe command handlers.
+- Moved clock and enabled operating-group condition summaries from the navigation
+  status area into the command-bar shell.
+- Added a manually collapsible workflow rail and automatic compact navigation for
+  reduced window widths.
+
+User QA follow-up: the first implementation made the selected-radio relationship
+too implicit by labeling the primary row `NOW`, even though the selected radio was
+also highlighted in the source header. The revised contract labels the row with
+the radio itself, such as `FIO-A · AMRRON 20M`, and removes that selected radio
+from the header. Alternate radios remain one-click selection targets. Expanding
+navigation also exposed a stale single-row shell height that clipped Next and the
+quick actions in condensed mode; navigation changes now trigger an immediate
+presentation reflow and condensed height derives from scaled control-row metrics.
+
+Second user QA follow-up: expanding Controls repeated the selected radio, current
+destination, Next, plan, Health, and quick actions in a legacy radio card. The
+collapsed navigation also used platform-dependent icons and direct child shortcuts
+such as JS8Call instead of representing the full master menus.
+
+Refinement implementation:
+
+- Replaced the expanded legacy card with a responsive advanced-control tray. The
+  persistent context row remains visible; duplicate QSY and Hold quick actions
+  yield to target selection, QSY Now, Timed QSY, scheduler Suspend, Resume, and
+  compact Health and Plan actions.
+- Preserved the existing target model, RF-safe QSY handlers, duration preferences,
+  scheduler suspend/resume handlers, health summary, and plan-assignment route.
+- Added roomy one-row, compact two-row, and condensed/Large Text three-row tray
+  arrangements. The shell height now derives from density and scaled row height.
+- Rebuilt compact navigation around the same master hierarchy as the full menu:
+  Messages, Net Control, Operators, Plans, Station, and Settings open complete
+  child flyouts; Ops, Map, and Help remain direct destinations.
+- Replaced platform stock icons with application-owned SVG icons plus short labels.
+  Map now uses a map marker, Messages an envelope, and Net Control a radio/wave
+  symbol. The active master group uses a stable accent edge and border.
+- Added `adaptive_shell_controls_navigation_spec.md` as the detailed behavior and
+  acceptance specification. No database or configuration schema changed.
+
+Verification:
+
+- `162` presenter, adaptive-shell, existing main-shell, and responsiveness tests
+  pass (`36` focused presenter/adaptive/responsiveness tests plus `126` existing
+  main-shell tests).
+- Visual matrix exercised 1920x1080, 1000x700, 900x600, Normal and Large Text,
+  one to three radios, condition summaries, compact navigation, and the expanded
+  selected-radio Controls panel.
+- The shell does not require horizontal scrolling in the tested matrix.
+- No database or configuration schema was changed.
+- The refined Controls tray measured 122px high at 1920x1080 Normal Text, 156px
+  at 1000x700 Normal Text, and 258px at 900x600 Large Text, with zero horizontal
+  scroll in each visual run.
+- Compact navigation exposed all nine master/direct items; the Net Control flyout
+  contained FLDigi / SSB, JS8Call, and VHF/UHF rather than routing directly to one.
+- `172` related shell, state, and responsiveness tests pass with the one known
+  unrelated prewarm assertion deselected; Python compilation and `git diff --check`
+  pass.
+
+Final QSY refinement: target lists now omit every assigned-plan option whose
+normalized frequency exactly matches the radio's currently reported frequency.
+This applies to the quick QSY menu, advanced Controls tray, and legacy selector;
+an assigned plan with no remaining destination reports `No alternate QSY targets`.
+Frequency comparison uses the runtime MHz label when available and falls back to
+the runtime Hz value. No RF action, persistence, or schema behavior changed.
+
+Known unrelated test state: `test_phase7_main_window_does_not_prewarm_messages_tab`
+expects only FreqPlanner prewarming, while the existing runtime helper currently
+returns Messages and FreqPlanner. This shell work did not change that behavior.

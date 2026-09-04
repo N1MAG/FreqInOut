@@ -59,7 +59,6 @@ htmlcov/
 uv.lock
 
 # Local planning/docs artifacts (Codex workflow)
-AGENTS.md
 SPEC*.md
 !SPEC.md
 

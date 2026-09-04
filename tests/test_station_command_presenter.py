@@ -3,10 +3,49 @@ from __future__ import annotations
 from freqinout.gui.station_command_presenter import (
     countdown_text,
     frequency_controls_available,
+    next_action_state,
+    primary_context_text,
     qsy_action_state,
+    schedule_prominence,
     scheduler_action_state,
+    shell_layout_state,
+    source_chip_text,
     timed_qsy_text,
 )
+
+
+def test_shell_layout_density_accounts_for_sources_and_large_text() -> None:
+    assert shell_layout_state(1400, source_count=1).density == "roomy"
+    assert shell_layout_state(1000, source_count=2).density == "compact"
+    condensed = shell_layout_state(760, source_count=3, large_text=True)
+    assert condensed.density == "condensed"
+    assert condensed.stack_primary_context is True
+    assert condensed.show_clock_seconds is False
+
+
+def test_next_action_prominence_steps_up_at_thirty_and_fifteen_minutes() -> None:
+    assert schedule_prominence(None) == "calm"
+    assert schedule_prominence(31) == "calm"
+    assert schedule_prominence(30) == "upcoming"
+    assert schedule_prominence(16) == "upcoming"
+    assert schedule_prominence(15) == "urgent"
+    assert schedule_prominence(0) == "urgent"
+    assert schedule_prominence(-1) == "overdue"
+
+    action = next_action_state("MAGNET 20M", 15)
+    assert action.text == "MAGNET 20M in 15m"
+    assert action.prominence == "urgent"
+    assert action.role == "warning"
+
+
+def test_source_chip_context_is_only_shown_when_space_is_roomy() -> None:
+    assert source_chip_text("FIO-A", "MAGNET 40M", density="roomy") == "FIO-A  ·  MAGNET 40M"
+    assert source_chip_text("FIO-A", "MAGNET 40M", density="compact") == "FIO-A"
+
+
+def test_primary_context_explicitly_binds_destination_to_radio() -> None:
+    assert primary_context_text("FIO-A", "AMRRON 20M") == "FIO-A  ·  AMRRON 20M"
+    assert primary_context_text("", "") == "Radio  ·  Unavailable"
 
 
 def test_qsy_action_state_mutes_unchanged_frequency() -> None:
