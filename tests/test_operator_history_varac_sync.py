@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -157,6 +158,8 @@ def test_manage_menu_includes_sync_to_varac(monkeypatch, tmp_path: Path) -> None
     tab._show_manage_menu()
 
     assert "Sync to VarAC" in _FakeMenu.actions
+    assert "Change Callsign..." in _FakeMenu.actions
+    assert "Callsign History..." in _FakeMenu.actions
 
 
 def test_add_operator_dialog_triggers_varac_sync_after_success() -> None:
@@ -170,4 +173,59 @@ def test_add_operator_dialog_triggers_varac_sync_after_success() -> None:
 
     OperatorHistoryTab._add_operator_dialog(tab)
 
+    assert seen == ["load", "schedule", "sync"]
+
+
+def test_operator_history_applies_callsign_change_without_losing_identity(monkeypatch, tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    config = profile / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(profile))
+    QApplication.instance() or QApplication([])
+    tab = OperatorHistoryTab()
+    db_path = config / "freqinout_nets.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        from freqinout.core.checkins_db import ensure_operator_checkins_schema
+
+        ensure_operator_checkins_schema(conn)
+        conn.execute(
+            "INSERT INTO operator_checkins(callsign,name,group1,group_role,trusted) "
+            "VALUES ('K1OLD','Casey','MAGNET','HUB',1)"
+        )
+        ensure_operator_checkins_schema(conn)
+        original_id = conn.execute(
+            "SELECT operator_id FROM operator_checkins WHERE callsign='K1OLD'"
+        ).fetchone()[0]
+        conn.execute(
+            "CREATE TABLE peer_hf_schedule (id INTEGER PRIMARY KEY, owner_callsign TEXT)"
+        )
+        conn.execute("INSERT INTO peer_hf_schedule(owner_callsign) VALUES ('K1OLD')")
+        conn.commit()
+    finally:
+        conn.close()
+    seen: list[str] = []
+    tab._load_data = lambda **_kwargs: seen.append("load")
+    tab._schedule_history_update = lambda: seen.append("schedule")
+    tab._sync_varac_callsign_tags = lambda: seen.append("sync")
+    monkeypatch.setattr("freqinout.gui.operator_history_tab.QMessageBox.information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("freqinout.gui.operator_history_tab.QMessageBox.warning", lambda *_args, **_kwargs: None)
+    tab.settings.set(
+        "controlfreq_awareness_pins",
+        [{"type": "callsign", "value": "K1OLD", "label": "K1OLD"}],
+    )
+
+    assert tab._apply_callsign_change("K1OLD", "K1NEW", 1_725_494_400.0, "FCC change") is True
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT callsign,operator_id,name,group_role,trusted FROM operator_checkins"
+        ).fetchone()
+        schedule_call = conn.execute("SELECT owner_callsign FROM peer_hf_schedule").fetchone()[0]
+    finally:
+        conn.close()
+    assert row == ("K1NEW", original_id, "Casey", "HUB", 1)
+    assert schedule_call == "K1NEW"
+    assert tab.settings.get("controlfreq_awareness_pins")[0]["value"] == "K1NEW"
     assert seen == ["load", "schedule", "sync"]

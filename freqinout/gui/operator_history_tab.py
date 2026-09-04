@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint
+from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint, QDateTime
 from PySide6.QtGui import QColor, QPainter, QCursor
 from PySide6.QtWidgets import (
     QWidget,
@@ -33,10 +33,18 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QStyle,
     QCompleter,
+    QDateTimeEdit,
 )
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.checkins_db import ensure_operator_checkins_schema, upsert_operator_metadata
+from freqinout.core.operator_identity import (
+    CallsignConflictError,
+    OperatorIdentityError,
+    canonical_callsign,
+    change_operator_callsign,
+    list_callsign_history,
+)
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
@@ -2162,6 +2170,8 @@ class OperatorHistoryTab(QWidget):
         menu = QMenu(self)
         menu.addAction("Add Operator...", self._add_operator_dialog)
         menu.addAction("Edit Selected...", self._edit_selected_dialog)
+        menu.addAction("Change Callsign...", self._change_selected_callsign)
+        menu.addAction("Callsign History...", self._show_selected_callsign_history)
         menu.addAction("Delete Selected...", self._delete_selected)
         menu.addSeparator()
         menu.addAction("Sync to VarAC", self._sync_to_varac_action)
@@ -2341,6 +2351,9 @@ class OperatorHistoryTab(QWidget):
         form = QFormLayout(dlg)
 
         cs_edit = QLineEdit(defaults.get("callsign", ""))
+        if defaults.get("callsign"):
+            cs_edit.setReadOnly(True)
+            cs_edit.setToolTip("Use Manage Operators > Change Callsign to preserve operator history.")
         name_edit = QLineEdit(defaults.get("name", ""))
         state_edit = QLineEdit(defaults.get("state", ""))
         grid_edit = QLineEdit(defaults.get("grid", ""))
@@ -2417,6 +2430,164 @@ class OperatorHistoryTab(QWidget):
             self._load_data(show_toast=True)
             self._schedule_history_update()
             self._sync_varac_callsign_tags()
+
+    def _show_selected_callsign_history(self) -> None:
+        calls = self._selected_callsigns()
+        if len(calls) != 1:
+            QMessageBox.information(
+                self,
+                "Callsign History",
+                "Select one operator using the checkbox.",
+            )
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                self._ensure_schema(conn)
+                entries = list_callsign_history(conn, calls[0])
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.error("OperatorHistoryTab: callsign history failed: %s", exc)
+            QMessageBox.warning(self, "Callsign History", f"Could not load callsign history:\n{exc}")
+            return
+        lines = []
+        for entry in entries:
+            start = datetime.datetime.fromtimestamp(
+                entry.effective_from, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d") if entry.effective_from > 0 else "unknown"
+            if entry.effective_to is None:
+                interval = f"Current · since {start}"
+            else:
+                end = datetime.datetime.fromtimestamp(
+                    entry.effective_to, tz=datetime.timezone.utc
+                ).strftime("%Y-%m-%d")
+                interval = f"Former · {start} through {end}"
+            note = f" · {entry.note}" if entry.note else ""
+            lines.append(f"{entry.callsign}   {interval}{note}")
+        QMessageBox.information(
+            self,
+            f"Callsign History · {calls[0]}",
+            "\n".join(lines) if lines else "No callsign history is available.",
+        )
+
+    def _change_selected_callsign(self) -> None:
+        calls = self._selected_callsigns()
+        if len(calls) != 1:
+            QMessageBox.information(
+                self,
+                "Change Callsign",
+                "Select one operator using the checkbox.",
+            )
+            return
+        old_callsign = calls[0]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Change Callsign · {old_callsign}")
+        form = QFormLayout(dlg)
+        old_value = QLineEdit(old_callsign)
+        old_value.setReadOnly(True)
+        new_value = QLineEdit()
+        new_value.setPlaceholderText("New callsign")
+        effective_value = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        effective_value.setTimeSpec(Qt.UTC)
+        effective_value.setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'")
+        effective_value.setCalendarPopup(True)
+        note_value = QLineEdit()
+        note_value.setPlaceholderText("Optional reason or note")
+        preservation = QLabel(
+            "Groups, role, trust, schedules, pins, and retained history stay "
+            "with this operator. Received records keep their original callsign."
+        )
+        preservation.setWordWrap(True)
+        form.addRow("Current callsign:", old_value)
+        form.addRow("New callsign:", new_value)
+        form.addRow("Effective:", effective_value)
+        form.addRow("Note:", note_value)
+        form.addRow(preservation)
+        actions = QHBoxLayout()
+        save_btn = QPushButton("Change Callsign")
+        cancel_btn = QPushButton("Cancel")
+        actions.addStretch()
+        actions.addWidget(save_btn)
+        actions.addWidget(cancel_btn)
+        form.addRow(actions)
+        save_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        new_callsign = new_value.text().strip().upper()
+        if not new_callsign:
+            QMessageBox.warning(self, "Change Callsign", "Enter the new callsign.")
+            return
+        self._apply_callsign_change(
+            old_callsign,
+            new_callsign,
+            float(effective_value.dateTime().toUTC().toSecsSinceEpoch()),
+            note_value.text().strip(),
+        )
+
+    def _apply_callsign_change(
+        self,
+        old_callsign: str,
+        new_callsign: str,
+        effective_at: float,
+        note: str = "",
+    ) -> bool:
+        db_path = self._db_path()
+        if not db_path:
+            QMessageBox.warning(self, "Change Callsign", "Operator database path not found.")
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                self._ensure_schema(conn)
+                result = change_operator_callsign(
+                    conn,
+                    old_callsign,
+                    new_callsign,
+                    effective_at=effective_at,
+                    note=note,
+                    provenance="operator_history",
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except (CallsignConflictError, OperatorIdentityError) as exc:
+            QMessageBox.warning(self, "Change Callsign", str(exc))
+            return False
+        except Exception as exc:
+            log.error("OperatorHistoryTab: callsign change failed: %s", exc)
+            QMessageBox.warning(self, "Change Callsign", f"Could not change callsign:\n{exc}")
+            return False
+        try:
+            pins = self.settings.get("controlfreq_awareness_pins", ())
+            if isinstance(pins, (list, tuple)):
+                updated_pins = []
+                changed_pin = False
+                for raw_pin in pins:
+                    pin = dict(raw_pin) if isinstance(raw_pin, dict) else raw_pin
+                    if isinstance(pin, dict) and str(pin.get("type") or pin.get("pin_type") or "").lower() == "callsign":
+                        if canonical_callsign(pin.get("value")) == canonical_callsign(old_callsign):
+                            pin["value"] = result.current_callsign
+                            pin["label"] = result.current_callsign
+                            changed_pin = True
+                    updated_pins.append(pin)
+                if changed_pin:
+                    self.settings.set("controlfreq_awareness_pins", updated_pins)
+        except Exception as exc:
+            log.debug("OperatorHistoryTab: could not retarget awareness pins after callsign change: %s", exc)
+        self._load_data(show_toast=True)
+        self._schedule_history_update()
+        self._sync_varac_callsign_tags()
+        QMessageBox.information(
+            self,
+            "Callsign Changed",
+            f"{old_callsign} is now {result.current_callsign}. The former callsign remains in Operator History.",
+        )
+        return True
 
     def _edit_selected_dialog(self):
         calls = self._selected_callsigns()

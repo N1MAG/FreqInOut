@@ -584,3 +584,53 @@ and collision/reuse safeguards. Ops Search consumes the compact alias resolver
 so either call opens one operator focus; it does not mutate identities or load
 historical traffic for autocomplete. Source evidence keeps the callsign that
 was actually transmitted.
+
+### Ops dashboard focus and visual differentiation
+
+Status: implementation complete; production-data QA requested.
+
+Ops Center now treats the former Search FIO field as an explicit operational
+focus. Categorized, icon-led autocomplete resolves callsigns and former
+callsigns, groups, topics, historical events, geography, bands, and source
+families from compact indexes. Typing is autocomplete-only; selecting a result
+or pressing Enter applies a session-only focus. Navigation and application
+commands remain separate under `Go…` and `Ctrl+K`.
+
+The focus banner always states the intersecting Traffic Age, Group, and Source
+scope and renders Current Scope separately from Last Known. Retained read or
+archived messages, observations, Spotter status, SitRep status, and Operator
+History last-seen evidence can supply an aged Last Known fact without entering
+current traffic, unread, action, incident, or trend counts. Message and
+observation projections update compact entity summaries incrementally; initial
+backfills are bounded, resumable, and backgrounded. Suggestion and snapshot
+caches are explicitly bounded and use stale-while-revalidate with request-id
+suppression for superseded results.
+
+Operator History now owns `Change Callsign…` and `Callsign History…`. Changes
+are one audited transaction over a stable `operator_id`; effective-dated aliases
+allow delayed evidence to resolve by event time while later callsign reuse stays
+separate. Operator metadata, explicit/inferred peer schedules, awareness pins,
+and VarAC tags follow the new current callsign. Received message and observation
+evidence retains the callsign actually transmitted.
+
+The default Operations view now uses distinct visual grammars: ranked situation
+cards, source-lane cards, a peer rendezvous timeline, a schedule time rail, the
+existing current/prior traffic bars, and a three-band RF-readiness ladder.
+Dense awareness, source, peer, schedule, and propagation tables remain behind
+Evidence/Details disclosures. Compact focus actions collapse into `More…`, and
+theme-aware section fills replace fixed light backgrounds.
+
+Verification: `469` focused message, observation, operator, traffic, Ops, and
+shell regressions pass with the pre-existing Messages-prewarm assertion
+deselected. Python compilation and `git diff --check` pass. Offscreen visual QA
+covered Light/Normal at 1000x700, Dark/Large Text at 900x560, and a Dark wide
+dashboard at 1600x900; the focus actions and all new dashboard grammars remained
+readable without horizontal clipping. The monolithic suite reached `1475`
+passes and `3` skips before stopping on the pre-existing stale
+`radio_row.addWidget(QLabel("Radio"))` source assertion; an independent Qt/mesh
+thread teardown segfault also remains outside this change. Neither occurs in
+the focused regression set.
+
+Synthetic autocomplete timing over a 5,000-entity compact index measured a
+0.36 ms warm p95 on the development Mac, comfortably inside the 50 ms warm
+target; production telemetry remains the authority for Linux hardware.

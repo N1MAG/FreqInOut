@@ -114,7 +114,62 @@ NETS_TABLES: Dict[str, TableDef] = {
             timezone TEXT,
             tier TEXT,
             roster_parent_group TEXT,
-            roster_region TEXT
+            roster_region TEXT,
+            operator_id TEXT
+        )
+        """,
+    ),
+    "operator_identities": TableDef(
+        name="operator_identities",
+        db=NETS_DB,
+        description="Stable operator identities independent of callsign changes.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS operator_identities (
+            operator_id TEXT PRIMARY KEY,
+            current_callsign TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        )
+        """,
+    ),
+    "operator_callsign_history": TableDef(
+        name="operator_callsign_history",
+        db=NETS_DB,
+        description="Effective-dated current and former callsigns for a stable operator.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS operator_callsign_history (
+            alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operator_id TEXT NOT NULL,
+            callsign TEXT NOT NULL COLLATE NOCASE,
+            effective_from REAL NOT NULL DEFAULT 0,
+            effective_to REAL,
+            provenance TEXT NOT NULL DEFAULT 'migration',
+            note TEXT NOT NULL DEFAULT '',
+            created_utc TEXT NOT NULL,
+            UNIQUE(operator_id, callsign, effective_from)
+        );
+        CREATE INDEX IF NOT EXISTS idx_operator_alias_lookup
+            ON operator_callsign_history(callsign COLLATE NOCASE, effective_from DESC, effective_to);
+        CREATE INDEX IF NOT EXISTS idx_operator_alias_identity
+            ON operator_callsign_history(operator_id, effective_from DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_alias_current
+            ON operator_callsign_history(callsign COLLATE NOCASE) WHERE effective_to IS NULL;
+        """,
+    ),
+    "operator_identity_audit": TableDef(
+        name="operator_identity_audit",
+        db=NETS_DB,
+        description="Audited operator callsign identity changes.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS operator_identity_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operator_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            old_callsign TEXT,
+            new_callsign TEXT,
+            effective_at REAL,
+            changed_utc TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT ''
         )
         """,
     ),

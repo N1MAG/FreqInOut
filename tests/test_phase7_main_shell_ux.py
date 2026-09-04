@@ -3097,13 +3097,16 @@ def test_phase7_runtime_banner_suppresses_routine_launch_control_context() -> No
     assert "Messages hidden" in MainWindow._runtime_banner_text(profile, policy)
 
 
-def test_phase7_controlfreq_search_exposes_app_wide_quick_find() -> None:
+def test_phase7_controlfreq_search_separates_ops_focus_from_command_find() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
-    assert 'self.search_edit.setPlaceholderText("Search FIO... radios, schedules, messages, settings")' in source
-    assert "self.search_edit.returnPressed.connect(self._show_app_search_results)" in source
-    assert 'self.app_search_btn = QPushButton("Search FIO")' in source
+    assert "Focus on callsign, group, event, topic, place, band, or source" in source
+    assert "self.search_edit.returnPressed.connect(self._apply_best_focus_suggestion)" in source
+    assert 'self.app_search_btn = QPushButton("Focus")' in source
+    assert 'self.command_palette_btn.setText("Go…")' in source
     assert "root.show_quick_search_results(query, self.search_edit)" in source
+    assert 'QShortcut(QKeySequence("Ctrl+K"), self)' in main_source
 
 
 def test_phase7_main_window_quick_search_indexes_core_app_objects(monkeypatch) -> None:

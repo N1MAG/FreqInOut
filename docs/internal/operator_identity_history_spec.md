@@ -2,8 +2,9 @@
 
 ## Status
 
-Planned. This contract is required before Ops Center entity focus treats former
-callsigns as one operator.
+Implemented on the multi-rig private-testing branch on 2026-09-04. Operator
+History owns the audited mutation workflow; Ops focus and ingestion consume the
+stable identity/effective-dated alias resolver.
 
 ## Intent
 
@@ -165,4 +166,3 @@ callsign appears in traffic or an imported roster.
   during migration.
 - Identity lookup and autocomplete remain bounded and do not load retained
   message history.
-

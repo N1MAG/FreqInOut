@@ -173,6 +173,11 @@ def upsert_observation_conn(
         """,
         [(observation.observation_id, topic) for topic in observation.observed_topics],
     )
+    # Keep Ops autocomplete and Last Known summaries incremental without
+    # coupling the observation model to the GUI.
+    from freqinout.core.ops_focus import index_observation_for_ops_focus
+
+    index_observation_for_ops_focus(conn, observation)
     return observation.observation_id
 
 

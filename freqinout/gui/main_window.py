@@ -33,8 +33,9 @@ from PySide6.QtWidgets import (
     QStyle,
     QToolButton,
     QMenu,
+    QInputDialog,
 )
-from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction
+from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction, QShortcut, QKeySequence
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QMetaObject, QSize, Qt, QThread, QTimer, QUrl
 from pathlib import Path
@@ -285,6 +286,9 @@ class MainWindow(QMainWindow):
         self.help_tab = HelpTab(self)
         self._context_help_dialog: ContextHelpDialog | None = None
         self.controlfreq_tab = ControlFreqTab(self, plan_context_service=self.plan_context_service)
+        self.command_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.command_palette_shortcut.setContext(Qt.ApplicationShortcut)
+        self.command_palette_shortcut.activated.connect(self._open_command_palette)
         self.station_overview_tab = StationOverviewTab(self)
         self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
         self.station_health_tab = StationHealthTab(self)
@@ -4421,6 +4425,15 @@ class MainWindow(QMainWindow):
         if isinstance(data, Mapping):
             self._activate_quick_search_result(data)
         return True
+
+    def _open_command_palette(self) -> None:
+        query, accepted = QInputDialog.getText(
+            self,
+            "Find in FIO",
+            "Screen, setting, radio, schedule, action, or issue:",
+        )
+        if accepted and str(query or "").strip():
+            self.show_quick_search_results(str(query).strip(), self)
 
     def _style_station_command_bar(self, theme: dict) -> None:
         if not hasattr(self, "station_command_bar"):

@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed implementation contract for the next Ops Center refinement slices.
+Implemented on the multi-rig private-testing branch on 2026-09-04. The focus
+resolver, two-horizon evidence model, bounded caches/background backfills,
+command-search separation, icon family, and differentiated dashboard renderers
+are now the maintained contract.
 This spec refines, but does not replace,
 `multirig_product_ui_contract.md`,
 `controlfreq_operational_awareness_center_spec.md`, and
@@ -568,10 +571,9 @@ new visual renderers, minimizing duplicate queries and rework.
 - Light/Dark and Normal/Large Text layouts pass at 1920x1080, approximately
   1000x700, and approximately 900x560 without important horizontal scrolling.
 
-## Decisions Still Needed Before Slice 2
+## Decisions Applied
 
-1. Whether unknown but valid callsigns should be pinnable before they appear in
-   the operator table. Recommendation: yes; mark identity and trust as unknown.
-2. Whether choosing a focused station should automatically retarget the visible
-   Propagation card. Recommendation: yes, while leaving radio/QSY state
-   unchanged until the operator acts.
+1. Unknown but valid callsigns are pinnable before they appear in the operator
+   table and are labeled as not present in the operator roster.
+2. Choosing a station or supported geographic focus retargets the visible
+   Propagation card while leaving selected-radio and QSY state unchanged.

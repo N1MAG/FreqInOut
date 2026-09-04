@@ -6,13 +6,25 @@ import math
 import re
 import sqlite3
 import time
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QSize, QRectF
-from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QSize, QRectF, QModelIndex
+from PySide6.QtGui import (
+    QFont,
+    QFontMetrics,
+    QShortcut,
+    QKeySequence,
+    QColor,
+    QPainter,
+    QPen,
+    QIcon,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -38,6 +50,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QToolButton,
+    QProgressBar,
     QStyledItemDelegate,
     QStyle,
     QStyleOptionViewItem,
@@ -55,6 +68,16 @@ from freqinout.core.observation_queries import (
     query_observations,
 )
 from freqinout.core.observation_store import list_observations, upsert_observation
+from freqinout.core.ops_focus import (
+    OpsFocus,
+    OpsFocusSnapshot,
+    OpsFocusSuggestion,
+    backfill_ops_focus_index,
+    backfill_ops_focus_observation_index,
+    build_focus_snapshot,
+    format_focus_last_known,
+    search_focus_suggestions,
+)
 from freqinout.core.mesh import (
     clear_mesh_message_topic_override,
     default_mesh_db_path,
@@ -258,6 +281,9 @@ class ControlFreqTab(QWidget):
     """
 
     _message_summary_ready = Signal(int, object, object)
+    _focus_suggestions_ready = Signal(int, object, object)
+    _focus_snapshot_ready = Signal(int, object, object)
+    _focus_backfill_ready = Signal(bool, int)
 
     def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
@@ -385,12 +411,32 @@ class ControlFreqTab(QWidget):
         self._message_summary_applied_id = 0
         self._message_summary_cache_rows: List[List[str]] = []
         self._message_summary_ready.connect(self._on_message_summary_ready)
-        self.destroyed.connect(lambda *_args: self._shutdown_message_summary_executor())
+        self._focus_executor: Optional[ThreadPoolExecutor] = None
+        self._focus_suggestion_request_id = 0
+        self._focus_snapshot_request_id = 0
+        self._focus_apply_when_ready = False
+        self._focus_suggestions: tuple[OpsFocusSuggestion, ...] = ()
+        self._active_ops_focus: OpsFocus | None = None
+        self._focus_suggestion_cache: OrderedDict[tuple[object, ...], tuple[OpsFocusSuggestion, ...]] = OrderedDict()
+        self._focus_snapshot_cache: OrderedDict[tuple[object, ...], OpsFocusSnapshot] = OrderedDict()
+        self._focus_suggestion_cache_keys: Dict[int, tuple[object, ...]] = {}
+        self._focus_snapshot_cache_keys: Dict[int, tuple[object, ...]] = {}
+        self._focus_backfill_pending = False
+        self._focus_backfill_complete = False
+        self._focus_suggestions_ready.connect(self._on_focus_suggestions_ready)
+        self._focus_snapshot_ready.connect(self._on_focus_snapshot_ready)
+        self._focus_backfill_ready.connect(self._on_focus_backfill_ready)
+        self._focus_autocomplete_timer = QTimer(self)
+        self._focus_autocomplete_timer.setSingleShot(True)
+        self._focus_autocomplete_timer.setInterval(125)
+        self._focus_autocomplete_timer.timeout.connect(self._request_focus_suggestions)
+        self.destroyed.connect(lambda *_args: self._shutdown_background_executors())
         self._build_ui()
         refresh_hold_duration_combo(self.hold_duration_combo, self.settings, self._runtime_hold_duration_profile())
         self._restore_ui_state()
         self._apply_theme()
         self._refresh_all()
+        QTimer.singleShot(0, self._schedule_focus_index_backfill)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -453,15 +499,32 @@ class ControlFreqTab(QWidget):
         filter_row.setSpacing(8)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search FIO... radios, schedules, messages, settings")
-        self.search_edit.textChanged.connect(self._on_filters_changed)
-        self.search_edit.returnPressed.connect(self._show_app_search_results)
+        self.search_edit.setPlaceholderText("Focus on callsign, group, event, topic, place, band, or source…")
+        self.search_edit.setAccessibleName("Focus Ops Center")
+        self.search_edit.setAccessibleDescription(
+            "Type an operational entity. Suggestions do not refresh the dashboard until selected."
+        )
+        self.search_edit.textChanged.connect(self._on_focus_search_text_changed)
+        self.search_edit.returnPressed.connect(self._apply_best_focus_suggestion)
         self.search_edit.setMinimumWidth(220)
         self.search_edit.setMaximumWidth(420)
 
-        self.app_search_btn = QPushButton("Search FIO")
-        self.app_search_btn.setToolTip("Search across radios, schedules, settings, actions, and current setup issues.")
-        self.app_search_btn.clicked.connect(self._show_app_search_results)
+        self._focus_completion_model = QStandardItemModel(self)
+        self._focus_completer = QCompleter(self._focus_completion_model, self)
+        self._focus_completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self._focus_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._focus_completer.setMaxVisibleItems(14)
+        self._focus_completer.activated[QModelIndex].connect(self._activate_focus_completion)
+        self.search_edit.setCompleter(self._focus_completer)
+
+        self.app_search_btn = QPushButton("Focus")
+        self.app_search_btn.setToolTip("Apply the best matching operational focus.")
+        self.app_search_btn.clicked.connect(self._apply_best_focus_suggestion)
+        self.command_palette_btn = QToolButton()
+        self.command_palette_btn.setText("Go…")
+        self.command_palette_btn.setToolTip("Find a screen, setting, radio, schedule, action, or setup issue (Ctrl+K).")
+        self.command_palette_btn.setAccessibleName("Open command search")
+        self.command_palette_btn.clicked.connect(self._show_command_palette)
 
         self.group_combo = QComboBox()
         self.group_combo.setMinimumWidth(130)
@@ -512,6 +575,63 @@ class ControlFreqTab(QWidget):
 
         self._arrange_filter_controls(compact=False)
         root.addLayout(filter_row)
+
+        self.focus_banner = QFrame()
+        self.focus_banner.setObjectName("controlfreqFocusBanner")
+        self.focus_banner.setVisible(False)
+        focus_layout = QHBoxLayout(self.focus_banner)
+        focus_layout.setContentsMargins(10, 7, 8, 7)
+        focus_layout.setSpacing(8)
+        self.focus_icon_label = QLabel()
+        self.focus_icon_label.setFixedSize(24, 24)
+        focus_layout.addWidget(self.focus_icon_label, alignment=Qt.AlignTop)
+        focus_text_layout = QVBoxLayout()
+        focus_text_layout.setContentsMargins(0, 0, 0, 0)
+        focus_text_layout.setSpacing(2)
+        self.focus_title_label = QLabel("Focused")
+        self.focus_title_label.setObjectName("controlfreqFocusTitle")
+        self.focus_title_label.setStyleSheet("font-weight: 700;")
+        self.focus_title_label.setWordWrap(True)
+        focus_text_layout.addWidget(self.focus_title_label)
+        self.focus_current_label = QLabel("")
+        self.focus_current_label.setObjectName("controlfreqFocusCurrent")
+        self.focus_current_label.setWordWrap(True)
+        focus_text_layout.addWidget(self.focus_current_label)
+        self.focus_history_label = QLabel("")
+        self.focus_history_label.setObjectName("controlfreqFocusHistory")
+        self.focus_history_label.setWordWrap(True)
+        focus_text_layout.addWidget(self.focus_history_label)
+        focus_layout.addLayout(focus_text_layout, 1)
+        self.focus_inbox_btn = QPushButton("Inbox")
+        self.focus_inbox_btn.clicked.connect(self._open_focus_inbox)
+        self.focus_map_btn = QPushButton("Map")
+        self.focus_map_btn.clicked.connect(self._open_focus_map)
+        self.focus_pin_btn = QPushButton("Pin")
+        self.focus_pin_btn.clicked.connect(self._pin_active_focus)
+        self.focus_history_btn = QPushButton("History")
+        self.focus_history_btn.clicked.connect(self._open_focus_history)
+        self.focus_more_btn = QToolButton()
+        self.focus_more_btn.setText("More…")
+        self.focus_more_btn.setPopupMode(QToolButton.InstantPopup)
+        self.focus_more_btn.setToolTip("Additional focus actions.")
+        focus_more_menu = QMenu(self.focus_more_btn)
+        focus_more_menu.addAction("Map", self._open_focus_map)
+        focus_more_menu.addAction("Pin", self._pin_active_focus)
+        focus_more_menu.addAction("History", self._open_focus_history)
+        self.focus_more_btn.setMenu(focus_more_menu)
+        self.focus_more_btn.setVisible(False)
+        self.focus_clear_btn = QPushButton("Clear Focus")
+        self.focus_clear_btn.clicked.connect(self._clear_ops_focus)
+        for button in (
+            self.focus_inbox_btn,
+            self.focus_map_btn,
+            self.focus_pin_btn,
+            self.focus_history_btn,
+            self.focus_more_btn,
+            self.focus_clear_btn,
+        ):
+            focus_layout.addWidget(button, alignment=Qt.AlignTop)
+        root.addWidget(self.focus_banner)
 
         self.applied_filters_label = QLabel("")
         self.applied_filters_label.setObjectName("controlfreqAppliedFilters")
@@ -583,6 +703,20 @@ class ControlFreqTab(QWidget):
         self.activity_window_combo.currentIndexChanged.connect(self._refresh_activity)
         self.activity_window_combo.currentIndexChanged.connect(self._schedule_persist_ui_state)
         act_header.addWidget(self.activity_window_combo)
+        self.source_lanes_details_btn = QToolButton()
+        self.source_lanes_details_btn.setText("Source Details")
+        self.source_lanes_details_btn.setCheckable(True)
+        self.source_lanes_details_btn.setToolTip("Show the detailed source-lane table.")
+        self.source_lanes_details_btn.toggled.connect(
+            lambda checked: self.source_lanes_table.setVisible(bool(checked))
+        )
+        act_header.addWidget(self.source_lanes_details_btn)
+        self.awareness_details_btn = QToolButton()
+        self.awareness_details_btn.setText("Evidence")
+        self.awareness_details_btn.setCheckable(True)
+        self.awareness_details_btn.setToolTip("Show the dense awareness and activity evidence tables.")
+        self.awareness_details_btn.toggled.connect(self._set_awareness_details_visible)
+        act_header.addWidget(self.awareness_details_btn)
         act_header.addStretch(1)
         act_layout.addLayout(act_header)
         self.awareness_now_next_label = QLabel("Now: -- | Next: --")
@@ -601,7 +735,13 @@ class ControlFreqTab(QWidget):
         source_header.setSectionResizeMode(2, QHeaderView.Stretch)
         source_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.source_lanes_table.itemSelectionChanged.connect(self._set_source_lane_focus_from_selection)
+        self.source_lane_cards_container = QWidget()
+        self.source_lane_cards_layout = QVBoxLayout(self.source_lane_cards_container)
+        self.source_lane_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_lane_cards_layout.setSpacing(5)
+        act_layout.addWidget(self.source_lane_cards_container)
         act_layout.addWidget(self.source_lanes_table)
+        self.source_lanes_table.setVisible(False)
         self.awareness_sop_label = QLabel("SOP: --")
         self.awareness_sop_label.setObjectName("controlfreqAwarenessSop")
         self.awareness_sop_label.setWordWrap(True)
@@ -661,6 +801,7 @@ class ControlFreqTab(QWidget):
         awareness_header.setSectionResizeMode(2, QHeaderView.Stretch)
         awareness_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         act_layout.addWidget(self.awareness_table)
+        self.awareness_table.setVisible(False)
         self.awareness_pins_label = QLabel("")
         self.awareness_pins_label.setObjectName("controlfreqAwarenessPins")
         self.awareness_pins_label.setWordWrap(True)
@@ -723,6 +864,7 @@ class ControlFreqTab(QWidget):
         self._setup_table_defaults(self.activity_table)
         self.activity_table.horizontalHeader().setStretchLastSection(True)
         act_layout.addWidget(self.activity_table)
+        self.activity_table.setVisible(False)
 
         self.intersection_box = QGroupBox("Peer Schedule Finder")
         intersection_layout = QVBoxLayout(self.intersection_box)
@@ -747,6 +889,12 @@ class ControlFreqTab(QWidget):
         self.intersection_window_combo.currentIndexChanged.connect(self._schedule_persist_ui_state)
         inter_header_row.addWidget(self.intersection_window_combo, alignment=Qt.AlignVCenter)
         inter_header_row.addStretch(1)
+        self.peer_details_btn = QToolButton()
+        self.peer_details_btn.setText("Details")
+        self.peer_details_btn.setCheckable(True)
+        self.peer_details_btn.setToolTip("Show the detailed peer overlap tables.")
+        self.peer_details_btn.toggled.connect(self._set_peer_details_visible)
+        inter_header_row.addWidget(self.peer_details_btn)
         intersection_layout.addLayout(inter_header_row)
         self.intersection_table = QTableWidget(0, 3)
         self.intersection_table.setHorizontalHeaderLabels(["When", "Peers", "Net/Band/Freq"])
@@ -756,6 +904,12 @@ class ControlFreqTab(QWidget):
         inter_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         inter_header.setSectionResizeMode(2, QHeaderView.Stretch)
         intersection_layout.addWidget(self.intersection_table)
+        self.intersection_table.setVisible(False)
+        self.peer_timeline_container = QWidget()
+        self.peer_timeline_layout = QVBoxLayout(self.peer_timeline_container)
+        self.peer_timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.peer_timeline_layout.setSpacing(5)
+        intersection_layout.addWidget(self.peer_timeline_container)
         self.peer_finder_table = QTableWidget(0, 5)
         self.peer_finder_table.setObjectName("controlfreqPeerScheduleFinderTable")
         self.peer_finder_table.setHorizontalHeaderLabels(["Peer", "When", "Net/Band", "Heard", "Actions"])
@@ -768,6 +922,7 @@ class ControlFreqTab(QWidget):
         peer_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         peer_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         intersection_layout.addWidget(self.peer_finder_table)
+        self.peer_finder_table.setVisible(False)
         self._peer_finder_contexts: List[Dict[str, str]] = []
 
         self.inbox_box = QGroupBox("Traffic Intelligence")
@@ -948,6 +1103,29 @@ class ControlFreqTab(QWidget):
 
         self.schedule_box = QGroupBox("Schedule Outlook")
         schedule_layout = QVBoxLayout(self.schedule_box)
+        schedule_header = QHBoxLayout()
+        self.schedule_now_marker = QLabel("● NOW")
+        self.schedule_now_marker.setStyleSheet("font-weight: 700;")
+        schedule_header.addWidget(self.schedule_now_marker)
+        schedule_header.addStretch(1)
+        self.schedule_later_btn = QToolButton()
+        self.schedule_later_btn.setText("Later")
+        self.schedule_later_btn.setCheckable(True)
+        self.schedule_later_btn.setToolTip("Show or hide routine later events.")
+        self.schedule_later_btn.toggled.connect(lambda *_args: self._refresh_schedule_outlook())
+        schedule_header.addWidget(self.schedule_later_btn)
+        self.schedule_details_btn = QToolButton()
+        self.schedule_details_btn.setText("Details")
+        self.schedule_details_btn.setCheckable(True)
+        self.schedule_details_btn.setToolTip("Show the detailed schedule table.")
+        self.schedule_details_btn.toggled.connect(self._set_schedule_details_visible)
+        schedule_header.addWidget(self.schedule_details_btn)
+        schedule_layout.addLayout(schedule_header)
+        self.schedule_timeline_container = QWidget()
+        self.schedule_timeline_layout = QVBoxLayout(self.schedule_timeline_container)
+        self.schedule_timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.schedule_timeline_layout.setSpacing(5)
+        schedule_layout.addWidget(self.schedule_timeline_container)
         self.schedule_table = QTableWidget(0, 5)
         self.schedule_table.setHorizontalHeaderLabels(["When/Day", "Type", "Group/Net", "Band/Freq", "Actions"])
         self._setup_table_defaults(self.schedule_table)
@@ -960,8 +1138,10 @@ class ControlFreqTab(QWidget):
         sched_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         sched_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         schedule_layout.addWidget(self.schedule_table)
+        self.schedule_table.setVisible(False)
         self.schedule_action_hint = QLabel("Tip: use buttons in Actions, or right-click a row for actions.")
         self.schedule_action_hint.setWordWrap(True)
+        self.schedule_action_hint.setVisible(False)
         schedule_layout.addWidget(self.schedule_action_hint)
 
         self.right_splitter = QSplitter(Qt.Vertical)
@@ -1003,6 +1183,11 @@ class ControlFreqTab(QWidget):
         self.prop_summary_label.setWordWrap(True)
         self.prop_summary_label.setStyleSheet("font-weight: 600;")
         prop_layout.addWidget(self.prop_summary_label)
+        self.prop_band_ladder_container = QWidget()
+        self.prop_band_ladder_layout = QHBoxLayout(self.prop_band_ladder_container)
+        self.prop_band_ladder_layout.setContentsMargins(0, 0, 0, 0)
+        self.prop_band_ladder_layout.setSpacing(8)
+        prop_layout.addWidget(self.prop_band_ladder_container)
         self.prop_detail_widget = QWidget()
         prop_detail_layout = QVBoxLayout(self.prop_detail_widget)
         prop_detail_layout.setContentsMargins(0, 0, 0, 0)
@@ -1096,10 +1281,16 @@ class ControlFreqTab(QWidget):
         mode = self._controlfreq_responsive_mode_for_width(int(self.width() or 0))
         self._arrange_filter_controls(mode == "compact")
         self._apply_ops_table_column_layout(mode == "compact")
+        compact = mode == "compact"
+        for name in ("focus_map_btn", "focus_pin_btn", "focus_history_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setVisible(not compact)
+        if hasattr(self, "focus_more_btn"):
+            self.focus_more_btn.setVisible(compact)
         if mode == self._responsive_layout_mode:
             return
         self._responsive_layout_mode = mode
-        compact = mode == "compact"
         try:
             self.top_overview_row.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
             self.top_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
@@ -1130,6 +1321,7 @@ class ControlFreqTab(QWidget):
         controls = (
             self.search_edit,
             self.app_search_btn,
+            self.command_palette_btn,
             self.group_combo,
             self.traffic_source_combo,
             self.traffic_age_combo,
@@ -1139,11 +1331,12 @@ class ControlFreqTab(QWidget):
         )
         for control in controls:
             layout.removeWidget(control)
-        for column in range(8):
+        for column in range(9):
             layout.setColumnStretch(column, 0)
         if compact:
-            layout.addWidget(self.search_edit, 0, 0, 1, 3)
-            layout.addWidget(self.app_search_btn, 0, 3)
+            layout.addWidget(self.search_edit, 0, 0, 1, 2)
+            layout.addWidget(self.app_search_btn, 0, 2)
+            layout.addWidget(self.command_palette_btn, 0, 3)
             layout.addWidget(self.group_combo, 1, 0)
             layout.addWidget(self.traffic_source_combo, 1, 1)
             layout.addWidget(self.traffic_age_combo, 1, 2)
@@ -1285,7 +1478,9 @@ class ControlFreqTab(QWidget):
             values = {
                 "controlfreq_show_local": bool(self._show_local),
                 "controlfreq_focus_mode": bool(self._focus_mode),
-                "controlfreq_search": (self.search_edit.text() or "").strip(),
+                # Focus is deliberately session-only. Persistent monitoring is
+                # represented by Pins, not a restored hidden dashboard lens.
+                "controlfreq_search": "",
                 "controlfreq_group_filter": (self.group_combo.currentData() or "").strip().upper(),
                 "controlfreq_traffic_age_seconds": int(self.traffic_age_combo.currentData() or 0),
                 "controlfreq_activity_window_min": int(self.activity_window_combo.currentData() or 120),
@@ -1326,11 +1521,6 @@ class ControlFreqTab(QWidget):
             self._view_preset = self._preset_for_view_cards(self._view_cards)
             if saved_preset == "Custom":
                 self._view_preset = "Custom"
-            saved_search = str(self.settings.get("controlfreq_search", "") or "").strip()
-            if saved_search:
-                self.search_edit.blockSignals(True)
-                self.search_edit.setText(saved_search)
-                self.search_edit.blockSignals(False)
             saved_window = int(self.settings.get("controlfreq_activity_window_min", 120) or 120)
             idx = self.activity_window_combo.findData(saved_window)
             if idx >= 0:
@@ -1776,6 +1966,21 @@ class ControlFreqTab(QWidget):
             theme = self._theme()
             self.help_btn.setStyleSheet(button_style("secondary", theme))
             self.app_search_btn.setStyleSheet(button_style("secondary", theme))
+            self.command_palette_btn.setStyleSheet(button_style("muted", theme))
+            focus_bg, focus_fg, focus_border = self._semantic_panel_colors("secondary")
+            self.focus_banner.setStyleSheet(
+                f"QFrame#controlfreqFocusBanner {{ background: {focus_bg}; color: {focus_fg}; "
+                f"border: 1px solid {focus_border}; border-radius: 6px; }}"
+            )
+            for button in (
+                self.focus_inbox_btn,
+                self.focus_map_btn,
+                self.focus_pin_btn,
+                self.focus_history_btn,
+                self.focus_more_btn,
+                self.focus_clear_btn,
+            ):
+                button.setStyleSheet(button_style("secondary", theme))
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
             self.freq_action_btn.setStyleSheet(button_style("muted", theme))
@@ -1940,6 +2145,7 @@ class ControlFreqTab(QWidget):
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
         if self._active:
+            QTimer.singleShot(0, self._schedule_focus_index_backfill)
             self._reload_sop_manager_settings()
             if self._timer is None:
                 self._timer = QTimer(self)
@@ -1978,6 +2184,7 @@ class ControlFreqTab(QWidget):
 
     def on_tab_activated(self) -> None:
         with perf_span("controlfreq.on_tab_activated", settings=self.settings, min_ms=5.0):
+            self._schedule_focus_index_backfill()
             now = time.time()
             stale = (self._last_refresh_ts <= 0.0) or (
                 now - float(self._last_refresh_ts) >= self._activation_refresh_interval_sec
@@ -2348,6 +2555,8 @@ class ControlFreqTab(QWidget):
         self._update_clear_filters_style()
         self._update_applied_filters_label()
         self._schedule_persist_ui_state()
+        if self._active_ops_focus is not None:
+            self._request_focus_snapshot()
         try:
             self._filter_refresh_timer.start(220)
         except Exception:
@@ -2371,6 +2580,7 @@ class ControlFreqTab(QWidget):
             log.debug("ControlFreq: filter refresh failed: %s", e)
 
     def _clear_filters(self) -> None:
+        self._clear_ops_focus(clear_search=True, refresh=False)
         self.search_edit.clear()
         if self.group_combo.count() > 0:
             self.group_combo.setCurrentIndex(0)
@@ -2398,7 +2608,7 @@ class ControlFreqTab(QWidget):
         self._on_filters_changed()
 
     def _filters_active(self) -> bool:
-        search_active = bool((self.search_edit.text() or "").strip())
+        search_active = self._active_ops_focus is not None
         group_active = bool((self.group_combo.currentData() or "").strip())
         window_active = int(self.activity_window_combo.currentData() or 120) != 120
         intersection_combo = getattr(self, "intersection_window_combo", self.activity_window_combo)
@@ -2408,7 +2618,20 @@ class ControlFreqTab(QWidget):
         return search_active or group_active or window_active or intersection_window_active or source_active or topic_active
 
     def _show_app_search_results(self) -> None:
+        """Backward-compatible route for the navigation command search."""
+        self._show_command_palette()
+
+    def _show_command_palette(self) -> None:
         query = (self.search_edit.text() or "").strip()
+        if not query:
+            query, ok = QInputDialog.getText(
+                self,
+                "Find in FIO",
+                "Screen, setting, radio, schedule, action, or issue:",
+            )
+            if not ok:
+                return
+            query = str(query or "").strip()
         if not query:
             return
         root = self.window()
@@ -2418,6 +2641,494 @@ class ControlFreqTab(QWidget):
                 return
             except Exception as e:
                 log.debug("ControlFreq: app search failed: %s", e)
+
+    def _ensure_focus_executor(self) -> ThreadPoolExecutor:
+        if self._focus_executor is None:
+            self._focus_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="fio-ops-focus",
+            )
+        return self._focus_executor
+
+    def _shutdown_background_executors(self) -> None:
+        self._shutdown_message_summary_executor()
+        executor = self._focus_executor
+        self._focus_executor = None
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+        except Exception as exc:
+            log.debug("ControlFreq: focus executor shutdown failed: %s", exc)
+
+    def _schedule_focus_index_backfill(self) -> None:
+        if self._focus_backfill_pending or self._focus_backfill_complete:
+            return
+        db_path = self._db_path()
+        if not db_path.exists():
+            self._focus_backfill_complete = True
+            return
+        self._focus_backfill_pending = True
+
+        def _work() -> tuple[int, bool]:
+            perf_meta: Dict[str, object] = {"budget_ms": 200, "batch_size": 500}
+            with perf_span("controlfreq.focus_index_backfill", meta=perf_meta, min_ms=0.0):
+                conn = connect_sqlite(db_path, timeout=1.5, busy_timeout_ms=1500)
+                try:
+                    indexed = 0
+                    messages_complete = False
+                    observations_complete = False
+                    deadline = time.monotonic() + 0.20
+                    while not (messages_complete and observations_complete) and time.monotonic() < deadline:
+                        message_count, messages_complete = backfill_ops_focus_index(conn, batch_size=500)
+                        observation_count, observations_complete = backfill_ops_focus_observation_index(
+                            conn, batch_size=500
+                        )
+                        indexed += message_count + observation_count
+                        if message_count + observation_count == 0:
+                            break
+                    conn.commit()
+                    perf_meta["rows_indexed"] = indexed
+                    perf_meta["complete"] = messages_complete and observations_complete
+                    return indexed, messages_complete and observations_complete
+                finally:
+                    conn.close()
+
+        future = self._ensure_focus_executor().submit(_work)
+
+        def _done(done: Future) -> None:
+            try:
+                indexed, complete = done.result()
+            except Exception as exc:
+                log.debug("ControlFreq: focus index backfill failed: %s", exc)
+                indexed, complete = 0, True
+            try:
+                self._focus_backfill_ready.emit(bool(complete), int(indexed))
+            except RuntimeError:
+                pass
+
+        future.add_done_callback(_done)
+
+    def _on_focus_backfill_ready(self, complete: bool, indexed: int) -> None:
+        self._focus_backfill_pending = False
+        self._focus_backfill_complete = bool(complete)
+        if indexed and (self.search_edit.text() or "").strip():
+            self._focus_autocomplete_timer.start(0)
+        if not complete and self._active:
+            QTimer.singleShot(100, self._schedule_focus_index_backfill)
+
+    def _configured_focus_entities(self) -> tuple[tuple[str, str, str], ...]:
+        entities: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index in range(self.group_combo.count()):
+            group = normalize_group_name(self.group_combo.itemData(index))
+            if group and ("group", group) not in seen:
+                seen.add(("group", group))
+                entities.append(("group", group, group))
+        for state in LOWER48_STATES:
+            key = ("geography", f"state:{str(state).upper()}")
+            if key not in seen:
+                seen.add(key)
+                entities.append((key[0], key[1], str(state).upper()))
+        for region in FEMA_REGIONS:
+            label = str(region).upper()
+            key = ("geography", f"region:{label}")
+            if key not in seen:
+                seen.add(key)
+                entities.append((key[0], key[1], label))
+        for index in range(self.traffic_source_combo.count()):
+            source = str(self.traffic_source_combo.itemData(index) or "").strip().lower()
+            if not source:
+                continue
+            label = str(self.traffic_source_combo.itemText(index) or source).replace("Traffic Source:", "").strip()
+            key = ("source", source)
+            if key not in seen:
+                seen.add(key)
+                entities.append((key[0], key[1], label))
+        return tuple(entities)
+
+    def _on_focus_search_text_changed(self, text: str) -> None:
+        self._update_clear_filters_style()
+        query = str(text or "").strip()
+        if not query:
+            self._focus_completion_model.clear()
+            self._focus_suggestions = ()
+            return
+        self._focus_autocomplete_timer.start(125)
+
+    def _request_focus_suggestions(self) -> None:
+        query = (self.search_edit.text() or "").strip()
+        if not query:
+            return
+        self._focus_suggestion_request_id += 1
+        request_id = self._focus_suggestion_request_id
+        db_path = self._db_path()
+        extras = self._configured_focus_entities()
+        cache_key = (query.casefold(), extras, self._focus_db_checkpoint(db_path))
+        self._bounded_request_key_put(self._focus_suggestion_cache_keys, request_id, cache_key)
+        cached = self._focus_suggestion_cache.get(cache_key)
+        if cached is not None:
+            self._focus_suggestion_cache.move_to_end(cache_key)
+            self._on_focus_suggestions_ready(request_id, cached, "")
+
+        def _work() -> tuple[OpsFocusSuggestion, ...]:
+            perf_meta: Dict[str, object] = {
+                "cache": "refresh" if cached is not None else "miss",
+                "query_chars": len(query),
+            }
+            with perf_span(
+                "controlfreq.focus_autocomplete",
+                meta=perf_meta,
+                min_ms=0.0,
+            ):
+                conn = connect_sqlite(db_path, timeout=1.5, busy_timeout_ms=1500)
+                try:
+                    result = search_focus_suggestions(conn, query, limit=8, extra_entities=extras)
+                    perf_meta["result_count"] = len(result)
+                    return result
+                finally:
+                    conn.close()
+
+        future = self._ensure_focus_executor().submit(_work)
+
+        def _done(done: Future) -> None:
+            try:
+                suggestions: object = done.result()
+                error = ""
+            except Exception as exc:
+                suggestions = ()
+                error = str(exc)
+            try:
+                self._focus_suggestions_ready.emit(request_id, suggestions, error)
+            except RuntimeError:
+                pass
+
+        future.add_done_callback(_done)
+
+    def _focus_icon_path(self, kind: str) -> Path:
+        icon_root = Path(__file__).resolve().parents[2] / "assets" / "icons"
+        mapping = {
+            "callsign": icon_root / "navigation" / "operators.svg",
+            "group": icon_root / "navigation" / "operators.svg",
+            "event": icon_root / "ops" / "event.svg",
+            "topic": icon_root / "ops" / "topic.svg",
+            "geography": icon_root / "navigation" / "map.svg",
+            "band": icon_root / "ops" / "rf-readiness.svg",
+            "source": icon_root / "ops" / "source.svg",
+        }
+        return mapping.get(str(kind or "").lower(), icon_root / "navigation" / "ops.svg")
+
+    def _on_focus_suggestions_ready(self, request_id: int, payload: object, error: object) -> None:
+        if request_id != self._focus_suggestion_request_id:
+            with perf_span("controlfreq.focus_stale_result_drop", meta={"kind": "suggestions"}):
+                pass
+            return
+        if error:
+            log.debug("ControlFreq: focus suggestions failed: %s", error)
+        suggestions = tuple(
+            item for item in (payload if isinstance(payload, (tuple, list)) else ())
+            if isinstance(item, OpsFocusSuggestion)
+        )
+        self._focus_suggestions = suggestions
+        cache_key = self._focus_suggestion_cache_keys.get(request_id)
+        if cache_key is not None and not error:
+            self._bounded_cache_put(self._focus_suggestion_cache, cache_key, suggestions, limit=64)
+        self._focus_completion_model.clear()
+        grouped: OrderedDict[str, list[OpsFocusSuggestion]] = OrderedDict()
+        for suggestion in suggestions:
+            grouped.setdefault(suggestion.focus.kind, []).append(suggestion)
+        for kind, kind_suggestions in grouped.items():
+            heading = QStandardItem(f"{kind.title()} suggestions")
+            heading.setEnabled(False)
+            heading.setSelectable(False)
+            heading.setData(f"{kind.title()} suggestions", Qt.AccessibleTextRole)
+            self._focus_completion_model.appendRow(heading)
+            for suggestion in kind_suggestions:
+                label = suggestion.primary_text
+                if suggestion.secondary_text:
+                    label = f"{label}  ·  {suggestion.secondary_text}"
+                item = QStandardItem(QIcon(str(self._focus_icon_path(suggestion.focus.kind))), label)
+                item.setData(suggestion, Qt.UserRole)
+                item.setData(label, Qt.AccessibleTextRole)
+                item.setData(suggestion.secondary_text, Qt.AccessibleDescriptionRole)
+                item.setToolTip(label)
+                self._focus_completion_model.appendRow(item)
+        if suggestions and self.search_edit.hasFocus():
+            self._focus_completer.complete()
+        if bool(getattr(self, "_focus_apply_when_ready", False)):
+            self._focus_apply_when_ready = False
+            if suggestions:
+                self._apply_ops_focus(suggestions[0].focus)
+
+    def _activate_focus_completion(self, index: QModelIndex) -> None:
+        suggestion = index.data(Qt.UserRole)
+        if isinstance(suggestion, OpsFocusSuggestion):
+            self._apply_ops_focus(suggestion.focus)
+
+    def _apply_best_focus_suggestion(self) -> None:
+        popup = self._focus_completer.popup()
+        if popup is not None and popup.currentIndex().isValid():
+            suggestion = popup.currentIndex().data(Qt.UserRole)
+            if isinstance(suggestion, OpsFocusSuggestion):
+                self._apply_ops_focus(suggestion.focus)
+                return
+        query = (self.search_edit.text() or "").strip()
+        for suggestion in self._focus_suggestions:
+            if suggestion.focus.query_text.strip().lower() == query.lower():
+                self._apply_ops_focus(suggestion.focus)
+                return
+        if query:
+            self._focus_apply_when_ready = True
+            self._request_focus_suggestions()
+
+    def _apply_ops_focus(self, focus: OpsFocus) -> None:
+        self._active_ops_focus = focus
+        self._focus_apply_when_ready = False
+        previous = self.search_edit.blockSignals(True)
+        try:
+            self.search_edit.setText(focus.display_label)
+        finally:
+            self.search_edit.blockSignals(previous)
+        self.focus_banner.setVisible(True)
+        self.focus_title_label.setText(f"Focused on {focus.display_label} · {focus.kind.title()}")
+        self.focus_current_label.setText("Current Scope · checking…")
+        self.focus_history_label.setText("Last Known · checking retained evidence…")
+        icon = QIcon(str(self._focus_icon_path(focus.kind)))
+        self.focus_icon_label.setPixmap(icon.pixmap(24, 24))
+        self.focus_icon_label.setAccessibleName(f"{focus.kind.title()} focus")
+        self.focus_pin_btn.setEnabled(focus.kind in {"callsign", "group", "topic"})
+        self.focus_history_btn.setEnabled(True)
+        self._set_focus_action_context(focus)
+        self._retarget_propagation_for_focus(focus)
+        self._update_applied_filters_label()
+        self._on_filters_changed()
+
+    def _clear_ops_focus(self, *, clear_search: bool = True, refresh: bool = True) -> None:
+        self._active_ops_focus = None
+        self._focus_snapshot_request_id += 1
+        self.focus_banner.setVisible(False)
+        self._operational_awareness_context = {}
+        if clear_search:
+            previous = self.search_edit.blockSignals(True)
+            try:
+                self.search_edit.clear()
+            finally:
+                self.search_edit.blockSignals(previous)
+        self._update_applied_filters_label()
+        self._update_clear_filters_style()
+        if refresh:
+            self._run_filter_refresh()
+
+    def _request_focus_snapshot(self) -> None:
+        focus = self._active_ops_focus
+        if focus is None:
+            return
+        self._focus_snapshot_request_id += 1
+        request_id = self._focus_snapshot_request_id
+        db_path = self._db_path()
+        age_seconds = self._traffic_age_seconds()
+        group_filter = normalize_group_name(self.group_combo.currentData())
+        source_filter = str(self.traffic_source_combo.currentData() or "").strip().lower()
+        cache_key = (
+            focus.kind,
+            focus.canonical_id,
+            focus.operator_id,
+            age_seconds,
+            group_filter,
+            source_filter,
+            self._focus_db_checkpoint(db_path),
+            int(time.time() // 15),
+        )
+        self._bounded_request_key_put(self._focus_snapshot_cache_keys, request_id, cache_key)
+        cached = self._focus_snapshot_cache.get(cache_key)
+        if cached is not None:
+            self._focus_snapshot_cache.move_to_end(cache_key)
+            self._on_focus_snapshot_ready(request_id, cached, "")
+            self.focus_history_label.setText(self.focus_history_label.text() + " · refreshing…")
+
+        def _work() -> OpsFocusSnapshot:
+            perf_meta: Dict[str, object] = {
+                "kind": focus.kind,
+                "cache": "refresh" if cached is not None else "miss",
+            }
+            with perf_span(
+                "controlfreq.focus_snapshot_build",
+                meta=perf_meta,
+                min_ms=0.0,
+            ):
+                conn = connect_sqlite(db_path, timeout=1.5, busy_timeout_ms=1500)
+                try:
+                    result = build_focus_snapshot(
+                        conn,
+                        focus,
+                        age_seconds=age_seconds,
+                        group_filter=group_filter,
+                        source_filter=source_filter,
+                    )
+                    perf_meta["current_rows"] = result.current_count
+                    perf_meta["has_last_known"] = result.historical_summary is not None
+                    return result
+                finally:
+                    conn.close()
+
+        future = self._ensure_focus_executor().submit(_work)
+
+        def _done(done: Future) -> None:
+            try:
+                snapshot: object = done.result()
+                error = ""
+            except Exception as exc:
+                snapshot = None
+                error = str(exc)
+            try:
+                self._focus_snapshot_ready.emit(request_id, snapshot, error)
+            except RuntimeError:
+                pass
+
+        future.add_done_callback(_done)
+
+    def _on_focus_snapshot_ready(self, request_id: int, payload: object, error: object) -> None:
+        if request_id != self._focus_snapshot_request_id:
+            with perf_span("controlfreq.focus_stale_result_drop", meta={"kind": "snapshot"}):
+                pass
+            return
+        if error or not isinstance(payload, OpsFocusSnapshot):
+            log.debug("ControlFreq: focus snapshot failed: %s", error)
+            self.focus_current_label.setText("Current Scope · unavailable")
+            self.focus_history_label.setText("Last Known · unavailable; other dashboard data remains active")
+            return
+        snapshot = payload
+        cache_key = self._focus_snapshot_cache_keys.get(request_id)
+        if cache_key is not None and not error:
+            self._bounded_cache_put(self._focus_snapshot_cache, cache_key, snapshot, limit=32)
+        apply_started = time.perf_counter()
+        aliases = tuple(alias for alias in snapshot.aliases if alias != snapshot.focus.display_label)
+        title = f"Focused on {snapshot.focus.display_label} · {snapshot.focus.kind.title()}"
+        if aliases:
+            title += f" · formerly {', '.join(aliases)}"
+        self.focus_title_label.setText(title)
+        counts = []
+        if snapshot.current_unread:
+            counts.append(f"{snapshot.current_unread} new")
+        if snapshot.current_actionable:
+            counts.append(f"{snapshot.current_actionable} actionable")
+        self.focus_current_label.setText(
+            "Current Scope · " + snapshot.current_scope_summary + (f" · {' · '.join(counts)}" if counts else "")
+        )
+        history_text = format_focus_last_known(snapshot.historical_summary)
+        if snapshot.historical_summary and snapshot.historical_summary.latest_summary:
+            history_text += f" · {snapshot.historical_summary.latest_summary}"
+        if snapshot.historical_summary and snapshot.historical_summary.scope_mismatch_notes:
+            history_text += " · outside selected " + ", ".join(snapshot.historical_summary.scope_mismatch_notes)
+        self.focus_history_label.setText(history_text)
+        self.focus_history_label.setToolTip(history_text)
+        self._set_focus_action_context(snapshot.focus)
+        from freqinout.core.perf_metrics import emit_span
+        emit_span(
+            "controlfreq.focus_ui_apply",
+            (time.perf_counter() - apply_started) * 1000.0,
+            meta={"kind": snapshot.focus.kind},
+        )
+
+    @staticmethod
+    def _focus_db_checkpoint(db_path: Path) -> tuple[int, int]:
+        try:
+            stat = db_path.stat()
+            return int(stat.st_mtime_ns), int(stat.st_size)
+        except OSError:
+            return (0, 0)
+
+    @staticmethod
+    def _bounded_cache_put(cache: OrderedDict, key: tuple[object, ...], value: object, *, limit: int) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > max(1, int(limit)):
+            cache.popitem(last=False)
+
+    @staticmethod
+    def _bounded_request_key_put(
+        cache: Dict[int, tuple[object, ...]], request_id: int, key: tuple[object, ...]
+    ) -> None:
+        cache[int(request_id)] = key
+        while len(cache) > 128:
+            cache.pop(next(iter(cache)))
+
+    def _focus_context(self, focus: OpsFocus | None = None) -> Dict[str, str]:
+        active = focus or self._active_ops_focus
+        if active is None:
+            return {}
+        context: Dict[str, str] = {"search_query": active.display_label}
+        if active.kind == "callsign":
+            context["callsign"] = active.display_label
+        elif active.kind == "group":
+            context["group_filter"] = active.display_label
+        elif active.kind in {"topic", "event"}:
+            context["topic_filter"] = active.display_label
+        elif active.kind == "source":
+            context["source_family"] = active.canonical_id
+        elif active.kind == "geography":
+            prefix, _, value = active.canonical_id.partition(":")
+            context["grid_filter" if prefix == "grid" else "state_filter"] = value or active.display_label
+        return context
+
+    def _set_focus_action_context(self, focus: OpsFocus) -> None:
+        context = self._focus_context(focus)
+        self._operational_awareness_context = dict(context)
+        self._operational_activity_context = dict(context)
+
+    def _open_focus_inbox(self) -> None:
+        self._set_focus_action_context(self._active_ops_focus) if self._active_ops_focus else None
+        self._open_operational_activity_messages()
+
+    def _open_focus_map(self) -> None:
+        self._set_focus_action_context(self._active_ops_focus) if self._active_ops_focus else None
+        self._open_operational_activity_map()
+
+    def _pin_active_focus(self) -> None:
+        if self._active_ops_focus is None:
+            return
+        self._set_focus_action_context(self._active_ops_focus)
+        self._pin_selected_awareness_focus()
+
+    def _open_focus_history(self) -> None:
+        focus = self._active_ops_focus
+        if focus is None:
+            return
+        context = map_context_from_mapping(self._focus_context(focus))
+        host = self.window()
+        if hasattr(host, "open_messages_section"):
+            kwargs = context.as_messages_kwargs()
+            kwargs["age_filter_seconds"] = 0
+            host.open_messages_section("inbox", **kwargs)
+
+    def _retarget_propagation_for_focus(self, focus: OpsFocus) -> None:
+        target_type = ""
+        target_value = ""
+        if focus.kind == "callsign":
+            target_type, target_value = "OPERATOR", focus.display_label
+        elif focus.kind == "geography":
+            prefix, _, value = focus.canonical_id.partition(":")
+            if prefix == "state":
+                target_type, target_value = "STATE", value
+            elif prefix == "region":
+                target_type, target_value = "REGION", value
+        if not target_type or not hasattr(self, "prop_target_type_combo"):
+            return
+        self._prop_target_syncing = True
+        try:
+            index = self.prop_target_type_combo.findData(target_type)
+            if index >= 0:
+                self.prop_target_type_combo.setCurrentIndex(index)
+                self._set_prop_target_value_options(target_type, target_value)
+        finally:
+            self._prop_target_syncing = False
+        try:
+            self.settings.set_many({"prop_target_type": target_type, "prop_target_value": target_value})
+        except Exception:
+            pass
+        QTimer.singleShot(0, self._refresh_propagation_snapshot)
 
     def _update_clear_filters_style(self) -> None:
         try:
@@ -2443,7 +3154,9 @@ class ControlFreqTab(QWidget):
         if source.lower() == "all":
             source = "All sources"
         age = str(self.traffic_age_combo.currentText() or "Traffic: 24h").replace("Traffic:", "").strip()
-        label.setText(f"Showing traffic received in {age} · {group} · {source}")
+        focus = self._active_ops_focus
+        focus_text = f" · Focus: {focus.display_label}" if focus is not None else ""
+        label.setText(f"Showing traffic received in {age} · {group} · {source}{focus_text}")
         try:
             theme = self._theme()
             label.setStyleSheet(f"font-weight: 600; color: {theme.get('text_muted', '#5b6875')};")
@@ -3593,6 +4306,93 @@ class ControlFreqTab(QWidget):
             self._fit_table_height_to_rows(table, min_rows=1, max_rows=4, empty_rows=1)
         finally:
             self._source_lane_syncing = False
+        self._render_source_lane_cards(rows, contexts)
+
+    def _set_awareness_details_visible(self, visible: bool) -> None:
+        """Keep dense evidence available without making it the default grammar."""
+        self.awareness_table.setVisible(bool(visible))
+        self.activity_table.setVisible(bool(visible))
+        self._fit_group_box_to_contents(self.activity_box)
+
+    @staticmethod
+    def _clear_widget_layout(layout: QBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                ControlFreqTab._clear_widget_layout(child_layout)  # type: ignore[arg-type]
+
+    def _render_source_lane_cards(
+        self,
+        rows: Sequence[Sequence[str]],
+        contexts: Sequence[Dict[str, str]],
+    ) -> None:
+        layout = getattr(self, "source_lane_cards_layout", None)
+        if layout is None:
+            return
+        self._clear_widget_layout(layout)
+        theme = self._theme()
+        for index, row in enumerate(tuple(rows)[:4]):
+            values = list(row) + ["", "", "", ""]
+            source, now_text, next_text, attention = values[:4]
+            role = "warning" if attention and attention.lower() not in {"clear", "--"} else "panel"
+            bg, fg, border = self._semantic_panel_colors(role)
+            card = QFrame(self.source_lane_cards_container)
+            card.setObjectName("controlfreqSourceLaneCard")
+            card.setStyleSheet(
+                f"QFrame#controlfreqSourceLaneCard {{ background: {bg}; color: {fg}; "
+                f"border: 1px solid {border}; border-radius: 6px; }}"
+            )
+            card_row = QHBoxLayout(card)
+            card_row.setContentsMargins(8, 5, 8, 5)
+            card_row.setSpacing(8)
+            icon = QLabel()
+            icon.setPixmap(QIcon(str(self._focus_icon_path("source"))).pixmap(20, 20))
+            icon.setAccessibleName("Source")
+            card_row.addWidget(icon)
+            source_label = QLabel(f"<b>{source}</b>")
+            source_label.setTextFormat(Qt.RichText)
+            source_label.setMinimumWidth(80)
+            card_row.addWidget(source_label)
+            now_label = QLabel(f"Now · {now_text}")
+            now_label.setWordWrap(True)
+            card_row.addWidget(now_label, 2)
+            next_label = QLabel(f"Next · {next_text}")
+            next_label.setWordWrap(True)
+            card_row.addWidget(next_label, 2)
+            attention_label = QLabel(str(attention or "clear"))
+            attention_label.setStyleSheet(f"font-weight: 700; color: {fg};")
+            attention_label.setToolTip(f"Source attention: {attention or 'clear'}")
+            card_row.addWidget(attention_label)
+            focus_btn = QPushButton("Focus")
+            focus_btn.setMaximumWidth(68)
+            focus_btn.setStyleSheet(button_style("secondary", theme))
+            focus_btn.setToolTip(f"Focus Ops Center on {source} without changing the selected radio.")
+            focus_btn.clicked.connect(lambda _checked=False, row_index=index: self._activate_source_lane_card(row_index))
+            card_row.addWidget(focus_btn)
+            layout.addWidget(card)
+        if not rows:
+            empty = QLabel("No active source · check radio and source setup")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+
+    def _activate_source_lane_card(self, row: int) -> None:
+        contexts = list(getattr(self, "_source_lane_contexts", []) or [])
+        if row < 0 or row >= len(contexts):
+            return
+        context = dict(contexts[row] or {})
+        label = str(context.get("source_name") or "Source").strip()
+        canonical = str(
+            context.get("source_family") or context.get("source_id") or label
+        ).strip().lower()
+        if not canonical:
+            return
+        self._apply_ops_focus(
+            OpsFocus("source", canonical, label, label, "source_lane")
+        )
 
     def _set_source_lane_focus_from_selection(self) -> None:
         if bool(getattr(self, "_source_lane_syncing", False)):
@@ -5051,6 +5851,7 @@ class ControlFreqTab(QWidget):
         if not rows:
             self._set_table_rows(table, [["-", "Now", "No peer schedule matches", "-", ""]])
             self._peer_finder_contexts = [{}]
+            self._render_peer_timeline((), horizon_minutes=horizon_minutes)
             return
         for row_idx, row in enumerate(rows[:6]):
             table.insertRow(row_idx)
@@ -5067,9 +5868,71 @@ class ControlFreqTab(QWidget):
                 table.setItem(row_idx, col, item)
             table.setCellWidget(row_idx, 4, self._peer_finder_action_widget(row_idx))
         self._apply_elide_tooltips(table, 2)
+        self._render_peer_timeline(rows[:6], horizon_minutes=horizon_minutes)
 
-    def _peer_finder_action_widget(self, row: int) -> QWidget:
-        wrap = QWidget(self.peer_finder_table)
+    def _set_peer_details_visible(self, visible: bool) -> None:
+        self.intersection_table.setVisible(bool(visible))
+        self.peer_finder_table.setVisible(bool(visible))
+        self._fit_group_box_to_contents(self.intersection_box)
+
+    def _render_peer_timeline(
+        self,
+        rows: Sequence[Dict[str, object]],
+        *,
+        horizon_minutes: int,
+    ) -> None:
+        layout = getattr(self, "peer_timeline_layout", None)
+        if layout is None:
+            return
+        self._clear_widget_layout(layout)
+        if not rows:
+            empty = QLabel(f"No peer overlap in the next {self._format_window_label(horizon_minutes)}")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+            return
+        theme = self._theme()
+        for index, row in enumerate(rows):
+            frame = QFrame(self.peer_timeline_container)
+            frame.setObjectName("controlfreqPeerTimelineRow")
+            bg, fg, border = self._semantic_panel_colors("panel")
+            frame.setStyleSheet(
+                f"QFrame#controlfreqPeerTimelineRow {{ background: {bg}; color: {fg}; "
+                f"border: 1px solid {border}; border-radius: 6px; }}"
+            )
+            row_layout = QHBoxLayout(frame)
+            row_layout.setContentsMargins(8, 5, 8, 5)
+            row_layout.setSpacing(8)
+            peer = str(row.get("peer") or "-")
+            peer_label = QLabel(f"<b>{peer}</b>")
+            peer_label.setTextFormat(Qt.RichText)
+            peer_label.setMinimumWidth(78)
+            row_layout.addWidget(peer_label)
+            offset = max(0, int(row.get("start_offset_minutes") or 0))
+            track = QProgressBar()
+            track.setRange(0, max(1, int(horizon_minutes)))
+            track.setValue(max(1, min(int(horizon_minutes), offset)))
+            track.setFormat(f"{row.get('when') or 'Now'} · {row.get('net_band') or '-'}")
+            track.setTextVisible(True)
+            track.setAccessibleName(f"Peer rendezvous with {peer}")
+            track.setAccessibleDescription(
+                f"{row.get('when') or 'Now'} on {row.get('net_band') or 'unknown band'}; "
+                f"heard status {row.get('heard') or 'unknown'}"
+            )
+            track.setStyleSheet(
+                "QProgressBar { text-align: center; border: 1px solid "
+                f"{theme.get('border', '#D3D7DD')}; border-radius: 5px; "
+                f"background: {theme.get('surface_alt', '#E9EDF2')}; color: {theme.get('text', '#1C1F21')}; }}"
+                f"QProgressBar::chunk {{ background: {theme.get('accent', '#2E6F9E')}; border-radius: 4px; }}"
+            )
+            row_layout.addWidget(track, 1)
+            heard = QLabel(str(row.get("heard") or "schedule"))
+            heard.setToolTip("Most recent heard evidence, or schedule-only when no observation is available.")
+            row_layout.addWidget(heard)
+            row_layout.addWidget(self._peer_finder_action_widget(index, parent=frame))
+            layout.addWidget(frame)
+
+    def _peer_finder_action_widget(self, row: int, *, parent: QWidget | None = None) -> QWidget:
+        wrap = QWidget(parent or self.peer_finder_table)
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -5251,6 +6114,7 @@ class ControlFreqTab(QWidget):
                 if not overlaps:
                     continue
                 start_abs = min(start for start, _end in overlaps)
+                end_abs = max(end for start, end in overlaps if start == start_abs)
                 when = self._format_peer_overlap_when(start_abs, now_week_min=now_week_min, now_utc=now_utc)
                 net_band = self._format_group_band_freq_label(entry)
                 key = (cs, when, net_band)
@@ -5264,6 +6128,8 @@ class ControlFreqTab(QWidget):
                         "when": when,
                         "net_band": net_band,
                         "heard": "peer schedule",
+                        "start_offset_minutes": max(0, int(start_abs - now_week_min)),
+                        "end_offset_minutes": max(0, int(end_abs - now_week_min)),
                         "sort": (0 if when == "Now" else 1, start_abs, cs),
                         "context": {
                             "callsign": cs,
@@ -6059,6 +6925,7 @@ class ControlFreqTab(QWidget):
         ]
         self._next_schedule_outlook_preview = self._next_schedule_outlook_entry(now_utc, today_rows + week_rows)
         self._set_awareness_sop_summary(today_rows, week_rows)
+        self._render_schedule_timeline(today_rows, week_rows, now_utc=now_utc)
         self.schedule_table.setRowCount(0)
         self._schedule_entries_by_row.clear()
         self._append_section_row_to(self.schedule_table, "Today")
@@ -6098,6 +6965,82 @@ class ControlFreqTab(QWidget):
         self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=8, empty_rows=1)
         self._fit_group_box_to_contents(self.schedule_box)
         self._refresh_scheduler_strip()
+
+    def _set_schedule_details_visible(self, visible: bool) -> None:
+        self.schedule_table.setVisible(bool(visible))
+        self.schedule_action_hint.setVisible(bool(visible))
+        self._fit_group_box_to_contents(self.schedule_box)
+
+    def _render_schedule_timeline(
+        self,
+        today_rows: Sequence[Dict[str, Any]],
+        later_rows: Sequence[Dict[str, Any]],
+        *,
+        now_utc: dt.datetime,
+    ) -> None:
+        layout = getattr(self, "schedule_timeline_layout", None)
+        if layout is None:
+            return
+        self._clear_widget_layout(layout)
+        valid_today = [row for row in today_rows if isinstance(row.get("when_utc"), dt.datetime)]
+        valid_later = [row for row in later_rows if isinstance(row.get("when_utc"), dt.datetime)]
+        self.schedule_later_btn.setText(f"Later ({len(valid_later)})")
+        visible_rows = list(valid_today[:5])
+        if self.schedule_later_btn.isChecked():
+            visible_rows.extend(valid_later[:5])
+        if not visible_rows:
+            empty = QLabel("No upcoming schedule or SOP events in this view")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+            return
+        theme = self._theme()
+        for entry in visible_rows:
+            when_utc = entry.get("when_utc")
+            if not isinstance(when_utc, dt.datetime):
+                continue
+            normalized_when = when_utc if when_utc.tzinfo else when_utc.replace(tzinfo=dt.timezone.utc)
+            mins = int((normalized_when.astimezone(dt.timezone.utc) - now_utc).total_seconds() // 60)
+            role = "warning" if mins <= 30 else "secondary" if mins <= 180 else "panel"
+            bg, fg, border = self._semantic_panel_colors(role)
+            frame = QFrame(self.schedule_timeline_container)
+            frame.setObjectName("controlfreqScheduleTimelineEvent")
+            frame.setStyleSheet(
+                f"QFrame#controlfreqScheduleTimelineEvent {{ background: {bg}; color: {fg}; "
+                f"border-left: 3px solid {border}; border-top: 1px solid {border}; "
+                f"border-right: 1px solid {border}; border-bottom: 1px solid {border}; border-radius: 5px; }}"
+            )
+            row_layout = QHBoxLayout(frame)
+            row_layout.setContentsMargins(8, 5, 8, 5)
+            row_layout.setSpacing(8)
+            event_type = str(entry.get("type") or "Schedule")
+            icon_kind = "event" if "SOP" in event_type.upper() or "CONDITION" in event_type.upper() else "schedule"
+            icon = QLabel()
+            icon.setPixmap(QIcon(str(self._focus_icon_path(icon_kind))).pixmap(20, 20))
+            icon.setAccessibleName(event_type)
+            row_layout.addWidget(icon)
+            when_text = str(entry.get("when_text") or "--")
+            when_label = QLabel(f"<b>{when_text}</b>")
+            when_label.setTextFormat(Qt.RichText)
+            when_label.setMinimumWidth(72)
+            row_layout.addWidget(when_label)
+            group = str(entry.get("group") or "--")
+            band_freq = str(entry.get("band_freq") or "--")
+            summary = QLabel(f"{event_type} · {group} · {band_freq}")
+            summary.setWordWrap(True)
+            summary.setToolTip(summary.text())
+            row_layout.addWidget(summary, 1)
+            action_label = str(entry.get("action") or "").strip()
+            action_kind = str(entry.get("action_kind") or "").strip()
+            if action_label and action_kind:
+                action = QPushButton(action_label)
+                action.setMaximumWidth(132)
+                action.setToolTip(self._schedule_action_tooltip(action_kind))
+                action.setStyleSheet(button_style(self._schedule_action_button_role(action_kind), theme))
+                action.clicked.connect(
+                    lambda _checked=False, payload=dict(entry): self._on_schedule_action_clicked(payload)
+                )
+                row_layout.addWidget(action)
+            layout.addWidget(frame)
 
     def _set_awareness_sop_summary(
         self,
@@ -7658,8 +8601,8 @@ class ControlFreqTab(QWidget):
             item = QTableWidgetItem(val if val else "")
             item.setFlags(item.flags() ^ Qt.ItemIsEditable)
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            item.setBackground(Qt.lightGray)
-            item.setForeground(Qt.black)
+            item.setBackground(table.palette().alternateBase())
+            item.setForeground(table.palette().text())
             font = item.font()
             font.setBold(True)
             item.setFont(font)
@@ -7728,6 +8671,7 @@ class ControlFreqTab(QWidget):
                 "Tip: Set Grid 6 in Settings to enable forecast."
             )
             self._set_prop_summary("RF Readiness: set operator grid to enable forecast.")
+            self._render_prop_band_ladder((), target_label="", evidence_label="")
             self._sync_propagation_box_height()
             return
 
@@ -7862,6 +8806,18 @@ class ControlFreqTab(QWidget):
                 now_local=now_local,
             )
         )
+        active_window = self._prop_window_for_time(now_local)
+        active_scores = reg_scores.get(active_window) or modeled_reg.get(active_window) or []
+        evidence_label = (
+            "modeled + observed outcomes"
+            if bool(blend_settings.get("prop_blend_enabled", 1))
+            else "modeled"
+        )
+        self._render_prop_band_ladder(
+            active_scores,
+            target_label=target_label,
+            evidence_label=evidence_label,
+        )
         self._sync_propagation_box_height()
 
     def _set_prop_summary(self, text: str) -> None:
@@ -7870,6 +8826,60 @@ class ControlFreqTab(QWidget):
             return
         label.setText(str(text or "").strip() or "RF Readiness: unavailable")
         label.setToolTip(label.text())
+
+    def _render_prop_band_ladder(
+        self,
+        scores: Sequence[Tuple[str, float]],
+        *,
+        target_label: str,
+        evidence_label: str,
+    ) -> None:
+        layout = getattr(self, "prop_band_ladder_layout", None)
+        if layout is None:
+            return
+        self._clear_widget_layout(layout)
+        if not scores:
+            empty = QLabel("No current band recommendation")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+        theme = self._theme()
+        for rank, (band, score) in enumerate(tuple(scores)[:3]):
+            card = QFrame(self.prop_band_ladder_container)
+            card.setObjectName("controlfreqBandLadderCard")
+            bg, fg, border = self._semantic_panel_colors("secondary" if rank == 0 else "panel")
+            card.setStyleSheet(
+                f"QFrame#controlfreqBandLadderCard {{ background: {bg}; color: {fg}; "
+                f"border: {2 if rank == 0 else 1}px solid {border}; border-radius: 6px; }}"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 5, 8, 5)
+            card_layout.setSpacing(3)
+            title = QLabel(f"<b>{str(band).upper()}</b> · {'Best now' if rank == 0 else 'Alternative'}")
+            title.setTextFormat(Qt.RichText)
+            card_layout.addWidget(title)
+            confidence = QProgressBar()
+            confidence.setRange(0, 100)
+            confidence.setValue(max(0, min(100, int(round(float(score or 0.0))))))
+            confidence.setFormat(f"{self._score_to_qual(float(score or 0.0))} · {int(round(float(score or 0.0)))}")
+            confidence.setAccessibleName(f"{band} RF readiness")
+            confidence.setAccessibleDescription(
+                f"{evidence_label or 'modeled'} confidence toward {target_label or 'selected target'}"
+            )
+            confidence.setStyleSheet(
+                "QProgressBar { text-align: center; border: 1px solid "
+                f"{theme.get('border', '#D3D7DD')}; border-radius: 4px; "
+                f"background: {theme.get('surface_alt', '#E9EDF2')}; color: {theme.get('text', '#1C1F21')}; }}"
+                f"QProgressBar::chunk {{ background: {theme.get('accent', '#2E6F9E')}; border-radius: 3px; }}"
+            )
+            card_layout.addWidget(confidence)
+            evidence = QLabel(f"{evidence_label} · {target_label}")
+            evidence.setStyleSheet(f"color: {theme.get('text_muted', '#5B6570')};")
+            evidence.setWordWrap(True)
+            card_layout.addWidget(evidence)
+            layout.addWidget(card, 1)
+        layout.addStretch(1)
 
     def _format_prop_readiness_summary(
         self,
@@ -8125,7 +9135,7 @@ class ControlFreqTab(QWidget):
                 self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)
             box.setMinimumHeight(0)
             height = max(96, int(box.sizeHint().height()) + 8)
-            box.setMaximumHeight(min(height, 420 if details_visible else 150))
+            box.setMaximumHeight(min(height, 460 if details_visible else 230))
         except Exception:
             box.setMaximumHeight(16777215)
 
@@ -8135,8 +9145,8 @@ class ControlFreqTab(QWidget):
         item = QTableWidgetItem(text)
         item.setFlags(item.flags() ^ Qt.ItemIsEditable)
         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        item.setBackground(Qt.lightGray)
-        item.setForeground(Qt.black)
+        item.setBackground(self.prop_table.palette().alternateBase())
+        item.setForeground(self.prop_table.palette().text())
         self.prop_table.setItem(row, 0, item)
         self.prop_table.setSpan(row, 0, 1, self.prop_table.columnCount())
 

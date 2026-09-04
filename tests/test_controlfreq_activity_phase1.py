@@ -22,12 +22,56 @@ from freqinout.core.controlfreq_awareness import AttentionItem, build_radio_sour
 from freqinout.core.observation_projection import Observation, observation_from_rf_pin
 from freqinout.core.observation_store import upsert_observation
 from freqinout.core.traffic_actionability import TrafficGroupVolume
+from freqinout.core.ops_focus import OpsFocus, OpsFocusSnapshot, OpsHistoricalSummary
 
 
 def _app():
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])
+
+
+def test_controlfreq_focus_banner_separates_current_scope_and_last_known(monkeypatch, tmp_path):
+    _app()
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, *args, **kwargs: None)
+    tab = ControlFreqTab()
+    try:
+        focus = OpsFocus("callsign", "operator-1", "K1NEW", "K1OLD", "operator_history", "operator-1")
+        tab._on_filters_changed = lambda *_args: None
+        tab._retarget_propagation_for_focus = lambda *_args: None
+        tab._apply_ops_focus(focus)
+        tab._focus_snapshot_request_id = 7
+        snapshot = OpsFocusSnapshot(
+            focus=focus,
+            generated_at=1_725_600_000.0,
+            current_count=0,
+            current_scope_summary="No traffic received in selected 24 hours",
+            historical_summary=OpsHistoricalSummary(
+                entity_kind="callsign",
+                entity_id="operator-1",
+                latest_received_at=1_722_576_000.0,
+                latest_status_at_receipt="green",
+                latest_source="js8call",
+                latest_group="MR08",
+                latest_summary="Operations normal",
+            ),
+            aliases=("K1NEW", "K1OLD"),
+        )
+        tab._on_focus_snapshot_ready(7, snapshot, "")
+
+        assert tab.focus_banner.isHidden() is False
+        assert "formerly K1OLD" in tab.focus_title_label.text()
+        assert "No traffic received in selected 24 hours" in tab.focus_current_label.text()
+        assert "Last known" in tab.focus_history_label.text()
+        assert "reported green" in tab.focus_history_label.text()
+
+        tab._clear_ops_focus(refresh=False)
+        assert tab.focus_banner.isHidden()
+        assert tab._active_ops_focus is None
+    finally:
+        tab.deleteLater()
 
 
 def test_controlfreq_dark_semantic_panel_colors_are_readable() -> None:
@@ -968,9 +1012,44 @@ def test_controlfreq_sparse_views_size_around_rows_and_collapse_details():
     assert "self._fit_table_height_to_rows(self.peer_finder_table, min_rows=0, max_rows=6, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.schedule_table, min_rows=0, max_rows=8, empty_rows=1)" in controlfreq_source
     assert "self._fit_table_height_to_rows(self.prop_table, min_rows=0, max_rows=6, empty_rows=0)" in controlfreq_source
-    assert "box.setMaximumHeight(min(height, 420 if details_visible else 150))" in controlfreq_source
+    assert "box.setMaximumHeight(min(height, 460 if details_visible else 230))" in controlfreq_source
     assert "def _set_schedule_splitter_content_sizes" in controlfreq_source
     assert "self._set_schedule_splitter_content_sizes()" in controlfreq_source
+
+
+def test_controlfreq_dashboard_uses_distinct_visual_grammars_and_details_disclosures() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert "self.source_lane_cards_container = QWidget()" in source
+    assert "def _render_source_lane_cards" in source
+    assert "self.peer_timeline_container = QWidget()" in source
+    assert "def _render_peer_timeline" in source
+    assert "self.schedule_timeline_container = QWidget()" in source
+    assert "def _render_schedule_timeline" in source
+    assert "self.prop_band_ladder_container = QWidget()" in source
+    assert "def _render_prop_band_ladder" in source
+    assert "self.awareness_table.setVisible(False)" in source
+    assert "self.activity_table.setVisible(False)" in source
+    assert "def _set_awareness_details_visible" in source
+    assert "self.intersection_table.setVisible(False)" in source
+    assert "self.peer_finder_table.setVisible(False)" in source
+    assert "self.schedule_table.setVisible(False)" in source
+
+
+def test_controlfreq_focus_search_is_explicit_bounded_and_accessible() -> None:
+    source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
+
+    assert "self._focus_autocomplete_timer.setInterval(125)" in source
+    assert "self._focus_completer.setMaxVisibleItems(14)" in source
+    assert 'heading = QStandardItem(f"{kind.title()} suggestions")' in source
+    assert "Qt.AccessibleDescriptionRole" in source
+    assert "OrderedDict" in source
+    assert "limit=64" in source
+    assert "limit=32" in source
+    assert '"controlfreq.focus_autocomplete"' in source
+    assert '"controlfreq.focus_snapshot_build"' in source
+    assert '"controlfreq.focus_stale_result_drop"' in source
+    assert "self.focus_more_btn.setVisible(compact)" in source
 
 
 def test_controlfreq_and_shared_splitters_use_visible_handles() -> None:

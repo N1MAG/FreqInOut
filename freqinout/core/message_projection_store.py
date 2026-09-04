@@ -595,6 +595,12 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
         """,
         _message_values(message, stamp),
     )
+    # Keep the compact Ops entity index current without making the UI parse or
+    # scan retained message bodies. Import lazily to avoid a projection-module
+    # dependency cycle at startup.
+    from freqinout.core.ops_focus import index_message_for_ops_focus
+
+    index_message_for_ops_focus(conn, message)
     return message.message_id
 
 
