@@ -112,9 +112,9 @@ def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None
     assert [(label, target) for label, _accessible, target, _icon in specs] == [
         ("Ops", "ControlFreq"),
         ("Map", "Map"),
-        ("Messages", "Messages"),
+        ("Msgs", "Messages"),
         ("Net Ctrl", "NCS"),
-        ("Operators", "Operators"),
+        ("Calls", "Operators"),
         ("Plans", "Plan Builder"),
         ("Station", "Station"),
         ("Settings", "Settings"),

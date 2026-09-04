@@ -63,9 +63,9 @@ meaning does not depend on platform icon themes.
 | --- | --- |
 | Ops | Open Ops Center |
 | Map | Open Map |
-| Messages | Flyout: Inbox, Compose |
+| Msgs | Messages flyout: Inbox, Compose |
 | Net Control | Flyout: FLDigi / SSB, JS8Call, VHF/UHF |
-| Operators | Flyout: HF Callsigns, Local Callsigns, Local Reports |
+| Calls | Operators flyout: HF Callsigns, Local Callsigns, Local Reports |
 | Plans | Flyout: Plan Builder, SOP Builder, HF Daily, HF Nets, HF Peer Scheds |
 | Station | Flyout: Control Center, Health Details |
 | Settings | Flyout: Main, Radios |
@@ -74,6 +74,9 @@ meaning does not depend on platform icon themes.
 The active compact item reflects the active master group. A grouped item opens a
 flyout and does not silently choose one child. Flyout actions invoke the same full
 navigation buttons, preserving Messages and Settings sub-context behavior.
+Visible labels may abbreviate a master group to fit the compact rail (`Msgs` and
+`Calls`), while its full group name remains in the accessible name and tooltip.
+Do not label the Messages master button `Inbox`, because it also owns Compose.
 
 The compact rail is approximately 72--88 logical pixels wide depending on the
 selected text scale. It must retain the visible expand-navigation control and

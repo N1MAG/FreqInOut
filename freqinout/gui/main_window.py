@@ -3296,9 +3296,9 @@ class MainWindow(QMainWindow):
         return (
             ("Ops", "Ops Center", "ControlFreq", "ops.svg"),
             ("Map", "Map", "Map", "map.svg"),
-            ("Messages", "Messages", "Messages", "messages.svg"),
+            ("Msgs", "Messages", "Messages", "messages.svg"),
             ("Net Ctrl", "Net Control", "NCS", "net-control.svg"),
-            ("Operators", "Operators", "Operators", "operators.svg"),
+            ("Calls", "Operators", "Operators", "operators.svg"),
             ("Plans", "Plans", "Plan Builder", "plans.svg"),
             ("Station", "Station", "Station", "station.svg"),
             ("Settings", "Settings", "Settings", "settings.svg"),

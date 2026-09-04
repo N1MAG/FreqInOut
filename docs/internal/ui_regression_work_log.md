@@ -431,6 +431,13 @@ button six logical pixels wider than its paint area. Button width now subtracts
 both nested margin pairs (60px inside a 74px Normal rail and 74px inside an 88px
 Large Text rail), with a regression test for both densities.
 
+Compact-label follow-up: after the geometry correction, the full `Messages` and
+`Operators` labels still exceeded the Normal Text button width on production.
+Their visible rail labels are now `Msgs` and `Calls`; full `Messages` and
+`Operators` semantics remain in accessible names/tooltips, and both buttons still
+open their complete master-group flyouts. `Inbox` was intentionally not used as
+the master label because Compose is an equal child of Messages.
+
 Known unrelated test state: `test_phase7_main_window_does_not_prewarm_messages_tab`
 expects only FreqPlanner prewarming, while the existing runtime helper currently
 returns Messages and FreqPlanner. This shell work did not change that behavior.
