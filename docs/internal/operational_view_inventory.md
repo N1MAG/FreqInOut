@@ -546,6 +546,10 @@ Near-term rule:
 
 - Treat operator rows as identity/contact projections that can feed Messages,
   Map, NCS, and Compose.
+- Own `Change callsign` and the effective-dated identity timeline in HF
+  Operator History. Other views resolve that stable identity and never rename
+  or merge operators implicitly. See
+  `docs/internal/operator_identity_history_spec.md`.
 
 ### Settings
 

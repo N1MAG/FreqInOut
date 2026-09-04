@@ -567,3 +567,20 @@ Visible metadata is now one compact sequence:
 also defines a reusable application-owned icon language for entity kinds,
 evidence, actions, schedule/SOP, and RF-readiness views without relying on color,
 emoji, or platform icon themes.
+
+Focus-history clarification: operator and event focus must not appear broken
+when the selected Traffic Age window has no matching activity. The focus spec
+now separates Current Scope from an age-labeled Last Known summary. Historical
+evidence may cross the Age filter for context but never enters current traffic,
+action, unread, trend, or incident counts. The performance contract uses compact
+incremental latest-evidence rows or bounded indexed latest-record probes, a
+chunked background backfill, and paginated History drill-down rather than loading
+an entity's retained history into Ops Center.
+
+Callsign-change clarification: `Change callsign` is owned by HF Operator
+History management. The identity-history spec defines a stable operator id,
+effective-dated current/former callsigns, an atomic audited change workflow,
+and collision/reuse safeguards. Ops Search consumes the compact alias resolver
+so either call opens one operator focus; it does not mutate identities or load
+historical traffic for autocomplete. Source evidence keeps the callsign that
+was actually transmitted.

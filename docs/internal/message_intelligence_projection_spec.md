@@ -80,8 +80,11 @@ Required fields:
   `projection_version`.
 - Source: `primary_source_id`, `source_family`, `source_label`, `radio_id`,
   `app_instance_id`.
-- Actor/context: `from_call`, `to_call`, `group_name`, `scope`, `state_code`,
-  `grid`, `lat`, `lon`.
+- Actor/context: `from_call`, `to_call`, optional resolved
+  `from_operator_id`/`to_operator_id`, `group_name`, `scope`, `state_code`,
+  `grid`, `lat`, `lon`. Callsign text remains immutable; identity references
+  follow `docs/internal/operator_identity_history_spec.md` and may be backfilled
+  only when effective-date attribution is unambiguous.
 - Time: `event_ts`, `received_ts`, `event_utc`, `received_utc`,
   `projected_utc`.
 - Display: `message_type`, `display_type`, `status`, `severity`, `subject`,

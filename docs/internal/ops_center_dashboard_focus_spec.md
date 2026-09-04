@@ -218,6 +218,7 @@ Initial focus kinds:
 
 - callsign/operator
 - operating or local group
+- event/incident/storyline
 - message-intelligence topic
 - state, FEMA region, grid, or known place
 - band/frequency
@@ -228,6 +229,7 @@ Examples:
 - `K7ETC` → `Callsign · K7ETC · MR08 Hub · heard 38m ago`
 - `MR08` → `Group · MR08 · configured membership group`
 - `power` → `Topic · Power · 4 recent reports`
+- `Pine Ridge Fire` → `Event · last activity 12d ago · 3 retained reports`
 - `CO` → `State · Colorado · 6 active stations`
 - `Region 8` → `FEMA Region · CO/MT/ND/SD/UT/WY`
 
@@ -248,6 +250,7 @@ visibly stated. The focus never silently rewrites user configuration.
 For a **callsign focus**, show or filter:
 
 - identity, trusted state, known roles, and explicit groups
+- current callsign plus former callsigns from Operator History when applicable
 - last heard by source and most recent status/SitRep
 - direct and group-relevant traffic, open needs, and reply/relay state
 - known personal/group schedule and next likely rendezvous
@@ -268,8 +271,67 @@ For a **region/place focus**, show active callsigns/groups, status distribution,
 traffic topics, needs/incidents, schedule relevance, and propagation toward that
 area.
 
+For an **event/incident focus**, show its last known state, affected
+groups/places, retained report and source summary, unresolved or last-reported
+needs, most recent update, and applicable Messages, Map, SOP, and propagation
+context. An inactive historical event remains orientable without being presented
+as currently active.
+
 If a field is unknown, say `No schedule known`, `No recent status`, or
 `Location unknown`; do not leave an unexplained blank card.
+
+### Two-Horizon Evidence Contract
+
+The active Traffic Age window answers **what is current**. It must not determine
+whether FIO appears to know an operator, group, or event at all. A focused
+dashboard therefore has two explicitly labeled evidence horizons:
+
+1. **Current scope** applies the selected Age, Group, and Source filters to
+   traffic, awareness, needs, schedule relevance, and trend calculations.
+2. **Last known** uses retained indexed summaries to show the newest available
+   evidence for the focused entity even when that evidence is outside the
+   selected time window.
+
+Example:
+
+```text
+K7ETC · Callsign
+No traffic received in the selected 24-hour window.
+Last known · heard 34d ago · JS8Call · MR08
+Last report · Green at receipt · received 35d ago · DM38ST
+```
+
+Rules:
+
+- Never replace `No traffic in the selected 24-hour window` with a generic
+  `No data` state when retained evidence exists.
+- Never silently widen the active window or add old messages to current counts,
+  charts, action queues, or incident status.
+- Label historical evidence with its age and `Last known`, `Last heard`, or
+  `Last report` language. A month-old Green report means `reported Green 35d
+  ago`, not `currently Green`.
+- Last-known identity/evidence may cross the active Age filter by design. If it
+  also falls outside the selected Group or Source filter, state that scope
+  mismatch rather than hiding the record or treating it as current.
+- Read and archived retained evidence may supply Last Known. Deleted evidence
+  does not reappear in operational focus; audit-only records remain in their
+  existing audit surface.
+- Receipt time determines when FIO learned the evidence. Preserve source/event
+  time separately when available.
+- If retention or missing projections prevent a historical answer, say
+  `No retained traffic found` and show the oldest searchable boundary when FIO
+  knows it. Do not imply the station has never been heard.
+- A `History` action opens a descending, paginated entity-specific view. It does
+  not load all retained rows into Ops Center.
+- The compact Last Known summary is shown even when current results exist when
+  it materially adds status, schedule, location, or path context; avoid
+  duplicating the newest current item.
+
+Callsign resolution follows
+`docs/internal/operator_identity_history_spec.md`. `Change callsign` is owned
+by Operator History management, not Ops Center. Searching a current or former
+callsign opens one stable operator focus while historical evidence keeps the
+callsign actually received.
 
 ### Autocomplete And Disambiguation
 
@@ -310,8 +372,9 @@ Suggested Qt-free contracts:
 
 ```text
 OpsFocus
-  kind: callsign | group | topic | geography | band | source
+  kind: callsign | group | event | topic | geography | band | source
   canonical_id
+  operator_id (when kind is callsign and identity is known)
   display_label
   query_text
   provenance
@@ -325,6 +388,8 @@ OpsFocusSuggestion
 OpsFocusSnapshot
   focus
   generated_at
+  current_scope_summary
+  historical_summary
   identity
   traffic_summary
   status_summary
@@ -334,6 +399,19 @@ OpsFocusSnapshot
   rf_readiness
   actions
   missing_data_reasons
+
+OpsHistoricalSummary
+  entity_kind
+  entity_id
+  latest_received_at
+  latest_event_at
+  latest_message_ref
+  latest_observation_ref
+  latest_status_at_receipt
+  last_heard_by_source
+  retained_source_summary
+  scope_mismatch_notes
+  retention_boundary
 ```
 
 Build suggestions from compact entity dictionaries derived from existing
@@ -354,6 +432,9 @@ Performance is a product requirement for this feature.
 - Run database and propagation work off the Qt UI thread.
 - Use bounded, indexed queries and batch reads; avoid one query per card or per
   callsign.
+- Resolve Last Known through one-row/per-kind entity summaries or indexed
+  `ORDER BY received DESC LIMIT n` probes. Never hydrate an entity's full
+  message/observation history to build the Ops summary.
 - Reuse `message_projection`, `observation_projection`, topic indexes, operator
   tables, schedule caches, situation projection, and `PropagationService`.
 - Cache suggestions by entity-index generation. Cache focus snapshots by focus,
@@ -364,6 +445,19 @@ Performance is a product requirement for this feature.
 - Optional free-text body search belongs behind a later indexed FTS projection;
   do not use `%substring%` scans across retained message bodies in the initial
   focus implementation.
+- Maintain compact latest-evidence/aggregate rows incrementally when message and
+  observation projections change. Store references and summary fields, not
+  duplicate message bodies.
+- Initial historical-summary backfill must be chunked and resumable in a
+  background worker. Focus remains usable through bounded indexed probes while
+  backfill is incomplete.
+- The autocomplete dictionary includes unique retained entity keys and latest
+  timestamps, not every historical record.
+- The callsign autocomplete index maps current and former callsign keys to one
+  stable operator display record. Alias resolution must not query retained
+  traffic while the user types.
+- History drill-down uses keyset pagination with a small page size; do not use
+  large offsets or eager all-history loading.
 
 Targets on the Linux 1920x1080 Normal Text baseline:
 
@@ -371,6 +465,7 @@ Targets on the Linux 1920x1080 Normal Text baseline:
 - focus banner/selection feedback: under 50 ms
 - cached focus snapshot: p95 under 150 ms
 - uncached callsign/group/topic snapshot without propagation: p95 under 300 ms
+- Last Known summary lookup: p95 under 100 ms warm and under 250 ms cold
 - complete target-oriented snapshot including propagation: p95 under 750 ms,
   with non-propagation cards allowed to appear first
 - no synchronous UI-thread task over 16 ms during typing or focus changes
@@ -400,6 +495,11 @@ Do not log complete message bodies or other unnecessary sensitive content.
   schedule, SOP, relay, and RF readiness; reuse existing navigation assets for
   operator, group, map, message, radio, and health meanings where appropriate.
 - Add Qt-free focus/suggestion dataclasses and entity resolver.
+- Consume stable operator/callsign-history resolution from Operator History;
+  do not implement callsign mutation in Ops Center.
+- Add the compact historical-summary contract, indexed latest-evidence queries,
+  and incremental updater. Provide a bounded-query fallback while any chunked
+  historical backfill is incomplete.
 - Add performance instrumentation and deterministic resolver tests.
 - Keep the existing quick-search command menu unchanged until the focus field is
   ready to replace it.
@@ -409,13 +509,16 @@ Do not log complete message bodies or other unnecessary sensitive content.
 - Add categorized autocomplete, explicit focus banner, and Clear Focus.
 - Build a cached callsign snapshot from operator, traffic, status, schedule,
   map, and existing signal evidence.
+- Render Current Scope and Last Known as distinct states; include retained
+  read/archived evidence without adding it to current-window counts.
 - Filter current cards through that snapshot and add Message/Map/Pin actions.
 - Render propagation as a separately completing recommendation so it cannot
   delay the rest of the focus.
 
 ### Slice 3: Group, Topic, And Geography Focus
 
-- Add group/topic/region resolvers and focused projections.
+- Add group/event/topic/region resolvers and focused projections with the same
+  Current Scope / Last Known distinction.
 - Apply the same focus contract to traffic chart, awareness, schedule, peer,
   map handoff, SOP, and RF readiness.
 - Move navigation/settings quick search to the command palette.
@@ -441,6 +544,17 @@ new visual renderers, minimizing duplicate queries and rework.
   interpretable when elided or read by assistive technology.
 - Callsign focus produces identity/group, last-heard/status, traffic,
   schedule, map, and RF-readiness summaries without opening several tabs.
+- Searching either side of a confirmed callsign change opens one operator
+  focus; source evidence retains its transmitted callsign, and current actions
+  use the current callsign.
+- When current scope is empty but retained evidence exists, focus states both
+  facts: no current-window match and an age-labeled Last Known summary.
+- Historical evidence never inflates current action, unread, traffic, incident,
+  or trend counts and never presents a stale report as current status.
+- Last Known lookup uses indexed bounded queries or compact incremental
+  summaries; Ops Center never loads all entity history.
+- Event/incident focus remains discoverable after its active window and clearly
+  identifies its last activity and inactive/historical state.
 - Topic focus narrows all compatible Ops views to the same canonical topic and
   exposes related Messages and Map routes.
 - Region/place focus can drive a persistent RF-readiness recommendation using
@@ -456,11 +570,8 @@ new visual renderers, minimizing duplicate queries and rework.
 
 ## Decisions Still Needed Before Slice 2
 
-1. Whether the initial callsign focus should include archived/read traffic by
-   default or honor only the active Traffic Age control. Recommendation: honor
-   Traffic Age, with an explicit `History` action for retained traffic.
-2. Whether unknown but valid callsigns should be pinnable before they appear in
+1. Whether unknown but valid callsigns should be pinnable before they appear in
    the operator table. Recommendation: yes; mark identity and trust as unknown.
-3. Whether choosing a focused station should automatically retarget the visible
+2. Whether choosing a focused station should automatically retarget the visible
    Propagation card. Recommendation: yes, while leaving radio/QSY state
    unchanged until the operator acts.
