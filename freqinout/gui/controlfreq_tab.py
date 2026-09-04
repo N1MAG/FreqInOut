@@ -86,6 +86,13 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_metadata import source_family_label
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.source_view_contracts import source_contract_for
+from freqinout.core.message_projection_store import list_projected_messages
+from freqinout.core.traffic_actionability import (
+    TrafficActionSummary,
+    build_traffic_action_summary,
+    configured_group_names,
+    load_operator_traffic_context,
+)
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory, format_bbs_inventory_detail
 from freqinout.core.view_contracts import compose_intent_from_map_context, map_context_from_mapping
 from freqinout.utils.timezones import get_timezone
@@ -117,6 +124,7 @@ from freqinout.gui.stations_map_tab import (
 )
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
+from freqinout.gui.traffic_action_summary_widget import TrafficActionSummaryWidget
 from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
     button_height_for_font,
@@ -636,10 +644,23 @@ class ControlFreqTab(QWidget):
         intersection_layout.addWidget(self.peer_finder_table)
         self._peer_finder_contexts: List[Dict[str, str]] = []
 
-        self.inbox_box = QGroupBox("Unread Messages & BBS Files")
+        self.inbox_box = QGroupBox("Traffic Intelligence")
         inbox_layout = QVBoxLayout(self.inbox_box)
         inbox_layout.setContentsMargins(8, 6, 8, 6)
-        inbox_layout.setSpacing(2)
+        inbox_layout.setSpacing(4)
+        self.traffic_action_summary = TrafficActionSummaryWidget(self.settings)
+        self.traffic_action_summary.bucketActivated.connect(self._open_traffic_action_bucket)
+        inbox_layout.addWidget(self.traffic_action_summary)
+        detail_row = QHBoxLayout()
+        detail_row.setContentsMargins(0, 0, 0, 0)
+        self.traffic_source_detail_btn = QToolButton()
+        self.traffic_source_detail_btn.setText("Sources")
+        self.traffic_source_detail_btn.setCheckable(True)
+        self.traffic_source_detail_btn.setToolTip("Show unread/file counts by message source.")
+        self.traffic_source_detail_btn.toggled.connect(self._toggle_traffic_source_detail)
+        detail_row.addWidget(self.traffic_source_detail_btn)
+        detail_row.addStretch(1)
+        inbox_layout.addLayout(detail_row)
         self.inbox_table = QTableWidget(0, 3)
         self.inbox_table.setHorizontalHeaderLabels(["Source", "Unread / Files", "What needs attention"])
         self._setup_table_defaults(self.inbox_table)
@@ -649,6 +670,7 @@ class ControlFreqTab(QWidget):
         inbox_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         inbox_header.setSectionResizeMode(2, QHeaderView.Stretch)
         inbox_layout.addWidget(self.inbox_table)
+        self.inbox_table.setVisible(False)
         self._set_message_summary_visible_rows(6)
 
         self.left_splitter = QSplitter(Qt.Vertical)
@@ -1009,7 +1031,7 @@ class ControlFreqTab(QWidget):
             frame_h = int(self.inbox_table.frameWidth()) * 2
             target_h = header_h + (row_h * rows) + frame_h + 4
             self._message_summary_target_height = max(
-                target_h,
+                target_h if self.inbox_table.isVisible() else 0,
                 int(self.inbox_box.sizeHint().height()),
             )
             self.inbox_table.setMinimumHeight(target_h)
@@ -1528,6 +1550,10 @@ class ControlFreqTab(QWidget):
                 self.prop_details_btn.setStyleSheet(
                     button_style("secondary" if self.prop_details_btn.isChecked() else "muted", theme)
                 )
+            if hasattr(self, "traffic_action_summary"):
+                self.traffic_action_summary.apply_theme(theme)
+            if hasattr(self, "traffic_source_detail_btn"):
+                self.traffic_source_detail_btn.setStyleSheet(button_style("muted", theme))
             self._update_time_toggle_style(theme)
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
             self._update_view_chip_styles(theme)
@@ -6589,6 +6615,18 @@ class ControlFreqTab(QWidget):
     def _refresh_message_summary(self) -> None:
         self._schedule_message_summary_refresh()
 
+    def _toggle_traffic_source_detail(self, visible: bool) -> None:
+        self.inbox_table.setVisible(bool(visible))
+        self.traffic_source_detail_btn.setText("Hide Sources" if visible else "Sources")
+        self._set_message_summary_visible_rows(6)
+
+    def _open_traffic_action_bucket(self, bucket: str) -> None:
+        if not bucket:
+            return
+        host = self.window()
+        if hasattr(host, "open_messages_section"):
+            host.open_messages_section("inbox", action_filter=bucket)
+
     def _ensure_message_summary_executor(self) -> ThreadPoolExecutor:
         if self._message_summary_executor is None:
             self._message_summary_executor = ThreadPoolExecutor(
@@ -6633,13 +6671,14 @@ class ControlFreqTab(QWidget):
         flmsg_dir_txt = str(message_paths.get("flmsg", "") or "").strip()
         flamp_dir_txt = str(message_paths.get("flamp", "") or "").strip()
         db_path = self._db_path()
+        hf_groups, local_groups = configured_group_names(self.settings)
         self._message_summary_request_id += 1
         request_id = self._message_summary_request_id
         self._message_summary_pending = True
         if not self._message_summary_cache_rows:
             self._set_table_rows(self.inbox_table, [["Checking messages...", "", ""]])
 
-        def _work() -> List[List[str]]:
+        def _work() -> Dict[str, object]:
             message_rows = self._collect_inbox_rows(
                 search,
                 db_path=db_path,
@@ -6652,21 +6691,43 @@ class ControlFreqTab(QWidget):
                 flmsg_dir_txt=flmsg_dir_txt,
                 flamp_dir_txt=flamp_dir_txt,
             )
-            return self._message_summary_rows(message_rows, bbs_rows, file_rows)
+            context = load_operator_traffic_context(
+                db_path,
+                callsign=local_operator_call,
+                configured_operating_groups=hf_groups,
+                configured_local_groups=local_groups,
+            )
+            try:
+                projected_rows = (
+                    [dict(row) for row in list_projected_messages(db_path, limit=1500)]
+                    if db_path.exists()
+                    else []
+                )
+            except Exception as exc:
+                log.debug("ControlFreq: actionable traffic projection unavailable: %s", exc)
+                projected_rows = []
+            return {
+                "source_rows": self._message_summary_rows(message_rows, bbs_rows, file_rows),
+                "traffic_summary": build_traffic_action_summary(projected_rows, context),
+            }
 
         future = self._ensure_message_summary_executor().submit(_work)
         future.add_done_callback(lambda done, rid=request_id: self._handle_message_summary_future(rid, done))
 
     def _handle_message_summary_future(self, request_id: int, future: Future) -> None:
-        rows: List[List[str]]
+        payload: Dict[str, object]
         error = ""
         try:
-            rows = future.result()
+            result = future.result()
+            payload = result if isinstance(result, dict) else {}
         except Exception as exc:
             error = str(exc)
-            rows = [["Messages", "0", "Message summary unavailable"]]
+            payload = {
+                "source_rows": [["Messages", "0", "Message summary unavailable"]],
+                "traffic_summary": TrafficActionSummary(),
+            }
         try:
-            self._message_summary_ready.emit(int(request_id), rows, error)
+            self._message_summary_ready.emit(int(request_id), payload, error)
         except RuntimeError:
             pass
 
@@ -6678,9 +6739,15 @@ class ControlFreqTab(QWidget):
             return
         if error:
             log.debug("ControlFreq: message summary worker failed: %s", error)
-        rows_out = rows if isinstance(rows, list) else [["Messages", "0", "Message summary unavailable"]]
+        payload = rows if isinstance(rows, dict) else {}
+        rows_value = payload.get("source_rows", [])
+        rows_out = rows_value if isinstance(rows_value, list) else [["Messages", "0", "Message summary unavailable"]]
+        traffic_summary = payload.get("traffic_summary")
+        if not isinstance(traffic_summary, TrafficActionSummary):
+            traffic_summary = TrafficActionSummary()
         self._message_summary_applied_id = int(request_id)
         self._message_summary_cache_rows = rows_out
+        self.traffic_action_summary.set_summary(traffic_summary)
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)

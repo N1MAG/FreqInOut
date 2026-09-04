@@ -4,6 +4,31 @@ This log tracks user-observed UI regressions and contract follow-up items that
 must remain visible across implementation passes. Use it for issues that are
 easy to lose inside broader specs.
 
+## 2026-09-04
+
+### Shared Actionable Traffic Summary
+
+Status: first implementation slice complete; production-data QA pending.
+
+Observation: Ops Center's source-count table was useful but did not yet behave
+like a dashboard, while Messages exposed strong intelligence through a dense
+set of controls. Operators need a common concise answer to what traffic needs a
+reply, what impactful report needs distribution, and why the duty applies.
+
+Contract: `actionable_traffic_summary_spec.md` defines exact user/group
+relevance, event-over-social priority, and role-derived duties. Group hierarchy
+is not inferred. Hub, Hub-Alt/Alt-Hub, NCS, and ANCS share distribution duty;
+Peer remains a reporter role.
+
+Implementation: added a Qt-free actionability projection and one shared summary
+widget used by Ops Center and Messages. Ops Center now collapses legacy source
+counts behind `Sources`; its action buckets drill into the corresponding
+Messages filter. Reading traffic does not complete its operational action.
+
+Next check: verify counts and the lead What/Why line against N1MAG production
+traffic containing direct social messages, MR08 group traffic, and impactful
+reports addressed to a Hub/Alt-Hub/NCS operator.
+
 ## 2026-09-01
 
 ### FLDigi NCS Blank Workspace

@@ -234,6 +234,7 @@ def test_main_messages_navigation_routes_to_requested_surface(monkeypatch) -> No
         group_filter="MAGNET",
         topic_filter="Comms",
         grid_filter="DM79QJ",
+        action_filter="relay",
     )
     assert selected_screens == [7]
     assert len(callbacks) == 1
@@ -242,6 +243,7 @@ def test_main_messages_navigation_routes_to_requested_surface(monkeypatch) -> No
     assert tab.inbox_contexts[-1]["group_filter"] == "MAGNET"
     assert tab.inbox_contexts[-1]["topic_filter"] == "Comms"
     assert tab.inbox_contexts[-1]["grid_filter"] == "DM79QJ"
+    assert tab.inbox_contexts[-1]["action_filter"] == "relay"
     assert tab.compose_count == 0
 
     MainWindow.open_messages_section(

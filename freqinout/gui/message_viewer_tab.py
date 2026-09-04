@@ -202,6 +202,13 @@ from freqinout.core.message_summary import (
     message_summary_from_row,
     normalize_message_source_family,
 )
+from freqinout.core.traffic_actionability import (
+    OperatorTrafficContext,
+    build_traffic_action_summary,
+    configured_group_names,
+    load_operator_traffic_context,
+    message_matches_traffic_bucket,
+)
 from freqinout.core.message_projection_projector import (
     mark_projected_message_rows_deleted,
     project_unified_message_rows,
@@ -226,6 +233,7 @@ from freqinout.core.message_delete_audit import (
     record_message_delete_audit,
     safe_audit_text,
 )
+from freqinout.gui.traffic_action_summary_widget import TrafficActionSummaryWidget
 from freqinout.core.message_delete_policy import (
     bulk_delete_completion_text,
     bulk_delete_confirmation_text,
@@ -2994,6 +3002,9 @@ class MessageViewerTab(QWidget):
         self._intel_status_filter: str = ""
         self._intel_topic_filter: str = ""
         self._intel_filter_buttons: List[QPushButton] = []
+        self._traffic_action_filter: str = ""
+        self._traffic_context_cache_key: tuple[object, ...] = ()
+        self._traffic_context_cache = OperatorTrafficContext()
         self._locally_deleted_row_keys: set[tuple] = set()
         self._filters_initialized = False
         self._has_active_view = False
@@ -5078,6 +5089,8 @@ class MessageViewerTab(QWidget):
         self.message_intel_filter_label.setStyleSheet("font-weight: bold;")
         self.message_intel_filter_layout.addWidget(self.message_intel_filter_label)
         self.message_intel_filter_layout.addStretch()
+        self.traffic_action_summary = TrafficActionSummaryWidget(self.settings)
+        self.traffic_action_summary.bucketActivated.connect(self._set_traffic_action_filter)
         self.map_context_filter_label = QLabel("")
         self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")
         self.map_context_filter_label.setWordWrap(True)
@@ -5126,9 +5139,10 @@ class MessageViewerTab(QWidget):
         self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
-        messages_layout.insertWidget(3, self.message_intel_filter_widget)
-        messages_layout.insertWidget(4, self.map_context_filter_label)
-        messages_layout.insertWidget(5, self.bulk_selection_bar)
+        messages_layout.insertWidget(3, self.traffic_action_summary)
+        messages_layout.insertWidget(4, self.message_intel_filter_widget)
+        messages_layout.insertWidget(5, self.map_context_filter_label)
+        messages_layout.insertWidget(6, self.bulk_selection_bar)
 
         self._arrange_inbox_action_controls(compact=False)
         self._sync_inbox_focus_buttons()
@@ -5304,6 +5318,9 @@ class MessageViewerTab(QWidget):
         self._inbox_focus = focus
         self._intel_status_filter = ""
         self._intel_topic_filter = ""
+        self._traffic_action_filter = ""
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.set_active_bucket("")
         self._sync_inbox_focus_buttons()
         self._sync_source_filter_for_inbox_focus(focus)
         self._unfreeze_table()
@@ -8774,6 +8791,7 @@ class MessageViewerTab(QWidget):
         state_filter: str = "",
         grid_filter: str = "",
         fema_region_filter: str = "",
+        action_filter: str = "",
     ) -> None:
         self.show_inbox_from_navigation()
         try:
@@ -8790,6 +8808,9 @@ class MessageViewerTab(QWidget):
             "grid_filter": str(grid_filter or "").strip().upper(),
             "fema_region_filter": str(fema_region_filter or "").strip().upper(),
         }
+        self._traffic_action_filter = str(action_filter or "").strip().lower()
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
         source = str(source_family or "").strip().lower()
         source_values = self._message_context_source_values(source)
         normalized_source = normalize_message_source_family(source)
@@ -9017,6 +9038,8 @@ class MessageViewerTab(QWidget):
             self.inbox_focus_widget.setVisible(not compose_active)
         if hasattr(self, "message_funnel_widget"):
             self.message_funnel_widget.setVisible(not compose_active)
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.setVisible(not compose_active)
         self._update_map_context_filter_label()
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setVisible(True)
@@ -12392,6 +12415,8 @@ class MessageViewerTab(QWidget):
                 mark=mark,
             )
         self._update_time_toggle_style(theme)
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.apply_theme(theme)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         self._apply_accessibility_width_guards()
@@ -13911,6 +13936,51 @@ class MessageViewerTab(QWidget):
         self._unfreeze_table()
         self._apply_message_filters_preserve_scroll()
 
+    def _operator_traffic_context(self) -> OperatorTrafficContext:
+        hf_groups, local_groups = configured_group_names(self.settings)
+        callsign = str(self.settings.get("operator_callsign", "") or "").strip().upper()
+        db_path = self._db_path()
+        try:
+            db_mtime = int(db_path.stat().st_mtime_ns) if db_path and db_path.exists() else 0
+        except Exception:
+            db_mtime = 0
+        cache_key = (callsign, hf_groups, local_groups, db_mtime)
+        if cache_key != self._traffic_context_cache_key:
+            self._traffic_context_cache = load_operator_traffic_context(
+                db_path,
+                callsign=callsign,
+                configured_operating_groups=hf_groups,
+                configured_local_groups=local_groups,
+            )
+            self._traffic_context_cache_key = cache_key
+        return self._traffic_context_cache
+
+    def _set_traffic_action_filter(self, bucket: object) -> None:
+        self._traffic_action_filter = str(bucket or "").strip().lower()
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
+        self._unfreeze_table()
+        self._apply_message_filters_preserve_scroll()
+
+    def _refresh_traffic_action_summary(self, rows: Sequence[UnifiedMessage]) -> None:
+        if not hasattr(self, "traffic_action_summary"):
+            return
+        for row in rows:
+            self._message_summary_for_row(row)
+        summary = build_traffic_action_summary(rows, self._operator_traffic_context())
+        self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
+        self.traffic_action_summary.set_summary(summary)
+
+    def _row_matches_traffic_action_filter(self, row: UnifiedMessage) -> bool:
+        bucket = str(getattr(self, "_traffic_action_filter", "") or "").strip().lower()
+        if not bucket:
+            return True
+        return message_matches_traffic_bucket(
+            row,
+            self._operator_traffic_context(),
+            bucket,
+        )
+
     def message_summaries(self, *, visible_only: bool = True, default_visible_only: bool = False) -> Tuple[MessageSummary, ...]:
         if visible_only and hasattr(self, "_messages_model"):
             rows = self._messages_model.rows()
@@ -13947,6 +14017,7 @@ class MessageViewerTab(QWidget):
 
         filtered = []
         intel_base_rows = []
+        traffic_base_rows = []
         workspace_pass_count = 0
         criteria_pass_count = 0
         map_context_pass_count = 0
@@ -13970,6 +14041,9 @@ class MessageViewerTab(QWidget):
             if not self._row_matches_intel_filter(row):
                 continue
             intel_pass_count += 1
+            traffic_base_rows.append(row)
+            if not self._row_matches_traffic_action_filter(row):
+                continue
             filtered.append(row)
         if (
             recover_empty_stale_scope
@@ -13987,6 +14061,7 @@ class MessageViewerTab(QWidget):
             map_context_pass_count = 0
             intel_pass_count = 0
             intel_base_rows = []
+            traffic_base_rows = []
             for row in rows:
                 if not _core_row_matches_workspace_scope(
                     row,
@@ -14006,6 +14081,9 @@ class MessageViewerTab(QWidget):
                 if not self._row_matches_intel_filter(row):
                     continue
                 intel_pass_count += 1
+                traffic_base_rows.append(row)
+                if not self._row_matches_traffic_action_filter(row):
+                    continue
                 filtered.append(row)
         self._set_message_table_display_profile(self._message_display_profile_for_current_view(type_sel))
         if (
@@ -14018,6 +14096,7 @@ class MessageViewerTab(QWidget):
             filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
         self._refresh_intel_filter_bar(intel_base_rows)
+        self._refresh_traffic_action_summary(traffic_base_rows)
         self._update_clear_filters_style()
         self._update_map_context_filter_label()
         self._update_mark_all_read_style()
@@ -14598,6 +14677,8 @@ class MessageViewerTab(QWidget):
             return True
         if getattr(self, "_intel_status_filter", "") or getattr(self, "_intel_topic_filter", ""):
             return True
+        if getattr(self, "_traffic_action_filter", ""):
+            return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
         if hasattr(self, "received_filter") and int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS:
@@ -14681,6 +14762,7 @@ class MessageViewerTab(QWidget):
             and self._selected_message_groups() is None
             and not getattr(self, "_intel_status_filter", "")
             and not getattr(self, "_intel_topic_filter", "")
+            and not getattr(self, "_traffic_action_filter", "")
             and not (getattr(self, "_map_context_filter", {}) or {})
             and int(self.received_filter.currentData() or 0) == DEFAULT_RECEIVED_FILTER_SECONDS
             and not self.rcv_search.text().strip()
@@ -14698,6 +14780,9 @@ class MessageViewerTab(QWidget):
         self._map_context_filter = {}
         self._intel_status_filter = ""
         self._intel_topic_filter = ""
+        self._traffic_action_filter = ""
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.set_active_bucket("")
         self._sync_inbox_focus_buttons()
         default_age_idx = self.received_filter.findData(DEFAULT_RECEIVED_FILTER_SECONDS)
         self.received_filter.setCurrentIndex(default_age_idx if default_age_idx >= 0 else 0)
@@ -14990,6 +15075,8 @@ class MessageViewerTab(QWidget):
             intel_parts.append(f"Status {str(self._intel_status_filter).title()}")
         if getattr(self, "_intel_topic_filter", ""):
             intel_parts.append(f"Topic {self._intel_topic_filter}")
+        if getattr(self, "_traffic_action_filter", ""):
+            intel_parts.append(f"Action {str(self._traffic_action_filter).title()}")
         if isinstance(context, dict) and context.get("concern_only"):
             geo_parts = []
             state_filter = str(context.get("state_filter") or "").strip().upper()
@@ -15967,6 +16054,7 @@ class MessageViewerTab(QWidget):
             or self._message_group_filter_active()
             or bool(getattr(self, "_intel_status_filter", ""))
             or bool(getattr(self, "_intel_topic_filter", ""))
+            or bool(getattr(self, "_traffic_action_filter", ""))
             or int(self.received_filter.currentData() or 0) != DEFAULT_RECEIVED_FILTER_SECONDS
             or bool(getattr(self, "_map_context_filter", {}) or {})
             or bool(self.rcv_search.text().strip())

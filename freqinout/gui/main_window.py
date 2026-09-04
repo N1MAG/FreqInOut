@@ -3918,6 +3918,7 @@ class MainWindow(QMainWindow):
         state_filter: str = "",
         grid_filter: str = "",
         fema_region_filter: str = "",
+        action_filter: str = "",
         compose_intent: Mapping[str, object] | None = None,
     ) -> None:
         idx = self._screen_index_by_label.get("Messages", -1)
@@ -3941,6 +3942,7 @@ class MainWindow(QMainWindow):
         normalized_intent = compose_intent_from_mapping(compose_intent).as_dict() if compose_intent else {}
         self._messages_nav_filter_context = {
             **map_context.as_messages_kwargs(),
+            "action_filter": str(action_filter or "").strip().lower(),
             "compose_intent": normalized_intent,
         }
         self._set_screen(idx)
