@@ -2913,6 +2913,7 @@ class MessageViewerTab(QWidget):
             cfg.get("projection_primary_enabled", True), True
         )
         self._available_type_filters: List[str] = []
+        self._inbox_focus_unread_counts: Dict[str, int] = {}
         self._responsive_layout_mode = "wide"
         self._responsive_compact_width = 1200
         msg_paths = self.settings.get("message_paths", {}) or {}
@@ -5091,6 +5092,10 @@ class MessageViewerTab(QWidget):
         self.message_intel_filter_layout.addStretch()
         self.traffic_action_summary = TrafficActionSummaryWidget(self.settings)
         self.traffic_action_summary.bucketActivated.connect(self._set_traffic_action_filter)
+        self.message_scope_label = QLabel("")
+        self.message_scope_label.setObjectName("messageAppliedScopeLabel")
+        self.message_scope_label.setWordWrap(True)
+        self.message_scope_label.setStyleSheet("font-weight: 600; color: #5b6875;")
         self.map_context_filter_label = QLabel("")
         self.map_context_filter_label.setObjectName("messageMapContextFilterLabel")
         self.map_context_filter_label.setWordWrap(True)
@@ -5139,13 +5144,15 @@ class MessageViewerTab(QWidget):
         self.inbox_focus_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         messages_layout.insertWidget(1, self.inbox_focus_widget)
         messages_layout.insertWidget(2, self.message_funnel_widget)
-        messages_layout.insertWidget(3, self.traffic_action_summary)
-        messages_layout.insertWidget(4, self.message_intel_filter_widget)
-        messages_layout.insertWidget(5, self.map_context_filter_label)
-        messages_layout.insertWidget(6, self.bulk_selection_bar)
+        messages_layout.insertWidget(3, self.message_scope_label)
+        messages_layout.insertWidget(4, self.traffic_action_summary)
+        messages_layout.insertWidget(5, self.message_intel_filter_widget)
+        messages_layout.insertWidget(6, self.map_context_filter_label)
+        messages_layout.insertWidget(7, self.bulk_selection_bar)
 
         self._arrange_inbox_action_controls(compact=False)
         self._sync_inbox_focus_buttons()
+        self._update_visible_message_scope_label()
         self._refresh_basic_filter_button_texts()
         self._build_messages_header()
         self._apply_accessibility_width_guards()
@@ -5332,12 +5339,77 @@ class MessageViewerTab(QWidget):
 
     def _sync_inbox_focus_buttons(self) -> None:
         theme = resolve_theme(self.settings)
+        labels = {key: label for key, label, _tip in self._inbox_focus_options()}
         for key, btn in getattr(self, "_inbox_focus_buttons", {}).items():
             active = key == self._inbox_focus
+            count = int(getattr(self, "_inbox_focus_unread_counts", {}).get(key, 0))
+            button_text = f"{labels.get(key, key.title())} {count}"
+            btn.setText(button_text)
+            try:
+                btn.setMinimumWidth(max(100, int(btn.fontMetrics().horizontalAdvance(button_text) + 34)))
+            except Exception:
+                pass
             btn.blockSignals(True)
             btn.setChecked(active)
             btn.blockSignals(False)
             btn.setStyleSheet(button_style("primary" if active else "muted", theme))
+
+    @staticmethod
+    def _row_is_unread_for_focus_count(row: UnifiedMessage) -> bool:
+        status = str(getattr(row, "status", "") or "").strip().upper()
+        if status == "READ":
+            return False
+        if status in {"NEW", "UNREAD", "ALERT", "YELLOW", "RED"}:
+            return True
+        payload = getattr(row, "payload", None)
+        read_state = str(getattr(payload, "read_state", "") or "").strip().lower()
+        if read_state:
+            return read_state in {"new", "unread", "alert"}
+        return False
+
+    def _refresh_inbox_focus_unread_counts(self, rows: Sequence[UnifiedMessage], *, now_ts: float) -> None:
+        try:
+            age_seconds = int(self.received_filter.currentData() or 0)
+        except Exception:
+            age_seconds = 0
+        selected_groups = self._expanded_selected_message_groups()
+        configured_groups = self._configured_message_group_names()
+        counts: Dict[str, int] = {}
+        for key, _label, _tip in self._inbox_focus_options():
+            count = 0
+            for row in rows:
+                if not _core_row_matches_workspace_scope(
+                    row,
+                    selected_sources=None,
+                    selected_groups=selected_groups,
+                    configured_groups=configured_groups,
+                ):
+                    continue
+                if not _core_row_matches_age_filter(row, age_seconds, now_ts=now_ts):
+                    continue
+                if key != "all" and not _core_row_matches_inbox_focus(row, key):
+                    continue
+                if self._row_is_unread_for_focus_count(row):
+                    count += 1
+            counts[key] = count
+        self._inbox_focus_unread_counts = counts
+        self._sync_inbox_focus_buttons()
+
+    def _update_visible_message_scope_label(self) -> None:
+        label = getattr(self, "message_scope_label", None)
+        if label is None:
+            return
+        age = str(self.received_filter.currentText() or "All time").strip()
+        focus_labels = {key: value for key, value, _tip in self._inbox_focus_options()}
+        focus = focus_labels.get(getattr(self, "_inbox_focus", "all"), "All")
+        groups = str(self.operating_group_filter.text() or "Groups: Configured").strip()
+        sources = str(self.source_filter.text() or "Sources: All").strip()
+        label.setText(f"Showing: {age} · Focus {focus} · {groups} · {sources}")
+        try:
+            theme = resolve_theme(self.settings)
+            label.setStyleSheet(f"font-weight: 600; color: {theme.get('text_muted', '#5b6875')};")
+        except Exception:
+            pass
 
     @staticmethod
     def _source_values_for_inbox_focus(focus: object) -> list[str]:
@@ -8817,6 +8889,8 @@ class MessageViewerTab(QWidget):
         focus = {
             "flmsg": "forms",
             "flamp": "forms",
+            "forms": "forms",
+            "nbems": "forms",
             "js8spotter": "spotter",
             "fiospotter": "spotter",
             "spotter": "spotter",
@@ -8911,6 +8985,8 @@ class MessageViewerTab(QWidget):
         if source == "js8call" or normalized == "js8":
             return ["js8"]
         if source == "forms":
+            return ["flmsg", "flamp"]
+        if source == "nbems":
             return ["flmsg", "flamp"]
         if source == "fastlight":
             return ["flmsg", "flamp"]
@@ -14094,11 +14170,13 @@ class MessageViewerTab(QWidget):
             filtered = sorted(filtered, key=lambda r: r.rcv_ts or 0.0)
         else:
             filtered = self._sort_rows(filtered)
+        self._refresh_inbox_focus_unread_counts(rows, now_ts=now_ts)
         self._render_messages_table(filtered)
         self._refresh_intel_filter_bar(intel_base_rows)
         self._refresh_traffic_action_summary(traffic_base_rows)
         self._update_clear_filters_style()
         self._update_map_context_filter_label()
+        self._update_visible_message_scope_label()
         self._update_mark_all_read_style()
         if refresh_options:
             self._refresh_workspace_filter_options(self._rows_for_group_filter_options(rows))

@@ -5,7 +5,9 @@ from dataclasses import replace
 from freqinout.core.message_summary import MessageActionValidity, MessageSummary
 from freqinout.core.traffic_actionability import (
     build_operator_traffic_context,
+    build_traffic_group_volumes,
     build_traffic_action_summary,
+    filter_traffic_messages,
     message_matches_traffic_bucket,
 )
 
@@ -163,3 +165,97 @@ def test_unassociated_group_is_not_inferred_from_related_name() -> None:
     child_named_message = _message(to_target="MR08", group="MR08")
 
     assert build_traffic_action_summary((child_named_message,), context).items == ()
+
+
+def test_green_status_report_is_volume_not_reply_work() -> None:
+    context = build_operator_traffic_context(
+        callsign="N1MAG",
+        operator_rows=({"callsign": "N1MAG", "group1": "MR08", "group_role": "HUB"},),
+    )
+    green_report = {
+        "message_id": "k7etc-green-f701c",
+        "source_family": "js8call",
+        "from_call": "K7ETC",
+        "to_call": "MR08",
+        "group_name": "MR08",
+        "subject": "F!701C Situation Report",
+        "summary": (
+            "Current Operational Status (QTH) *Operations steady, no significant issues "
+            "or noteworthy activity - Green"
+        ),
+        "severity": "important",
+        "actionable": True,
+    }
+
+    summary = build_traffic_action_summary((green_report,), context)
+
+    assert summary.count("reply") == 0
+    assert summary.count("relay") == 0
+    assert summary.count("review") == 0
+
+
+def test_green_report_with_explicit_question_can_request_reply() -> None:
+    context = build_operator_traffic_context(
+        callsign="N1MAG",
+        configured_operating_groups=("MR08",),
+    )
+    green_request = _message(
+        summary="Operations steady and Green. Please confirm receipt?",
+        severity="routine",
+    )
+
+    assert build_traffic_action_summary((green_request,), context).count("reply") == 1
+
+
+def test_traffic_age_scope_and_group_trend_are_shared() -> None:
+    now = 200_000.0
+    rows = [
+        {
+            "message_id": f"current-{index}",
+            "source_family": "js8",
+            "group_name": "MR08",
+            "received_ts": now - (index * 60),
+            "read_state": "new" if index < 3 else "read",
+        }
+        for index in range(6)
+    ]
+    rows.append(
+        {
+            "message_id": "previous",
+            "source_family": "js8call",
+            "group_name": "MR08",
+            "received_ts": now - 90_000,
+            "read_state": "read",
+        }
+    )
+    rows.append(
+        {
+            "message_id": "other-group",
+            "source_family": "js8call",
+            "group_name": "MAGNET",
+            "received_ts": now - 60,
+            "read_state": "new",
+        }
+    )
+
+    scoped = filter_traffic_messages(
+        rows,
+        age_seconds=86_400,
+        now_ts=now,
+        source_family="js8call",
+        group_filter="MR08",
+    )
+    volumes = build_traffic_group_volumes(
+        rows,
+        age_seconds=86_400,
+        now_ts=now,
+        source_family="js8call",
+        group_filter="MR08",
+    )
+
+    assert len(scoped) == 6
+    assert len(volumes) == 1
+    assert volumes[0].current_count == 6
+    assert volumes[0].previous_count == 1
+    assert volumes[0].unread_count == 3
+    assert volumes[0].trend == "Spike ↑"

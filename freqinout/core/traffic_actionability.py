@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -34,7 +35,14 @@ _IMPACT_TOPICS = frozenset(
     }
 )
 _REQUEST_RE = re.compile(
-    r"(?:\?|\b(?:ack|acknowledge|advise|confirm|need|please|reply|request|respond|status|traffic)\b)",
+    r"(?:\?|\b(?:please\s+)?(?:ack(?:nowledge)?|advise|confirm|reply|respond)\b|"
+    r"\b(?:reply|response|ack(?:nowledgement)?|confirmation)\s+(?:is\s+)?requested\b|"
+    r"\brequest(?:ing|ed)?\s+(?:a\s+)?(?:reply|response|ack(?:nowledgement)?|confirmation)\b)",
+    re.IGNORECASE,
+)
+_GREEN_RE = re.compile(
+    r"\b(?:green(?:\s+(?:report|status))?|all\s+clear|operations?\s+(?:steady|normal)|"
+    r"no\s+significant\s+(?:issues?|activity)|overall\s+status\s*[:=-]?\s*(?:green|normal|functioning))\b",
     re.IGNORECASE,
 )
 
@@ -117,6 +125,16 @@ class TrafficActionSummary:
     @property
     def lead(self) -> TrafficActionItem | None:
         return self.items[0] if self.items else None
+
+
+@dataclass(frozen=True)
+class TrafficGroupVolume:
+    group: str
+    unread_count: int = 0
+    current_count: int = 0
+    previous_count: int = 0
+    trend: str = "Steady"
+    latest_ts: float = 0.0
 
 
 def build_operator_traffic_context(
@@ -228,7 +246,10 @@ def traffic_action_item(
         topics=topics,
         actionable=actionable,
     )
-    request_signal = actionable or bool(_REQUEST_RE.search(text))
+    request_signal = bool(_REQUEST_RE.search(text))
+    explicit_green = bool(_GREEN_RE.search(text))
+    if explicit_green and not request_signal and status not in {"ALERT", "RED"}:
+        event_oriented = False
     can_reply = _can_reply(message)
     reply_needed = bool(
         can_reply
@@ -314,6 +335,96 @@ def build_traffic_action_summary(
     items = [item for message in messages if (item := traffic_action_item(message, context)) is not None]
     items.sort(key=lambda item: (_priority(item), -float(item.received_ts or 0.0), item.stable_id))
     return TrafficActionSummary(tuple(items))
+
+
+def filter_traffic_messages(
+    messages: Iterable[object],
+    *,
+    age_seconds: object = 0,
+    now_ts: float | None = None,
+    source_family: object = "",
+    group_filter: object = "",
+) -> tuple[object, ...]:
+    """Apply the shared Ops/Inbox time, source, and group scope to traffic rows."""
+    try:
+        age = max(0, int(age_seconds or 0))
+    except Exception:
+        age = 0
+    now = float(now_ts if now_ts is not None else time.time())
+    minimum_ts = now - age if age else 0.0
+    source = _normalize_source(source_family)
+    group = _normalize_group(group_filter)
+    result: list[object] = []
+    for message in messages:
+        received = _float_value(message, "received_ts", "rcv_ts", "event_ts")
+        if minimum_ts and (not received or received < minimum_ts):
+            continue
+        if source and _normalize_source(_value(message, "source_family", "origin")) != source:
+            continue
+        if group:
+            message_group = _message_group(message)
+            if message_group != group:
+                continue
+        result.append(message)
+    return tuple(result)
+
+
+def build_traffic_group_volumes(
+    messages: Iterable[object],
+    *,
+    age_seconds: object = 24 * 60 * 60,
+    now_ts: float | None = None,
+    source_family: object = "",
+    group_filter: object = "",
+) -> tuple[TrafficGroupVolume, ...]:
+    """Summarize current traffic and compare it with the preceding equal window."""
+    rows = tuple(messages)
+    try:
+        age = max(0, int(age_seconds or 0))
+    except Exception:
+        age = 0
+    now = float(now_ts if now_ts is not None else time.time())
+    source = _normalize_source(source_family)
+    wanted_group = _normalize_group(group_filter)
+    buckets: dict[str, dict[str, float | int]] = {}
+    for message in rows:
+        if source and _normalize_source(_value(message, "source_family", "origin")) != source:
+            continue
+        target = _normalize_target(_value(message, "to_target", "to_call"))
+        group = _message_group(message) or ("DIRECT" if _looks_like_callsign(target) else "UNASSIGNED")
+        if wanted_group and group != wanted_group:
+            continue
+        received = _float_value(message, "received_ts", "rcv_ts", "event_ts")
+        elapsed = max(0.0, now - received) if received else 0.0
+        current = not age or bool(received and elapsed <= age)
+        previous = bool(age and received and age < elapsed <= age * 2)
+        if not current and not previous:
+            continue
+        bucket = buckets.setdefault(
+            group,
+            {"unread": 0, "current": 0, "previous": 0, "latest": 0.0},
+        )
+        if current:
+            bucket["current"] = int(bucket["current"]) + 1
+            bucket["latest"] = max(float(bucket["latest"]), received)
+            if _is_unread(message):
+                bucket["unread"] = int(bucket["unread"]) + 1
+        elif previous:
+            bucket["previous"] = int(bucket["previous"]) + 1
+    result = [
+        TrafficGroupVolume(
+            group=group,
+            unread_count=int(values["unread"]),
+            current_count=int(values["current"]),
+            previous_count=int(values["previous"]),
+            trend=_traffic_trend(int(values["current"]), int(values["previous"]), age),
+            latest_ts=float(values["latest"]),
+        )
+        for group, values in buckets.items()
+        if int(values["current"]) > 0
+    ]
+    result.sort(key=lambda item: (-_trend_rank(item.trend), -item.current_count, item.group))
+    return tuple(result)
 
 
 def message_matches_traffic_bucket(
@@ -456,7 +567,71 @@ def _value(message: object, *names: str) -> object:
             value = getattr(nested, name, None)
             if value not in (None, ""):
                 return value
+    payload = None if isinstance(message, Mapping) else getattr(message, "payload", None)
+    if payload is not None and payload is not message:
+        for name in names:
+            if isinstance(payload, Mapping):
+                value = payload.get(name)
+            else:
+                value = getattr(payload, name, None)
+            if value not in (None, ""):
+                return value
     return ""
+
+
+def _message_group(message: object) -> str:
+    group = _normalize_group(_value(message, "group", "group_name"))
+    if group:
+        return group
+    target = _normalize_target(_value(message, "to_target", "to_call"))
+    return target if target and not _looks_like_callsign(target) else ""
+
+
+def _looks_like_callsign(value: object) -> bool:
+    text = str(value or "").strip().upper()
+    return bool(re.fullmatch(r"[A-Z]{1,3}\d[A-Z0-9]{1,4}(?:-[A-Z0-9]+)?", text))
+
+
+def _is_unread(message: object) -> bool:
+    state = str(_value(message, "read_state") or "").strip().lower()
+    if state:
+        return state in {"new", "unread", "alert"}
+    status = str(_value(message, "status") or "").strip().upper()
+    return status in {"NEW", "UNREAD", "ALERT", "YELLOW", "RED"}
+
+
+def _traffic_trend(current: int, previous: int, age: int) -> str:
+    if not age:
+        return "Window total"
+    if current >= 5 and current >= previous * 2 and current - previous >= 3:
+        return "Spike ↑"
+    if current > previous:
+        return "Rising ↑"
+    if current < previous:
+        return "Falling ↓"
+    return "Steady"
+
+
+def _trend_rank(value: str) -> int:
+    return {"Spike ↑": 3, "Rising ↑": 2, "Steady": 1, "Falling ↓": 0}.get(value, 0)
+
+
+def _normalize_source(value: object) -> str:
+    source = str(value or "").strip().lower()
+    aliases = {
+        "nbems": "forms",
+        "flmsg": "forms",
+        "flamp": "forms",
+        "js8": "js8call",
+        "commstat_rf": "commstat",
+        "fiospotter": "spotter",
+        "js8spotter": "spotter",
+        "mesh": "meshcore",
+        "meshtastic": "meshcore",
+        "local_mesh": "meshcore",
+        "bbs_archive": "bbs",
+    }
+    return aliases.get(source, source)
 
 
 def _bool_value(message: object, name: str) -> bool:

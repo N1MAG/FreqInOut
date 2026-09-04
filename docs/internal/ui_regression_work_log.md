@@ -466,3 +466,36 @@ the master label because Compose is an equal child of Messages.
 Known unrelated test state: `test_phase7_main_window_does_not_prewarm_messages_tab`
 expects only FreqPlanner prewarming, while the existing runtime helper currently
 returns Messages and FreqPlanner. This shell work did not change that behavior.
+
+### Traffic intelligence production QA follow-up
+
+Production screenshots showed unbounded Ops action counts, weak visibility of
+the active scope, fixed-width center columns, no category-level unread counts,
+and a Green F!701C report incorrectly presented as Reply work.
+
+Implementation:
+
+- Ops traffic intelligence now defaults to the last 24 hours and offers 1h,
+  6h, 24h, 7d, 30d, and all-time receive windows. The visible scope states age,
+  group, and source, and action drill-down carries those filters into Messages.
+- Added a persistent `Traffic by group` view with unread, total, trend, and
+  latest-receipt columns. Trend compares the current receive window with the
+  immediately preceding equal window and highlights material spikes.
+- Message focus buttons now display age- and group-scoped unread counts, while
+  an always-visible scope line makes the Inbox filter state explicit.
+- Ops table headers now give the information-bearing center columns elastic
+  space at both wide and compact widths.
+- Reply detection now requires an explicit question or response/acknowledgment
+  phrase. Explicit Green/normal/steady reports remain volume evidence but are
+  suppressed from action buckets unless the content asks for a response.
+- Projection reads accept a receive-time lower bound and a larger bounded query
+  limit so current/prior traffic windows can be compared without loading the
+  full retained history.
+
+Verification: `364` focused traffic, projection, Ops, Messages, and shell tests
+pass with the existing unrelated Messages-prewarm assertion deselected. Python
+compilation and `git diff --check` pass. Offscreen visual smoke covered a 930px
+compact Ops content width and confirmed filter reflow, persistent Traffic
+Intelligence, elastic center columns, and no horizontal clipping. A Messages
+widget smoke confirmed all nine focus controls render their unread count. The
+existing unrelated Messages-prewarm assertion remains unchanged.

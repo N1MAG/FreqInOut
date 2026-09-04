@@ -737,6 +737,7 @@ def list_projected_messages(
     status: str = "",
     severity: str = "",
     search_text: str = "",
+    received_after_ts: float = 0.0,
     include_archived: bool = False,
     include_deleted: bool = False,
     limit: int = 500,
@@ -773,7 +774,10 @@ def list_projected_messages(
     if search_text:
         clauses.append("search_text LIKE ?")
         params.append(f"%{search_text.lower()}%")
-    params.append(max(1, min(5000, int(limit or 500))))
+    if received_after_ts:
+        clauses.append("COALESCE(NULLIF(received_ts, 0), event_ts, 0) >= ?")
+        params.append(float(received_after_ts))
+    params.append(max(1, min(20000, int(limit or 500))))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
     try:

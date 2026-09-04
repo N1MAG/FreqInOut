@@ -1630,17 +1630,17 @@ def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() 
 def test_phase7_controlfreq_uses_filter_row_and_hides_context() -> None:
     source = Path("freqinout/gui/controlfreq_tab.py").read_text(encoding="utf-8")
     build_block = source[source.index("header = QHBoxLayout()") : source.index("controlfreq_context_text = (")]
-    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QHBoxLayout()")]
-    filter_block = build_block[build_block.index("filter_row = QHBoxLayout()") :]
+    header_block = build_block[build_block.index("header = QHBoxLayout()") : build_block.index("filter_row = QGridLayout()")]
+    filter_block = source[source.index("def _arrange_filter_controls") : source.index("def _apply_ops_table_column_layout")]
 
     assert "header.addWidget(self.help_btn)" in header_block
     assert "header.addWidget(self.search_edit" not in header_block
     assert "header.addWidget(self.time_toggle_btn" not in header_block
-    assert "filter_row.addWidget(self.search_edit" in filter_block
-    assert "filter_row.addWidget(self.group_combo)" in filter_block
-    assert "filter_row.addWidget(self.refresh_btn)" in filter_block
-    assert "filter_row.addWidget(self.clear_filters_btn)" in filter_block
-    assert "filter_row.addWidget(self.time_toggle_btn)" in filter_block
+    assert "layout.addWidget(self.search_edit" in filter_block
+    assert "layout.addWidget(self.group_combo" in filter_block
+    assert "layout.addWidget(self.refresh_btn" in filter_block
+    assert "layout.addWidget(self.clear_filters_btn" in filter_block
+    assert "layout.addWidget(self.time_toggle_btn" in filter_block
     assert "self.plan_context_label.setVisible(False)" in source
 
 

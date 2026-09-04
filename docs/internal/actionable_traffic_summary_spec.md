@@ -48,6 +48,13 @@ associations and may be used.
 - **Social**: direct non-event traffic. It remains visible but sorts after
   event-oriented traffic.
 
+Normal/Green situation reports are awareness traffic, not action traffic. A
+report containing explicit Green/normal/steady evidence must not be classified
+as Reply, Relay, or Review solely because an upstream source marked it
+actionable or because it contains generic words such as `status` or `traffic`.
+It enters Reply only when the content contains an explicit question or response
+request. It still contributes to global traffic and unread volume.
+
 Event orientation uses the existing normalized severity, actionable flag,
 message/form family, and intelligence topics. The projection is advisory;
 operators retain judgment when source content is ambiguous.
@@ -56,6 +63,11 @@ operators retain judgment when source content is ambiguous.
 
 - Received time remains the actionable time because delayed RF/internet routing
   can make an older authored message newly known to the station.
+- Ops Center defaults action and volume counts to messages received by FIO in
+  the last 24 hours. Operators can select 1 hour, 6 hours, 24 hours, 7 days,
+  30 days, or all retained traffic.
+- The active traffic age, group, and source scope is always stated in plain
+  language. Opening Messages from an Ops action bucket carries the same scope.
 - Marking a message read does not mean reply, relay, or review duty is complete.
 - This slice does not add action-completion persistence. A later workflow may
   add explicit acknowledge/defer/complete actions without redefining read state.
@@ -71,6 +83,17 @@ operators retain judgment when source content is ambiguous.
 - Ops Center keeps legacy source/file counts under a collapsed `Sources`
   disclosure so source health remains available without dominating the
   dashboard.
+- Ops Center keeps `Traffic by group` visible as a first-class awareness view.
+  It shows new/unread count, total traffic, latest receipt age, and comparison
+  with the immediately preceding equal-duration window. A `Spike` is an
+  awareness signal and does not create an action by itself. Group rows drill
+  into Messages with the same age and source scope.
+- Inbox focus controls show new/unread counts for each focus category. Those
+  counts follow the selected age and group scope; changing the focus does not
+  hide the counts for other focus categories.
+- Ops Center tables assign elastic resize behavior to information-bearing
+  center columns so expanding the navigation does not force those columns off
+  screen.
 - The summary uses theme-derived semantic styling and must remain usable with
   light/dark themes and larger text.
 
@@ -84,4 +107,9 @@ operators retain judgment when source content is ambiguous.
 - Peer classifies that report as Review, not Relay.
 - Event-oriented direct traffic is presented before newer social traffic.
 - Changing a message from New to Read does not remove its operational action.
+- A Green F!701C report to an associated group remains in traffic volume but is
+  absent from Reply/Relay/Review unless its content explicitly requests a
+  response.
+- Traffic focus counts change with the selected age window and count unread
+  traffic rather than all retained traffic.
 - Ops Center and Messages compute counts from the same Qt-free core functions.

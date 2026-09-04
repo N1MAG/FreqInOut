@@ -88,9 +88,12 @@ from freqinout.core.sop_manager import SOPManager
 from freqinout.core.source_view_contracts import source_contract_for
 from freqinout.core.message_projection_store import list_projected_messages
 from freqinout.core.traffic_actionability import (
+    TrafficGroupVolume,
     TrafficActionSummary,
+    build_traffic_group_volumes,
     build_traffic_action_summary,
     configured_group_names,
+    filter_traffic_messages,
     load_operator_traffic_context,
 )
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory, format_bbs_inventory_detail
@@ -340,26 +343,24 @@ class ControlFreqTab(QWidget):
         header.addStretch(1)
         root.addLayout(header)
 
-        filter_row = QHBoxLayout()
+        filter_row = QGridLayout()
+        self.filter_row = filter_row
         filter_row.setSpacing(8)
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search FIO... radios, schedules, messages, settings")
         self.search_edit.textChanged.connect(self._on_filters_changed)
         self.search_edit.returnPressed.connect(self._show_app_search_results)
-        self.search_edit.setMinimumWidth(360)
-        self.search_edit.setMaximumWidth(520)
-        filter_row.addWidget(self.search_edit, 1)
+        self.search_edit.setMinimumWidth(220)
+        self.search_edit.setMaximumWidth(420)
 
         self.app_search_btn = QPushButton("Search FIO")
         self.app_search_btn.setToolTip("Search across radios, schedules, settings, actions, and current setup issues.")
         self.app_search_btn.clicked.connect(self._show_app_search_results)
-        filter_row.addWidget(self.app_search_btn)
 
         self.group_combo = QComboBox()
-        self.group_combo.setMinimumWidth(180)
+        self.group_combo.setMinimumWidth(130)
         self.group_combo.currentIndexChanged.connect(self._on_filters_changed)
-        filter_row.addWidget(self.group_combo)
 
         self.traffic_source_combo = QComboBox()
         self.traffic_source_combo.setToolTip("Limit Ops Center traffic to one message source.")
@@ -371,27 +372,47 @@ class ControlFreqTab(QWidget):
         self.traffic_source_combo.addItem("Mesh", "meshcore")
         self.traffic_source_combo.addItem("VarAC", "varac")
         self.traffic_source_combo.addItem("BBS", "bbs")
-        self.traffic_source_combo.setMinimumWidth(170)
+        self.traffic_source_combo.setMinimumWidth(140)
         self.traffic_source_combo.currentIndexChanged.connect(self._on_traffic_source_filter_changed)
-        filter_row.addWidget(self.traffic_source_combo)
+
+        self.traffic_age_combo = QComboBox()
+        self.traffic_age_combo.setToolTip(
+            "Bound traffic counts and action queues by when FIO received each message."
+        )
+        for label, seconds in (
+            ("Traffic: 1h", 60 * 60),
+            ("Traffic: 6h", 6 * 60 * 60),
+            ("Traffic: 24h", 24 * 60 * 60),
+            ("Traffic: 7d", 7 * 24 * 60 * 60),
+            ("Traffic: 30d", 30 * 24 * 60 * 60),
+            ("Traffic: All", 0),
+        ):
+            self.traffic_age_combo.addItem(label, seconds)
+        self.traffic_age_combo.setCurrentIndex(2)
+        self.traffic_age_combo.setMinimumWidth(112)
+        self.traffic_age_combo.currentIndexChanged.connect(self._on_filters_changed)
 
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_all)
-        filter_row.addWidget(self.refresh_btn)
 
         self.clear_filters_btn = QPushButton("Clear Filters")
         self.clear_filters_btn.clicked.connect(self._clear_filters)
-        filter_row.addWidget(self.clear_filters_btn)
 
         self.time_toggle_btn = QPushButton("Times: Local")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        filter_row.addWidget(self.time_toggle_btn)
 
         self.focus_mode_btn = QPushButton("Focus Mode: Off")
         self.focus_mode_btn.clicked.connect(self._toggle_focus_mode)
         self.focus_mode_btn.setVisible(False)
 
+        self._arrange_filter_controls(compact=False)
         root.addLayout(filter_row)
+
+        self.applied_filters_label = QLabel("")
+        self.applied_filters_label.setObjectName("controlfreqAppliedFilters")
+        self.applied_filters_label.setWordWrap(True)
+        self.applied_filters_label.setStyleSheet("font-weight: 600; color: #5b6875;")
+        root.addWidget(self.applied_filters_label)
 
         controlfreq_context_text = (
             "Ops Center uses the current radio and Frequency Plan context when reviewing schedule control."
@@ -651,6 +672,26 @@ class ControlFreqTab(QWidget):
         self.traffic_action_summary = TrafficActionSummaryWidget(self.settings)
         self.traffic_action_summary.bucketActivated.connect(self._open_traffic_action_bucket)
         inbox_layout.addWidget(self.traffic_action_summary)
+        traffic_group_header = QHBoxLayout()
+        self.traffic_group_title = QLabel("Traffic by group")
+        self.traffic_group_title.setStyleSheet("font-weight: 700;")
+        traffic_group_header.addWidget(self.traffic_group_title)
+        traffic_group_header.addStretch(1)
+        self.traffic_group_hint = QLabel("Trend compares the prior equal window")
+        self.traffic_group_hint.setStyleSheet("color: #5b6875;")
+        traffic_group_header.addWidget(self.traffic_group_hint)
+        inbox_layout.addLayout(traffic_group_header)
+        self.traffic_group_table = QTableWidget(0, 5)
+        self.traffic_group_table.setObjectName("controlfreqTrafficByGroupTable")
+        self.traffic_group_table.setHorizontalHeaderLabels(["Group", "New", "Traffic", "Trend", "Latest"])
+        self._setup_table_defaults(self.traffic_group_table)
+        self.traffic_group_table.setToolTip(
+            "Global traffic volume by group. A spike is a signal to review the traffic, not an automatic action. "
+            "Double-click a group to open its Inbox traffic."
+        )
+        self.traffic_group_table.itemDoubleClicked.connect(self._open_traffic_group_row)
+        inbox_layout.addWidget(self.traffic_group_table)
+        self._fit_table_height_to_rows(self.traffic_group_table, min_rows=1, max_rows=5, empty_rows=1)
         detail_row = QHBoxLayout()
         detail_row.setContentsMargins(0, 0, 0, 0)
         self.traffic_source_detail_btn = QToolButton()
@@ -925,6 +966,8 @@ class ControlFreqTab(QWidget):
         if not hasattr(self, "top_overview_row") or not hasattr(self, "top_splitter"):
             return
         mode = self._controlfreq_responsive_mode_for_width(int(self.width() or 0))
+        self._arrange_filter_controls(mode == "compact")
+        self._apply_ops_table_column_layout(mode == "compact")
         if mode == self._responsive_layout_mode:
             return
         self._responsive_layout_mode = mode
@@ -951,6 +994,62 @@ class ControlFreqTab(QWidget):
         if not compact:
             self._apply_saved_splitter_sizes()
         self._sync_top_panel_heights()
+
+    def _arrange_filter_controls(self, compact: bool) -> None:
+        layout = getattr(self, "filter_row", None)
+        if layout is None:
+            return
+        controls = (
+            self.search_edit,
+            self.app_search_btn,
+            self.group_combo,
+            self.traffic_source_combo,
+            self.traffic_age_combo,
+            self.refresh_btn,
+            self.clear_filters_btn,
+            self.time_toggle_btn,
+        )
+        for control in controls:
+            layout.removeWidget(control)
+        for column in range(8):
+            layout.setColumnStretch(column, 0)
+        if compact:
+            layout.addWidget(self.search_edit, 0, 0, 1, 3)
+            layout.addWidget(self.app_search_btn, 0, 3)
+            layout.addWidget(self.group_combo, 1, 0)
+            layout.addWidget(self.traffic_source_combo, 1, 1)
+            layout.addWidget(self.traffic_age_combo, 1, 2)
+            layout.addWidget(self.refresh_btn, 1, 3)
+            layout.addWidget(self.clear_filters_btn, 2, 0, 1, 2)
+            layout.addWidget(self.time_toggle_btn, 2, 2, 1, 2)
+            for column in range(4):
+                layout.setColumnStretch(column, 1)
+        else:
+            for column, control in enumerate(controls):
+                layout.addWidget(control, 0, column)
+            layout.setColumnStretch(0, 1)
+
+    def _apply_ops_table_column_layout(self, compact: bool) -> None:
+        """Keep meaningful center columns elastic as the navigation width changes."""
+        layouts = (
+            (getattr(self, "source_lanes_table", None), ("contents", "stretch", "stretch", "stretch")),
+            (getattr(self, "awareness_table", None), ("contents", "contents", "stretch", "contents")),
+            (getattr(self, "activity_table", None), ("contents", "stretch", "stretch", "stretch")),
+            (getattr(self, "intersection_table", None), ("contents", "contents", "stretch")),
+            (getattr(self, "peer_finder_table", None), ("contents", "contents", "stretch", "stretch", "contents")),
+            (getattr(self, "traffic_group_table", None), ("stretch", "contents", "contents", "stretch", "contents")),
+            (getattr(self, "inbox_table", None), ("contents", "contents", "stretch")),
+        )
+        for table, modes in layouts:
+            if table is None:
+                continue
+            header = table.horizontalHeader()
+            header.setStretchLastSection(False)
+            for column, column_mode in enumerate(modes):
+                mode = QHeaderView.Stretch if column_mode == "stretch" else QHeaderView.ResizeToContents
+                header.setSectionResizeMode(column, mode)
+        if hasattr(self, "traffic_group_hint"):
+            self.traffic_group_hint.setVisible(not compact)
 
     def _lock_frequency_control_height(self) -> None:
         try:
@@ -1055,6 +1154,7 @@ class ControlFreqTab(QWidget):
                 "controlfreq_focus_mode": bool(self._focus_mode),
                 "controlfreq_search": (self.search_edit.text() or "").strip(),
                 "controlfreq_group_filter": (self.group_combo.currentData() or "").strip().upper(),
+                "controlfreq_traffic_age_seconds": int(self.traffic_age_combo.currentData() or 0),
                 "controlfreq_activity_window_min": int(self.activity_window_combo.currentData() or 120),
                 "controlfreq_intersection_window_min": int(self.intersection_window_combo.currentData() or 120),
                 "controlfreq_view_preset": str(self._view_preset or "Operations"),
@@ -1104,6 +1204,12 @@ class ControlFreqTab(QWidget):
                 self.activity_window_combo.blockSignals(True)
                 self.activity_window_combo.setCurrentIndex(idx)
                 self.activity_window_combo.blockSignals(False)
+            saved_traffic_age = int(self.settings.get("controlfreq_traffic_age_seconds", 86400) or 0)
+            idx = self.traffic_age_combo.findData(saved_traffic_age)
+            if idx >= 0:
+                self.traffic_age_combo.blockSignals(True)
+                self.traffic_age_combo.setCurrentIndex(idx)
+                self.traffic_age_combo.blockSignals(False)
             saved_intersection_window = int(self.settings.get("controlfreq_intersection_window_min", 120) or 120)
             idx = self.intersection_window_combo.findData(saved_intersection_window)
             if idx >= 0:
@@ -1122,6 +1228,7 @@ class ControlFreqTab(QWidget):
         self._apply_saved_splitter_sizes()
         self._sync_view_controls_from_state()
         self._apply_view_state(animated=False)
+        self._update_applied_filters_label()
 
     def _apply_saved_splitter_sizes(self) -> None:
         if getattr(self, "_responsive_layout_mode", "wide") != "wide":
@@ -1320,10 +1427,9 @@ class ControlFreqTab(QWidget):
     def _sync_inbox_summary_visibility(self) -> None:
         if not hasattr(self, "inbox_box"):
             return
-        preset = str(getattr(self, "_view_preset", "") or "").strip()
-        activity_visible = bool(getattr(self, "_view_cards", {}).get("activity", False))
-        show_inbox = (not activity_visible) or preset == "All"
-        self.inbox_box.setVisible(show_inbox)
+        # Traffic volume is first-class situational awareness, independent of
+        # which detailed Ops cards are selected below it.
+        self.inbox_box.setVisible(True)
 
     def _set_schedule_splitter_content_sizes(self) -> None:
         if not hasattr(self, "right_splitter"):
@@ -2100,6 +2206,7 @@ class ControlFreqTab(QWidget):
 
     def _on_filters_changed(self, *_args) -> None:
         self._update_clear_filters_style()
+        self._update_applied_filters_label()
         self._schedule_persist_ui_state()
         try:
             self._filter_refresh_timer.start(220)
@@ -2133,6 +2240,9 @@ class ControlFreqTab(QWidget):
         if hasattr(self, "intersection_window_combo") and self.intersection_window_combo.count() > 0:
             idx = self.intersection_window_combo.findData(120)
             self.intersection_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        if hasattr(self, "traffic_age_combo"):
+            idx = self.traffic_age_combo.findData(24 * 60 * 60)
+            self.traffic_age_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._source_family_filter = ""
         if hasattr(self, "traffic_source_combo"):
             previous = self.traffic_source_combo.blockSignals(True)
@@ -2174,6 +2284,29 @@ class ControlFreqTab(QWidget):
             theme = self._theme()
             role = "eligible_warning" if self._filters_active() else "muted"
             self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+        except Exception:
+            pass
+
+    def _traffic_age_seconds(self) -> int:
+        try:
+            return max(0, int(self.traffic_age_combo.currentData() or 0))
+        except Exception:
+            return 24 * 60 * 60
+
+    def _update_applied_filters_label(self) -> None:
+        label = getattr(self, "applied_filters_label", None)
+        if label is None:
+            return
+        group = str(self.group_combo.currentText() or "All groups").strip()
+        source = str(self.traffic_source_combo.currentText() or "Traffic Source: All").strip()
+        source = source.replace("Traffic Source:", "").strip() or "All sources"
+        if source.lower() == "all":
+            source = "All sources"
+        age = str(self.traffic_age_combo.currentText() or "Traffic: 24h").replace("Traffic:", "").strip()
+        label.setText(f"Showing traffic received in {age} · {group} · {source}")
+        try:
+            theme = self._theme()
+            label.setStyleSheet(f"font-weight: 600; color: {theme.get('text_muted', '#5b6875')};")
         except Exception:
             pass
 
@@ -6625,7 +6758,30 @@ class ControlFreqTab(QWidget):
             return
         host = self.window()
         if hasattr(host, "open_messages_section"):
-            host.open_messages_section("inbox", action_filter=bucket)
+            host.open_messages_section(
+                "inbox",
+                action_filter=bucket,
+                age_filter_seconds=self._traffic_age_seconds(),
+                group_filter=str(self.group_combo.currentData() or ""),
+                source_family=str(self.traffic_source_combo.currentData() or ""),
+            )
+
+    def _open_traffic_group_row(self, item: QTableWidgetItem) -> None:
+        table = getattr(self, "traffic_group_table", None)
+        if table is None:
+            return
+        group_item = table.item(item.row(), 0)
+        group = str(group_item.text() if group_item is not None else "").strip()
+        if not group or group in {"No traffic", "DIRECT", "UNASSIGNED"}:
+            return
+        host = self.window()
+        if hasattr(host, "open_messages_section"):
+            host.open_messages_section(
+                "inbox",
+                group_filter=group,
+                age_filter_seconds=self._traffic_age_seconds(),
+                source_family=str(self.traffic_source_combo.currentData() or ""),
+            )
 
     def _ensure_message_summary_executor(self) -> ThreadPoolExecutor:
         if self._message_summary_executor is None:
@@ -6671,6 +6827,9 @@ class ControlFreqTab(QWidget):
         flmsg_dir_txt = str(message_paths.get("flmsg", "") or "").strip()
         flamp_dir_txt = str(message_paths.get("flamp", "") or "").strip()
         db_path = self._db_path()
+        traffic_age_seconds = self._traffic_age_seconds()
+        source_family = str(self.traffic_source_combo.currentData() or "").strip().lower()
+        now_ts = time.time()
         hf_groups, local_groups = configured_group_names(self.settings)
         self._message_summary_request_id += 1
         request_id = self._message_summary_request_id
@@ -6698,17 +6857,43 @@ class ControlFreqTab(QWidget):
                 configured_local_groups=local_groups,
             )
             try:
+                received_after_ts = (
+                    now_ts - (traffic_age_seconds * 2)
+                    if traffic_age_seconds
+                    else 0.0
+                )
                 projected_rows = (
-                    [dict(row) for row in list_projected_messages(db_path, limit=1500)]
+                    [
+                        dict(row)
+                        for row in list_projected_messages(
+                            db_path,
+                            received_after_ts=received_after_ts,
+                            limit=20000,
+                        )
+                    ]
                     if db_path.exists()
                     else []
                 )
             except Exception as exc:
                 log.debug("ControlFreq: actionable traffic projection unavailable: %s", exc)
                 projected_rows = []
+            scoped_rows = filter_traffic_messages(
+                projected_rows,
+                age_seconds=traffic_age_seconds,
+                now_ts=now_ts,
+                source_family=source_family,
+                group_filter=group_filter,
+            )
             return {
                 "source_rows": self._message_summary_rows(message_rows, bbs_rows, file_rows),
-                "traffic_summary": build_traffic_action_summary(projected_rows, context),
+                "traffic_summary": build_traffic_action_summary(scoped_rows, context),
+                "traffic_group_volumes": build_traffic_group_volumes(
+                    projected_rows,
+                    age_seconds=traffic_age_seconds,
+                    now_ts=now_ts,
+                    source_family=source_family,
+                    group_filter=group_filter,
+                ),
             }
 
         future = self._ensure_message_summary_executor().submit(_work)
@@ -6748,12 +6933,67 @@ class ControlFreqTab(QWidget):
         self._message_summary_applied_id = int(request_id)
         self._message_summary_cache_rows = rows_out
         self.traffic_action_summary.set_summary(traffic_summary)
+        volume_rows = payload.get("traffic_group_volumes", ())
+        self._render_traffic_group_volumes(
+            tuple(row for row in volume_rows if isinstance(row, TrafficGroupVolume))
+            if isinstance(volume_rows, (tuple, list))
+            else ()
+        )
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)
         if self._message_summary_followup:
             self._message_summary_followup = False
             QTimer.singleShot(0, self._schedule_message_summary_refresh)
+
+    def _render_traffic_group_volumes(self, volumes: tuple[TrafficGroupVolume, ...]) -> None:
+        table = getattr(self, "traffic_group_table", None)
+        if table is None:
+            return
+        rows = [
+            [
+                volume.group,
+                str(volume.unread_count),
+                str(volume.current_count),
+                volume.trend,
+                self._relative_traffic_age(volume.latest_ts),
+            ]
+            for volume in volumes[:8]
+        ]
+        if not rows:
+            rows = [["No traffic", "0", "0", "—", "—"]]
+        self._set_table_rows(table, rows)
+        total = sum(volume.current_count for volume in volumes)
+        unread = sum(volume.unread_count for volume in volumes)
+        self.traffic_group_title.setText(f"Traffic by group · {total} total / {unread} new")
+        self._fit_table_height_to_rows(table, min_rows=1, max_rows=5, empty_rows=1)
+        self._apply_ops_table_column_layout(
+            getattr(self, "_responsive_layout_mode", "wide") == "compact"
+        )
+        try:
+            theme = self._theme()
+            for row_index, volume in enumerate(volumes[:8]):
+                if not volume.trend.startswith("Spike"):
+                    continue
+                for column in range(table.columnCount()):
+                    item = table.item(row_index, column)
+                    if item is not None:
+                        item.setBackground(QColor(theme.get("warning_bg", "#fff3cd")))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _relative_traffic_age(timestamp: float) -> str:
+        if not timestamp:
+            return "—"
+        seconds = max(0, int(time.time() - float(timestamp)))
+        if seconds < 60:
+            return "now"
+        if seconds < 3600:
+            return f"{seconds // 60}m"
+        if seconds < 86400:
+            return f"{seconds // 3600}h"
+        return f"{seconds // 86400}d"
 
     @staticmethod
     def _message_summary_rows(

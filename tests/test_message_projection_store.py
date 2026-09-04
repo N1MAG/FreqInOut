@@ -176,8 +176,10 @@ def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -
     upsert_projected_message(db_path, source=source, message=second)
 
     rows = list_projected_messages(db_path, source_family="commstat", group_name="@MR08", limit=1)
+    recent_rows = list_projected_messages(db_path, received_after_ts=150.0, limit=10)
 
     assert [row["message_id"] for row in rows] == [first.message_id]
+    assert [row["message_id"] for row in recent_rows] == [first.message_id]
     conn = sqlite3.connect(db_path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM message_projection").fetchone()[0] == 2
