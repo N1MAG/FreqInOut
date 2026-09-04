@@ -8880,9 +8880,6 @@ class MessageViewerTab(QWidget):
             "grid_filter": str(grid_filter or "").strip().upper(),
             "fema_region_filter": str(fema_region_filter or "").strip().upper(),
         }
-        self._traffic_action_filter = str(action_filter or "").strip().lower()
-        if hasattr(self, "traffic_action_summary"):
-            self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
         source = str(source_family or "").strip().lower()
         source_values = self._message_context_source_values(source)
         normalized_source = normalize_message_source_family(source)
@@ -8912,6 +8909,11 @@ class MessageViewerTab(QWidget):
             "meshtastic": "mesh",
         }.get(normalized_source, "all"))
         self._set_inbox_focus(focus)
+        # Setting focus can clear action state as part of a normal user focus
+        # change. Restore the incoming Ops action only after focus is settled.
+        self._traffic_action_filter = str(action_filter or "").strip().lower()
+        if hasattr(self, "traffic_action_summary"):
+            self.traffic_action_summary.set_active_bucket(self._traffic_action_filter)
         selected_group = self._select_context_group_filter(group_filter)
         selected_source = self._select_context_source_filter(source_values)
         search_parts: list[str] = []
@@ -8934,7 +8936,10 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "rcv_search"):
             self.rcv_search.setText(search)
         self._select_context_age_filter(age_seconds)
-        self._apply_message_filters_light()
+        # Reload from the canonical projection after every incoming scope value
+        # is installed. This keeps Ops and Inbox on the same message population.
+        if not self._load_projected_messages_into_table():
+            self._apply_message_filters_light()
         self._update_map_context_filter_label()
 
     def _select_context_age_filter(self, age_seconds: int) -> None:
@@ -13141,7 +13146,7 @@ class MessageViewerTab(QWidget):
             return False
         self._projected_table_loading = True
         try:
-            rows = self._load_projected_message_rows(limit=1500)
+            rows = self._load_projected_message_rows(limit=20000)
             if not rows:
                 return False
             self._message_rows = rows
@@ -13173,7 +13178,17 @@ class MessageViewerTab(QWidget):
             return []
         source_families = self._projected_source_families_for_current_scope()
         try:
-            db_rows = list_projected_messages(db_path, limit=limit, source_families=source_families)
+            age_seconds = int(self.received_filter.currentData() or 0)
+        except Exception:
+            age_seconds = 0
+        received_after_ts = time.time() - age_seconds if age_seconds > 0 else 0.0
+        try:
+            db_rows = list_projected_messages(
+                db_path,
+                limit=limit,
+                source_families=source_families,
+                received_after_ts=received_after_ts,
+            )
         except Exception as exc:
             log.debug("MessageViewer: failed to load projected messages: %s", exc)
             return []

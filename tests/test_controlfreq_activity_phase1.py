@@ -16,6 +16,7 @@ from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.core.controlfreq_awareness import AttentionItem, build_radio_source_lanes
 from freqinout.core.observation_projection import Observation, observation_from_rf_pin
 from freqinout.core.observation_store import upsert_observation
+from freqinout.core.traffic_actionability import TrafficGroupVolume
 
 
 def _app():
@@ -52,16 +53,159 @@ def test_controlfreq_dark_spike_rows_use_contrasting_warning_palette() -> None:
     tab = ControlFreqTab.__new__(ControlFreqTab)
     tab.settings = FakeSettings()
     tab._theme_cache = None
-    tab.traffic_group_table = QTableWidget(1, 5)
-    for column, text in enumerate(("MR04", "0", "10", "Spike ↑", "3h")):
+    tab.traffic_group_table = QTableWidget(1, 6)
+    for column, text in enumerate(("MR04", "CommStat 8 · JS8Call 2", "0", "10", "Spike ↑", "3h")):
         tab.traffic_group_table.setItem(0, column, QTableWidgetItem(text))
 
     ControlFreqTab._style_traffic_group_rows(tab)
 
-    for column in range(5):
+    for column in range(6):
         item = tab.traffic_group_table.item(0, column)
         assert item.background().color().name().upper() == "#5B4420"
         assert item.foreground().color().name().upper() == "#F2F2F2"
+
+
+def test_controlfreq_traffic_group_source_summary_is_compact() -> None:
+    assert ControlFreqTab._traffic_source_summary(
+        (("CommStat", 8), ("JS8Call", 4), ("SitRep", 2), ("Spotter", 1))
+    ) == "CommStat 8 · JS8Call 4 · SitRep 2 · +1"
+    assert ControlFreqTab._traffic_source_summary(()) == "Unknown"
+
+
+def test_controlfreq_traffic_group_detail_can_collapse_and_persists() -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel, QTableWidget, QToolButton
+
+    _app()
+
+    class FakeSettings:
+        def __init__(self) -> None:
+            self.saved: list[tuple[str, object]] = []
+
+        def set(self, key: str, value: object) -> None:
+            self.saved.append((key, value))
+
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    tab.settings = FakeSettings()
+    tab._responsive_layout_mode = "wide"
+    tab.traffic_group_title = QToolButton()
+    tab.traffic_group_title.setCheckable(True)
+    tab.traffic_group_table = QTableWidget(0, 6)
+    tab.traffic_group_hint = QLabel("Trend compares the prior equal window")
+
+    ControlFreqTab._toggle_traffic_group_detail(tab, False)
+
+    assert tab.traffic_group_table.isHidden()
+    assert tab.traffic_group_hint.isHidden()
+    assert tab.traffic_group_title.arrowType() == Qt.RightArrow
+    assert tab.settings.saved == [("controlfreq_traffic_group_expanded", False)]
+
+
+def test_controlfreq_traffic_group_header_keeps_increasing_aggregate() -> None:
+    from PySide6.QtWidgets import QTableWidget, QToolButton
+
+    _app()
+
+    class FakeSettings:
+        def get(self, _key: str, default=None):
+            return default
+
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    tab.settings = FakeSettings()
+    tab._theme_cache = None
+    tab._responsive_layout_mode = "wide"
+    tab.traffic_group_title = QToolButton()
+    tab.traffic_group_table = QTableWidget(0, 6)
+    tab.traffic_group_table.setHorizontalHeaderLabels(
+        ["Group", "Sources", "New", "Traffic", "Trend", "Latest"]
+    )
+
+    ControlFreqTab._render_traffic_group_volumes(
+        tab,
+        (
+            TrafficGroupVolume(
+                group="MR08",
+                sources=(("CommStat", 8), ("JS8Call", 2)),
+                unread_count=3,
+                current_count=10,
+                previous_count=2,
+                trend="Spike ↑",
+            ),
+            TrafficGroupVolume(
+                group="MAGNET",
+                sources=(("JS8Call", 4),),
+                unread_count=1,
+                current_count=4,
+                previous_count=3,
+                trend="Rising ↑",
+            ),
+            TrafficGroupVolume(
+                group="AMRRON",
+                sources=(("Spotter", 2),),
+                unread_count=0,
+                current_count=2,
+                previous_count=2,
+                trend="Steady →",
+            ),
+        ),
+    )
+
+    assert tab.traffic_group_title.text() == (
+        "Traffic by group · 16 total / 4 new · 2 increasing"
+    )
+    assert tab.traffic_group_table.horizontalHeaderItem(1).text() == "Sources"
+    assert tab.traffic_group_table.item(0, 1).text() == "CommStat 8 · JS8Call 2"
+
+
+def test_controlfreq_sources_distinguish_commstat_from_sitrep_aggregate(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE js8_messages (from_call TEXT, state TEXT);
+        CREATE TABLE spotter_traffic (from_call TEXT, state TEXT);
+        CREATE TABLE varac_messages (from_call TEXT, read_status INTEGER);
+        CREATE TABLE operator_checkins (
+            callsign TEXT, group1 TEXT, group2 TEXT, group3 TEXT, groups_json TEXT
+        );
+        CREATE TABLE message_projection (
+            from_call TEXT, read_state TEXT, status TEXT, group_name TEXT,
+            source_family TEXT, deleted INTEGER, archived INTEGER
+        );
+        CREATE TABLE sitrep_latest_by_callsign (
+            callsign TEXT, effective_status TEXT, latest_report_group TEXT,
+            source_summary_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO operator_checkins VALUES (?, ?, ?, ?, ?)",
+        ("N1MAG", "MR08", "", "", "[]"),
+    )
+    conn.execute(
+        "INSERT INTO message_projection VALUES (?, ?, ?, ?, ?, 0, 0)",
+        ("K7ETC", "new", "YELLOW", "MR08", "commstat"),
+    )
+    conn.execute(
+        "INSERT INTO sitrep_latest_by_callsign VALUES (?, ?, ?, ?)",
+        ("K7ETC", "yellow", "MR08", '{"CommStat": 1}'),
+    )
+    conn.commit()
+    conn.close()
+
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    rows = ControlFreqTab._collect_inbox_rows(
+        tab,
+        "",
+        db_path=db_path,
+        group_filter="",
+        local_operator_call="N1MAG",
+    )
+
+    by_label = {row[0]: row for row in rows}
+    assert by_label["CommStat"][1] == "1"
+    assert by_label["SitRep Summary"][1] == "1"
+    assert by_label["SitRep Summary"][2].startswith("Aggregated station status")
 
 
 def _write_settings_db(

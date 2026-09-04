@@ -673,17 +673,30 @@ class ControlFreqTab(QWidget):
         self.traffic_action_summary.bucketActivated.connect(self._open_traffic_action_bucket)
         inbox_layout.addWidget(self.traffic_action_summary)
         traffic_group_header = QHBoxLayout()
-        self.traffic_group_title = QLabel("Traffic by group")
+        self.traffic_group_title = QToolButton()
+        self.traffic_group_title.setText("Traffic by group")
+        self.traffic_group_title.setCheckable(True)
+        self.traffic_group_title.setChecked(
+            bool(self.settings.get("controlfreq_traffic_group_expanded", True))
+        )
+        self.traffic_group_title.setAutoRaise(True)
+        self.traffic_group_title.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.traffic_group_title.setStyleSheet("font-weight: 700;")
+        self.traffic_group_title.setToolTip(
+            "Show or hide group/source traffic detail. The header remains visible as an aggregate event signal."
+        )
+        self.traffic_group_title.toggled.connect(self._toggle_traffic_group_detail)
         traffic_group_header.addWidget(self.traffic_group_title)
         traffic_group_header.addStretch(1)
         self.traffic_group_hint = QLabel("Trend compares the prior equal window")
         self.traffic_group_hint.setStyleSheet("color: #5b6875;")
         traffic_group_header.addWidget(self.traffic_group_hint)
         inbox_layout.addLayout(traffic_group_header)
-        self.traffic_group_table = QTableWidget(0, 5)
+        self.traffic_group_table = QTableWidget(0, 6)
         self.traffic_group_table.setObjectName("controlfreqTrafficByGroupTable")
-        self.traffic_group_table.setHorizontalHeaderLabels(["Group", "New", "Traffic", "Trend", "Latest"])
+        self.traffic_group_table.setHorizontalHeaderLabels(
+            ["Group", "Sources", "New", "Traffic", "Trend", "Latest"]
+        )
         self._setup_table_defaults(self.traffic_group_table)
         self.traffic_group_table.setToolTip(
             "Global traffic volume by group. A spike is a signal to review the traffic, not an automatic action. "
@@ -692,6 +705,7 @@ class ControlFreqTab(QWidget):
         self.traffic_group_table.itemDoubleClicked.connect(self._open_traffic_group_row)
         inbox_layout.addWidget(self.traffic_group_table)
         self._fit_table_height_to_rows(self.traffic_group_table, min_rows=1, max_rows=5, empty_rows=1)
+        self._toggle_traffic_group_detail(self.traffic_group_title.isChecked(), persist=False)
         detail_row = QHBoxLayout()
         detail_row.setContentsMargins(0, 0, 0, 0)
         self.traffic_source_detail_btn = QToolButton()
@@ -1037,7 +1051,7 @@ class ControlFreqTab(QWidget):
             (getattr(self, "activity_table", None), ("contents", "stretch", "stretch", "stretch")),
             (getattr(self, "intersection_table", None), ("contents", "contents", "stretch")),
             (getattr(self, "peer_finder_table", None), ("contents", "contents", "stretch", "stretch", "contents")),
-            (getattr(self, "traffic_group_table", None), ("stretch", "contents", "contents", "stretch", "contents")),
+            (getattr(self, "traffic_group_table", None), ("contents", "stretch", "contents", "contents", "stretch", "contents")),
             (getattr(self, "inbox_table", None), ("contents", "contents", "stretch")),
         )
         for table, modes in layouts:
@@ -1049,7 +1063,8 @@ class ControlFreqTab(QWidget):
                 mode = QHeaderView.Stretch if column_mode == "stretch" else QHeaderView.ResizeToContents
                 header.setSectionResizeMode(column, mode)
         if hasattr(self, "traffic_group_hint"):
-            self.traffic_group_hint.setVisible(not compact)
+            expanded = bool(getattr(self, "traffic_group_title", None) and self.traffic_group_title.isChecked())
+            self.traffic_group_hint.setVisible(not compact and expanded)
 
     def _lock_frequency_control_height(self) -> None:
         try:
@@ -6758,6 +6773,23 @@ class ControlFreqTab(QWidget):
         self.traffic_source_detail_btn.setText("Hide Sources" if visible else "Sources")
         self._set_message_summary_visible_rows(6)
 
+    def _toggle_traffic_group_detail(self, visible: bool, *, persist: bool = True) -> None:
+        expanded = bool(visible)
+        if hasattr(self, "traffic_group_table"):
+            self.traffic_group_table.setVisible(expanded)
+        if hasattr(self, "traffic_group_hint"):
+            compact = getattr(self, "_responsive_layout_mode", "wide") == "compact"
+            self.traffic_group_hint.setVisible(expanded and not compact)
+        if hasattr(self, "traffic_group_title"):
+            self.traffic_group_title.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        if persist:
+            try:
+                self.settings.set("controlfreq_traffic_group_expanded", expanded)
+            except Exception:
+                pass
+        if hasattr(self, "freq_ctrl_box"):
+            self._sync_top_panel_heights()
+
     def _open_traffic_action_bucket(self, bucket: str) -> None:
         if not bucket:
             return
@@ -6958,6 +6990,7 @@ class ControlFreqTab(QWidget):
         rows = [
             [
                 volume.group,
+                self._traffic_source_summary(volume.sources),
                 str(volume.unread_count),
                 str(volume.current_count),
                 volume.trend,
@@ -6966,11 +6999,16 @@ class ControlFreqTab(QWidget):
             for volume in volumes[:8]
         ]
         if not rows:
-            rows = [["No traffic", "0", "0", "—", "—"]]
+            rows = [["No traffic", "—", "0", "0", "—", "—"]]
         self._set_table_rows(table, rows)
         total = sum(volume.current_count for volume in volumes)
         unread = sum(volume.unread_count for volume in volumes)
-        self.traffic_group_title.setText(f"Traffic by group · {total} total / {unread} new")
+        increasing = sum(
+            1 for volume in volumes if volume.trend.startswith(("Spike", "Rising"))
+        )
+        self.traffic_group_title.setText(
+            f"Traffic by group · {total} total / {unread} new · {increasing} increasing"
+        )
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=5, empty_rows=1)
         self._sync_top_panel_heights()
         self._apply_ops_table_column_layout(
@@ -6985,7 +7023,7 @@ class ControlFreqTab(QWidget):
         try:
             palette = self._urgency_palette()
             for row_index in range(table.rowCount()):
-                trend_item = table.item(row_index, 3)
+                trend_item = table.item(row_index, 4)
                 if trend_item is None or not trend_item.text().startswith("Spike"):
                     continue
                 for column in range(table.columnCount()):
@@ -6995,6 +7033,16 @@ class ControlFreqTab(QWidget):
                         item.setForeground(palette["text"])
         except Exception:
             pass
+
+    @staticmethod
+    def _traffic_source_summary(sources: tuple[tuple[str, int], ...]) -> str:
+        if not sources:
+            return "Unknown"
+        visible = [f"{source} {count}" for source, count in sources[:3]]
+        remaining = len(sources) - len(visible)
+        if remaining > 0:
+            visible.append(f"+{remaining}")
+        return " · ".join(visible)
 
     @staticmethod
     def _relative_traffic_age(timestamp: float) -> str:
@@ -7059,7 +7107,7 @@ class ControlFreqTab(QWidget):
                         it.setBackground(palette["warn"])
                         it.setForeground(palette["text"])
                 continue
-            if label == "SITREP":
+            if label.startswith("SITREP"):
                 red_ct = 0
                 if detail_item:
                     txt = (detail_item.text() or "").upper()
@@ -7091,8 +7139,10 @@ class ControlFreqTab(QWidget):
     ) -> List[List[str]]:
         if not db_path.exists():
             return [["No data", "0", "Messages DB unavailable"]]
-        counts = {"JS8": 0, "Spotter": 0, "VarAC": 0}
-        top_senders: Dict[str, Dict[str, int]] = {"JS8": {}, "Spotter": {}, "VarAC": {}}
+        counts = {"JS8": 0, "Spotter": 0, "CommStat": 0, "VarAC": 0}
+        top_senders: Dict[str, Dict[str, int]] = {
+            "JS8": {}, "Spotter": {}, "CommStat": {}, "VarAC": {}
+        }
         sitrep_counts = {"red": 0, "yellow": 0, "green": 0}
 
         def _load_operator_groups(cur: sqlite3.Cursor) -> Dict[str, Set[str]]:
@@ -7186,6 +7236,38 @@ class ControlFreqTab(QWidget):
                     continue
                 counts["VarAC"] += 1
                 top_senders["VarAC"][cs] = top_senders["VarAC"].get(cs, 0) + 1
+            try:
+                cur.execute(
+                    """
+                    SELECT from_call, read_state, status, group_name
+                      FROM message_projection
+                     WHERE deleted=0 AND archived=0
+                       AND LOWER(source_family) IN ('commstat', 'commstat_rf')
+                    """
+                )
+                for cs, read_state, status, projected_group in cur.fetchall():
+                    state = str(read_state or "").strip().lower()
+                    status_up = str(status or "").strip().upper()
+                    if state == "read":
+                        continue
+                    if state not in {"new", "unread", "alert"} and status_up not in {
+                        "NEW", "UNREAD", "ALERT", "YELLOW", "RED"
+                    }:
+                        continue
+                    cs = (cs or "").strip().upper()
+                    projected_group = normalize_group_name(projected_group)
+                    if group_filter and projected_group != group_filter:
+                        continue
+                    if search and not any(
+                        search in value
+                        for value in (cs, projected_group, "COMMSTAT")
+                        if value
+                    ):
+                        continue
+                    counts["CommStat"] += 1
+                    top_senders["CommStat"][cs] = top_senders["CommStat"].get(cs, 0) + 1
+            except Exception:
+                pass
             operator_groups: Dict[str, Set[str]] = {}
             local_operator_groups: Set[str] = set()
             if group_filter or local_operator_call:
@@ -7244,8 +7326,13 @@ class ControlFreqTab(QWidget):
         except Exception as e:
             log.debug("ControlFreq: inbox summary load failed: %s", e)
         rows_out: List[List[str]] = []
-        display_labels = {"JS8": "JS8", "Spotter": "Spotter", "VarAC": "VarAC Direct"}
-        for key in ("JS8", "Spotter", "VarAC"):
+        display_labels = {
+            "JS8": "JS8",
+            "Spotter": "Spotter",
+            "CommStat": "CommStat",
+            "VarAC": "VarAC Direct",
+        }
+        for key in ("JS8", "Spotter", "CommStat", "VarAC"):
             if search and search not in key.upper() and counts[key] == 0:
                 continue
             senders = sorted(top_senders[key].items(), key=lambda kv: kv[1], reverse=True)[:3]
@@ -7258,9 +7345,12 @@ class ControlFreqTab(QWidget):
                 sender_txt = "No unread messages"
             rows_out.append([display_labels[key], str(counts[key]), sender_txt])
         sitrep_total = sitrep_counts["red"] + sitrep_counts["yellow"] + sitrep_counts["green"]
-        sitrep_details = f"R:{sitrep_counts['red']}  Y:{sitrep_counts['yellow']}  G:{sitrep_counts['green']}"
+        sitrep_details = (
+            "Aggregated station status · "
+            f"R:{sitrep_counts['red']}  Y:{sitrep_counts['yellow']}  G:{sitrep_counts['green']}"
+        )
         if not search or search in "SITREP" or sitrep_total > 0:
-            rows_out.append(["SitRep", str(sitrep_total), sitrep_details])
+            rows_out.append(["SitRep Summary", str(sitrep_total), sitrep_details])
         return rows_out or [["No matches", "0", "-"]]
 
     def _collect_flmsg_flamp_rows(

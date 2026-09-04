@@ -130,6 +130,7 @@ class TrafficActionSummary:
 @dataclass(frozen=True)
 class TrafficGroupVolume:
     group: str
+    sources: tuple[tuple[str, int], ...] = ()
     unread_count: int = 0
     current_count: int = 0
     previous_count: int = 0
@@ -386,7 +387,7 @@ def build_traffic_group_volumes(
     now = float(now_ts if now_ts is not None else time.time())
     source = _normalize_source(source_family)
     wanted_group = _normalize_group(group_filter)
-    buckets: dict[str, dict[str, float | int]] = {}
+    buckets: dict[str, dict[str, object]] = {}
     for message in rows:
         if source and _normalize_source(_value(message, "source_family", "origin")) != source:
             continue
@@ -402,11 +403,15 @@ def build_traffic_group_volumes(
             continue
         bucket = buckets.setdefault(
             group,
-            {"unread": 0, "current": 0, "previous": 0, "latest": 0.0},
+            {"unread": 0, "current": 0, "previous": 0, "latest": 0.0, "sources": {}},
         )
         if current:
             bucket["current"] = int(bucket["current"]) + 1
             bucket["latest"] = max(float(bucket["latest"]), received)
+            sources = bucket["sources"]
+            if isinstance(sources, dict):
+                source_label = _source_label(_value(message, "source_family", "origin"))
+                sources[source_label] = int(sources.get(source_label, 0)) + 1
             if _is_unread(message):
                 bucket["unread"] = int(bucket["unread"]) + 1
         elif previous:
@@ -414,6 +419,19 @@ def build_traffic_group_volumes(
     result = [
         TrafficGroupVolume(
             group=group,
+            sources=tuple(
+                sorted(
+                    (
+                        (str(source), int(count))
+                        for source, count in (
+                            values["sources"].items()
+                            if isinstance(values.get("sources"), dict)
+                            else ()
+                        )
+                    ),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
             unread_count=int(values["unread"]),
             current_count=int(values["current"]),
             previous_count=int(values["previous"]),
@@ -561,12 +579,6 @@ def _value(message: object, *names: str) -> object:
                 continue
             if value not in (None, ""):
                 return value
-    nested = None if isinstance(message, Mapping) else getattr(message, "summary", None)
-    if nested is not None and nested is not message and not isinstance(nested, str):
-        for name in names:
-            value = getattr(nested, name, None)
-            if value not in (None, ""):
-                return value
     payload = None if isinstance(message, Mapping) else getattr(message, "payload", None)
     if payload is not None and payload is not message:
         for name in names:
@@ -574,6 +586,12 @@ def _value(message: object, *names: str) -> object:
                 value = payload.get(name)
             else:
                 value = getattr(payload, name, None)
+            if value not in (None, ""):
+                return value
+    nested = None if isinstance(message, Mapping) else getattr(message, "summary", None)
+    if nested is not None and nested is not message and not isinstance(nested, str):
+        for name in names:
+            value = getattr(nested, name, None)
             if value not in (None, ""):
                 return value
     return ""
@@ -632,6 +650,21 @@ def _normalize_source(value: object) -> str:
         "bbs_archive": "bbs",
     }
     return aliases.get(source, source)
+
+
+def _source_label(value: object) -> str:
+    source = _normalize_source(value)
+    return {
+        "forms": "FLMSG/FLAMP",
+        "js8call": "JS8Call",
+        "spotter": "Spotter",
+        "commstat": "CommStat",
+        "sitrep": "SitRep",
+        "local_report": "Local Report",
+        "meshcore": "Mesh",
+        "varac": "VarAC",
+        "bbs": "BBS",
+    }.get(source, str(source or "Unknown").strip().title())
 
 
 def _bool_value(message: object, name: str) -> bool:

@@ -506,3 +506,29 @@ the existing theme-aware urgency background and foreground as a pair, are
 restyled on theme changes, and force the Traffic Intelligence panel to recompute
 its content height after row-count changes. Dark visual verification confirmed
 `#5B4420` with `#F2F2F2` text and no Sources-button/table overlap.
+
+Ops/Inbox parity and source-clarity follow-up: production showed a nonzero Ops
+`Review` bucket opening an empty Inbox at the same apparent scope. Ops queried a
+receive-time-bounded canonical projection of up to 20,000 rows, while Messages
+loaded only 1,500 rows before applying age and could clear the requested action
+bucket while switching focus. Messages now installs all incoming scope values
+first, restores the requested action bucket after focus selection, and reloads
+the same canonical projection with the receive-time bound and 20,000-row cap.
+The shared classifier also prefers canonical projected payload fields over a
+derived presentation summary so Ops and Inbox cannot classify the same row from
+different evidence.
+
+`Traffic by group` now includes a compact source-mix column. Its always-visible
+header reports total, new, and the number of groups rising or spiking; the detail
+table can be collapsed with that aggregate signal preserved. The legacy Sources
+disclosure identifies CommStat traffic as its own source and labels SitRep as
+`SitRep Summary` with aggregate station-status wording, avoiding the impression
+that both rows represent equivalent transports.
+
+Verification: `372` focused traffic, projection, Ops, Messages, and shell tests
+pass with the existing unrelated Messages-prewarm assertion deselected. Added
+regressions cover canonical-row/wrapper classification parity, receive-window
+projection bounds, source-mix rendering, the persistent increasing-groups
+aggregate, dark spike-row contrast, collapse-state persistence, and separate
+CommStat/SitRep Summary source rows. Python compilation and `git diff --check`
+pass.

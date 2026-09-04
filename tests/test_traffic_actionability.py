@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 from freqinout.core.message_summary import MessageActionValidity, MessageSummary
 from freqinout.core.traffic_actionability import (
@@ -259,3 +260,54 @@ def test_traffic_age_scope_and_group_trend_are_shared() -> None:
     assert volumes[0].previous_count == 1
     assert volumes[0].unread_count == 3
     assert volumes[0].trend == "Spike ↑"
+    assert volumes[0].sources == (("JS8Call", 6),)
+
+
+def test_projected_wrapper_and_canonical_row_classify_identically() -> None:
+    context = build_operator_traffic_context(
+        callsign="N1MAG",
+        operator_rows=({"callsign": "N1MAG", "group1": "MR08", "group_role": "PEER"},),
+    )
+    canonical = {
+        "message_id": "canonical-1",
+        "source_family": "commstat",
+        "from_call": "K7ETC",
+        "to_call": "MR08",
+        "group_name": "MR08",
+        "summary": "Power outage confirmed in the region.",
+        "severity": "important",
+        "topics_json": '["Power"]',
+        "actionable": True,
+        "received_ts": 500.0,
+    }
+    wrapper = SimpleNamespace(
+        to_call="MR08",
+        status="NEW",
+        actionable=True,
+        rcv_ts=500.0,
+        topics=("Power",),
+        payload=SimpleNamespace(
+            message_id="canonical-1",
+            source_family="commstat",
+            from_call="K7ETC",
+            to_call="MR08",
+            group="MR08",
+            summary="Power outage confirmed in the region.",
+            severity="important",
+        ),
+        summary=_message(
+            stable_id="canonical-1",
+            source_family="commstat",
+            group="MR08",
+            to_target="MR08",
+            summary="Presentation fallback should not override canonical payload.",
+            severity="routine",
+            topics=(),
+        ),
+    )
+
+    raw_summary = build_traffic_action_summary((canonical,), context)
+    wrapped_summary = build_traffic_action_summary((wrapper,), context)
+
+    assert raw_summary.count("review") == 1
+    assert wrapped_summary.count("review") == raw_summary.count("review")

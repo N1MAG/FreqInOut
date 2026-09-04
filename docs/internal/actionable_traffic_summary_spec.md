@@ -83,11 +83,18 @@ operators retain judgment when source content is ambiguous.
 - Ops Center keeps legacy source/file counts under a collapsed `Sources`
   disclosure so source health remains available without dominating the
   dashboard.
-- Ops Center keeps `Traffic by group` visible as a first-class awareness view.
-  It shows new/unread count, total traffic, latest receipt age, and comparison
-  with the immediately preceding equal-duration window. A `Spike` is an
-  awareness signal and does not create an action by itself. Group rows drill
-  into Messages with the same age and source scope.
+- Ops Center keeps the `Traffic by group` header visible as a first-class
+  awareness signal. The header shows total traffic, new/unread traffic, and the
+  number of groups whose volume is rising or spiking. Its detailed table is
+  collapsible so this global signal remains available without permanently
+  consuming workspace.
+- Each detailed group row shows its contributing source mix as well as
+  new/unread count, total traffic, latest receipt age, and comparison with the
+  immediately preceding equal-duration window. `CommStat` is a distinct source;
+  `SitRep Summary` is explicitly identified as an aggregate rather than a
+  transport/source. A `Spike` is an awareness signal and does not create an
+  action by itself. Group rows drill into Messages with the same age, group,
+  source, and action scope.
 - Inbox focus controls show new/unread counts for each focus category. Those
   counts follow the selected age and group scope; changing the focus does not
   hide the counts for other focus categories.
@@ -112,4 +119,10 @@ operators retain judgment when source content is ambiguous.
   response.
 - Traffic focus counts change with the selected age window and count unread
   traffic rather than all retained traffic.
-- Ops Center and Messages compute counts from the same Qt-free core functions.
+- Ops Center and Messages compute counts from the same canonical projection
+  population and Qt-free core classifiers. For an identical age, group, source,
+  and action scope, the Ops bucket count and resulting Inbox count must match.
+- Collapsing `Traffic by group` preserves a visible aggregate including the
+  number of groups with increasing volume.
+- CommStat message traffic and aggregated SitRep station status are visibly
+  distinct in source summaries.
