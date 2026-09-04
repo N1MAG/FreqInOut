@@ -40,6 +40,30 @@ def test_controlfreq_dark_semantic_panel_colors_are_readable() -> None:
     assert tab._semantic_panel_colors("secondary") == ("#16263A", "#E8F1FF", "#2E4A68")
 
 
+def test_controlfreq_dark_spike_rows_use_contrasting_warning_palette() -> None:
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+
+    _app()
+
+    class FakeSettings:
+        def get(self, key: str, default=None):
+            return "dark" if key == "ui_theme" else default
+
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    tab.settings = FakeSettings()
+    tab._theme_cache = None
+    tab.traffic_group_table = QTableWidget(1, 5)
+    for column, text in enumerate(("MR04", "0", "10", "Spike ↑", "3h")):
+        tab.traffic_group_table.setItem(0, column, QTableWidgetItem(text))
+
+    ControlFreqTab._style_traffic_group_rows(tab)
+
+    for column in range(5):
+        item = tab.traffic_group_table.item(0, column)
+        assert item.background().color().name().upper() == "#5B4420"
+        assert item.foreground().color().name().upper() == "#F2F2F2"
+
+
 def _write_settings_db(
     cfg_root: Path,
     *,

@@ -1054,7 +1054,9 @@ class ControlFreqTab(QWidget):
     def _lock_frequency_control_height(self) -> None:
         try:
             if not bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)()):
-                self.inbox_box.setMinimumHeight(0)
+                self.inbox_box.setMinimumHeight(
+                    self._content_fit_group_height(self.inbox_box, floor=150)
+                )
                 self.inbox_box.setMaximumHeight(16777215)
                 return
             # Recompute from natural content height, then lock to keep stable size across modes.
@@ -1071,7 +1073,9 @@ class ControlFreqTab(QWidget):
     def _sync_top_panel_heights(self) -> None:
         try:
             if not bool(getattr(self.freq_ctrl_box, "isVisible", lambda: True)()):
-                self.inbox_box.setMinimumHeight(0)
+                self.inbox_box.setMinimumHeight(
+                    self._content_fit_group_height(self.inbox_box, floor=150)
+                )
                 self.inbox_box.setMaximumHeight(16777215)
                 if getattr(self, "_responsive_layout_mode", "wide") == "compact":
                     for widget, height in (
@@ -1660,6 +1664,7 @@ class ControlFreqTab(QWidget):
                 self.traffic_action_summary.apply_theme(theme)
             if hasattr(self, "traffic_source_detail_btn"):
                 self.traffic_source_detail_btn.setStyleSheet(button_style("muted", theme))
+            self._style_traffic_group_rows()
             self._update_time_toggle_style(theme)
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
             self._update_view_chip_styles(theme)
@@ -6967,18 +6972,27 @@ class ControlFreqTab(QWidget):
         unread = sum(volume.unread_count for volume in volumes)
         self.traffic_group_title.setText(f"Traffic by group · {total} total / {unread} new")
         self._fit_table_height_to_rows(table, min_rows=1, max_rows=5, empty_rows=1)
+        self._sync_top_panel_heights()
         self._apply_ops_table_column_layout(
             getattr(self, "_responsive_layout_mode", "wide") == "compact"
         )
+        self._style_traffic_group_rows()
+
+    def _style_traffic_group_rows(self) -> None:
+        table = getattr(self, "traffic_group_table", None)
+        if table is None:
+            return
         try:
-            theme = self._theme()
-            for row_index, volume in enumerate(volumes[:8]):
-                if not volume.trend.startswith("Spike"):
+            palette = self._urgency_palette()
+            for row_index in range(table.rowCount()):
+                trend_item = table.item(row_index, 3)
+                if trend_item is None or not trend_item.text().startswith("Spike"):
                     continue
                 for column in range(table.columnCount()):
                     item = table.item(row_index, column)
                     if item is not None:
-                        item.setBackground(QColor(theme.get("warning_bg", "#fff3cd")))
+                        item.setBackground(palette["warn"])
+                        item.setForeground(palette["text"])
         except Exception:
             pass
 

@@ -499,3 +499,10 @@ compact Ops content width and confirmed filter reflow, persistent Traffic
 Intelligence, elastic center columns, and no horizontal clipping. A Messages
 widget smoke confirmed all nine focus controls render their unread count. The
 existing unrelated Messages-prewarm assertion remains unchanged.
+
+Dark-theme production follow-up: spike rows in `Traffic by group` were using a
+light warning fill with the inherited dark-theme light text. Spike rows now use
+the existing theme-aware urgency background and foreground as a pair, are
+restyled on theme changes, and force the Traffic Intelligence panel to recompute
+its content height after row-count changes. Dark visual verification confirmed
+`#5B4420` with `#F2F2F2` text and no Sources-button/table overlap.
