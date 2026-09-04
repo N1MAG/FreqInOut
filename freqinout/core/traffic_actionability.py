@@ -131,6 +131,7 @@ class TrafficActionSummary:
 class TrafficGroupVolume:
     group: str
     sources: tuple[tuple[str, int], ...] = ()
+    is_operator_group: bool = False
     unread_count: int = 0
     current_count: int = 0
     previous_count: int = 0
@@ -377,6 +378,7 @@ def build_traffic_group_volumes(
     now_ts: float | None = None,
     source_family: object = "",
     group_filter: object = "",
+    operator_groups: Iterable[object] = (),
 ) -> tuple[TrafficGroupVolume, ...]:
     """Summarize current traffic and compare it with the preceding equal window."""
     rows = tuple(messages)
@@ -387,6 +389,11 @@ def build_traffic_group_volumes(
     now = float(now_ts if now_ts is not None else time.time())
     source = _normalize_source(source_family)
     wanted_group = _normalize_group(group_filter)
+    associated_groups = {
+        normalized
+        for normalized in (_normalize_group(value) for value in operator_groups)
+        if normalized
+    }
     buckets: dict[str, dict[str, object]] = {}
     for message in rows:
         if source and _normalize_source(_value(message, "source_family", "origin")) != source:
@@ -432,6 +439,7 @@ def build_traffic_group_volumes(
                     key=lambda item: (-item[1], item[0]),
                 )
             ),
+            is_operator_group=group in associated_groups,
             unread_count=int(values["unread"]),
             current_count=int(values["current"]),
             previous_count=int(values["previous"]),
@@ -441,7 +449,14 @@ def build_traffic_group_volumes(
         for group, values in buckets.items()
         if int(values["current"]) > 0
     ]
-    result.sort(key=lambda item: (-_trend_rank(item.trend), -item.current_count, item.group))
+    result.sort(
+        key=lambda item: (
+            0 if item.is_operator_group else 1,
+            -_trend_rank(item.trend),
+            -item.current_count,
+            item.group,
+        )
+    )
     return tuple(result)
 
 

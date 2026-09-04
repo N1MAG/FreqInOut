@@ -11,8 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QSize, QRectF
+from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -38,6 +38,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QToolButton,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
 )
 
 from freqinout.core.config_paths import get_config_dir
@@ -145,6 +148,108 @@ FLMSG_FLAMP_RECENT_SECONDS = 24 * 60 * 60
 FLMSG_FLAMP_SUMMARY_EXTS = {".b2s", ".k2s", ".txt", ".rtf", ".html", ".htm", ".xml", ".ff"}
 FLMSG_FLAMP_SUMMARY_MAX_FILES = 750
 FLMSG_FLAMP_SUMMARY_MAX_DIRS = 80
+
+TRAFFIC_CHART_CURRENT_ROLE = int(Qt.UserRole) + 1
+TRAFFIC_CHART_PREVIOUS_ROLE = int(Qt.UserRole) + 2
+TRAFFIC_CHART_SCALE_ROLE = int(Qt.UserRole) + 3
+TRAFFIC_CHART_TREND_ROLE = int(Qt.UserRole) + 4
+
+
+class TrafficVolumeBarDelegate(QStyledItemDelegate):
+    """Paint an exact current/prior traffic comparison without losing table accessibility."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._theme: Dict[str, str] = {
+            "surface_alt": "#DDE1E6",
+            "border": "#D3D7DD",
+            "text_muted": "#5B6570",
+            "accent": "#2E6F9E",
+            "warning": "#C99700",
+            "text": "#1C1F21",
+        }
+
+    def apply_theme(self, theme: Dict[str, str]) -> None:
+        self._theme = dict(theme or {})
+        parent = self.parent()
+        if isinstance(parent, QWidget):
+            if hasattr(parent, "viewport"):
+                parent.viewport().update()
+            else:
+                parent.update()
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # type: ignore[override]
+        painter.save()
+        try:
+            selected = bool(option.state & QStyle.State_Selected)
+            background = (
+                option.palette.highlight().color()
+                if selected
+                else option.palette.base().color()
+            )
+            painter.fillRect(option.rect, background)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+
+            current = max(0, int(index.data(TRAFFIC_CHART_CURRENT_ROLE) or 0))
+            previous = max(0, int(index.data(TRAFFIC_CHART_PREVIOUS_ROLE) or 0))
+            scale = max(1, int(index.data(TRAFFIC_CHART_SCALE_ROLE) or 1))
+            trend = str(index.data(TRAFFIC_CHART_TREND_ROLE) or "")
+            label = str(index.data(Qt.DisplayRole) or f"{current} now · {previous} prior")
+
+            metrics = option.fontMetrics
+            label_width = max(92, metrics.horizontalAdvance(label) + 8)
+            outer = option.rect.adjusted(8, 7, -8, -7)
+            bar_width = max(12, outer.width() - label_width - 8)
+            bar_rect = QRectF(float(outer.x()), float(outer.center().y() - 6), float(bar_width), 12.0)
+
+            track = QColor(self._theme.get("surface_alt", "#DDE1E6"))
+            border = QColor(self._theme.get("border", "#D3D7DD"))
+            muted = QColor(self._theme.get("text_muted", "#5B6570"))
+            accent = QColor(
+                self._theme.get("warning" if trend.startswith("Spike") else "accent", "#2E6F9E")
+            )
+            text_color = option.palette.highlightedText().color() if selected else QColor(
+                self._theme.get("text", "#1C1F21")
+            )
+
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(track)
+            painter.drawRoundedRect(bar_rect, 4.0, 4.0)
+
+            current_width = bar_width * min(1.0, current / scale)
+            if current > 0:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(accent)
+                painter.drawRoundedRect(
+                    QRectF(bar_rect.x(), bar_rect.y(), max(3.0, current_width), bar_rect.height()),
+                    4.0,
+                    4.0,
+                )
+
+            if previous > 0:
+                marker_x = bar_rect.x() + (bar_width * min(1.0, previous / scale))
+                marker_pen = QPen(muted, 2)
+                marker_pen.setStyle(Qt.DashLine)
+                painter.setPen(marker_pen)
+                painter.drawLine(
+                    int(marker_x),
+                    int(bar_rect.top() - 3),
+                    int(marker_x),
+                    int(bar_rect.bottom() + 3),
+                )
+
+            painter.setPen(text_color)
+            painter.drawText(
+                outer.adjusted(bar_width + 8, 0, 0, 0),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                label,
+            )
+        finally:
+            painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # type: ignore[override]
+        base = super().sizeHint(option, index)
+        return QSize(base.width(), max(base.height(), option.fontMetrics.height() + 18))
 
 
 class ControlFreqTab(QWidget):
@@ -688,21 +793,30 @@ class ControlFreqTab(QWidget):
         self.traffic_group_title.toggled.connect(self._toggle_traffic_group_detail)
         traffic_group_header.addWidget(self.traffic_group_title)
         traffic_group_header.addStretch(1)
-        self.traffic_group_hint = QLabel("Trend compares the prior equal window")
+        self.traffic_group_hint = QLabel("Solid = current · dashed marker = prior window")
         self.traffic_group_hint.setStyleSheet("color: #5b6875;")
         traffic_group_header.addWidget(self.traffic_group_hint)
         inbox_layout.addLayout(traffic_group_header)
-        self.traffic_group_table = QTableWidget(0, 6)
-        self.traffic_group_table.setObjectName("controlfreqTrafficByGroupTable")
-        self.traffic_group_table.setHorizontalHeaderLabels(
-            ["Group", "Sources", "New", "Traffic", "Trend", "Latest"]
+        self.traffic_group_table = QTableWidget(0, 3)
+        self.traffic_group_table.setObjectName("controlfreqTrafficByGroupChart")
+        self.traffic_group_table.setAccessibleName("Traffic by group comparison chart")
+        self.traffic_group_table.setAccessibleDescription(
+            "Horizontal bars compare current traffic with the prior equal time window. "
+            "Associated operating and membership groups are listed first."
         )
+        self.traffic_group_table.setHorizontalHeaderLabels(["Group", "Volume comparison", "Details"])
         self._setup_table_defaults(self.traffic_group_table)
+        self.traffic_group_table.horizontalHeader().setVisible(False)
+        self.traffic_group_table.setAlternatingRowColors(False)
+        self.traffic_group_table.setShowGrid(False)
+        self.traffic_group_table.setWordWrap(False)
+        self.traffic_group_bar_delegate = TrafficVolumeBarDelegate(self.traffic_group_table)
+        self.traffic_group_table.setItemDelegateForColumn(1, self.traffic_group_bar_delegate)
         self.traffic_group_table.setToolTip(
-            "Global traffic volume by group. A spike is a signal to review the traffic, not an automatic action. "
-            "Double-click a group to open its Inbox traffic."
+            "Current versus prior-window traffic by group. Associated operating and membership groups are first. "
+            "A spike is an awareness signal, not an automatic action. Double-click or press Enter to open Inbox traffic."
         )
-        self.traffic_group_table.itemDoubleClicked.connect(self._open_traffic_group_row)
+        self.traffic_group_table.itemActivated.connect(self._open_traffic_group_row)
         inbox_layout.addWidget(self.traffic_group_table)
         self._fit_table_height_to_rows(self.traffic_group_table, min_rows=1, max_rows=5, empty_rows=1)
         self._toggle_traffic_group_detail(self.traffic_group_title.isChecked(), persist=False)
@@ -1051,7 +1165,7 @@ class ControlFreqTab(QWidget):
             (getattr(self, "activity_table", None), ("contents", "stretch", "stretch", "stretch")),
             (getattr(self, "intersection_table", None), ("contents", "contents", "stretch")),
             (getattr(self, "peer_finder_table", None), ("contents", "contents", "stretch", "stretch", "contents")),
-            (getattr(self, "traffic_group_table", None), ("contents", "stretch", "contents", "contents", "stretch", "contents")),
+            (getattr(self, "traffic_group_table", None), ("contents", "stretch", "stretch")),
             (getattr(self, "inbox_table", None), ("contents", "contents", "stretch")),
         )
         for table, modes in layouts:
@@ -1679,7 +1793,13 @@ class ControlFreqTab(QWidget):
                 self.traffic_action_summary.apply_theme(theme)
             if hasattr(self, "traffic_source_detail_btn"):
                 self.traffic_source_detail_btn.setStyleSheet(button_style("muted", theme))
-            self._style_traffic_group_rows()
+            if hasattr(self, "traffic_group_bar_delegate"):
+                self.traffic_group_bar_delegate.apply_theme(theme)
+            if hasattr(self, "traffic_group_hint"):
+                self.traffic_group_hint.setStyleSheet(
+                    f"color: {theme.get('text_muted', '#5b6875')};"
+                )
+            self._refresh_traffic_group_chart_theme()
             self._update_time_toggle_style(theme)
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
             self._update_view_chip_styles(theme)
@@ -6807,8 +6927,10 @@ class ControlFreqTab(QWidget):
         table = getattr(self, "traffic_group_table", None)
         if table is None:
             return
-        group_item = table.item(item.row(), 0)
-        group = str(group_item.text() if group_item is not None else "").strip()
+        group = str(item.data(Qt.UserRole) or "").strip()
+        if not group:
+            group_item = table.item(item.row(), 0)
+            group = str(group_item.text() if group_item is not None else "").strip()
         if not group or group in {"No traffic", "DIRECT", "UNASSIGNED"}:
             return
         host = self.window()
@@ -6930,6 +7052,7 @@ class ControlFreqTab(QWidget):
                     now_ts=now_ts,
                     source_family=source_family,
                     group_filter=group_filter,
+                    operator_groups=context.groups,
                 ),
             }
 
@@ -6987,20 +7110,71 @@ class ControlFreqTab(QWidget):
         table = getattr(self, "traffic_group_table", None)
         if table is None:
             return
-        rows = [
-            [
-                volume.group,
-                self._traffic_source_summary(volume.sources),
-                str(volume.unread_count),
-                str(volume.current_count),
-                volume.trend,
-                self._relative_traffic_age(volume.latest_ts),
-            ]
-            for volume in volumes[:8]
-        ]
-        if not rows:
-            rows = [["No traffic", "—", "0", "0", "—", "—"]]
-        self._set_table_rows(table, rows)
+        visible_volumes = volumes[:8]
+        table.setUpdatesEnabled(False)
+        table.clearSpans()
+        table.setRowCount(0)
+        if not visible_volumes:
+            table.insertRow(0)
+            empty_item = QTableWidgetItem("No traffic in the current scope")
+            empty_item.setFlags(empty_item.flags() & ~Qt.ItemIsEditable)
+            empty_item.setToolTip("No projected traffic matches the selected age, group, and source scope.")
+            table.setItem(0, 0, empty_item)
+            table.setSpan(0, 0, 1, 3)
+        else:
+            scale = max(
+                1,
+                max(max(volume.current_count, volume.previous_count) for volume in visible_volumes),
+            )
+            row_height = max(42, (QFontMetrics(table.font()).height() * 2) + 10)
+            for row_index, volume in enumerate(visible_volumes):
+                table.insertRow(row_index)
+                source_summary = self._traffic_source_summary(volume.sources)
+                source_detail = " · ".join(
+                    f"{source} {count}" for source, count in volume.sources
+                ) or "Unknown source"
+                latest = self._relative_traffic_age(volume.latest_ts)
+                association = "My group · " if volume.is_operator_group else ""
+                trend_detail = (
+                    f"{association}{volume.trend} · {volume.unread_count} new · latest {latest}"
+                )
+                tooltip = (
+                    f"{volume.group}: {volume.current_count} in the current window; "
+                    f"{volume.previous_count} in the prior equal window; {volume.unread_count} new. "
+                    f"Trend: {volume.trend}. Latest: {latest}. Sources: {source_detail}. "
+                    f"{'Associated operating or membership group. ' if volume.is_operator_group else ''}"
+                    "Double-click or press Enter to open this group in Messages."
+                )
+
+                group_item = QTableWidgetItem(volume.group)
+                group_font = group_item.font()
+                group_font.setBold(volume.is_operator_group)
+                group_item.setFont(group_font)
+
+                comparison_label = (
+                    f"{volume.current_count} total"
+                    if volume.trend == "All time"
+                    else f"{volume.current_count} current · {volume.previous_count} prior"
+                )
+                bar_item = QTableWidgetItem(comparison_label)
+                bar_item.setData(TRAFFIC_CHART_CURRENT_ROLE, volume.current_count)
+                bar_item.setData(TRAFFIC_CHART_PREVIOUS_ROLE, volume.previous_count)
+                bar_item.setData(TRAFFIC_CHART_SCALE_ROLE, scale)
+                bar_item.setData(TRAFFIC_CHART_TREND_ROLE, volume.trend)
+
+                detail_item = QTableWidgetItem(f"{trend_detail}\n{source_summary}")
+                for chart_item in (group_item, bar_item, detail_item):
+                    chart_item.setFlags(chart_item.flags() & ~Qt.ItemIsEditable)
+                    chart_item.setData(Qt.UserRole, volume.group)
+                    chart_item.setToolTip(tooltip)
+                    chart_item.setSizeHint(QSize(-1, row_height))
+                table.setItem(row_index, 0, group_item)
+                table.setItem(row_index, 1, bar_item)
+                table.setItem(row_index, 2, detail_item)
+                table.setRowHeight(row_index, row_height)
+        table.setUpdatesEnabled(True)
+        table.clearSelection()
+        table.setCurrentCell(-1, -1)
         total = sum(volume.current_count for volume in volumes)
         unread = sum(volume.unread_count for volume in volumes)
         increasing = sum(
@@ -7014,23 +7188,17 @@ class ControlFreqTab(QWidget):
         self._apply_ops_table_column_layout(
             getattr(self, "_responsive_layout_mode", "wide") == "compact"
         )
-        self._style_traffic_group_rows()
+        self._refresh_traffic_group_chart_theme()
 
-    def _style_traffic_group_rows(self) -> None:
+    def _refresh_traffic_group_chart_theme(self) -> None:
         table = getattr(self, "traffic_group_table", None)
         if table is None:
             return
         try:
-            palette = self._urgency_palette()
-            for row_index in range(table.rowCount()):
-                trend_item = table.item(row_index, 4)
-                if trend_item is None or not trend_item.text().startswith("Spike"):
-                    continue
-                for column in range(table.columnCount()):
-                    item = table.item(row_index, column)
-                    if item is not None:
-                        item.setBackground(palette["warn"])
-                        item.setForeground(palette["text"])
+            delegate = getattr(self, "traffic_group_bar_delegate", None)
+            if isinstance(delegate, TrafficVolumeBarDelegate):
+                delegate.apply_theme(self._theme())
+            table.viewport().update()
         except Exception:
             pass
 
@@ -8089,7 +8257,11 @@ class ControlFreqTab(QWidget):
                 row_count = max(0, reserve_rows)
             else:
                 row_count = max(int(min_rows), min(int(max_rows), actual_rows))
-            header_h = max(int(table.horizontalHeader().height()), int(table.horizontalHeader().sizeHint().height()), 24)
+            header_h = (
+                0
+                if table.horizontalHeader().isHidden()
+                else max(int(table.horizontalHeader().height()), int(table.horizontalHeader().sizeHint().height()), 24)
+            )
             frame = int(table.frameWidth() or 0) * 2
             rows_h = 0
             for row in range(row_count):

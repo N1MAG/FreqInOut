@@ -12,7 +12,12 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.gui.controlfreq_tab import (
+    ControlFreqTab,
+    TrafficVolumeBarDelegate,
+    TRAFFIC_CHART_CURRENT_ROLE,
+    TRAFFIC_CHART_PREVIOUS_ROLE,
+)
 from freqinout.core.controlfreq_awareness import AttentionItem, build_radio_source_lanes
 from freqinout.core.observation_projection import Observation, observation_from_rf_pin
 from freqinout.core.observation_store import upsert_observation
@@ -41,8 +46,9 @@ def test_controlfreq_dark_semantic_panel_colors_are_readable() -> None:
     assert tab._semantic_panel_colors("secondary") == ("#16263A", "#E8F1FF", "#2E4A68")
 
 
-def test_controlfreq_dark_spike_rows_use_contrasting_warning_palette() -> None:
-    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+def test_controlfreq_dark_chart_uses_contrasting_warning_palette() -> None:
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QTableWidget
 
     _app()
 
@@ -53,16 +59,13 @@ def test_controlfreq_dark_spike_rows_use_contrasting_warning_palette() -> None:
     tab = ControlFreqTab.__new__(ControlFreqTab)
     tab.settings = FakeSettings()
     tab._theme_cache = None
-    tab.traffic_group_table = QTableWidget(1, 6)
-    for column, text in enumerate(("MR04", "CommStat 8 · JS8Call 2", "0", "10", "Spike ↑", "3h")):
-        tab.traffic_group_table.setItem(0, column, QTableWidgetItem(text))
+    tab.traffic_group_table = QTableWidget(1, 3)
+    tab.traffic_group_bar_delegate = TrafficVolumeBarDelegate(tab.traffic_group_table)
 
-    ControlFreqTab._style_traffic_group_rows(tab)
+    ControlFreqTab._refresh_traffic_group_chart_theme(tab)
 
-    for column in range(6):
-        item = tab.traffic_group_table.item(0, column)
-        assert item.background().color().name().upper() == "#5B4420"
-        assert item.foreground().color().name().upper() == "#F2F2F2"
+    assert QColor(tab.traffic_group_bar_delegate._theme["warning"]).name().upper() == "#D1A000"
+    assert QColor(tab.traffic_group_bar_delegate._theme["text"]).name().upper() == "#E7EBF0"
 
 
 def test_controlfreq_traffic_group_source_summary_is_compact() -> None:
@@ -90,7 +93,7 @@ def test_controlfreq_traffic_group_detail_can_collapse_and_persists() -> None:
     tab._responsive_layout_mode = "wide"
     tab.traffic_group_title = QToolButton()
     tab.traffic_group_title.setCheckable(True)
-    tab.traffic_group_table = QTableWidget(0, 6)
+    tab.traffic_group_table = QTableWidget(0, 3)
     tab.traffic_group_hint = QLabel("Trend compares the prior equal window")
 
     ControlFreqTab._toggle_traffic_group_detail(tab, False)
@@ -115,9 +118,9 @@ def test_controlfreq_traffic_group_header_keeps_increasing_aggregate() -> None:
     tab._theme_cache = None
     tab._responsive_layout_mode = "wide"
     tab.traffic_group_title = QToolButton()
-    tab.traffic_group_table = QTableWidget(0, 6)
+    tab.traffic_group_table = QTableWidget(0, 3)
     tab.traffic_group_table.setHorizontalHeaderLabels(
-        ["Group", "Sources", "New", "Traffic", "Trend", "Latest"]
+        ["Group", "Volume comparison", "Details"]
     )
 
     ControlFreqTab._render_traffic_group_volumes(
@@ -126,6 +129,7 @@ def test_controlfreq_traffic_group_header_keeps_increasing_aggregate() -> None:
             TrafficGroupVolume(
                 group="MR08",
                 sources=(("CommStat", 8), ("JS8Call", 2)),
+                is_operator_group=True,
                 unread_count=3,
                 current_count=10,
                 previous_count=2,
@@ -153,8 +157,44 @@ def test_controlfreq_traffic_group_header_keeps_increasing_aggregate() -> None:
     assert tab.traffic_group_title.text() == (
         "Traffic by group · 16 total / 4 new · 2 increasing"
     )
-    assert tab.traffic_group_table.horizontalHeaderItem(1).text() == "Sources"
-    assert tab.traffic_group_table.item(0, 1).text() == "CommStat 8 · JS8Call 2"
+    assert tab.traffic_group_table.horizontalHeaderItem(1).text() == "Volume comparison"
+    assert tab.traffic_group_table.item(0, 1).text() == "10 current · 2 prior"
+    assert tab.traffic_group_table.item(0, 1).data(TRAFFIC_CHART_CURRENT_ROLE) == 10
+    assert tab.traffic_group_table.item(0, 1).data(TRAFFIC_CHART_PREVIOUS_ROLE) == 2
+    assert "My group · Spike ↑" in tab.traffic_group_table.item(0, 2).text()
+    assert "CommStat 8 · JS8Call 2" in tab.traffic_group_table.item(0, 2).text()
+
+
+def test_controlfreq_chart_activation_drills_group_from_any_chart_cell(monkeypatch) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+
+    _app()
+    tab = ControlFreqTab.__new__(ControlFreqTab)
+    tab.traffic_group_table = QTableWidget(1, 3)
+    tab.traffic_source_combo = SimpleNamespace(currentData=lambda: "commstat")
+    tab._traffic_age_seconds = lambda: 6 * 60 * 60
+    opened: list[tuple[str, dict[str, object]]] = []
+    host = SimpleNamespace(
+        open_messages_section=lambda section, **kwargs: opened.append((section, kwargs))
+    )
+    monkeypatch.setattr(ControlFreqTab, "window", lambda _self: host)
+    bar_item = QTableWidgetItem("10 current · 2 prior")
+    bar_item.setData(Qt.UserRole, "MR08")
+    tab.traffic_group_table.setItem(0, 1, bar_item)
+
+    ControlFreqTab._open_traffic_group_row(tab, bar_item)
+
+    assert opened == [
+        (
+            "inbox",
+            {
+                "group_filter": "MR08",
+                "age_filter_seconds": 6 * 60 * 60,
+                "source_family": "commstat",
+            },
+        )
+    ]
 
 
 def test_controlfreq_sources_distinguish_commstat_from_sitrep_aggregate(tmp_path) -> None:

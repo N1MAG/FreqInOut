@@ -85,16 +85,24 @@ operators retain judgment when source content is ambiguous.
   dashboard.
 - Ops Center keeps the `Traffic by group` header visible as a first-class
   awareness signal. The header shows total traffic, new/unread traffic, and the
-  number of groups whose volume is rising or spiking. Its detailed table is
+  number of groups whose volume is rising or spiking. Its detailed chart is
   collapsible so this global signal remains available without permanently
   consuming workspace.
-- Each detailed group row shows its contributing source mix as well as
-  new/unread count, total traffic, latest receipt age, and comparison with the
-  immediately preceding equal-duration window. `CommStat` is a distinct source;
-  `SitRep Summary` is explicitly identified as an aggregate rather than a
-  transport/source. A `Spike` is an awareness signal and does not create an
-  action by itself. Group rows drill into Messages with the same age, group,
-  source, and action scope.
+- The detailed view is a horizontal comparison chart. A solid bar represents
+  the current selected age window, and a labeled dashed marker represents the
+  immediately preceding equal-duration window. Exact current/prior values,
+  new/unread count, trend direction, latest receipt age, and source mix remain
+  visible as text or available through keyboard focus and tooltips; the chart
+  must not rely on color alone.
+- Groups explicitly associated with the operator are always listed before
+  unrelated groups. This priority tier combines configured operating groups,
+  configured local groups, and membership groups from the operator's own data
+  row. Within each tier, spike/rise severity and current volume determine order.
+  No parent/child group relationship is inferred for this ordering.
+- `CommStat` is a distinct source; `SitRep Summary` is explicitly identified as
+  an aggregate rather than a transport/source. A `Spike` is an awareness signal
+  and does not create an action by itself. Chart rows drill into Messages with
+  the same age, group, source, and action scope.
 - Inbox focus controls show new/unread counts for each focus category. Those
   counts follow the selected age and group scope; changing the focus does not
   hide the counts for other focus categories.
@@ -124,5 +132,10 @@ operators retain judgment when source content is ambiguous.
   and action scope, the Ops bucket count and resulting Inbox count must match.
 - Collapsing `Traffic by group` preserves a visible aggregate including the
   number of groups with increasing volume.
+- Configured operating groups and explicit membership groups appear before
+  unrelated groups even when an unrelated group has greater traffic volume.
+- The chart exposes the exact current and prior counts in addition to graphical
+  bar/marker encoding, remains keyboard navigable, and scales without horizontal
+  scrolling at the supported compact workspace width.
 - CommStat message traffic and aggregated SitRep station status are visibly
   distinct in source summaries.

@@ -263,6 +263,40 @@ def test_traffic_age_scope_and_group_trend_are_shared() -> None:
     assert volumes[0].sources == (("JS8Call", 6),)
 
 
+def test_operator_groups_sort_before_unassociated_volume_spikes() -> None:
+    now = 200_000.0
+    rows = [
+        {
+            "message_id": "my-group",
+            "source_family": "commstat",
+            "group_name": "MR08",
+            "received_ts": now - 60,
+            "read_state": "new",
+        },
+        *(
+            {
+                "message_id": f"other-{index}",
+                "source_family": "js8call",
+                "group_name": "GHOSTNET",
+                "received_ts": now - (index * 30),
+                "read_state": "new",
+            }
+            for index in range(8)
+        ),
+    ]
+
+    volumes = build_traffic_group_volumes(
+        rows,
+        age_seconds=3600,
+        now_ts=now,
+        operator_groups=("MR08", "MAGNET"),
+    )
+
+    assert [volume.group for volume in volumes] == ["MR08", "GHOSTNET"]
+    assert volumes[0].is_operator_group is True
+    assert volumes[1].is_operator_group is False
+
+
 def test_projected_wrapper_and_canonical_row_classify_identically() -> None:
     context = build_operator_traffic_context(
         callsign="N1MAG",

@@ -532,3 +532,30 @@ projection bounds, source-mix rendering, the persistent increasing-groups
 aggregate, dark spike-row contrast, collapse-state persistence, and separate
 CommStat/SitRep Summary source rows. Python compilation and `git diff --check`
 pass.
+
+### Traffic-by-group dashboard chart
+
+The detailed traffic-by-group table has been converted to a compact horizontal
+comparison chart. Each row uses a solid current-window bar and a dashed
+prior-equal-window marker, while retaining exact current/prior counts, trend,
+new count, latest age, and source mix in text and tooltips. The table-backed
+rendering is intentionally retained underneath the visual delegate so keyboard
+navigation, accessible cell text, scrolling, and Enter/double-click Inbox
+drill-down remain native Qt behaviors. The visible table header and grid are
+removed so the surface reads as a dashboard visualization rather than a data
+grid.
+
+Configured operating groups, configured local groups, and explicit groups on
+the user's own operator record are marked as operator groups and sorted into the
+first tier. Trend and volume sorting continue within that tier; unrelated groups
+follow and remain visible as broader event indicators. The persistent collapsed
+header still reports total, new, and increasing-group counts.
+
+Verification: `374` focused traffic, projection, Ops, Messages, and shell tests
+pass with the existing unrelated Messages-prewarm assertion deselected. Offscreen
+visual checks covered Light/Normal at 980px, Dark/Normal at 650px, and Dark/Large
+Text at 900px. The chart retained zero horizontal overflow, readable exact-value
+labels, distinct current bars and prior markers, and compact 33–36px rows across
+those cases. Regression coverage includes operator-group-first ordering,
+current/prior chart roles, theme colors, persistent aggregate/collapse behavior,
+and group drill-down from any chart cell.
