@@ -161,8 +161,10 @@ def test_controlfreq_traffic_group_header_keeps_increasing_aggregate() -> None:
     assert tab.traffic_group_table.item(0, 1).text() == "10 current · 2 prior"
     assert tab.traffic_group_table.item(0, 1).data(TRAFFIC_CHART_CURRENT_ROLE) == 10
     assert tab.traffic_group_table.item(0, 1).data(TRAFFIC_CHART_PREVIOUS_ROLE) == 2
-    assert "My group · Spike ↑" in tab.traffic_group_table.item(0, 2).text()
-    assert "CommStat 8 · JS8Call 2" in tab.traffic_group_table.item(0, 2).text()
+    assert tab.traffic_group_table.item(0, 2).text() == (
+        "Spike ↑ · 3 new · CommStat 8 · JS8Call 2 · latest —"
+    )
+    assert "My group" not in tab.traffic_group_table.item(0, 2).text()
 
 
 def test_controlfreq_chart_activation_drills_group_from_any_chart_cell(monkeypatch) -> None:

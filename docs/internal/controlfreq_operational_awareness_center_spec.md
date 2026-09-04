@@ -531,6 +531,11 @@ Presentation:
 
 ## Dashboard Layout
 
+The focused visual-language and entity-oriented dashboard search contract is
+defined in `ops_center_dashboard_focus_spec.md`. That spec separates operational
+focus from the existing navigation/settings quick search and defines the staged
+conversion of remaining default tables into cards, lanes, and timelines.
+
 Default `Operations` view:
 
 1. Top: Source Lanes And Now / Next Strip

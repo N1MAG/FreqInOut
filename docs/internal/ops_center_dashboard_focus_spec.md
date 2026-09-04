@@ -1,0 +1,466 @@
+# Ops Center Dashboard And Focus Search Spec
+
+## Status
+
+Proposed implementation contract for the next Ops Center refinement slices.
+This spec refines, but does not replace,
+`multirig_product_ui_contract.md`,
+`controlfreq_operational_awareness_center_spec.md`, and
+`actionable_traffic_summary_spec.md`.
+
+## Product Outcome
+
+Ops Center should feel like one operational dashboard rather than several tables
+placed on one page. Its purpose is to help the operator answer:
+
+- **What requires action or attention?**
+- **Why does it matter?**
+- **Who, what group, topic, or region is involved?**
+- **Can I reach them, and what band is likely to work?**
+
+The Station Control Bar continues to own persistent radio-specific **Where** and
+**When** context. Ops Center uses the remaining workspace for **What**, **Why**,
+and fast orientation around a station, group, topic, or place.
+
+## Visual System: One Dashboard, Several Visual Grammars
+
+The views should share typography, spacing, semantic colors, chips, and action
+placement, but they should not all use the same table treatment. Each view gets
+the smallest visualization that expresses its primary relationship:
+
+| View | Primary question | Default presentation |
+| --- | --- | --- |
+| Actionable Traffic | What do I need to handle? | Ranked action chips and one concise What/Why line |
+| Traffic by Group | Where is activity changing? | Horizontal current/prior comparison bars |
+| Operational Awareness | What is developing? | Ranked situation/need cards with compact evidence strips |
+| Source Lanes | What is each radio/source doing? | Stable lane cards: source, now, next, attention badge |
+| Peer Schedule Finder | Who can I reach now or soon? | Rendezvous timeline with a visible Now marker and peer rows |
+| Schedule Outlook | What is due next? | Vertical time rail with schedule/SOP events and direct actions |
+| Propagation | What path/band is most promising? | Band ladder with modeled and observed confidence |
+
+Tables remain appropriate for dense inspection and editing, but they are
+secondary disclosures. The default dashboard uses cards, bars, lanes, and
+timelines so adjacent sections remain visually distinguishable.
+
+### Shared Card Rules
+
+- Every card begins with one answer, not a generic container title.
+- Metadata follows one consistent bullet-delimited grammar:
+  `State or trend · count/freshness · source/provenance · latest age`.
+- Primary actions occupy a predictable trailing edge. Secondary evidence opens
+  through row/card activation or a Details disclosure.
+- Empty states are explicit and compact, for example `No peer overlap in the
+  next 2 hours`; they do not reserve a full empty table.
+- Red and amber represent operational significance, not decoration. Shape,
+  wording, and icons carry the same meaning without color.
+- Updates should change values in place rather than resize or reorder the whole
+  dashboard unnecessarily. Priority-driven reordering is allowed when the
+  underlying operational state materially changes.
+
+### Iconology Contract
+
+Iconology should provide fast category recognition and help each view feel like
+part of one application. It is a semantic layer, not decoration and not a
+replacement for unfamiliar operational terms.
+
+Use one application-owned outline icon family with consistent 24px view boxes,
+stroke weight, padding, and theme behavior. Reuse the existing navigation icons
+where their meaning is already correct, and add Ops-specific assets under
+`assets/icons/ops/` rather than relying on platform theme icons or Unicode emoji.
+
+Recommended mappings:
+
+| Meaning | Symbol direction | Uses |
+| --- | --- | --- |
+| Callsign/operator | single operator/headset | autocomplete, callsign focus, peer row |
+| Group | multiple operators/network nodes | autocomplete, group focus, traffic group |
+| Topic/intelligence | tag with small signal mark | autocomplete, topic focus, storyline |
+| Geography | existing map pin | place/region focus, Map action, location evidence |
+| Message/reply | existing envelope with reply variant | traffic, Inbox, Reply |
+| Relay/distribute | antenna with outward arrow | actionable Relay, need progress |
+| Schedule/time | clock/calendar | schedule events, next rendezvous |
+| SOP/action | clipboard/checklist | SOP timeline and Review SOP |
+| RF readiness | signal bars or propagation arc | band ladder, path recommendation |
+| Source/radio | existing antenna/radio mark | source lane and source provenance |
+| Health/warning | existing health mark / triangle | blocked action or degraded source |
+| Pin/watch | map-pin or bookmark variant | persistent awareness pin |
+
+Rules:
+
+- Use one leading icon per card, suggestion, or lane to identify its type.
+- Use icons on compact repeated actions when the symbol is familiar; retain a
+  tooltip, accessible name, visible keyboard focus, and text in Large Text or
+  ambiguous contexts.
+- Keep trend arrows (`↑`, `→`, `↓`) because they communicate direction more
+  directly than a novel trend icon. Do not add a second decorative trend glyph.
+- Source-mix icons may precede concise counts, but the accessible text must still
+  name the source. Multiple source icons must not become an unexplained legend.
+- A warning icon indicates operational significance only. Do not use it merely
+  because a count is nonzero.
+- Never distinguish two states by icon color alone; shape and adjacent wording
+  must also differ.
+- At narrow widths, preserve the leading type icon and primary action icon; hide
+  secondary decorative/source icons before eliding the What/Why text.
+
+## Traffic By Group Copy Contract
+
+Explicitly associated operating and membership groups remain bold and sort
+before unrelated groups. Do not add `My group` to every row; the repeated text
+adds noise after the typographic and ordering treatment already establishes the
+distinction.
+
+The row detail is a single bullet-delimited sequence, for example:
+
+`Rising ↑ · 0 new · CommStat 5 · SitRep 4 · latest 3h`
+
+The current/prior exact values remain beside the bar. Full source mix and group
+association remain in the accessible description/tooltip if the visible line is
+elided. At narrow widths, preserve trend, new count, and latest age before
+showing every source count.
+
+## Dashboard View Directions
+
+### Operational Awareness
+
+Replace the transitional evidence table in the default Operations preset with
+a small ranked card stack:
+
+- lead line: plain-language situation or need
+- evidence strip: severity/topic · callsign/group · source diversity · age
+- progress state: open, relayed, acknowledged, handled, or watching
+- contextual actions: Inbox, Reply, Map, SOP, or Pin only when supported
+
+Keep the full evidence table behind `Details`. This preserves dense review
+without making every default surface look like a spreadsheet.
+
+### Source Lanes
+
+Render each active radio or non-radio data source as a stable horizontal lane:
+
+- concise source name and status icon
+- current assignment or `monitoring`
+- next meaningful transition
+- attention count/status at the trailing edge
+
+Configured commandable radios remain visually distinct from Mesh, APRS, and
+other awareness-only sources. A lane activates source focus; it does not replace
+the selected-radio control in the Station Control Bar.
+
+### Peer Schedule Finder
+
+Use a compact rendezvous timeline:
+
+- fixed Now marker
+- look-ahead horizon from the existing 30m/1h/2h/6h control
+- one row per peer, with the likely overlap window shown as a segment
+- band/frequency label on the segment
+- observed `heard` freshness/confidence marker when available
+- Msg, Map, and Pin actions at the trailing edge
+
+The existing table remains the detailed fallback when timeline density exceeds
+the useful compact range.
+
+### Schedule Outlook
+
+Use a vertical time rail rather than a conventional grid:
+
+- due/overdue and next events align to a clear Now marker
+- event glyph distinguishes SOP action, HF schedule, local net, or condition
+  transition
+- group, band/frequency, and concise action appear on one event row
+- QSY/Hold, Open SOP, or Compose remains directly actionable
+- routine later rows collapse under `Later` by default
+
+### Propagation / RF Readiness
+
+The default card is a band ladder, not the full forecast table:
+
+- best band now
+- one or two alternatives
+- next expected improvement/change
+- modeled confidence and freshness
+- observed signal evidence when available
+
+When focused on a callsign or geographic target, the card should combine:
+
+- the existing propagation model for that target
+- recent historical signal strength/path observations
+- peer schedule evidence
+- station/radio availability
+
+The result is a recommendation with Why, such as:
+
+`20m best now · modeled good · heard -7 dB 38m ago · 40m improves after 2300Z`
+
+Modeled and observed evidence must remain visibly distinct. Missing observations
+must not be presented as a negative path result.
+
+## Search FIO Becomes Focus And Orientation
+
+### Intent
+
+`Search FIO` is primarily a fast way to orient the entire Ops dashboard around
+an operational entity. It is not initially a document search engine and does
+not need to return an unstructured page of matches.
+
+Typing shows categorized autocomplete suggestions. Choosing a suggestion
+creates one typed `OpsFocus` and refreshes compatible dashboard projections.
+Typing alone does not repeatedly run the full dashboard query.
+
+The current behavior, where `textChanged` schedules several independent view
+refreshes and Enter opens the navigation-oriented quick-result menu, is
+transitional. During migration, `textChanged` must become autocomplete-only;
+the dashboard refresh begins only when a typed focus is accepted. Existing raw
+search matching may remain behind an explicit `Filter visible evidence for…`
+fallback, bounded by the active Traffic Age window.
+
+Initial focus kinds:
+
+- callsign/operator
+- operating or local group
+- message-intelligence topic
+- state, FEMA region, grid, or known place
+- band/frequency
+- source family
+
+Examples:
+
+- `K7ETC` → `Callsign · K7ETC · MR08 Hub · heard 38m ago`
+- `MR08` → `Group · MR08 · configured membership group`
+- `power` → `Topic · Power · 4 recent reports`
+- `CO` → `State · Colorado · 6 active stations`
+- `Region 8` → `FEMA Region · CO/MT/ND/SD/UT/WY`
+
+Each suggestion begins with its entity-kind icon so callsigns, groups, topics,
+and places remain distinguishable before the user reads the secondary text.
+The applied focus banner repeats that icon once; individual cards do not repeat
+it unless the card represents a different evidence type.
+
+### Focused Dashboard Behavior
+
+A visible focus banner prevents hidden-filter uncertainty:
+
+`Focused on K7ETC · Callsign    [Clear]`
+
+Existing Age, Group, and Source controls intersect with the focus and remain
+visibly stated. The focus never silently rewrites user configuration.
+
+For a **callsign focus**, show or filter:
+
+- identity, trusted state, known roles, and explicit groups
+- last heard by source and most recent status/SitRep
+- direct and group-relevant traffic, open needs, and reply/relay state
+- known personal/group schedule and next likely rendezvous
+- map/grid/state context
+- target-oriented RF readiness using modeled propagation and observed signal
+  history
+- actions: Message, Map, Pin, and applicable SOP/Net routes
+
+For a **group focus**, show associated operators, traffic trend/source mix,
+condition/SOP state, current and upcoming schedule, active needs, map context,
+and group-oriented RF readiness.
+
+For a **topic focus**, show traffic volume/trend, active incidents or needs,
+involved callsigns/groups, geographic clusters, source diversity, relevant SOP
+actions, and Messages/Map handoffs.
+
+For a **region/place focus**, show active callsigns/groups, status distribution,
+traffic topics, needs/incidents, schedule relevance, and propagation toward that
+area.
+
+If a field is unknown, say `No schedule known`, `No recent status`, or
+`Location unknown`; do not leave an unexplained blank card.
+
+### Autocomplete And Disambiguation
+
+- Suggestions appear after one meaningful character for groups/topics/places
+  and after two characters for callsigns unless an exact known callsign exists.
+- Show no more than eight suggestions, grouped by entity kind.
+- Rank exact match, prefix match, explicitly associated groups/operators,
+  recency, and operational relevance ahead of generic substring matches.
+- A callsign-shaped token is not assumed to be a known operator. Label unknown
+  but syntactically valid input as `Callsign · not in operator roster` and
+  allow a traffic-only focus.
+- Ambiguous values such as `CO` show typed alternatives instead of guessing.
+- Arrow keys move through suggestions; Enter applies the selected/exact focus;
+  Escape closes suggestions; the Clear action returns to the unfiltered Ops
+  dashboard.
+- Suggestion rows and the focus banner expose accessible names/descriptions and
+  never rely on icons alone.
+
+### Navigation Search Separation
+
+The existing quick-search records for tabs, settings, radios, setup issues, and
+commands are useful but represent navigation, not operational focus. Preserve
+them as a separate command palette, preferably available through `Ctrl+K` and a
+small command/navigation affordance. Do not mix `Go To Settings` results into a
+callsign/topic autocomplete list.
+
+This separation makes the field predictable:
+
+- Search FIO = focus the operational picture
+- command palette = navigate or execute an application command
+
+## Core Contracts
+
+The Qt layer must consume immutable projections; it must not query several
+tables independently to assemble meaning.
+
+Suggested Qt-free contracts:
+
+```text
+OpsFocus
+  kind: callsign | group | topic | geography | band | source
+  canonical_id
+  display_label
+  query_text
+  provenance
+
+OpsFocusSuggestion
+  focus
+  primary_text
+  secondary_text
+  score
+
+OpsFocusSnapshot
+  focus
+  generated_at
+  identity
+  traffic_summary
+  status_summary
+  schedule_summary
+  awareness_summary
+  map_context
+  rf_readiness
+  actions
+  missing_data_reasons
+```
+
+Build suggestions from compact entity dictionaries derived from existing
+operator/group records, topic taxonomy, schedule targets, geography constants,
+and source contracts. Build focus snapshots from the existing message,
+observation, schedule, operator, situation, and propagation projections.
+
+## Performance Contract
+
+Performance is a product requirement for this feature.
+
+- Never scan rendered Qt rows to resolve or apply focus.
+- Do not execute a full dashboard refresh for each keystroke.
+- Debounce autocomplete by 100–150 ms and query a compact in-memory index.
+- Apply the focus only on explicit suggestion selection or Enter.
+- Use a single generation/request ID so stale worker results cannot replace a
+  newer query.
+- Run database and propagation work off the Qt UI thread.
+- Use bounded, indexed queries and batch reads; avoid one query per card or per
+  callsign.
+- Reuse `message_projection`, `observation_projection`, topic indexes, operator
+  tables, schedule caches, situation projection, and `PropagationService`.
+- Cache suggestions by entity-index generation. Cache focus snapshots by focus,
+  age/group/source scope, projection checkpoints, and a short time bucket.
+- Use stale-while-revalidate: keep the last complete focus visible with a small
+  refresh indicator until the replacement snapshot is complete.
+- Cancel or ignore superseded propagation/database work when focus changes.
+- Optional free-text body search belongs behind a later indexed FTS projection;
+  do not use `%substring%` scans across retained message bodies in the initial
+  focus implementation.
+
+Targets on the Linux 1920x1080 Normal Text baseline:
+
+- autocomplete update: p95 under 50 ms warm, under 150 ms cold
+- focus banner/selection feedback: under 50 ms
+- cached focus snapshot: p95 under 150 ms
+- uncached callsign/group/topic snapshot without propagation: p95 under 300 ms
+- complete target-oriented snapshot including propagation: p95 under 750 ms,
+  with non-propagation cards allowed to appear first
+- no synchronous UI-thread task over 16 ms during typing or focus changes
+- bounded memory: suggestion index and snapshot cache have explicit size limits
+
+Instrumentation should record autocomplete latency, focus-build latency by
+component, cache hit/miss, rows examined, stale-result drops, and UI apply time.
+Do not log complete message bodies or other unnecessary sensitive content.
+
+## State And Persistence
+
+- The current focus is session state by default and is cleared at application
+  restart. Persistent monitoring uses the existing Pin model instead.
+- Age, Group, Source, and visible-card preferences retain their existing
+  persistence behavior.
+- Clearing focus does not clear Age/Group/Source unless the operator chooses
+  `Clear All Filters`.
+- Pins and focus are distinct: focus is the current lens; pins are things the
+  operator wants FIO to keep watching.
+
+## Efficient Implementation Slices
+
+### Slice 1: Visual Language And Focus Contract
+
+- Apply the Traffic-by-Group copy refinement.
+- Define and add the small Ops icon asset family needed for autocomplete, focus,
+  schedule, SOP, relay, and RF readiness; reuse existing navigation assets for
+  operator, group, map, message, radio, and health meanings where appropriate.
+- Add Qt-free focus/suggestion dataclasses and entity resolver.
+- Add performance instrumentation and deterministic resolver tests.
+- Keep the existing quick-search command menu unchanged until the focus field is
+  ready to replace it.
+
+### Slice 2: Callsign Focus
+
+- Add categorized autocomplete, explicit focus banner, and Clear Focus.
+- Build a cached callsign snapshot from operator, traffic, status, schedule,
+  map, and existing signal evidence.
+- Filter current cards through that snapshot and add Message/Map/Pin actions.
+- Render propagation as a separately completing recommendation so it cannot
+  delay the rest of the focus.
+
+### Slice 3: Group, Topic, And Geography Focus
+
+- Add group/topic/region resolvers and focused projections.
+- Apply the same focus contract to traffic chart, awareness, schedule, peer,
+  map handoff, SOP, and RF readiness.
+- Move navigation/settings quick search to the command palette.
+
+### Slice 4: Dashboard Differentiation
+
+- Convert Schedule Outlook to the time rail.
+- Convert Peer Schedule Finder to the rendezvous timeline.
+- Convert Source Lanes to stable lane cards.
+- Demote dense evidence tables behind Details after action and route parity is
+  verified for each replacement.
+
+This sequence builds the reusable focus/data path before introducing several
+new visual renderers, minimizing duplicate queries and rework.
+
+## Acceptance Criteria
+
+- Associated operating and membership groups remain first in Traffic by Group,
+  are bold, and do not repeat `My group` text.
+- Icons use one application-owned family, retain accessible names/tooltips, and
+  never become the sole carrier of meaning.
+- Traffic chart metadata follows the bullet-delimited sequence and remains
+  interpretable when elided or read by assistive technology.
+- Callsign focus produces identity/group, last-heard/status, traffic,
+  schedule, map, and RF-readiness summaries without opening several tabs.
+- Topic focus narrows all compatible Ops views to the same canonical topic and
+  exposes related Messages and Map routes.
+- Region/place focus can drive a persistent RF-readiness recommendation using
+  modeled and observed evidence.
+- Active focus and intersecting Age/Group/Source scope are always visible.
+- Typing never causes a full dashboard/database/propagation refresh.
+- Stale asynchronous results never replace a newer focus.
+- Empty or missing data is explicit rather than silently omitted.
+- Default Operations view contains visually distinct bars, cards, lanes, and
+  timelines; detailed tables remain available without dominating the page.
+- Light/Dark and Normal/Large Text layouts pass at 1920x1080, approximately
+  1000x700, and approximately 900x560 without important horizontal scrolling.
+
+## Decisions Still Needed Before Slice 2
+
+1. Whether the initial callsign focus should include archived/read traffic by
+   default or honor only the active Traffic Age control. Recommendation: honor
+   Traffic Age, with an explicit `History` action for retained traffic.
+2. Whether unknown but valid callsigns should be pinnable before they appear in
+   the operator table. Recommendation: yes; mark identity and trust as unknown.
+3. Whether choosing a focused station should automatically retarget the visible
+   Propagation card. Recommendation: yes, while leaving radio/QSY state
+   unchanged until the operator acts.

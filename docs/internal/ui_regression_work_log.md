@@ -559,3 +559,11 @@ labels, distinct current bars and prior markers, and compact 33–36px rows acro
 those cases. Regression coverage includes operator-group-first ordering,
 current/prior chart roles, theme colors, persistent aggregate/collapse behavior,
 and group drill-down from any chart cell.
+
+Production chart-copy follow-up: associated operating and membership groups
+remain bold and first, but the repeated `My group` phrase has been removed.
+Visible metadata is now one compact sequence:
+`trend · new · source counts · latest`. The dashboard/focus-search specification
+also defines a reusable application-owned icon language for entity kinds,
+evidence, actions, schedule/SOP, and RF-readiness views without relying on color,
+emoji, or platform icon themes.

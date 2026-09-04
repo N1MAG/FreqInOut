@@ -7134,9 +7134,9 @@ class ControlFreqTab(QWidget):
                     f"{source} {count}" for source, count in volume.sources
                 ) or "Unknown source"
                 latest = self._relative_traffic_age(volume.latest_ts)
-                association = "My group · " if volume.is_operator_group else ""
                 trend_detail = (
-                    f"{association}{volume.trend} · {volume.unread_count} new · latest {latest}"
+                    f"{volume.trend} · {volume.unread_count} new · "
+                    f"{source_summary} · latest {latest}"
                 )
                 tooltip = (
                     f"{volume.group}: {volume.current_count} in the current window; "
@@ -7162,7 +7162,7 @@ class ControlFreqTab(QWidget):
                 bar_item.setData(TRAFFIC_CHART_SCALE_ROLE, scale)
                 bar_item.setData(TRAFFIC_CHART_TREND_ROLE, volume.trend)
 
-                detail_item = QTableWidgetItem(f"{trend_detail}\n{source_summary}")
+                detail_item = QTableWidgetItem(trend_detail)
                 for chart_item in (group_item, bar_item, detail_item):
                     chart_item.setFlags(chart_item.flags() & ~Qt.ItemIsEditable)
                     chart_item.setData(Qt.UserRole, volume.group)

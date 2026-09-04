@@ -98,7 +98,11 @@ operators retain judgment when source content is ambiguous.
   unrelated groups. This priority tier combines configured operating groups,
   configured local groups, and membership groups from the operator's own data
   row. Within each tier, spike/rise severity and current volume determine order.
-  No parent/child group relationship is inferred for this ordering.
+  No parent/child group relationship is inferred for this ordering. Associated
+  rows are bold; do not repeat `My group` in every row.
+- Chart metadata uses one bullet-delimited sequence: trend, new/unread count,
+  source counts, and latest receipt age. Preserve exact current/prior counts
+  beside the graphical comparison.
 - `CommStat` is a distinct source; `SitRep Summary` is explicitly identified as
   an aggregate rather than a transport/source. A `Spike` is an awareness signal
   and does not create an action by itself. Chart rows drill into Messages with
