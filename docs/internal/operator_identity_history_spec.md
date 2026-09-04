@@ -125,13 +125,19 @@ not silently rewrite external radio/application configuration.
 The current `operator_checkins` table is keyed by callsign. Migration must:
 
 1. create one stable identity and one open callsign-history row for each
-   existing operator row;
+   normalized callsign owner; exact portable/format variants may remain as
+   separate compatibility-roster rows associated with that same identity;
 2. add or project `operator_id` without losing the current callsign-keyed
    compatibility API;
 3. move identity-owned fields behind Qt-free repository/resolver functions;
 4. update consumers incrementally so Map, NCS, SOP, Messages, schedules, and
    imports do not query identity ownership independently; and
 5. keep migration idempotent and transactional, with collision diagnostics.
+
+The compatibility roster's `operator_id` index is intentionally non-unique.
+Stable identity and alias-ownership constraints are enforced by
+`operator_identities` and `operator_callsign_history`; making the roster index
+unique would reject valid base/portable rows and block startup migration.
 
 Source ingestion continues storing observed callsign text. It may resolve and
 store an `operator_id` reference when interval attribution is unambiguous, but

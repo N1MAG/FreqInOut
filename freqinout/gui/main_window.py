@@ -218,6 +218,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._startup_status_callback = startup_status
         self._shutting_down = False
+        self._shutdown_close_pending = False
+        self._allow_final_close = False
+        self._shutdown_wait_started = 0.0
+        self._shutdown_wait_last_log = 0.0
         self._app_active = True
         self._ui_resume_pending = False
         self._ui_refresh_dirty = False
@@ -3048,6 +3052,20 @@ class MainWindow(QMainWindow):
             log.debug("MainWindow shutdown: transient widget close failed: %s", e)
 
     def closeEvent(self, event):
+        if not self._allow_final_close:
+            event.ignore()
+            if not self._shutdown_close_pending:
+                self._shutdown_close_pending = True
+                self._shutdown_wait_started = time.monotonic()
+                self._shutdown_wait_last_log = self._shutdown_wait_started
+                # Keep the Qt event loop alive, but remove the application from
+                # view while worker-owned timers are stopped on their owning
+                # threads. Accepting the close immediately would let QObject
+                # parents destroy a still-running QThread during process exit.
+                self.hide()
+                self._on_app_about_to_quit()
+                QTimer.singleShot(0, self._poll_graceful_close)
+            return
         unsubscribe = getattr(self, "_action_feedback_unsubscribe", None)
         if callable(unsubscribe):
             try:
@@ -3057,6 +3075,37 @@ class MainWindow(QMainWindow):
             self._action_feedback_unsubscribe = None
         self._on_app_about_to_quit()
         super().closeEvent(event)
+
+    def _poll_graceful_close(self) -> None:
+        live_threads: list[QThread] = []
+        candidates = list(self.findChildren(QThread))
+        candidates.extend(entry[0] for entry in tuple(_MESH_RUNTIME_SHUTDOWN_GUARD))
+        seen: set[int] = set()
+        for thread in candidates:
+            marker = id(thread)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                if thread.isRunning():
+                    live_threads.append(thread)
+            except RuntimeError:
+                continue
+        if live_threads:
+            now = time.monotonic()
+            if now - self._shutdown_wait_last_log >= 5.0:
+                elapsed = now - self._shutdown_wait_started
+                log.info(
+                    "MainWindow shutdown: waiting %.1fs for %s worker thread(s) to stop cleanly.",
+                    elapsed,
+                    len(live_threads),
+                )
+                self._shutdown_wait_last_log = now
+            QTimer.singleShot(50, self._poll_graceful_close)
+            return
+        self._allow_final_close = True
+        log.info("MainWindow shutdown: all Qt worker threads stopped cleanly.")
+        self.close()
 
     def resizeEvent(self, event):
         try:

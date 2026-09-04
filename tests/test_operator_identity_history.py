@@ -43,6 +43,54 @@ def test_schema_backfills_stable_identity_and_current_alias() -> None:
     assert identity.current_callsign == "K1OLD"
 
 
+def test_schema_allows_base_and_portable_roster_rows_to_share_identity() -> None:
+    conn = sqlite3.connect(":memory:")
+    _seed(conn, "K1ABC")
+    original = resolve_operator_identity(conn, "K1ABC")
+    assert original is not None
+
+    # Reproduce the partially migrated production shape: the exact portable
+    # row has no identity yet while its canonical base call already does.
+    conn.execute(
+        """
+        INSERT INTO operator_checkins(
+            callsign, name, group1, group_role, trusted, first_seen_utc
+        ) VALUES ('K1ABC/P', 'Portable', 'MAGNET', 'PEER', 0, '20240901')
+        """
+    )
+    ensure_operator_checkins_schema(conn)
+
+    rows = conn.execute(
+        "SELECT callsign, operator_id FROM operator_checkins ORDER BY callsign"
+    ).fetchall()
+    assert rows == [("K1ABC", original.operator_id), ("K1ABC/P", original.operator_id)]
+    index_row = next(
+        row for row in conn.execute("PRAGMA index_list(operator_checkins)").fetchall()
+        if row[1] == "idx_operator_checkins_identity"
+    )
+    assert index_row[2] == 0  # non-unique compatibility lookup index
+
+
+def test_change_callsign_preserves_variant_roster_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    _seed(conn, "K1ABC")
+    conn.execute(
+        """
+        INSERT INTO operator_checkins(
+            callsign, name, group1, group_role, trusted, first_seen_utc
+        ) VALUES ('K1ABC/P', 'Portable', 'MAGNET', 'PEER', 0, '20240901')
+        """
+    )
+    ensure_operator_checkins_schema(conn)
+
+    change_operator_callsign(conn, "K1ABC", "K1NEW", effective_at=1_725_494_400.0)
+
+    rows = conn.execute(
+        "SELECT callsign FROM operator_checkins ORDER BY callsign"
+    ).fetchall()
+    assert rows == [("K1ABC/P",), ("K1NEW",)]
+
+
 def test_change_callsign_preserves_operator_row_and_alias_history() -> None:
     conn = sqlite3.connect(":memory:")
     _seed(conn, "K1OLD", name="Casey")

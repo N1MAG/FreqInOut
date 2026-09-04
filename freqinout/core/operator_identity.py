@@ -154,8 +154,14 @@ def ensure_operator_identity_schema(
     }
     if "operator_id" not in operator_columns:
         return
+    # ``operator_checkins`` remains a compatibility roster keyed by the exact
+    # observed callsign.  It can therefore contain both a base call and a
+    # portable/variant call which intentionally resolve to one stable operator
+    # identity.  Older builds briefly made this index UNIQUE; remove that
+    # migration artifact before backfilling so existing rosters self-heal.
+    conn.execute("DROP INDEX IF EXISTS idx_operator_checkins_identity")
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_checkins_identity "
+        "CREATE INDEX IF NOT EXISTS idx_operator_checkins_identity "
         "ON operator_checkins(operator_id) WHERE operator_id IS NOT NULL AND operator_id <> ''"
     )
 
@@ -420,10 +426,20 @@ def change_operator_callsign(
             "UPDATE operator_identities SET current_callsign=?, updated_utc=? WHERE operator_id=?",
             (new_call, now_iso, identity.operator_id),
         )
-        conn.execute(
-            "UPDATE operator_checkins SET callsign=? WHERE operator_id=?",
-            (new_call, identity.operator_id),
-        )
+        # The compatibility roster may retain multiple observed-call rows for
+        # one identity (for example K1ABC and K1ABC/P).  Rename one primary row
+        # rather than collapsing or overwriting those evidence-bearing rows.
+        roster_rows = conn.execute(
+            "SELECT callsign FROM operator_checkins WHERE operator_id=? "
+            "ORDER BY CASE WHEN callsign=? COLLATE NOCASE THEN 0 ELSE 1 END, callsign COLLATE NOCASE",
+            (identity.operator_id, old_call),
+        ).fetchall()
+        if roster_rows:
+            primary_roster_call = str(roster_rows[0][0] or "").strip()
+            conn.execute(
+                "UPDATE operator_checkins SET callsign=? WHERE callsign=? COLLATE NOCASE",
+                (new_call, primary_roster_call),
+            )
         # Explicit/inferred peer schedule rows are operator-owned configuration,
         # not immutable received evidence, so they follow the stable identity.
         for table_name in ("peer_hf_schedule", "peer_hf_schedule_inferred"):

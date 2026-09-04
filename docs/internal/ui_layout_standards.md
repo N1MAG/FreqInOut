@@ -234,6 +234,10 @@ Mandatory rules:
   thread. GUI shutdown should queue the worker stop, let the worker emit its
   finished/stopped signal, and only use a short bounded wait as a cleanup
   grace period.
+- Final window close must keep the Qt event loop alive until queued worker
+  shutdown has completed. The window may hide immediately, but FIO must not
+  accept the terminal close while a child or guarded `QThread` still runs;
+  otherwise Python/Qt teardown can destroy the timer owner on the wrong thread.
 
 Implementation gates:
 
@@ -264,8 +268,9 @@ Current remediation gates from the responsiveness audit:
    force repaint or commit editors. Use focus changes, model commits,
    `QTimer.singleShot(0, ...)`, or worker completion callbacks.
 4. Mesh runtime shutdown and reconnect paths must avoid long waits. If a GUI
-   thread waits for a worker, the wait is capped at 250 ms and failure to stop
-   cleanly is logged rather than freezing the UI.
+   thread waits for a worker, the wait is capped at 250 ms. Final application
+   close then polls asynchronously and accepts the close only after guarded Qt
+   workers have stopped, preserving responsiveness and QObject thread affinity.
 5. Plan Builder, daily schedule, net schedule, and SOP views must move broad
    table projection and RF Guard scans into worker snapshots before further
    high-volume source families are added.

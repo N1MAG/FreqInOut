@@ -2939,6 +2939,9 @@ def test_main_window_wires_mesh_runtime_lifecycle() -> None:
     assert "stop_requested = True" in stop_block
     assert "if not stop_requested:" in stop_block
     assert "thread.wait(200)" in stop_block
+    assert "event.ignore()" in source
+    assert "self._poll_graceful_close" in source
+    assert "_MESH_RUNTIME_SHUTDOWN_GUARD" in source
 
 
 def test_mesh_worker_stop_cleans_timer_in_worker_lifecycle() -> None:

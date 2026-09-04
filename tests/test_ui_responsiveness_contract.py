@@ -85,7 +85,7 @@ def test_gui_process_events_are_allowlisted_migration_items() -> None:
 
 def test_gui_future_result_is_done_callback_only_for_now() -> None:
     allowed = {
-        "freqinout/gui/controlfreq_tab.py": ["future.result()"],
+        "freqinout/gui/controlfreq_tab.py": ["future.result()", "done.result()"],
         "freqinout/gui/freq_planner_tab.py": ["future.result()"],
         "freqinout/gui/stations_map_tab.py": ["future.result()"],
     }

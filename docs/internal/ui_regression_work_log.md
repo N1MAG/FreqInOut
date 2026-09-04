@@ -49,7 +49,7 @@ state without remounting the scroll widget.
 
 ### Qt Shutdown Timer Warning
 
-Status: specified, needs runtime verification after the next shutdown QA pass.
+Status: corrective lifecycle fix implemented; production shutdown QA requested.
 
 Observation: closing FIO can log `QObject::killTimer` and
 `QObject::~QObject: Timers cannot be stopped from another thread`.
@@ -58,9 +58,38 @@ Contract: QObjects that own timers must stop and delete those timers in their
 owning thread. Worker shutdown should be queued, non-blocking, and capped by a
 short cleanup grace period if the GUI thread waits at all.
 
+Production confirmed that retaining an unfinished mesh worker in a module-level
+guard was insufficient: normal window close still ended the process, so Python
+eventually destroyed the guarded live `QThread` and its timer. Final close now
+hides the window, performs the existing queued shutdown, and keeps the Qt event
+loop alive with a lightweight poll until all child and guarded Qt workers have
+stopped. Only then is the close accepted. Interactive reconnect/disconnect
+retains the existing 200 ms maximum GUI wait.
+
 Next check: reproduce normal app exit after Mesh, Map, Ops Center, and NCS have
-all been visited. If the warning remains, identify the timer-owning object from
-shutdown traces and move its stop/delete path onto the owner thread.
+all been visited and confirm the clean-shutdown log line is emitted without Qt
+timer or live-thread warnings.
+
+### Operator Identity Compatibility-Index Migration
+
+Status: fixed after production-data startup validation.
+
+Observation: startup could report `UNIQUE constraint failed:
+operator_checkins.operator_id` after the identity-history rollout. Production
+contained exact portable calls such as `KK4CJO/P` and `W3BFO/P` alongside their
+base calls. The new resolver correctly associated each pair with one stable
+identity, but a unique compatibility-roster index incorrectly prohibited that
+relationship.
+
+Contract: identity uniqueness belongs to `operator_identities` and effective
+callsign history. `operator_checkins` is an exact observed-callsign compatibility
+roster and may retain multiple rows associated with one identity. Migration may
+link those rows but must not delete, merge, or overwrite production roster data.
+
+Implementation: schema ensure now replaces the obsolete unique roster index
+with a non-unique lookup index before backfill. Callsign change updates one
+primary roster row and retains associated portable/variant evidence rows. The
+migration is idempotent and repairs the affected database on the next startup.
 
 ### Mesh Device Library And Connection Management
 
