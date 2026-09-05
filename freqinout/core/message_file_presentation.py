@@ -182,8 +182,8 @@ def file_message_row_presentation(
     report_ts = form_report_timestamp_from_summary(
         (getattr(intelligence, "date_summary", "") if intelligence else "") or form_meta.get("date_summary", "")
     )
-    rcv_ts = float(report_ts or rec.mtime or 0.0)
-    age_ts_source = "report" if report_ts else "received"
+    rcv_ts = float(rec.mtime or 0.0)
+    age_ts_source = "received"
     topics = tuple(getattr(intelligence, "topics", ()) or ()) if intelligence else ()
     search_detail = " ".join(
         part

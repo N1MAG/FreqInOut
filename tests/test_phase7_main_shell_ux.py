@@ -2743,9 +2743,10 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert header.sectionResizeMode(1) == QHeaderView.Stretch
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
         assert tab.messages_table.columnWidth(1) >= 280
-        assert tab.messages_table.columnWidth(5) <= 120
-        assert tab.messages_table.columnWidth(6) <= 90
-        assert tab.messages_table.minimumWidth() >= 930
+            assert tab.messages_table.columnWidth(5) <= 120
+            assert tab.messages_table.columnWidth(6) <= 90
+            assert tab.messages_table.columnWidth(7) >= 200
+            assert tab.messages_table.minimumWidth() >= 930
 
         tab.resize(900, 560)
         tab.show()

@@ -57,7 +57,10 @@ class CachedMessageFileMetadata:
     search_text: str = ""
 
     def age_timestamp_for(self, rec: FileRecord) -> float:
-        return float(self.report_ts or rec.mtime or 0.0)
+        # Inbox age is based on when FIO discovered/received the artifact.  A
+        # form's embedded report timestamp remains valuable provenance, but it
+        # may be hours or days older than the actual arrival.
+        return float(rec.mtime or 0.0)
 
 
 @dataclass(frozen=True)
@@ -126,7 +129,7 @@ def cached_message_file_row_summary(
         title=title,
         rcv_ts=cached.age_timestamp_for(rec),
         report_ts=cached.report_ts,
-        age_ts_source=cached.age_ts_source,
+        age_ts_source="received",
         topics=cached.topics,
         actionable=cached.actionable,
         search_text=cached.search_text,

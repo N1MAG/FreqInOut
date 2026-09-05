@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import json
 from pathlib import Path
@@ -1127,6 +1129,83 @@ def test_file_scanner_preserves_source_metadata_for_nested_full_scan(tmp_path: P
     assert records["flmsg"][0].path == msg_path
     assert records["flmsg"][0].source_id == "source-flmsg-a"
     assert records["flmsg"][0].source_label == "FIO-A FLMSG"
+
+
+def test_file_scanner_incremental_discovers_file_in_changed_nested_directory(tmp_path: Path) -> None:
+    root = tmp_path / "messages"
+    nested = root / "received" / "region-8"
+    nested.mkdir(parents=True)
+    existing = nested / "existing.k2s"
+    existing.write_text("existing", encoding="utf-8")
+    watch = [{"origin": "flmsg", "path": str(root)}]
+
+    first_records, first_mtimes, _mode = MessageFileScanner(watch, force=True).scan()
+    root_mtime = root.stat().st_mtime
+    received_mtime = (root / "received").stat().st_mtime
+    arrived = nested / "new-report.k2s"
+    arrived.write_text("new report", encoding="utf-8")
+    # Reproduce the important filesystem condition explicitly: only the file's
+    # immediate directory advertises the change.
+    os.utime(root, (root_mtime, root_mtime))
+    os.utime(root / "received", (received_mtime, received_mtime))
+
+    records, _mtimes, mode = MessageFileScanner(
+        watch,
+        force=False,
+        base_records=first_records,
+        base_dir_mtimes=first_mtimes,
+    ).scan()
+
+    assert mode == "incremental"
+    assert {record.path for record in records["flmsg"]} == {existing, arrived}
+
+
+def test_file_scanner_incremental_removes_file_from_changed_nested_directory(tmp_path: Path) -> None:
+    root = tmp_path / "messages"
+    nested = root / "received"
+    nested.mkdir(parents=True)
+    removed = nested / "old-report.k2s"
+    removed.write_text("old report", encoding="utf-8")
+    watch = [{"origin": "flmsg", "path": str(root)}]
+
+    first_records, first_mtimes, _mode = MessageFileScanner(watch, force=True).scan()
+    root_mtime = root.stat().st_mtime
+    removed.unlink()
+    os.utime(root, (root_mtime, root_mtime))
+
+    records, _mtimes, mode = MessageFileScanner(
+        watch,
+        force=False,
+        base_records=first_records,
+        base_dir_mtimes=first_mtimes,
+    ).scan()
+
+    assert mode == "incremental"
+    assert records["flmsg"] == []
+
+
+def test_file_scanner_incremental_removes_deleted_nested_directory(tmp_path: Path) -> None:
+    root = tmp_path / "messages"
+    nested = root / "received" / "old-session"
+    nested.mkdir(parents=True)
+    removed = nested / "old-report.k2s"
+    removed.write_text("old report", encoding="utf-8")
+    watch = [{"origin": "flmsg", "path": str(root)}]
+
+    first_records, first_mtimes, _mode = MessageFileScanner(watch, force=True).scan()
+    root_mtime = root.stat().st_mtime
+    shutil.rmtree(nested)
+    os.utime(root, (root_mtime, root_mtime))
+
+    records, _mtimes, mode = MessageFileScanner(
+        watch,
+        force=False,
+        base_records=first_records,
+        base_dir_mtimes=first_mtimes,
+    ).scan()
+
+    assert mode == "incremental"
+    assert records["flmsg"] == []
 
 
 def test_file_scanner_includes_nested_bbs_management_files(tmp_path: Path) -> None:

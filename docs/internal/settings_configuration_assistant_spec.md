@@ -248,6 +248,11 @@ Target behavior:
   FLMsg/FLAmp content from BBS sync without deleting the original message or
   source artifact. Initial implementation changes copied rows to a `-BBS`
   action that removes only the copied BBS artifact.
+- `+BBS` applies equally to source-row and projection-first Inbox rendering.
+  When more than one eligible live or managed BBS destination exists, selecting
+  `+BBS` opens one checkbox list so the operator can publish to multiple
+  locations in one action. Managed target IDs/names must survive the UI mapping;
+  the action must never silently fall back to a different BBS location.
 - Future Settings/Messages work should add age-based archive sweepers for
   original FLMsg and FLAmp receive folders. This is separate from BBS copy
   removal: the user should be able to keep radio-message archives clean without

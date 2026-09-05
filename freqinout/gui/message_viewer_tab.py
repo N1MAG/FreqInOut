@@ -21,7 +21,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Sequence, Set, Mapping
 
-from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal, QObject, QThread
+from PySide6.QtCore import (
+    Qt,
+    QTimer,
+    QAbstractTableModel,
+    QModelIndex,
+    QEvent,
+    QRect,
+    Signal,
+    QObject,
+    QThread,
+    QFileSystemWatcher,
+)
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QWidget,
@@ -2594,7 +2605,9 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        if isinstance(row.payload, (SitrepMessage, ProjectedMessagePayload)):
+        if isinstance(row.payload, SitrepMessage) or (
+            isinstance(row.payload, ProjectedMessagePayload) and not projected_file_row
+        ):
             painter.setPen(self._danger)
             painter.setFont(option.font)
             painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
@@ -2728,6 +2741,13 @@ class MessageActionDelegate(QStyledItemDelegate):
         elif isinstance(row.payload, ProjectedMessagePayload) and projected_file_row:
             if live_bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_projected_file_message(row)
+            elif bbs_copy_row and bbs_rect.contains(pos):
+                if hasattr(parent_widget, "_is_row_already_in_varac_bbs") and parent_widget._is_row_already_in_varac_bbs(row):
+                    if hasattr(parent_widget, "_remove_row_from_varac_bbs"):
+                        parent_widget._remove_row_from_varac_bbs(row)
+                elif bbs_copy_enabled:
+                    self.parent()._copy_row_to_varac_bbs(row)
+                return True
             elif del_rect.contains(pos):
                 self.parent()._delete_projected_file_message(row)
             else:
@@ -2958,6 +2978,8 @@ class MessageViewerTab(QWidget):
         self._pending_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
         self._message_check_timer: QTimer | None = None
+        self._file_system_watcher: QFileSystemWatcher | None = None
+        self._file_watch_debounce_timer: QTimer | None = None
         self._projection_delete_queue_timer: QTimer | None = None
         self._pending_rows: List[Dict[str, str | float]] = []
         self._pending_rows_signature: str = ""
@@ -3050,6 +3072,7 @@ class MessageViewerTab(QWidget):
         self._native_file_projection_pending_force: bool = False
         self._last_source_rows_build_ts: float = 0.0
         self._last_projection_render_ts: float = 0.0
+        self._projected_scope_load_key: tuple[object, ...] | None = None
         self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
@@ -3086,7 +3109,9 @@ class MessageViewerTab(QWidget):
         self._spotter_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
         self._sitrep_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
         self._commstat_local_snapshot_fp: Optional[Tuple[Tuple[str, ...], ...]] = None
-        self._file_refresh_interval_sec: float = 60.0
+        self._file_refresh_interval_sec: float = float(
+            max(15, min(60, int(self._visible_check_interval_sec or 30)))
+        )
         self._last_file_refresh_ts: float = 0.0
         self._sender_cache: Dict[tuple, str] = {}
         self._file_view_cache: Dict[tuple, tuple[bool, str, str, Optional[Path], str]] = {}
@@ -3110,6 +3135,10 @@ class MessageViewerTab(QWidget):
         self._flamp_relay_validation_cache: Dict[tuple[str, float, int], bool] = {}
         self._flamp_relay_parse_cache: Dict[tuple[str, float, int], Optional[Dict[str, object]]] = {}
         self._bbs_copy_target_session_id: str = ""
+        self._bbs_copy_targets_cache: List[Dict[str, object]] = []
+        self._bbs_copy_targets_cache_ts: float = 0.0
+        self._bbs_published_index_cache: Dict[str, Set[str]] = {}
+        self._bbs_published_index_cache_ts: float = 0.0
         self._retired_worker_refs: List[object] = []
 
         # merge DB paths if present
@@ -3145,6 +3174,7 @@ class MessageViewerTab(QWidget):
         self._setup_js8_timer()
         self._setup_pending_timer()
         self._setup_message_check_timer()
+        self._setup_file_system_watcher()
         self._setup_projection_delete_queue_timer()
 
     def _retain_finished_worker_refs(self, *refs: object) -> None:
@@ -4017,39 +4047,6 @@ class MessageViewerTab(QWidget):
                 digest = (digest * 1099511628211) & 0xFFFFFFFFFFFFFFFF
             out.append((origin, int(len(recs)), int(digest)))
         return tuple(out)
-
-    def _can_skip_file_scan_quick(self, watch_dirs: List[Dict], force: bool) -> bool:
-        if force:
-            return False
-        if not self._scan_cache_loaded:
-            return False
-        if not self._scan_dir_mtime_cache:
-            return False
-        roots: set[str] = set()
-        for entry in watch_dirs:
-            path = str(entry.get("path", "") or "").strip()
-            if not path:
-                continue
-            roots.add(os.path.normcase(os.path.normpath(path)))
-        if not roots:
-            return False
-        cached = self._scan_dir_mtime_cache
-        for root in roots:
-            if root not in cached:
-                return False
-        for dir_path, prev_mtime in cached.items():
-            norm = os.path.normcase(os.path.normpath(str(dir_path or "")))
-            if not norm:
-                return False
-            if not any(norm == root or norm.startswith(root + os.sep) for root in roots):
-                return False
-            try:
-                cur_mtime = float(Path(norm).stat().st_mtime)
-            except OSError:
-                return False
-            if abs(cur_mtime - float(prev_mtime or 0.0)) > 1e-6:
-                return False
-        return True
 
     @staticmethod
     def _read_state_key(origin: str, rec: FileRecord) -> tuple:
@@ -4971,7 +4968,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setColumnWidth(3, 104)
         self.messages_table.setColumnWidth(4, 104)
         self.messages_table.setColumnWidth(5, 148)
-        self.messages_table.setColumnWidth(7, 142)
+        self.messages_table.setColumnWidth(7, 220)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -5374,24 +5371,24 @@ class MessageViewerTab(QWidget):
             age_seconds = 0
         selected_groups = self._expanded_selected_message_groups()
         configured_groups = self._configured_message_group_names()
-        counts: Dict[str, int] = {}
-        for key, _label, _tip in self._inbox_focus_options():
-            count = 0
-            for row in rows:
-                if not _core_row_matches_workspace_scope(
-                    row,
-                    selected_sources=None,
-                    selected_groups=selected_groups,
-                    configured_groups=configured_groups,
-                ):
-                    continue
-                if not _core_row_matches_age_filter(row, age_seconds, now_ts=now_ts):
-                    continue
-                if key != "all" and not _core_row_matches_inbox_focus(row, key):
-                    continue
-                if self._row_is_unread_for_focus_count(row):
-                    count += 1
-            counts[key] = count
+        focus_keys = [key for key, _label, _tip in self._inbox_focus_options()]
+        counts: Dict[str, int] = {key: 0 for key in focus_keys}
+        for row in rows:
+            if not _core_row_matches_workspace_scope(
+                row,
+                selected_sources=None,
+                selected_groups=selected_groups,
+                configured_groups=configured_groups,
+            ):
+                continue
+            if not _core_row_matches_age_filter(row, age_seconds, now_ts=now_ts):
+                continue
+            if not self._row_is_unread_for_focus_count(row):
+                continue
+            counts["all"] += 1
+            for key in focus_keys:
+                if key != "all" and _core_row_matches_inbox_focus(row, key):
+                    counts[key] += 1
         self._inbox_focus_unread_counts = counts
         self._sync_inbox_focus_buttons()
 
@@ -5460,8 +5457,17 @@ class MessageViewerTab(QWidget):
             return False
         if not getattr(self, "_last_projection_render_ts", 0.0) and not getattr(self, "_message_rows", []):
             return False
+        if self._projected_scope_key() == getattr(self, "_projected_scope_load_key", None):
+            return False
         self._unfreeze_table()
         return self._load_projected_messages_into_table()
+
+    def _projected_scope_key(self) -> tuple[object, ...]:
+        try:
+            age_seconds = int(self.received_filter.currentData() or 0)
+        except Exception:
+            age_seconds = 0
+        return (self._projected_source_families_for_current_scope(), age_seconds)
 
     def _toggle_advanced_filters(self) -> None:
         self._advanced_filters_visible = bool(self.advanced_filters_btn.isChecked())
@@ -10502,6 +10508,49 @@ class MessageViewerTab(QWidget):
         self._message_check_timer.timeout.connect(self._on_visible_message_check_timer)
         self._sync_message_check_timer()
 
+    def _setup_file_system_watcher(self) -> None:
+        if self._file_system_watcher is None:
+            self._file_system_watcher = QFileSystemWatcher(self)
+            self._file_system_watcher.directoryChanged.connect(self._on_watched_message_directory_changed)
+        if self._file_watch_debounce_timer is None:
+            self._file_watch_debounce_timer = QTimer(self)
+            self._file_watch_debounce_timer.setSingleShot(True)
+            self._file_watch_debounce_timer.timeout.connect(self._on_file_watch_debounce)
+        self._sync_file_system_watcher()
+
+    def _sync_file_system_watcher(self) -> None:
+        watcher = getattr(self, "_file_system_watcher", None)
+        if watcher is None:
+            return
+        desired: Set[str] = set()
+        for entry in self._effective_watch_dirs():
+            raw = str(entry.get("path", "") or "").strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.exists() and path.is_dir():
+                desired.add(str(path))
+        current = set(watcher.directories())
+        remove = sorted(current - desired)
+        add = sorted(desired - current)
+        if remove:
+            watcher.removePaths(remove)
+        if add:
+            watcher.addPaths(add)
+
+    def _on_watched_message_directory_changed(self, _path: str) -> None:
+        if self._is_shutting_down:
+            return
+        timer = getattr(self, "_file_watch_debounce_timer", None)
+        if timer is not None:
+            timer.start(350)
+
+    def _on_file_watch_debounce(self) -> None:
+        if self._is_shutting_down:
+            return
+        self._sync_file_system_watcher()
+        self._refresh_files(force=False)
+
     def _setup_projection_delete_queue_timer(self) -> None:
         if self._projection_delete_queue_timer:
             self._projection_delete_queue_timer.stop()
@@ -10689,12 +10738,12 @@ class MessageViewerTab(QWidget):
         self._message_check_status_text = "Checking..."
         self._update_message_check_status()
         try:
-            if getattr(self, "_projection_primary_enabled", False):
-                self._request_projected_source_ingest(force=False)
-                loaded = self._load_projected_messages_into_table()
-                self._start_native_message_projection_write(force=False)
-                if not loaded:
-                    self._populate_messages_table(force=False)
+            projection_primary = bool(getattr(self, "_projection_primary_enabled", False))
+            if projection_primary:
+                # The activation refresh below starts source/file projection.
+                # Completion callbacks reload only when a projector reports a
+                # change, avoiding multiple 20k-row reads per timer tick.
+                self._message_check_status_text = "Checking sources..."
             else:
                 self._refresh_js8_messages(force=False, rebuild=False)
                 self._refresh_varac_messages(force=False, rebuild=False)
@@ -10703,9 +10752,14 @@ class MessageViewerTab(QWidget):
                 if after_fp != before_fp:
                     self._populate_messages_table(force=False)
             self._refresh_pending_backlog()
-            after_count = self._message_source_count()
-            delta = max(0, int(after_count - before_count))
-            self._message_check_status_text = f"{delta} new message{'s' if delta != 1 else ''}" if delta else "No new messages"
+            if not projection_primary:
+                after_count = self._message_source_count()
+                delta = max(0, int(after_count - before_count))
+                self._message_check_status_text = (
+                    f"{delta} new message{'s' if delta != 1 else ''}"
+                    if delta
+                    else "No new messages"
+                )
             now = time.time()
             self._last_visible_message_check_ts = now
             self._last_activation_refresh_ts = now
@@ -10918,9 +10972,8 @@ class MessageViewerTab(QWidget):
                     self._refresh_files(force=force)
                 if getattr(self, "_projection_primary_enabled", False):
                     self._request_projected_source_ingest(force=force)
-                    loaded = self._load_projected_messages_into_table()
                     self._start_native_message_projection_write(force=force)
-                    if not loaded:
+                    if not self._message_rows:
                         self._populate_messages_table(force=force)
                 else:
                     before_fp = self._message_sources_fingerprint()
@@ -11233,6 +11286,7 @@ class MessageViewerTab(QWidget):
         self._scan_dir_mtime_cache = {}
         self._files_snapshot_fp = None
         self._save_settings()
+        self._sync_file_system_watcher()
         self._refresh_files()
 
     def _remove_path(self, origin: str):
@@ -11247,6 +11301,7 @@ class MessageViewerTab(QWidget):
         self._scan_dir_mtime_cache = {}
         self._files_snapshot_fp = None
         self._save_settings()
+        self._sync_file_system_watcher()
         self._refresh_files()
 
     # ---------- Scanning ----------
@@ -11510,31 +11565,6 @@ class MessageViewerTab(QWidget):
         self._emit_message_refresh_busy()
         self._file_scan_start_ts = time.time()
         self._load_paths_lists()
-        watch_dirs = self._effective_watch_dirs()
-        if self._can_skip_file_scan_quick(watch_dirs, force):
-            try:
-                self._save_file_scan_cache_meta_only(dir_mtimes=self._scan_dir_mtime_cache)
-            except Exception:
-                pass
-            finally:
-                self._refresh_files_inflight = False
-                self._last_file_refresh_ts = time.time()
-                self._emit_message_refresh_busy()
-                elapsed = time.time() - self._file_scan_start_ts
-                total_records = sum(len(v) for v in self.files.values())
-                emit_span(
-                    "messages.file_scan_total",
-                    elapsed * 1000.0,
-                    settings=self.settings,
-                    meta={
-                        "force": bool(force),
-                        "records": int(total_records),
-                        "mode": "quick_skip",
-                        "unchanged": True,
-                    },
-                    min_ms=5.0,
-                )
-            return
         base_records = None if force else self.files
         base_dir_mtimes = None if force else self._scan_dir_mtime_cache
         scan_watch_dirs = self._effective_watch_dirs(include_source_metadata=True)
@@ -12552,6 +12582,11 @@ class MessageViewerTab(QWidget):
                 self._filter_timer.stop()
         except Exception:
             pass
+        try:
+            if self._file_watch_debounce_timer:
+                self._file_watch_debounce_timer.stop()
+        except Exception:
+            pass
         self._request_worker_thread_stop(self._file_scan_thread)
         self._request_worker_thread_stop(self._rows_build_thread)
         self._request_worker_thread_stop(self._projection_write_thread)
@@ -12592,6 +12627,7 @@ class MessageViewerTab(QWidget):
                 self.settings.reload()
         except Exception:
             pass
+        self._invalidate_bbs_action_cache()
         watch_sig_changed = False
         auth_sig_changed = False
         try:
@@ -12603,6 +12639,7 @@ class MessageViewerTab(QWidget):
         try:
             if watch_sig_changed:
                 # Only rescan file watches when a watch-root-affecting setting changed.
+                self._sync_file_system_watcher()
                 self._refresh_files(force=False)
         except Exception:
             if watch_sig_changed:
@@ -13151,6 +13188,7 @@ class MessageViewerTab(QWidget):
                 return False
             self._message_rows = rows
             self._last_projection_render_ts = time.time()
+            self._projected_scope_load_key = self._projected_scope_key()
             with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
                 self._refresh_message_filters(rows)
             with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
@@ -13650,7 +13688,10 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
-        if self._projection_primary_enabled and not self._is_shutting_down:
+        projected_count = int(data.get("projected", 0) or 0)
+        if self._projection_primary_enabled and not self._is_shutting_down and (
+            projected_count > 0 or bool(data.get("force", False))
+        ):
             self._load_projected_messages_into_table()
 
     def _on_message_projection_write_thread_finished(self) -> None:
@@ -13711,7 +13752,15 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
-        if self._projection_primary_enabled and not self._is_shutting_down:
+        changed_count = sum(int(value or 0) for value in projected.values()) if isinstance(projected, dict) else 0
+        if changed_count > 0:
+            self._message_check_status_text = "Messages updated"
+        elif self._message_check_status_text == "Checking sources...":
+            self._message_check_status_text = "No new messages"
+        self._update_message_check_status()
+        if self._projection_primary_enabled and not self._is_shutting_down and (
+            changed_count > 0 or bool(data.get("force", False))
+        ):
             self._load_projected_messages_into_table()
 
     def _on_native_message_projection_thread_finished(self) -> None:
@@ -13778,7 +13827,13 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
-        if self._projection_primary_enabled and not self._is_shutting_down:
+        projected_count = int(data.get("projected", 0) or 0)
+        if projected_count > 0:
+            self._message_check_status_text = "Messages updated"
+            self._update_message_check_status()
+        if self._projection_primary_enabled and not self._is_shutting_down and (
+            projected_count > 0 or bool(data.get("force", False))
+        ):
             self._load_projected_messages_into_table()
 
     def _on_native_file_projection_thread_finished(self) -> None:
@@ -14404,20 +14459,20 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         if profile == "field_summary":
-            widths = {0: 32, 1: 140, 2: 76, 3: 104, 4: 112, 5: 360, 6: 78, 7: 136}
-            min_width = 1040
+            widths = {0: 32, 1: 140, 2: 76, 3: 104, 4: 112, 5: 360, 6: 78, 7: 220}
+            min_width = 1120
         elif profile == "field_report":
-            widths = {0: 32, 1: 280, 2: 76, 3: 104, 4: 112, 5: 112, 6: 78, 7: 136}
-            min_width = 930
+            widths = {0: 32, 1: 280, 2: 76, 3: 104, 4: 112, 5: 112, 6: 78, 7: 220}
+            min_width = 1015
         elif profile == "intel_report":
-            widths = {0: 32, 1: 180, 2: 82, 3: 104, 4: 112, 5: 120, 6: 78, 7: 136}
-            min_width = 850
+            widths = {0: 32, 1: 180, 2: 82, 3: 104, 4: 112, 5: 120, 6: 78, 7: 220}
+            min_width = 935
         elif profile == "form_message":
-            widths = {0: 32, 1: 420, 2: 104, 3: 82, 4: 104, 5: 112, 6: 78, 7: 136}
-            min_width = 960
+            widths = {0: 32, 1: 420, 2: 104, 3: 82, 4: 104, 5: 112, 6: 78, 7: 220}
+            min_width = 1170
         else:
-            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 78, 7: 136}
-            min_width = 850
+            widths = {0: 32, 1: 76, 2: 82, 3: 104, 4: 104, 5: 78, 7: 220}
+            min_width = 935
         for idx, width in widths.items():
             try:
                 self.messages_table.setColumnWidth(idx, width)
@@ -15548,6 +15603,14 @@ class MessageViewerTab(QWidget):
             if db_path is not None:
                 try:
                     mark_projected_messages_read(db_path, [msg.message_id for msg in projected_rows])
+                    projected_file_records = [
+                        rec
+                        for msg in projected_rows
+                        for rec in [self._projected_file_record(msg, allow_detail_lookup=False)]
+                        if rec is not None
+                    ]
+                    if projected_file_records:
+                        self._set_read_state_bulk(projected_file_records, "READ", ts)
                 except Exception as exc:
                     log.debug("MessageViewer: failed to mark projected rows read in bulk: %s", exc)
 
@@ -16746,6 +16809,9 @@ class MessageViewerTab(QWidget):
             return
         try:
             mark_projected_messages_read(db_path, [msg.message_id])
+            rec = self._projected_file_record(msg, allow_detail_lookup=False)
+            if rec is not None:
+                self._set_read_state_bulk([rec], "READ", time.time())
             msg.read_state = "read"
             msg.status = "READ"
         except Exception as exc:
@@ -17415,16 +17481,30 @@ class MessageViewerTab(QWidget):
         if before_exists and not rec.path.exists():
             self._mark_projection_rows_deleted([row], source_scope="projected_file_archive")
 
+    def _file_record_for_message_row(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        allow_detail_lookup: bool = False,
+    ) -> FileRecord | None:
+        payload = getattr(row, "payload", None) if row is not None else None
+        if isinstance(payload, FileRecord):
+            return payload
+        if isinstance(payload, ProjectedMessagePayload):
+            return self._projected_file_record(payload, allow_detail_lookup=allow_detail_lookup)
+        return None
+
     def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         if row is None:
             return False
         if not self._varac_bbs_copy_targets():
             return False
-        msg_type = str(getattr(row, "msg_type", "") or "").strip().upper()
-        if msg_type not in {"FLMSG", "FLAMP", "VARAC"}:
-            return False
-        payload = getattr(row, "payload", None)
-        return isinstance(payload, FileRecord)
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        return isinstance(rec, FileRecord) and str(rec.origin or "").strip().lower() in {
+            "flmsg",
+            "flamp",
+            "varac",
+        }
 
     @staticmethod
     def _bbs_copy_session_key_for_record(rec: FileRecord | None) -> tuple[str, float, int] | None:
@@ -17446,8 +17526,9 @@ class MessageViewerTab(QWidget):
         return (path_key, mtime_key, size_key)
 
     def _bbs_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
-        payload = getattr(row, "payload", None) if row is not None else None
-        return MessageViewerTab._bbs_copy_session_key_for_record(payload if isinstance(payload, FileRecord) else None)
+        return MessageViewerTab._bbs_copy_session_key_for_record(
+            self._file_record_for_message_row(row, allow_detail_lookup=False)
+        )
 
     def _bbs_copy_session_marker(self, row: UnifiedMessage | None, target_id: str) -> tuple[str, float, int, str] | None:
         key = self._bbs_copy_session_key_for_row(row)
@@ -17488,6 +17569,11 @@ class MessageViewerTab(QWidget):
         return {loc.id: loc for loc in inventory.locations}
 
     def _varac_bbs_copy_targets(self) -> List[Dict[str, object]]:
+        now = time.monotonic()
+        cached = getattr(self, "_bbs_copy_targets_cache", [])
+        cached_ts = float(getattr(self, "_bbs_copy_targets_cache_ts", 0.0) or 0.0)
+        if cached and (now - cached_ts) < 5.0:
+            return list(cached)
         targets: List[Dict[str, object]] = []
         load_radio_targets = getattr(self, "_load_compose_radio_targets", None)
         compose_bbs_targets = getattr(self, "_compose_bbs_targets_for_radio", None)
@@ -17495,7 +17581,7 @@ class MessageViewerTab(QWidget):
         if not radio_targets:
             bbs_dir_txt = str(self.settings.get("varac_bbs_dir", "") or "").strip()
             path = Path(bbs_dir_txt).expanduser() if bbs_dir_txt else None
-            return [
+            targets = [
                 {
                     "id": "live",
                     "kind": "live",
@@ -17511,6 +17597,9 @@ class MessageViewerTab(QWidget):
                     "is_default": True,
                 }
             ]
+            self._bbs_copy_targets_cache = list(targets)
+            self._bbs_copy_targets_cache_ts = now
+            return targets
         for radio_target in radio_targets:
             bbs_targets = compose_bbs_targets(radio_target) if callable(compose_bbs_targets) else []
             for bbs_target in bbs_targets:
@@ -17531,6 +17620,8 @@ class MessageViewerTab(QWidget):
                         "radio_id": str(radio_target.radio_id),
                         "radio_label": radio_short_label,
                         "bbs_label": label,
+                        "location_id": str(bbs_target.get("location_id", "") or ""),
+                        "location_name": str(bbs_target.get("location_name", "") or label),
                         "detail": f"Radio: {radio_short_label}",
                         "full_radio_label": radio_target.label,
                         "path": path,
@@ -17540,23 +17631,42 @@ class MessageViewerTab(QWidget):
                         "is_default": "default" in label.lower(),
                     }
                 )
+        self._bbs_copy_targets_cache = list(targets)
+        self._bbs_copy_targets_cache_ts = now
         return targets
+
+    def _invalidate_bbs_action_cache(self) -> None:
+        self._bbs_copy_targets_cache = []
+        self._bbs_copy_targets_cache_ts = 0.0
+        self._bbs_published_index_cache = {}
+        self._bbs_published_index_cache_ts = 0.0
 
     def _managed_bbs_published_target_ids_for_record(self, rec: FileRecord | None) -> Set[str]:
         if not isinstance(rec, FileRecord):
+            return set()
+        managed_targets = [
+            target
+            for target in self._varac_bbs_copy_targets()
+            if str(target.get("kind", "") or "") == "location"
+            and str(target.get("location_id", "") or "").strip()
+        ]
+        if not managed_targets:
             return set()
         try:
             resolved = str(rec.path.resolve())
         except Exception:
             resolved = str(rec.path)
-        published: Set[str] = set()
+        norm_resolved = os.path.normcase(os.path.normpath(resolved))
+        now = time.monotonic()
+        cache_ts = float(getattr(self, "_bbs_published_index_cache_ts", 0.0) or 0.0)
+        if (now - cache_ts) < 5.0:
+            return set(getattr(self, "_bbs_published_index_cache", {}).get(norm_resolved, set()))
+        published_index: Dict[str, Set[str]] = {}
         try:
             db_path = bbs_library_db_path_from_settings(self.settings)
             with connect_sqlite(db_path) as conn:
                 ensure_bbs_library_schema(conn)
-                for target in self._varac_bbs_copy_targets():
-                    if str(target.get("kind", "") or "") != "location":
-                        continue
+                for target in managed_targets:
                     location_id = str(target.get("location_id", "") or "").strip()
                     if not location_id:
                         continue
@@ -17565,12 +17675,13 @@ class MessageViewerTab(QWidget):
                             row_path = str(Path(row.source_path).resolve())
                         except Exception:
                             row_path = str(row.source_path or "")
-                        if os.path.normcase(os.path.normpath(row_path)) == os.path.normcase(os.path.normpath(resolved)):
-                            published.add(str(target.get("id", "") or ""))
-                            break
+                        path_key = os.path.normcase(os.path.normpath(row_path))
+                        published_index.setdefault(path_key, set()).add(str(target.get("id", "") or ""))
         except Exception:
-            return published
-        return published
+            return set()
+        self._bbs_published_index_cache = published_index
+        self._bbs_published_index_cache_ts = now
+        return set(published_index.get(norm_resolved, set()))
 
     def _select_varac_bbs_publish_targets(self, row: UnifiedMessage | None) -> List[Dict[str, object]]:
         targets = [target for target in self._varac_bbs_copy_targets() if bool(target.get("valid", False))]
@@ -17578,8 +17689,8 @@ class MessageViewerTab(QWidget):
             return []
         if len(targets) == 1:
             return targets
-        payload = getattr(row, "payload", None) if row is not None else None
-        published_ids = self._managed_bbs_published_target_ids_for_record(payload if isinstance(payload, FileRecord) else None)
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        published_ids = self._managed_bbs_published_target_ids_for_record(rec)
         preferred_id = self._bbs_copy_target_session_id
         if not preferred_id:
             preferred = next((target for target in targets if bool(target.get("is_default", False))), None)
@@ -17641,8 +17752,8 @@ class MessageViewerTab(QWidget):
     ) -> Path | None:
         if not self._can_copy_row_to_varac_bbs(row):
             return None
-        payload = getattr(row, "payload", None)
-        if not isinstance(payload, FileRecord):
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if not isinstance(rec, FileRecord):
             return None
         if target is None:
             bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
@@ -17654,7 +17765,7 @@ class MessageViewerTab(QWidget):
             return None
         if not target_dir.exists() or not target_dir.is_dir():
             return None
-        safe_name = MessageViewerTab._safe_varac_bbs_filename(payload.path.name)
+        safe_name = MessageViewerTab._safe_varac_bbs_filename(rec.path.name)
         dst = target_dir / safe_name
         if not unique:
             return dst
@@ -17667,25 +17778,25 @@ class MessageViewerTab(QWidget):
         target: Optional[Dict[str, object]] = None,
     ) -> bool:
         dst = self._varac_bbs_destination_for_row(row, target=target)
-        payload = getattr(row, "payload", None) if row is not None else None
-        if dst is None or not isinstance(payload, FileRecord):
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if dst is None or not isinstance(rec, FileRecord):
             return False
         target_id = str((target or {}).get("id", "") or "live")
         if str((target or {}).get("kind", "") or "") == "location":
-            return target_id in self._managed_bbs_published_target_ids_for_record(payload)
+            return target_id in self._managed_bbs_published_target_ids_for_record(rec)
         marker = self._bbs_copy_session_marker(row, target_id)
         if marker is not None and marker in self._bbs_copied_session_keys:
             return True
         try:
-            if payload.path.resolve() == dst.resolve():
+            if rec.path.resolve() == dst.resolve():
                 return True
         except Exception:
             pass
         if not dst.exists():
             return False
-        if dst.name == payload.path.name:
+        if dst.name == rec.path.name:
             return True
-        return MessageViewerTab._file_record_matches_path(payload, dst)
+        return MessageViewerTab._file_record_matches_path(rec, dst)
 
     def _is_row_bbs_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
         if not self._can_copy_row_to_varac_bbs(row):
@@ -17758,11 +17869,11 @@ class MessageViewerTab(QWidget):
     def _varac_bbs_existing_copy_targets(self, row: UnifiedMessage | None) -> List[Dict[str, object]]:
         if not self._can_copy_row_to_varac_bbs(row):
             return []
-        payload = getattr(row, "payload", None)
-        if not isinstance(payload, FileRecord):
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if not isinstance(rec, FileRecord):
             return []
         existing: List[Dict[str, object]] = []
-        managed_published_ids = self._managed_bbs_published_target_ids_for_record(payload)
+        managed_published_ids = self._managed_bbs_published_target_ids_for_record(rec)
         for target in self._varac_bbs_copy_targets():
             if not bool(target.get("valid", False)):
                 continue
@@ -17777,21 +17888,21 @@ class MessageViewerTab(QWidget):
             if dst is None:
                 continue
             try:
-                same_source = payload.path.resolve() == dst.resolve()
+                same_source = rec.path.resolve() == dst.resolve()
             except Exception:
                 same_source = False
             if same_source:
                 continue
             if not dst.exists() or not dst.is_file():
                 continue
-            if dst.name == payload.path.name or MessageViewerTab._file_record_matches_path(payload, dst):
+            if dst.name == rec.path.name or MessageViewerTab._file_record_matches_path(rec, dst):
                 candidate = dict(target)
                 candidate["copied_path"] = dst
                 existing.append(candidate)
         return existing
 
     def _remove_row_from_varac_bbs(self, row: UnifiedMessage | None, *, confirm: bool = True) -> None:
-        payload = getattr(row, "payload", None) if row is not None else None
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
         existing = self._varac_bbs_existing_copy_targets(row)
         if not existing:
             return
@@ -17820,7 +17931,7 @@ class MessageViewerTab(QWidget):
                         with conn:
                             removed += unpublish_bbs_artifact_path_from_location(
                                 conn,
-                                source_path=payload.path if isinstance(payload, FileRecord) else "",
+                                source_path=rec.path if isinstance(rec, FileRecord) else "",
                                 location_id=location_id,
                             )
                 except Exception as e:
@@ -17846,6 +17957,7 @@ class MessageViewerTab(QWidget):
                 "Remove From BBS",
                 f"Removed {removed} copied BBS artifact(s). The original message/file was left in place.",
             )
+        self._invalidate_bbs_action_cache()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 
@@ -17854,10 +17966,10 @@ class MessageViewerTab(QWidget):
             return
         if not self._is_row_bbs_copy_action_enabled(row):
             return
-        payload = getattr(row, "payload", None)
-        if not isinstance(payload, FileRecord):
+        rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
+        if not isinstance(rec, FileRecord):
             return
-        src = payload.path
+        src = rec.path
         if not src.exists() or not src.is_file():
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
             return
@@ -17870,7 +17982,7 @@ class MessageViewerTab(QWidget):
             kind = str(target.get("kind", "") or "")
             target_label = str(target.get("label", "") or "VarAC BBS")
             if kind == "location":
-                ok, detail = self._publish_row_to_managed_bbs_target(row, payload, target)
+                ok, detail = self._publish_row_to_managed_bbs_target(row, rec, target)
                 if ok:
                     successes.append(detail)
                 else:
@@ -17897,6 +18009,11 @@ class MessageViewerTab(QWidget):
                 shutil.copy2(str(src), str(dst))
                 self._mark_row_copied_to_varac_bbs_session(row, str(target.get("id", "") or "live"))
                 successes.append(f"{target_label}: copied to {dst.name}")
+                safe_name = MessageViewerTab._safe_varac_bbs_filename(src.name)
+                if safe_name != src.name:
+                    successes.append(f"Filename cleaned from {src.name} to {safe_name}")
+                if dst.name != safe_name:
+                    successes.append(f"Existing BBS filename avoided; used {dst.name}")
             except Exception as e:
                 errors.append(f"{target_label}: {e}")
         if errors and not successes:
@@ -17910,6 +18027,7 @@ class MessageViewerTab(QWidget):
             "Publish to BBS",
             message,
         )
+        self._invalidate_bbs_action_cache()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 

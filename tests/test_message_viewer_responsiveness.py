@@ -80,3 +80,35 @@ def test_normal_varac_refresh_defers_source_ingest_when_background_unavailable()
         module.ingest_varac_for_runtime_sources = original
 
     assert called["direct"] == 0
+
+
+def test_local_message_filter_change_reuses_loaded_projection_scope() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._projection_primary_enabled = True
+    tab._last_projection_render_ts = 1.0
+    tab._message_rows = [object()]
+    tab.received_filter = SimpleNamespace(currentData=lambda: 86400)
+    tab._projected_source_families_for_current_scope = lambda: ("flmsg", "flamp")
+    tab._projected_scope_load_key = (("flmsg", "flamp"), 86400)
+    called = {"loads": 0}
+    tab._unfreeze_table = lambda: None
+    tab._load_projected_messages_into_table = lambda: called.__setitem__("loads", called["loads"] + 1) or True
+
+    assert tab._reload_projected_messages_for_scope_change() is False
+    assert called["loads"] == 0
+
+
+def test_age_or_source_change_reloads_projection_scope_once() -> None:
+    tab = MessageViewerTab.__new__(MessageViewerTab)
+    tab._projection_primary_enabled = True
+    tab._last_projection_render_ts = 1.0
+    tab._message_rows = [object()]
+    tab.received_filter = SimpleNamespace(currentData=lambda: 21600)
+    tab._projected_source_families_for_current_scope = lambda: ("flmsg",)
+    tab._projected_scope_load_key = (("flmsg", "flamp"), 86400)
+    called = {"loads": 0}
+    tab._unfreeze_table = lambda: None
+    tab._load_projected_messages_into_table = lambda: called.__setitem__("loads", called["loads"] + 1) or True
+
+    assert tab._reload_projected_messages_for_scope_change() is True
+    assert called["loads"] == 1

@@ -222,6 +222,31 @@ class MessageFileScanner:
         previous_mtime = self._base_dir_mtimes.get(base_norm)
         if previous_mtime is not None and abs(previous_mtime - current_mtime) < 1e-6:
             reused_dirs[origin].add(base_norm)
+            # A file created inside an existing child directory does not update
+            # every ancestor directory's mtime. Walk directory entries (but not
+            # files) so a changed descendant can still be discovered without a
+            # full recursive file scan.
+            try:
+                with os.scandir(base) as entries:
+                    for dent in entries:
+                        try:
+                            if dent.is_dir(follow_symlinks=False):
+                                self._scan_changed_recursive(
+                                    Path(dent.path),
+                                    origin,
+                                    allowed_exts,
+                                    out_map,
+                                    dir_mtimes,
+                                    seen_files,
+                                    changed_dirs,
+                                    reused_dirs,
+                                    source_id=source_id,
+                                    source_label=source_label,
+                                )
+                        except OSError:
+                            continue
+            except OSError:
+                pass
             return
         changed_dirs[origin].add(base_norm)
         try:
@@ -405,9 +430,14 @@ class MessageFileScanner:
         for origin, path_map in records_map.items():
             roots = set(self._roots_by_origin.get(origin, []))
             changed = changed_dirs.get(origin, set())
-            reused = reused_dirs.get(origin, set())
             seen = seen_files.get(origin, set())
             missing = missing_roots.get(origin, set())
+            missing_dirs = {
+                self._norm_path(previous_dir)
+                for previous_dir in self._base_dir_mtimes
+                if self._is_under_any(self._norm_path(previous_dir), roots)
+                and self._norm_path(previous_dir) not in dir_mtimes
+            }
             if not roots:
                 path_map.clear()
                 continue
@@ -418,17 +448,21 @@ class MessageFileScanner:
                 if missing and self._is_under_any(key, missing):
                     path_map.pop(key, None)
                     continue
-                if changed and self._is_under_any(key, changed):
+                if missing_dirs and self._is_under_any(key, missing_dirs):
+                    path_map.pop(key, None)
+                    continue
+                parent = self._norm_path(Path(key).parent)
+                if parent in changed:
                     if key in seen:
-                        continue
-                    if reused and self._is_under_any(key, reused):
                         continue
                     path_map.pop(key, None)
 
         return self._finalize_maps(records_map), dir_mtimes
 
     def scan(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float], str]:
-        have_base = any(bool(value) for value in (self._base_records or {}).values())
+        have_base = bool(self._base_dir_mtimes) or any(
+            bool(value) for value in (self._base_records or {}).values()
+        )
         try:
             if self._force or not have_base:
                 records, dir_mtimes = self._run_full()

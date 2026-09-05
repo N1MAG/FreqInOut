@@ -7,6 +7,7 @@ from types import MethodType, SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui import message_viewer_tab as mvt
+from freqinout.core.message_projection_payload import ProjectedMessagePayload
 from freqinout.gui.message_viewer_tab import FileRecord, MessageViewerTab
 
 
@@ -35,11 +36,15 @@ def _tab(bbs_dir: Path) -> SimpleNamespace:
         _populate_messages_table=lambda force=False: None,
     )
     for name in (
+        "_file_record_for_message_row",
+        "_projected_file_record",
         "_can_copy_row_to_varac_bbs",
         "_bbs_copy_session_key_for_record",
         "_bbs_copy_session_key_for_row",
         "_bbs_copy_session_marker",
         "_varac_bbs_copy_targets",
+        "_managed_bbs_published_target_ids_for_record",
+        "_select_varac_bbs_publish_targets",
         "_select_varac_bbs_copy_target",
         "_varac_bbs_destination_for_row",
         "_is_row_already_in_varac_bbs",
@@ -48,8 +53,11 @@ def _tab(bbs_dir: Path) -> SimpleNamespace:
         "_varac_bbs_existing_copy_targets",
         "_remove_row_from_varac_bbs",
         "_copy_row_to_varac_bbs",
+        "_invalidate_bbs_action_cache",
     ):
         setattr(tab, name, MethodType(getattr(MessageViewerTab, name), tab))
+    tab._file_record_from_projected_refs = MessageViewerTab._file_record_from_projected_refs
+    tab._file_record_from_projected_artifacts = MessageViewerTab._file_record_from_projected_artifacts
     return tab
 
 
@@ -187,3 +195,60 @@ def test_projected_artifacts_convert_to_file_records(tmp_path: Path) -> None:
     assert rec.path == artifact_path
     assert rec.origin == "flamp"
     assert rec.size == artifact_path.stat().st_size
+
+
+def test_projected_flmsg_file_is_eligible_for_bbs_publish(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    bbs_dir = tmp_path / "bbs"
+    source_dir.mkdir()
+    bbs_dir.mkdir()
+    message_path = source_dir / "incoming.k2s"
+    message_path.write_text("payload", encoding="utf-8")
+    stat = message_path.stat()
+    payload = ProjectedMessagePayload(
+        message_id="message-1",
+        canonical_key="file:message-1",
+        source_family="flmsg",
+        message_type="FLMSG",
+        external_refs=(
+            {
+                "external_kind": "flmsg_file",
+                "external_path": str(message_path),
+                "external_mtime": stat.st_mtime,
+                "external_size": stat.st_size,
+            },
+        ),
+    )
+    row = SimpleNamespace(msg_type="FLMSG", payload=payload)
+    tab = _tab(bbs_dir)
+
+    assert tab._can_copy_row_to_varac_bbs(row) is True
+    assert tab._varac_bbs_destination_for_row(row) == bbs_dir / "incoming.k2s"
+
+
+def test_managed_bbs_copy_target_preserves_location_identity(tmp_path: Path) -> None:
+    managed_dir = tmp_path / "managed"
+    radio = SimpleNamespace(radio_id=9, label="FIO-B")
+    tab = SimpleNamespace(
+        settings=_MemorySettings(tmp_path),
+        _bbs_copy_targets_cache=[],
+        _bbs_copy_targets_cache_ts=0.0,
+        _load_compose_radio_targets=lambda: [radio],
+        _compose_bbs_targets_for_radio=lambda _radio: [
+            {
+                "id": "radio:9:managed:intel",
+                "kind": "managed",
+                "label": "Managed BBS: Intel",
+                "path": str(managed_dir),
+                "location_id": "intel",
+                "location_name": "Regional Intel",
+            }
+        ],
+        _compose_radio_target_short_label=lambda _radio: "FIO-B",
+    )
+
+    targets = MessageViewerTab._varac_bbs_copy_targets(tab)
+
+    assert targets[0]["location_id"] == "intel"
+    assert targets[0]["location_name"] == "Regional Intel"
+    assert managed_dir.is_dir()

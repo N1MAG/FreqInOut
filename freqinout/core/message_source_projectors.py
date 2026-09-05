@@ -30,6 +30,7 @@ from freqinout.core.message_projection_store import (
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 2
+FILE_PROJECTOR_VERSION = 3
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
 
@@ -83,6 +84,35 @@ def _load_file_projection_metadata(
         if key not in keys:
             continue
         out[key] = {str(name): row[name] for name in row.keys()}
+    return out
+
+
+def _load_file_read_states(
+    conn: sqlite3.Connection,
+    records: Sequence[FileRecord],
+) -> dict[tuple[str, str, float, int], str]:
+    if not records or not table_exists(conn, "message_read_state"):
+        return {}
+    keys = {_file_metadata_key(rec) for rec in records}
+    out: dict[tuple[str, str, float, int], str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT origin, path, mtime, size, status FROM message_read_state"
+        ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        try:
+            key = (
+                _text(row["origin"]).lower(),
+                _text(row["path"]),
+                float(row["mtime"] or 0.0),
+                int(row["size"] or 0),
+            )
+        except Exception:
+            continue
+        if key in keys:
+            out[key] = _text(row["status"]).upper() or "NEW"
     return out
 
 
@@ -144,7 +174,7 @@ def project_native_file_records(
                 )
             )
     fingerprint = content_hash(
-        PROJECTOR_VERSION,
+        FILE_PROJECTOR_VERSION,
         "file_records",
         len(flattened),
         "\n".join(
@@ -159,6 +189,7 @@ def project_native_file_records(
         try:
             ensure_message_projection_schema(conn)
             file_metadata = _load_file_projection_metadata(conn, flattened)
+            file_read_states = _load_file_read_states(conn, flattened)
             fingerprint = content_hash(
                 fingerprint,
                 "metadata",
@@ -173,9 +204,19 @@ def project_native_file_records(
                                 _text(meta.get("title", "")),
                                 _text(meta.get("report_ts", "")),
                                 _text(meta.get("age_ts_source", "")),
+                                file_read_states.get(key, "") or _text(meta.get("status", "")),
                             )
                         )
                         for key, meta in file_metadata.items()
+                    )
+                ),
+                "read_states",
+                "\n".join(
+                    sorted(
+                        "|".join(
+                            (key[0], key[1], f"{key[2]:.6f}", str(key[3]), status)
+                        )
+                        for key, status in file_read_states.items()
                     )
                 ),
             )
@@ -193,7 +234,13 @@ def project_native_file_records(
                         fallback_title=rec.path.name,
                         title_limit=240,
                     )
-                    event_ts = float(getattr(meta, "rcv_ts", 0.0) or rec.mtime or 0.0)
+                    received_ts = float(rec.mtime or 0.0)
+                    event_ts = float(getattr(meta, "report_ts", 0.0) or received_ts)
+                    status = (
+                        file_read_states.get(_file_metadata_key(rec), "")
+                        or _text(getattr(meta, "status", ""))
+                        or "NEW"
+                    ).upper()
                     title = _text(getattr(meta, "title", "")) or rec.path.name
                     message_type = _text(getattr(meta, "msg_type", "")) or _file_message_type(origin, rec.path)
                     display_type = _text(getattr(meta, "display_type", "")) or _file_source_base_label(origin)
@@ -214,28 +261,35 @@ def project_native_file_records(
                         endpoint_or_path=str(rec.path.parent),
                         capabilities={"read": True, "delete": True, "native_open": True},
                         provenance={"source": "file_scan", "origin": origin},
-                        last_seen_utc=_utc_from_ts(event_ts),
+                        last_seen_utc=_utc_from_ts(received_ts),
                         last_ingested_utc=_utc_now(),
                     )
                     projection = MessageProjectionRecord(
                         message_id=message_id,
                         canonical_key=f"{source_id}:{external_kind}:{external_key}",
-                        content_hash=content_hash(PROJECTOR_VERSION, "file", external_key),
+                        content_hash=content_hash(
+                            FILE_PROJECTOR_VERSION,
+                            "file",
+                            external_key,
+                            status,
+                            event_ts,
+                            received_ts,
+                        ),
                         primary_source_id=source_id,
                         source_family=origin,
                         source_label=source.source_label,
                         message_type=message_type,
                         display_type=display_type,
-                        status="INFO",
-                        severity="info",
-                        read_state="info",
+                        status=status,
+                        severity=_severity_from_status(status),
+                        read_state=_read_state(status),
                         from_call=from_call,
                         to_call=to_call,
                         group_name=_group(to_call),
                         event_ts=event_ts,
-                        received_ts=event_ts,
+                        received_ts=received_ts,
                         event_utc=_utc_from_ts(event_ts),
-                        received_utc=_utc_from_ts(event_ts),
+                        received_utc=_utc_from_ts(received_ts),
                         subject=title,
                         summary=title,
                         body_preview=body,
@@ -245,11 +299,12 @@ def project_native_file_records(
                             "path": str(rec.path),
                             "extension": rec.path.suffix.lower(),
                             "q_id": _q_id_from_path(rec.path),
-                            "age_ts_source": _text(getattr(meta, "age_ts_source", "")) or "received",
+                            "age_ts_source": "received",
+                            "report_ts": event_ts if event_ts != received_ts else 0.0,
                         },
                         retention_class="artifact",
                         search_text=search_text,
-                        projection_version=PROJECTOR_VERSION,
+                        projection_version=FILE_PROJECTOR_VERSION,
                     )
                     artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(
                         origin,

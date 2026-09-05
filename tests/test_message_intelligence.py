@@ -993,8 +993,9 @@ def test_file_message_row_presentation_is_shared_for_parsed_file_rows(tmp_path) 
     assert row.to_call == "MR08"
     assert row.title == "Widemouth 2 Fire"
     assert row.report_ts == datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp()
-    assert row.rcv_ts == row.report_ts
-    assert row.age_ts_source == "report"
+    assert row.rcv_ts == stat.st_mtime
+    assert row.rcv_ts != row.report_ts
+    assert row.age_ts_source == "received"
     assert "Fire" in row.topics
     assert row.actionable is True
     assert "Widemouth 2 Fire" in row.search_detail
@@ -1030,9 +1031,9 @@ def test_file_message_row_candidate_builders_share_cached_and_parsed_semantics(t
     assert cached is not None
     assert cached.used_cache is True
     assert cached.status == "READ"
-    assert cached.rcv_ts == report_ts
+    assert cached.rcv_ts == stat.st_mtime
     assert cached.report_ts == report_ts
-    assert cached.age_ts_source == "report"
+    assert cached.age_ts_source == "received"
     assert cached.display_type == "General"
     assert cached.topics == ("Fire",)
     assert cached.actionable is True
@@ -1080,8 +1081,8 @@ def test_file_message_row_candidate_builders_share_cached_and_parsed_semantics(t
     assert parsed.to_call == "MR08"
     assert parsed.title == "Widemouth 2 Fire"
     assert parsed.report_ts == report_ts
-    assert parsed.rcv_ts == report_ts
-    assert parsed.age_ts_source == "report"
+    assert parsed.rcv_ts == stat.st_mtime
+    assert parsed.age_ts_source == "received"
     assert parsed.display_type == "General"
     assert "Fire" in parsed.topics
 
@@ -1451,7 +1452,7 @@ def test_message_row_builder_uses_missing_template_subject_for_title(tmp_path) -
     assert "dm38st" in row.search_text
 
 
-def test_message_row_builder_uses_form_date_for_flmsg_age_not_file_mtime(tmp_path) -> None:
+def test_message_row_builder_uses_file_arrival_for_flmsg_age_and_keeps_report_time(tmp_path) -> None:
     path = tmp_path / "K7ETC-20260731-000127Z-54.k2s"
     path.write_text(
         "CUSTOM_FORM,missing.html\n"
@@ -1495,8 +1496,9 @@ def test_message_row_builder_uses_form_date_for_flmsg_age_not_file_mtime(tmp_pat
     worker.run()
 
     row = emitted[0]["rows"][0]
-    assert row.rcv_ts == datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp()
-    assert row.rcv_ts != stat.st_mtime
+    assert row.rcv_ts == stat.st_mtime
+    assert row.report_ts == datetime.datetime(2026, 7, 29, 3, 54, tzinfo=datetime.timezone.utc).timestamp()
+    assert row.age_ts_source == "received"
 
 
 def test_message_row_builder_uses_cached_file_metadata_without_parsing_source(tmp_path) -> None:
@@ -1555,10 +1557,10 @@ def test_message_row_builder_uses_cached_file_metadata_without_parsing_source(tm
     assert row.from_call == "K7ETC"
     assert row.to_call == "MR08"
     assert row.title == "Widemouth 2 Fire"
-    assert row.rcv_ts == datetime.datetime(2026, 8, 3, 4, 2, 12, tzinfo=datetime.timezone.utc).timestamp()
-    assert row.rcv_ts != stat.st_mtime
-    assert row.report_ts == row.rcv_ts
-    assert row.age_ts_source == "report"
+    assert row.rcv_ts == stat.st_mtime
+    assert row.report_ts == datetime.datetime(2026, 8, 3, 4, 2, 12, tzinfo=datetime.timezone.utc).timestamp()
+    assert row.report_ts != row.rcv_ts
+    assert row.age_ts_source == "received"
     assert row.topics == ("Fire", "Travel/Roads")
     assert row.actionable is True
     assert "widemouth" in row.search_text
@@ -4611,7 +4613,7 @@ def test_cached_message_file_metadata_normalizes_timestamps_topics_and_flags(tmp
     assert cached.to_call == "MR08"
     assert cached.report_ts == report_ts
     assert cached.age_ts_source == "report"
-    assert cached.age_timestamp_for(rec) == report_ts
+    assert cached.age_timestamp_for(rec) == stat.st_mtime
     assert cached.topics == ("Fire", "Travel/Roads")
     assert cached.actionable is True
     assert cached.search_text == "wildfire"
@@ -4650,9 +4652,9 @@ def test_cached_message_file_row_summary_applies_display_fallbacks(tmp_path) -> 
     assert summary.msg_type == "FLMSG"
     assert summary.from_call == "K7ETC"
     assert summary.to_call == "MR08"
-    assert summary.rcv_ts == report_ts
+    assert summary.rcv_ts == stat.st_mtime
     assert summary.report_ts == report_ts
-    assert summary.age_ts_source == "report"
+    assert summary.age_ts_source == "received"
     assert summary.topics == ("Fire",)
     assert summary.actionable is True
     assert summary.title == "Widemouth 2 Fire with a very long operational update titl..."
@@ -5146,17 +5148,16 @@ def test_message_file_metadata_refresh_rebuilds_old_cache_with_form_report_age(t
     worker.finished.connect(lambda payload: emitted.append(payload))
     worker.run()
     row = emitted[0]["rows"][0]
-    assert row.rcv_ts == report_ts
-    assert row.rcv_ts != stat.st_mtime
+    assert row.rcv_ts == stat.st_mtime
     assert row.report_ts == report_ts
-    assert row.age_ts_source == "report"
+    assert row.age_ts_source == "received"
 
     MessageViewerTab._save_message_file_metadata_from_rows(tab, [row])
     loaded = MessageViewerTab._load_message_file_metadata_map(tab, {"flmsg": [rec]})
     cached = loaded[("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size))]
     assert cached["title"] == "Widemouth 2 Fire"
     assert cached["report_ts"] == report_ts
-    assert cached["age_ts_source"] == "report"
+    assert cached["age_ts_source"] == "received"
 
     cached_worker = _RowsBuildWorker(
         js8_messages=[],
@@ -5190,9 +5191,9 @@ def test_message_file_metadata_refresh_rebuilds_old_cache_with_form_report_age(t
     cached_worker.run()
 
     cached_row = cached_emitted[0]["rows"][0]
-    assert cached_row.rcv_ts == report_ts
+    assert cached_row.rcv_ts == stat.st_mtime
     assert cached_row.report_ts == report_ts
-    assert cached_row.age_ts_source == "report"
+    assert cached_row.age_ts_source == "received"
     assert cached_emitted[0]["file_metadata_hits"] == 1
     assert cached_emitted[0]["file_parse_count"] == 0
 
@@ -6554,7 +6555,7 @@ def test_message_projection_schema_repairs_existing_partial_tables(tmp_path) -> 
     assert "message_id" in audit_columns
 
 
-def test_native_file_projection_uses_cached_report_timestamp_for_age(tmp_path) -> None:
+def test_native_file_projection_uses_arrival_for_received_and_preserves_report_time(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     msg_path = tmp_path / "copied-now.b2f"
     msg_path.write_text("CUSTOM_FORM,missing.html\nL01,MR08\nL02,K7ETC", encoding="utf-8")
@@ -6586,8 +6587,37 @@ def test_native_file_projection_uses_cached_report_timestamp_for_age(tmp_path) -
     rows = list_projected_messages(db_path, source_family="flmsg", limit=10)
 
     assert len(rows) == 1
-    assert rows[0]["received_ts"] == report_ts
+    assert rows[0]["received_ts"] == stat.st_mtime
+    assert rows[0]["event_ts"] == report_ts
+    assert rows[0]["status"] == "NEW"
+    assert rows[0]["read_state"] == "new"
     assert rows[0]["subject"] == "Copied Report"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE message_read_state (
+            origin TEXT NOT NULL, path TEXT NOT NULL, mtime REAL NOT NULL,
+            size INTEGER NOT NULL, status TEXT NOT NULL, read_ts REAL,
+            flag_state INTEGER DEFAULT 0,
+            PRIMARY KEY (origin, path, mtime, size)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO message_read_state(origin, path, mtime, size, status, read_ts, flag_state)
+        VALUES (?, ?, ?, ?, 'READ', ?, 0)
+        """,
+        ("flmsg", str(msg_path), float(stat.st_mtime), int(stat.st_size), time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    assert project_native_file_records(db_path, {"flmsg": [rec]}, force=True) == 1
+    updated = list_projected_messages(db_path, source_family="flmsg", limit=10)
+    assert updated[0]["status"] == "READ"
+    assert updated[0]["read_state"] == "read"
 
 
 def test_sqlite_identifier_rejects_non_table_names() -> None:

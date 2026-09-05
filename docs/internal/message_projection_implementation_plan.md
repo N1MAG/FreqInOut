@@ -45,6 +45,12 @@ Implemented:
 - FLMsg, FLAmp, VarAC file, and BBS file scan records project directly from
   `FileRecord` scan results, including file-delete refs and FLAmp Q ID/block
   artifact metadata.
+- File `received_ts` is the filesystem arrival/receipt time observed by FIO;
+  an embedded form/report timestamp remains separate as `event_ts`. Delayed
+  store-and-forward delivery must therefore remain visible in New and recent
+  inbox scopes when FIO first receives it.
+- File projection preserves NEW/READ state from FIO's file read-state table
+  instead of coercing every projected artifact to informational/read.
 - Source-native projectors use durable `message_projection_checkpoint` records
   so unchanged local tables and unchanged file scans skip projection writes.
 - All current Messages row families project into `message_projection`.
@@ -95,9 +101,19 @@ Implemented:
 - Hide/delete projected rows through the projection delete queue and audit path.
 - Use loaded file refs for projection-only file open, live BBS archive, and file
   delete actions while keeping table paint/click handling in-memory.
+- Projection-only FLMsg, FLAmp, and VarAC file rows retain the `+BBS` action.
+  The multi-target chooser uses checkboxes, preserves managed location identity,
+  and can publish to every selected radio/BBS location.
 - Run source-native projection workers for structured local message tables and
   file-scan records independently of table rendering.
 - Keep source row building as a background projection refresh feeder.
+- Local-only filters reuse the loaded projection snapshot. A new bounded DB
+  query is issued only when source-family or age scope changes, or when a
+  projector reports changed data.
+- Inbox focus unread counts are computed in one pass over the loaded rows.
+- File discovery watches configured roots for immediate direct arrivals and
+  retains a bounded periodic incremental traversal for nested arrivals. An
+  unchanged ancestor must not hide a changed descendant directory.
 
 Remaining:
 

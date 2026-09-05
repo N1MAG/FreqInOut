@@ -6,6 +6,37 @@ easy to lose inside broader specs.
 
 ## 2026-09-04
 
+### Messages Performance, File Discovery, And `+BBS`
+
+Status: corrective implementation complete; production file-arrival and
+multi-location BBS QA requested.
+
+Observation: Messages felt slow, projection-first FLMsg/FLAmp rows no longer
+showed `+BBS`, and a received FLMsg artifact could fail to appear. The periodic
+refresh also performed repeated bounded projection queries even when only a
+local table filter changed.
+
+Causes: projection payloads were excluded by the legacy file-only BBS action;
+managed BBS location identity was dropped while converting compose targets;
+the action column was too narrow; the file scanner skipped changed descendants
+when the root mtime remained stable; projected file receipt time/status were
+incorrectly derived from the report timestamp and hard-coded INFO state; and
+one timer pass could load up to 20,000 projection rows more than once.
+
+Implementation: projected external file refs now participate in `+BBS` and the
+checkbox destination chooser; managed IDs/names are retained; target/published
+state lookups are cached; the action column has stable room for actions; file
+roots trigger a debounced incremental scan while periodic traversal detects
+nested changes; received time is FIO/file arrival while report time remains
+event provenance; read state projects as NEW/READ; source/age scope controls DB
+reloads; focus counts use one pass; and unchanged projection workers no longer
+trigger full table reloads.
+
+Next check: place a new direct FLMsg file and a file in a nested receive folder,
+confirm both appear as New within the selected age window, verify `+BBS` offers
+the configured FIO-B managed/live locations, publish to two checked locations,
+and confirm removing `-BBS` leaves the received source file intact.
+
 ### Shared Actionable Traffic Summary
 
 Status: first implementation slice complete; production-data QA pending.

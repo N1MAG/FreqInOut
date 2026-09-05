@@ -338,6 +338,9 @@ def _event_ts(row: MessageSummaryRowLike, payload: object) -> float:
         value = _float(getattr(payload, attr, 0.0))
         if value > 0:
             return value
+    value = _float(getattr(row, "report_ts", 0.0))
+    if value > 0:
+        return value
     value = _float(getattr(row, "rcv_ts", 0.0))
     return value
 
