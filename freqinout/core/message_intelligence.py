@@ -835,5 +835,8 @@ def _subject_from_filename(path: object) -> str:
     for idx, token in enumerate(tokens):
         if re.fullmatch(r"\d{6,8}", token) or re.fullmatch(r"\d{4,6}z", token, flags=re.IGNORECASE):
             start = idx + 1
+            if idx + 1 < len(tokens) and re.fullmatch(r"\d{3,6}z", tokens[idx + 1], flags=re.IGNORECASE):
+                start = idx + 2
             break
-    return " ".join(tokens[start:] or tokens[-1:]).strip()
+    subject = " ".join(tokens[start:] or tokens[-1:]).strip()
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", subject)

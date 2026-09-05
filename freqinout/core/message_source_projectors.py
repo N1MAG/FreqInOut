@@ -30,7 +30,7 @@ from freqinout.core.message_projection_store import (
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 2
-FILE_PROJECTOR_VERSION = 3
+FILE_PROJECTOR_VERSION = 4
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
 

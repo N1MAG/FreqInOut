@@ -104,6 +104,15 @@ Implemented:
 - Projection-only FLMsg, FLAmp, and VarAC file rows retain the `+BBS` action.
   The multi-target chooser uses checkboxes, preserves managed location identity,
   and can publish to every selected radio/BBS location.
+- Projected file rows must paint the same management affordances their click
+  routing supports: `+BBS`/`-BBS` when eligible and `Delete` in addition to
+  `View`. Rendering and event handling may not use different payload-type gates.
+- Unknown custom-form schemas must not assume that positional fields such as
+  `L05` are universally Subject or that `L06` is universally Message. Compact
+  coded values are not titles; use descriptive labeled fields when available,
+  otherwise a cleaned filename title, while retaining the longest narrative as
+  intelligence evidence. Parser/projection version changes must re-enrich
+  already cached rows.
 - Run source-native projection workers for structured local message tables and
   file-scan records independently of table rendering.
 - Keep source row building as a background projection refresh feeder.

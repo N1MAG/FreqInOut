@@ -245,6 +245,9 @@ Mandatory rules:
   shutdown has completed. The window may hide immediately, but FIO must not
   accept the terminal close while a child or guarded `QThread` still runs;
   otherwise Python/Qt teardown can destroy the timer owner on the wrong thread.
+- After the worker drain and final close are complete, explicitly quit the Qt
+  event loop. Do not rely on `lastWindowClosed`: an already-hidden main window
+  does not emit that signal consistently across macOS and Linux window systems.
 
 Implementation gates:
 

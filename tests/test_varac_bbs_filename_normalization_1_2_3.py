@@ -224,6 +224,10 @@ def test_projected_flmsg_file_is_eligible_for_bbs_publish(tmp_path: Path) -> Non
 
     assert tab._can_copy_row_to_varac_bbs(row) is True
     assert tab._varac_bbs_destination_for_row(row) == bbs_dir / "incoming.k2s"
+    assert mvt.MessageActionDelegate._supports_standard_management_actions(
+        row,
+        projected_file_row=True,
+    ) is True
 
 
 def test_managed_bbs_copy_target_preserves_location_identity(tmp_path: Path) -> None:

@@ -123,6 +123,25 @@ def apply_common_l_field_metadata_fallback(meta: dict[str, str], fields: Mapping
     l06 = values.get("L06", "")
     l07 = values.get("L07", "")
 
+    def descriptive_subject(value: object) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if len(text) < 4 or looks_like_form_date_text(text):
+            return ""
+        return text
+
+    def narrative_value() -> str:
+        candidates: list[str] = []
+        for key, value in values.items():
+            if key in {"L01", "L02"} or looks_like_form_date_text(value):
+                continue
+            normalized = str(value or "").replace("\\n", " ").strip()
+            if len(normalized) < 12:
+                continue
+            if not (re.search(r"\s", normalized) or re.search(r"[.,:;!?-]", normalized)):
+                continue
+            candidates.append(str(value or "").strip())
+        return max(candidates, key=len) if candidates else ""
+
     if l01 and looks_like_form_date_text(l01):
         set_if_empty("date_summary", form_date_summary(l01))
         if l02 and looks_like_group_or_call_text(l02):
@@ -134,17 +153,29 @@ def apply_common_l_field_metadata_fallback(meta: dict[str, str], fields: Mapping
         if l07:
             set_if_empty("body", l07)
 
-    if l05:
-        set_if_empty("subject", l05)
-    elif l03 and not looks_like_form_date_text(l03) and l03.upper() not in {"R", "P", "I", "F"}:
-        set_if_empty("subject", l03)
+    # L-fields are user-form fields, not a universal schema. Short values such
+    # as C, LN, or QL are frequently coded status/scope selections and must not
+    # become the message title when a custom-form template is unavailable.
+    subject_value = descriptive_subject(l05)
+    if subject_value:
+        set_if_empty("subject", subject_value)
+    elif l03.upper() not in {"R", "P", "I", "F"}:
+        set_if_empty("subject", descriptive_subject(l03))
 
     if l04 and looks_like_form_date_text(l04):
         set_if_empty("date_summary", form_date_summary(l04))
     elif l03 and looks_like_form_date_text(l03):
         set_if_empty("date_summary", form_date_summary(l03))
+    else:
+        for value in values.values():
+            if looks_like_form_date_text(value):
+                set_if_empty("date_summary", form_date_summary(value))
+                break
 
-    if l06:
+    narrative = narrative_value()
+    if narrative:
+        set_if_empty("body", narrative)
+    elif l06:
         set_if_empty("body", l06)
     elif l04 and not looks_like_form_date_text(l04):
         set_if_empty("body", l04)

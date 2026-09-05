@@ -2941,6 +2941,7 @@ def test_main_window_wires_mesh_runtime_lifecycle() -> None:
     assert "thread.wait(200)" in stop_block
     assert "event.ignore()" in source
     assert "self._poll_graceful_close" in source
+    assert "QTimer.singleShot(0, app.quit)" in source
     assert "_MESH_RUNTIME_SHUTDOWN_GUARD" in source
 
 

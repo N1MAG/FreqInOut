@@ -14,7 +14,7 @@ from freqinout.core.message_file_scanner import FileRecord
 
 
 FILE_METADATA_ORIGINS = {"bbs", "flamp", "flmsg", "varac"}
-FILE_METADATA_PARSER_VERSION = 8
+FILE_METADATA_PARSER_VERSION = 9
 
 
 MESSAGE_FILE_METADATA_COLUMNS: tuple[tuple[str, str], ...] = (

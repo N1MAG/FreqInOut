@@ -37,11 +37,12 @@ def test_phase7_main_window_has_global_ledge_clock() -> None:
     assert "get_timezone(tz_name)" in source
 
 
-def test_phase7_main_window_does_not_prewarm_messages_tab() -> None:
+def test_phase7_main_window_prewarms_messages_projection_tab() -> None:
     from freqinout.gui.main_window import MainWindow
 
-    assert MainWindow._runtime_lazy_prewarm_labels(set()) == ["FreqPlanner"]
-    assert MainWindow._runtime_lazy_prewarm_labels({"FreqPlanner"}) == []
+    assert MainWindow._runtime_lazy_prewarm_labels(set()) == ["Messages", "FreqPlanner"]
+    assert MainWindow._runtime_lazy_prewarm_labels({"FreqPlanner"}) == ["Messages"]
+    assert MainWindow._runtime_lazy_prewarm_labels({"Messages", "FreqPlanner"}) == []
 
 
 def test_phase7_station_health_nav_uses_lightweight_alert_items() -> None:
@@ -2743,10 +2744,10 @@ def test_phase7_messages_filter_row_and_compose_splitter_reflow(monkeypatch, tmp
         assert header.sectionResizeMode(1) == QHeaderView.Stretch
         assert header.sectionResizeMode(6) == QHeaderView.Interactive
         assert tab.messages_table.columnWidth(1) >= 280
-            assert tab.messages_table.columnWidth(5) <= 120
-            assert tab.messages_table.columnWidth(6) <= 90
-            assert tab.messages_table.columnWidth(7) >= 200
-            assert tab.messages_table.minimumWidth() >= 930
+        assert tab.messages_table.columnWidth(5) <= 120
+        assert tab.messages_table.columnWidth(6) <= 90
+        assert tab.messages_table.columnWidth(7) >= 200
+        assert tab.messages_table.minimumWidth() >= 930
 
         tab.resize(900, 560)
         tab.show()

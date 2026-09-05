@@ -695,6 +695,44 @@ Synthetic autocomplete timing over a 5,000-entity compact index measured a
 0.36 ms warm p95 on the development Mac, comfortably inside the 50 ms warm
 target; production telemetry remains the authority for Linux hardware.
 
+## 2026-09-04 — Projected file actions, FLMsg titles, and terminal close
+
+Production review found three linked regressions. Projection-first FLMsg/FLAmp
+rows painted only `View` even though their event route already supported BBS and
+delete operations; unknown custom forms treated `L05` as Subject and displayed
+one-character codes such as `C`; and the main window could disappear while the
+Qt event loop remained alive.
+
+Projected file rows now share the standard file-management paint gate, exposing
+`+BBS` or `-BBS` and `Delete` alongside `View`. BBS target selection remains the
+existing checkbox-based multi-location workflow, and removing a BBS association
+does not remove the received source artifact.
+
+Unknown custom-form fallback parsing no longer assigns fixed meanings to every
+`Lxx` position. Compact coded values are excluded from subject fallback, dates
+are detected across the form, and the longest narrative is retained as the
+message body. When no descriptive subject exists, cleaned filename text is used;
+`W5TTA_TX_RR_20260904-2357z_SquatchOnTheLoose.k2s` therefore displays
+`Squatch On The Loose`. Metadata and native-file projection versions were bumped
+so cached production rows are re-enriched.
+
+Terminal close still hides the window immediately and waits asynchronously for
+all child/guarded Qt workers. Once they stop, FIO now explicitly quits the Qt
+event loop after accepting the final close. An isolated macOS reproduction that
+previously remained alive until a 15-second test failsafe now exits normally in
+about 1.3 seconds with code 0.
+
+Verification: the focused message intelligence, projection, BBS, lifecycle, and
+responsiveness set passes 345 tests. A wider message/BBS/shutdown/mesh selection
+passes 557 tests with five skipped. The two stale source-contract assertions for
+legacy Compose labels and Messages-prewarm policy were aligned with the already
+specified and implemented projection-first behavior and pass independently. The
+Messages responsive-layout regression also passes independently. Python
+compilation and `git diff --check` pass. An initial full-suite run reached 2,372
+passing and 37 skipped before those two stale assertions were aligned; a second
+run encountered the known independent Qt/mesh teardown segmentation fault at
+68 percent rather than a test assertion failure.
+
 ## 2026-09-04 — Ops Center peer schedule scale and rendering stability
 
 Production review exposed stale/overpainted peer rows while scrolling and

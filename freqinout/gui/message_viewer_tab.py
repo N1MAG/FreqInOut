@@ -141,6 +141,7 @@ from freqinout.core.message_file_presentation import (
     FileMessageRowCandidate,
     file_message_row_candidate,
     file_message_search_text,
+    title_from_filename_path as _core_title_from_filename_path,
 )
 from freqinout.core.message_row_identity import (
     filter_rows_excluding_identities as _core_filter_rows_excluding_identities,
@@ -663,19 +664,7 @@ def _extract_sender_from_form_text(text: str, path: Path) -> str:
 
 
 def _title_from_filename_path(path: Path) -> str:
-    stem = path.stem
-    tokens = [t for t in re.split(r"[-_]", stem) if t]
-    if not tokens:
-        return stem
-    date_idx: Optional[int] = None
-    for i, tok in enumerate(tokens):
-        t = tok.lower()
-        if re.fullmatch(r"\d{6,8}", t) or re.fullmatch(r"\d{4,6}z", t) or re.fullmatch(r"\d{5,6}z", t):
-            date_idx = i
-            break
-    title_tokens = tokens[date_idx + 1 :] if date_idx is not None else tokens[-1:]
-    title = " ".join(title_tokens).strip()
-    return title or stem
+    return _core_title_from_filename_path(path)
 
 
 def _spotter_mcf_display_label(code: object, title: object = "") -> str:
@@ -2464,6 +2453,13 @@ class MessageActionDelegate(QStyledItemDelegate):
         )
 
     @staticmethod
+    def _supports_standard_management_actions(row: UnifiedMessage | None, *, projected_file_row: bool) -> bool:
+        return bool(
+            projected_file_row
+            or isinstance(getattr(row, "payload", None), (JS8Message, FileRecord, VarACMessage, SpotterMessage))
+        )
+
+    @staticmethod
     def _action_rects(
         rect: QRect,
         fm,
@@ -2614,7 +2610,7 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
+        if self._supports_standard_management_actions(row, projected_file_row=projected_file_row):
             flag_state = getattr(row.payload, "flag_state", 0)
             if flag_state == 1:
                 painter.setPen(self._flag_color_red)

@@ -3106,6 +3106,13 @@ class MainWindow(QMainWindow):
         self._allow_final_close = True
         log.info("MainWindow shutdown: all Qt worker threads stopped cleanly.")
         self.close()
+        # The first close event hides the last visible window while Qt workers
+        # drain. Closing an already-hidden window does not reliably emit
+        # lastWindowClosed on every platform, so explicitly end the event loop
+        # after the final close event has been accepted.
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
     def resizeEvent(self, event):
         try:

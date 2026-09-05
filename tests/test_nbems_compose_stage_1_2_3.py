@@ -406,8 +406,8 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert 'self.settings.set("messages_compose_radio_id", int(target.radio_id))' in text
     assert "No radio profile has FLMsg, FLAmp, or VarAC message destinations configured." in text
     assert "def _compose_bbs_targets_for_radio(self, target: Optional[ComposeRadioTarget])" in text
-    assert 'radio_row.addWidget(QLabel("Radio"))' in text
-    assert 'location_row.addWidget(QLabel("BBS Location"))' in text
+    assert 'radio_row.addWidget(QLabel("Radio"))' not in text
+    assert 'bbs_location_row.addWidget(QLabel("BBS Destination"))' in text
     assert 'row2.addWidget(QLabel("Report Title"))' in text
     assert 'self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])' in text
     assert 'varac_outbox_dir=self._compose_varac_outbox_dir(radio_target)' in text

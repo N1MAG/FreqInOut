@@ -406,6 +406,60 @@ def test_flmsg_unlabeled_magnet_general_fallback_keeps_date_out_of_to_field(tmp_
     ).timestamp()
 
 
+def test_flmsg_unknown_sitrep_codes_do_not_become_title(tmp_path) -> None:
+    path = tmp_path / "W5TTA_TX_RR_20260904-2357z_SquatchOnTheLoose.k2s"
+    text = "\n".join(
+        [
+            "<flmsg>4.0.24.02",
+            ":hdr_fm:42",
+            "W5TTA 20260509003907",
+            "<customform>",
+            ":mg:487 CUSTOM_FORM,magnet_sitrep_V1.1.1.html",
+            "L01,KG5RKW",
+            "L02,W5TTA",
+            "L11,EM12JV",
+            "L14,260904-2357z",
+            "L13,Escapee reported from Southlake Sasquatch Sanctuary. Missing inmate is a juvenile.",
+            "L03,R",
+            "L04,N",
+            "L05,C",
+            "L06,LN",
+            "L07,QL",
+            "L08,06",
+            "L09,TX",
+            "L10,USA",
+            "L12,L",
+        ]
+    )
+
+    meta = extract_form_metadata_from_text(
+        text,
+        path,
+        template_title_for_form=lambda _form: "",
+        template_labels_for_form=lambda _form: [],
+    )
+    info = analyze_form_text(text, source_type="flmsg", path=path, fields=meta)
+
+    assert "subject" not in meta
+    assert meta["body"].startswith("Escapee reported")
+    assert meta["date_summary"] == "260904-2357z"
+    assert info.subject == "Squatch On The Loose"
+    assert info.subject != "C"
+
+    path.write_text(text, encoding="utf-8")
+    stat = path.stat()
+    rec = FileRecord(path=path, origin="flmsg", size=stat.st_size, mtime=stat.st_mtime)
+    row = file_message_row_candidate(
+        rec,
+        "flmsg",
+        status="NEW",
+        is_image=False,
+        is_transport_form=True,
+        form_meta=meta,
+    )
+    assert row.title == "Squatch On The Loose"
+
+
 def test_message_viewer_uses_radio_scoped_nbems_paths_for_flmsg_forms(tmp_path) -> None:
     nbems_root = tmp_path / "NBEMS.files"
     flmsg_dir = nbems_root / "ICS" / "messages"

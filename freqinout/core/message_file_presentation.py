@@ -59,9 +59,12 @@ def title_from_filename_path(path: Path) -> str:
         t = tok.lower()
         if re.fullmatch(r"\d{6,8}", t) or re.fullmatch(r"\d{4,6}z", t) or re.fullmatch(r"\d{5,6}z", t):
             date_idx = i
+            if i + 1 < len(tokens) and re.fullmatch(r"\d{3,6}z", tokens[i + 1], flags=re.IGNORECASE):
+                date_idx = i + 1
             break
     title_tokens = tokens[date_idx + 1 :] if date_idx is not None else tokens[-1:]
     title = " ".join(title_tokens).strip()
+    title = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", title)
     return title or stem
 
 

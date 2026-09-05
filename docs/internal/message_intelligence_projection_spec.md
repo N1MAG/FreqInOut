@@ -179,6 +179,10 @@ Rules:
 - Preserve external references for JS8Call, FIOSpotter, CommStat, SitRep,
   VarAC, FLMsg, FLAmp, and BBS rows.
 - Preserve file-backed artifact metadata, including FLAmp Q IDs and block ids.
+- File-form enrichment is schema-aware. If a custom-form template is missing,
+  positional `Lxx` values are treated as evidence rather than a fixed schema:
+  short status/scope codes cannot become the title, date fields may occur at any
+  position, and a descriptive filename is the title fallback.
 - Mark projected rows deleted when existing source-specific delete actions
   succeed.
 - Mark projection-only rows read/hidden directly in the FIO projection tables.
