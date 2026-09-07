@@ -7393,8 +7393,8 @@ class SettingsTab(QWidget):
             return layout
 
         varac_model_note = QLabel(
-            "VarAC BBS uses a shared Managed BBS Library as the source of truth, then publishes a separate live BBS folder "
-            "for each configured VarAC radio instance."
+            "This page configures the selected radio's native VarAC runtime, launcher, inbox, and outbox. "
+            "Open the top-level BBS service to configure live BBS folders, publication, access, retention, and visitor behavior."
         )
         varac_model_note.setWordWrap(True)
         varac_v.addWidget(varac_model_note)
@@ -7404,18 +7404,24 @@ class SettingsTab(QWidget):
         bbs_tabs.setDocumentMode(True)
         bbs_tabs.setUsesScrollButtons(True)
         bbs_tabs.setToolTip(
-            "Configure VarAC runtime paths, live BBS publishing, the shared Managed BBS Library, sweeper rules, and BBS Access Guard."
+            "Configure only the selected radio's native VarAC paths and inbound safety. BBS administration is a separate service."
         )
         paths_tab = QWidget()
         varac_paths_v = QVBoxLayout(paths_tab)
         varac_paths_v.setContentsMargins(8, 8, 8, 8)
         varac_paths_v.setSpacing(8)
         paths_scope_note = QLabel(
-            "Radio-specific runtime setup. These paths, launch values, and cluster controls apply to the selected radio's VarAC instance."
+            "Radio-specific runtime setup. These launcher, inbox, outbox, and cluster values apply to the selected radio's VarAC instance."
         )
         paths_scope_note.setWordWrap(True)
         varac_paths_v.addWidget(paths_scope_note)
-        bbs_settings_tab = QWidget()
+        # The legacy radio-BBS editor remains constructed for rollback and
+        # persistence compatibility, but is not a visible VarAC Settings tab.
+        # Explicitly hide the parent so Qt cannot paint an unregistered page on
+        # top of the active tab (observed on Linux in the prior layout).
+        bbs_settings_tab = QWidget(bbs_tabs)
+        bbs_settings_tab.setObjectName("legacyRadioBbsSettingsPage")
+        bbs_settings_tab.hide()
         bbs_settings_v = QVBoxLayout(bbs_settings_tab)
         bbs_settings_v.setContentsMargins(8, 8, 8, 8)
         bbs_settings_v.setSpacing(8)
@@ -7429,11 +7435,13 @@ class SettingsTab(QWidget):
             "Open the station-owned Managed BBS catalog, locations, retention, access, and publication workspace."
         )
         self.varac_manage_station_bbs_btn.clicked.connect(self._open_station_bbs_workspace)
-        bbs_settings_v.addWidget(self.varac_manage_station_bbs_btn, 0, Qt.AlignLeft)
+        varac_paths_v.addWidget(self.varac_manage_station_bbs_btn, 0, Qt.AlignLeft)
         # These legacy shared-library widgets remain as hidden compatibility
         # state for rollback.  Keep them parented so Qt does not delete their
         # C++ objects when the no-longer-visible tabs leave local scope.
         vault_tab = QWidget(bbs_tabs)
+        vault_tab.setObjectName("legacyManagedBbsLibraryPage")
+        vault_tab.hide()
         vault_guard_v = QVBoxLayout(vault_tab)
         vault_guard_v.setContentsMargins(8, 8, 8, 8)
         vault_guard_v.setSpacing(8)
@@ -7443,10 +7451,14 @@ class SettingsTab(QWidget):
         library_scope_note.setWordWrap(True)
         vault_guard_v.addWidget(library_scope_note)
         preview_tab = QWidget(bbs_tabs)
+        preview_tab.setObjectName("legacyBbsVisitorPreviewPage")
+        preview_tab.hide()
         preview_v = QVBoxLayout(preview_tab)
         preview_v.setContentsMargins(8, 8, 8, 8)
         preview_v.setSpacing(8)
         sweeper_tab = QWidget(bbs_tabs)
+        sweeper_tab.setObjectName("legacyBbsSweeperPage")
+        sweeper_tab.hide()
         sweeper_v = QVBoxLayout(sweeper_tab)
         sweeper_v.setContentsMargins(8, 8, 8, 8)
         sweeper_v.setSpacing(8)
@@ -7460,7 +7472,6 @@ class SettingsTab(QWidget):
         guard_scope_note.setWordWrap(True)
         vguard_v.addWidget(guard_scope_note)
         bbs_tabs.addTab(paths_tab, "Radio Paths")
-        bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")
         bbs_tabs.addTab(vguard_tab, "Inbound Guard")
         varac_v.addWidget(bbs_tabs)
 

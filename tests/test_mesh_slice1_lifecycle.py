@@ -597,3 +597,15 @@ def test_meshcore_encryption_timeout_explains_stale_bond_recovery() -> None:
     assert "Normal disconnect and restart must not require re-pairing" in message
     assert "last-resort recovery" in message
     assert "scan again" in message.lower()
+
+
+def test_meshcore_service_discovery_failure_preserves_pairing_and_guides_one_retry() -> None:
+    message = meshcore_adapter._pairing_error_message(
+        RuntimeError("failed to discover services, device disconnected")
+    )
+
+    assert "Companion service setup failed" in message
+    assert "Keep the saved Bluetooth pairing" in message
+    assert "restart the card if needed" in message
+    assert "choose Connect once" in message
+    assert "Re-pair only" in message

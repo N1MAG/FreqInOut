@@ -1291,3 +1291,64 @@ pass.
 
 The final combined BBS, Settings, navigation, helper, and legacy-compatibility
 selection passes 282 tests with one environment skip.
+
+## 2026-09-07 — Slice 2 production refinement: Mesh recovery evidence and top-level BBS service
+
+Linux production review covered the supplied `freqinout.log` and the saved
+T1000-E identified as `FE:BC:04:8F:50:E3` / `MeshCore-N1MAG MOBL1`. In the
+captured 10:00–10:09 interval, FIO acquired 17 serialized BLE sessions, reached
+Companion-ready twice, and completed eight requested teardowns in 0.4–3.4 ms.
+Twelve saved-target attempts and three discovered-target fallbacks failed during
+GATT service discovery; two operations timed out and five were cancelled by
+subsequent operator actions. No authentication, PIN, removed-key, Code 14, or
+BlueZ bond-failure marker was present. The evidence therefore does not justify
+asking the operator to forget a valid saved pairing.
+
+MeshCore service-discovery failures now give a bounded recovery path: preserve
+the saved pairing, restart the card if needed, wait for advertising, and choose
+Connect once. Re-pair guidance remains reserved for explicit authentication,
+PIN/passkey, encryption-key, or removed-key evidence. Timed lifecycle telemetry
+now separates link connect, link ready, service verification, and Companion
+initialization. Retry/backoff behavior was deliberately not changed; carrying
+backoff across worker replacement remains a hardware-gated follow-up so this
+review cannot introduce a new reconnect regression.
+
+The BBS information architecture now matches the operator mental model. BBS is
+a direct top-level expanded and compact navigation destination, not a child of
+Station or VarAC Settings. Its guided tabs are `Overview`, `Radio Service`,
+`Locations & Access`, `Publishing`, `Visitor Preview`, and `System Helpers`.
+Radio Service manages the BBS-specific live folder, service enablement,
+publication, and announcement state for each configured VarAC radio while
+preserving that radio's native launcher/inbox/outbox settings. Native VarAC
+paths and inbound safety remain in Radio Settings, which links back to BBS.
+
+Publishing retains the location-scoped checkbox and graphical detail workflow
+the operator approved. Disabled locations cannot remain publication targets.
+Visitor Preview is a dedicated read-only caller simulation. Generated helper
+files are excluded from Publishing and shown only under System Helpers with a
+clean logical name, purpose, compatibility filename, location, whole-day age,
+and health. The underlying compatibility files remain intact; this is a UI and
+ownership separation, not a destructive data migration.
+
+Delegation and review: Terra/high implemented the bounded BBS navigation and
+six-tab UI package. Luna/high independently reviewed the Mesh log, lifecycle
+diff, and focused Mesh tests. Mini/high audited focused UI tests; its initial
+over-broad source-contract edits were rejected, and the primary model restored
+unrelated coverage before retaining only narrow product-contract assertions.
+The high-reasoning primary model owned log interpretation, architecture,
+persistence and concurrency boundaries, Mesh guidance/telemetry, integration
+corrections, specification updates, visual review, and the final exit gate.
+
+Primary review corrected four integration risks before acceptance: publishing
+cannot be enabled while the native VarAC BBS service is disabled; disabled
+locations are not writable targets; Open Radio Settings carries the selected
+radio identity; and the main window's existing radio store is reused rather
+than opening schema work on the UI refresh path. Offscreen visual review covered
+the six BBS pages at 1200x800 and the Radio Service page at approximately
+900x560. The focused Mesh/BBS/Settings/shell acceptance matrix passes 510 tests
+with 20 environment skips. Fresh-process repository partitions pass 2,480 tests
+with 37 environment-dependent skips; the two skip-only files return pytest code
+5 because they collect no runnable tests, not because an assertion failed.
+Python compilation and `git diff --check` pass. The Slice 2 software exit gate
+is closed; the T1000-E direct reconnect remains a documented hardware follow-up,
+with restart-assisted recovery accepted for the present production review.

@@ -191,11 +191,11 @@ Safer multi-radio BBS model:
 - Keep VarAC Multi-Instance Cluster setup tied to radio-specific paths and
   launch. Cluster mode is runtime coordination for distinct VarAC instances; it
   is not required for a single VarAC instance or ordinary BBS monitoring.
-- Make scope obvious on every VarAC page. `Radio Paths`, `Radio Live BBS`, and
-  `Inbound Guard` are radio-specific. Shared library, visitor-facing structure,
-  publication membership, retention, and access policy live in `Station >
-  Managed BBS` and are reachable from Messages `+BBS` and the radio Settings
-  link.
+- Make scope obvious on every VarAC page. Native launcher, inbox, outbox, and
+  `Inbound Guard` remain radio-specific in Settings. Live BBS folders and
+  enablement join the shared library, visitor-facing structure, publication
+  membership, retention, helpers, and access policy in the direct top-level
+  `BBS` service, reachable from Messages `+BBS` and the radio Settings link.
 - Rename `VGuard` in operator-facing UI to `BBS Access Guard`. The function is
   inbound file protection based on sender trust; it is separate from the Managed
   BBS Library and from message-signature/hash verification.
@@ -205,10 +205,11 @@ Safer multi-radio BBS model:
 
 Target behavior:
 
-- Make VarAC BBS configuration and status clear without mixing station content
-  policy with a selected radio. The implemented radio Settings surface contains
-  `Radio Paths`, `Radio Live BBS`, and `Inbound Guard`; `Manage FIO BBS` opens
-  the station workspace.
+- Make VarAC BBS configuration and status clear without mixing it into the
+  selected-radio Settings mental model. The radio Settings surface contains
+  `Radio Paths` and `Inbound Guard`; `Manage FIO BBS` opens the top-level BBS
+  service. Its guided order is `Overview`, `Radio Service`, `Locations &
+  Access`, `Publishing`, `Visitor Preview`, and `System Helpers`.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
   VarAC instance. Initial guidance is now present in Settings and should remain

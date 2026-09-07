@@ -65,6 +65,10 @@ STALE_BOND_GUIDANCE = (
     "the same Bluetooth keys; re-pairing in system Bluetooth settings is the last-resort recovery because macOS "
     "does not provide applications a standard unpair API. Scan again after that recovery."
 )
+COMPANION_SERVICE_RECOVERY_GUIDANCE = (
+    "Keep the saved Bluetooth pairing, restart the card if needed, wait for it to advertise, then choose Connect once. "
+    "Re-pair only when the operating system reports an authentication, PIN, passkey, or removed-key error."
+)
 MESHCORE_RECEIVE_PENDING_WARNING = MESHCORE_COMPANION_DECODER_WARNING
 MESHCORE_BLE_DISCONNECTING_MESSAGE = (
     "MeshCore Bluetooth is still disconnecting. Wait for it to finish before reconnecting."
@@ -728,14 +732,39 @@ class MeshCoreBleAdapter:
         self._last_error = ""
 
     async def _open_ble_target(self, bleak: object, target: object) -> MeshCoreBleCompanionClient:
+        started_at = time.monotonic()
+        target_label = str(getattr(target, "address", "") or target or "unspecified")
         client = self._make_client(bleak, target)
         try:
+            log.info(
+                "MeshCore BLE stage adapter=%s stage=link_connect target=%s.",
+                self.adapter_id,
+                target_label,
+            )
             await client.connect()
             if not getattr(client, "is_connected", False):
                 raise MeshConnectionError(f"MeshCore BLE device did not report connected. {PAIRING_GUIDANCE}")
+            log.info(
+                "MeshCore BLE stage adapter=%s stage=link_connected target=%s elapsed_ms=%.1f.",
+                self.adapter_id,
+                target_label,
+                (time.monotonic() - started_at) * 1000.0,
+            )
             await self._verify_meshcore_characteristics(client)
+            log.info(
+                "MeshCore BLE stage adapter=%s stage=services_verified target=%s elapsed_ms=%.1f.",
+                self.adapter_id,
+                target_label,
+                (time.monotonic() - started_at) * 1000.0,
+            )
             companion = MeshCoreBleCompanionClient(client)
             await companion.initialize()
+            log.info(
+                "MeshCore BLE stage adapter=%s stage=companion_initialized target=%s elapsed_ms=%.1f.",
+                self.adapter_id,
+                target_label,
+                (time.monotonic() - started_at) * 1000.0,
+            )
             return companion
         except Exception:
             disconnect = getattr(client, "disconnect", None)
@@ -1053,7 +1082,7 @@ def _pairing_error_message(exc: object) -> str:
     if any(term in lowered for term in ("pair", "pin", "passkey", "authenticate", "not authorized", "permission")):
         return f"MeshCore BLE pairing is required or incomplete. {PAIRING_GUIDANCE}"
     if any(term in lowered for term in ("characteristic", "service", "gatt", "subscribe", "notify")):
-        return f"MeshCore BLE connected but Companion service setup failed. {PAIRING_GUIDANCE}"
+        return f"MeshCore BLE connected but Companion service setup failed. {COMPANION_SERVICE_RECOVERY_GUIDANCE}"
     return f"MeshCore BLE connection failed: {text}. {PAIRING_GUIDANCE}"
 
 

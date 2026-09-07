@@ -329,13 +329,38 @@ the same logical BBS model is available to every BBS node according to synced
 state and permissions.
 
 The administration surface moves out of selected-radio settings and becomes a
-first-class station workspace reachable from Station and from Messages `+BBS`.
-Selected-radio VarAC settings retain only:
+direct, top-level **BBS** service reachable from the expanded navigation, the
+compact rail, and Messages `+BBS`. BBS is station-owned but is not nested under
+Station in the navigation: operators understand it as a distinct service
+served by VarAC, not as a radio setting or a station-health screen.
+
+The service guides setup and daily administration from left to right:
+
+1. `Overview` — service purpose, bounded health/count summary, and the
+   Library → Locations → Live Radio Services relationship;
+2. `Radio Service` — the configured VarAC radio instances that serve the one
+   catalog, their live BBS folders, enablement, and publication health;
+3. `Locations & Access` — logical tree, hierarchy, caller access, and
+   retention;
+4. `Publishing` — the existing location-scoped checkbox workflow and artifact
+   detail;
+5. `Visitor Preview` — a dedicated read-only caller simulation rather than a
+   mode switch embedded in publication management;
+6. `System Helpers` — generated navigation/command files, clearly separated
+   from operator-published content.
+
+Selected-radio VarAC settings retain only native VarAC configuration:
 
 - VarAC installation/runtime paths and connection settings;
-- that radio's live materialization directory;
-- radio/instance enablement and health;
-- a link to `Manage FIO BBS`.
+- launcher, inbox, and outbox locations;
+- radio-specific inbound safety/guard settings;
+- a link to the top-level BBS service.
+
+Live BBS materialization directories, service enablement, publication status,
+locations, access, retention, helpers, and visitor behavior belong to the BBS
+service. Legacy radio-profile fields may remain as adapter persistence for
+compatibility, but they must not remain a competing visible administration
+surface in VarAC Settings.
 
 ### Graphical publication workspace
 
@@ -384,6 +409,10 @@ time in detail/tooltip.
   accepts. If an extension is technically required, FIO keeps it only in the
   generated compatibility filename while the UI presents the clean logical
   label.
+- Generated helper/navigation files are system output, not operator artifacts.
+  They never appear in the `Publishing` content list. The `System Helpers`
+  view shows their logical extensionless label, purpose, physical compatibility
+  name, age, and health without offering a publication-membership checkbox.
 
 ### BBS acceptance
 
@@ -933,6 +962,28 @@ and the matrix below is rerun.
 5. Close FIO during scan or channel refresh and confirm exit within three
    seconds with no Qt timer/thread warnings.
 
+Linux production evidence on 2026-09-07 adds a separate failure signature for
+the saved T1000-E (`FE:BC:04:8F:50:E3`, advertised as `MeshCore-N1MAG MOBL1`).
+Across the captured 10:00–10:09 window, FIO acquired 17 serialized sessions,
+completed eight explicit teardown requests in 0.4–3.4 ms, and eventually
+reached Companion-ready twice. Twelve saved-target attempts and three
+discovered-target fallbacks failed at GATT service discovery; two operations
+timed out and five were cancelled by subsequent operator actions. The log has
+no PIN, authentication, removed-key, Code 14, or BlueZ bond-failure marker.
+This supports a device/BlueZ/GATT bring-up problem, but does not support asking
+the operator to forget a still-valid pairing.
+
+FIO must therefore distinguish service discovery from authentication. A GATT
+service failure tells the operator to keep the saved pairing, restart the card
+if needed, wait for advertising, and choose Connect once. Forget/re-pair
+guidance is reserved for explicit authentication, PIN/passkey, encryption-key,
+or removed-key evidence. Lifecycle logging records link connect, link ready,
+service verification, and Companion initialization as separate timed stages.
+A future low-risk improvement may preserve reconnect backoff across worker
+replacement so repeated clicks cannot repeatedly cancel service discovery;
+that behavioral change requires another hardware gate and is not introduced
+by this review.
+
 A two-device macOS follow-up with MOBL1 and a MOKO SMART LW010-R advertising as
 `MeshCore-N1MAG MOBL2` exposed a saved/runtime identity collision: both physical
 endpoints had been retained with `meshcore-mobl1` as their connection and
@@ -1020,17 +1071,19 @@ legacy profile values remain for rollback. Source presence, operator intent,
 retention expiry, and location enablement are modeled independently. The
 background service reconciles missing sources and expiries in bounded batches.
 
-`Station > Managed BBS` now owns the graphical location tree, access and
-retention policy, Add/Edit/Disable workflow, bounded newest-first artifact view,
-publication checkboxes, and artifact health/detail. Compact layout stacks the
-tree and list and makes detail opt-in so 900x560 Large Text preserves the main
-workspace. Visitor Preview filters the effective tree by caller visibility and
-associated callsigns and makes publication controls read-only. Location access
-supports public, callsign, access-code, and combined rules; new codes are salted
-and hashed. Radio Settings retain only radio paths, the live BBS adapter, inbound
-guard, and a link to the station workspace. Messages `+BBS` uses the identical
-station locations and atomically replaces memberships, including uncheck-all,
-without copying or deleting the received source file.
+Top-level `BBS` now owns the graphical service workflow. Its guided tabs cover
+Overview, Radio Service, Locations & Access, Publishing, Visitor Preview, and
+System Helpers. The location workflow retains access and retention policy plus
+Add/Edit/Disable; Publishing retains the bounded newest-first artifact view,
+membership checkboxes, and artifact health/detail. Compact layout stacks the
+location editor and policy summary and makes publication detail opt-in so
+900x560 Large Text preserves the main workspace. Visitor Preview is a dedicated
+read-only caller view. Location access supports public, callsign, access-code,
+and combined rules; new codes are salted and hashed. Radio Settings retain only
+native VarAC paths and inbound guard plus a link to BBS; live BBS folders and
+service enablement are managed under Radio Service. Messages `+BBS` uses the
+identical station locations and atomically replaces memberships, including
+uncheck-all, without copying or deleting the received source file.
 
 Each radio live directory has a distinct manifest keyed to its resolved path,
 so one catalog projects independently through one or multiple VarAC instances.
@@ -1038,7 +1091,9 @@ Compatibility callers without an explicit database identity remain on the
 folder-backed path and cannot accidentally read the process-global catalog.
 Visitor helper labels are extensionless in the UI while on-disk compatibility
 files retain `.txt`; fixed-delay instructions were replaced by asynchronous
-refresh guidance.
+refresh guidance. Generated helpers are excluded from Publishing and appear
+only in System Helpers with purpose, compatibility filename, locations, age,
+and health.
 
 Exit gate: migration is backup-safe/idempotent; one catalog publishes correctly
 through one and multiple radio instances; expiration and missing-file tests pass.

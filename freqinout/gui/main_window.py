@@ -418,6 +418,7 @@ class MainWindow(QMainWindow):
             ("Map", "Map"),
             ("Inbox", "Messages"),
             ("Compose", "Messages"),
+            ("BBS", "Managed BBS"),
             ("FLDigi / SSB", "NCS-FLDigi/SSB"),
             ("JS8Call", "NCS-JS8"),
             ("VHF/UHF", "NCS-Local"),
@@ -430,7 +431,6 @@ class MainWindow(QMainWindow):
             ("HF Nets", "Net Schedule"),
             ("HF Peer Scheds", "Peer Schedules"),
             ("Control Center", "Station Overview"),
-            ("Managed BBS", "Managed BBS"),
             ("Health Details", "Station Health"),
             ("Main", "Settings"),
             ("Radios", "Settings"),
@@ -3542,6 +3542,7 @@ class MainWindow(QMainWindow):
             ("Ops", "Ops Center", "ControlFreq", "ops.svg"),
             ("Map", "Map", "Map", "map.svg"),
             ("Msgs", "Messages", "Messages", "messages.svg"),
+            ("BBS", "FIO BBS", "Managed BBS", "bbs.svg"),
             ("Net Ctrl", "Net Control", "NCS", "net-control.svg"),
             ("Calls", "Operators", "Operators", "operators.svg"),
             ("Plans", "Plans", "Plan Builder", "plans.svg"),
@@ -4114,7 +4115,7 @@ class MainWindow(QMainWindow):
             )
 
     def open_station_bbs(self) -> None:
-        """Open the shared, station-owned Managed BBS workspace."""
+        """Open the top-level, station-owned FIO BBS service."""
         idx = self._screen_index_by_label.get("Managed BBS", -1)
         if idx >= 0:
             self._set_screen(idx)
@@ -11085,7 +11086,7 @@ class MainWindow(QMainWindow):
         screen = str(screen_label or "").strip()
         if screen in {"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}:
             return "NCS"
-        if screen in {"Station Overview", "Station Health", "Managed BBS"}:
+        if screen in {"Station Overview", "Station Health"}:
             return "Station"
         if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:
             return "Plan Builder"

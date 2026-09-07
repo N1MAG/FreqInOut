@@ -94,7 +94,9 @@ retention is still enforced from the source modification time.
 
 ## Administration And Message Contract
 
-`Station > Managed BBS` is the first-class workspace. It provides:
+Top-level `BBS` is the first-class station service. Its guided tabs are ordered
+`Overview`, `Radio Service`, `Locations & Access`, `Publishing`, `Visitor
+Preview`, and `System Helpers`. It provides:
 
 - a logical location tree with access, retention, and disabled state;
 - progressive Add/Edit/Save/Disable location administration;
@@ -104,6 +106,12 @@ retention is still enforced from the source modification time.
 - origin, source path, size, age/modified time, access, retention/expiry, and
   publication health details;
 - compact reflow with opt-in details at 1000 pixels and below.
+
+The `Radio Service` tab owns BBS-specific adapter controls for every configured
+VarAC radio. VarAC Settings retains the native launcher, inbox, outbox, and
+radio-specific inbound-safety configuration, plus a route to BBS. Existing
+radio-profile fields remain valid adapter persistence and do not imply that BBS
+administration belongs under the selected radio.
 
 Visitor Preview reuses this surface in read-only mode. It filters the effective
 location tree using public/hidden visibility, the entered caller callsign, and
@@ -119,6 +127,11 @@ Messages `+BBS` opens the same logical location choices. Accepting the dialog
 atomically replaces that artifact's station memberships; unchecking every
 location removes publication everywhere while leaving the received source
 file unchanged. No live directory is copied from or deleted on the UI thread.
+
+Generated VarAC helper/navigation files are rendered only in `System Helpers`.
+They are excluded from the operator artifact publication table and have no
+membership checkbox. This is a presentation/ownership distinction; compatible
+generated files may still exist in each live VarAC BBS folder.
 
 ## Visitor Helpers
 

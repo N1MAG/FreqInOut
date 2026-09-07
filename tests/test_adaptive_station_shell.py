@@ -113,6 +113,7 @@ def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None
         ("Ops", "ControlFreq"),
         ("Map", "Map"),
         ("Msgs", "Messages"),
+        ("BBS", "Managed BBS"),
         ("Net Ctrl", "NCS"),
         ("Calls", "Operators"),
         ("Plans", "Plan Builder"),
@@ -143,6 +144,7 @@ def test_compact_navigation_mirrors_master_groups_and_uses_owned_icons() -> None
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     assert "Qt.ToolButtonTextUnderIcon" in source
     assert "QStyle.SP_DialogOpenButton" not in source
+    assert len(specs) == 10
 
 
 def test_awareness_rail_omits_selected_radio_but_keeps_alternates(monkeypatch) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,6 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.varac_bbs_library_store import (
     list_bbs_artifact_location_ids,
     list_bbs_locations,
@@ -80,6 +82,17 @@ def _location_item(tab: StationBbsTab, location_id: str):
     raise AssertionError(f"Location {location_id!r} not found")
 
 
+def _tree_texts(tree) -> list[str]:
+    root = tree.topLevelItem(0)
+    pending = [root] if root is not None else []
+    values: list[str] = []
+    while pending:
+        item = pending.pop()
+        values.append(item.text(0))
+        pending.extend(item.child(index) for index in range(item.childCount()))
+    return values
+
+
 def test_station_bbs_checkbox_replaces_membership_without_deleting_source(tmp_path):
     app = _qapplication_or_skip()
     settings, source, artifact_id = _seed_catalog(tmp_path)
@@ -143,6 +156,7 @@ def test_station_bbs_reads_are_bounded_and_compact_layout_stacks(monkeypatch, tm
 
         tab.resize(900, 620)
         tab.show()
+        tab.service_tabs.setCurrentWidget(tab.publishing_page)
         app.processEvents()
         assert tab.splitter.orientation() == Qt.Vertical
         assert tab.detail_toggle_btn.isVisible()
@@ -274,24 +288,18 @@ def test_visitor_preview_filters_tree_and_is_read_only(tmp_path):
             set_bbs_location_artifact(conn, location_id="public", artifact_id=artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
     try:
-        tab.visitor_preview_chk.setChecked(True)
+        tab.service_tabs.setCurrentWidget(tab.visitor_preview_page)
         app.processEvents()
-        with pytest.raises(AssertionError):
-            _location_item(tab, "restricted")
+        assert not any(text.startswith("Restricted") for text in _tree_texts(tab.visitor_preview_tree))
 
         tab.visitor_callsign_edit.setText("N1MAG")
         app.processEvents()
-        tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
-        app.processEvents()
-        assert tab.artifact_heading.text().startswith("Visitor artifacts")
-        assert tab.artifact_table.rowCount() == 0
-
-        tab.location_tree.setCurrentItem(_location_item(tab, "public"))
-        app.processEvents()
-        checkbox = tab.artifact_table.item(0, 0)
-        assert checkbox is not None
-        assert not bool(checkbox.flags() & Qt.ItemIsUserCheckable)
-        assert "read-only" in checkbox.toolTip().lower()
+        assert any(text.startswith("Restricted") for text in _tree_texts(tab.visitor_preview_tree))
+        assert tab.visitor_artifact_table.rowCount() == 1
+        file_item = tab.visitor_artifact_table.item(0, 0)
+        assert file_item is not None
+        assert not bool(file_item.flags() & Qt.ItemIsUserCheckable)
+        assert "read-only" in file_item.toolTip().lower()
     finally:
         tab.deleteLater()
         app.processEvents()
@@ -318,6 +326,94 @@ def test_location_access_code_is_hashed_and_not_stored_as_plaintext(tmp_path):
         assert location.metadata.get("access_code_hash")
         assert location.metadata.get("access_code_salt")
         assert "FIELD-42" not in str(location.metadata)
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_bbs_guided_tabs_and_system_helpers_are_separate_from_publishing(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    helper = tmp_path / "00 READ FIRST - type command, then refresh BBS.txt"
+    helper.write_text("system helper", encoding="utf-8")
+    with connect_sqlite(settings.db_path) as conn:
+        with conn:
+            helper_id = upsert_bbs_artifact_path(conn, source_path=helper, display_name=helper.name)
+            set_bbs_location_artifact(conn, location_id="public", artifact_id=helper_id, publish_enabled=True)
+
+    tab = StationBbsTab(settings=settings)
+    try:
+        assert [tab.service_tabs.tabText(index) for index in range(tab.service_tabs.count())] == [
+            "Overview",
+            "Radio Service",
+            "Locations & Access",
+            "Publishing",
+            "Visitor Preview",
+            "System Helpers",
+        ]
+        publishing_names = [
+            tab.artifact_table.item(row, 1).text()
+            for row in range(tab.artifact_table.rowCount())
+        ]
+        assert helper.name not in publishing_names
+        assert tab.helpers_table.rowCount() == 1
+        assert tab.helpers_table.item(0, 0).text() == helper.stem
+        assert tab.helpers_table.item(0, 2).text() == helper.name
+        assert tab.helpers_table.horizontalHeaderItem(4).text() == "Age"
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    store = MultiRadioStore(Path(settings.db_path))
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "system_key": "fio-a",
+            "use_varac": 1,
+            "varac_install_path": "/native/varac",
+            "varac_outbox_dir": "/native/outbox",
+        }
+    )
+    tab = StationBbsTab(settings=settings)
+    try:
+        assert tab.radio_service_table.rowCount() == 1
+        tab.radio_publish_enabled_chk.setChecked(True)
+        tab.radio_service_enabled_chk.setChecked(False)
+        tab.radio_live_dir_edit.setText(str(tmp_path / "live-bbs"))
+        tab._save_selected_radio_service()
+        assert "Enable VarAC BBS" in tab.radio_service_status.text()
+
+        tab.radio_service_enabled_chk.setChecked(True)
+        tab.radio_announce_enabled_chk.setChecked(True)
+        tab._save_selected_radio_service()
+        saved = store.get_device_profile(int(profile["id"]))
+        assert saved is not None
+        assert saved["varac_bbs_dir"] == str(tmp_path / "live-bbs")
+        assert bool(saved["varac_bbs_enabled"]) is True
+        assert bool(saved["varac_bbs_vault_enabled"]) is True
+        assert bool(saved["varac_bbs_announce_enabled"]) is True
+        assert saved["varac_install_path"] == "/native/varac"
+        assert saved["varac_outbox_dir"] == "/native/outbox"
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_disabled_location_is_not_a_publishing_target(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    tab = StationBbsTab(settings=settings)
+    try:
+        tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
+        tab.location_edit_btn.setChecked(True)
+        tab._disable_location()
+        app.processEvents()
+        assert tab.publishing_location_combo.findData("restricted") == -1
+        assert tab._publishing_location_id != "restricted"
     finally:
         tab.deleteLater()
         app.processEvents()

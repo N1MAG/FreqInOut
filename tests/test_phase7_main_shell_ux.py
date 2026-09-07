@@ -83,7 +83,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '"Plan Builder": False' in source
     assert 'raw["Plan Builder"] = raw.get("FreqPlanner")' in source
     assert "self._suppress_initial_nav_group_auto_expand = True" in source
-    assert 'if screen in {"Station Overview", "Station Health", "Managed BBS"}:' in source
+    assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
     assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
     assert 'return "Plan Builder"' in source
@@ -113,6 +113,10 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert 'if key == "Station" and not expanded:' in source
     assert "self._station_health_alert_counts()" in source
     assert "Expand Station or open Health Details." in source
+    assert '("BBS", "FIO BBS", "Managed BBS", "bbs.svg")' in source
+    assert source.index('("Compose", "Messages")') < source.index('("BBS", "Managed BBS")')
+    assert source.index('("BBS", "Managed BBS")') < source.index('("FLDigi / SSB", "NCS-FLDigi/SSB")')
+    assert 'if screen in {"Station Overview", "Station Health", "Managed BBS"}:' not in source
 
 
 def test_ops_center_visible_header_and_help_use_user_facing_name() -> None:
@@ -5146,15 +5150,23 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "station-owned review and publication live in Managed BBS" in spec
     assert "varacBbsSettingsTabs" in settings_source
     assert 'bbs_tabs.addTab(paths_tab, "Radio Paths")' in settings_source
-    assert 'bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")' in settings_source
     assert 'bbs_tabs.addTab(vguard_tab, "Inbound Guard")' in settings_source
-    assert 'bbs_tabs.addTab(vault_tab, "Shared Library")' not in settings_source
+    assert 'bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")' not in settings_source
+    assert 'bbs_settings_tab.setObjectName("legacyRadioBbsSettingsPage")' in settings_source
+    assert 'vault_tab.setObjectName("legacyManagedBbsLibraryPage")' in settings_source
+    assert 'preview_tab.setObjectName("legacyBbsVisitorPreviewPage")' in settings_source
+    assert 'sweeper_tab.setObjectName("legacyBbsSweeperPage")' in settings_source
+    assert "bbs_settings_tab.hide()" in settings_source
+    assert "vault_tab.hide()" in settings_source
+    assert "preview_tab.hide()" in settings_source
+    assert "sweeper_tab.hide()" in settings_source
     assert 'self.varac_manage_station_bbs_btn = QPushButton("Manage FIO BBS")' in settings_source
-    assert '("Managed BBS", "Managed BBS")' in main_source
-    assert 'title = QLabel("Managed BBS")' in station_bbs_source
+    assert 'varac_paths_v.addWidget(self.varac_manage_station_bbs_btn' in settings_source
+    assert '("BBS", "FIO BBS", "Managed BBS", "bbs.svg")' in main_source
+    assert 'title = QLabel("FIO BBS")' in station_bbs_source
     assert 'self.artifact_table.setHorizontalHeaderLabels(["Published"' in station_bbs_source
-    assert "shared Managed BBS Library as the source of truth" in settings_source
-    assert "Radio-specific live BBS folder" in settings_source
+    assert "Shared Managed BBS Library. Organize reusable locations here, then assign or publish them into each radio's live BBS folder." in settings_source
+    assert "Open the top-level BBS service to configure live BBS folders, publication, access, retention, and visitor behavior." in settings_source
     assert "BBS file management lives in Messages -> BBS" in settings_source
     assert "BBS Visitor Preview" in settings_source
     assert "BBS Sweeper Rules" in settings_source
