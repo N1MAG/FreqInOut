@@ -14,11 +14,13 @@ from freqinout.core.software_status_service import (
     STATUS_KEYS,
     SoftwareStatusService,
 )
+from freqinout.core.worker_lifecycle import CancellationToken, OperationCancelled
 
 
 LEGACY_PRIMARY_DEPENDENCY_SCOPE = "legacy_primary"
 PROCESS_STATUS_CADENCE_SEC = 10.0
 PROCESS_STATUS_STALE_AFTER_SEC = 30.0
+SCOPED_STATUS_STALE_AFTER_SEC = 15.0
 
 
 def _status_program_name(status_key: str) -> str:
@@ -169,9 +171,13 @@ class DependencyStatusService(QObject):
         self.settings = settings
         self._lock = threading.RLock()
         self._latest_snapshot = _initial_snapshot()
+        self._scoped_snapshots: Dict[str, DependencySnapshot] = {}
+        self._scoped_pending: set[str] = set()
+        self._active_futures: set[Future] = set()
         self._sequence = 0
         self._worker_pending = False
         self._stopped = False
+        self._cancel_token = CancellationToken()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fio-dependency-status")
         self._snapshot_ready.connect(self._publish_snapshot, Qt.QueuedConnection)
         self._timer = QTimer(self)
@@ -193,16 +199,85 @@ class DependencyStatusService(QObject):
     def software_status_snapshot(self) -> Dict[str, Dict[str, object]]:
         return self.latest_snapshot().to_software_status_snapshot()
 
+    def is_stopped(self) -> bool:
+        with self._lock:
+            return bool(self._stopped and not any(not future.done() for future in self._active_futures))
+
+    def status_snapshot(
+        self,
+        *,
+        force: bool = False,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        flrig_port_override: Optional[int] = None,
+        flrig_host_override: Optional[str] = None,
+        rigctld_port_override: Optional[int] = None,
+        rigctld_host_override: Optional[str] = None,
+        fldigi_port_override: Optional[int] = None,
+        fldigi_host_override: Optional[str] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        """Return the latest endpoint-scoped snapshot and refresh it asynchronously.
+
+        Settings and other UI surfaces use this compatibility-shaped API instead
+        of calling :class:`SoftwareStatusService` directly. The first request
+        returns the shared process snapshot while the endpoint-specific probe is
+        queued; subsequent calls return the completed immutable scoped snapshot.
+        """
+        overrides: Dict[str, object] = {
+            "port_override": port_override,
+            "host_override": host_override,
+            "flrig_port_override": flrig_port_override,
+            "flrig_host_override": flrig_host_override,
+            "rigctld_port_override": rigctld_port_override,
+            "rigctld_host_override": rigctld_host_override,
+            "fldigi_port_override": fldigi_port_override,
+            "fldigi_host_override": fldigi_host_override,
+        }
+        scope = self._endpoint_scope(overrides)
+        with self._lock:
+            cached = self._scoped_snapshots.get(scope)
+            stopped = self._stopped
+            pending = scope in self._scoped_pending
+        if stopped:
+            return cached.to_software_status_snapshot() if cached is not None else self.software_status_snapshot()
+        if cached is not None and cached.is_fresh_enough(SCOPED_STATUS_STALE_AFTER_SEC) and not force:
+            return cached.to_software_status_snapshot()
+        if not pending:
+            with self._lock:
+                if scope not in self._scoped_pending and not self._stopped:
+                    self._scoped_pending.add(scope)
+                    self._sequence += 1
+                    sequence = self._sequence
+                else:
+                    sequence = 0
+            if sequence:
+                future = self._executor.submit(
+                    self._build_endpoint_snapshot,
+                    sequence,
+                    scope,
+                    overrides,
+                    bool(force),
+                )
+                with self._lock:
+                    self._active_futures.add(future)
+                future.add_done_callback(lambda done, scoped=scope: self._on_scoped_worker_done(scoped, done))
+        return cached.to_software_status_snapshot() if cached is not None else self.software_status_snapshot()
+
     def refresh_now(self, *, reason: str = "manual", force: bool = False) -> DependencySnapshot:
         with self._lock:
             if self._stopped:
                 return self._latest_snapshot
-            if self._worker_pending and not force:
+            # A forced refresh bypasses freshness, not the single-flight rule.
+            # Queueing another whole process walk behind an in-flight one only
+            # makes the returned snapshot older and delays scoped requests.
+            if self._worker_pending:
                 return self._latest_snapshot
             self._worker_pending = True
             self._sequence += 1
             sequence = self._sequence
         future = self._executor.submit(self._build_process_snapshot, sequence, str(reason or "manual"))
+        with self._lock:
+            self._active_futures.add(future)
         future.add_done_callback(self._on_worker_done)
         return self.latest_snapshot()
 
@@ -211,6 +286,11 @@ class DependencyStatusService(QObject):
         with self._lock:
             self._stopped = True
             self._worker_pending = False
+            self._scoped_pending.clear()
+            futures = tuple(self._active_futures)
+        self._cancel_token.cancel()
+        for future in futures:
+            future.cancel()
         try:
             self._timer.stop()
         except Exception:
@@ -224,15 +304,39 @@ class DependencyStatusService(QObject):
 
     def _on_worker_done(self, future: Future) -> None:
         with self._lock:
+            self._active_futures.discard(future)
             stopped = self._stopped
         if stopped:
             return
         try:
             snapshot = future.result()
+        except OperationCancelled:
+            with self._lock:
+                self._worker_pending = False
+            return
         except Exception as exc:
             log.warning("DEPENDENCY_STATUS|refresh_failed|error=%s", exc)
             with self._lock:
                 self._worker_pending = False
+            return
+        self._snapshot_ready.emit(snapshot)
+
+    def _on_scoped_worker_done(self, scope: str, future: Future) -> None:
+        with self._lock:
+            self._active_futures.discard(future)
+            stopped = self._stopped
+        if stopped:
+            return
+        try:
+            snapshot = future.result()
+        except OperationCancelled:
+            with self._lock:
+                self._scoped_pending.discard(scope)
+            return
+        except Exception as exc:
+            log.warning("DEPENDENCY_STATUS|scoped_refresh_failed|scope=%s|error=%s", scope, exc)
+            with self._lock:
+                self._scoped_pending.discard(scope)
             return
         self._snapshot_ready.emit(snapshot)
 
@@ -241,9 +345,74 @@ class DependencyStatusService(QObject):
         with self._lock:
             if self._stopped:
                 return
-            self._latest_snapshot = snapshot
-            self._worker_pending = False
+            if snapshot.scope == LEGACY_PRIMARY_DEPENDENCY_SCOPE:
+                self._latest_snapshot = snapshot
+                self._worker_pending = False
+            else:
+                self._scoped_snapshots[snapshot.scope] = snapshot
+                self._scoped_pending.discard(snapshot.scope)
         self.snapshot_changed.emit(snapshot)
+
+    @staticmethod
+    def _endpoint_scope(overrides: Mapping[str, object]) -> str:
+        parts = []
+        for key in sorted(overrides):
+            value = overrides.get(key)
+            parts.append(f"{key}={'' if value is None else value}")
+        return "software_endpoint:" + "|".join(parts)
+
+    def _build_endpoint_snapshot(
+        self,
+        sequence: int,
+        scope: str,
+        overrides: Mapping[str, object],
+        force: bool,
+    ) -> DependencySnapshot:
+        started = time.perf_counter()
+        self._cancel_token.checkpoint()
+        checked_at = time.time()
+        probe = SoftwareStatusService(self.settings)
+        kwargs = {str(key): value for key, value in overrides.items()}
+        rows = probe.status_snapshot(force=bool(force), **kwargs)
+        self._cancel_token.checkpoint()
+        statuses: Dict[str, DependencyStatus] = {}
+        for key in STATUS_KEYS:
+            self._cancel_token.checkpoint()
+            row = dict(rows.get(key, {}) or {})
+            state = str(row.pop("state", "idle") or "idle")
+            tooltip = str(row.pop("tooltip", f"{key}: status not checked yet") or "")
+            running = bool(row.pop("running", False))
+            reachable = row.pop("reachable", None)
+            statuses[key] = DependencyStatus(
+                key=key,
+                state=state,
+                value=str(row.pop("value", "") or "") or None,
+                checked_at=checked_at,
+                updated_at=checked_at,
+                stale_after_sec=SCOPED_STATUS_STALE_AFTER_SEC,
+                source="endpoint",
+                tooltip=tooltip,
+                running=running,
+                reachable=bool(reachable) if reachable is not None else None,
+                last_success_at=checked_at if state != "error" else None,
+                last_error_at=checked_at if state == "error" else None,
+                last_error=str(row.pop("last_error", "") or ""),
+                meta=row,
+            )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if elapsed_ms > 250.0 and _logger_handlers_available():
+            log.info(
+                "DEPENDENCY_STATUS|slow_endpoint_snapshot|scope=%s|duration_ms=%.1f",
+                scope,
+                elapsed_ms,
+            )
+        return DependencySnapshot(
+            generated_at=checked_at,
+            scope=scope,
+            process=statuses,
+            reason="endpoint",
+            sequence=sequence,
+        )
 
     def _build_process_snapshot(self, sequence: int, reason: str) -> DependencySnapshot:
         started = time.perf_counter()
@@ -251,13 +420,12 @@ class DependencyStatusService(QObject):
         probe = SoftwareStatusService(self.settings)
         statuses: Dict[str, DependencyStatus] = {}
         for status_key in STATUS_KEYS:
+            self._cancel_token.checkpoint()
             program_name = _status_program_name(status_key)
             item_started = time.perf_counter()
             try:
                 running = bool(probe.program_is_running(program_name))
                 capability: Dict[str, object] = {}
-                if status_key == "JS8Call_API":
-                    capability = probe.js8_api_capability_status(process_running=running)
                 value = self._status_value(status_key, running, capability)
                 state = self._status_state(status_key, running, capability)
                 tooltip = self._process_tooltip(status_key, program_name, running, probe, capability)
@@ -326,6 +494,12 @@ class DependencyStatusService(QObject):
         capability: Optional[Mapping[str, object]] = None,
     ) -> str:
         if status_key == "JS8Call_API":
+            if not capability:
+                return (
+                    "JS8Call process is running. Endpoint readiness refreshes separately."
+                    if running
+                    else "JS8Call is not running."
+                )
             return self._js8_capability_tooltip(capability or {}, running=running)
         if status_key in {"FLRig", "FLDigi"}:
             return (
@@ -342,12 +516,16 @@ class DependencyStatusService(QObject):
     @staticmethod
     def _status_value(status_key: str, running: bool, capability: Mapping[str, object]) -> str:
         if status_key == "JS8Call_API":
+            if not capability:
+                return "running_unverified" if running else "offline"
             return str(capability.get("mode", "offline") or "offline")
         return "running" if running else "not_running"
 
     @staticmethod
     def _status_state(status_key: str, running: bool, capability: Mapping[str, object]) -> str:
         if status_key == "JS8Call_API":
+            if not capability:
+                return "warn" if running else "idle"
             mode = str(capability.get("mode", "offline") or "offline")
             if mode in {"api_full", "api_basic", "file_fallback"}:
                 return "ok"

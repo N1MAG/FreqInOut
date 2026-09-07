@@ -43,6 +43,7 @@ class UiEventLoopWatchdog(QObject):
         self._last_heartbeat = time.monotonic()
         self._last_report = 0.0
         self._running = False
+        self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._timer = QTimer(self)
         self._timer.setInterval(self._heartbeat_interval_ms)
@@ -52,6 +53,7 @@ class UiEventLoopWatchdog(QObject):
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._beat()
         self._timer.start()
         self._monitor_thread = threading.Thread(
@@ -68,11 +70,16 @@ class UiEventLoopWatchdog(QObject):
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         try:
             if self._timer.isActive():
                 self._timer.stop()
         except Exception:
             pass
+        monitor = self._monitor_thread
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=0.25)
+        self._monitor_thread = None
 
     def _beat(self) -> None:
         now = time.monotonic()
@@ -81,7 +88,8 @@ class UiEventLoopWatchdog(QObject):
 
     def _monitor_loop(self) -> None:
         while self._running:
-            time.sleep(self._check_interval_sec)
+            if self._stop_event.wait(self._check_interval_sec):
+                break
             now = time.monotonic()
             with self._lock:
                 last_heartbeat = self._last_heartbeat

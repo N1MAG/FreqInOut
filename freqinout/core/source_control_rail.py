@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping, Sequence
 
-from freqinout.core.mesh.settings import MeshConnectionConfig, mesh_connection_config_key
+from freqinout.core.mesh.settings import MeshConnectionConfig, mesh_connection_config_key, mesh_health_matches_config
 
 
 SOURCE_CONTROL_KIND_RADIO = "radio"
@@ -81,13 +81,21 @@ def _source_control_mesh_item_for_protocol(
         lifecycle = str(row.get("lifecycle_state") or "").strip().lower() if row else ""
         warning = warning or bool(last_error or lifecycle == "config_error")
         label = f"Connect: {name}" if name else "Connect saved mesh"
+        detail_lines = []
+        if config.ble_device_name:
+            detail_lines.append(f"Device: {config.ble_device_name}")
+        if config.ble_device_id:
+            detail_lines.append(f"Device ID: {config.ble_device_id}")
+        tooltip = f"Connect to saved mesh configuration {name}."
+        if detail_lines:
+            tooltip += "\n" + "\n".join(detail_lines)
         actions.append(
             SourceControlAction(
                 key=f"connect:{mesh_connection_config_key(config)}",
                 label=label,
                 enabled=True,
                 role="eligible_success" if row_connected else "muted",
-                tooltip=f"Connect to saved mesh device {name}.",
+                tooltip=tooltip,
             )
         )
     role = "eligible_success" if connected else ("warning" if warning else "muted")
@@ -120,8 +128,10 @@ def _mesh_config_has_saved_endpoint(config: MeshConnectionConfig) -> bool:
 
 def _mesh_config_display_name(config: MeshConnectionConfig) -> str:
     for value in (
-        config.ble_device_name,
+        config.display_name,
+        config.connection_name,
         config.adapter_id,
+        config.ble_device_name,
         config.ble_device_id,
         config.tcp_host,
         config.serial_port,
@@ -147,34 +157,22 @@ def _best_health_row_for_config(
     config: MeshConnectionConfig,
     rows: Sequence[Mapping[str, object]],
 ) -> Mapping[str, object] | None:
-    config_protocol = str(config.protocol or "").strip().lower()
-    keys = {
-        _normalize_identity(config.adapter_id),
-        _normalize_identity(config.ble_device_id),
-        _normalize_identity(config.ble_device_name),
-    }
-    keys.discard("")
-    if not keys:
-        return None
     matches = []
     for row in rows:
-        row_protocol = str(row.get("transport") or "").strip().lower()
-        if config_protocol and row_protocol and row_protocol != config_protocol:
-            continue
-        row_keys = {
-            _normalize_identity(row.get("adapter_id")),
-            _normalize_identity(row.get("device_name")),
-        }
-        if keys.intersection(row_keys):
+        if mesh_health_matches_config(config, row):
             matches.append(row)
     if not matches:
         return None
+    # Health is a point-in-time fact.  An older successful row must never keep
+    # the control-bar chip green after a newer attempt for the same saved
+    # device failed.  This can happen when an adapter id changes while the
+    # stable BLE identity/device name remains the same.
     return max(
         matches,
         key=lambda row: (
-            2 if bool(row.get("connected")) else 0,
-            0 if str(row.get("last_error") or "").strip() else 1,
             str(row.get("updated_utc") or ""),
+            1 if bool(row.get("connected")) else 0,
+            1 if not str(row.get("last_error") or "").strip() else 0,
         ),
     )
 

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+import threading
 
 from freqinout.core.mesh.adapter_base import MeshAdapter
 from freqinout.core.mesh.meshcore_adapter import MeshCoreBleAdapter
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError, MeshtasticLocalAdapter
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode
+from freqinout.core.mesh.models import (
+    MeshAdapterEvent,
+    MeshChannel,
+    MeshChannelCapabilities,
+    MeshHealthSnapshot,
+    MeshMessage,
+    MeshNode,
+)
 from freqinout.core.mesh.settings import MeshConnectionConfig
 
 MeshEventListener = Callable[[MeshAdapterEvent], None]
@@ -35,6 +43,10 @@ class MeshConnectionManager:
         self._last_errors: dict[str, str] = {}
         self._listeners: list[MeshEventListener] = []
         self._adapter_factory = adapter_factory
+        # Cancellation may be requested directly by the GUI thread while the
+        # worker thread is inside a device call. Protect adapter publication and
+        # snapshots without moving normal device work across threads.
+        self._adapter_lock = threading.RLock()
         for config in configs:
             self.upsert_config(config)
 
@@ -43,19 +55,22 @@ class MeshConnectionManager:
         self._configs[config.adapter_id] = config
         if existing is not None and existing != config:
             self.stop_adapter(config.adapter_id)
-            self._adapters.pop(config.adapter_id, None)
+            with self._adapter_lock:
+                self._adapters.pop(config.adapter_id, None)
 
     def remove_config(self, adapter_id: str) -> None:
         self.stop_adapter(adapter_id)
         self._configs.pop(adapter_id, None)
-        self._adapters.pop(adapter_id, None)
+        with self._adapter_lock:
+            self._adapters.pop(adapter_id, None)
         self._last_errors.pop(adapter_id, None)
 
     def configured_ids(self) -> tuple[str, ...]:
         return tuple(self._configs)
 
     def active_adapter_ids(self) -> tuple[str, ...]:
-        return tuple(self._adapters)
+        with self._adapter_lock:
+            return tuple(self._adapters)
 
     def add_listener(self, listener: MeshEventListener) -> None:
         if listener not in self._listeners:
@@ -79,11 +94,13 @@ class MeshConnectionManager:
             self._publish_health(snapshot)
             return snapshot
 
-        adapter = self._adapters.get(adapter_id)
+        with self._adapter_lock:
+            adapter = self._adapters.get(adapter_id)
         if adapter is None:
             try:
                 adapter = self._adapter_factory(config)
-                self._adapters[adapter_id] = adapter
+                with self._adapter_lock:
+                    self._adapters[adapter_id] = adapter
             except Exception as exc:
                 snapshot = self._snapshot_for_config(config, connected=False, last_error=str(exc))
                 self._last_errors[adapter_id] = snapshot.last_error
@@ -105,7 +122,8 @@ class MeshConnectionManager:
 
     def stop_adapter(self, adapter_id: str) -> MeshHealthSnapshot:
         config = self._require_config(adapter_id)
-        adapter = self._adapters.get(adapter_id)
+        with self._adapter_lock:
+            adapter = self._adapters.get(adapter_id)
         if adapter is not None:
             try:
                 adapter.disconnect()
@@ -117,7 +135,8 @@ class MeshConnectionManager:
 
     def health(self, adapter_id: str) -> MeshHealthSnapshot:
         config = self._require_config(adapter_id)
-        adapter = self._adapters.get(adapter_id)
+        with self._adapter_lock:
+            adapter = self._adapters.get(adapter_id)
         if adapter is not None:
             try:
                 snapshot = adapter.health()
@@ -195,6 +214,69 @@ class MeshConnectionManager:
         adapter = self._require_adapter(adapter_id)
         return tuple(adapter.list_channels())
 
+    def poll_channels_incremental(
+        self,
+        adapter_id: str,
+        on_channel: Callable[[MeshChannel], None],
+        *,
+        cancel_event: object | None = None,
+    ) -> tuple[MeshChannel, ...]:
+        adapter = self._require_adapter(adapter_id)
+        incremental = getattr(adapter, "list_channels_incremental", None)
+        if callable(incremental):
+            return tuple(incremental(on_channel, cancel_event=cancel_event))
+        channels = tuple(adapter.list_channels())
+        for channel in channels:
+            on_channel(channel)
+        return channels
+
+    def cancel_pending_operations(self) -> None:
+        """Thread-safe best-effort cancellation used before worker shutdown."""
+
+        with self._adapter_lock:
+            adapters = tuple(self._adapters.values())
+        for adapter in adapters:
+            cancel = getattr(adapter, "cancel_pending_operation", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:
+                    continue
+
+    def channel_capabilities(self, adapter_id: str) -> MeshChannelCapabilities:
+        adapter = self._require_adapter(adapter_id)
+        getter = getattr(adapter, "channel_capabilities", None)
+        if not callable(getter):
+            return MeshChannelCapabilities()
+        capabilities = getter()
+        return capabilities if isinstance(capabilities, MeshChannelCapabilities) else MeshChannelCapabilities()
+
+    def configure_channel(
+        self,
+        adapter_id: str,
+        channel_id: str,
+        updates: Mapping[str, object],
+    ) -> MeshChannel:
+        adapter = self._require_adapter(adapter_id)
+        configure = getattr(adapter, "configure_channel", None)
+        capabilities = self.channel_capabilities(adapter_id)
+        if not capabilities.can_configure or not callable(configure):
+            raise MeshConnectionError(capabilities.guidance)
+        safe_updates = {
+            str(key): value
+            for key, value in updates.items()
+            if str(key) in {"name", "role", "uplink_enabled", "downlink_enabled"}
+        }
+        return configure(str(channel_id), safe_updates)
+
+    def remove_channel_from_device(self, adapter_id: str, channel_id: str) -> None:
+        adapter = self._require_adapter(adapter_id)
+        remove = getattr(adapter, "remove_channel", None)
+        capabilities = self.channel_capabilities(adapter_id)
+        if not capabilities.can_remove_from_device or not callable(remove):
+            raise MeshConnectionError(capabilities.guidance)
+        remove(str(channel_id))
+
     def _require_config(self, adapter_id: str) -> MeshConnectionConfig:
         try:
             return self._configs[adapter_id]
@@ -202,10 +284,11 @@ class MeshConnectionManager:
             raise KeyError(f"Unknown mesh adapter: {adapter_id}") from exc
 
     def _require_adapter(self, adapter_id: str) -> MeshAdapter:
-        try:
-            return self._adapters[adapter_id]
-        except KeyError as exc:
-            raise MeshConnectionError(f"Mesh adapter {adapter_id} is not started.") from exc
+        with self._adapter_lock:
+            try:
+                return self._adapters[adapter_id]
+            except KeyError as exc:
+                raise MeshConnectionError(f"Mesh adapter {adapter_id} is not started.") from exc
 
     def _snapshot_for_config(
         self,

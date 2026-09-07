@@ -44,7 +44,7 @@ from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
-from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackService
@@ -82,7 +82,9 @@ from freqinout.core.mesh import (
     load_mesh_connection_configs,
     load_saved_mesh_connection_configs,
     mesh_connection_config_key,
+    mesh_health_matches_config,
 )
+from freqinout.core.mesh.settings import MeshConnectionConfig
 from freqinout.core.ncs_session_contract import (
     active_ncs_session_flags,
     active_ncs_session_summaries_by_kind,
@@ -94,6 +96,7 @@ from freqinout.core.source_control_rail import (
 )
 from freqinout.radio_interface.js8_api_client import JS8ApiClientRegistry
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
+from freqinout.core.worker_lifecycle import WorkerShutdownRegistry
 from freqinout.core.view_contracts import (
     compose_intent_from_mapping,
     map_context_from_mapping,
@@ -222,6 +225,8 @@ class MainWindow(QMainWindow):
         self._allow_final_close = False
         self._shutdown_wait_started = 0.0
         self._shutdown_wait_last_log = 0.0
+        self._shutdown_deadline_reported = False
+        self._shutdown_registry = WorkerShutdownRegistry()
         self._app_active = True
         self._ui_resume_pending = False
         self._ui_refresh_dirty = False
@@ -239,15 +244,32 @@ class MainWindow(QMainWindow):
         self._ui_resume_settle_timer.setInterval(350)
         self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
 
-        self.settings = SettingsManager()
-        self.action_feedback_service = ActionFeedbackService()
-        self.plan_context_service = PlanContextService()
+        def _construct_startup_component(name: str, factory: Callable[[], object]):
+            with perf_span(f"startup.construct.{name}", min_ms=0.0):
+                return factory()
+
+        self.settings = _construct_startup_component("settings_manager", SettingsManager)
+        with perf_span("startup.construct.action_feedback", min_ms=0.0):
+            self.action_feedback_service = ActionFeedbackService()
+        with perf_span("startup.construct.plan_context", min_ms=0.0):
+            self.plan_context_service = PlanContextService()
         self._action_feedback_unsubscribe = None
         self._notify_startup_status("Loading application settings...")
         self._clear_stale_ncs_activity_on_startup()
-        self.dependency_status_service = get_dependency_status_service(self.settings)
-        self.multi_radio_store = MultiRadioStore()
-        self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
+        self.dependency_status_service = _construct_startup_component(
+            "dependency_status",
+            lambda: get_dependency_status_service(self.settings),
+        )
+        self._shutdown_registry.register(
+            "dependency_status",
+            request_stop=self.dependency_status_service.stop,
+            is_stopped=self.dependency_status_service.is_stopped,
+        )
+        self.multi_radio_store = _construct_startup_component("multi_radio_store", MultiRadioStore)
+        self.station_runtime_manager = _construct_startup_component(
+            "station_runtime_manager",
+            lambda: StationRuntimeManager(store=self.multi_radio_store, settings=self.settings),
+        )
         self.station_runtime_manager.sync_with_store()
         self._runtime_profile_signature: tuple[object, ...] | None = None
         self._active_runtime_profile = self._load_runtime_active_device_profile()
@@ -259,6 +281,8 @@ class MainWindow(QMainWindow):
         self._mesh_worker_thread: QThread | None = None
         self._mesh_worker: MeshConnectionWorker | None = None
         self._mesh_runtime_signature: tuple[tuple[object, ...], ...] = tuple()
+        self._mesh_runtime_restart_pending = False
+        self._mesh_runtime_stopping = False
         self._mesh_manager_dialog: QDialog | None = None
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
@@ -268,40 +292,46 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        # Instantiate screens (lazy-load heavy tabs to improve perceived performance)
-        self.settings_tab = SettingsTab(self, action_feedback_service=self.action_feedback_service)
+        # Keep the first shell limited to Settings, Ops Center, and the SOP
+        # context needed by the Station Control Bar. The bar must be available
+        # before secondary workspaces build tables, maps, or data indexes.
+        # Secondary widgets retain stable stack slots until first navigation.
+        self.settings_tab = _construct_startup_component(
+            "settings_tab",
+            lambda: SettingsTab(self, action_feedback_service=self.action_feedback_service),
+        )
         self._sync_settings_runtime_status()
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
         self._launch_progress_dialog: QProgressDialog | None = None
         self._launch_progress_total = 0
         self._launch_progress_done = 0
-        self.hf_schedule_tab = DailyScheduleTab(self, plan_context_service=self.plan_context_service)  # this tab is labeled "HF Frequency Schedule"
-        self.net_tab = NetScheduleTab(self, plan_context_service=self.plan_context_service)
-        self.fldigi_tab = FldigiNetControlTab(self)
-        self.js8_tab = JS8CallNetControlTab(self)
-        self.sop_tab = SOPTab(self, plan_context_service=self.plan_context_service)
-        self.operator_history_tab = OperatorHistoryTab(self)
-        self.local_operator_tab = LocalOperatorTab(self)
-        self.local_report_history_tab = LocalReportHistoryTab(self)
-        self.local_ncs_tab = LocalNCSTab(self)
+        self.hf_schedule_tab: DailyScheduleTab | None = None
+        self.net_tab: NetScheduleTab | None = None
+        self.fldigi_tab: FldigiNetControlTab | None = None
+        self.js8_tab: JS8CallNetControlTab | None = None
+        self.sop_tab = _construct_startup_component(
+            "sop_tab",
+            lambda: SOPTab(self, plan_context_service=self.plan_context_service),
+        )
+        self.operator_history_tab: OperatorHistoryTab | None = None
+        self.local_operator_tab: LocalOperatorTab | None = None
+        self.local_report_history_tab: LocalReportHistoryTab | None = None
+        self.local_ncs_tab: LocalNCSTab | None = None
         self.log_tab: LogViewerTab | None = None
         self._log_dialog: QDialog | None = None
-        self.peer_sched_tab = PeerSchedTab(self)
-        self.help_tab = HelpTab(self)
+        self.peer_sched_tab: PeerSchedTab | None = None
+        self.help_tab: HelpTab | None = None
         self._context_help_dialog: ContextHelpDialog | None = None
-        self.controlfreq_tab = ControlFreqTab(self, plan_context_service=self.plan_context_service)
+        self.controlfreq_tab = _construct_startup_component(
+            "ops_center",
+            lambda: ControlFreqTab(self, plan_context_service=self.plan_context_service),
+        )
         self.command_palette_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self.command_palette_shortcut.setContext(Qt.ApplicationShortcut)
         self.command_palette_shortcut.activated.connect(self._open_command_palette)
-        self.station_overview_tab = StationOverviewTab(self)
-        self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
-        self.station_health_tab = StationHealthTab(self)
+        self.station_overview_tab: StationOverviewTab | None = None
+        self.station_health_tab: StationHealthTab | None = None
         self._refresh_station_health_scope_map()
-        self.station_health_tab.set_scope_resolver(self._station_health_scope_resolver)
-        self.station_health_tab.set_runtime_item_provider(self._station_health_runtime_items)
-        self.station_health_tab.set_runtime_source_provider(self._station_health_runtime_source_rows)
-        self.station_health_tab.related_view_requested.connect(self._open_station_health_runtime_source_related_view)
-        self.station_overview_tab.health_details_requested.connect(self._open_station_health_detail)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
         self._sop_data_refresh_timer.setSingleShot(True)
@@ -310,36 +340,49 @@ class MainWindow(QMainWindow):
 
         self.freq_planner_tab = None
         self.message_viewer_tab = None
-        # Build Map eagerly (hidden) so first click does not lazy-swap widgets.
-        self.stations_map_tab = StationsMapTab(self, plan_context_service=self.plan_context_service)
+        self.stations_map_tab: StationsMapTab | None = None
+        self._pending_map_focus: tuple[str, dict[str, str]] | None = None
         self._map_prop_target_syncing = False
 
         self._lazy_placeholders = {}
         self._lazy_factories = {
             "FreqPlanner": self._create_freq_planner_tab,
             "Messages": self._create_message_viewer_tab,
+            "HF Schedule": self._create_hf_schedule_tab,
+            "Net Schedule": self._create_net_schedule_tab,
+            "NCS-FLDigi/SSB": self._create_fldigi_ncs_tab,
+            "NCS-JS8": self._create_js8_ncs_tab,
+            "NCS-Local": self._create_local_ncs_tab,
+            "Station Overview": self._create_station_overview_tab,
+            "Station Health": self._create_station_health_tab,
+            "HF Operators": self._create_operator_history_tab,
+            "Local Operators": self._create_local_operator_tab,
+            "Local Reports": self._create_local_report_history_tab,
+            "Map": self._create_stations_map_tab,
+            "Peer Schedules": self._create_peer_sched_tab,
+            "Help": self._create_help_tab,
         }
 
         # Internal screen registry (stable keys used by cross-tab navigation/lazy loading)
         self._screens = [
             ("ControlFreq", self.controlfreq_tab),
-            ("Station Overview", self.station_overview_tab),
+            ("Station Overview", self._placeholder_widget("Station Overview")),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
-            ("NCS-FLDigi/SSB", self.fldigi_tab),
-            ("NCS-JS8", self.js8_tab),
-            ("NCS-Local", self.local_ncs_tab),
-            ("HF Operators", self.operator_history_tab),
-            ("Local Operators", self.local_operator_tab),
-            ("Local Reports", self.local_report_history_tab),
-            ("Map", self.stations_map_tab),
-            ("HF Schedule", self.hf_schedule_tab),
-            ("Net Schedule", self.net_tab),
-            ("Peer Schedules", self.peer_sched_tab),
-            ("Station Health", self.station_health_tab),
+            ("NCS-FLDigi/SSB", self._placeholder_widget("NCS-FLDigi/SSB")),
+            ("NCS-JS8", self._placeholder_widget("NCS-JS8")),
+            ("NCS-Local", self._placeholder_widget("NCS-Local")),
+            ("HF Operators", self._placeholder_widget("HF Operators")),
+            ("Local Operators", self._placeholder_widget("Local Operators")),
+            ("Local Reports", self._placeholder_widget("Local Reports")),
+            ("Map", self._placeholder_widget("Map")),
+            ("HF Schedule", self._placeholder_widget("HF Schedule")),
+            ("Net Schedule", self._placeholder_widget("Net Schedule")),
+            ("Peer Schedules", self._placeholder_widget("Peer Schedules")),
+            ("Station Health", self._placeholder_widget("Station Health")),
             ("Settings", self.settings_tab),
-            ("Help", self.help_tab),
+            ("Help", self._placeholder_widget("Help")),
         ]
         self._notify_startup_status("Building station dashboard...")
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
@@ -862,6 +905,7 @@ class MainWindow(QMainWindow):
         self._active_tab_index = None
         self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
         self._lazy_prewarm_index = 0
+        self._startup_deferred_prewarm_enabled = self._should_prewarm_deferred_screens_at_startup()
         self._webengine_warmup_widget = None
         self._webengine_warmup_done = False
         self._pending_map_switch_index: int | None = None
@@ -885,7 +929,11 @@ class MainWindow(QMainWindow):
             first_screen_index = self.button_group.id(self.nav_buttons[0])
             self._set_screen(first_screen_index if first_screen_index >= 0 else 0)
         self._suppress_initial_nav_group_auto_expand = False
-        QTimer.singleShot(600, self._start_lazy_prewarm)
+        if self._startup_deferred_prewarm_enabled:
+            # Opt-in only: automatic construction can still monopolize the GUI
+            # event loop on a production-sized station database.  The shell
+            # remains responsive until the operator explicitly opens a screen.
+            QTimer.singleShot(3000, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -908,13 +956,16 @@ class MainWindow(QMainWindow):
             else self._new_varac_status_client()
         )
         self.fldigi_log_status = FldigiLogStatusClient()
-        self.scheduler = SchedulerEngine(
-            self,
-            rig=self.rig_client,
-            js8=self.js8_control,
-            varac=self.varac_status,
-            fldigi_log=self.fldigi_log_status,
-            station_runtime_manager=self.station_runtime_manager,
+        self.scheduler = _construct_startup_component(
+            "scheduler",
+            lambda: SchedulerEngine(
+                self,
+                rig=self.rig_client,
+                js8=self.js8_control,
+                varac=self.varac_status,
+                fldigi_log=self.fldigi_log_status,
+                station_runtime_manager=self.station_runtime_manager,
+            ),
         )
         self._runtime_client_signature = self._runtime_client_signature_for_settings()
         try:
@@ -933,9 +984,23 @@ class MainWindow(QMainWindow):
             pass
         self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
-        self.background_ingest = BackgroundIngestController(
-            self.settings,
-            expect_guard_preflight=build_expect_rf_guard_preflight(self.station_runtime_manager),
+        self.background_ingest = _construct_startup_component(
+            "background_ingest",
+            lambda: BackgroundIngestController(
+                self.settings,
+                expect_guard_preflight=build_expect_rf_guard_preflight(self.station_runtime_manager),
+            ),
+        )
+        self._shutdown_registry.register(
+            "background_ingest",
+            request_stop=getattr(self.background_ingest, "stop", lambda: None),
+            is_stopped=getattr(
+                self.background_ingest,
+                "is_stopped",
+                lambda: not bool(
+                    getattr(self.background_ingest, "is_running", lambda: False)()
+                ),
+            ),
         )
         try:
             self.background_ingest.condition_sop_invocation_audited.connect(
@@ -987,15 +1052,6 @@ class MainWindow(QMainWindow):
             self.scheduler.active_entry_changed.connect(self._refresh_scheduler_status_panel)
         except Exception:
             pass
-        try:
-            if hasattr(self.fldigi_tab, "net_status_changed"):
-                self.fldigi_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
-            if hasattr(self.js8_tab, "net_status_changed"):
-                self.js8_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
-            if hasattr(self.local_ncs_tab, "net_status_changed"):
-                self.local_ncs_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
-        except Exception:
-            pass
         self._refresh_ncs_activity_from_snapshots()
 
         self._status_timer = QTimer(self)
@@ -1033,10 +1089,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 log.debug("MainWindow signal wiring failed: %s: %s", label, e)
 
-        _connect_or_log("settings_saved -> js8_tab", self.settings_tab.settings_saved, self.js8_tab.on_settings_saved)
-        _connect_or_log("settings_saved -> hf_schedule_tab", self.settings_tab.settings_saved, self.hf_schedule_tab.on_settings_saved)
-        _connect_or_log("settings_saved -> fldigi_tab", self.settings_tab.settings_saved, self.fldigi_tab.on_settings_saved)
-        _connect_or_log("settings_saved -> net_tab", self.settings_tab.settings_saved, self.net_tab.on_settings_saved)
         self.settings_tab.settings_saved.connect(self._on_settings_saved_for_lazy_tabs)
         _connect_or_log("settings_saved -> sop_tab", self.settings_tab.settings_saved, self.sop_tab.on_settings_saved)
         try:
@@ -1049,40 +1101,8 @@ class MainWindow(QMainWindow):
                 self.sop_tab.sop_data_changed.connect(self._on_sop_data_changed)
         except Exception as e:
             log.debug("MainWindow signal wiring failed: sop_data_changed -> main_window: %s", e)
-        _connect_or_log("settings_saved -> local_operator_tab", self.settings_tab.settings_saved, self.local_operator_tab.on_settings_saved)
-        _connect_or_log("settings_saved -> local_ncs_tab", self.settings_tab.settings_saved, self.local_ncs_tab.on_settings_saved)
-        _connect_or_log("settings_saved -> local_report_history_tab", self.settings_tab.settings_saved, self.local_report_history_tab.on_settings_saved)
-        if hasattr(self.local_report_history_tab, "local_reports_map_requested"):
-            _connect_or_log(
-                "local_report_history_tab.local_reports_map_requested -> map",
-                self.local_report_history_tab.local_reports_map_requested,
-                self.open_local_reports_map,
-            )
         # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
-        try:
-            if hasattr(self.operator_history_tab, "operator_history_updated"):
-                self.operator_history_tab.operator_history_updated.connect(
-                    self._on_operator_history_local_update
-                )
-        except Exception as e:
-            log.debug("MainWindow signal wiring failed: operator_history_updated -> main_window: %s", e)
-        try:
-            if hasattr(self.local_operator_tab, "local_operator_updated"):
-                self.local_operator_tab.local_operator_updated.connect(self.local_ncs_tab.reload_operator_lookup)
-        except Exception as e:
-            log.debug("MainWindow signal wiring failed: local_operator_updated -> local_ncs_tab: %s", e)
-        try:
-            if hasattr(self.local_operator_tab, "local_reports_requested"):
-                self.local_operator_tab.local_reports_requested.connect(self.open_local_reports)
-        except Exception as e:
-            log.debug("MainWindow signal wiring failed: local_reports_requested -> local reports: %s", e)
-        try:
-            if hasattr(self.local_ncs_tab, "local_data_updated"):
-                self.local_ncs_tab.local_data_updated.connect(self.local_operator_tab._load_data)
-                self.local_ncs_tab.local_data_updated.connect(self.local_report_history_tab.refresh_reports)
-                self.local_ncs_tab.local_data_updated.connect(self.local_ncs_tab.reload_operator_lookup)
-        except Exception as e:
-            log.debug("MainWindow signal wiring failed: local_data_updated fanout: %s", e)
+        self._wire_lazy_local_data_links()
         _connect_or_log("settings_saved -> apply theme", self.settings_tab.settings_saved, self._apply_app_theme)
         _connect_or_log("settings_saved -> runtime settings", self.settings_tab.settings_saved, self._on_runtime_settings_saved)
         _connect_or_log("settings_saved -> sync runtime status", self.settings_tab.settings_saved, self._sync_settings_runtime_status)
@@ -1095,15 +1115,21 @@ class MainWindow(QMainWindow):
         _connect_or_log("settings_saved -> background ingest", self.settings_tab.settings_saved, self.background_ingest.refresh_runtime_settings)
         _connect_or_log("settings_saved -> station health", self.settings_tab.settings_saved, self._on_station_health_settings_saved)
         _connect_or_log("settings_saved -> local mesh runtime", self.settings_tab.settings_saved, self._restart_mesh_runtime_if_needed)
+        mesh_connect_signal = getattr(self.settings_tab, "mesh_connect_requested", None)
+        if mesh_connect_signal is not None:
+            _connect_or_log("mesh connect requested", mesh_connect_signal, self._connect_saved_mesh_from_station_command)
+        mesh_disconnect_signal = getattr(self.settings_tab, "mesh_disconnect_requested", None)
+        if mesh_disconnect_signal is not None:
+            _connect_or_log("mesh disconnect requested", mesh_disconnect_signal, self._disconnect_mesh_runtime)
+        mesh_channel_cancel_signal = getattr(self.settings_tab, "mesh_channel_cancel_requested", None)
+        if mesh_channel_cancel_signal is not None:
+            _connect_or_log(
+                "mesh channel cancel -> local mesh runtime",
+                mesh_channel_cancel_signal,
+                self._cancel_mesh_runtime_operation,
+            )
         _connect_or_log("open_logs_requested -> log window", self.settings_tab.open_logs_requested, self._open_logs_window)
         _connect_or_log("log_level_changed -> log indicator", self.settings_tab.log_level_changed, self._update_log_indicator)
-        self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
-        self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
-        if hasattr(self.sop_tab, "on_hf_schedule_saved"):
-            self.hf_schedule_tab.schedule_saved.connect(self.sop_tab.on_hf_schedule_saved)
-        self.net_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
-        self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
-
         log.info("Main window initialized.")
         self._start_mesh_runtime_if_enabled()
         # Sync sidebar filters initially
@@ -1334,9 +1360,17 @@ class MainWindow(QMainWindow):
         except Exception:
             log.debug("UI_PERF|refresh_failed label=%s", label, exc_info=True)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        if elapsed_ms >= 250.0:
+        emit_span(
+            "ui.callback",
+            elapsed_ms,
+            settings=self.settings,
+            meta={"label": str(label)},
+            min_ms=16.0,
+            level="warning" if elapsed_ms >= 50.0 else "info",
+        )
+        if elapsed_ms >= 50.0:
             log.warning("UI_PERF|slow_refresh label=%s elapsed_ms=%.1f", label, elapsed_ms)
-        elif elapsed_ms >= 75.0:
+        elif elapsed_ms >= 16.0:
             log.info("UI_PERF|refresh label=%s elapsed_ms=%.1f", label, elapsed_ms)
 
     def _status_refresh_callbacks(self) -> tuple[tuple[str, Callable[[], None]], ...]:
@@ -2808,8 +2842,13 @@ class MainWindow(QMainWindow):
         self._mesh_runtime_signature = signature
         if not configs:
             return
-        if self._mesh_worker_thread is not None:
-            return
+        existing_thread = self._mesh_worker_thread
+        if existing_thread is not None:
+            if existing_thread.isRunning():
+                return
+            self._mesh_worker_thread = None
+            self._mesh_worker = None
+            self._mesh_runtime_stopping = False
         try:
             thread = QThread(self)
             worker = MeshConnectionWorker(configs, db_path=default_mesh_db_path())
@@ -2817,13 +2856,31 @@ class MainWindow(QMainWindow):
             thread.started.connect(worker.start)
             worker.error_ready.connect(self._on_mesh_runtime_error)
             worker.health_ready.connect(self._on_mesh_runtime_health)
+            settings_health_handler = getattr(self.settings_tab, "on_mesh_health_ready", None)
+            if callable(settings_health_handler):
+                worker.health_ready.connect(settings_health_handler)
             worker.event_ready.connect(self._on_mesh_runtime_event)
+            worker.channels_ready.connect(self.settings_tab.on_mesh_channels_ready)
+            worker.channel_capabilities_ready.connect(self.settings_tab.on_mesh_channel_capabilities_ready)
+            worker.operation_ready.connect(self.settings_tab.on_mesh_operation_ready)
+            self.settings_tab.mesh_channel_refresh_requested.connect(worker.refresh_channels, Qt.QueuedConnection)
+            self.settings_tab.mesh_channel_configure_requested.connect(worker.configure_channel, Qt.QueuedConnection)
+            self.settings_tab.mesh_channel_remove_device_requested.connect(
+                worker.remove_channel_from_device,
+                Qt.QueuedConnection,
+            )
             worker.stopped.connect(thread.quit)
             worker.stopped.connect(worker.deleteLater)
             thread.finished.connect(thread.deleteLater)
-            thread.finished.connect(self._on_mesh_runtime_thread_finished)
+            thread.finished.connect(
+                lambda runtime_thread=thread, runtime_worker=worker: self._on_mesh_runtime_thread_finished(
+                    runtime_thread,
+                    runtime_worker,
+                )
+            )
             self._mesh_worker_thread = thread
             self._mesh_worker = worker
+            self._mesh_runtime_stopping = False
             thread.start()
             log.info("MainWindow: local mesh runtime starting for %s configured source(s).", len(configs))
         except Exception as e:
@@ -2836,19 +2893,60 @@ class MainWindow(QMainWindow):
         signature = self._mesh_runtime_signature_from_configs(configs)
         if signature == getattr(self, "_mesh_runtime_signature", tuple()):
             return
-        self._stop_mesh_runtime()
         self._mesh_runtime_signature = signature
+        thread = getattr(self, "_mesh_worker_thread", None)
+        if thread is not None and thread.isRunning():
+            self._mesh_runtime_restart_pending = bool(configs)
+            self._stop_mesh_runtime()
+            return
+        if thread is not None:
+            self._mesh_worker_thread = None
+            self._mesh_worker = None
+            self._mesh_runtime_stopping = False
+        self._mesh_runtime_restart_pending = False
         if configs:
-            self._start_mesh_runtime_if_enabled()
+            QTimer.singleShot(0, self._start_mesh_runtime_if_enabled)
+
+    def _cancel_mesh_runtime_operation(self, adapter_id: str, request_class: str) -> None:
+        worker = getattr(self, "_mesh_worker", None)
+        if worker is not None:
+            worker.request_cancel(adapter_id, request_class)
+
+    def _restart_mesh_runtime_now(self) -> None:
+        configs = tuple(self._mesh_runtime_configs())
+        self._mesh_runtime_signature = self._mesh_runtime_signature_from_configs(configs)
+        thread = getattr(self, "_mesh_worker_thread", None)
+        if thread is not None and thread.isRunning():
+            self._mesh_runtime_restart_pending = bool(configs)
+            self._stop_mesh_runtime()
+            return
+        if thread is not None:
+            self._mesh_worker_thread = None
+            self._mesh_worker = None
+            self._mesh_runtime_stopping = False
+        if configs:
+            QTimer.singleShot(0, self._start_mesh_runtime_if_enabled)
+
+    def _disconnect_mesh_runtime(self) -> None:
+        """Stop the live mesh worker without scheduling an automatic restart."""
+
+        self._mesh_runtime_restart_pending = False
+        self._stop_mesh_runtime()
 
     def _stop_mesh_runtime(self) -> None:
         worker = getattr(self, "_mesh_worker", None)
         thread = getattr(self, "_mesh_worker_thread", None)
-        self._mesh_worker = None
-        self._mesh_worker_thread = None
+        if worker is None and thread is None:
+            self._mesh_runtime_stopping = False
+            return
+        self._mesh_runtime_stopping = True
         stop_requested = False
         if worker is not None:
             try:
+                # Set the cancellation flag synchronously. A queued stop cannot
+                # run while a BLE connect/channel request is occupying the
+                # worker thread's event loop.
+                worker.request_stop()
                 if thread is not None and thread.isRunning():
                     QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
                     stop_requested = True
@@ -2887,8 +2985,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _on_mesh_runtime_thread_finished(self) -> None:
+    def _on_mesh_runtime_thread_finished(
+        self,
+        runtime_thread: QThread | None = None,
+        runtime_worker: MeshConnectionWorker | None = None,
+    ) -> None:
         log.debug("MainWindow: local mesh runtime thread finished.")
+        if runtime_thread is not None and self._mesh_worker_thread is not runtime_thread:
+            return
+        if runtime_worker is None or self._mesh_worker is runtime_worker:
+            self._mesh_worker = None
+        self._mesh_worker_thread = None
+        self._mesh_runtime_stopping = False
+        if self._mesh_runtime_restart_pending and not self._shutdown_close_pending:
+            self._mesh_runtime_restart_pending = False
+            QTimer.singleShot(0, self._start_mesh_runtime_if_enabled)
 
     def _on_mesh_runtime_error(self, message: str) -> None:
         text = str(message or "").strip()
@@ -2922,11 +3033,46 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _register_qt_shutdown_threads(self) -> None:
+        """Add currently owned Qt workers to the cooperative shutdown registry."""
+        candidates = list(self.findChildren(QThread))
+        candidates.extend(entry[0] for entry in tuple(_MESH_RUNTIME_SHUTDOWN_GUARD))
+        seen: set[int] = set()
+        for thread in candidates:
+            marker = id(thread)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                label = str(thread.objectName() or "").strip() or str(marker)
+            except RuntimeError:
+                continue
+
+            def _thread_stopped(owned: QThread = thread) -> bool:
+                try:
+                    return not owned.isRunning()
+                except RuntimeError:
+                    return True
+
+            self._shutdown_registry.register(
+                f"qt_thread:{label}",
+                request_stop=lambda owned=thread: owned.requestInterruption(),
+                is_stopped=_thread_stopped,
+            )
+
     def _on_app_about_to_quit(self):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._mesh_runtime_restart_pending = False
         self._close_transient_shutdown_ui()
+        self._register_qt_shutdown_threads()
+        stop_errors = self._shutdown_registry.request_stop_all()
+        if stop_errors:
+            log.warning(
+                "MainWindow shutdown: stop request failed for registered worker(s): %s",
+                ", ".join(stop_errors),
+            )
         try:
             if hasattr(self, "_ui_watchdog"):
                 self._ui_watchdog.stop()
@@ -3091,19 +3237,53 @@ class MainWindow(QMainWindow):
                     live_threads.append(thread)
             except RuntimeError:
                 continue
-        if live_threads:
+        registered_pending = self._shutdown_registry.pending()
+        if live_threads or registered_pending:
             now = time.monotonic()
-            if now - self._shutdown_wait_last_log >= 5.0:
-                elapsed = now - self._shutdown_wait_started
+            elapsed = now - self._shutdown_wait_started
+            if elapsed >= 3.0 and not self._shutdown_deadline_reported:
+                self._shutdown_deadline_reported = True
+                emit_span(
+                    "shutdown.deadline_exceeded",
+                    elapsed * 1000.0,
+                    settings=self.settings,
+                    meta={
+                        "qt_threads": len(live_threads),
+                        "workers": list(registered_pending),
+                    },
+                    level="error",
+                )
+                log.error(
+                    "MainWindow shutdown exceeded 3.0s; pending Qt threads=%s, workers=%s",
+                    len(live_threads),
+                    ", ".join(registered_pending) or "none",
+                )
+                self._shutdown_registry.request_stop_all()
+                for thread in live_threads:
+                    try:
+                        thread.requestInterruption()
+                        thread.quit()
+                    except RuntimeError:
+                        continue
+            if now - self._shutdown_wait_last_log >= 1.0:
                 log.info(
-                    "MainWindow shutdown: waiting %.1fs for %s worker thread(s) to stop cleanly.",
+                    "MainWindow shutdown: waiting %.1fs for %s Qt thread(s), registered=%s.",
                     elapsed,
                     len(live_threads),
+                    ", ".join(registered_pending) or "none",
                 )
                 self._shutdown_wait_last_log = now
             QTimer.singleShot(50, self._poll_graceful_close)
             return
         self._allow_final_close = True
+        elapsed_ms = max(0.0, (time.monotonic() - self._shutdown_wait_started) * 1000.0)
+        emit_span(
+            "shutdown.complete",
+            elapsed_ms,
+            settings=self.settings,
+            meta={"deadline_ms": 3000},
+            level="warning" if elapsed_ms > 3000.0 else "info",
+        )
         log.info("MainWindow shutdown: all Qt worker threads stopped cleanly.")
         self.close()
         # The first close event hides the last visible window while Qt workers
@@ -3854,13 +4034,16 @@ class MainWindow(QMainWindow):
         help_index = next((idx for idx, (label, _) in enumerate(self._screens) if label == "Help"), -1)
         if help_index >= 0:
             self._set_screen(help_index)
+        tab = getattr(self, "help_tab", None)
+        if tab is None:
+            return
         try:
-            self.help_tab.open_anchor(anchor)
+            tab.open_anchor(anchor)
         except Exception:
             pass
         if title:
             try:
-                self.help_tab.setWindowTitle(str(title))
+                tab.setWindowTitle(str(title))
             except Exception:
                 pass
 
@@ -4008,6 +4191,26 @@ class MainWindow(QMainWindow):
         self._set_screen(idx)
         QTimer.singleShot(0, self._apply_messages_nav_context)
 
+    def _apply_pending_map_focus(self) -> None:
+        pending = getattr(self, "_pending_map_focus", None)
+        tab = getattr(self, "stations_map_tab", None)
+        if not pending or tab is None:
+            return
+        kind, context = pending
+        focus = None
+        if kind == "spotter":
+            focus = getattr(tab, "focus_hf_reports", None) or getattr(tab, "focus_spotter_reports", None)
+        elif kind == "local":
+            focus = getattr(tab, "focus_local_reports", None)
+        if not callable(focus):
+            return
+        self._pending_map_focus = None
+        try:
+            focus(**context)
+        except Exception as exc:
+            log.debug("MainWindow: deferred map focus failed: %s", exc)
+        QTimer.singleShot(0, self._sync_map_filters_from_tab)
+
     def open_spotter_map(
         self,
         *,
@@ -4020,26 +4223,18 @@ class MainWindow(QMainWindow):
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
-        tab = getattr(self, "stations_map_tab", None)
-        if tab is not None:
-            focus = getattr(tab, "focus_hf_reports", None) or getattr(tab, "focus_spotter_reports", None)
-            if callable(focus):
-                QTimer.singleShot(
-                    0,
-                    lambda: focus(
-                        group_filter=group_filter,
-                        topic_filter=topic_filter,
-                        query_filter=query_filter,
-                        state_filter=state_filter,
-                        grid_filter=grid_filter,
-                    ),
-                )
-                QTimer.singleShot(0, self._sync_map_filters_from_tab)
+        self._pending_map_focus = (
+            "spotter",
+            {
+                "group_filter": str(group_filter or ""),
+                "topic_filter": str(topic_filter or ""),
+                "query_filter": str(query_filter or ""),
+                "state_filter": str(state_filter or ""),
+                "grid_filter": str(grid_filter or ""),
+            },
+        )
         self._set_screen(idx)
-        try:
-            self._sync_map_filters_from_tab()
-        except Exception:
-            pass
+        self._apply_pending_map_focus()
 
     # Legacy source-contract marker: def open_local_reports_map(self) -> None:
     def open_local_reports_map(self, **context: object) -> None:
@@ -4074,24 +4269,18 @@ class MainWindow(QMainWindow):
         idx = self._screen_index_by_label.get("Map", -1)
         if idx < 0 or self._screen_is_runtime_suppressed("Map"):
             return
-        tab = getattr(self, "stations_map_tab", None)
-        if tab is not None and hasattr(tab, "focus_local_reports"):
-            QTimer.singleShot(
-                0,
-                lambda: tab.focus_local_reports(
-                    group_filter=group_filter,
-                    topic_filter=topic_filter,
-                    query_filter=query_filter,
-                    state_filter=state_filter,
-                    grid_filter=grid_filter,
-                ),
-            )
-            QTimer.singleShot(0, self._sync_map_filters_from_tab)
+        self._pending_map_focus = (
+            "local",
+            {
+                "group_filter": str(group_filter or ""),
+                "topic_filter": str(topic_filter or ""),
+                "query_filter": str(query_filter or ""),
+                "state_filter": str(state_filter or ""),
+                "grid_filter": str(grid_filter or ""),
+            },
+        )
         self._set_screen(idx)
-        try:
-            self._sync_map_filters_from_tab()
-        except Exception:
-            pass
+        self._apply_pending_map_focus()
 
     def open_local_reports(self, callsign: str = "", *, topic_filter: str = "", query: str = "") -> None:
         idx = self._screen_index_by_label.get("Local Reports", -1)
@@ -4161,16 +4350,19 @@ class MainWindow(QMainWindow):
             pass
 
     def _open_station_health_detail(self, device_profile_id: int = 0, scope_name: str = "") -> None:
+        idx = self._screen_index_by_label.get("Station Health", -1)
+        if idx >= 0:
+            self._set_screen(idx)
+        tab = getattr(self, "station_health_tab", None)
+        if tab is None:
+            return
         try:
-            self.station_health_tab.focus_scope(
+            tab.focus_scope(
                 device_profile_id=int(device_profile_id or 0),
                 scope_name=str(scope_name or "").strip(),
             )
         except Exception:
             pass
-        idx = self._screen_index_by_label.get("Station Health", -1)
-        if idx >= 0:
-            self._set_screen(idx)
 
     def _on_station_command_health_clicked(self, event=None, *, anchor: QWidget | None = None) -> None:
         try:
@@ -4912,6 +5104,14 @@ class MainWindow(QMainWindow):
             raw = None
         return self._truthy_flag(raw, default_enabled)
 
+    def _should_prewarm_deferred_screens_at_startup(self) -> bool:
+        """Keep deferred screens deferred unless an operator explicitly opts in."""
+        try:
+            raw = self.settings.get("startup_deferred_screen_prewarm", None)
+        except Exception:
+            raw = None
+        return MainWindow._truthy_flag(raw, False)
+
     def _show_tab_loading_notice(self, text: str) -> None:
         try:
             self.statusBar().showMessage(str(text or "Preparing..."), 2500)
@@ -5087,6 +5287,232 @@ class MainWindow(QMainWindow):
                 pass
             return self.message_viewer_tab
 
+    def _connect_lazy_screen_signal(self, key: str, signal: object, slot: object) -> None:
+        """Connect a deferred-screen signal once, after both endpoints exist."""
+        connected = getattr(self, "_lazy_screen_signal_keys", None)
+        if connected is None:
+            connected = set()
+            self._lazy_screen_signal_keys = connected
+        if key in connected or signal is None or not callable(slot):
+            return
+        try:
+            signal.connect(slot)
+            connected.add(key)
+        except Exception as exc:
+            log.debug("MainWindow deferred screen signal wiring failed: %s: %s", key, exc)
+
+    def _create_hf_schedule_tab(self) -> QWidget:
+        with perf_span("main_window.create_hf_schedule_tab", settings=self.settings, min_ms=5.0):
+            tab = DailyScheduleTab(self, plan_context_service=self.plan_context_service)
+            self.hf_schedule_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.hf_schedule",
+                self.settings_tab.settings_saved,
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "hf_schedule.freq_planner",
+                tab.schedule_saved,
+                self._refresh_freq_planner_if_loaded,
+            )
+            self._connect_lazy_screen_signal(
+                "hf_schedule.scheduler",
+                tab.schedule_saved,
+                self.scheduler.force_refresh,
+            )
+            self._connect_lazy_screen_signal(
+                "hf_schedule.sop",
+                tab.schedule_saved,
+                getattr(self.sop_tab, "on_hf_schedule_saved", None),
+            )
+            return tab
+
+    def _create_net_schedule_tab(self) -> QWidget:
+        with perf_span("main_window.create_net_schedule_tab", settings=self.settings, min_ms=5.0):
+            tab = NetScheduleTab(self, plan_context_service=self.plan_context_service)
+            self.net_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.net_schedule",
+                self.settings_tab.settings_saved,
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "net_schedule.freq_planner",
+                tab.schedule_saved,
+                self._refresh_freq_planner_if_loaded,
+            )
+            self._connect_lazy_screen_signal(
+                "net_schedule.scheduler",
+                tab.schedule_saved,
+                self.scheduler.force_refresh,
+            )
+            return tab
+
+    def _create_fldigi_ncs_tab(self) -> QWidget:
+        with perf_span("main_window.create_fldigi_ncs_tab", settings=self.settings, min_ms=5.0):
+            tab = FldigiNetControlTab(self)
+            self.fldigi_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.fldigi_ncs",
+                self.settings_tab.settings_saved,
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "fldigi_ncs.net_status",
+                getattr(tab, "net_status_changed", None),
+                self._on_ncs_net_status_changed,
+            )
+            return tab
+
+    def _create_js8_ncs_tab(self) -> QWidget:
+        with perf_span("main_window.create_js8_ncs_tab", settings=self.settings, min_ms=5.0):
+            tab = JS8CallNetControlTab(self)
+            self.js8_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.js8_ncs",
+                self.settings_tab.settings_saved,
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "js8_ncs.net_status",
+                getattr(tab, "net_status_changed", None),
+                self._on_ncs_net_status_changed,
+            )
+            return tab
+
+    def _create_local_ncs_tab(self) -> QWidget:
+        with perf_span("main_window.create_local_ncs_tab", settings=self.settings, min_ms=5.0):
+            tab = LocalNCSTab(self)
+            self.local_ncs_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.local_ncs",
+                self.settings_tab.settings_saved,
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "local_ncs.net_status",
+                getattr(tab, "net_status_changed", None),
+                self._on_ncs_net_status_changed,
+            )
+            self._wire_lazy_local_data_links()
+            return tab
+
+    def _create_station_overview_tab(self) -> QWidget:
+        with perf_span("main_window.create_station_overview_tab", settings=self.settings, min_ms=5.0):
+            tab = StationOverviewTab(self)
+            tab.set_runtime_manager(self.station_runtime_manager)
+            self.station_overview_tab = tab
+            try:
+                self.station_overview_tab.health_details_requested.connect(self._open_station_health_detail)
+            except Exception as exc:
+                log.debug("MainWindow deferred screen signal wiring failed: station overview health details: %s", exc)
+            return tab
+
+    def _create_station_health_tab(self) -> QWidget:
+        with perf_span("main_window.create_station_health_tab", settings=self.settings, min_ms=5.0):
+            tab = StationHealthTab(self)
+            tab.set_scope_resolver(self._station_health_scope_resolver)
+            tab.set_runtime_item_provider(self._station_health_runtime_items)
+            tab.set_runtime_source_provider(self._station_health_runtime_source_rows)
+            self._connect_lazy_screen_signal(
+                "station_health.related_view_requested",
+                getattr(tab, "related_view_requested", None),
+                self._open_station_health_runtime_source_related_view,
+            )
+            self.station_health_tab = tab
+            return tab
+
+    def _create_operator_history_tab(self) -> QWidget:
+        with perf_span("main_window.create_operator_history_tab", settings=self.settings, min_ms=5.0):
+            tab = OperatorHistoryTab(self)
+            self.operator_history_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.operator_history",
+                getattr(self.settings_tab, "settings_saved", None),
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "operator_history.updated",
+                getattr(tab, "operator_history_updated", None),
+                self._on_operator_history_local_update,
+            )
+            return tab
+
+    def _create_local_operator_tab(self) -> QWidget:
+        with perf_span("main_window.create_local_operator_tab", settings=self.settings, min_ms=5.0):
+            tab = LocalOperatorTab(self)
+            self.local_operator_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.local_operator",
+                getattr(self.settings_tab, "settings_saved", None),
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "local_operator.reports_requested",
+                getattr(tab, "local_reports_requested", None),
+                self.open_local_reports,
+            )
+            self._wire_lazy_local_data_links()
+            return tab
+
+    def _create_local_report_history_tab(self) -> QWidget:
+        with perf_span("main_window.create_local_report_history_tab", settings=self.settings, min_ms=5.0):
+            tab = LocalReportHistoryTab(self)
+            self.local_report_history_tab = tab
+            self._connect_lazy_screen_signal(
+                "settings_saved.local_report_history",
+                getattr(self.settings_tab, "settings_saved", None),
+                tab.on_settings_saved,
+            )
+            self._connect_lazy_screen_signal(
+                "local_report_history.map_requested",
+                getattr(tab, "local_reports_map_requested", None),
+                self.open_local_reports_map,
+            )
+            self._wire_lazy_local_data_links()
+            return tab
+
+    def _wire_lazy_local_data_links(self) -> None:
+        """Wire only loaded local-data screens; unloaded screens load fresh state."""
+        local_ncs = getattr(self, "local_ncs_tab", None)
+        if local_ncs is None:
+            return
+        signal = getattr(local_ncs, "local_data_updated", None)
+        self._connect_lazy_screen_signal(
+            "local_ncs.reload_lookup",
+            signal,
+            getattr(local_ncs, "reload_operator_lookup", None),
+        )
+        local_operators = getattr(self, "local_operator_tab", None)
+        if local_operators is not None:
+            self._connect_lazy_screen_signal(
+                "local_operator.reload_ncs_lookup",
+                getattr(local_operators, "local_operator_updated", None),
+                getattr(local_ncs, "reload_operator_lookup", None),
+            )
+            self._connect_lazy_screen_signal(
+                "local_ncs.refresh_local_operators",
+                signal,
+                getattr(local_operators, "_load_data", None),
+            )
+        local_reports = getattr(self, "local_report_history_tab", None)
+        if local_reports is not None:
+            self._connect_lazy_screen_signal(
+                "local_ncs.refresh_local_reports",
+                signal,
+                getattr(local_reports, "refresh_reports", None),
+            )
+
+    def _create_peer_sched_tab(self) -> QWidget:
+        with perf_span("main_window.create_peer_sched_tab", settings=self.settings, min_ms=5.0):
+            self.peer_sched_tab = PeerSchedTab(self)
+            return self.peer_sched_tab
+
+    def _create_help_tab(self) -> QWidget:
+        with perf_span("main_window.create_help_tab", settings=self.settings, min_ms=5.0):
+            self.help_tab = HelpTab(self)
+            return self.help_tab
+
     def _create_stations_map_tab(self) -> QWidget:
         with perf_span(
             "main_window.create_stations_map_tab",
@@ -5094,6 +5520,8 @@ class MainWindow(QMainWindow):
             min_ms=5.0,
         ):
             self.stations_map_tab = StationsMapTab(self, plan_context_service=self.plan_context_service)
+            QTimer.singleShot(0, self._sync_map_filters_from_tab)
+            QTimer.singleShot(0, self._apply_pending_map_focus)
             return self.stations_map_tab
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
@@ -5557,7 +5985,8 @@ class MainWindow(QMainWindow):
                     self._prewarm_webengine()
                 except Exception:
                     pass
-            QTimer.singleShot(0, self._start_lazy_prewarm)
+            if bool(getattr(self, "_startup_deferred_prewarm_enabled", False)):
+                QTimer.singleShot(3000, self._start_lazy_prewarm)
 
         banner_text = self._runtime_banner_text(profile, policy)
         if hasattr(self, "runtime_mode_label"):
@@ -7795,23 +8224,13 @@ class MainWindow(QMainWindow):
         config: object,
         rows: Sequence[Mapping[str, object]],
     ) -> Mapping[str, object] | None:
-        keys = {
-            MainWindow._station_command_normalized_mesh_identity(getattr(config, "adapter_id", "")),
-            MainWindow._station_command_normalized_mesh_identity(getattr(config, "ble_device_id", "")),
-            MainWindow._station_command_normalized_mesh_identity(getattr(config, "ble_device_name", "")),
-        }
-        keys.discard("")
-        if not keys:
+        if not isinstance(config, MeshConnectionConfig):
             return None
         matches = []
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
-            row_keys = {
-                MainWindow._station_command_normalized_mesh_identity(row.get("adapter_id")),
-                MainWindow._station_command_normalized_mesh_identity(row.get("device_name")),
-            }
-            if keys.intersection(row_keys):
+            if mesh_health_matches_config(config, row):
                 matches.append(row)
         if not matches:
             return None
@@ -7880,11 +8299,13 @@ class MainWindow(QMainWindow):
         return device_is_raw and adapter_is_raw
 
     @staticmethod
-    def _station_command_mesh_chip_rank(row: Mapping[str, object]) -> tuple[int, str]:
-        connected = 2 if bool(row.get("connected")) else 0
-        issue = 0 if str(row.get("last_error") or "").strip() else 1
+    def _station_command_mesh_chip_rank(row: Mapping[str, object]) -> tuple[str, int, int]:
+        # A retained success from an older adapter identity must not override a
+        # newer failed/disconnected snapshot for the same physical device.
         updated = str(row.get("updated_utc") or "").strip()
-        return (connected + issue, updated)
+        connected = 1 if bool(row.get("connected")) else 0
+        healthy = 1 if not str(row.get("last_error") or "").strip() else 0
+        return (updated, connected, healthy)
 
     @staticmethod
     def _station_command_mesh_chip_signature(chips: Sequence[Mapping[str, object]]) -> tuple[tuple[str, str, str], ...]:
@@ -7996,8 +8417,7 @@ class MainWindow(QMainWindow):
         restart_btn.setToolTip("Restart the local mesh worker for the configured connection.")
         restart_btn.clicked.connect(
             lambda _checked=False: (
-                self._stop_mesh_runtime(),
-                self._start_mesh_runtime_if_enabled(),
+                self._restart_mesh_runtime_now(),
                 self._refresh_station_command_bar(force=True),
             )
         )
@@ -8007,7 +8427,7 @@ class MainWindow(QMainWindow):
         disconnect_btn.setToolTip("Stop the local mesh worker. The saved configuration remains unchanged.")
         disconnect_btn.clicked.connect(
             lambda _checked=False: (
-                self._stop_mesh_runtime(),
+                self._disconnect_mesh_runtime(),
                 self._refresh_station_command_bar(force=True),
             )
         )
@@ -8031,6 +8451,14 @@ class MainWindow(QMainWindow):
         selected_key = str(_source_key or "").strip()
         if selected_key.startswith("connect:"):
             selected_key = selected_key.split("connect:", 1)[1]
+        # SettingsTab owns a separate SQLite-backed SettingsManager.  A Scan /
+        # Use Device action persists there immediately and then emits this
+        # signal.  Reload before resolving the stable endpoint key so the
+        # newly saved device cannot be rejected by this window's stale cache.
+        try:
+            self.settings.reload()
+        except Exception as exc:
+            log.debug("MainWindow: local mesh settings reload before connect failed: %s", exc)
         try:
             payload = activate_mesh_connection_config(
                 self.settings.all(),
@@ -8049,7 +8477,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.warning("MainWindow: failed to save activated mesh connection %s: %s", selected_key, exc)
             return
-        self._restart_mesh_runtime_if_needed()
+        # This is an explicit operator Connect action. Disconnect deliberately
+        # preserves the saved configuration, so a signature-only restart check
+        # would see no settings change and turn Connect into a no-op.
+        self._restart_mesh_runtime_now()
         self._refresh_station_command_bar(force=True)
         settings_tab = getattr(self, "settings_tab", None)
         if settings_tab is not None and hasattr(settings_tab, "_load_mesh_settings_from_data"):
@@ -8061,8 +8492,9 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _station_command_mesh_protocol_prefix(source_key: str) -> str:
         protocol = str(source_key or "").strip().split(":", 1)[0].strip().lower()
-        if protocol in {"meshcore", "meshtastic"}:
-            return protocol
+        for known_protocol in ("meshcore", "meshtastic"):
+            if protocol == known_protocol or protocol.startswith(f"{known_protocol}-"):
+                return known_protocol
         return "meshtastic"
 
     def _show_mesh_source_menu(self, button: QPushButton, item: SourceControlItem) -> None:
@@ -8070,29 +8502,58 @@ class MainWindow(QMainWindow):
         menu.setObjectName("stationCommandMeshMenu")
         menu.setToolTipsVisible(True)
         for action_item in item.actions:
-            action = QAction(action_item.label, menu)
-            action.setEnabled(bool(action_item.enabled))
+            is_connected = action_item.role == "eligible_success"
+            label = action_item.label
+            if is_connected and label.startswith("Connect: "):
+                # Keep connected saved devices visible as known configurations,
+                # but never present an enabled Connect action for one already
+                # owned by the runtime.
+                label = f"Connected: {label.split('Connect: ', 1)[1]}"
+            action = QAction(label, menu)
+            action.setEnabled(bool(action_item.enabled) and not is_connected)
             if action_item.tooltip:
-                action.setToolTip(action_item.tooltip)
+                tooltip = action_item.tooltip
+                if is_connected:
+                    tooltip = tooltip.replace("Connect to", "Already connected to", 1)
+                action.setToolTip(tooltip)
             key = str(action_item.key or "")
-            if key.startswith("connect:"):
+            if key.startswith("connect:") and not is_connected:
                 action.triggered.connect(lambda _checked=False, source_key=key: self._connect_saved_mesh_from_station_command(source_key))
             menu.addAction(action)
         if item.actions:
             menu.addSeparator()
-        if item.role == "eligible_success" or any(action_item.role == "eligible_success" for action_item in item.actions):
-            disconnect_action = QAction(f"Disconnect {item.label}", menu)
+        connected_actions = [
+            action_item
+            for action_item in item.actions
+            if action_item.role == "eligible_success"
+        ]
+        if connected_actions:
+            connected_names = []
+            for action_item in connected_actions:
+                name = str(action_item.label or "").strip()
+                if name.startswith("Connect: "):
+                    name = name.split("Connect: ", 1)[1].strip()
+                if name and name not in connected_names:
+                    connected_names.append(name)
+            active_label = ", ".join(connected_names) or item.label
+            disconnect_action = QAction(f"Disconnect {active_label}", menu)
             disconnect_action.setToolTip("Stop the active local mesh worker. Saved device settings remain available.")
-            disconnect_action.triggered.connect(lambda _checked=False: (self._stop_mesh_runtime(), self._refresh_station_command_bar(force=True)))
+            disconnect_action.triggered.connect(
+                lambda _checked=False: (
+                    self._disconnect_mesh_runtime(),
+                    self._refresh_station_command_bar(force=True),
+                )
+            )
             menu.addAction(disconnect_action)
+        scan_action = QAction("Scan for Device…", menu)
+        scan_action.setToolTip("Open Local Mesh settings to scan for and use a nearby device.")
+        scan_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
+        menu.addAction(scan_action)
+        menu.addSeparator()
         manage_action = QAction("Manage Channels", menu)
         manage_action.setToolTip("Open Local Mesh settings and channel/feed review.")
         manage_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
         menu.addAction(manage_action)
-        add_action = QAction("Add Device...", menu)
-        add_action.setToolTip("Open Local Mesh settings to scan or add a saved device.")
-        add_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
-        menu.addAction(add_action)
         settings_action = QAction("Mesh Settings", menu)
         settings_action.triggered.connect(lambda _checked=False: self._open_mesh_settings_from_station_command())
         menu.addAction(settings_action)
@@ -10182,7 +10643,9 @@ class MainWindow(QMainWindow):
     def _on_station_health_settings_saved(self) -> None:
         self._refresh_station_health_scope_map()
         try:
-            self.station_health_tab.refresh_from_registry()
+            tab = getattr(self, "station_health_tab", None)
+            if tab is not None:
+                tab.refresh_from_registry()
         except Exception:
             pass
         self._station_health_alert_signature = None

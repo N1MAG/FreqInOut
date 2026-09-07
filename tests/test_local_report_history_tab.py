@@ -231,9 +231,10 @@ def test_main_window_registers_local_reports_separate_from_hf_operator_history()
     text = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
     assert "from freqinout.gui.local_report_history_tab import LocalReportHistoryTab" in text
-    assert '("HF Operators", self.operator_history_tab)' in text
-    assert '("Local Reports", self.local_report_history_tab)' in text
+    assert '("HF Operators", self._placeholder_widget("HF Operators"))' in text
+    assert '("Local Reports", self._placeholder_widget("Local Reports"))' in text
     assert '("Local Reports", "Local Reports")' in text
-    assert "self.local_operator_tab.local_reports_requested.connect(self.open_local_reports)" in text
-    assert "self.local_report_history_tab.local_reports_map_requested" in text
-    assert "def open_local_reports_map(self) -> None:" in text
+    assert '"Local Reports": self._create_local_report_history_tab' in text
+    assert '"local_operator.reports_requested"' in text
+    assert '"local_report_history.map_requested"' in text
+    assert "def open_local_reports_map(self, **context: object) -> None:" in text

@@ -1,7 +1,12 @@
 # Mesh Client Integration Spec
 
-Status: runtime foundation plus initial MeshCore receive bridge implemented  
+Status: runtime foundation, responsive lifecycle, and channel administration implemented; live Linux/macOS device QA pending
 Scope: local mesh connection configuration, Meshtastic/MeshCore source contracts, passive message/node ingest, future UI routing
+
+Production remediation for connection naming, responsive BLE fields,
+cancellable scan/reconnect/channel work, channel administration, platform-neutral
+guidance, and shutdown behavior is governed by
+`production_reliability_and_workflow_remediation_spec.md`.
 
 ## Sources And Documentation
 
@@ -60,7 +65,9 @@ Meshtastic-specific source differences:
   or Meshtastic short name, with raw ids shown only as secondary detail.
 - Channels: preserve channel index, channel name, role, uplink/downlink
   capability when exposed, and key readiness. Named channels sort before blank
-  or generated channel labels.
+  or generated channel labels. MeshCore channel administration contains only
+  device channels (Public, hashtag, or private); contact/person-to-person
+  messages and direct-route observations are not synthetic channels.
 - Encryption: private-channel PSKs or keys are required to join or configure a
   private feed unless the connected device already has the channel configured.
   Secrets must not be logged, displayed after entry, copied into observations,
@@ -144,6 +151,9 @@ Validation must be specific:
 - MeshCore BLE scan must run outside the Qt UI thread and must not connect,
   pair, or change saved settings until the user explicitly chooses a discovered
   device.
+- The MeshCore BLE discovery row and its empty/error state remain visible while
+  BLE is selected. Choosing `Use Device` persists the selected id/name and
+  requests connection; operators do not need to find a separate Save action.
 - USB serial reconnect should be designed to avoid stale open-port failures.
 
 ## Connection Lifecycle Rules
@@ -161,6 +171,15 @@ Required lifecycle behavior:
 - `Reconnect` should be a visible action when a saved connection is enabled but
   disconnected. It should reuse the saved BLE id/name and should not require a
   new scan unless the device cannot be found.
+- A failed direct open of a saved BLE identity may perform one bounded scan by
+  exact saved id/name and retry using the discovered device object. Automatic
+  backoff must not repeat a full scan on every attempt.
+- Normal disconnect, application restart, and card restart must never be
+  described as requiring the computer to forget or re-pair the device.
+  CoreBluetooth Code 14 (`Peer removed pairing information`) is a distinct
+  terminal stale-key state: record the raw platform error, avoid an ineffective
+  scan loop, and explain OS re-pairing only as last-resort recovery because
+  standard macOS APIs do not permit an application to clear the host bond.
 - Auto-reconnect should be conservative: exponential backoff with a visible
   status such as `Retrying in 30s`, capped so a missing device does not burn
   battery or make the UI feel stuck.
@@ -208,7 +227,9 @@ Channel fields:
 - `channel_id`: stable protocol identifier when known, such as Meshtastic
   channel index or MeshCore room/channel id.
 - `channel_name`: user-facing label when known.
-- `channel_role`: public, private, direct, admin, telemetry, or unknown.
+- `channel_role`: public, private, admin, telemetry, or unknown. `direct` may be
+  retained internally as a compatibility/message-routing policy role, but must
+  not render as a MeshCore device channel.
 - `channel_privacy`: plain-language hint such as `public`, `encrypted`,
   `direct`, or `unknown`; never display secrets or PSKs.
 - `mapped_groups`: zero or more FIO operating groups that should receive the
@@ -263,9 +284,10 @@ Projection rules:
 - If `topic_scan_enabled` is off but another surface is allowed, the message may
   appear in that surface without contributing topics.
 - Messages with no explicit channel may use an accepted default public channel
-  policy for that adapter/protocol. Directed packets may use the accepted direct
-  policy when the protocol exposes a recipient but omits a clean direct-channel
-  id.
+  policy for that adapter/protocol. MeshCore contact messages may use an
+  internal person-to-person feed policy when the protocol exposes a recipient
+  but no channel id. That policy is routing/message metadata and is not listed
+  as a device channel.
 - Retention is enforced per channel policy during runtime maintenance. Expired
   raw packets and their observation projections are removed together; `keep
   pinned` must preserve the feed until pin support can distinguish pinned rows.
@@ -303,13 +325,13 @@ Source reference contract:
   data may refresh node and channel projections, but it must not clear accepted
   `mesh:` message projections or replace them with topology rows.
 
-Default channel policies:
+Default channel/feed policies:
 
 | Channel type | Inbox | Ops Center | Topic Scan | Map | Retention |
 | --- | --- | --- | --- | --- | --- |
 | Public/default | On, categorized as public mesh | On, severity-gated | On | If mappable | 24h |
 | Private/named | On | On | On | If mappable | 7d |
-| Direct | On | On for recent/direct context | On | Sender location only when labeled | 30d |
+| Contact/person-to-person (not a device channel) | On | On for recent contact context | On | Sender location only when labeled | 30d |
 | Telemetry/admin | Off | Health/context only | Off by default | Node/location only | 24h |
 | Ignored | Off | Off | Off | Off | none |
 
@@ -648,11 +670,21 @@ Implemented now:
 - Settings `Local Mesh` panel for station-level mesh connection configuration
 - Mesh protocol selector for Meshtastic vs MeshCore provenance
 - TCP, USB serial, BLE, HTTP, and MQTT configuration fields
+- protocol-derived saved connection names that preserve operator edits, with
+  stable adapter/device id, advertised name, and optional source radio/role kept
+  as separate fields
+- responsive BLE id/name/timeout/status/result rows at compact and Large Text
+  sizes, with platform-neutral primary Bluetooth guidance
+- explicit off-thread BLE discovery with immediate progress, elapsed/remaining
+  state, cancellable operation ownership, and scan results that do not require a
+  second checkbox interaction
 - explicit receive/map/send policy controls, with send disabled by default
 - lazy USB serial-port discovery that does not require PySerial at startup
 - validation-driven setup guidance in Settings
 - non-Qt mesh connection manager for adapter lifecycle, health snapshots, and event publication
 - Qt-safe mesh connection worker wrapper for future threaded passive receive
+- immutable operation snapshots, capped exponential reconnect backoff, manual
+  retry, cross-thread cancellation, and ordered worker replacement
 - Meshtastic pub-sub receive subscription with queued event draining
 - durable passive mesh message store
 - mesh health persistence for device/status UI
@@ -662,14 +694,16 @@ Implemented now:
 - manager-to-store event sink so live workers can persist health/messages without UI coupling
 - app runtime sidecar that starts the mesh worker only when Local Mesh is explicitly enabled
 - settings-saved restart hook so Local Mesh connection changes take effect without restarting FIO
-- main-window shutdown hook so the mesh worker stops before app exit
+- main-window shutdown hook that synchronously requests cancellation before the
+  queued worker stop, preventing blocked device work from outliving Qt
 - slow node polling cadence so node/map readiness does not make UI refresh feel heavy
 - shared source-family labels for Mesh, MeshCore, and Meshtastic
 - MeshCore BLE safe-connect adapter using the Companion/Nordic UART service
   UUIDs from `mesh-client`, with pairing-aware error guidance
 - in-app MeshCore BLE scan/select workflow in Settings so BLE-only advertised
   devices can be selected even when macOS Bluetooth Settings does not list them
-- mesh channel policy model with public/private/direct/telemetry defaults,
+- mesh channel/feed policy model with public/private/telemetry channel defaults
+  and an internal person-to-person message-routing policy,
   review-state gates, per-channel retention, and Inbox/Ops/Map/topic-scan
   controls
 - private/encrypted channel key-state gating: private feeds require an explicit
@@ -682,7 +716,8 @@ Implemented now:
   channel write path.
 - durable `mesh_channel_policies` store for accepted, ignored, and pending
   device-discovered channels, including private channel key readiness metadata
-- protocol-neutral channel polling boundary for future device channel import
+- protocol-neutral incremental/cancellable channel polling and capability-gated
+  device configuration/removal boundaries
 - MeshCore companion normalization boundary for `getChannels()` and
   `getWaitingMessages()` shapes used by `mesh-client`, including channel
   privacy/key readiness, channel/direct message projection, stable message IDs,
@@ -702,10 +737,14 @@ Implemented now:
 - mesh ingest readiness assessment that distinguishes no reviewed feeds,
   private channels needing a joined/key-ready state, no accepted feeds, accepted
   policy with MeshCore decoder still pending, and fully ready feeds
-- Settings `Mesh Channels` review surface with staged Public/Direct defaults,
-  manually staged private feeds, accepted/ignored review states, explicit
-  private-channel joined/key-ready status, and persisted policy gates scoped by
-  adapter/protocol
+- responsive Settings `Mesh Channels` administration surface with a bounded
+  channel selector; separate device facts and FIO policy; protocol-aware staged
+  defaults (Public only for MeshCore); accepted/ignored review states; category, retention, mapped-group,
+  and Inbox/Ops/Map/topic controls; explicit private-channel key readiness; and
+  persisted policy gates scoped by adapter/protocol
+- separate `Remove from FIO` archival and confirmed, capability-gated `Remove
+  from device` actions; unsupported adapters show companion-tool guidance and
+  no secret/key material is rendered
 - device-discovered channel staging from the runtime worker into Settings review
   without overwriting reviewed choices
 - Settings Local Mesh must show an obvious connection indicator sourced from the
@@ -737,6 +776,20 @@ Implemented now:
   If the live worker is connected to a device different from the selected form
   entry, Settings must show that as connection state, not silently relabel the
   selected configuration.
+- The stable protocol/transport/physical-endpoint key owns saved identity.
+  Internal adapter ids must be unique across the complete saved library,
+  including disabled devices. Legacy duplicate adapter ids are normalized
+  non-destructively before runtime selection; only the explicit active endpoint
+  in a protocol/transport family may start.
+- Saved-device selection and exact status are the first Local Mesh controls,
+  Scan/Use Device is the next first-class workflow, and transport plus raw BLE
+  fields live under collapsed Advanced details. Channel administration shows
+  the saved connection label and retains the internal adapter id only as
+  diagnostic metadata.
+- Health matching must reject a contradictory advertised name even when a
+  legacy adapter id matches. A pre-connection health row carrying the raw saved
+  BLE id may still match that exact endpoint so connection failures remain
+  visible.
 - Saved-device activation must use a stable protocol/transport/endpoint key,
   not only a friendly adapter id. Choosing `Connect` for a saved MeshCore BLE
   device from the top source rail updates the active Local Mesh settings to
@@ -831,9 +884,11 @@ Implemented now:
 
 Not implemented yet:
 
-- reconnect/backoff UI and persisted retry countdown diagnostics
-- explicit disconnect/reconnect actions in Station Control Center
-- editable channel/group mapping controls
+- persisted retry countdown diagnostics in settings (runtime backoff and manual
+  reconnect are implemented)
+- native channel write/remove support for MeshCore and Meshtastic adapters;
+  their current capabilities intentionally direct device changes to the
+  companion application
 - secure private-channel join workflow for entering/importing encryption keys,
   writing them to supported mesh devices, and never exposing raw keys in normal
   configuration or logs
@@ -851,11 +906,8 @@ passive messages, node snapshots, and health into the mesh store and observation
 pipeline. Live send remains disabled until the user explicitly enables it per
 adapter.
 
-After passive live receive is exercised against real hardware, add:
+After the Slice 1 physical gate is exercised against real hardware, add:
 
-- connection-state UI for MeshCore BLE: connected, disconnected, retrying,
-  pairing needed, not found
-- manual disconnect/reconnect controls and conservative auto-reconnect backoff
 - real-hardware MeshCore passive receive QA for channel discovery, public and
   private feed review, direct messages, and route/hop hints
 - mesh topic/tag normalization and severity policy for Inbox/Ops/Map

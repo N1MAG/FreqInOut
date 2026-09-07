@@ -4,6 +4,386 @@ This log tracks user-observed UI regressions and contract follow-up items that
 must remain visible across implementation passes. Use it for issues that are
 easy to lose inside broader specs.
 
+## 2026-09-06
+
+### Slice 1 Mesh Lifecycle And Administration
+
+Status: implementation and automated acceptance complete; physical macOS
+reconnect and Linux production exit gates pending.
+
+Slice 1 now separates saved mesh connection name, stable adapter/device id,
+advertised name, protocol, and optional source radio/role. Untouched connection
+names track the selected protocol (`meshcore-1`, `meshtastic-1`), while manual
+names survive later protocol changes. BLE setup uses responsive rows and an
+explicit background Scan/Cancel lifecycle with immediate progress; results no
+longer depend on toggling a second control.
+
+The station command rail and saved-connect actions now lead with the saved
+connection label instead of the advertised BLE device name. Scan results keep
+the device identity readable as the selectable item, but the secondary details
+and tooltips carry the advertised name and stable device id so the UI no longer
+mixes saved configuration identity with physical device identity.
+
+The runtime publishes immutable operation snapshots, uses capped exponential
+reconnect backoff, supports direct cancellation before the worker event loop is
+free, and sequences worker replacement so old and new device runtimes cannot
+overlap. Channel discovery is incremental and stops at the protocol no-response
+boundary instead of accumulating 32 full timeouts. Explicit Disconnect clears
+any pending automatic restart.
+
+The new channel administration component separates device facts from FIO
+policy. Operators can accept/ignore feeds and set category, retention, mapped
+groups, and Inbox/Ops/Map/topic scope. `Remove from FIO` archives the local
+policy without changing the device. Device configuration/removal is available
+only through adapter capabilities; removal requires confirmation, unsupported
+adapters show companion guidance, and secrets are never displayed.
+
+Primary-model review corrected cancellation propagation, thread-safe adapter
+and operation registries, group-string normalization, stale scan results under
+another protocol, explicit-disconnect restart inheritance, compact action
+reflow, and compatibility with lightweight Settings test doubles. No schema or
+destructive data migration was added.
+
+Acceptance results:
+
+- Full repository: 2,418 passed, 37 skipped in 49.18 seconds.
+- Simulated five-second stalled BLE scan: visible/click response and resize
+  checks under 100 ms, successful cancellation, no live scan thread afterward.
+- macOS BLE stack: an initial five-second scan completed in 5,236.8 ms with no
+  device present. With the device advertising, a ten-second scan found
+  `MeshCore-N1MAG MOBL1` in 10,234.2 ms at RSSI -66, captured stable id
+  `97C92879-047E-FEA8-7A11-8A2EE82B381D`, and identified the Nordic UART
+  service. Real discovery and identity capture therefore pass.
+- The saved-device connection reached CoreBluetooth but macOS returned error 15
+  (encrypted pairing timed out). The Bluetooth daemon recorded `lePaired 1` and
+  `isPairing=0`: the host considered MOBL1 paired, did not offer a new PIN
+  prompt, and the device rejected the stored key. FIO now maps that signature
+  to explicit stale-bond recovery guidance. Ordinary disconnect and restart
+  are never defined as requiring re-pairing; host re-pairing is a last-resort
+  action only when CoreBluetooth explicitly reports incompatible saved keys.
+  FIO kept retry work off the GUI thread and the Station Control Bar remained
+  present; reconnect and live channel behavior remained pending successful
+  pairing.
+
+Live paired-session follow-up then confirmed Companion initialization and real
+channel decoding, but exposed a state/lifecycle cluster. Empty channel-capacity
+slots were shown as `Channel 4` through `Channel 31`; the detailed Mesh state
+said Needs attention while a retained older health row kept the control-bar chip
+green; Disconnect followed by Reconnect could lose runtime ownership; and an
+empty/failing repeat scan could hide the device-selection action even though MOBL1 had
+already been discovered. The Bluetooth trace also showed FIO writing
+`SYNC_NEXT_MESSAGE` every second throughout the otherwise idle connected
+session.
+
+The corrected path now scans the bounded protocol slots while skipping empty
+capacity, hides only legacy pending/device-generated phantom rows, keeps real device
+channels ahead of staged FIO channels, and preserves the last valid scan result
+and selection action. Idle receive performs no BLE command write until the
+device sends its waiting-message push. Runtime references remain owned until
+the exact worker thread finishes, and a queued reconnect begins afterward.
+Companion notification initialization is now part of the connection contract;
+a bare GATT connection cannot paint green. Health selection is newest-first so
+an old success cannot override a current error.
+
+Focused follow-up verification passes 138 Mesh adapter, channel, Settings,
+worker, lifecycle, reconnect, and control-bar tests. Added regressions cover the
+unused-slot stop condition, idle receive write count, legacy phantom filtering,
+device-first natural channel ordering, scan-action persistence, disconnect then
+reconnect sequencing, and newer-failure-over-stale-success health selection.
+The current macOS bond again returns CoreBluetooth error 15 after the successful
+session. Physical retest therefore requires forgetting/re-pairing once more with
+other MeshCore clients disconnected; the cross-platform exit gate remains open.
+
+The current continuation added focused regressions for saved-connection label
+presentation across the station rail, mesh settings, and reconnect indicator.
+Those tests now verify that the connect menu, chip labels, and status tooltip
+all keep the saved connection name first and only surface the BLE device name
+as secondary detail.
+
+The next live run did prompt for the PIN after the host forgot MOBL1 and then
+showed the device connected in the Station Control Bar. It also exposed two
+distinct stale-action defects: Mesh Settings retained `Needs attention` because
+runtime health was only wired to MainWindow, and the explicit saved-device
+Connect action was suppressed by the unchanged-configuration signature after a
+manual Disconnect. Runtime health is now delivered to Mesh Settings with
+transition deduplication, and explicit Connect uses the ordered forced-restart
+path. The last observed shutdown completed cleanly in 18.842 ms with all Qt
+worker threads stopped.
+
+MeshCore terminology and administration were corrected at the same boundary.
+Public, hashtag, and private are device channel types; a contact message and a
+direct route are message/routing facts, not a synthetic device channel. The
+adapter and protocol-aware staging no longer invent `Direct`, and legacy
+synthetic Direct rows are hidden non-destructively from MeshCore channel
+administration. Discovery now scans the protocol's bounded eight slots, skips
+empty capacity, and continues across gaps so sparse real channels remain
+discoverable.
+
+Verification for this correction passes 141 focused Mesh, Settings, lifecycle,
+and source-control tests and 298 tests in the expanded Mesh plus adaptive-shell
+and Station Control Bar set. The added `gpt-5.4-mini` work package supplied the
+saved-connect, live Settings-health, and channel-model regression tests; the
+high-reasoning primary model reviewed and corrected the diff, caught the
+adapter-id protocol-prefix edge case, aligned the bounded scan with the current
+Companion protocol, integrated the implementation, and ran the acceptance set.
+
+The full repository assertion gate was rerun in fresh-process partitions after
+the known monolithic Qt teardown crash reproduced at 68 percent. Results total
+2,429 passed and 37 environment-dependent skips: 529/2 (`a-h`), 178/0 (`i-k`),
+802/0 (`l-m`), 509/6 (`n-r`), 231/28 (`s`), and 180/1 (`t-z`). The `l-m`
+partition completed all 802 assertions before returning 139 during process
+teardown; all other partitions exited zero. A separate Station Control Bar and
+shell regression set passes 157 tests. Inspection against the active
+`/Users/bill/RadioCode/runtime/multi-rig` profile confirms that 28 legacy empty
+slots are hidden while the five meaningful feeds remain visible; no stored row
+was deleted. The newest saved-device health projection is warning, matching the
+current CoreBluetooth error rather than the older success.
+
+The next live restart established that discovery identity was still healthy:
+with FIO closed, MOBL1 advertised immediately under the exact saved
+CoreBluetooth id and name at approximately -52 dBm with the Nordic UART
+service. Two isolated connection probes then failed before GATT setup with the
+exact raw error `CBErrorDomain Code=14 "Peer removed pairing information"`:
+one used the saved id directly and one used a freshly scanned BLE device
+object. This distinguishes an external host/card key mismatch from a missing
+device or stale FIO identity. The app now preserves the raw platform error in
+the log while showing operator guidance in Settings. The live macOS Bluetooth
+trace confirms the sequence: `lePaired 1`, LE/GATT connected, encryption failed
+with status 706 because the peer removed keys, and macOS disconnected the link
+because the peer was no longer paired. The sequence repeated on later retries.
+
+The recovery UI no longer disappears after this failure. MeshCore BLE always
+shows the Found row, an empty/failed-scan explanation, Scan, `Use Device`,
+`Connect Saved Device`, and `Disconnect`. `Use Device` persists the selected
+BLE identity and immediately requests a connection. A normal saved-id failure
+gets one bounded mesh-client-style rediscovery by exact id/name and a retry
+with the live discovered device object; automatic backoff does not repeat the
+scan indefinitely. Explicit Code 14 skips that ineffective scan retry and
+reports that normal reconnect should not require pairing, while explaining the
+OS-level last-resort boundary. Standard macOS CoreBluetooth does not expose an
+application unpair API, and mesh-client uses the same CoreBluetooth boundary,
+so neither implementation can silently replace keys the card has discarded.
+
+Post-correction verification passes 144 focused Mesh/Settings/lifecycle tests
+and 301 tests in the expanded Mesh plus adaptive-shell/control-bar set. A full
+monolithic repository run again reached 68 percent before the previously
+documented macOS Qt teardown segmentation fault, this time while constructing
+the log viewer; no assertion failure preceded it. The physical reconnect gate
+remains open because the current Code 14 state must first be repaired outside
+FIO, after which ordinary restart/disconnect/reconnect must pass without
+another forget/re-pair cycle.
+
+The first live `Use Device` exercise caught an integration-key mismatch before
+the updated process was restarted: Settings correctly persisted MOBL1 but
+emitted the friendly adapter id (`meshcore-mobl1`) to an activation function
+that requires the stable protocol/transport/endpoint library key. The log made
+the resulting no-op explicit as `saved mesh connection meshcore-mobl1 was not
+found`. Settings now emits `mesh_connection_config_key(config)` from both Use
+Device and Connect Saved Device. Regression coverage asserts that exact key,
+and both the 144-test focused set and 301-test expanded set pass afterward.
+This FIO action defect is separate from the subsequent BLE attempt, which
+again reached CoreBluetooth and returned Code 14.
+
+The two-device MOBL1/MOBL2 production run then exposed a deeper identity and
+presentation fault. Both BLE endpoints existed in the saved library with the
+same `meshcore-mobl1` adapter and connection name, while MOBL2 was active. A
+Settings-owned save was followed immediately by lookup through MainWindow's
+stale settings cache. This combination explains the observed mixed MOBL1/MOBL2
+form, false Needs attention state, duplicate Connect choices, and Connect no-op
+until restart.
+
+The reviewed correction normalizes internal adapter ids against all saved
+siblings before filtering runtime devices, retains both physical endpoints,
+honors only the protocol-prefixed active endpoint, reloads MainWindow settings
+before activation lookup, and matches health by exact device identity. This is
+non-destructive and adds no schema migration; normalized identity persists on
+the next ordinary activation/save.
+
+Local Mesh now presents saved devices and their exact status/actions first;
+nearby discovery and Use Device second; Advanced connection details collapsed;
+and channel administration labeled with the friendly saved connection. Adding
+a device displays an explicit new-device row so the selector cannot imply an
+existing device is being edited. The control-bar menu disables the connected
+row, labels the active disconnect target, and promotes Scan for Device. UUIDs
+and internal adapter ids remain available only as tooltips/Advanced diagnostics.
+
+Verification: 156 focused Mesh/Settings/lifecycle tests pass, including six
+new multi-device/cache-boundary regressions. The expanded Mesh, adaptive-shell,
+and Station Control Bar set passes 313 tests. `py_compile` and `git diff
+--check` pass. Visual review covered two intentionally colliding saved records
+at 1200x900 and 900x650 Large Text. The currently running FIO process predates
+this correction, so physical acceptance still requires restart into the new
+build; the Slice 1 gate remains open and Slice 2 has not begun.
+
+Current continuation ownership:
+
+- `gpt-5.6-terra` (high): saved-device/discovery-first Local Mesh UI package.
+- `gpt-5.6-luna` (high): source-control menu and friendly device action package.
+- `gpt-5.4-mini` (high): focused identity, selector, and cache-boundary tests.
+- high-reasoning primary model: live evidence analysis, persistence/runtime
+  identity design, delegated diff review/correction, visual QA, integration,
+  expanded acceptance, specifications, and work log.
+
+MOBL2 physical follow-up passed the normal macOS reconnect boundary. After its
+initial PIN exchange completed, `MeshCore-N1MAG MOBL2` reached Companion-ready.
+At 18:52:24, FIO Disconnect completed full teardown in 97.7 ms; a direct Connect
+at 18:52:30 reached Companion-ready at 18:52:31 using the saved endpoint. The
+operator reports the card continues to reconnect well after disconnect. This
+is the healthy reference behavior and isolates the T1000-E pairing-key failure
+from FIO's shared BLE teardown/reconnect implementation. Channel and shutdown
+checks plus the Linux hardware run remain before the Slice 1 exit gate closes.
+
+The final automated hardening pass makes idle MeshCore behavior intentionally
+quiet. Recurring channel polling is disabled by default, so a full eight-slot
+read happens only after the operator chooses Refresh. Contact discovery no
+longer begins on the first worker tick and uses a five-minute default cadence;
+passive indications, message receipt, health checks, and reconnect remain live.
+This removes the two unsolicited command bursts most likely to delay an explicit
+action or put needless pressure on device firmware.
+
+Slow channel refresh cancellation now remains a normal terminal state even when
+an adapter returns after cancellation: already staged progress is retained, no
+false capabilities/complete event is sent, and expected cancellation does not
+surface as an error. Channel administration paints Refresh/Cancel feedback
+immediately and keeps policy-summary refreshes from overwriting the live state.
+
+Verification for this pass: 46 focused Slice 1 tests and 317 expanded Mesh,
+Settings, adaptive-shell, and Station Control Bar tests pass. Fresh-process
+repository partitions total 2,451 passed and 37 environment-dependent skips.
+The single-process run reproduced the documented macOS Qt teardown crash at 68
+percent in `log_viewer.py`, with no prior assertion failure; every fresh-process
+partition exited cleanly. Compilation and `git diff --check` pass. Visual review
+covered 900x560 Normal/Large Text and 1200x900, including the scrolled channel
+actions. Implementation and automated acceptance are complete; current-build
+macOS channel/close validation and the Linux physical matrix remain mandatory,
+so Slice 2 has not started.
+
+Final continuation model ownership:
+
+- `gpt-5.6-terra` (high): bounded channel-administration state and tooltip UI.
+- `gpt-5.6-luna` (high): read-only lifecycle audit and bounded worker polling/
+  cancellation implementation.
+- `gpt-5.4-mini` (high): focused idle-poll, channel-cancel, scan-shutdown, and
+  channel-state regression tests.
+- high-reasoning primary model: polling/concurrency contract, review and
+  correction of every delegated diff, stale-test alignment, visual QA,
+  integration/repository acceptance, specifications, and final gate decision.
+
+Model ownership:
+
+- `gpt-5.6-terra` (high): responsive connection editor, scan presentation, and
+  focused connection UI tests.
+- `gpt-5.6-luna` (medium): reusable channel administration component and
+  focused channel UI tests.
+- `gpt-5.4-mini` (high): focused configuration, retry, cancellation, adapter
+  capability, policy archive, and worker lifecycle tests.
+- `gpt-5.6-luna` (high): live-follow-up channel provenance/sorting, retained
+  scan results, action visibility, and focused UI regressions.
+- `gpt-5.4-mini` (high): live-follow-up reconnect, stale-health, and idle BLE
+  receive regression tests.
+- `gpt-5.6-terra` (high): read-only comparison of mesh-client's Noble BLE
+  discovery, saved-device reconnect, service discovery, and picker lifecycle.
+- `gpt-5.6-luna` (high): read-only runtime/settings/log diagnosis and live
+  advertisement identity verification.
+- `gpt-5.4-mini` (high): Code 14 terminal-path, one-shot discovery fallback,
+  persistent recovery-control, and connection-action regression tests.
+- high-reasoning primary model: architecture, concurrency and shutdown,
+  persistence compatibility, isolated live connection probes, runtime
+  integration, review/correction of every delegated diff, expanded acceptance
+  tests, whole-repository regression, specifications, and final integration
+  review.
+
+To close the remaining exit gate, run the five-step physical matrix in the
+Slice 1 section of `production_reliability_and_workflow_remediation_spec.md`
+with an awake/advertising MeshCore device on macOS and the 1920x1080 Linux
+production host. Slice 2 must not begin before those results pass.
+
+### Slice 0 Qt Soak Acceptance Harness
+
+Status: complete; automated Slice 0 exit gate passed.
+
+Slice 0 now has a dedicated offscreen soak runner at
+`tools/gui_slice0_soak.py`. It uses an isolated `FREQINOUT_CONFIG_DIR`, cycles
+only safe navigation/layout interactions on the real `MainWindow`, samples
+event-loop lag on a practical cadence, and records first-usable-shell plus
+shutdown timing. The harness is intentionally bounded so CI can shorten the run
+with `--duration-sec`.
+
+The corresponding tests verify safe target selection, interaction sequencing,
+first-usable accounting, hard Qt warning recognition, and normal shutdown
+accounting. The harness explicitly suppresses scheduler tuning, Mesh startup,
+background ingest, and application launch so it cannot operate the live station.
+It requires an explicit isolated configuration directory and uses a Qt precise
+timer so ordinary coarse-timer coalescing is not misclassified as application
+lag.
+
+The required 30-minute offscreen run passed on the macOS development host:
+
+- first usable shell: 855.7 ms;
+- 17,932 event-loop samples;
+- 871 operator-paced interactions, including 436 screen switches and 218 resize
+  cycles;
+- maximum event-loop lag: 33.7 ms;
+- shutdown: 156.4 ms;
+- no `QObject::killTimer`, cross-thread timer, or live-`QThread` warning.
+
+A SQLite-consistent clone of the production-sized databases also passed the
+shell budgets with 4,219.0 ms first usable, 2,565.0 ms main-window construction,
+380.3 ms database initialization, and 16.3 ms shutdown. Seven forced uncached
+process inventories ranged from 11.1 to 19.4 ms.
+
+Regression assertions were run in stable partitions to avoid the repository's
+pre-existing monolithic-suite Qt/Mesh teardown crash: 1,595 passed/2 skipped,
+127 passed, and 672 passed/35 skipped (2,394 passed/37 skipped total). The crash
+is a test-process teardown issue rather than an assertion failure and was not
+masked by omitting test files.
+
+Model ownership for this slice:
+
+- `gpt-5.6-luna` (medium): bounded performance-log parser, CLI report, and
+  focused parser tests;
+- `gpt-5.6-terra` (high): deferred-shell foundation, lazy screen factories, and
+  focused shell tests;
+- `gpt-5.4-mini` (high): initial isolated soak harness and controller tests;
+- high-reasoning primary model: architecture, process/dependency cache and
+  concurrency ownership, cancellation/shutdown integration, expanded deferral,
+  review and correction of every delegated diff, production-clone measurement,
+  final acceptance, specifications, and integration review.
+
+No migration was required or added. Slice 1 had not started when this Slice 0
+entry was recorded.
+
+### Production reliability and administration review
+
+Status: governing specification complete; Slices 0–1 implementation complete;
+Slice 1 physical platform gate pending; Slices 2–6 not started.
+
+The supplied macOS/Linux logs, MAGNET roster, SOP screenshot, existing domain
+specifications, and related implementations were reviewed as one dependency
+set. The resulting contract is
+`production_reliability_and_workflow_remediation_spec.md`.
+
+The logs confirm that perceived slowness is caused by synchronous and overlapping
+process inspection, source projection, file discovery, construction, and widget
+population. Recorded startup reached 236.5 seconds, native source projection
+83.1 seconds, projected-row conversion 29.9 seconds, and unchanged incremental
+file discovery 9.9 seconds. Across both logs, FIO recorded 389 slow UI refresh
+warnings, 841 slow dependency snapshots, and 32 event-loop stalls.
+Performance/lifecycle remediation is therefore Slice 0 and a prerequisite for
+the Mesh, BBS, Messages, Launch, and builder UI work.
+
+The supplied roster produces 166 operator entries. Its 22 reported skips are 18
+blank separator/trailing rows plus four section/legend labels (`New additions`,
+`* = Signal only`, `C.S. Change`, and `Limbo`); no valid operator row was lost.
+The new contract separates ignored layout rows from invalid operator rows and
+requires row-level diagnostics.
+
+Implementation is divided into gated slices: performance/lifecycle, Mesh,
+station-owned BBS, Messages/FIOSpotter, radio launch bundles, responsive SOP/Plan
+builders, and roster/final integration. High-reasoning review remains required
+for concurrency and persistence boundaries; bounded UI/copy/test work is
+explicitly suitable for lower-cost coding models after interfaces are fixed.
+
 ## 2026-09-04
 
 ### Messages Performance, File Discovery, And `+BBS`
@@ -763,3 +1143,84 @@ awareness, focus-search, traffic-actionability, and shell regression set passes
 188 tests with the pre-existing Messages-prewarm assertion deselected. Offscreen
 visual QA covered Light/Normal at 1400x900 and 900x700 plus Dark/Large Text at
 1200x800, including mid-list scrolling and concurrent 20m/40m lanes.
+
+## 2026-09-06 — MeshCore physical reconnect and BLE ownership
+
+A fresh macOS forget/pair/PIN run connected MOBL1 and delivered sustained GATT
+traffic. FIO Disconnect changed the control gray; the following Connect changed
+it yellow but did not restore the session. CoreBluetooth tracing showed that
+the reconnect found the saved UUID, reached BLE/GATT, and then failed encryption
+with status 706 (`peer removed keys`) while macOS still reported the device as
+paired. The absence of a second PIN prompt is expected: PIN entry is an initial
+pairing or explicit bond-replacement operation, not a normal reconnect step.
+
+Primary integration added a process-wide MeshCore BLE session owner. A
+replacement connection cannot open until the prior Companion notifications,
+raw BLE client, and asyncio thread are fully stopped. A teardown that exceeds
+the bounded wait retains ownership until a background completion guard observes
+the thread exit; Connect reports that Bluetooth is still disconnecting instead
+of overlapping native clients. Passive link loss follows the same retirement
+path before retry. Session-ready and teardown timing logs were added for the
+next physical run. This confines FIO's lifecycle contribution but cannot repair
+keys already removed by the card.
+
+Delegation: Luna performed the read-only live log/CoreBluetooth correlation;
+Terra compared the lifecycle with mesh-client and identified the missing native
+session ownership boundary; Mini supplied focused ordering/timeout regression
+tests; the high-reasoning primary model owned the concurrency design,
+implementation, diff review, documentation, and integration verification.
+
+Verification after review and adjustment of the delegated tests: four direct
+disconnect/order/status regressions pass; the focused Slice 1 set passes 148
+tests; the expanded Mesh, adaptive-shell, and Station Control Bar set passes
+305 tests. Python compilation and `git diff --check` pass. The physical
+Disconnect/Connect gate remains open because the current macOS/card bond still
+enters Code 14 after the first clean session.
+
+Physical retest correction: the 16:36 run did include the BLE ownership patch.
+It connected after the initial PIN, completed FIO Disconnect teardown in 82.4
+ms, waited eight seconds, acquired a fresh session, and then failed only when
+the card rejected the stored encryption key. macOS recorded a new GATT handle
+and `lePaired 1`, followed by SMP status 706 (`peer removed keys`). This rules
+out the FIO gate, Qt worker overlap, stale GATT ownership, and insufficient
+disconnect delay.
+
+Code 14 now blocks automatic retries and publishes `needs-attention`; manual
+Retry Now/Connect allows one diagnostic attempt. The device is now identified
+as a Seeed Studio SenseCAP T1000-E running Companion 1.17.0 or 1.17.1. The
+directly relevant upstream MeshCore issue #3183 reports T1000-E Bluetooth
+timeouts on 1.17.0 and recovery only after a full nRF52 erase/reflash/restore.
+Review of the official 1.17.0-to-1.17.1 diff found no T1000-E, nRF52 BLE,
+bonding, or framework change; 1.17.1 is therefore not a documented fix. The
+unmerged #3263 secured-connection timeout addresses a different half-paired
+stall and is not evidence of a Code 14 correction.
+
+The 17:03 physical recovery supplied another clean baseline: after Forget
+Device, macOS requested the PIN immediately, accepted it, enabled encryption,
+reported pairing success, and stored the pairing; FIO became Companion-ready
+and continued receiving GATT indications. This proves discovery and initial
+pairing are healthy. No firmware mutation is authorized or required for the
+next test. The remaining macOS gate is one controlled Disconnect then Connect
+without Scan, device reboot, or Forget Device. The updated focused gate passes
+150 tests and the expanded gate passes 307 tests.
+
+The requested controlled test ran at 17:47. Disconnect teardown completed in
+41.9 ms. After a twelve-second pause, one Connect acquired a fresh FIO BLE
+session and reached the saved T1000-E, then failed with Code 14 because the
+peer had again removed/rejected the saved pairing information. No scan, reboot,
+Forget Device, second process, or overlapping session occurred. FIO changed to
+the yellow/`needs-attention` terminal state and did not resume background
+retries through and beyond the former five-minute retry interval. This
+physically validates the new ownership and retry-suppression
+behavior, but fails the Slice 1 product exit criterion that a normal
+Disconnect/Connect preserve the bond. Slice 1 remains open at the external
+T1000-E firmware/storage recovery boundary; Slice 2 has not started.
+
+Operator clarification: requiring one card restart is an acceptable small
+nuisance when FIO identifies it and presents the next action clearly. The
+physical matrix now distinguishes direct reconnect (healthy), one card restart
+plus one explicit Connect with the existing bond (acceptable device recovery),
+and any requirement to Forget/Pair or repair firmware (workflow failure). The
+next device is a RAK WisMesh-style card marked MOKO SMART LW010-R; FIO discovery
+will establish its advertised identity before the exact firmware variant is
+assumed.

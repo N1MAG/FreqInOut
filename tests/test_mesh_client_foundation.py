@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import threading
 import types
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -12,7 +14,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QGridLayout
+from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout
 
 from freqinout.core.mesh import (
     activate_mesh_connection_config,
@@ -246,6 +248,136 @@ def test_saved_mesh_library_repairs_stale_meshtastic_record_for_meshcore_ble() -
     assert tuple(config.protocol for config in saved_configs) == ("meshcore",)
 
 
+def test_saved_mesh_library_repairs_duplicate_adapter_ids_without_dropping_endpoints() -> None:
+    first = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    second = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="B8752C73-007D-D8AF-D938-AE58CB78A414",
+        ble_device_name="MeshCore-N1MAG MOBL2",
+    )
+
+    saved_configs = load_saved_mesh_connection_configs(
+        {"mesh_connection_library": serialize_mesh_connection_library((first, second))}
+    )
+
+    assert len(saved_configs) == 2
+    assert {config.ble_device_id for config in saved_configs} == {
+        first.ble_device_id,
+        second.ble_device_id,
+    }
+    assert len({config.adapter_id for config in saved_configs}) == 2
+    assert "meshcore-field" in {config.adapter_id for config in saved_configs}
+    assert {
+        mesh_connection_config_key(config) for config in saved_configs
+    } == {
+        mesh_connection_config_key(first),
+        mesh_connection_config_key(second),
+    }
+
+
+def test_runtime_loader_suppresses_stale_enabled_same_family_sibling() -> None:
+    first = MeshConnectionConfig(
+        adapter_id="meshcore-field-1",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    second = MeshConnectionConfig(
+        adapter_id="meshcore-field-2",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="B8752C73-007D-D8AF-D938-AE58CB78A414",
+        ble_device_name="MeshCore-N1MAG MOBL2",
+    )
+    values = {
+        "mesh_connection_library": serialize_mesh_connection_library((first, second)),
+        "meshcore_enabled": True,
+        "meshcore_protocol": "meshcore",
+        "meshcore_adapter_id": second.adapter_id,
+        "meshcore_connection_type": "ble",
+        "meshcore_ble_device_id": second.ble_device_id,
+        "meshcore_ble_device_name": second.ble_device_name,
+    }
+
+    runtime_configs = load_mesh_connection_configs(values)
+    saved_configs = load_saved_mesh_connection_configs(values)
+
+    assert tuple(config.ble_device_id for config in runtime_configs) == (second.ble_device_id,)
+    assert tuple(config.adapter_id for config in runtime_configs) == (second.adapter_id,)
+    assert {config.ble_device_id for config in saved_configs} == {
+        first.ble_device_id,
+        second.ble_device_id,
+    }
+
+
+def test_runtime_loader_repairs_active_duplicate_id_against_disabled_saved_sibling() -> None:
+    first = MeshConnectionConfig(
+        adapter_id="meshcore-mobl1",
+        protocol="meshcore",
+        connection_name="meshcore-mobl1",
+        connection_name_auto=False,
+        enabled=False,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    second = replace(
+        first,
+        enabled=True,
+        ble_device_id="B8752C73-007D-D8AF-D938-AE58CB78A414",
+        ble_device_name="MeshCore-N1MAG MOBL2",
+    )
+    values = {
+        # Preserve the malformed production shape; the public serializer would
+        # repair it before this loader boundary is exercised.
+        "mesh_connection_library": json.dumps([first.to_mapping(), second.to_mapping()]),
+        **{
+            f"meshcore_{key}": value
+            for key, value in second.to_mapping().items()
+        },
+    }
+
+    runtime_configs = load_mesh_connection_configs(values)
+
+    assert len(runtime_configs) == 1
+    assert runtime_configs[0].ble_device_id == second.ble_device_id
+    assert runtime_configs[0].adapter_id != first.adapter_id
+    assert runtime_configs[0].connection_name == "N1MAG MOBL2"
+
+
+def test_mesh_health_matching_refuses_conflicting_device_name_even_with_legacy_adapter_id() -> None:
+    from freqinout.core.mesh import mesh_health_matches_config
+
+    config = MeshConnectionConfig(
+        adapter_id="meshcore-field",
+        protocol="meshcore",
+        enabled=True,
+        connection_type=MeshConnectionType.BLE,
+        ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
+        ble_device_name="MeshCore-N1MAG MOBL1",
+    )
+    contradictory_row = {
+        "transport": "meshcore",
+        "adapter_id": "meshcore-field",
+        "device_name": "MeshCore-N1MAG MOBL2",
+    }
+
+    assert mesh_health_matches_config(config, contradictory_row) is False
+
+
 def test_mesh_config_saved_library_preserves_disconnected_devices_for_ui() -> None:
     library = serialize_mesh_connection_library(
         (
@@ -468,6 +600,52 @@ def test_meshcore_ble_pairing_errors_are_actionable(monkeypatch: pytest.MonkeyPa
     assert "pairing" in adapter.health().last_error.lower()
 
 
+def test_meshcore_ble_peer_removed_pairing_information_is_terminal_and_skips_scan_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bleak_module = types.ModuleType("bleak")
+    discover_calls: list[tuple[int, bool]] = []
+
+    class FakeBleakClient:
+        is_connected = False
+
+        def __init__(self, address: str, timeout: int = 20) -> None:
+            self.address = address
+            self.timeout = timeout
+
+        async def connect(self) -> None:
+            raise RuntimeError('CBErrorDomain Code=14 "Peer removed pairing information"')
+
+        async def disconnect(self) -> None:
+            pass
+
+    class FakeScanner:
+        @staticmethod
+        async def discover(timeout: int, return_adv: bool = False):
+            discover_calls.append((timeout, return_adv))
+            raise AssertionError("scan fallback must not run for stale pairing errors")
+
+    bleak_module.BleakClient = FakeBleakClient
+    bleak_module.BleakScanner = FakeScanner
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+
+    adapter = MeshCoreBleAdapter(
+        MeshConnectionConfig(
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="AA:BB:CC:DD:EE:FF",
+            ble_device_name="MeshCore Field",
+        )
+    )
+
+    with pytest.raises(MeshConnectionError, match="saved Bluetooth pairing information"):
+        adapter.connect()
+
+    assert discover_calls == []
+    assert "saved Bluetooth pairing information" in adapter.health().last_error
+
+
 def test_meshcore_ble_connects_with_saved_device_id(monkeypatch: pytest.MonkeyPatch) -> None:
     bleak_module = types.ModuleType("bleak")
     captured: dict[str, object] = {}
@@ -499,6 +677,15 @@ def test_meshcore_ble_connects_with_saved_device_id(monkeypatch: pytest.MonkeyPa
         async def get_services(self) -> list[FakeService]:
             return [FakeService()]
 
+        async def start_notify(self, _uuid: str, _callback: object) -> None:
+            captured["notifications_started"] = True
+
+        async def stop_notify(self, _uuid: str) -> None:
+            pass
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
     bleak_module.BleakClient = FakeBleakClient
     monkeypatch.setitem(sys.modules, "bleak", bleak_module)
 
@@ -519,10 +706,143 @@ def test_meshcore_ble_connects_with_saved_device_id(monkeypatch: pytest.MonkeyPa
     assert captured["timeout"] == 12
     health = adapter.health()
     assert health.connected is True
-    assert health.warnings == (MESHCORE_COMPANION_DECODER_WARNING,)
+    assert health.warnings == ()
+    assert captured["notifications_started"] is True
 
     adapter.disconnect()
     assert captured["disconnected"] is True
+
+
+def test_meshcore_ble_companion_disconnect_stops_notify_before_raw_disconnect() -> None:
+    events: list[str] = []
+
+    class FakeBleClient:
+        is_connected = True
+
+        def __init__(self) -> None:
+            self.callback = None
+
+        async def start_notify(self, _uuid: str, callback: object) -> None:
+            self.callback = callback
+
+        async def stop_notify(self, _uuid: str) -> None:
+            events.append("stop_notify")
+
+        async def disconnect(self) -> None:
+            events.append("disconnect")
+            self.is_connected = False
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
+    raw = FakeBleClient()
+    client = MeshCoreBleCompanionClient(raw)
+
+    asyncio.run(client.initialize())
+    asyncio.run(client.disconnect())
+
+    assert events == ["stop_notify", "disconnect"]
+    assert raw.is_connected is False
+
+
+def test_meshcore_ble_passive_link_loss_defers_replacement_until_teardown_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
+
+    bleak_module = types.ModuleType("bleak")
+    created_clients: list[object] = []
+    release_teardown = threading.Event()
+    wait_started = threading.Event()
+    wait_finished = threading.Event()
+
+    class FakeCharacteristic:
+        def __init__(self, uuid: str) -> None:
+            self.uuid = uuid
+
+    class FakeService:
+        uuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        characteristics = (
+            FakeCharacteristic("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
+            FakeCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
+        )
+
+    class FakeBleakClient:
+        def __init__(self, address: object, timeout: int = 20) -> None:
+            created_clients.append(self)
+            self.address = address
+            self.timeout = timeout
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            self.is_connected = True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+        async def get_services(self) -> list[FakeService]:
+            return [FakeService()]
+
+        async def start_notify(self, _uuid: str, _callback: object) -> None:
+            pass
+
+        async def stop_notify(self, _uuid: str) -> None:
+            pass
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
+    class FakeLoopRunner:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def run(self, awaitable: object, *, timeout_sec: float = 30.0) -> object:
+            return asyncio.run(awaitable)
+
+        def stop(self) -> bool:
+            self.stop_calls += 1
+            return False
+
+        def wait_until_stopped(self) -> None:
+            wait_started.set()
+            release_teardown.wait(timeout=1)
+            wait_finished.set()
+
+        def cancel_current(self) -> None:
+            pass
+
+    bleak_module.BleakClient = FakeBleakClient
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+    monkeypatch.setattr(meshcore_adapter, "_AsyncioLoopRunner", FakeLoopRunner)
+
+    adapter = MeshCoreBleAdapter(
+        MeshConnectionConfig(
+            adapter_id="meshcore-field",
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="AA:BB:CC:DD:EE:FF",
+            ble_device_name="MeshCore Field",
+        )
+    )
+
+    adapter.connect()
+    assert len(created_clients) == 1
+    created_clients[0].is_connected = False
+
+    with pytest.raises(MeshConnectionError, match="Bluetooth is still disconnecting"):
+        adapter.connect()
+
+    assert len(created_clients) == 1
+    assert "Bluetooth is still disconnecting" in adapter.health().last_error
+    assert wait_started.wait(timeout=1)
+
+    release_teardown.set()
+    assert wait_finished.wait(timeout=1)
+
+    adapter.connect()
+    assert len(created_clients) == 2
+    adapter.disconnect()
 
 
 def test_meshcore_ble_companion_client_decodes_channels_and_waiting_messages() -> None:
@@ -586,6 +906,50 @@ def test_meshcore_ble_companion_client_decodes_channels_and_waiting_messages() -
     assert normalized_messages[0].hop_count == 2
     assert normalized_messages[1].channel == "direct"
     assert normalized_messages[1].direct_receive is True
+
+
+def test_meshcore_channel_refresh_skips_unused_slots_and_keeps_sparse_channels() -> None:
+    written: list[bytes] = []
+
+    class FakeBleClient:
+        is_connected = True
+
+        def __init__(self) -> None:
+            self.callback = None
+
+        async def start_notify(self, _uuid: str, callback: object) -> None:
+            self.callback = callback
+
+        async def write_gatt_char(self, _uuid: str, payload: bytes, response: bool = False) -> None:
+            written.append(bytes(payload))
+            if self.callback is None:
+                return
+            if payload == bytes([31, 0]):
+                self.callback(None, _meshcore_channel_frame(0, "Public", b"\x00" * 16))
+            elif payload == bytes([31, 1]):
+                self.callback(None, _meshcore_channel_frame(1, "MAGNET", bytes(range(16))))
+            elif payload == bytes([31, 2]):
+                self.callback(None, _meshcore_channel_frame(2, "", b"\x00" * 16))
+            elif payload == bytes([31, 3]):
+                self.callback(None, _meshcore_channel_frame(3, "REGIONAL", bytes(range(16))))
+            else:
+                channel_idx = payload[1]
+                self.callback(None, _meshcore_channel_frame(channel_idx, "", b"\x00" * 16))
+
+    raw = FakeBleClient()
+    client = MeshCoreBleCompanionClient(raw, command_timeout_sec=0.5)
+
+    async def run() -> list[dict[str, object]]:
+        await client.initialize()
+        return await client.getChannels()
+
+    channels = asyncio.run(run())
+
+    assert [channel["name"] for channel in channels] == ["Public", "MAGNET", "REGIONAL"]
+    assert bytes([31, 2]) in written
+    assert bytes([31, 3]) in written
+    assert bytes([31, 7]) in written
+    assert bytes([31, 8]) not in written
 
 
 def test_meshcore_channel_message_direct_route_keeps_channel_and_extracts_sender() -> None:
@@ -799,6 +1163,7 @@ def test_meshcore_ble_adapter_wraps_notify_capable_client_without_decoder_warnin
     health = adapter.health()
     assert health.connected is True
     assert MESHCORE_COMPANION_DECODER_WARNING not in health.warnings
+    adapter.disconnect()
 
 
 def test_mesh_ingest_readiness_guides_empty_channel_review() -> None:
@@ -806,7 +1171,9 @@ def test_mesh_ingest_readiness_guides_empty_channel_review() -> None:
 
     assert readiness.state == "needs_channels"
     assert readiness.accepted_count == 0
-    assert "Stage Public + Direct" in readiness.summary()
+    assert "Connect the device" in readiness.summary()
+    assert "supported default channel" in readiness.summary()
+    assert "Direct" not in readiness.summary()
 
 
 def test_mesh_ingest_readiness_blocks_private_channel_without_key() -> None:
@@ -896,7 +1263,7 @@ def test_meshcore_companion_channel_discovery_marks_private_as_joined() -> None:
     assert by_name["Neighborhood"].channel_role == "private"
     assert by_name["Neighborhood"].key_state == "device_configured"
     assert by_name["Neighborhood"].key_available is True
-    assert "Direct" in by_name
+    assert "Direct" not in by_name
 
 
 def test_meshcore_companion_waiting_messages_become_events() -> None:
@@ -981,6 +1348,15 @@ def test_meshcore_ble_scans_for_saved_device_name(monkeypatch: pytest.MonkeyPatc
         async def get_services(self) -> list:
             return []
 
+        async def start_notify(self, _uuid: str, _callback: object) -> None:
+            pass
+
+        async def stop_notify(self, _uuid: str) -> None:
+            pass
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
     bleak_module.BleakClient = FakeBleakClient
     bleak_module.BleakScanner = FakeScanner
     monkeypatch.setitem(sys.modules, "bleak", bleak_module)
@@ -998,7 +1374,97 @@ def test_meshcore_ble_scans_for_saved_device_name(monkeypatch: pytest.MonkeyPatc
 
     assert captured["scan_timeout"] == 20
     assert captured["address"] == "11:22:33:44:55:66"
-    assert adapter.health().device_name == "meshcore field"
+    assert adapter.health().device_name == "MeshCore Field"
+    adapter.disconnect()
+
+
+def test_meshcore_ble_saved_device_open_failure_falls_back_once_to_saved_name_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bleak_module = types.ModuleType("bleak")
+    client_targets: list[tuple[object, int]] = []
+    scan_calls: list[tuple[int, bool]] = []
+
+    class FakeCharacteristic:
+        def __init__(self, uuid: str) -> None:
+            self.uuid = uuid
+
+    class FakeService:
+        uuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        characteristics = (
+            FakeCharacteristic("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
+            FakeCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
+        )
+
+    class FakeDevice:
+        def __init__(self, address: str, name: str = "") -> None:
+            self.address = address
+            self.name = name
+
+    class FakeAdvertisement:
+        def __init__(self, local_name: str) -> None:
+            self.local_name = local_name
+
+    discovered_device = FakeDevice("11:22:33:44:55:66")
+    discovered_adv = FakeAdvertisement("MeshCore Field")
+
+    class FakeScanner:
+        @staticmethod
+        async def discover(timeout: int, return_adv: bool = False):
+            scan_calls.append((timeout, return_adv))
+            return {"mesh": (discovered_device, discovered_adv)}
+
+    class FakeBleakClient:
+        def __init__(self, address: object, timeout: int = 20) -> None:
+            client_targets.append((address, timeout))
+            self.address = address
+            self.timeout = timeout
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            if isinstance(self.address, str):
+                raise RuntimeError("not authorized")
+            self.is_connected = True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+        async def get_services(self) -> list[FakeService]:
+            return [FakeService()]
+
+        async def start_notify(self, _uuid: str, _callback: object) -> None:
+            pass
+
+        async def stop_notify(self, _uuid: str) -> None:
+            pass
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
+    bleak_module.BleakClient = FakeBleakClient
+    bleak_module.BleakScanner = FakeScanner
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+
+    adapter = MeshCoreBleAdapter(
+        MeshConnectionConfig(
+            adapter_id="meshcore-field",
+            protocol="meshcore",
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id="AA:BB:CC:DD:EE:FF",
+            ble_device_name="MeshCore Field",
+            ble_scan_timeout_sec=12,
+        )
+    )
+
+    adapter.connect()
+
+    assert scan_calls == [(12, True)]
+    assert client_targets[0][0] == "AA:BB:CC:DD:EE:FF"
+    assert client_targets[1][0] is discovered_device
+    assert adapter.health().device_name == "MeshCore Field"
+    assert adapter.health().connected is True
+    adapter.disconnect()
 
 
 def test_meshcore_ble_discovery_filters_companion_advertisements(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1352,11 +1818,10 @@ def test_settings_local_mesh_panel_builds_and_persists_payload(monkeypatch: pyte
     assert "Ready to configure Meshcore over SERIAL" in tab.mesh_status_label.text()
     assert hasattr(tab, "mesh_ble_scan_btn")
     assert hasattr(tab, "mesh_ble_results_combo")
-    assert isinstance(tab.mesh_ble_row.layout(), QGridLayout)
-    assert tab.mesh_ble_row.layout().rowCount() >= 2
-    assert tab.mesh_ble_timeout_spin.minimumWidth() >= 140
-    assert isinstance(tab.mesh_channel_actions_layout, QGridLayout)
-    assert tab.mesh_channel_actions_layout.rowCount() >= 2
+    assert isinstance(tab.mesh_ble_row.layout(), QVBoxLayout)
+    assert tab.mesh_ble_row.layout().count() >= 6
+    assert tab.mesh_ble_timeout_spin.sizePolicy().horizontalPolicy() == QSizePolicy.MinimumExpanding
+    assert tab.mesh_channel_admin.channel_list is not None
 
 
 def test_mesh_saved_loader_does_not_show_unconfigured_meshtastic_chip_for_meshcore_only() -> None:
@@ -1395,11 +1860,21 @@ def test_settings_meshcore_ble_scan_selection_populates_identity(monkeypatch: py
             ),
         )
     )
+    connect_requests: list[str] = []
+    tab.mesh_connect_requested.connect(connect_requests.append)
     tab._on_mesh_ble_use_selected_clicked()
+    app.processEvents()
 
     assert tab.mesh_ble_device_id_edit.text() == "B8752C73-007D-D8AF-D938-AE58CB78A414"
     assert tab.mesh_ble_device_name_edit.text() == "MeshCore-N1MAG MOBL2"
-    assert "Using MeshCore BLE device MeshCore-N1MAG MOBL2" in tab.mesh_status_label.text()
+    assert tab.mesh_status_label.text() == "Connecting to MeshCore-N1MAG MOBL2…"
+    assert connect_requests == [mesh_connection_config_key(tab._mesh_config_from_ui())]
+    saved = load_saved_mesh_connection_configs(tab.settings.all())
+    assert any(
+        config.ble_device_id == "B8752C73-007D-D8AF-D938-AE58CB78A414"
+        and config.ble_device_name == "MeshCore-N1MAG MOBL2"
+        for config in saved
+    )
 
 
 def test_settings_mesh_channel_review_stages_accepts_and_ignores_defaults(
@@ -1420,21 +1895,21 @@ def test_settings_mesh_channel_review_stages_accepts_and_ignores_defaults(
     tab._stage_mesh_default_channels()
 
     policies = list_mesh_channel_policies(default_mesh_db_path(), adapter_id="meshcore-field", transport="meshcore")
-    assert [policy.display_name for policy in policies] == ["Direct", "Public"]
+    assert [policy.display_name for policy in policies] == ["Public"]
     assert {policy.review_state for policy in policies} == {"pending"}
-    assert tab.mesh_channel_policy_table.rowCount() == 2
+    assert tab.mesh_channel_admin.channel_list.count() == 1
 
-    tab.mesh_channel_policy_table.selectRow(0)
-    tab._set_selected_mesh_channel_review_state("accepted")
-    tab.mesh_channel_policy_table.clearSelection()
-    tab.mesh_channel_policy_table.selectRow(1)
-    tab._set_selected_mesh_channel_review_state("ignored")
+    rows_by_id = {
+        str(tab.mesh_channel_admin.channel_list.item(row).data(32)): row
+        for row in range(tab.mesh_channel_admin.channel_list.count())
+    }
+    tab.mesh_channel_admin.channel_list.setCurrentRow(rows_by_id["0"])
+    tab.mesh_channel_admin.ignore_button.click()
 
     policies_by_name = {
         policy.display_name: policy
         for policy in list_mesh_channel_policies(default_mesh_db_path(), adapter_id="meshcore-field", transport="meshcore")
     }
-    assert policies_by_name["Direct"].review_state == "accepted"
     assert policies_by_name["Public"].review_state == "ignored"
     assert policies_by_name["Public"].inbox_enabled is False
     assert policies_by_name["Public"].topic_scan_enabled is False
@@ -1515,7 +1990,7 @@ def test_settings_theme_refresh_rebuilds_mesh_channel_table_brushes() -> None:
     apply_start = source.index("def apply_theme(self):")
     apply_block = source[apply_start : source.index("def resizeEvent", apply_start)]
 
-    assert 'hasattr(self, "mesh_channel_policy_table")' in apply_block
+    assert 'hasattr(self, "mesh_channel_admin")' in apply_block
     assert "self._refresh_mesh_channel_table()" in apply_block
 
 
@@ -1770,7 +2245,7 @@ def test_mesh_message_store_preserves_route_context(tmp_path) -> None:
     assert row["path_hops"] == ("relay-1", "relay-2")
 
 
-def test_mesh_channel_policy_defaults_match_public_private_direct_and_telemetry() -> None:
+def test_mesh_channel_policy_defaults_match_public_private_and_telemetry() -> None:
     public = default_policy_for_channel(
         adapter_id="meshcore-field",
         transport="meshcore",
@@ -1785,13 +2260,6 @@ def test_mesh_channel_policy_defaults_match_public_private_direct_and_telemetry(
         channel_name="County Team",
         channel_role="private",
     )
-    direct = default_policy_for_channel(
-        adapter_id="meshcore-field",
-        transport="meshcore",
-        channel_id="dm",
-        channel_name="Direct",
-        channel_role="direct",
-    )
     telemetry = default_policy_for_channel(
         adapter_id="meshcore-field",
         transport="meshcore",
@@ -1804,7 +2272,6 @@ def test_mesh_channel_policy_defaults_match_public_private_direct_and_telemetry(
     assert public.inbox_enabled is True
     assert public.topic_scan_enabled is True
     assert private.retention_window == "7d"
-    assert direct.retention_window == "30d"
     assert telemetry.inbox_enabled is False
     assert telemetry.ops_enabled is True
     assert telemetry.topic_scan_enabled is False
@@ -2872,6 +3339,7 @@ def test_mesh_worker_starts_polls_and_stops_without_hardware(tmp_path) -> None:
         [MeshConnectionConfig(adapter_id="local", enabled=True, tcp_host="192.0.2.2")],
         db_path=db_path,
         poll_interval_ms=250,
+        node_poll_interval_ms=250,
         channel_poll_interval_ms=250,
         adapter_factory=FakeMeshAdapter,
     )
@@ -2883,6 +3351,7 @@ def test_mesh_worker_starts_polls_and_stops_without_hardware(tmp_path) -> None:
     worker.manager()._adapters["local"].nodes.append(
         MeshNode(adapter_id="local", transport="meshtastic", node_id="!worker", short_name="WK")
     )
+    worker._last_node_poll_ms = worker._elapsed_ms() - 250
     worker.poll_once()
     worker.stop()
     app.processEvents()
@@ -2897,14 +3366,13 @@ def test_mesh_worker_starts_polls_and_stops_without_hardware(tmp_path) -> None:
     assert "WK" in summaries
 
 
-def test_mesh_worker_stages_discovered_channels_for_review(tmp_path) -> None:
+def test_mesh_worker_explicit_refresh_stages_discovered_channels_for_review(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     db_path = tmp_path / "mesh-worker-channels.db"
     worker = MeshConnectionWorker(
         [MeshConnectionConfig(adapter_id="local", enabled=True, tcp_host="192.0.2.2")],
         db_path=db_path,
         poll_interval_ms=250,
-        channel_poll_interval_ms=250,
         adapter_factory=FakeMeshAdapter,
     )
 
@@ -2912,7 +3380,7 @@ def test_mesh_worker_stages_discovered_channels_for_review(tmp_path) -> None:
     worker.manager()._adapters["local"].channels.append(
         MeshChannel(adapter_id="local", transport="meshtastic", index=0, name="Public", role="public")
     )
-    worker.poll_once()
+    worker.refresh_channels("local")
     worker.stop()
     app.processEvents()
 
@@ -2922,11 +3390,97 @@ def test_mesh_worker_stages_discovered_channels_for_review(tmp_path) -> None:
     assert policies[0].review_state == "pending"
 
 
+def test_meshcore_ble_worker_exposes_connect_disconnect_status_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    import freqinout.core.mesh.meshcore_adapter as meshcore_adapter
+
+    app = QApplication.instance() or QApplication([])
+    bleak_module = types.ModuleType("bleak")
+    health_snapshots: list[MeshHealthSnapshot] = []
+    operation_states: list[tuple[str, str, int]] = []
+    started_events: list[str] = []
+    stopped_events: list[str] = []
+
+    class FakeCharacteristic:
+        def __init__(self, uuid: str) -> None:
+            self.uuid = uuid
+
+    class FakeService:
+        uuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        characteristics = (
+            FakeCharacteristic("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),
+            FakeCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
+        )
+
+    class FakeBleakClient:
+        def __init__(self, address: object, timeout: int = 20) -> None:
+            self.address = address
+            self.timeout = timeout
+            self.is_connected = False
+
+        async def connect(self) -> None:
+            self.is_connected = True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+        async def get_services(self) -> list[FakeService]:
+            return [FakeService()]
+
+        async def start_notify(self, _uuid: str, _callback: object) -> None:
+            pass
+
+        async def stop_notify(self, _uuid: str) -> None:
+            pass
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, response: bool = False) -> None:
+            pass
+
+    bleak_module.BleakClient = FakeBleakClient
+    monkeypatch.setitem(sys.modules, "bleak", bleak_module)
+    monkeypatch.setattr(meshcore_adapter, "meshcore_ble_available", lambda: True)
+
+    worker = MeshConnectionWorker(
+        [
+            MeshConnectionConfig(
+                adapter_id="meshcore-field",
+                protocol="meshcore",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_id="AA:BB:CC:DD:EE:FF",
+                ble_device_name="MeshCore Field",
+            )
+        ],
+        poll_interval_ms=250,
+        node_poll_interval_ms=250,
+        channel_poll_interval_ms=250,
+    )
+    worker.started.connect(lambda: started_events.append("started"))
+    worker.stopped.connect(lambda: stopped_events.append("stopped"))
+    worker.health_ready.connect(health_snapshots.append)
+    worker.operation_state.connect(
+        lambda adapter_id, state, progress: operation_states.append((adapter_id, state, progress))
+    )
+
+    try:
+        worker.start()
+        worker.stop()
+        app.processEvents()
+    finally:
+        worker.deleteLater()
+        app.processEvents()
+
+    assert started_events == ["started"]
+    assert stopped_events == ["stopped"]
+    assert any(snapshot.connected for snapshot in health_snapshots)
+    assert any(not snapshot.connected for snapshot in health_snapshots)
+    assert any(state == "connected" for _adapter_id, state, _progress in operation_states)
+
+
 def test_main_window_wires_mesh_runtime_lifecycle() -> None:
     source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
     stop_block = source[
         source.index("    def _stop_mesh_runtime(self) -> None:") :
-        source.index("    def _on_mesh_runtime_thread_finished(self) -> None:")
+        source.index("    def _on_mesh_runtime_thread_finished(")
     ]
 
     assert "MeshConnectionWorker" in source

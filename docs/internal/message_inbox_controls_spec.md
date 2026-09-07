@@ -1,5 +1,10 @@
 # Message Inbox Controls Spec
 
+Production remediation for relevant directed JS8 ingestion, bounded query/model
+performance, select-all visibility, newest-first sorting, CommStat semantics, and
+FIOSpotter administration is governed by
+`production_reliability_and_workflow_remediation_spec.md`.
+
 ## Scope
 
 This contract applies to the FIO multi-rig Message Inbox control surface.

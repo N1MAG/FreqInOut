@@ -24,6 +24,7 @@ from freqinout.core.js8_runtime_messages import inbox_path_for_directed_source, 
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.ingest_source_model import IngestSourceDescriptor, IngestSourceInventory, js8_ingest_sources
 from freqinout.core.logger import log
+from freqinout.core.worker_lifecycle import CancellationToken, OperationCancelled
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.multi_rig_runtime_status import (
     SCOPE_ALL_ACTIVE_RUNTIME,
@@ -144,6 +145,7 @@ class BackgroundIngestController(QObject):
         self._job_watchdog_timer: Optional[QTimer] = None
         self._health = get_dependency_health_registry()
         self._running = False
+        self._cancel_token = CancellationToken()
         self._varac_vault_activity_signature: Optional[object] = None
         self._varac_vault_no_change_runs: int = 0
         self._varac_vault_full_interval_ms: int = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
@@ -165,6 +167,8 @@ class BackgroundIngestController(QObject):
     def start(self, *, initial_stagger: bool = True) -> None:
         if self._running:
             return
+        if self._cancel_token.is_cancelled:
+            self._cancel_token = CancellationToken()
         self._running = True
         self._ensure_executor()
         # JS8 links/background ingest: low cadence
@@ -237,6 +241,7 @@ class BackgroundIngestController(QObject):
 
     def stop(self) -> None:
         self._running = False
+        self._cancel_token.cancel()
         for attr in (
             "_js8_links_timer",
             "_messages_timer",
@@ -272,7 +277,6 @@ class BackgroundIngestController(QObject):
     def _shutdown_executor(self) -> None:
         with self._executor_lock:
             futures = list(self._job_futures.values())
-            self._job_futures.clear()
             executor = self._executor
             self._executor = None
         for future in futures:
@@ -301,7 +305,6 @@ class BackgroundIngestController(QObject):
     def _shutdown_realtime_executor(self) -> None:
         with self._realtime_executor_lock:
             futures = list(self._realtime_job_futures.values())
-            self._realtime_job_futures.clear()
             executor = self._realtime_executor
             self._realtime_executor = None
         for future in futures:
@@ -404,6 +407,19 @@ class BackgroundIngestController(QObject):
     def is_running(self) -> bool:
         return bool(self._running)
 
+    def is_stopped(self) -> bool:
+        """Return True once timers are stopped and submitted jobs have drained."""
+        if self._running:
+            return False
+        with self._executor_lock:
+            background_pending = any(not future.done() for future in self._job_futures.values())
+        with self._realtime_executor_lock:
+            realtime_pending = any(not future.done() for future in self._realtime_job_futures.values())
+        return not background_pending and not realtime_pending
+
+    def _cancel_checkpoint(self) -> None:
+        self._cancel_token.checkpoint()
+
     def job_status_snapshot(self, *, now_ts: Optional[float] = None) -> Dict[str, object]:
         now = time.time() if now_ts is None else float(now_ts)
         with self._executor_lock:
@@ -495,9 +511,15 @@ class BackgroundIngestController(QObject):
     def _run_job(self, job_name: str, job_func: Callable[[], object]) -> object:
         started_at = time.time()
         failed = False
+        was_cancelled = False
         result: object = None
         try:
+            self._cancel_checkpoint()
             result = job_func()
+            self._cancel_checkpoint()
+        except OperationCancelled:
+            was_cancelled = True
+            return None
         except Exception as e:
             failed = True
             log.debug("BackgroundIngest: %s worker failed: %s", job_name, e)
@@ -505,7 +527,9 @@ class BackgroundIngestController(QObject):
             elapsed = time.time() - started_at
             elapsed_ms = elapsed * 1000.0
             health_key = self._job_health_key(job_name)
-            if failed:
+            if was_cancelled:
+                log.debug("BackgroundIngest: %s cancelled during shutdown", job_name)
+            elif failed:
                 self._health.record_failure(
                     health_key,
                     owner="BackgroundIngest",
@@ -534,7 +558,8 @@ class BackgroundIngestController(QObject):
             future.result()
         except Exception as e:
             log.debug("BackgroundIngest: %s future failed: %s", job_name, e)
-        self._queue_controller_thread_call(lambda name=job_name: self.job_finished.emit(name))
+        if self._running:
+            self._queue_controller_thread_call(lambda name=job_name: self.job_finished.emit(name))
 
     def _submit_realtime_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
@@ -575,6 +600,8 @@ class BackgroundIngestController(QObject):
         except Exception as e:
             log.debug("BackgroundIngest: realtime %s future failed: %s", job_name, e)
             result = None
+        if not self._running:
+            return
         if job_name == "varac_vault":
             self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_result(result))
         elif job_name == "varac_vault_probe":
@@ -830,6 +857,7 @@ class BackgroundIngestController(QObject):
     def _run_messages_job(self, *, include_observation_backfill: bool = True) -> None:
         worker_settings = self._new_worker_settings()
         try:
+            self._cancel_checkpoint()
             msg_ingest = MessageIngestor(worker_settings)
             has_runtime_js8 = bool([instance for instance in self._runtime_ingest_inventory().app_instances if instance.family == "js8call"])
             if has_runtime_js8:
@@ -838,24 +866,29 @@ class BackgroundIngestController(QObject):
                 except Exception as e:
                     log.debug("BackgroundIngest: multi-radio JS8 inbox ingest failed: %s", e)
             else:
+                self._cancel_checkpoint()
                 try:
                     msg_ingest.ingest_js8_messages()
                 except Exception as e:
                     log.debug("BackgroundIngest: JS8 inbox ingest failed: %s", e)
                 try:
+                    self._cancel_checkpoint()
                     msg_ingest.ingest_spotter_from_directed()
                 except Exception as e:
                     log.debug("BackgroundIngest: spotter ingest failed: %s", e)
             try:
+                self._cancel_checkpoint()
                 self._run_multi_radio_spotter_ingest()
             except Exception as e:
                 log.debug("BackgroundIngest: multi-radio spotter ingest failed: %s", e)
             if include_observation_backfill:
                 try:
+                    self._cancel_checkpoint()
                     self._run_observation_backfill(worker_settings)
                 except Exception as e:
                     log.debug("BackgroundIngest: observation backfill failed: %s", e)
                 try:
+                    self._cancel_checkpoint()
                     self._run_condition_sop_invocation(worker_settings)
                 except Exception as e:
                     log.debug("BackgroundIngest: condition SOP invocation failed: %s", e)
@@ -870,6 +903,7 @@ class BackgroundIngestController(QObject):
         store = MultiRadioStore()
         profiles = {str(profile.get("id", "") or profile.get("system_key", "") or ""): profile for profile in self._active_js8_spotter_profiles()}
         for instance in instances:
+            self._cancel_checkpoint()
             profile = profiles.get(str(instance.radio_id or ""))
             if profile is None:
                 continue

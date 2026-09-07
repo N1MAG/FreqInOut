@@ -28,6 +28,7 @@ def test_mesh_source_control_uses_saved_device_names_not_raw_ids() -> None:
             MeshConnectionConfig(
                 adapter_id="meshcore-mobl1",
                 protocol="meshcore",
+                connection_name="Harbor mesh",
                 enabled=True,
                 connection_type=MeshConnectionType.BLE,
                 ble_device_id="97C92879-047E-FEA8-7A11-8A2EE82B381D",
@@ -53,8 +54,10 @@ def test_mesh_source_control_uses_saved_device_names_not_raw_ids() -> None:
     assert item is not None
     assert item.label == "MeshCore"
     assert item.role == "eligible_success"
-    assert "97C92879" not in item.tooltip
-    assert tuple(action.label for action in item.actions) == ("Connect: N1MAG MOBL1",)
+    assert "Harbor mesh" in item.tooltip
+    assert "MeshCore-N1MAG MOBL1" in item.actions[0].tooltip
+    assert "97C92879" in item.actions[0].tooltip
+    assert tuple(action.label for action in item.actions) == ("Connect: Harbor mesh",)
     assert tuple(action.key for action in item.actions) == (
         "connect:meshcore:ble:97c92879-047e-fea8-7a11-8a2ee82b381d",
     )
@@ -95,6 +98,7 @@ def test_mesh_source_control_aggregates_multiple_saved_sources() -> None:
             MeshConnectionConfig(
                 adapter_id="meshcore-mobl1",
                 protocol="meshcore",
+                connection_name="Harbor mesh",
                 enabled=True,
                 connection_type=MeshConnectionType.BLE,
                 ble_device_name="MeshCore-N1MAG MOBL1",
@@ -102,6 +106,7 @@ def test_mesh_source_control_aggregates_multiple_saved_sources() -> None:
             MeshConnectionConfig(
                 adapter_id="meshcore-mobl2",
                 protocol="meshcore",
+                connection_name="Summit relay",
                 enabled=True,
                 connection_type=MeshConnectionType.BLE,
                 ble_device_name="MeshCore-N1MAG MOBL2",
@@ -122,13 +127,15 @@ def test_mesh_source_control_aggregates_multiple_saved_sources() -> None:
     assert item.label == "MeshCore (2)"
     assert item.role == "warning"
     assert tuple(action.label for action in item.actions) == (
-        "Connect: N1MAG MOBL1",
-        "Connect: N1MAG MOBL2",
+        "Connect: Harbor mesh",
+        "Connect: Summit relay",
     )
     assert tuple(action.key for action in item.actions) == (
         "connect:meshcore:ble:meshcore-n1mag mobl1",
         "connect:meshcore:ble:meshcore-n1mag mobl2",
     )
+    assert "Harbor mesh" in item.tooltip
+    assert "Summit relay" in item.tooltip
 
 
 def test_mesh_source_control_groups_configured_devices_by_protocol() -> None:
@@ -137,6 +144,7 @@ def test_mesh_source_control_groups_configured_devices_by_protocol() -> None:
             MeshConnectionConfig(
                 adapter_id="meshcore-mobl1",
                 protocol="meshcore",
+                connection_name="Harbor mesh",
                 enabled=True,
                 connection_type=MeshConnectionType.BLE,
                 ble_device_name="MeshCore-N1MAG MOBL1",
@@ -144,6 +152,7 @@ def test_mesh_source_control_groups_configured_devices_by_protocol() -> None:
             MeshConnectionConfig(
                 adapter_id="meshtastic-main",
                 protocol="meshtastic",
+                connection_name="Trailhead relay",
                 enabled=True,
                 connection_type=MeshConnectionType.TCP,
                 tcp_host="192.0.2.10",
@@ -153,6 +162,42 @@ def test_mesh_source_control_groups_configured_devices_by_protocol() -> None:
 
     assert tuple(item.label for item in items) == ("MeshCore", "Meshtastic")
     assert tuple(action.label for item in items for action in item.actions) == (
-        "Connect: N1MAG MOBL1",
-        "Connect: meshtastic-main",
+        "Connect: Harbor mesh",
+        "Connect: Trailhead relay",
     )
+
+
+def test_mesh_source_control_prefers_newest_failure_over_stale_connected_alias() -> None:
+    item = source_control_mesh_item_from_configs(
+        (
+            MeshConnectionConfig(
+                adapter_id="meshcore-mobl1",
+                protocol="meshcore",
+                enabled=True,
+                connection_type=MeshConnectionType.BLE,
+                ble_device_name="MeshCore-N1MAG MOBL1",
+            ),
+        ),
+        (
+            {
+                "adapter_id": "meshcore-main",
+                "transport": "meshcore",
+                "device_name": "MeshCore-N1MAG MOBL1",
+                "connected": True,
+                "updated_utc": "2026-09-06T10:00:00+00:00",
+            },
+            {
+                "adapter_id": "meshcore-mobl1",
+                "transport": "meshcore",
+                "device_name": "MeshCore-N1MAG MOBL1",
+                "connected": False,
+                "last_error": "encryption timed out",
+                "lifecycle_state": "config_error",
+                "updated_utc": "2026-09-06T10:05:00+00:00",
+            },
+        ),
+    )
+
+    assert item is not None
+    assert item.role == "warning"
+    assert "needs attention" in item.tooltip

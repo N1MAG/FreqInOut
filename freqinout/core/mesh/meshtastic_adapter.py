@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from importlib import import_module, util
 from typing import Iterator, Mapping, Sequence
 
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode
+from freqinout.core.mesh.models import (
+    MeshAdapterEvent,
+    MeshChannel,
+    MeshChannelCapabilities,
+    MeshHealthSnapshot,
+    MeshMessage,
+    MeshNode,
+)
 from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, validate_mesh_connection_config
 
 
@@ -63,6 +70,22 @@ class MeshtasticLocalAdapter:
         close = getattr(interface, "close", None)
         if callable(close):
             close()
+
+    def cancel_pending_operation(self) -> None:
+        # Meshtastic constructors are synchronous. Closing a partially-created
+        # interface is the only safe cross-version cancellation hook.
+        interface = self._interface
+        close = getattr(interface, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def channel_capabilities(self) -> MeshChannelCapabilities:
+        return MeshChannelCapabilities(
+            guidance="Use the Meshtastic companion application to configure or remove device channels.",
+        )
 
     def health(self) -> MeshHealthSnapshot:
         device_name = self.config.display_name

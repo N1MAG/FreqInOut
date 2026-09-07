@@ -1,5 +1,10 @@
 # VarAC Managed BBS Database Manifest Spec
 
+Production remediation that moves shared BBS administration to station scope
+and defines graphical publication, retention expiry, missing-source handling,
+and visitor helpers is governed by
+`production_reliability_and_workflow_remediation_spec.md`.
+
 ## Goal
 
 FreqInOut multi-rig treats the Managed VarAC BBS Library as a normalized catalog of publishable artifacts and location memberships. A file can be available in multiple managed BBS locations without requiring duplicate library copies. The live VarAC BBS directory remains a materialized view that FIO publishes on demand for the active radio/session/location.

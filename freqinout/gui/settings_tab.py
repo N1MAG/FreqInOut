@@ -13,6 +13,7 @@ import time
 import tempfile
 import zipfile
 import re
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Mapping, Sequence
@@ -207,6 +208,11 @@ from freqinout.core.mesh import (
     MeshCoreBleAdvertisement,
     MeshConnectionConfig,
     MeshConnectionType,
+    MeshOperationSnapshot,
+    MeshOperationCancelled,
+    connection_name_is_automatic,
+    archive_mesh_channel_policy,
+    activate_mesh_connection_config,
     default_mesh_db_path,
     default_policy_for_channel,
     discover_meshcore_ble_devices,
@@ -218,10 +224,15 @@ from freqinout.core.mesh import (
     merge_mesh_connection_library,
     mesh_ingest_readiness,
     mesh_connection_active_settings_payload,
+    mesh_connection_config_key,
+    mesh_health_matches_config,
+    next_mesh_adapter_id,
+    next_mesh_connection_name,
     normalize_mesh_connection_config,
     serialize_mesh_connection_library,
     stage_mesh_channel_policies_from_channels,
     upsert_mesh_channel_policy,
+    update_automatic_connection_name,
     validate_mesh_connection_config,
 )
 from freqinout.core.js8_expect_store import (
@@ -343,6 +354,7 @@ from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.js8_runtime_ingest import ingest_js8_links_for_runtime_sources
 from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
 from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.mesh_channel_admin import MeshChannelAdminWidget
 from freqinout.gui.theme import (
     apply_text_size_accessibility_guards,
     button_height_for_font,
@@ -671,15 +683,36 @@ LOCAL_NET_SERVICE_OPTIONS = LOCAL_NET_RESOURCE_OPTIONS
 
 class _MeshCoreBleScanWorker(QObject):
     finished = Signal(tuple)
+    progress = Signal(tuple)
+    cancelled = Signal()
     failed = Signal(str)
 
     def __init__(self, timeout_sec: int) -> None:
         super().__init__()
         self.timeout_sec = max(5, int(timeout_sec))
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Request cancellation without waiting for this worker's thread event loop."""
+
+        self._cancel_event.set()
+
+    def _report_progress(self, advertisements: tuple[MeshCoreBleAdvertisement, ...]) -> None:
+        self.progress.emit(tuple(advertisements))
 
     def run(self) -> None:
         try:
-            self.finished.emit(tuple(discover_meshcore_ble_devices(self.timeout_sec)))
+            self.finished.emit(
+                tuple(
+                    discover_meshcore_ble_devices(
+                        self.timeout_sec,
+                        cancel_event=self._cancel_event,
+                        progress_callback=self._report_progress,
+                    )
+                )
+            )
+        except MeshOperationCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -711,6 +744,12 @@ class SettingsTab(QWidget):
     local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
+    mesh_channel_refresh_requested = Signal(str)
+    mesh_channel_cancel_requested = Signal(str, str)
+    mesh_channel_configure_requested = Signal(str, str, dict)
+    mesh_channel_remove_device_requested = Signal(str, str)
+    mesh_connect_requested = Signal(str)
+    mesh_disconnect_requested = Signal()
     SECTION_HEALTH_STATE_ROLE = int(Qt.UserRole) + 1
     SECTION_HEALTH_KEY_ROLE = int(Qt.UserRole) + 2
     SECTION_STACK_INDEX_ROLE = int(Qt.UserRole) + 3
@@ -5491,16 +5530,109 @@ class SettingsTab(QWidget):
         )
         mesh_hint.setWordWrap(True)
         mesh_layout.addWidget(mesh_hint)
-        self.mesh_status_label = QLabel("Local mesh is not enabled.")
-        self.mesh_status_label.setObjectName("localMeshStatus")
-        self.mesh_status_label.setWordWrap(True)
-        mesh_layout.addWidget(self.mesh_status_label)
+
+        # Saved endpoints and discovery deliberately lead this section.  The
+        # transport editor below is for the selected endpoint, not the way an
+        # operator chooses between nearby or previously saved devices.
+        saved_devices_group = QGroupBox("Saved devices")
+        saved_devices_layout = QVBoxLayout(saved_devices_group)
+        saved_devices_layout.setContentsMargins(8, 8, 8, 8)
+        saved_devices_layout.setSpacing(6)
+        self.mesh_saved_devices_hint_label = QLabel(
+            "Choose a saved device to connect, review, or edit. Device IDs are available only in Advanced diagnostics."
+        )
+        self.mesh_saved_devices_hint_label.setWordWrap(True)
+        saved_devices_layout.addWidget(self.mesh_saved_devices_hint_label)
+        self.mesh_saved_device_combo = QComboBox()
+        self.mesh_saved_device_combo.setObjectName("meshSavedDeviceSelector")
+        self.mesh_saved_device_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mesh_saved_device_combo.setMaxVisibleItems(3)
+        self.mesh_saved_device_combo.addItem("No saved mesh devices — add or scan one", "")
+        self.mesh_saved_device_combo.currentIndexChanged.connect(self._on_mesh_saved_device_selected)
+        saved_devices_layout.addWidget(self.mesh_saved_device_combo)
+        self.mesh_saved_device_detail_label = QLabel("No saved device selected.")
+        self.mesh_saved_device_detail_label.setObjectName("meshSavedDeviceDetail")
+        self.mesh_saved_device_detail_label.setWordWrap(True)
+        saved_devices_layout.addWidget(self.mesh_saved_device_detail_label)
         self.mesh_connection_state_label = QLabel("Disconnected")
         self.mesh_connection_state_label.setObjectName("localMeshConnectionState")
         self.mesh_connection_state_label.setMinimumWidth(140)
         self.mesh_connection_state_label.setMaximumWidth(520)
         self.mesh_connection_state_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        mesh_layout.addWidget(self.mesh_connection_state_label)
+        saved_devices_layout.addWidget(self.mesh_connection_state_label)
+        saved_device_actions = QHBoxLayout()
+        saved_device_actions.setContentsMargins(0, 0, 0, 0)
+        saved_device_actions.setSpacing(6)
+        self.mesh_add_device_btn = QPushButton("Add Device")
+        self.mesh_add_device_btn.setToolTip("Prepare a new MeshCore Bluetooth device without changing an existing saved device.")
+        self.mesh_add_device_btn.clicked.connect(self._on_mesh_add_device_clicked)
+        self.mesh_connect_saved_btn = QPushButton("Connect")
+        self.mesh_connect_saved_btn.setToolTip("Connect using the selected saved device identity.")
+        self.mesh_connect_saved_btn.clicked.connect(
+            lambda _checked=False: self.mesh_connect_requested.emit(
+                mesh_connection_config_key(normalize_mesh_connection_config(self._mesh_config_from_ui()))
+            )
+        )
+        self.mesh_disconnect_btn = QPushButton("Disconnect")
+        self.mesh_disconnect_btn.setToolTip(
+            "Stop the selected local mesh connection and its automatic retry loop without removing the saved device."
+        )
+        self.mesh_disconnect_btn.clicked.connect(self.mesh_disconnect_requested.emit)
+        saved_device_actions.addWidget(self.mesh_add_device_btn)
+        saved_device_actions.addWidget(self.mesh_connect_saved_btn)
+        saved_device_actions.addWidget(self.mesh_disconnect_btn)
+        saved_device_actions.addStretch(1)
+        saved_devices_layout.addLayout(saved_device_actions)
+        self.mesh_status_label = QLabel("Local mesh is not enabled.")
+        self.mesh_status_label.setObjectName("localMeshStatus")
+        self.mesh_status_label.setWordWrap(True)
+        saved_devices_layout.addWidget(self.mesh_status_label)
+        mesh_layout.addWidget(saved_devices_group)
+
+        self.mesh_discovery_group = QGroupBox("Find a MeshCore device")
+        discovery_layout = QVBoxLayout(self.mesh_discovery_group)
+        discovery_layout.setContentsMargins(8, 8, 8, 8)
+        discovery_layout.setSpacing(6)
+        discovery_hint = QLabel(
+            "Scan for a nearby device, select it, then use it. If Bluetooth requests a PIN, enter the PIN shown by the device."
+        )
+        discovery_hint.setWordWrap(True)
+        discovery_layout.addWidget(discovery_hint)
+        discovery_actions = QHBoxLayout()
+        discovery_actions.setContentsMargins(0, 0, 0, 0)
+        discovery_actions.setSpacing(6)
+        self.mesh_ble_scan_btn = QPushButton("Scan")
+        self.mesh_ble_scan_btn.setToolTip("Look for nearby MeshCore Bluetooth devices.")
+        self.mesh_ble_scan_btn.clicked.connect(self._on_mesh_ble_scan_clicked)
+        self.mesh_ble_scan_state_label = QLabel("Ready to scan")
+        self.mesh_ble_scan_state_label.setWordWrap(True)
+        self.mesh_ble_scan_state_label.setObjectName("meshBleScanState")
+        discovery_actions.addWidget(self.mesh_ble_scan_btn)
+        discovery_actions.addWidget(self.mesh_ble_scan_state_label, 1)
+        discovery_layout.addLayout(discovery_actions)
+        self.mesh_ble_results_row = QWidget()
+        mesh_ble_results_layout = QHBoxLayout(self.mesh_ble_results_row)
+        mesh_ble_results_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_ble_results_layout.setSpacing(6)
+        self.mesh_ble_results_combo = QComboBox()
+        self.mesh_ble_results_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mesh_ble_results_combo.addItem("No scan results yet", None)
+        self.mesh_ble_use_selected_btn = QPushButton("Use Device")
+        self.mesh_ble_use_selected_btn.setToolTip(
+            "Save this discovered device without overwriting another saved device, then connect to it."
+        )
+        self.mesh_ble_use_selected_btn.setEnabled(False)
+        self.mesh_ble_use_selected_btn.clicked.connect(self._on_mesh_ble_use_selected_clicked)
+        mesh_ble_results_layout.addWidget(self.mesh_ble_results_combo, 1)
+        mesh_ble_results_layout.addWidget(self.mesh_ble_use_selected_btn)
+        discovery_layout.addWidget(self.mesh_ble_results_row)
+        self.mesh_ble_guidance_label = QLabel(
+            "MeshCore may not appear in Bluetooth settings for this computer until a connection requests pairing. Use Scan, then enter the PIN shown on the device if prompted."
+        )
+        self.mesh_ble_guidance_label.setWordWrap(True)
+        self.mesh_ble_guidance_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        discovery_layout.addWidget(self.mesh_ble_guidance_label)
+        mesh_layout.addWidget(self.mesh_discovery_group)
 
         mesh_form = QFormLayout()
         self.mesh_form = mesh_form
@@ -5517,9 +5649,40 @@ class SettingsTab(QWidget):
         self.mesh_protocol_combo.addItem("MeshCore", "meshcore")
         self.mesh_protocol_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         mesh_form.addRow("Protocol:", self.mesh_protocol_combo)
+        self._mesh_connection_name_auto = True
+        self.mesh_connection_name_edit = QLineEdit(next_mesh_connection_name("meshtastic"))
+        self.mesh_connection_name_edit.setPlaceholderText("Visible name for this connection")
+        self.mesh_connection_name_edit.setToolTip(
+            "Saved connection label shown in the control bar and connect menu. It is separate from the advertised BLE device name."
+        )
+        self.mesh_connection_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mesh_connection_name_auto_label = QLabel("Generated automatically")
+        self.mesh_connection_name_auto_label.setObjectName("meshConnectionNameState")
+        self.mesh_connection_name_auto_label.setWordWrap(True)
+        mesh_connection_name_row = QWidget()
+        mesh_connection_name_layout = QVBoxLayout(mesh_connection_name_row)
+        mesh_connection_name_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_connection_name_layout.setSpacing(3)
+        mesh_connection_name_layout.addWidget(self.mesh_connection_name_edit)
+        mesh_connection_name_layout.addWidget(self.mesh_connection_name_auto_label)
+        mesh_form.addRow("Connection Name:", mesh_connection_name_row)
         self.mesh_adapter_id_edit = QLineEdit()
-        self.mesh_adapter_id_edit.setPlaceholderText("meshtastic-main")
-        mesh_form.addRow("Connection Name:", self.mesh_adapter_id_edit)
+        self.mesh_adapter_id_edit.setPlaceholderText("Stable internal identifier (optional)")
+        self.mesh_adapter_id_edit.setToolTip("Stable internal identifier used by FIO. Leave blank to use the protocol default.")
+        mesh_form.addRow("Adapter ID:", self.mesh_adapter_id_edit)
+        self.mesh_source_radio_id_edit = QLineEdit()
+        self.mesh_source_radio_id_edit.setPlaceholderText("Optional radio profile ID")
+        self.mesh_source_role_edit = QLineEdit()
+        self.mesh_source_role_edit.setPlaceholderText("Optional role, such as gateway")
+        mesh_source_row = QWidget()
+        mesh_source_layout = QVBoxLayout(mesh_source_row)
+        mesh_source_layout.setContentsMargins(0, 0, 0, 0)
+        mesh_source_layout.setSpacing(5)
+        mesh_source_layout.addWidget(QLabel("Radio profile (optional)"))
+        mesh_source_layout.addWidget(self.mesh_source_radio_id_edit)
+        mesh_source_layout.addWidget(QLabel("Role (optional)"))
+        mesh_source_layout.addWidget(self.mesh_source_role_edit)
+        mesh_form.addRow("Source:", mesh_source_row)
         self.mesh_connection_type_combo = QComboBox()
         for label, value in (
             ("TCP / WiFi", MeshConnectionType.TCP.value),
@@ -5569,53 +5732,41 @@ class SettingsTab(QWidget):
         mesh_form.addRow("USB Serial:", self.mesh_serial_row)
 
         self.mesh_ble_row = QWidget()
-        mesh_ble_layout = QGridLayout(self.mesh_ble_row)
+        mesh_ble_layout = QVBoxLayout(self.mesh_ble_row)
         mesh_ble_layout.setContentsMargins(0, 0, 0, 0)
-        mesh_ble_layout.setHorizontalSpacing(8)
-        mesh_ble_layout.setVerticalSpacing(6)
+        mesh_ble_layout.setSpacing(6)
         self.mesh_ble_device_id_edit = QLineEdit()
         self.mesh_ble_device_id_edit.setPlaceholderText("Saved BLE device id")
+        self.mesh_ble_device_id_edit.setToolTip(
+            "Stable BLE identifier captured during scan. FIO prefers this id for reconnect, then falls back to the advertised name."
+        )
         self.mesh_ble_device_name_edit = QLineEdit()
-        self.mesh_ble_device_name_edit.setPlaceholderText("or advertised name")
+        self.mesh_ble_device_name_edit.setPlaceholderText("Advertised device name (optional)")
+        self.mesh_ble_device_name_edit.setToolTip(
+            "Advertised BLE name saved for reconnect and shown as secondary device detail."
+        )
         self.mesh_ble_timeout_spin = QSpinBox()
         self.mesh_ble_timeout_spin.setRange(5, 120)
         self.mesh_ble_timeout_spin.setValue(20)
         self.mesh_ble_timeout_spin.setSuffix(" sec")
         self.mesh_ble_timeout_spin.setToolTip("BLE scan timeout.")
-        self.mesh_ble_timeout_spin.setMinimumWidth(140)
-        self.mesh_ble_timeout_spin.setMaximumWidth(170)
-        self.mesh_ble_scan_btn = QPushButton("Scan MeshCore")
-        self.mesh_ble_scan_btn.setToolTip("Look for nearby MeshCore BLE devices and choose one for this connection.")
-        self.mesh_ble_scan_btn.clicked.connect(self._on_mesh_ble_scan_clicked)
+        self.mesh_ble_timeout_spin.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.mesh_ble_device_id_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.mesh_ble_device_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        mesh_ble_layout.addWidget(self.mesh_ble_device_id_edit, 0, 0, 1, 2)
-        mesh_ble_layout.addWidget(self.mesh_ble_device_name_edit, 0, 2, 1, 2)
-        mesh_ble_layout.addWidget(QLabel("Scan timeout"), 1, 0)
-        mesh_ble_layout.addWidget(self.mesh_ble_timeout_spin, 1, 1)
-        mesh_ble_layout.addWidget(self.mesh_ble_scan_btn, 1, 2)
-        mesh_ble_layout.setColumnStretch(0, 1)
-        mesh_ble_layout.setColumnStretch(2, 1)
-        mesh_form.addRow("BLE:", self.mesh_ble_row)
-        self.mesh_ble_results_row = QWidget()
-        mesh_ble_results_layout = QHBoxLayout(self.mesh_ble_results_row)
-        mesh_ble_results_layout.setContentsMargins(0, 0, 0, 0)
-        mesh_ble_results_layout.setSpacing(6)
-        self.mesh_ble_results_combo = QComboBox()
-        self.mesh_ble_results_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.mesh_ble_results_combo.addItem("No scan results yet", None)
-        self.mesh_ble_use_selected_btn = QPushButton("Use Selected")
-        self.mesh_ble_use_selected_btn.setEnabled(False)
-        self.mesh_ble_use_selected_btn.clicked.connect(self._on_mesh_ble_use_selected_clicked)
-        mesh_ble_results_layout.addWidget(self.mesh_ble_results_combo, 1)
-        mesh_ble_results_layout.addWidget(self.mesh_ble_use_selected_btn)
-        mesh_form.addRow("Found:", self.mesh_ble_results_row)
-        self.mesh_ble_guidance_label = QLabel(
-            "MeshCore may not appear in macOS Bluetooth Settings until a connection asks for pairing. Use Scan MeshCore, then pair with the PIN shown on the device if macOS prompts."
-        )
-        self.mesh_ble_guidance_label.setWordWrap(True)
-        self.mesh_ble_guidance_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        mesh_layout.addWidget(self.mesh_ble_guidance_label)
+        mesh_ble_layout.addWidget(QLabel("Device ID"))
+        mesh_ble_layout.addWidget(self.mesh_ble_device_id_edit)
+        mesh_ble_layout.addWidget(QLabel("Device name"))
+        mesh_ble_layout.addWidget(self.mesh_ble_device_name_edit)
+        mesh_ble_scan_controls = QHBoxLayout()
+        mesh_ble_scan_controls.setContentsMargins(0, 0, 0, 0)
+        mesh_ble_scan_controls.addWidget(QLabel("Scan timeout"))
+        mesh_ble_scan_controls.addWidget(self.mesh_ble_timeout_spin)
+        mesh_ble_scan_controls.addStretch(1)
+        mesh_ble_layout.addLayout(mesh_ble_scan_controls)
+        mesh_ble_advanced_hint = QLabel("Use Find a MeshCore device above to choose or replace this saved identity.")
+        mesh_ble_advanced_hint.setWordWrap(True)
+        mesh_ble_layout.addWidget(mesh_ble_advanced_hint)
+        mesh_form.addRow("Saved BLE identity (advanced):", self.mesh_ble_row)
 
         self.mesh_http_row = QWidget()
         mesh_http_layout = QHBoxLayout(self.mesh_http_row)
@@ -5661,40 +5812,34 @@ class SettingsTab(QWidget):
             mesh_policy_layout.addWidget(checkbox)
         mesh_policy_layout.addStretch(1)
         mesh_form.addRow("Use Data For:", mesh_policy_row)
-        mesh_layout.addLayout(mesh_form)
-
-        mesh_channels_group = QGroupBox("Mesh Channels")
-        mesh_channels_layout = QVBoxLayout(mesh_channels_group)
-        mesh_channels_layout.setContentsMargins(10, 10, 10, 10)
-        mesh_channels_layout.setSpacing(8)
-        self.mesh_channel_status_label = QLabel(
-            "Review channel feeds before mesh traffic appears in Inbox, Ops Center, Map, or topic scanning."
+        self.mesh_details_group = QGroupBox()
+        mesh_details_layout = QVBoxLayout(self.mesh_details_group)
+        mesh_details_layout.setContentsMargins(8, 8, 8, 8)
+        mesh_details_layout.setSpacing(6)
+        self.mesh_details_toggle = QToolButton()
+        self.mesh_details_toggle.setText("Advanced connection details")
+        self.mesh_details_toggle.setCheckable(True)
+        self.mesh_details_toggle.setChecked(False)
+        self.mesh_details_toggle.setArrowType(Qt.RightArrow)
+        self.mesh_details_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.mesh_details_toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        mesh_details_layout.addWidget(self.mesh_details_toggle)
+        self.mesh_details_content = QWidget()
+        self.mesh_details_content.setLayout(mesh_form)
+        self.mesh_details_content.setVisible(False)
+        self.mesh_details_toggle.toggled.connect(self.mesh_details_content.setVisible)
+        self.mesh_details_toggle.toggled.connect(
+            lambda checked: self.mesh_details_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         )
-        self.mesh_channel_status_label.setWordWrap(True)
-        mesh_channels_layout.addWidget(self.mesh_channel_status_label)
+        self.mesh_details_toggle.toggled.connect(lambda _checked: self._queue_mesh_section_fit_refresh())
+        mesh_details_layout.addWidget(self.mesh_details_content)
+        mesh_layout.addWidget(self.mesh_details_group)
 
-        self.mesh_channel_policy_table = QTableWidget(0, 11)
-        self.mesh_channel_policy_table.setHorizontalHeaderLabels(
-            ["State", "Channel", "Role", "Key", "Retention", "Inbox", "Ops", "Map", "Topics", "Category", "Groups"]
-        )
-        self.mesh_channel_policy_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.mesh_channel_policy_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.mesh_channel_policy_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.mesh_channel_policy_table.verticalHeader().setVisible(False)
-        self.mesh_channel_policy_table.setAlternatingRowColors(True)
-        self.mesh_channel_policy_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        mesh_policy_header = self.mesh_channel_policy_table.horizontalHeader()
-        mesh_policy_header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        mesh_policy_header.setSectionResizeMode(1, QHeaderView.Stretch)
-        mesh_policy_header.setSectionResizeMode(10, QHeaderView.Stretch)
-        mesh_channels_layout.addWidget(self.mesh_channel_policy_table)
-
-        self.mesh_channel_actions_layout = QGridLayout()
-        self.mesh_channel_actions_layout.setHorizontalSpacing(8)
-        self.mesh_channel_actions_layout.setVerticalSpacing(8)
-        self.mesh_stage_default_channels_btn = QPushButton("Stage Public + Direct")
+        mesh_channel_seed_actions = QHBoxLayout()
+        mesh_channel_seed_actions.setSpacing(8)
+        self.mesh_stage_default_channels_btn = QPushButton("Stage Defaults")
         self.mesh_stage_default_channels_btn.setToolTip(
-            "Create Public and Direct channel policies for this mesh connection so you can review them before use."
+            "Create the selected protocol's supported default channel policies so you can review them before use."
         )
         self.mesh_stage_default_channels_btn.clicked.connect(self._stage_mesh_default_channels)
         self.mesh_add_private_channel_btn = QPushButton("Add Private Feed")
@@ -5702,48 +5847,27 @@ class SettingsTab(QWidget):
             "Stage a private mesh channel for review. Configure the encryption key on the device before accepting it."
         )
         self.mesh_add_private_channel_btn.clicked.connect(self._add_private_mesh_channel_policy)
-        self.mesh_accept_channels_btn = QPushButton("Accept Selected")
-        self.mesh_accept_channels_btn.clicked.connect(lambda: self._set_selected_mesh_channel_review_state("accepted"))
-        self.mesh_mark_joined_btn = QPushButton("Mark Joined")
-        self.mesh_mark_joined_btn.setToolTip(
-            "Use after a private channel and its encryption key are configured on the mesh device."
+        mesh_channel_seed_actions.addWidget(self.mesh_stage_default_channels_btn)
+        mesh_channel_seed_actions.addWidget(self.mesh_add_private_channel_btn)
+        mesh_channel_seed_actions.addStretch(1)
+        mesh_layout.addLayout(mesh_channel_seed_actions)
+
+        self.mesh_channel_admin = MeshChannelAdminWidget(mesh_group)
+        self.mesh_channel_status_label = self.mesh_channel_admin.sync_label
+        self.mesh_channel_admin.refresh_requested.connect(self.mesh_channel_refresh_requested.emit)
+        self.mesh_channel_admin.cancel_requested.connect(self.mesh_channel_cancel_requested.emit)
+        self.mesh_channel_admin.configure_requested.connect(self.mesh_channel_configure_requested.emit)
+        self.mesh_channel_admin.remove_from_device_confirmation_requested.connect(
+            self._confirm_mesh_channel_device_removal
         )
-        self.mesh_mark_joined_btn.clicked.connect(self._mark_selected_mesh_channels_joined)
-        self.mesh_ignore_channels_btn = QPushButton("Ignore Selected")
-        self.mesh_ignore_channels_btn.clicked.connect(lambda: self._set_selected_mesh_channel_review_state("ignored"))
-        self.mesh_category_auto_btn = QPushButton("Category: Auto")
-        self.mesh_category_auto_btn.setToolTip("Let FIO classify selected channel traffic from message text.")
-        self.mesh_category_auto_btn.clicked.connect(lambda: self._set_selected_mesh_channel_category("auto"))
-        self.mesh_category_social_btn = QPushButton("Mark Social")
-        self.mesh_category_social_btn.setToolTip("Treat selected channel traffic as social by default.")
-        self.mesh_category_social_btn.clicked.connect(lambda: self._set_selected_mesh_channel_category("social"))
-        self.mesh_category_ignore_btn = QPushButton("Mute Topics")
-        self.mesh_category_ignore_btn.setToolTip("Keep selected feeds but disable topic attention from their traffic.")
-        self.mesh_category_ignore_btn.clicked.connect(lambda: self._set_selected_mesh_channel_category("ignore"))
-        self.mesh_refresh_channels_btn = QPushButton("Refresh Review")
-        self.mesh_refresh_channels_btn.clicked.connect(self._refresh_mesh_channel_table)
-        mesh_channel_action_rows = (
-            (
-                self.mesh_stage_default_channels_btn,
-                self.mesh_add_private_channel_btn,
-                self.mesh_accept_channels_btn,
-                self.mesh_refresh_channels_btn,
-            ),
-            (
-                self.mesh_mark_joined_btn,
-                self.mesh_ignore_channels_btn,
-                self.mesh_category_auto_btn,
-                self.mesh_category_social_btn,
-                self.mesh_category_ignore_btn,
-            ),
+        self.mesh_channel_admin.remove_from_device_requested.connect(
+            self.mesh_channel_remove_device_requested.emit
         )
-        for row_index, buttons in enumerate(mesh_channel_action_rows):
-            for column_index, button in enumerate(buttons):
-                button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-                self.mesh_channel_actions_layout.addWidget(button, row_index, column_index)
-        self.mesh_channel_actions_layout.setColumnStretch(5, 1)
-        mesh_channels_layout.addLayout(self.mesh_channel_actions_layout)
-        mesh_layout.addWidget(mesh_channels_group)
+        self.mesh_channel_admin.remove_from_fio_requested.connect(self._remove_mesh_channel_from_fio)
+        self.mesh_channel_admin.policy_update_requested.connect(self._update_mesh_channel_policy)
+        self._mesh_live_channels: dict[tuple[str, str], MeshChannel] = {}
+        self._mesh_operation_starts: dict[tuple[str, str], int] = {}
+        mesh_layout.addWidget(self.mesh_channel_admin)
 
         mesh_actions = QHBoxLayout()
         mesh_actions.addStretch(1)
@@ -5752,10 +5876,28 @@ class SettingsTab(QWidget):
         mesh_actions.addWidget(self.mesh_test_connection_btn)
         mesh_layout.addLayout(mesh_actions)
 
+        self._mesh_ble_scan_thread: QThread | None = None
+        self._mesh_ble_scan_worker: _MeshCoreBleScanWorker | None = None
+        self._mesh_ble_scan_started_monotonic: float | None = None
+        self._mesh_ble_scan_timeout_sec = 0
+        self._mesh_ble_scan_cancel_requested = False
+        self._mesh_ble_scan_results_present = False
+        self._mesh_ble_scan_devices: tuple[MeshCoreBleAdvertisement, ...] = ()
+        self._mesh_section_fit_refresh_pending = False
+        self._mesh_ble_scan_timer = QTimer(self)
+        self._mesh_ble_scan_timer.setInterval(100)
+        self._mesh_ble_scan_timer.timeout.connect(self._refresh_mesh_ble_scan_progress)
+
+        self.mesh_protocol_combo.currentIndexChanged.connect(self._on_mesh_protocol_changed)
+        self.mesh_connection_name_edit.textEdited.connect(self._on_mesh_connection_name_edited)
+
         for widget in (
             self.mesh_enabled_chk,
             self.mesh_protocol_combo,
+            self.mesh_connection_name_edit,
             self.mesh_adapter_id_edit,
+            self.mesh_source_radio_id_edit,
+            self.mesh_source_role_edit,
             self.mesh_connection_type_combo,
             self.mesh_tcp_host_edit,
             self.mesh_tcp_port_spin,
@@ -10000,6 +10142,138 @@ class SettingsTab(QWidget):
             return max(34, header_btn.sizeHint().height() + extra)
         return max(34, group.fontMetrics().height() + 24 + extra)
 
+    @staticmethod
+    def _mesh_saved_device_primary_label(config: MeshConnectionConfig) -> str:
+        """Return the operator-facing label without leaking adapter identities."""
+
+        label = str(config.connection_name or "").strip()
+        if label and not bool(config.connection_name_auto):
+            return label
+        for value in (config.ble_device_name, config.display_name, config.connection_name):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return "Saved mesh device"
+
+    @staticmethod
+    def _mesh_saved_device_secondary_label(config: MeshConnectionConfig) -> str:
+        protocol_key = str(config.protocol or "mesh").strip().lower()
+        protocol = {"meshcore": "MeshCore", "meshtastic": "Meshtastic"}.get(protocol_key, "Mesh")
+        transport_key = str(config.connection_type.value or "").strip().lower()
+        transport = {
+            "ble": "Bluetooth LE",
+            "serial": "USB Serial",
+            "tcp": "TCP / WiFi",
+            "http": "HTTP",
+            "mqtt": "MQTT",
+        }.get(transport_key, transport_key.upper())
+        advertised = str(config.ble_device_name or "").strip()
+        primary = SettingsTab._mesh_saved_device_primary_label(config)
+        secondary = f"{protocol} · {transport}"
+        if advertised and advertised.casefold() != primary.casefold():
+            secondary += f" · device {advertised}"
+        return secondary
+
+    def _mesh_saved_device_status(self, config: MeshConnectionConfig) -> str:
+        row = self._mesh_connected_health_row(config) or self._mesh_health_row(config)
+        if bool(row.get("connected")):
+            return "Connected"
+        if str(row.get("last_error") or "").strip():
+            return "Needs attention"
+        return "Saved"
+
+    def _refresh_mesh_saved_device_selector(
+        self,
+        saved_configs: Sequence[MeshConnectionConfig] = (),
+        *,
+        selected_key: str = "",
+    ) -> None:
+        selector = getattr(self, "mesh_saved_device_combo", None)
+        detail = getattr(self, "mesh_saved_device_detail_label", None)
+        if not isinstance(selector, QComboBox):
+            return
+        configs = tuple(saved_configs)
+        current_key = str(selected_key or getattr(self, "_mesh_selected_connection_key", "") or "").strip()
+        adding_new = bool(getattr(self, "_mesh_adding_new_connection", False))
+        if adding_new:
+            current_key = ""
+        elif not current_key:
+            current_key = str(selector.currentData() or "").strip()
+        blocker = QSignalBlocker(selector)
+        selector.clear()
+        selected_index = -1
+        if adding_new:
+            selector.addItem("New device — scan or configure below", "")
+        for config in configs:
+            index = selector.count()
+            key = mesh_connection_config_key(config)
+            primary = self._mesh_saved_device_primary_label(config)
+            status = self._mesh_saved_device_status(config)
+            selector.addItem(f"{primary} — {status}", key)
+            selector.setItemData(index, self._mesh_saved_device_secondary_label(config), Qt.ToolTipRole)
+            if key == current_key:
+                selected_index = index
+        if not configs and not adding_new:
+            selector.addItem("No saved mesh devices — add or scan one", "")
+        selector.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        del blocker
+        selected_config = next(
+            (config for config in configs if mesh_connection_config_key(config) == current_key),
+            None,
+        )
+        if selected_config is not None:
+            self._mesh_selected_connection_key = mesh_connection_config_key(selected_config)
+            if isinstance(detail, QLabel):
+                detail.setText(
+                    f"{self._mesh_saved_device_secondary_label(selected_config)} · "
+                    f"{self._mesh_saved_device_status(selected_config)}"
+                )
+        else:
+            self._mesh_selected_connection_key = ""
+            if isinstance(detail, QLabel):
+                detail.setText("No saved device selected. Add a device or scan for a nearby MeshCore device.")
+
+    def _on_mesh_saved_device_selected(self, _index: int) -> None:
+        selector = getattr(self, "mesh_saved_device_combo", None)
+        if not isinstance(selector, QComboBox):
+            return
+        selected_key = str(selector.currentData() or "").strip()
+        if not selected_key or selected_key == str(getattr(self, "_mesh_selected_connection_key", "") or ""):
+            return
+        self._mesh_adding_new_connection = False
+        self._mesh_selected_connection_key = selected_key
+        try:
+            values = self.settings.all()
+        except Exception:
+            values = {}
+        self._load_mesh_settings_from_data(values)
+        self._settings_dirty = bool(getattr(self, "_settings_dirty", False))
+
+    def _on_mesh_add_device_clicked(self) -> None:
+        """Start a new endpoint without repurposing the selected saved device."""
+
+        try:
+            saved_configs = load_saved_mesh_connection_configs(self.settings)
+        except Exception:
+            saved_configs = ()
+        config = MeshConnectionConfig(
+            adapter_id=next_mesh_adapter_id("meshcore", saved_configs),
+            protocol="meshcore",
+            connection_name=next_mesh_connection_name("meshcore", saved_configs),
+            connection_name_auto=True,
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+        )
+        self._mesh_selected_connection_key = ""
+        self._mesh_adding_new_connection = True
+        # Retain the generated internal id in the editor so a manual endpoint
+        # save cannot collapse onto the default adapter identity.
+        self._load_mesh_config_into_ui(config, saved_configs=saved_configs, is_new_connection=False)
+        self._refresh_mesh_saved_device_selector(saved_configs)
+        self._refresh_mesh_connection_visibility()
+        self._refresh_mesh_config_status()
+        self._mark_settings_dirty()
+
     def _mesh_config_from_ui(self) -> MeshConnectionConfig:
         protocol = (
             self._combo_data_text(self.mesh_protocol_combo, "meshtastic")
@@ -10019,6 +10293,23 @@ class SettingsTab(QWidget):
             )
             or f"{protocol}-main",
             protocol=protocol,
+            connection_name=(
+                self.mesh_connection_name_edit.text().strip()
+                if hasattr(self, "mesh_connection_name_edit")
+                else next_mesh_connection_name(protocol)
+            )
+            or next_mesh_connection_name(protocol),
+            connection_name_auto=bool(getattr(self, "_mesh_connection_name_auto", True)),
+            source_radio_id=(
+                self.mesh_source_radio_id_edit.text().strip()
+                if hasattr(self, "mesh_source_radio_id_edit")
+                else ""
+            ),
+            source_role=(
+                self.mesh_source_role_edit.text().strip()
+                if hasattr(self, "mesh_source_role_edit")
+                else ""
+            ),
             enabled=bool(hasattr(self, "mesh_enabled_chk") and self.mesh_enabled_chk.isChecked()),
             connection_type=MeshConnectionType.from_value(connection_type),
             tcp_host=self.mesh_tcp_host_edit.text().strip() if hasattr(self, "mesh_tcp_host_edit") else "",
@@ -10088,43 +10379,108 @@ class SettingsTab(QWidget):
         payload["mesh_connection_library"] = serialize_mesh_connection_library(library)
         return payload
 
+    def _load_mesh_config_into_ui(
+        self,
+        config: MeshConnectionConfig,
+        *,
+        saved_configs: Sequence[MeshConnectionConfig] = (),
+        is_new_connection: bool = False,
+    ) -> None:
+        """Load exactly one saved endpoint into the selected-device editor."""
+
+        config = normalize_mesh_connection_config(config)
+        widgets_to_block = (
+            self.mesh_enabled_chk,
+            self.mesh_protocol_combo,
+            self.mesh_connection_name_edit,
+            self.mesh_adapter_id_edit,
+            self.mesh_source_radio_id_edit,
+            self.mesh_source_role_edit,
+            self.mesh_connection_type_combo,
+            self.mesh_tcp_host_edit,
+            self.mesh_tcp_port_spin,
+            self.mesh_serial_port_combo,
+            self.mesh_serial_baud_spin,
+            self.mesh_ble_device_id_edit,
+            self.mesh_ble_device_name_edit,
+            self.mesh_ble_timeout_spin,
+            self.mesh_http_base_url_edit,
+            self.mesh_mqtt_enabled_chk,
+            self.mesh_mqtt_broker_edit,
+            self.mesh_mqtt_topic_root_edit,
+            self.mesh_send_enabled_chk,
+            self.mesh_store_messages_chk,
+            self.mesh_map_positions_chk,
+            self.mesh_reticulum_bridge_chk,
+        )
+        blockers = [QSignalBlocker(widget) for widget in widgets_to_block]
+        try:
+            self.mesh_enabled_chk.setChecked(config.enabled)
+            self._set_combo_data_if_present(self.mesh_protocol_combo, config.protocol, fallback="meshtastic")
+            self._mesh_connection_name_auto = bool(config.connection_name_auto)
+            connection_name = config.connection_name.strip()
+            if not connection_name:
+                connection_name = next_mesh_connection_name(config.protocol, saved_configs)
+                self._mesh_connection_name_auto = True
+            self.mesh_connection_name_edit.setText(connection_name)
+            self.mesh_adapter_id_edit.setText("" if is_new_connection else config.adapter_id)
+            self.mesh_source_radio_id_edit.setText(config.source_radio_id)
+            self.mesh_source_role_edit.setText(config.source_role)
+            self._set_combo_data_if_present(
+                self.mesh_connection_type_combo,
+                config.connection_type.value,
+                fallback=MeshConnectionType.TCP.value,
+            )
+            self.mesh_tcp_host_edit.setText(config.tcp_host)
+            self.mesh_tcp_port_spin.setValue(config.tcp_port)
+            self._refresh_mesh_serial_ports(selected=config.serial_port)
+            self.mesh_serial_baud_spin.setValue(config.serial_baud)
+            self.mesh_ble_device_id_edit.setText(config.ble_device_id)
+            self.mesh_ble_device_name_edit.setText(config.ble_device_name)
+            self.mesh_ble_timeout_spin.setValue(config.ble_scan_timeout_sec)
+            self.mesh_http_base_url_edit.setText(config.http_base_url)
+            self.mesh_mqtt_enabled_chk.setChecked(config.mqtt_enabled)
+            self.mesh_mqtt_broker_edit.setText(config.mqtt_broker)
+            self.mesh_mqtt_topic_root_edit.setText(config.mqtt_topic_root)
+            self.mesh_send_enabled_chk.setChecked(config.send_enabled)
+            self.mesh_store_messages_chk.setChecked(config.store_messages_enabled)
+            self.mesh_map_positions_chk.setChecked(config.map_positions_enabled)
+            self.mesh_reticulum_bridge_chk.setChecked(config.bridge_to_reticulum_enabled)
+        finally:
+            del blockers
+        self._refresh_mesh_connection_name_state()
+        self._refresh_mesh_connection_visibility()
+        self._refresh_mesh_config_status()
+        self._refresh_mesh_channel_table()
+
     def _load_mesh_settings_from_data(self, data: Mapping[str, Any]) -> None:
         if not hasattr(self, "mesh_enabled_chk"):
             return
         runtime_configs = load_mesh_connection_configs(data)
         saved_configs = load_saved_mesh_connection_configs(data)
-        config = next((candidate for candidate in runtime_configs if candidate.enabled), None)
+        is_new_connection = not runtime_configs and not saved_configs
+        selected_key = str(getattr(self, "_mesh_selected_connection_key", "") or "").strip()
+        config = next(
+            (
+                candidate
+                for candidate in saved_configs
+                if selected_key and mesh_connection_config_key(candidate) == selected_key
+            ),
+            None,
+        )
+        if config is None:
+            config = next((candidate for candidate in runtime_configs if candidate.enabled), None)
         if config is None:
             config = next(iter(saved_configs), None)
         if config is None:
             config = MeshConnectionConfig.from_mapping(data)
         config = normalize_mesh_connection_config(config)
-        self.mesh_enabled_chk.setChecked(config.enabled)
-        self._set_combo_data_if_present(self.mesh_protocol_combo, config.protocol, fallback="meshtastic")
-        self.mesh_adapter_id_edit.setText(config.adapter_id)
-        self._set_combo_data_if_present(
-            self.mesh_connection_type_combo,
-            config.connection_type.value,
-            fallback=MeshConnectionType.TCP.value,
+        self._mesh_selected_connection_key = (
+            mesh_connection_config_key(config) if not is_new_connection else ""
         )
-        self.mesh_tcp_host_edit.setText(config.tcp_host)
-        self.mesh_tcp_port_spin.setValue(config.tcp_port)
-        self._refresh_mesh_serial_ports(selected=config.serial_port)
-        self.mesh_serial_baud_spin.setValue(config.serial_baud)
-        self.mesh_ble_device_id_edit.setText(config.ble_device_id)
-        self.mesh_ble_device_name_edit.setText(config.ble_device_name)
-        self.mesh_ble_timeout_spin.setValue(config.ble_scan_timeout_sec)
-        self.mesh_http_base_url_edit.setText(config.http_base_url)
-        self.mesh_mqtt_enabled_chk.setChecked(config.mqtt_enabled)
-        self.mesh_mqtt_broker_edit.setText(config.mqtt_broker)
-        self.mesh_mqtt_topic_root_edit.setText(config.mqtt_topic_root)
-        self.mesh_send_enabled_chk.setChecked(config.send_enabled)
-        self.mesh_store_messages_chk.setChecked(config.store_messages_enabled)
-        self.mesh_map_positions_chk.setChecked(config.map_positions_enabled)
-        self.mesh_reticulum_bridge_chk.setChecked(config.bridge_to_reticulum_enabled)
-        self._refresh_mesh_connection_visibility()
-        self._refresh_mesh_config_status()
-        self._refresh_mesh_channel_table()
+        self._mesh_adding_new_connection = is_new_connection
+        self._load_mesh_config_into_ui(config, saved_configs=saved_configs, is_new_connection=is_new_connection)
+        self._refresh_mesh_saved_device_selector(saved_configs, selected_key=self._mesh_selected_connection_key)
 
     def _mesh_policy_db_path(self) -> Path:
         db_path = default_mesh_db_path()
@@ -10138,7 +10494,7 @@ class SettingsTab(QWidget):
         config = self._mesh_config_from_ui()
         adapter_id = config.adapter_id or "local-mesh"
         transport = config.protocol.strip().lower() or "meshtastic"
-        return (
+        defaults = [
             default_policy_for_channel(
                 adapter_id=adapter_id,
                 transport=transport,
@@ -10147,17 +10503,25 @@ class SettingsTab(QWidget):
                 channel_role="public",
                 channel_privacy="public",
                 source="default",
-            ),
-            default_policy_for_channel(
-                adapter_id=adapter_id,
-                transport=transport,
-                channel_id="direct",
-                channel_name="Direct",
-                channel_role="direct",
-                channel_privacy="direct",
-                source="default",
-            ),
-        )
+            )
+        ]
+        # MeshCore exposes Public/private device channels. Direct recipient and
+        # direct-receive facts belong to message routing metadata, not to a
+        # synthetic device channel in administration. Preserve the legacy
+        # Meshtastic fallback until that adapter receives its own model review.
+        if transport != "meshcore":
+            defaults.append(
+                default_policy_for_channel(
+                    adapter_id=adapter_id,
+                    transport=transport,
+                    channel_id="direct",
+                    channel_name="Direct",
+                    channel_role="direct",
+                    channel_privacy="direct",
+                    source="default",
+                )
+            )
+        return tuple(defaults)
 
     def _mesh_channel_policy_item(self, text: str, policy: MeshChannelPolicy | None = None) -> QTableWidgetItem:
         item = QTableWidgetItem(str(text or ""))
@@ -10190,8 +10554,8 @@ class SettingsTab(QWidget):
         return "Yes" if value else "No"
 
     def _refresh_mesh_channel_table(self) -> None:
-        table = getattr(self, "mesh_channel_policy_table", None)
-        if not isinstance(table, QTableWidget):
+        admin = getattr(self, "mesh_channel_admin", None)
+        if not isinstance(admin, MeshChannelAdminWidget):
             return
         config = self._mesh_config_from_ui()
         policies = list_mesh_channel_policies(
@@ -10199,45 +10563,209 @@ class SettingsTab(QWidget):
             adapter_id=config.adapter_id or "local-mesh",
             transport=config.protocol.strip().lower() or "meshtastic",
         )
-        table.blockSignals(True)
-        try:
-            table.setRowCount(0)
-            for row, policy in enumerate(sorted(policies, key=self._mesh_channel_policy_sort_key)):
-                table.insertRow(row)
-                values = (
-                    policy.review_state.title(),
-                    policy.display_name,
-                    policy.channel_role.title(),
-                    self._mesh_channel_key_table_text(policy),
-                    policy.retention_window,
-                    self._mesh_policy_bool_text(policy.inbox_enabled),
-                    self._mesh_policy_bool_text(policy.ops_enabled),
-                    self._mesh_policy_bool_text(policy.map_enabled),
-                    self._mesh_policy_bool_text(policy.topic_scan_enabled),
-                    policy.default_category.title(),
-                    ", ".join(policy.mapped_groups) if policy.mapped_groups else "All/auto",
+        admin.set_adapter_context(
+            config.adapter_id or "local-mesh",
+            display_name=self._mesh_saved_connection_label(config),
+        )
+        live = [
+            channel
+            for (adapter_id, _channel_id), channel in self._mesh_live_channels.items()
+            if adapter_id == (config.adapter_id or "local-mesh")
+        ]
+        live_ids = {channel.channel_id or str(channel.index) for channel in live}
+        # Early MeshCore discovery treated the device's empty capacity slots as
+        # real channels named ``Channel N``.  Keep those legacy pending rows in
+        # storage (no destructive migration), but do not show or count them.
+        # A genuinely configured unnamed slot is retained whenever the current
+        # device snapshot reports its id.
+        visible_policies = [
+            policy
+            for policy in policies
+            if not self._mesh_policy_is_hidden_compatibility_row(policy, live_ids)
+        ]
+        admin.set_policies(sorted(visible_policies, key=self._mesh_channel_policy_sort_key))
+        staged = [
+            MeshChannel(
+                adapter_id=policy.adapter_id,
+                transport=policy.transport,
+                index=int(policy.channel_id) if policy.channel_id.isdigit() else -1,
+                name=policy.channel_name,
+                role=policy.channel_role,
+                channel_id=policy.channel_id,
+                privacy=policy.channel_privacy,
+            )
+            for policy in visible_policies
+            if policy.channel_id not in live_ids
+        ]
+        known_device_ids = live_ids | {
+            policy.channel_id for policy in visible_policies if policy.source == "device"
+        }
+        admin.set_device_channel_ids(known_device_ids)
+        admin.set_channels([*live, *staged])
+        health_rows = list_mesh_health(
+            self._mesh_policy_db_path(),
+            transport=config.protocol.strip().lower() or "meshtastic",
+        )
+        readiness = mesh_ingest_readiness(policies=visible_policies, health_rows=health_rows)
+        admin.set_sync_summary(
+            f"{readiness.accepted_count} accepted · {readiness.pending_count} pending · "
+            f"{readiness.ignored_count} ignored"
+        )
+        self._queue_mesh_section_fit_refresh()
+
+    @staticmethod
+    def _mesh_policy_is_legacy_empty_slot(policy: MeshChannelPolicy, live_ids: set[str]) -> bool:
+        if policy.channel_id in live_ids:
+            return False
+        if policy.source != "device" or policy.review_state != "pending":
+            return False
+        match = re.fullmatch(r"channel\s+(\d+)", str(policy.channel_name or "").strip(), flags=re.IGNORECASE)
+        return bool(match and match.group(1) == str(policy.channel_id))
+
+    @staticmethod
+    def _mesh_policy_is_hidden_compatibility_row(policy: MeshChannelPolicy, live_ids: set[str]) -> bool:
+        if policy.transport == "meshcore" and policy.channel_role == "direct":
+            return True
+        return SettingsTab._mesh_policy_is_legacy_empty_slot(policy, live_ids)
+
+    def on_mesh_health_ready(self, health: object) -> None:
+        """Refresh the visible Mesh status from a worker health transition."""
+
+        config = self._mesh_config_from_ui()
+        adapter_id = str(getattr(health, "adapter_id", "") or "").strip()
+        if adapter_id and adapter_id != config.adapter_id:
+            return
+        signature = (
+            adapter_id,
+            bool(getattr(health, "connected", False)),
+            str(getattr(health, "device_name", "") or ""),
+            str(getattr(health, "last_error", "") or ""),
+        )
+        if signature == getattr(self, "_mesh_health_ui_signature", None):
+            return
+        self._mesh_health_ui_signature = signature
+        self._refresh_mesh_config_status()
+
+    def on_mesh_channels_ready(self, adapter_id: str, channels: tuple) -> None:
+        """Merge an incremental device result without rebuilding unrelated settings UI."""
+
+        for channel in channels:
+            if not isinstance(channel, MeshChannel):
+                continue
+            channel_id = channel.channel_id or str(channel.index)
+            self._mesh_live_channels[(str(adapter_id), channel_id)] = channel
+        config = self._mesh_config_from_ui()
+        if str(adapter_id) == config.adapter_id:
+            self._refresh_mesh_channel_table()
+
+    def on_mesh_channel_capabilities_ready(self, adapter_id: str, capabilities: object) -> None:
+        config = self._mesh_config_from_ui()
+        if str(adapter_id) != config.adapter_id:
+            return
+        admin = getattr(self, "mesh_channel_admin", None)
+        if isinstance(admin, MeshChannelAdminWidget):
+            admin.set_capabilities(capabilities)
+
+    def on_mesh_operation_ready(self, operation: object) -> None:
+        if not isinstance(operation, MeshOperationSnapshot) or operation.request_class != "channel-sync":
+            return
+        key = (operation.source_id, operation.request_class)
+        latest_start = self._mesh_operation_starts.get(key, -1)
+        if operation.started_monotonic_ms < latest_start:
+            return
+        self._mesh_operation_starts[key] = operation.started_monotonic_ms
+        config = self._mesh_config_from_ui()
+        if operation.source_id != config.adapter_id:
+            return
+        admin = getattr(self, "mesh_channel_admin", None)
+        if not isinstance(admin, MeshChannelAdminWidget):
+            return
+        labels = {
+            "queued": "Queued channel refresh…",
+            "running": f"Syncing channels · {operation.progress_current} found",
+            "complete": f"Channel sync complete · {operation.progress_current} found",
+            "cancelled": "Channel sync cancelled",
+            "error": "Channel sync needs attention",
+        }
+        admin.set_sync_state(labels.get(operation.state, operation.state.replace("-", " ").title()))
+
+    def _mesh_channel_policy_for(self, adapter_id: str, channel_id: str) -> MeshChannelPolicy | None:
+        config = self._mesh_config_from_ui()
+        transport = config.protocol.strip().lower() or "meshtastic"
+        return next(
+            (
+                policy
+                for policy in list_mesh_channel_policies(
+                    self._mesh_policy_db_path(),
+                    adapter_id=str(adapter_id),
+                    transport=transport,
                 )
-                background, foreground = self._mesh_channel_policy_brushes(policy.review_state)
-                for col, value in enumerate(values):
-                    item = self._mesh_channel_policy_item(value, policy if col == 0 else None)
-                    item.setBackground(background)
-                    item.setForeground(foreground)
-                    table.setItem(row, col, item)
-            self._fit_table_height_to_rows(table, min_rows=2, max_rows=5, extra_rows=1)
-        finally:
-            table.blockSignals(False)
-        status = getattr(self, "mesh_channel_status_label", None)
-        if isinstance(status, QLabel):
-            health_rows = list_mesh_health(
-                self._mesh_policy_db_path(),
-                transport=config.protocol.strip().lower() or "meshtastic",
-            )
-            readiness = mesh_ingest_readiness(policies=policies, health_rows=health_rows)
-            status.setText(
-                f"{readiness.summary()} "
-                f"Feeds: {readiness.accepted_count} accepted, "
-                f"{readiness.pending_count} pending, {readiness.ignored_count} ignored."
-            )
+                if policy.channel_id == str(channel_id)
+            ),
+            None,
+        )
+
+    def _update_mesh_channel_policy(self, adapter_id: str, channel_id: str, updates: dict) -> None:
+        policy = self._mesh_channel_policy_for(adapter_id, channel_id)
+        if policy is None:
+            return
+        review_state = str(updates.get("review_state") or policy.review_state).strip().lower()
+        if review_state == "accepted" and policy.requires_key and not policy.key_available:
+            self.mesh_channel_admin.set_sync_state(f"{policy.display_name}: key needed before acceptance")
+            return
+        if review_state not in {"accepted", "pending", "ignored"}:
+            review_state = policy.review_state
+        category = str(updates.get("default_category") or policy.default_category).strip().lower()
+        if category not in {"auto", "social", "ignore"}:
+            category = policy.default_category
+        retention = str(updates.get("retention_window") or policy.retention_window).strip().lower()
+        if retention not in {"24h", "7d", "30d", "keep pinned", "none"}:
+            retention = policy.retention_window
+        groups_value = updates.get("mapped_groups", policy.mapped_groups)
+        if isinstance(groups_value, str):
+            group_items = groups_value.split(",")
+        else:
+            group_items = groups_value
+        mapped_groups = tuple(
+            dict.fromkeys(str(value).strip().upper() for value in group_items if str(value).strip())
+        )
+        surface_default = review_state != "ignored"
+        updated = replace(
+            policy,
+            review_state=review_state,
+            default_category=category,
+            retention_window=retention,
+            mapped_groups=mapped_groups,
+            inbox_enabled=surface_default and bool(updates.get("inbox_enabled", policy.inbox_enabled)),
+            ops_enabled=surface_default and bool(updates.get("ops_enabled", policy.ops_enabled)),
+            map_enabled=surface_default and bool(updates.get("map_enabled", policy.map_enabled)),
+            topic_scan_enabled=surface_default and bool(
+                updates.get("topic_scan_enabled", policy.topic_scan_enabled)
+            ),
+        )
+        upsert_mesh_channel_policy(self._mesh_policy_db_path(), updated)
+        self._refresh_mesh_channel_table()
+        self._mark_settings_dirty()
+
+    def _remove_mesh_channel_from_fio(self, adapter_id: str, channel_id: str) -> None:
+        policy = self._mesh_channel_policy_for(adapter_id, channel_id)
+        if policy is None:
+            return
+        archive_mesh_channel_policy(self._mesh_policy_db_path(), policy)
+        self._refresh_mesh_channel_table()
+        self.mesh_channel_admin.set_sync_state(f"{policy.display_name} removed from FIO; device unchanged")
+        self._mark_settings_dirty()
+
+    def _confirm_mesh_channel_device_removal(self, adapter_id: str, channel_id: str) -> None:
+        choice = QMessageBox.question(
+            self,
+            "Remove channel from device?",
+            "This changes the connected mesh device. FIO channel policy is separate. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice == QMessageBox.Yes:
+            self.mesh_channel_admin.confirm_remove_from_device(adapter_id, channel_id)
 
     @staticmethod
     def _mesh_channel_policy_sort_key(policy: MeshChannelPolicy) -> tuple[int, int, int, str]:
@@ -10432,77 +10960,299 @@ class SettingsTab(QWidget):
             combo.blockSignals(False)
         self._refresh_mesh_config_status()
 
+    def _mesh_saved_connection_configs(self) -> tuple[MeshConnectionConfig, ...]:
+        try:
+            values = self.settings.all()
+        except Exception:
+            values = {}
+        return load_saved_mesh_connection_configs(values)
+
+    def _refresh_mesh_connection_name_state(self) -> None:
+        label = getattr(self, "mesh_connection_name_auto_label", None)
+        edit = getattr(self, "mesh_connection_name_edit", None)
+        if not isinstance(label, QLabel) or not isinstance(edit, QLineEdit):
+            return
+        generated = bool(getattr(self, "_mesh_connection_name_auto", True))
+        label.setText("Generated automatically" if generated else "Custom name")
+        edit.setToolTip(
+            "Generated from the selected protocol until you edit it. This saved connection label appears in the control bar and connect menu."
+            if generated
+            else "Operator-provided saved connection label. This name will not change when the protocol changes."
+        )
+
+    @staticmethod
+    def _mesh_saved_connection_label(config: MeshConnectionConfig) -> str:
+        for value in (config.connection_name, config.adapter_id):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return "saved mesh"
+
+    @staticmethod
+    def _mesh_ble_scan_item_label(device: MeshCoreBleAdvertisement) -> str:
+        text = str(getattr(device, "name", "") or "").strip()
+        return text or "MeshCore device"
+
+    @staticmethod
+    def _mesh_ble_scan_item_tooltip(device: MeshCoreBleAdvertisement) -> str:
+        details: list[str] = []
+        name = str(getattr(device, "name", "") or "").strip()
+        address = str(getattr(device, "address", "") or "").strip()
+        rssi = getattr(device, "rssi", None)
+        if name:
+            details.append(f"Name: {name}")
+        if rssi is not None:
+            details.append(f"RSSI: {rssi}")
+        if address:
+            details.append(f"Device ID: {address}")
+        return " · ".join(details) if details else "Discovered MeshCore BLE device"
+
+    def _on_mesh_connection_name_edited(self, _text: str) -> None:
+        """A textEdited signal represents an operator edit, unlike loading saved settings."""
+
+        self._mesh_connection_name_auto = False
+        self._refresh_mesh_connection_name_state()
+
+    def _on_mesh_protocol_changed(self, _index: int) -> None:
+        edit = getattr(self, "mesh_connection_name_edit", None)
+        if not isinstance(edit, QLineEdit):
+            return
+        protocol = self._combo_data_text(self.mesh_protocol_combo, "meshtastic")
+        current_name = edit.text().strip()
+        is_auto = bool(getattr(self, "_mesh_connection_name_auto", connection_name_is_automatic(current_name)))
+        updated = update_automatic_connection_name(
+            current_name,
+            protocol,
+            is_auto=is_auto,
+            configs=self._mesh_saved_connection_configs(),
+        )
+        if updated != current_name:
+            blocker = QSignalBlocker(edit)
+            edit.setText(updated)
+            del blocker
+        self._mesh_connection_name_auto = is_auto
+        self._refresh_mesh_connection_name_state()
+        self._refresh_mesh_connection_visibility()
+        self._refresh_mesh_config_status()
+        self._queue_mesh_section_fit_refresh()
+
+    def _queue_mesh_section_fit_refresh(self) -> None:
+        if bool(getattr(self, "_mesh_section_fit_refresh_pending", False)):
+            return
+        self._mesh_section_fit_refresh_pending = True
+
+        def refresh() -> None:
+            self._mesh_section_fit_refresh_pending = False
+            self._refresh_fit_content_section_height(getattr(self, "local_mesh_section_group", None))
+
+        QTimer.singleShot(0, refresh)
+
+    def _mesh_ble_scan_is_active(self) -> bool:
+        return bool(getattr(self, "_mesh_ble_scan_thread", None) is not None)
+
+    def _set_mesh_ble_scan_controls(self, scanning: bool, *, cancelling: bool = False) -> None:
+        button = getattr(self, "mesh_ble_scan_btn", None)
+        timeout = getattr(self, "mesh_ble_timeout_spin", None)
+        if isinstance(button, QPushButton):
+            button.setText("Cancelling…" if cancelling else ("Cancel Scan" if scanning else "Scan"))
+            button.setEnabled(not cancelling)
+        if isinstance(timeout, QSpinBox):
+            timeout.setEnabled(not scanning)
+        # Keep the operation context stable while a background scan is live.
+        # Changing either selector mid-scan can otherwise make valid results
+        # appear under a different protocol or transport.
+        for selector_name in ("mesh_protocol_combo", "mesh_connection_type_combo"):
+            selector = getattr(self, selector_name, None)
+            if isinstance(selector, QComboBox):
+                selector.setEnabled(not scanning)
+
+    def _refresh_mesh_ble_scan_progress(self) -> None:
+        if not self._mesh_ble_scan_is_active():
+            timer = getattr(self, "_mesh_ble_scan_timer", None)
+            if isinstance(timer, QTimer):
+                timer.stop()
+            return
+        started = getattr(self, "_mesh_ble_scan_started_monotonic", None)
+        if started is None:
+            return
+        elapsed = max(0.0, time.monotonic() - started)
+        timeout = max(1, int(getattr(self, "_mesh_ble_scan_timeout_sec", 0)))
+        remaining = max(0, int(round(timeout - elapsed)))
+        state = getattr(self, "mesh_ble_scan_state_label", None)
+        if isinstance(state, QLabel):
+            if bool(getattr(self, "_mesh_ble_scan_cancel_requested", False)):
+                state.setText(f"Cancelling scan ({elapsed:.1f}s elapsed)…")
+            else:
+                state.setText(f"Scanning… {elapsed:.1f}s elapsed, about {remaining}s remaining")
+
+    def _show_mesh_ble_scan_results(self, advertisements: tuple[MeshCoreBleAdvertisement, ...]) -> None:
+        combo = getattr(self, "mesh_ble_results_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        combo.clear()
+        devices = [item for item in advertisements if isinstance(item, MeshCoreBleAdvertisement)]
+        self._mesh_ble_scan_devices = tuple(devices)
+        for device in devices:
+            combo.addItem(self._mesh_ble_scan_item_label(device), device)
+            combo.setItemData(combo.count() - 1, self._mesh_ble_scan_item_tooltip(device), Qt.ToolTipRole)
+        self._mesh_ble_scan_results_present = bool(devices)
+        use_button = getattr(self, "mesh_ble_use_selected_btn", None)
+        if isinstance(use_button, QPushButton):
+            # Progress callbacks can discover a device before the scan's
+            # timeout completes. Keep the selection action usable so a later
+            # reconnect failure cannot strand the discovered target.
+            use_button.setEnabled(bool(devices))
+        self._refresh_mesh_connection_visibility()
+
     def _on_mesh_ble_scan_clicked(self) -> None:
         if not hasattr(self, "mesh_ble_scan_btn"):
+            return
+        if self._mesh_ble_scan_is_active():
+            self._cancel_mesh_ble_scan()
             return
         config = self._mesh_config_from_ui()
         if config.protocol.strip().lower() != "meshcore" or config.connection_type is not MeshConnectionType.BLE:
             self.mesh_status_label.setText("MeshCore scan is available when Protocol is MeshCore and Connection is Bluetooth LE.")
             return
-        if hasattr(self, "_mesh_ble_scan_thread") and self._mesh_ble_scan_thread is not None:
-            return
-        self.mesh_ble_scan_btn.setEnabled(False)
+        self._mesh_ble_scan_started_monotonic = time.monotonic()
+        self._mesh_ble_scan_timeout_sec = int(self.mesh_ble_timeout_spin.value())
+        self._mesh_ble_scan_cancel_requested = False
+        self._set_mesh_ble_scan_controls(True)
         self.mesh_ble_use_selected_btn.setEnabled(False)
         self.mesh_ble_results_combo.clear()
         self.mesh_ble_results_combo.addItem("Scanning for MeshCore BLE devices...", None)
+        self.mesh_ble_scan_state_label.setText("Scanning… 0.0s elapsed")
         self.mesh_status_label.setText("Scanning for nearby MeshCore BLE devices. Keep the device awake and advertising.")
+        self._refresh_mesh_connection_visibility()
+        self._queue_mesh_section_fit_refresh()
 
         thread = QThread(self)
-        worker = _MeshCoreBleScanWorker(int(self.mesh_ble_timeout_spin.value()))
+        worker = _MeshCoreBleScanWorker(self._mesh_ble_scan_timeout_sec)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_mesh_ble_scan_finished)
+        worker.progress.connect(self._on_mesh_ble_scan_progress)
+        worker.cancelled.connect(self._on_mesh_ble_scan_cancelled)
         worker.failed.connect(self._on_mesh_ble_scan_failed)
         worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        worker.cancelled.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_mesh_ble_scan_thread_finished)
         self._mesh_ble_scan_thread = thread
         self._mesh_ble_scan_worker = worker
         thread.start()
+        self._mesh_ble_scan_timer.start()
+
+    def _cancel_mesh_ble_scan(self) -> None:
+        worker = getattr(self, "_mesh_ble_scan_worker", None)
+        if worker is None:
+            return
+        self._mesh_ble_scan_cancel_requested = True
+        worker.request_cancel()
+        self._set_mesh_ble_scan_controls(True, cancelling=True)
+        self.mesh_status_label.setText("Cancelling MeshCore BLE scan…")
+        self._refresh_mesh_ble_scan_progress()
+        self._queue_mesh_section_fit_refresh()
+
+    def shutdown(self) -> None:
+        """Cancel Settings-owned device work before QObject teardown."""
+
+        timer = getattr(self, "_mesh_ble_scan_timer", None)
+        if isinstance(timer, QTimer):
+            timer.stop()
+        if self._mesh_ble_scan_is_active():
+            self._cancel_mesh_ble_scan()
+
+    def _on_mesh_ble_scan_progress(self, advertisements: tuple) -> None:
+        devices = tuple(item for item in advertisements if isinstance(item, MeshCoreBleAdvertisement))
+        if devices:
+            self._show_mesh_ble_scan_results(devices)
+            self.mesh_status_label.setText(f"Scanning… found {len(devices)} MeshCore BLE device{'s' if len(devices) != 1 else ''} so far.")
 
     def _on_mesh_ble_scan_finished(self, advertisements: tuple) -> None:
-        combo = getattr(self, "mesh_ble_results_combo", None)
-        if not isinstance(combo, QComboBox):
-            return
-        combo.clear()
         devices = [item for item in advertisements if isinstance(item, MeshCoreBleAdvertisement)]
         if not devices:
             config = self._mesh_config_from_ui()
             connected = self._mesh_connected_health_row(config)
             if connected:
                 device = str(connected.get("device_name") or config.endpoint_address or config.adapter_id or "saved MeshCore").strip()
-                combo.addItem(f"Saved device connected: {device}", None)
+                self.mesh_ble_results_combo.clear()
+                self.mesh_ble_results_combo.addItem(f"Saved device connected: {device}", None)
                 self.mesh_status_label.setText("Saved MeshCore BLE device is connected. Scan only if you want to choose a different device.")
             else:
-                combo.addItem("No new MeshCore BLE devices found", None)
-                self.mesh_status_label.setText("No new MeshCore BLE devices found. Keep the device awake and try Scan MeshCore again.")
-            self.mesh_ble_use_selected_btn.setEnabled(False)
+                self.mesh_status_label.setText("No new MeshCore BLE devices found. Keep the device awake and try Scan again.")
+            # A scan can finish empty while a previously discovered device is
+            # still the valid target (for example after a failed reconnect).
+            # Keep that result available instead of making the operator scan
+            # again just to recover the Use Device action.
+            if self._mesh_ble_scan_devices:
+                self._show_mesh_ble_scan_results(self._mesh_ble_scan_devices)
+            else:
+                self._mesh_ble_scan_results_present = False
+                self.mesh_ble_results_combo.clear()
+                self.mesh_ble_results_combo.addItem("No device found — choose Scan to try again", None)
+                self.mesh_ble_use_selected_btn.setEnabled(False)
+            self._refresh_mesh_connection_visibility()
             return
-        for device in devices:
-            rssi_text = f" | RSSI {device.rssi}" if device.rssi is not None else ""
-            label = f"{device.name or 'MeshCore'}{rssi_text} | {device.address}"
-            combo.addItem(label, device)
-        self.mesh_ble_use_selected_btn.setEnabled(True)
-        self.mesh_status_label.setText(f"Found {len(devices)} MeshCore BLE device{'s' if len(devices) != 1 else ''}. Select one and choose Use Selected.")
+        self._show_mesh_ble_scan_results(tuple(devices))
+        self.mesh_status_label.setText(
+            f"Found {len(devices)} MeshCore BLE device{'s' if len(devices) != 1 else ''}. "
+            "Select one, then choose Use Device to save it and connect."
+        )
+
+    def _on_mesh_ble_scan_cancelled(self) -> None:
+        if self._mesh_ble_scan_devices:
+            self._show_mesh_ble_scan_results(self._mesh_ble_scan_devices)
+        else:
+            self._mesh_ble_scan_results_present = False
+            self.mesh_ble_results_combo.clear()
+            self.mesh_ble_results_combo.addItem("No device selected — choose Scan", None)
+            self.mesh_ble_use_selected_btn.setEnabled(False)
+        self.mesh_status_label.setText("MeshCore BLE scan cancelled.")
+        state = getattr(self, "mesh_ble_scan_state_label", None)
+        if isinstance(state, QLabel):
+            state.setText("Scan cancelled")
+        self._refresh_mesh_connection_visibility()
 
     def _on_mesh_ble_scan_failed(self, message: str) -> None:
-        combo = getattr(self, "mesh_ble_results_combo", None)
-        if isinstance(combo, QComboBox):
-            combo.clear()
-            combo.addItem("Scan failed", None)
-        if hasattr(self, "mesh_ble_use_selected_btn"):
-            self.mesh_ble_use_selected_btn.setEnabled(False)
+        if self._mesh_ble_scan_devices:
+            self._show_mesh_ble_scan_results(self._mesh_ble_scan_devices)
+        else:
+            combo = getattr(self, "mesh_ble_results_combo", None)
+            if isinstance(combo, QComboBox):
+                combo.clear()
+                combo.addItem("Scan failed — choose Scan to retry", None)
+            if hasattr(self, "mesh_ble_use_selected_btn"):
+                self.mesh_ble_use_selected_btn.setEnabled(False)
+            self._mesh_ble_scan_results_present = False
         if hasattr(self, "mesh_status_label"):
             self.mesh_status_label.setText(f"MeshCore BLE scan failed: {message}")
+        state = getattr(self, "mesh_ble_scan_state_label", None)
+        if isinstance(state, QLabel):
+            state.setText("Scan failed")
+        self._refresh_mesh_connection_visibility()
 
     def _on_mesh_ble_scan_thread_finished(self) -> None:
-        if hasattr(self, "mesh_ble_scan_btn"):
-            self.mesh_ble_scan_btn.setEnabled(True)
+        timer = getattr(self, "_mesh_ble_scan_timer", None)
+        if isinstance(timer, QTimer):
+            timer.stop()
+        self._set_mesh_ble_scan_controls(False)
+        if not bool(getattr(self, "_mesh_ble_scan_cancel_requested", False)):
+            state = getattr(self, "mesh_ble_scan_state_label", None)
+            if isinstance(state, QLabel) and state.text().startswith("Scanning"):
+                state.setText("Scan complete")
         self._mesh_ble_scan_thread = None
         self._mesh_ble_scan_worker = None
+        self._mesh_ble_scan_started_monotonic = None
+        use_button = getattr(self, "mesh_ble_use_selected_btn", None)
+        if isinstance(use_button, QPushButton):
+            use_button.setEnabled(bool(getattr(self, "_mesh_ble_scan_results_present", False)))
+        self._refresh_mesh_connection_visibility()
+        self._queue_mesh_section_fit_refresh()
 
     def _on_mesh_ble_use_selected_clicked(self) -> None:
         combo = getattr(self, "mesh_ble_results_combo", None)
@@ -10511,16 +11261,69 @@ class SettingsTab(QWidget):
         device = combo.currentData()
         if not isinstance(device, MeshCoreBleAdvertisement):
             return
-        self.mesh_ble_device_id_edit.setText(device.address)
-        if device.name:
-            self.mesh_ble_device_name_edit.setText(device.name)
-        self.mesh_status_label.setText(f"Using MeshCore BLE device {device.name or device.address}. Save Settings to keep it.")
-        self._mark_settings_dirty()
+        had_unrelated_pending_edits = bool(self._settings_dirty)
+        try:
+            existing_values = self.settings.all()
+        except Exception:
+            existing_values = {}
+        saved_configs = load_saved_mesh_connection_configs(existing_values)
+        endpoint_config = MeshConnectionConfig(
+            adapter_id=next_mesh_adapter_id("meshcore", saved_configs, preferred_name=device.name),
+            protocol="meshcore",
+            connection_name=str(device.name or "").strip() or next_mesh_connection_name("meshcore", saved_configs),
+            connection_name_auto=not bool(str(device.name or "").strip()),
+            enabled=True,
+            connection_type=MeshConnectionType.BLE,
+            ble_device_id=str(device.address or "").strip(),
+            ble_device_name=str(device.name or "").strip(),
+            ble_scan_timeout_sec=int(self.mesh_ble_timeout_spin.value()),
+        )
+        endpoint_key = mesh_connection_config_key(endpoint_config)
+        existing = next(
+            (config for config in saved_configs if mesh_connection_config_key(config) == endpoint_key),
+            None,
+        )
+        if existing is None:
+            library = (*saved_configs, endpoint_config)
+            activation_values = dict(existing_values)
+            activation_values["mesh_connection_library"] = serialize_mesh_connection_library(library)
+        else:
+            activation_values = existing_values
+        payload = activate_mesh_connection_config(activation_values, endpoint_key, prefix="meshcore")
+        if not payload:
+            self.mesh_status_label.setText(f"Could not prepare {device.name or device.address} for connection.")
+            return
+        try:
+            self.settings.set_many(payload, save=True)
+        except Exception as exc:
+            log.warning("SettingsTab: failed to save selected MeshCore BLE device: %s", exc)
+            self.mesh_status_label.setText(
+                f"Could not save MeshCore BLE device {device.name or device.address}: {exc}"
+            )
+            self._mark_settings_dirty()
+            return
+        self._mesh_selected_connection_key = endpoint_key
+        self._mesh_adding_new_connection = False
+        self._load_mesh_settings_from_data({**existing_values, **payload})
+        self.mesh_status_label.setText(f"Connecting to {device.name or device.address}…")
+        self._settings_dirty = had_unrelated_pending_edits
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+        self._refresh_section_nav_health()
+        QTimer.singleShot(
+            0,
+            lambda connection_key=endpoint_key: self.mesh_connect_requested.emit(connection_key),
+        )
 
     def _on_mesh_settings_changed(self, *_args) -> None:
         self._refresh_mesh_connection_visibility()
         self._refresh_mesh_config_status()
-        self._refresh_mesh_channel_table()
+        admin = getattr(self, "mesh_channel_admin", None)
+        if isinstance(admin, MeshChannelAdminWidget):
+            current = self._mesh_config_from_ui()
+            admin.set_adapter_context(
+                current.adapter_id or "local-mesh",
+                display_name=self._mesh_saved_connection_label(current),
+            )
         self._mark_settings_dirty()
 
     def _refresh_mesh_connection_visibility(self) -> None:
@@ -10547,19 +11350,23 @@ class SettingsTab(QWidget):
                     if isinstance(label, QWidget):
                         label.setVisible(visible)
         show_meshcore_ble = selected is MeshConnectionType.BLE and protocol == "meshcore"
+        stage_defaults = getattr(self, "mesh_stage_default_channels_btn", None)
+        if isinstance(stage_defaults, QPushButton):
+            stage_defaults.setText("Stage Public" if protocol == "meshcore" else "Stage Public + Direct")
+            stage_defaults.setToolTip(
+                "Create a Public channel policy for review. Direct recipient/receive facts remain message metadata."
+                if protocol == "meshcore"
+                else "Create Public and Direct policies for this mesh connection so you can review them before use."
+            )
+        discovery_group = getattr(self, "mesh_discovery_group", None)
+        # Discovery remains independent from saved-device selection. A failed
+        # connection must not hide recovery or retarget another endpoint.
+        if isinstance(discovery_group, QGroupBox):
+            discovery_group.setVisible(show_meshcore_ble)
         results_row = getattr(self, "mesh_ble_results_row", None)
         if isinstance(results_row, QWidget):
             results_row.setVisible(show_meshcore_ble)
-            if isinstance(form, QFormLayout):
-                label = form.labelForField(results_row)
-                if isinstance(label, QWidget):
-                    label.setVisible(show_meshcore_ble)
-        scan_btn = getattr(self, "mesh_ble_scan_btn", None)
-        if isinstance(scan_btn, QPushButton):
-            scan_btn.setVisible(show_meshcore_ble)
-        guidance = getattr(self, "mesh_ble_guidance_label", None)
-        if isinstance(guidance, QLabel):
-            guidance.setVisible(show_meshcore_ble)
+        self._queue_mesh_section_fit_refresh()
 
     def _refresh_mesh_config_status(self) -> None:
         label = getattr(self, "mesh_status_label", None)
@@ -10577,6 +11384,11 @@ class SettingsTab(QWidget):
             first = issues[0]
             label.setText(f"Needs setup: {first.message}")
             return
+        health_row = getattr(self, "_mesh_last_health_row", {})
+        last_error = str(health_row.get("last_error") or "").strip() if isinstance(health_row, Mapping) else ""
+        if last_error:
+            label.setText(last_error)
+            return
         send_text = "send allowed" if config.send_enabled else "receive-only"
         data_targets = []
         if config.store_messages_enabled:
@@ -10585,7 +11397,10 @@ class SettingsTab(QWidget):
             data_targets.append("Map")
         target_text = ", ".join(data_targets) if data_targets else "no data views"
         if config.protocol.strip().lower() == "meshcore" and config.connection_type is MeshConnectionType.BLE:
-            label.setText(f"MeshCore BLE saved for {target_text}; {send_text}. Pairing is automatic when macOS requests the PIN.")
+            label.setText(
+                f"Receives: {target_text} · Sending: {'On' if config.send_enabled else 'Off'} · "
+                "Pairing is requested only when the computer and device require it."
+            )
             return
         label.setText(
             f"Ready to configure {config.protocol.title()} over {config.connection_type.value.upper()} "
@@ -10599,14 +11414,26 @@ class SettingsTab(QWidget):
         theme = resolve_theme(self.settings)
         is_dark = _theme_appears_dark(theme)
         if not config.enabled:
+            self._mesh_last_health_row = {}
+            self._set_mesh_connection_action_state(config, connected=False)
             indicator.setText("Disconnected")
             muted = theme.get("text_muted", "#5b6b78")
             indicator.setStyleSheet(f"QLabel#localMeshConnectionState {{ color: {muted}; font-weight: 700; }}")
             return
         row = self._mesh_connected_health_row(config) or self._mesh_health_row(config)
+        self._mesh_last_health_row = row
+        self._set_mesh_connection_action_state(config, connected=bool(row.get("connected")))
         if bool(row.get("connected")):
-            device = self._mesh_display_device_name(row, config)
-            indicator.setText(f"Connected: {device}")
+            connection_name = self._mesh_saved_connection_label(config)
+            indicator.setText(f"Connected: {connection_name}")
+            tooltip_parts = [f"Saved connection: {connection_name}"]
+            device_name = str(row.get("device_name") or "").strip() or str(config.ble_device_name or "").strip()
+            if device_name:
+                tooltip_parts.append(f"Device: {device_name}")
+            device_id = str(config.ble_device_id or "").strip()
+            if device_id:
+                tooltip_parts.append(f"Device ID: {device_id}")
+            indicator.setToolTip(" · ".join(tooltip_parts))
             color = "#CFF6D6" if is_dark else "#087b25"
             border = "#39874D" if is_dark else "#8dcf9e"
             background = "#122E1B" if is_dark else "#eaf7ea"
@@ -10618,6 +11445,7 @@ class SettingsTab(QWidget):
         last_error = str(row.get("last_error") or "").strip()
         if last_error:
             indicator.setText("Needs attention")
+            indicator.setToolTip(f"Saved connection: {self._mesh_saved_connection_label(config)}")
             color = "#FFE3A3" if is_dark else "#8a4b00"
             border = "#A06F18" if is_dark else "#e0b15b"
             background = "#35260F" if is_dark else "#fff4cf"
@@ -10627,8 +11455,26 @@ class SettingsTab(QWidget):
             )
             return
         indicator.setText("Not connected")
+        indicator.setToolTip(f"Saved connection: {self._mesh_saved_connection_label(config)}")
         muted = theme.get("text_muted", "#5b6b78")
         indicator.setStyleSheet(f"QLabel#localMeshConnectionState {{ color: {muted}; font-weight: 700; }}")
+
+    def _set_mesh_connection_action_state(self, config: MeshConnectionConfig, *, connected: bool) -> None:
+        connect_button = getattr(self, "mesh_connect_saved_btn", None)
+        disconnect_button = getattr(self, "mesh_disconnect_btn", None)
+        can_connect = bool(
+            config.enabled
+            and not validate_mesh_connection_config(config)
+            and (
+                config.connection_type is not MeshConnectionType.BLE
+                or bool(config.ble_device_id or config.ble_device_name)
+            )
+        )
+        if isinstance(connect_button, QPushButton):
+            connect_button.setEnabled(can_connect and not connected)
+        if isinstance(disconnect_button, QPushButton):
+            # Disconnect also stops a failed connection's automatic retry loop.
+            disconnect_button.setEnabled(bool(config.enabled))
 
     def _mesh_health_row(self, config: MeshConnectionConfig) -> dict:
         try:
@@ -10639,8 +11485,7 @@ class SettingsTab(QWidget):
         except Exception:
             health_rows = []
         matches = [row for row in health_rows if self._mesh_health_matches_config(row, config)]
-        health_rows = matches or health_rows
-        return dict(health_rows[0]) if health_rows else {}
+        return dict(max(matches, key=self._mesh_health_row_rank)) if matches else {}
 
     def _mesh_connected_health_row(self, config: MeshConnectionConfig) -> dict:
         try:
@@ -10650,10 +11495,20 @@ class SettingsTab(QWidget):
             )
         except Exception:
             health_rows = []
-        for row in health_rows:
-            if bool(row.get("connected")) and self._mesh_health_matches_config(row, config):
-                return dict(row)
-        return {}
+        matches = [
+            row
+            for row in health_rows
+            if bool(row.get("connected")) and self._mesh_health_matches_config(row, config)
+        ]
+        return dict(max(matches, key=self._mesh_health_row_rank)) if matches else {}
+
+    @staticmethod
+    def _mesh_health_row_rank(row: Mapping[str, object]) -> tuple[str, int, int]:
+        return (
+            str(row.get("updated_utc") or ""),
+            1 if bool(row.get("connected")) else 0,
+            1 if not str(row.get("last_error") or "").strip() else 0,
+        )
 
     @staticmethod
     def _mesh_display_device_name(row: Mapping[str, object], config: MeshConnectionConfig) -> str:
@@ -10673,18 +11528,7 @@ class SettingsTab(QWidget):
 
     @staticmethod
     def _mesh_health_matches_config(row: Mapping[str, object], config: MeshConnectionConfig) -> bool:
-        adapter = str(row.get("adapter_id") or "").strip().casefold()
-        device = str(row.get("device_name") or "").strip().casefold()
-        candidates = {
-            str(config.adapter_id or "").strip().casefold(),
-            str(config.ble_device_id or "").strip().casefold(),
-            str(config.ble_device_name or "").strip().casefold(),
-            str(config.endpoint_address or "").strip().casefold(),
-        }
-        candidates = {candidate for candidate in candidates if candidate}
-        if adapter in candidates or device in candidates:
-            return True
-        return any(candidate and (candidate in adapter or candidate in device) for candidate in candidates)
+        return mesh_health_matches_config(config, row)
 
     @staticmethod
     def _mesh_identifier_looks_raw(value: object) -> bool:
@@ -26046,7 +26890,7 @@ class SettingsTab(QWidget):
     def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
         if not self._active:
             return
-        self._refresh_running_status_compat(force=True)
+        self._refresh_running_status_compat(force=False)
 
     def _refresh_running_status_compat(self, force: bool = False) -> None:
         try:
@@ -26127,7 +26971,17 @@ class SettingsTab(QWidget):
     def _selected_radio_status_snapshot(self, force: bool = False) -> Dict[str, Dict[str, object]]:
         try:
             js8_host, js8_port, flrig_port, fldigi_host, fldigi_port = self._selected_radio_status_endpoint_sig()
-            return self._software_status_probe.status_snapshot(
+            status_service = getattr(self, "_status_service", None)
+            if status_service is None or not hasattr(status_service, "status_snapshot"):
+                return self._software_status_probe.status_snapshot(
+                    force=force,
+                    host_override=js8_host or None,
+                    port_override=js8_port,
+                    flrig_port_override=flrig_port,
+                    fldigi_host_override=fldigi_host or None,
+                    fldigi_port_override=fldigi_port,
+                )
+            return status_service.status_snapshot(
                 force=force,
                 host_override=js8_host or None,
                 port_override=js8_port,
@@ -26176,7 +27030,7 @@ class SettingsTab(QWidget):
             if hasattr(self, "sections_nav_list"):
                 self._apply_sections_nav_style()
                 self._refresh_section_nav_health()
-            if hasattr(self, "mesh_channel_policy_table"):
+            if hasattr(self, "mesh_channel_admin"):
                 self._refresh_mesh_channel_table()
             for btn in getattr(self, "_context_help_buttons", []):
                 try:

@@ -4,12 +4,15 @@ import asyncio
 import inspect
 import sys
 import threading
+import time
 from concurrent.futures import CancelledError as FutureCancelledError, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from importlib import import_module, util
-from typing import Iterator
+from typing import Callable, Iterator
 
+from freqinout.core.logger import log
 from freqinout.core.mesh.ingest_status import MESHCORE_COMPANION_DECODER_WARNING
+from freqinout.core.mesh.lifecycle import MeshOperationCancelled
 from freqinout.core.mesh.meshcore_codec import (
     MESHCORE_CMD_GET_CONTACTS,
     MESHCORE_CMD_DEVICE_QUERY,
@@ -37,7 +40,14 @@ from freqinout.core.mesh.meshcore_codec import (
     normalize_meshcore_waiting_messages,
 )
 from freqinout.core.mesh.meshtastic_adapter import MeshConnectionError
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode
+from freqinout.core.mesh.models import (
+    MeshAdapterEvent,
+    MeshChannel,
+    MeshChannelCapabilities,
+    MeshHealthSnapshot,
+    MeshMessage,
+    MeshNode,
+)
 from freqinout.core.mesh.settings import MeshConnectionConfig, MeshConnectionType, validate_mesh_connection_config
 
 MESHCORE_NUS_SERVICE_UUID = "6e400001b5a3f393e0a9e50e24dcca9e"
@@ -45,10 +55,49 @@ MESHCORE_NUS_RX_UUID = "6e400002b5a3f393e0a9e50e24dcca9e"
 MESHCORE_NUS_TX_UUID = "6e400003b5a3f393e0a9e50e24dcca9e"
 
 PAIRING_GUIDANCE = (
-    "Pair the MeshCore device in macOS Bluetooth Settings first if prompted, "
-    "using the PIN shown on the device, then retry Local Mesh."
+    "Open Bluetooth settings for this computer if pairing is requested, use the PIN shown on the device, "
+    "then retry Local Mesh."
+)
+STALE_BOND_GUIDANCE = (
+    "Disconnect phone/tablet clients, restart the card, and retry the saved device once. "
+    "Normal disconnect and restart must not require re-pairing. "
+    "If the card continues to report that it removed pairing information, the computer and card no longer share "
+    "the same Bluetooth keys; re-pairing in system Bluetooth settings is the last-resort recovery because macOS "
+    "does not provide applications a standard unpair API. Scan again after that recovery."
 )
 MESHCORE_RECEIVE_PENDING_WARNING = MESHCORE_COMPANION_DECODER_WARNING
+MESHCORE_BLE_DISCONNECTING_MESSAGE = (
+    "MeshCore Bluetooth is still disconnecting. Wait for it to finish before reconnecting."
+)
+
+
+class _MeshCoreBleSessionGate:
+    """Serialize native BLE ownership across retiring and replacement workers."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._owner: object | None = None
+
+    def acquire(self, owner: object, *, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        with self._condition:
+            while self._owner is not None and self._owner is not owner:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            self._owner = owner
+            return True
+
+    def release(self, owner: object) -> None:
+        with self._condition:
+            if self._owner is not owner:
+                return
+            self._owner = None
+            self._condition.notify_all()
+
+
+_MESHCORE_BLE_SESSION_GATE = _MeshCoreBleSessionGate()
 
 
 @dataclass(frozen=True)
@@ -114,9 +163,19 @@ class MeshCoreBleCompanionClient:
         if callable(disconnect):
             await disconnect()
 
-    async def getChannels(self) -> list[dict[str, object]]:
+    async def getChannels(
+        self,
+        on_channel: Callable[[dict[str, object]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[dict[str, object]]:
         channels: list[dict[str, object]] = []
-        for channel_idx in range(0, 32):
+        # Companion firmware exposes eight channel slots (0-7). Empty slots
+        # are capacity, not feeds, but configured slots can be sparse, so scan
+        # the bounded range and skip empties instead of treating the first one
+        # as an end marker.
+        for channel_idx in range(0, 8):
+            if cancel_event is not None and cancel_event.is_set():
+                raise MeshOperationCancelled("MeshCore channel refresh cancelled.")
             try:
                 frame = await self._request(
                     bytes([MESHCORE_CMD_GET_CHANNEL, channel_idx]),
@@ -128,7 +187,13 @@ class MeshCoreBleCompanionClient:
             parsed = decode_meshcore_channel_info_frame(frame)
             if parsed is None:
                 break
+            # Empty CHANNEL_INFO responses represent unused capacity. They
+            # must not become synthetic ``Channel N`` policies.
+            if _meshcore_channel_slot_is_unused(parsed):
+                continue
             channels.append(parsed)
+            if on_channel is not None:
+                on_channel(parsed)
         return channels
 
     async def getContacts(self) -> list[dict[str, object]]:
@@ -191,6 +256,15 @@ class MeshCoreBleCompanionClient:
         frames = tuple(self._raw_frames)
         self._raw_frames.clear()
         return frames
+
+    def waiting_messages_pending(self) -> bool:
+        """Return whether firmware announced queued traffic.
+
+        Sync-next is a command, not a harmless status poll. Sending it on every
+        one-second worker tick can monopolize the BLE link and delay shutdown.
+        """
+
+        return self._msg_waiting_seen
 
     def inject_frame_for_test(self, frame: bytes | bytearray | memoryview) -> None:
         self._on_notification(None, frame)
@@ -268,6 +342,11 @@ class MeshCoreBleAdapter:
         self._last_error = ""
         self._last_rx = None
         self._device_name = config.endpoint_address
+        self._saved_device_scan_fallback_attempted = False
+        self._session_token = object()
+        self._session_gate_owned = False
+        self._session_teardown_pending = False
+        self._session_state_lock = threading.Lock()
 
     def connect(self) -> None:
         if not self.config.enabled:
@@ -281,22 +360,50 @@ class MeshCoreBleAdapter:
             raise MeshConnectionError(
                 "The Python BLE package 'bleak' is not installed. Install it before using MeshCore BLE."
             )
-        if self._ble_loop is None:
-            self._ble_loop = _AsyncioLoopRunner()
+        with self._session_state_lock:
+            teardown_pending = self._session_teardown_pending
+        if teardown_pending:
+            self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+            raise MeshConnectionError(self._last_error)
+        if self._client is not None:
+            if bool(getattr(self._client, "is_connected", False)):
+                return
+            # A passive link loss leaves the Companion wrapper and its native
+            # event loop in place. Retire that entire session before retrying.
+            self.disconnect()
+            with self._session_state_lock:
+                teardown_pending = self._session_teardown_pending
+            if teardown_pending:
+                raise MeshConnectionError(MESHCORE_BLE_DISCONNECTING_MESSAGE)
+        if not self._session_gate_owned:
+            if not _MESHCORE_BLE_SESSION_GATE.acquire(self._session_token, timeout_sec=6.0):
+                self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+                log.warning("MeshCore BLE connect deferred adapter=%s: prior session teardown is incomplete.", self.adapter_id)
+                raise MeshConnectionError(self._last_error)
+            self._session_gate_owned = True
+            log.info("MeshCore BLE session acquired adapter=%s device=%s.", self.adapter_id, self._device_name)
         try:
+            if self._ble_loop is None:
+                self._ble_loop = _AsyncioLoopRunner()
             self._ble_loop.run(self._connect_ble(), timeout_sec=30.0)
+            log.info("MeshCore BLE Companion session ready adapter=%s device=%s.", self.adapter_id, self._device_name)
+        except MeshOperationCancelled:
+            self._finish_ble_session()
+            raise
         except MeshConnectionError as exc:
             self._last_error = str(exc)
-            self._stop_ble_loop()
+            self._finish_ble_session()
             raise
         except Exception as exc:
             self._last_error = _pairing_error_message(exc)
-            self._stop_ble_loop()
+            self._finish_ble_session()
             raise MeshConnectionError(self._last_error) from exc
 
     def disconnect(self) -> None:
+        started_at = time.monotonic()
         client = self._client
         self._client = None
+        log.info("MeshCore BLE disconnect requested adapter=%s.", self.adapter_id)
         try:
             if client is None:
                 return
@@ -312,14 +419,66 @@ class MeshCoreBleAdapter:
                     asyncio.run(result)
         except Exception as exc:
             self._last_error = str(exc)
+            log.warning("MeshCore BLE disconnect failed adapter=%s raw=%s", self.adapter_id, str(exc))
         finally:
-            self._stop_ble_loop()
+            stopped = self._finish_ble_session()
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            log.info(
+                "MeshCore BLE disconnect teardown adapter=%s complete=%s elapsed_ms=%.1f.",
+                self.adapter_id,
+                stopped,
+                elapsed_ms,
+            )
 
-    def _stop_ble_loop(self) -> None:
+    def cancel_pending_operation(self) -> None:
+        runner = self._ble_loop
+        if runner is not None:
+            runner.cancel_current()
+
+    def channel_capabilities(self) -> MeshChannelCapabilities:
+        return MeshChannelCapabilities(
+            guidance="Use the MeshCore companion application to configure or remove device channels.",
+        )
+
+    def _stop_ble_loop(self) -> tuple[_AsyncioLoopRunner | None, bool]:
         runner = self._ble_loop
         self._ble_loop = None
         if runner is not None:
-            runner.stop()
+            return runner, runner.stop()
+        return None, True
+
+    def _finish_ble_session(self) -> bool:
+        runner, stopped = self._stop_ble_loop()
+        if stopped:
+            with self._session_state_lock:
+                self._session_teardown_pending = False
+            self._release_session_gate()
+            return True
+        self._last_error = MESHCORE_BLE_DISCONNECTING_MESSAGE
+        with self._session_state_lock:
+            self._session_teardown_pending = True
+        log.warning("MeshCore BLE event loop is still stopping adapter=%s; retaining session ownership.", self.adapter_id)
+        if runner is not None:
+            threading.Thread(
+                target=self._release_session_gate_after_runner,
+                args=(runner,),
+                name="FIO MeshCore BLE teardown",
+                daemon=True,
+            ).start()
+        return False
+
+    def _release_session_gate_after_runner(self, runner: _AsyncioLoopRunner) -> None:
+        runner.wait_until_stopped()
+        with self._session_state_lock:
+            self._session_teardown_pending = False
+        self._release_session_gate()
+        log.info("MeshCore BLE delayed teardown completed adapter=%s.", self.adapter_id)
+
+    def _release_session_gate(self) -> None:
+        if not self._session_gate_owned:
+            return
+        _MESHCORE_BLE_SESSION_GATE.release(self._session_token)
+        self._session_gate_owned = False
 
     def _run_adapter_awaitable(self, awaitable: object, *, timeout_sec: float = 10.0) -> object:
         if not _is_awaitable(awaitable):
@@ -376,7 +535,7 @@ class MeshCoreBleAdapter:
             transport=self.transport_name,
         )
         if channels:
-            return list(channels) + [self._direct_channel()]
+            return list(channels)
         return [
             MeshChannel(
                 adapter_id=self.adapter_id,
@@ -387,10 +546,53 @@ class MeshCoreBleAdapter:
                 channel_id="0",
                 privacy="public",
             ),
-            self._direct_channel(),
         ]
 
+    def list_channels_incremental(
+        self,
+        on_channel: Callable[[MeshChannel], None],
+        cancel_event: threading.Event | None = None,
+    ) -> list[MeshChannel]:
+        client = self._client
+        method = getattr(client, "getChannels", None)
+        if not callable(method):
+            channels = self.list_channels()
+            for channel in channels:
+                on_channel(channel)
+            return channels
+
+        collected: list[MeshChannel] = []
+
+        def _stage(raw: dict[str, object]) -> None:
+            normalized = normalize_meshcore_channels(
+                (raw,),
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+            )
+            for channel in normalized:
+                collected.append(channel)
+                on_channel(channel)
+
+        try:
+            result = method(on_channel=_stage, cancel_event=cancel_event)
+        except TypeError:
+            result = method()
+        raw_channels = self._run_adapter_awaitable(result, timeout_sec=120.0)
+        if not collected:
+            for channel in normalize_meshcore_channels(
+                raw_channels,
+                adapter_id=self.adapter_id,
+                transport=self.transport_name,
+            ):
+                collected.append(channel)
+                on_channel(channel)
+        return collected
+
     def get_recent_messages(self) -> list[MeshMessage]:
+        client = self._client
+        pending = getattr(client, "waiting_messages_pending", None)
+        if callable(pending) and not bool(pending()):
+            return []
         raw_messages = self._call_client_collection("getWaitingMessages")
         messages = list(
             normalize_meshcore_waiting_messages(
@@ -461,17 +663,6 @@ class MeshCoreBleAdapter:
         )
         return nodes[0] if nodes else None
 
-    def _direct_channel(self) -> MeshChannel:
-        return MeshChannel(
-            adapter_id=self.adapter_id,
-            transport=self.transport_name,
-            index=-1,
-            name="Direct",
-            role="direct",
-            channel_id="direct",
-            privacy="direct",
-        )
-
     def _call_client_collection(self, method_name: str) -> tuple[object, ...]:
         client = self._client
         if client is None:
@@ -496,13 +687,56 @@ class MeshCoreBleAdapter:
 
     async def _connect_ble(self) -> None:
         bleak = import_module("bleak")
-        address = self.config.ble_device_id or await self._find_device_address(bleak)
-        client = self._make_client(bleak, address)
+        saved_id = self.config.ble_device_id.strip()
+        address = saved_id or await self._find_device_address(bleak)
+        try:
+            companion = await self._open_ble_target(bleak, address)
+        except Exception as exc:
+            log.warning(
+                "MeshCore BLE saved-device open failed adapter=%s device=%s raw=%s",
+                self.adapter_id,
+                self.config.ble_device_name or saved_id or "unspecified",
+                str(exc),
+            )
+            can_scan_fallback = bool(
+                saved_id
+                and not self._saved_device_scan_fallback_attempted
+                and not _peer_removed_pairing_information(exc)
+            )
+            if not can_scan_fallback:
+                raise MeshConnectionError(_pairing_error_message(exc)) from exc
+            self._saved_device_scan_fallback_attempted = True
+            discovered = await self._find_saved_device(bleak)
+            if discovered is None:
+                raise MeshConnectionError(_pairing_error_message(exc)) from exc
+            discovered_device, discovered_name = discovered
+            try:
+                companion = await self._open_ble_target(bleak, discovered_device)
+            except Exception as fallback_exc:
+                log.warning(
+                    "MeshCore BLE discovered-device retry failed adapter=%s device=%s raw=%s",
+                    self.adapter_id,
+                    discovered_name or self.config.ble_device_name or saved_id,
+                    str(fallback_exc),
+                )
+                raise MeshConnectionError(_pairing_error_message(fallback_exc)) from fallback_exc
+            self._device_name = discovered_name or self.config.ble_device_name or saved_id
+        self._client = companion
+        if not self._device_name or self._device_name == self.config.endpoint_address:
+            self._device_name = self.config.ble_device_name or str(getattr(address, "address", address))
+        self._saved_device_scan_fallback_attempted = False
+        self._last_error = ""
+
+    async def _open_ble_target(self, bleak: object, target: object) -> MeshCoreBleCompanionClient:
+        client = self._make_client(bleak, target)
         try:
             await client.connect()
             if not getattr(client, "is_connected", False):
                 raise MeshConnectionError(f"MeshCore BLE device did not report connected. {PAIRING_GUIDANCE}")
             await self._verify_meshcore_characteristics(client)
+            companion = MeshCoreBleCompanionClient(client)
+            await companion.initialize()
+            return companion
         except Exception:
             disconnect = getattr(client, "disconnect", None)
             if callable(disconnect):
@@ -511,17 +745,33 @@ class MeshCoreBleAdapter:
                 except Exception:
                     pass
             raise
-        companion_client: object = client
+
+    async def _find_saved_device(self, bleak: object) -> tuple[object, str] | None:
+        scanner = getattr(bleak, "BleakScanner", None)
+        discover = getattr(scanner, "discover", None)
+        if not callable(discover):
+            return None
         try:
-            companion = MeshCoreBleCompanionClient(client)
-            await companion.initialize()
-            companion_client = companion
-        except Exception as exc:
-            self._last_error = str(exc)
-        self._client = companion_client
-        self._device_name = self.config.ble_device_name or str(address)
-        if _client_has_companion_receive(self._client):
-            self._last_error = ""
+            discovered = await discover(timeout=max(5, int(self.config.ble_scan_timeout_sec)), return_adv=True)
+        except TypeError:
+            discovered = await discover(timeout=max(5, int(self.config.ble_scan_timeout_sec)))
+        candidates: list[tuple[object, str, str]] = []
+        values = discovered.values() if isinstance(discovered, dict) else (discovered or ())
+        for item in values:
+            device = item[0] if isinstance(item, tuple) and item else item
+            adv = item[1] if isinstance(item, tuple) and len(item) > 1 else None
+            address = str(getattr(device, "address", "") or "").strip()
+            name = str(getattr(adv, "local_name", "") or getattr(device, "name", "") or "").strip()
+            candidates.append((device, address, name))
+        saved_id = self.config.ble_device_id.strip().casefold()
+        saved_name = self.config.ble_device_name.strip().casefold()
+        for device, address, name in candidates:
+            if saved_id and address.casefold() == saved_id:
+                return device, name
+        for device, _address, name in candidates:
+            if saved_name and name.casefold() == saved_name:
+                return device, name
+        return None
 
     async def _find_device_address(self, bleak: object) -> str:
         target_name = self.config.ble_device_name.strip()
@@ -537,7 +787,7 @@ class MeshCoreBleAdapter:
                 return str(getattr(device, "address", "") or "").strip()
         raise MeshConnectionError(f"Could not find MeshCore BLE device named '{target_name}'. {PAIRING_GUIDANCE}")
 
-    def _make_client(self, bleak: object, address: str) -> object:
+    def _make_client(self, bleak: object, address: object) -> object:
         client_cls = getattr(bleak, "BleakClient", None)
         if client_cls is None:
             raise MeshConnectionError("The Python BLE package 'bleak' does not provide BleakClient.")
@@ -570,6 +820,18 @@ def _normalize_uuid(value: object) -> str:
     return str(value or "").replace("-", "").strip().lower()
 
 
+def _meshcore_channel_slot_is_unused(channel: object) -> bool:
+    if not isinstance(channel, dict):
+        return False
+    name = str(channel.get("name") or "").strip()
+    secret = channel.get("secret")
+    try:
+        secret_bytes = bytes(secret or b"")
+    except (TypeError, ValueError):
+        secret_bytes = b""
+    return not name and (not secret_bytes or not any(secret_bytes))
+
+
 def _is_awaitable(value: object) -> bool:
     return inspect.isawaitable(value)
 
@@ -588,6 +850,8 @@ class _AsyncioLoopRunner:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
+        self._current_future: object | None = None
+        self._future_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="FIO MeshCore BLE", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=2)
@@ -596,8 +860,12 @@ class _AsyncioLoopRunner:
         if not _is_awaitable(awaitable):
             return awaitable
         future = asyncio.run_coroutine_threadsafe(awaitable, self._loop)
+        with self._future_lock:
+            self._current_future = future
         try:
             return future.result(timeout=max(0.1, float(timeout_sec or 30.0)))
+        except FutureCancelledError as exc:
+            raise MeshOperationCancelled("MeshCore BLE operation cancelled.") from exc
         except FutureTimeoutError as exc:
             future.cancel()
             try:
@@ -607,12 +875,35 @@ class _AsyncioLoopRunner:
             raise MeshConnectionError(
                 "MeshCore BLE operation timed out. Check that the device is awake, nearby, and still paired."
             ) from exc
+        finally:
+            with self._future_lock:
+                if self._current_future is future:
+                    self._current_future = None
 
-    def stop(self) -> None:
-        if self._loop.is_closed():
-            return
-        self._loop.call_soon_threadsafe(self._loop.stop)
+    def cancel_current(self) -> None:
+        with self._future_lock:
+            future = self._current_future
+        cancel = getattr(future, "cancel", None)
+        if callable(cancel):
+            cancel()
+
+    def stop(self) -> bool:
+        self.cancel_current()
+        if not self._thread.is_alive() or self._loop.is_closed():
+            return True
+        try:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        except RuntimeError:
+            # The loop can close between the state check and the threadsafe
+            # callback when disconnect completion and shutdown coincide.
+            pass
         self._thread.join(timeout=2)
+        return not self._thread.is_alive()
+
+    def wait_until_stopped(self) -> None:
+        if self._thread is threading.current_thread():
+            return
+        self._thread.join()
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -628,30 +919,57 @@ class _AsyncioLoopRunner:
             self._loop.close()
 
 
-def discover_meshcore_ble_devices(timeout_sec: int = 10) -> tuple[MeshCoreBleAdvertisement, ...]:
+def discover_meshcore_ble_devices(
+    timeout_sec: int = 10,
+    *,
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[tuple[MeshCoreBleAdvertisement, ...]], None] | None = None,
+) -> tuple[MeshCoreBleAdvertisement, ...]:
     if not meshcore_ble_available():
         raise MeshConnectionError(
             "The Python BLE package 'bleak' is not installed. Install it before scanning for MeshCore BLE."
         )
     try:
-        return tuple(asyncio.run(_discover_meshcore_ble_devices(timeout_sec)))
-    except MeshConnectionError:
+        return tuple(
+            asyncio.run(
+                _discover_meshcore_ble_devices(
+                    timeout_sec,
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                )
+            )
+        )
+    except (MeshConnectionError, MeshOperationCancelled):
         raise
     except Exception as exc:
         raise MeshConnectionError(_pairing_error_message(exc)) from exc
 
 
-async def _discover_meshcore_ble_devices(timeout_sec: int) -> tuple[MeshCoreBleAdvertisement, ...]:
+async def _discover_meshcore_ble_devices(
+    timeout_sec: int,
+    *,
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[tuple[MeshCoreBleAdvertisement, ...]], None] | None = None,
+) -> tuple[MeshCoreBleAdvertisement, ...]:
     bleak = import_module("bleak")
     scanner = getattr(bleak, "BleakScanner", None)
     discover = getattr(scanner, "discover", None)
     if not callable(discover):
         raise MeshConnectionError("The Python BLE package 'bleak' does not provide BleakScanner.discover.")
     timeout = max(5, int(timeout_sec))
+    if cancel_event is not None and cancel_event.is_set():
+        raise MeshOperationCancelled("MeshCore BLE scan cancelled.")
     try:
-        discovered = await discover(timeout=timeout, return_adv=True)
+        task = asyncio.create_task(discover(timeout=timeout, return_adv=True))
     except TypeError:
-        discovered = await discover(timeout=timeout)
+        task = asyncio.create_task(discover(timeout=timeout))
+    while not task.done():
+        if cancel_event is not None and cancel_event.is_set():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise MeshOperationCancelled("MeshCore BLE scan cancelled.")
+        await asyncio.sleep(0.1)
+    discovered = await task
     advertisements: list[MeshCoreBleAdvertisement] = []
     if isinstance(discovered, dict):
         values = discovered.values()
@@ -668,7 +986,10 @@ async def _discover_meshcore_ble_devices(timeout_sec: int) -> tuple[MeshCoreBleA
             advertisement = _advertisement_from_bleak(device, None)
             if _looks_like_meshcore(advertisement):
                 advertisements.append(advertisement)
-    return tuple(_dedupe_advertisements(advertisements))
+    result = tuple(_dedupe_advertisements(advertisements))
+    if progress_callback is not None and result:
+        progress_callback(result)
+    return result
 
 
 def _advertisement_from_bleak(device: object, advertisement_data: object | None) -> MeshCoreBleAdvertisement:
@@ -720,9 +1041,22 @@ def _dedupe_advertisements(
 
 def _pairing_error_message(exc: object) -> str:
     text = str(exc)
+    if isinstance(exc, MeshConnectionError):
+        # Adapter-raised errors are already operator-facing. Reclassifying
+        # them from keywords such as "pair" can hide the specific failure.
+        return text
     lowered = text.casefold()
+    if _peer_removed_pairing_information(exc):
+        return f"The MeshCore card removed its saved Bluetooth pairing information. {STALE_BOND_GUIDANCE}"
+    if any(term in lowered for term in ("failed to encrypt", "encryption timeout", "encrypt the connection")):
+        return f"MeshCore BLE could not use the saved encryption keys. {STALE_BOND_GUIDANCE}"
     if any(term in lowered for term in ("pair", "pin", "passkey", "authenticate", "not authorized", "permission")):
         return f"MeshCore BLE pairing is required or incomplete. {PAIRING_GUIDANCE}"
     if any(term in lowered for term in ("characteristic", "service", "gatt", "subscribe", "notify")):
         return f"MeshCore BLE connected but Companion service setup failed. {PAIRING_GUIDANCE}"
     return f"MeshCore BLE connection failed: {text}. {PAIRING_GUIDANCE}"
+
+
+def _peer_removed_pairing_information(exc: object) -> bool:
+    text = str(exc).casefold()
+    return "peer removed pairing information" in text or "cberrordomain code=14" in text

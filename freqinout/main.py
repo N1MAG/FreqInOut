@@ -137,6 +137,7 @@ def main():
         win.show()
         app.processEvents(QEventLoop.ExcludeUserInputEvents)
         _emit_startup_stage("main_window_show", stage_started, app_start=startup_started)
+        _emit_startup_stage("first_usable_shell", startup_started)
         if splash is not None:
             splash.finish(win)
         _emit_startup_stage("startup_complete", startup_started)

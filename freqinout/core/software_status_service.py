@@ -37,6 +37,24 @@ PROGRAM_PATH_KEYS: Dict[str, str] = {
     "CommStat": "path_commstat",
 }
 
+# Process names that commonly host a configured script/application rather than
+# exposing the application name as the process name. Only these processes need
+# the more expensive command-line inspection during a routine inventory pass.
+PROCESS_WRAPPER_TOKENS = {
+    "python",
+    "python3",
+    "pythonw",
+    "python.exe",
+    "python3.exe",
+    "wine",
+    "wine64",
+    "mono",
+    "bash",
+    "sh",
+    "zsh",
+    "env",
+}
+
 STATUS_KEYS: Sequence[str] = (
     "JS8Call_API",
     "FLRig",
@@ -82,7 +100,10 @@ class SoftwareStatusService:
         self._proc_snapshot: List[str] = []
         self._proc_records: List[Dict[str, object]] = []
         self._proc_snapshot_ts: float = 0.0
-        self._snapshot_ttl_sec: float = 5.0
+        # The shared coordinator refreshes every 10 seconds. Keep the process
+        # inventory fresh across that cadence so an incidental UI action never
+        # becomes the owner of another full process walk between ticks.
+        self._snapshot_ttl_sec: float = 15.0
         self._js8_api_cache_key: tuple[str, int, bool] | None = None
         self._js8_api_cache_ok: bool = False
         self._js8_api_cache_ts: float = 0.0
@@ -202,12 +223,35 @@ class SoftwareStatusService:
             started = time.perf_counter()
             snap: List[str] = []
             records: List[Dict[str, object]] = []
-            for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+            target_tokens = {
+                token
+                for program_name in PROGRAM_TOKENS
+                for token in self._target_tokens(program_name)
+                if token
+            }
+            # Reading exe/cmdline for every process is disproportionately slow on
+            # some Linux systems (and can block on inaccessible/FUSE-backed proc
+            # entries). Start with the cheap name inventory and inspect details
+            # only for a direct match or a known wrapper process.
+            for proc in psutil.process_iter(attrs=["name"]):
                 try:
                     name = (proc.info.get("name") or "").strip().lower()
-                    exe_path = (proc.info.get("exe") or "").strip()
-                    exe = self._basename_token(exe_path)
-                    cmdline = proc.info.get("cmdline") or []
+                    exe_path = ""
+                    exe = ""
+                    cmdline: Sequence[object] = ()
+                    direct_match = name in target_tokens
+                    inspect_command = name in PROCESS_WRAPPER_TOKENS or not name
+                    if direct_match:
+                        try:
+                            exe_path = str(proc.exe() or "").strip()
+                        except Exception:
+                            exe_path = ""
+                        exe = self._basename_token(exe_path)
+                    if inspect_command:
+                        try:
+                            cmdline = proc.cmdline() or ()
+                        except Exception:
+                            cmdline = ()
                     cmd_paths: List[str] = []
                     cmd_tokens: List[str] = []
                     for arg in cmdline[:6]:

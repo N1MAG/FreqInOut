@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from PySide6.QtWidgets import QApplication
 
@@ -30,3 +31,17 @@ def test_main_window_starts_ui_watchdog() -> None:
     assert "self._ui_watchdog = UiEventLoopWatchdog(self)" in text
     assert "self._ui_watchdog.start()" in text
     assert "self._ui_watchdog.stop()" in text
+
+
+def test_ui_watchdog_stop_interrupts_monitor_wait() -> None:
+    from freqinout.core.ui_watchdog import UiEventLoopWatchdog
+
+    watchdog = UiEventLoopWatchdog(check_interval_sec=10.0)
+    watchdog.start()
+    monitor = watchdog._monitor_thread
+    started = time.monotonic()
+    watchdog.stop()
+
+    assert time.monotonic() - started < 0.5
+    assert monitor is not None
+    assert not monitor.is_alive()

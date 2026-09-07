@@ -468,6 +468,23 @@ def upsert_mesh_channel_policies(
     return count
 
 
+def archive_mesh_channel_policy(db_path: str | Path, policy: MeshChannelPolicy) -> str:
+    """Remove a feed from FIO surfaces while preserving an auditable policy row."""
+
+    return upsert_mesh_channel_policy(
+        db_path,
+        replace(
+            policy,
+            inbox_enabled=False,
+            ops_enabled=False,
+            map_enabled=False,
+            topic_scan_enabled=False,
+            review_state="ignored",
+            source="archived",
+        ),
+    )
+
+
 def stage_mesh_channel_policies_from_channels(
     db_path: str | Path,
     channels: Sequence[MeshChannel],

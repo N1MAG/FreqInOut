@@ -55,7 +55,7 @@ def mesh_ingest_readiness(
         return MeshIngestReadiness(
             state="needs_channels",
             headline="No mesh feeds are reviewed yet.",
-            guidance="Stage Public + Direct, or connect the device to discover feeds.",
+            guidance="Connect the device to discover feeds, or stage its supported default channel.",
             **base,
         )
     if key_needed:

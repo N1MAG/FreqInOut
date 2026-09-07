@@ -2048,7 +2048,7 @@ def test_phase7_station_command_mesh_chips_open_lightweight_manager() -> None:
     assert 'disconnect_btn = QPushButton("Disconnect"' in source
     assert 'settings_btn = QPushButton("Local Mesh Settings"' in source
     assert "def _show_mesh_source_menu" in source
-    assert '"Add Device..."' in source
+    assert '"Scan for Device…"' in source
     assert "source_control_mesh_items_from_configs" in source
 
 

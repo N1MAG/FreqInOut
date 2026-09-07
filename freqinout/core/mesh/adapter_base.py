@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterator, Protocol
+from typing import Iterator, Mapping, Protocol
 
-from freqinout.core.mesh.models import MeshAdapterEvent, MeshChannel, MeshHealthSnapshot, MeshMessage, MeshNode
+from freqinout.core.mesh.models import (
+    MeshAdapterEvent,
+    MeshChannel,
+    MeshChannelCapabilities,
+    MeshHealthSnapshot,
+    MeshMessage,
+    MeshNode,
+)
 
 
 class MeshAdapter(Protocol):
@@ -28,4 +35,16 @@ class MeshAdapter(Protocol):
         ...
 
     def receive_events(self) -> Iterator[MeshAdapterEvent]:
+        ...
+
+    def cancel_pending_operation(self) -> None:
+        ...
+
+    def channel_capabilities(self) -> MeshChannelCapabilities:
+        ...
+
+    def configure_channel(self, channel_id: str, updates: Mapping[str, object]) -> MeshChannel:
+        ...
+
+    def remove_channel(self, channel_id: str) -> None:
         ...

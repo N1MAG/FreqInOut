@@ -5,6 +5,7 @@ from enum import Enum
 from importlib import import_module
 import json
 from pathlib import Path
+import re
 from typing import Mapping, Sequence
 
 from freqinout.core.config_paths import get_config_dir
@@ -30,6 +31,10 @@ class MeshConnectionType(str, Enum):
 class MeshConnectionConfig:
     adapter_id: str = "meshtastic-main"
     protocol: str = "meshtastic"
+    connection_name: str = ""
+    connection_name_auto: bool = True
+    source_radio_id: str = ""
+    source_role: str = ""
     enabled: bool = False
     connection_type: MeshConnectionType = MeshConnectionType.TCP
     tcp_host: str = ""
@@ -53,6 +58,9 @@ class MeshConnectionConfig:
         def get(name: str, default: object = "") -> object:
             return values.get(f"{prefix}_{name}", values.get(name, default))
 
+        def has(name: str) -> bool:
+            return f"{prefix}_{name}" in values or name in values
+
         def as_bool(value: object, default: bool = False) -> bool:
             if value is None:
                 return default
@@ -69,10 +77,22 @@ class MeshConnectionConfig:
         protocol_default = _mesh_protocol_settings_prefix(prefix, fallback=cls.protocol)
         protocol = _mesh_protocol_settings_prefix(get("protocol", protocol_default), fallback=protocol_default)
         adapter_default = "meshcore-main" if protocol == "meshcore" else cls.adapter_id
+        adapter_id = str(get("adapter_id", adapter_default) or adapter_default)
+        connection_name = str(get("connection_name", "") or "").strip()
+        if not connection_name and has("adapter_id"):
+            connection_name = adapter_id
+        connection_name_auto = as_bool(
+            get("connection_name_auto", connection_name_is_automatic(connection_name)),
+            connection_name_is_automatic(connection_name),
+        )
 
         return cls(
-            adapter_id=str(get("adapter_id", adapter_default) or adapter_default),
+            adapter_id=adapter_id,
             protocol=protocol,
+            connection_name=connection_name,
+            connection_name_auto=connection_name_auto,
+            source_radio_id=str(get("source_radio_id", "") or "").strip(),
+            source_role=str(get("source_role", "") or "").strip(),
             enabled=as_bool(get("enabled", cls.enabled), cls.enabled),
             connection_type=MeshConnectionType.from_value(get("connection_type", cls.connection_type.value)),
             tcp_host=str(get("tcp_host", cls.tcp_host) or "").strip(),
@@ -115,9 +135,14 @@ class MeshConnectionConfig:
     def display_name(self) -> str:
         """Human-facing saved-device name for chips, settings, and health."""
 
+        connection_name = str(self.connection_name or "").strip()
+        adapter_id = str(self.adapter_id or "").strip()
+        if connection_name and connection_name.casefold() != adapter_id.casefold():
+            return connection_name
         for value in (
             self.ble_device_name,
-            self.adapter_id,
+            connection_name,
+            adapter_id,
             self.serial_port,
             self.tcp_host,
             self.http_base_url,
@@ -133,6 +158,10 @@ class MeshConnectionConfig:
         return {
             "adapter_id": self.adapter_id,
             "protocol": self.protocol,
+            "connection_name": self.connection_name,
+            "connection_name_auto": self.connection_name_auto,
+            "source_radio_id": self.source_radio_id,
+            "source_role": self.source_role,
             "enabled": self.enabled,
             "connection_type": self.connection_type.value,
             "tcp_host": self.tcp_host,
@@ -209,12 +238,38 @@ def default_mesh_db_path() -> Path:
 def load_mesh_connection_configs(settings_or_values: object, prefix: str = "all") -> tuple[MeshConnectionConfig, ...]:
     values = _settings_values(settings_or_values)
     configs: list[MeshConnectionConfig] = []
-    configs.extend(_load_mesh_connection_library(values))
+    # Identity repair must see disabled saved siblings too. Otherwise an active
+    # endpoint can retain a legacy adapter id already owned by a disconnected
+    # device and publish health under the wrong device. Filtering to runnable
+    # records happens only after the complete saved set has been normalized.
+    configs.extend(_load_mesh_connection_library(values, include_disabled=True))
+    active_configs: list[MeshConnectionConfig] = []
     for active_prefix in _mesh_active_prefixes(prefix):
         config = normalize_mesh_connection_config(MeshConnectionConfig.from_mapping(values, prefix=active_prefix))
         if config.enabled and (_mesh_prefix_has_explicit_config(values, active_prefix) or _mesh_connection_has_endpoint(config)):
+            active_configs.append(config)
             configs.append(config)
-    return tuple(_dedupe_mesh_connection_configs(configs))
+    deduped = _dedupe_mesh_connection_configs(configs)
+    if not active_configs:
+        return tuple(config for config in deduped if config.enabled)
+    # The protocol-prefixed record is the active runtime selection.  Saved
+    # library siblings remain available to the UI, but stale enabled flags in
+    # an older library must not start multiple adapters in the same runtime
+    # family after a scan/use handoff or interrupted save.
+    active_by_family = {
+        (str(config.protocol or "").strip().lower(), config.connection_type): mesh_connection_config_key(config)
+        for config in active_configs
+    }
+    return tuple(
+        config
+        for config in deduped
+        if config.enabled
+        and (
+            (str(config.protocol or "").strip().lower(), config.connection_type) not in active_by_family
+            or mesh_connection_config_key(config)
+            == active_by_family[(str(config.protocol or "").strip().lower(), config.connection_type)]
+        )
+    )
 
 
 def load_saved_mesh_connection_configs(
@@ -233,7 +288,93 @@ def load_saved_mesh_connection_configs(
 
 
 def serialize_mesh_connection_library(configs: Sequence[MeshConnectionConfig]) -> str:
-    return json.dumps([config.to_mapping() for config in configs], sort_keys=True)
+    return json.dumps([config.to_mapping() for config in _dedupe_mesh_connection_configs(configs)], sort_keys=True)
+
+
+_AUTO_CONNECTION_NAME_RE = re.compile(r"^(meshcore|meshtastic)-(\d+)$", re.IGNORECASE)
+
+
+def mesh_protocol_slug(protocol: object) -> str:
+    """Return the stable user-facing prefix for a supported mesh protocol."""
+
+    normalized = str(protocol or "").strip().lower()
+    return normalized if normalized in {"meshcore", "meshtastic"} else "mesh"
+
+
+def next_mesh_connection_name(
+    protocol: object,
+    configs: Sequence[MeshConnectionConfig] = (),
+) -> str:
+    """Choose the first unused protocol-number name without touching saved identities."""
+
+    prefix = mesh_protocol_slug(protocol)
+    used = {
+        str(config.connection_name or config.adapter_id or "").strip().casefold()
+        for config in configs
+        if str(config.connection_name or config.adapter_id or "").strip()
+    }
+    index = 1
+    while f"{prefix}-{index}".casefold() in used:
+        index += 1
+    return f"{prefix}-{index}"
+
+
+def next_mesh_adapter_id(
+    protocol: object,
+    configs: Sequence[MeshConnectionConfig] = (),
+    *,
+    preferred_name: object = "",
+) -> str:
+    """Return a unique internal adapter id without exposing a BLE address."""
+
+    prefix = mesh_protocol_slug(protocol)
+    used = {
+        _normalize_mesh_config_key(config.adapter_id)
+        for config in configs
+        if _normalize_mesh_config_key(config.adapter_id)
+    }
+    preferred = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        re.sub(r"^(meshcore|meshtastic|mesh)[\s:_-]+", "", str(preferred_name or "").strip(), flags=re.IGNORECASE).lower(),
+    ).strip("-")
+    base = f"{prefix}-{preferred}" if preferred else f"{prefix}-1"
+    if _normalize_mesh_config_key(base) not in used:
+        return base
+    index = 2
+    while _normalize_mesh_config_key(f"{base}-{index}") in used:
+        index += 1
+    return f"{base}-{index}"
+
+
+def connection_name_is_automatic(name: object) -> bool:
+    return bool(_AUTO_CONNECTION_NAME_RE.fullmatch(str(name or "").strip()))
+
+
+def update_automatic_connection_name(
+    current_name: object,
+    protocol: object,
+    *,
+    is_auto: bool,
+    configs: Sequence[MeshConnectionConfig] = (),
+) -> str:
+    """Update an untouched generated name while preserving any operator edit."""
+
+    text = str(current_name or "").strip()
+    if not is_auto:
+        return text
+    prefix = mesh_protocol_slug(protocol)
+    match = _AUTO_CONNECTION_NAME_RE.fullmatch(text)
+    if match:
+        candidate = f"{prefix}-{match.group(2)}"
+        used = {
+            str(config.connection_name or config.adapter_id or "").strip().casefold()
+            for config in configs
+            if str(config.connection_name or config.adapter_id or "").strip().casefold() != text.casefold()
+        }
+        if candidate.casefold() not in used:
+            return candidate
+    return next_mesh_connection_name(prefix, configs)
 
 
 def merge_mesh_connection_library(
@@ -316,6 +457,10 @@ def mesh_connection_active_settings_payload(
     return {
         f"{prefix}_adapter_id": config.adapter_id,
         f"{prefix}_protocol": config.protocol,
+        f"{prefix}_connection_name": config.connection_name,
+        f"{prefix}_connection_name_auto": config.connection_name_auto,
+        f"{prefix}_source_radio_id": config.source_radio_id,
+        f"{prefix}_source_role": config.source_role,
         f"{prefix}_enabled": config.enabled,
         f"{prefix}_connection_type": config.connection_type.value,
         f"{prefix}_tcp_host": config.tcp_host,
@@ -341,6 +486,32 @@ def mesh_connection_config_key(config: MeshConnectionConfig) -> str:
     connection_type = str(config.connection_type.value or "").strip().lower()
     endpoint = _mesh_connection_identity_endpoint(config)
     return f"{protocol}:{connection_type}:{endpoint}"
+
+
+def mesh_health_matches_config(
+    config: MeshConnectionConfig,
+    row: Mapping[str, object],
+) -> bool:
+    """Match health to one saved endpoint without crossing named devices."""
+
+    config_protocol = str(config.protocol or "").strip().lower()
+    row_protocol = str(row.get("transport") or "").strip().lower()
+    if config_protocol and row_protocol and config_protocol != row_protocol:
+        return False
+    config_name = _normalize_mesh_identity(config.ble_device_name)
+    row_name = _normalize_mesh_identity(row.get("device_name"))
+    config_device_id = _normalize_mesh_identity(config.ble_device_id)
+    row_adapter = _normalize_mesh_identity(row.get("adapter_id"))
+    if config_device_id and config_device_id in {row_adapter, row_name}:
+        return True
+    if config_name and row_name:
+        # Advertised names are the strongest readable identity currently
+        # persisted in a health row. A contradictory named device must never
+        # match merely because legacy data reused an adapter id. A raw BLE id
+        # in device_name was handled above so pre-GATT failures still surface.
+        return config_name == row_name
+    config_adapter = _normalize_mesh_identity(config.adapter_id)
+    return bool(config_adapter and config_adapter == row_adapter)
 
 
 def normalize_mesh_connection_config(config: MeshConnectionConfig) -> MeshConnectionConfig:
@@ -402,7 +573,39 @@ def _dedupe_mesh_connection_configs(configs: Sequence[MeshConnectionConfig]) -> 
     by_key: dict[str, MeshConnectionConfig] = {}
     for config in configs:
         by_key[mesh_connection_config_key(config)] = config
-    return tuple(by_key.values())
+    unique: list[MeshConnectionConfig] = []
+    used_adapter_ids: set[str] = set()
+    for config in by_key.values():
+        adapter_key = _normalize_mesh_config_key(config.adapter_id)
+        if adapter_key and adapter_key not in used_adapter_ids:
+            unique.append(config)
+            used_adapter_ids.add(adapter_key)
+            continue
+        replacement_id = next_mesh_adapter_id(
+            config.protocol,
+            unique,
+            preferred_name=config.ble_device_name or config.connection_name,
+        )
+        connection_name = str(config.connection_name or "").strip()
+        replacement_name_is_auto = (
+            not connection_name or _normalize_mesh_config_key(connection_name) == adapter_key
+        )
+        if replacement_name_is_auto:
+            connection_name = re.sub(
+                r"^(meshcore|meshtastic|mesh)[\s:_-]+",
+                "",
+                str(config.ble_device_name or replacement_id).strip(),
+                flags=re.IGNORECASE,
+            ).strip()
+        repaired = replace(
+            config,
+            adapter_id=replacement_id,
+            connection_name=connection_name,
+            connection_name_auto=replacement_name_is_auto,
+        )
+        unique.append(repaired)
+        used_adapter_ids.add(_normalize_mesh_config_key(replacement_id))
+    return tuple(unique)
 
 
 def _mesh_connection_has_endpoint(config: MeshConnectionConfig) -> bool:
@@ -474,6 +677,12 @@ def _normalize_mesh_config_key(value: object) -> str:
     return " ".join(text.split())
 
 
+def _normalize_mesh_identity(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^(meshcore|meshtastic|mesh)[\s:_-]+", "", text)
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
 def _settings_values(settings_or_values: object) -> Mapping[str, object]:
     if isinstance(settings_or_values, Mapping):
         return settings_or_values
@@ -488,6 +697,10 @@ def _settings_values(settings_or_values: object) -> Mapping[str, object]:
         defaults = (
             ("adapter_id", MeshConnectionConfig.adapter_id),
             ("protocol", MeshConnectionConfig.protocol),
+            ("connection_name", MeshConnectionConfig.connection_name),
+            ("connection_name_auto", MeshConnectionConfig.connection_name_auto),
+            ("source_radio_id", MeshConnectionConfig.source_radio_id),
+            ("source_role", MeshConnectionConfig.source_role),
             ("enabled", MeshConnectionConfig.enabled),
             ("connection_type", MeshConnectionConfig.connection_type.value),
             ("tcp_host", MeshConnectionConfig.tcp_host),

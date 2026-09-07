@@ -101,6 +101,13 @@ class MeshChannel:
 
 
 @dataclass(frozen=True)
+class MeshChannelCapabilities:
+    can_configure: bool = False
+    can_remove_from_device: bool = False
+    guidance: str = "Use the device companion application to change device channels."
+
+
+@dataclass(frozen=True)
 class MeshMessage:
     adapter_id: str
     transport: str

@@ -1,5 +1,9 @@
 # SOP Schedule Plan Spec
 
+The responsive SOP/Plan Builder completion contract and performance gates from
+the September 2026 production review are governed by
+`production_reliability_and_workflow_remediation_spec.md`.
+
 ## Intent
 
 SOP scheduling becomes a first-class operational plan: where to be, when to be there,

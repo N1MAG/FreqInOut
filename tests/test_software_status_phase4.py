@@ -874,20 +874,16 @@ def test_js8_shadow_health_stays_clear_when_api_basic_lacks_busy_fields():
         engine.stop()
 
 
-def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
+def test_dependency_process_snapshot_does_not_block_on_js8_capability(monkeypatch):
     def fake_running(self, name):
         return name == "JS8Call"
 
+    capability_calls = 0
+
     def fake_capability(self, **_kwargs):
-        return {
-            "connected": True,
-            "mode": "api_basic",
-            "version": "2.2.0",
-            "endpoint": "127.0.0.1:2450",
-            "supported": {"RIG.GET_FREQ": True},
-            "errors": {},
-            "last_error": "",
-        }
+        nonlocal capability_calls
+        capability_calls += 1
+        return {"connected": True, "mode": "api_basic"}
 
     monkeypatch.setattr(SoftwareStatusService, "program_is_running", fake_running)
     monkeypatch.setattr(SoftwareStatusService, "js8_api_capability_status", fake_capability)
@@ -899,10 +895,10 @@ def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
         service.stop()
 
     js8_status = snapshot.process["JS8Call_API"]
-    assert js8_status.state == "ok"
-    assert js8_status.value == "api_basic"
-    assert js8_status.meta["version"] == "2.2.0"
-    assert "compatibility fallbacks" in js8_status.tooltip
+    assert capability_calls == 0
+    assert js8_status.state == "warn"
+    assert js8_status.value == "running_unverified"
+    assert "refreshes separately" in js8_status.tooltip
 
 
 def test_settings_tab_refresh_running_status_uses_unsaved_flrig_port(monkeypatch, tmp_path):
