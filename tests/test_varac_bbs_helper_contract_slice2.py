@@ -35,7 +35,8 @@ def test_logical_location_helper_label_is_extensionless_but_disk_name_is_compati
 
     assert logical_label == "20 type INTEL - open Intel - Latest reports"
     assert not logical_label.lower().endswith(".txt")
-    assert entry.name == f"{logical_label}.txt"
+    assert entry.name == logical_label
+    assert not entry.name.lower().endswith(".txt")
     assert entry.content == logical_label + "\n"
 
 

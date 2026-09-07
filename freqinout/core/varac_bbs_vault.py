@@ -1300,11 +1300,15 @@ def _entry_map(entries: Sequence[VaultPublishManifestEntry]) -> Dict[str, VaultP
 
 def _is_fio_bbs_generated_listing(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
-    if clean.startswith("BBS MSG - ") and clean.endswith(".TXT"):
+    if clean.startswith((
+        "BBS MSG - ",
+        "00 HOW TO USE -",
+        "00 READ FIRST -",
+        "00 NOTICE -",
+        "01 COMMANDS -",
+    )):
         return True
-    if clean.startswith(("00 READ FIRST -", "00 NOTICE -", "01 COMMANDS -")) and clean.endswith(".TXT"):
-        return True
-    if re.match(r"^\d{2} TYPE .+\.TXT$", clean):
+    if re.match(r"^\d{2} TYPE .+(?:\.TXT)?$", clean):
         return True
     return clean.startswith((DEFAULT_FLAMP_QUEUE_HELPER_NAME.upper(), f"{DEFAULT_FLAMP_BLOCK_PREFIX}_"))
 
@@ -1725,14 +1729,15 @@ def _logical_helper_label(value: object) -> str:
 
 
 def _menu_instruction_entry(text: str) -> _VirtualFile:
-    # VarAC accepts the historical ``.txt`` compatibility filename, while the
-    # logical label and helper content stay extensionless for operators.
+    # New VarAC menu instruction files intentionally omit ``.txt``. Historical
+    # files remain recognized above so reconciliation can remove them when the
+    # extensionless projection supersedes them.
     logical_label = _logical_helper_label(text)
-    return _VirtualFile(name=f"{logical_label}.txt", content=logical_label + "\n")
+    return _VirtualFile(name=logical_label, content=logical_label + "\n")
 
 
 def _read_first_entry() -> _VirtualFile:
-    text = "00 READ FIRST - type command, then refresh BBS"
+    text = "00 HOW TO USE - Type command then refresh BBS"
     return _menu_instruction_entry(text)
 
 

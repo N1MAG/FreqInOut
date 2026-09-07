@@ -5167,7 +5167,9 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert 'self.artifact_table.setHorizontalHeaderLabels(["Published"' in station_bbs_source
     assert "Shared Managed BBS Library. Organize reusable locations here, then assign or publish them into each radio's live BBS folder." in settings_source
     assert "Open the top-level BBS service to configure live BBS folders, publication, access, retention, and visitor behavior." in settings_source
-    assert "BBS file management lives in Messages -> BBS" in settings_source
+    assert "Station BBS administration lives in the top-level BBS service." in settings_source
+    assert "Radio Settings retain only native VarAC" in settings_source
+    assert "launcher, inbox, outbox, and live-folder integration paths." in settings_source
     assert "BBS Visitor Preview" in settings_source
     assert "BBS Sweeper Rules" in settings_source
     assert "varac_bbs_sweeper_rules_v1" in settings_source

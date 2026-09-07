@@ -33,6 +33,7 @@ ORIGIN_EXTS = {
 FLAMP_AUTH_EXTS = set(AUTH_FILE_EXTS)
 BBS_HELPER_FILE_PREFIXES = (
     "BBS MSG - ",
+    "00 HOW TO USE -",
     "00 READ FIRST -",
     "00 NOTICE -",
     "01 COMMANDS -",
@@ -60,7 +61,7 @@ class FileRecord:
 def is_fio_bbs_helper_file_name(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
     return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES) or bool(
-        re.match(r"^\d{2} TYPE .+\.TXT$", clean)
+        re.match(r"^\d{2} TYPE .+(?:\.TXT)?$", clean)
     )
 
 

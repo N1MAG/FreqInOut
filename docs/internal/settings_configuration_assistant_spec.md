@@ -208,8 +208,8 @@ Target behavior:
 - Make VarAC BBS configuration and status clear without mixing it into the
   selected-radio Settings mental model. The radio Settings surface contains
   `Radio Paths` and `Inbound Guard`; `Manage FIO BBS` opens the top-level BBS
-  service. Its guided order is `Overview`, `Radio Service`, `Locations &
-  Access`, `Publishing`, `Visitor Preview`, and `System Helpers`.
+  service. Its guided order is `Radio Service`, `Locations & Access`,
+  `Publishing`, `Visitor Preview`, and `Visitor Helpers`.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
   VarAC instance. Initial guidance is now present in Settings and should remain

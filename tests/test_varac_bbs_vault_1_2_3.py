@@ -591,9 +591,9 @@ def test_publish_root_view_appends_custom_helper_text_to_filename(tmp_path: Path
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 READ FIRST - type command, then refresh BBS.txt" in names
-    assert "01 COMMANDS - type one command below.txt" in names
-    assert "20 type INTEL - open Intel - Latest reports.txt" in names
+    assert "00 HOW TO USE - Type command then refresh BBS" in names
+    assert "01 COMMANDS - type one command below" in names
+    assert "20 type INTEL - open Intel - Latest reports" in names
 
 
 def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path: Path) -> None:
@@ -633,7 +633,7 @@ def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert normalize_location_alias("TEST_A") == "TESTA"
-    assert "20 type TESTA - open TEST_A - custom text add-on.txt" in names
+    assert "20 type TESTA - open TEST_A - custom text add-on" in names
     assert stale.name not in names
 
 
@@ -710,7 +710,7 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
     assert any("RESTRICTED" in name for name in names)
-    assert "22 type CODE [CODE] - open CODE with access code.txt" in names
+    assert "22 type CODE [CODE] - open CODE with access code" in names
 
     publish_root_view(
         sender="KX9ZZZ",
@@ -726,7 +726,7 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
     assert any("RESTRICTED" in name for name in names)
-    assert "22 type CODE [CODE] - open CODE with access code.txt" in names
+    assert "22 type CODE [CODE] - open CODE with access code" in names
 
 
 def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path) -> None:
@@ -764,7 +764,7 @@ def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path)
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("INTEL" in name for name in names)
-    assert any(name.endswith(".txt") for name in names)
+    assert not any(name.endswith(".txt") for name in names)
 
 
 def test_reset_to_default_resolves_wine_bbs_paths(tmp_path: Path) -> None:
@@ -1391,8 +1391,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 NOTICE - HUBS requires an access code.txt" in names
-    assert "10 type HUBS [CODE] - open with access code.txt" in names
+    assert "00 NOTICE - HUBS requires an access code" in names
+    assert "10 type HUBS [CODE] - open with access code" in names
     assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
@@ -1721,9 +1721,9 @@ def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 READ FIRST - type command, then refresh BBS.txt" in names
-    assert "01 COMMANDS - type one command below.txt" in names
-    assert "20 type FLAMP - show Flamp block fill commands.txt" in names
+    assert "00 HOW TO USE - Type command then refresh BBS" in names
+    assert "01 COMMANDS - type one command below" in names
+    assert "20 type FLAMP - show Flamp block fill commands" in names
     assert not any("FLAMP CMDS LIST Q" in name for name in names)
 
 
@@ -1782,10 +1782,10 @@ def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "10 type ROOT - return to main menu.txt" in names
-    assert "20 type LIST Q - list available Flamp files.txt" in names
-    assert "21 type LIST F277 - show blocks for queue F277.txt" in names
-    assert "22 type BLKS 0,8,9 F277 - request blocks 0,8,9.txt" in names
+    assert "10 type ROOT - return to main menu" in names
+    assert "20 type LIST Q - list available Flamp files" in names
+    assert "21 type LIST F277 - show blocks for queue F277" in names
+    assert "22 type BLKS 0,8,9 F277 - request blocks 0,8,9" in names
 
 
 def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_path: Path) -> None:
@@ -1843,7 +1843,7 @@ def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_p
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "20 type LIST Q - list available Flamp files.txt" in names
+    assert "20 type LIST Q - list available Flamp files" in names
 
 
 def test_run_varac_bbs_vault_flamp_queue_and_block_commands_accept_prefixed_db_entries(tmp_path: Path) -> None:
@@ -2307,7 +2307,7 @@ def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Pat
     assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
     assert (
-        live_bbs / "00 NOTICE - LIST BLKS 41D6 received. Request sent—refresh when the updated listing is ready.txt"
+        live_bbs / "00 NOTICE - LIST BLKS 41D6 received. Request sent—refresh when the updated listing is ready"
     ).exists()
 
 
@@ -2798,7 +2798,7 @@ def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -
 
     assert (
         tab.varac_bbs_vault_helper_preview_label.text()
-        == "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
+        == "All BBS views include: 00 HOW TO USE — Type command then refresh BBS\n"
         "20 type INTEL - open Intel - Latest reports"
     )
 

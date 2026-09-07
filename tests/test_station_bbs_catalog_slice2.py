@@ -13,11 +13,16 @@ from freqinout.core.varac_bbs_library_store import (
     ensure_bbs_library_schema,
     import_legacy_station_bbs_profiles,
     list_bbs_admin_rows,
+    list_bbs_artifact_location_ids,
     list_bbs_location_manifest_rows,
     list_bbs_locations,
     reconcile_bbs_publications,
+    remove_bbs_artifact_from_all_locations,
+    republish_bbs_artifact,
+    set_bbs_artifact_keep,
     set_bbs_artifact_locations,
     set_bbs_location_artifact,
+    sync_bbs_location_from_folder,
     upsert_bbs_artifact_path,
     upsert_bbs_location,
 )
@@ -529,8 +534,10 @@ def test_admin_rows_report_publication_states_and_whole_day_age(tmp_path: Path) 
     assert by_name["published.txt"].publication_state == "published"
     assert by_name["published.txt"].published is True
     assert by_name["published.txt"].age_days == 1
+    assert by_name["published.txt"].expires_utc == ""
     assert by_name["disabled.txt"].publication_state == "operator_disabled"
     assert by_name["expired.txt"].publication_state == "retention_expired"
+    assert by_name["expired.txt"].expires_utc == "2026-01-04T00:00:00+00:00"
     assert by_name["missing.txt"].publication_state == "source_missing"
     assert by_name["missing.txt"].age_days == 0
 
@@ -558,12 +565,15 @@ def test_set_bbs_artifact_locations_is_atomic_and_preserves_operator_intent(tmp_
             "SELECT location_id, publish_enabled, disabled_reason FROM bbs_location_artifacts WHERE artifact_id=? ORDER BY location_id",
             (artifact_id,),
         ).fetchall())
-        set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=["weather"])
+        cleared = set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=[])
+        removed = set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=["weather"])
         manifest_rows = list_bbs_location_manifest_rows(conn, "weather")
         intel_rows = list_bbs_location_manifest_rows(conn, "intel")
 
     assert selected == [("intel", 1, ""), ("weather", 1, "")]
     assert after_error == selected
+    assert cleared == ()
+    assert removed == ("weather",)
     assert manifest_rows and manifest_rows[0].source_path == str(source.resolve())
     assert intel_rows == []
 
@@ -619,3 +629,188 @@ def test_location_retention_change_recalculates_existing_mapping_expiry(tmp_path
     assert manual_expiry is None
     assert seven_day_expiry == "2026-01-08T00:00:00+00:00"
     assert restored_manual_expiry is None
+
+
+def test_remove_bbs_artifact_disables_every_mapping_and_keeps_source(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    managed = tmp_path / "managed" / "intel"
+    managed.mkdir(parents=True)
+    source = managed / "status.txt"
+    source.write_text("retain me\n", encoding="utf-8")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_bbs_library_schema(conn)
+        artifact_id = upsert_bbs_artifact_path(conn, source_path=source, source_kind="operator_file")
+        upsert_bbs_location(
+            conn,
+            location_id="intel",
+            name="Intel",
+            source_dir=str(managed),
+            enabled=True,
+        )
+        upsert_bbs_location(
+            conn,
+            location_id="weather",
+            name="Weather",
+            source_dir=str(managed / "weather"),
+            enabled=True,
+        )
+        set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=["intel", "weather"])
+        removed = remove_bbs_artifact_from_all_locations(conn, artifact_id=artifact_id)
+        mapping_ids = list_bbs_artifact_location_ids(conn, artifact_id)
+        manifest_rows = list_bbs_location_manifest_rows(conn, "intel")
+        artifact_row = conn.execute(
+            "SELECT source_state, deleted FROM bbs_artifacts WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()
+        admin_rows = list_bbs_admin_rows(conn, location_id="intel", now_utc=dt.datetime(2026, 1, 5, tzinfo=dt.timezone.utc))
+
+    assert removed == 2
+    assert mapping_ids == ()
+    assert manifest_rows == []
+    assert artifact_row == ("present", 0)
+    assert any(row.publication_state == "operator_disabled" for row in admin_rows)
+    assert source.read_text(encoding="utf-8") == "retain me\n"
+
+
+def test_keep_override_bypasses_expiry_and_reconcile(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    managed = tmp_path / "managed" / "intel"
+    managed.mkdir(parents=True)
+    source = managed / "keep.txt"
+    source.write_text("keep me\n", encoding="utf-8")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_bbs_library_schema(conn)
+        artifact_id = upsert_bbs_artifact_path(conn, source_path=source, source_kind="operator_file")
+        upsert_bbs_location(
+            conn,
+            location_id="intel",
+            name="Intel",
+            source_dir=str(managed),
+            enabled=True,
+            retention_mode="expire_after_days",
+            retention_days=1,
+        )
+        set_bbs_location_artifact(conn, location_id="intel", artifact_id=artifact_id, publish_enabled=True)
+        keep_expiry = set_bbs_artifact_keep(conn, artifact_id=artifact_id, location_id="intel", keep=True)
+        keep_row = conn.execute(
+            """
+            SELECT publish_enabled, disabled_reason, retention_class, expires_utc
+            FROM bbs_location_artifacts
+            WHERE location_id='intel' AND artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        result = reconcile_bbs_publications(conn, now_utc=dt.datetime(2026, 1, 10, tzinfo=dt.timezone.utc))
+        admin_row = list_bbs_admin_rows(
+            conn,
+            location_id="intel",
+            now_utc=dt.datetime(2026, 1, 10, tzinfo=dt.timezone.utc),
+        )[0]
+        manifest_rows = list_bbs_location_manifest_rows(conn, "intel")
+
+    assert keep_expiry == ""
+    assert keep_row == (1, "", "keep", None) or keep_row == (1, "", "keep", "")
+    assert result.expired == 0
+    assert admin_row.publication_state == "published"
+    assert manifest_rows and manifest_rows[0].source_path == str(source.resolve())
+    assert source.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_republish_uses_action_time_plus_resolved_retention_not_mtime(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    managed = tmp_path / "managed" / "intel"
+    managed.mkdir(parents=True)
+    source = managed / "status.txt"
+    source.write_text("status\n", encoding="utf-8")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_bbs_library_schema(conn)
+        artifact_id = upsert_bbs_artifact_path(conn, source_path=source, source_kind="operator_file")
+        conn.execute(
+            "UPDATE bbs_artifacts SET mtime_ns=? WHERE artifact_id=?",
+            (int(dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc).timestamp() * 1_000_000_000), artifact_id),
+        )
+        upsert_bbs_location(
+            conn,
+            location_id="intel",
+            name="Intel",
+            source_dir=str(managed),
+            enabled=True,
+            retention_mode="expire_after_days",
+            retention_days=7,
+        )
+        set_bbs_location_artifact(conn, location_id="intel", artifact_id=artifact_id, publish_enabled=False)
+        now = dt.datetime(2026, 1, 10, 12, 0, tzinfo=dt.timezone.utc)
+        expiry = republish_bbs_artifact(conn, artifact_id=artifact_id, location_id="intel", now_utc=now)
+        row = conn.execute(
+            """
+            SELECT publish_enabled, disabled_reason, retention_class, expires_utc
+            FROM bbs_location_artifacts
+            WHERE location_id='intel' AND artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+
+    assert expiry == "2026-01-17T12:00:00+00:00"
+    assert row == (1, "", "normal", "2026-01-17T12:00:00+00:00")
+    assert source.read_text(encoding="utf-8") == "status\n"
+
+
+def test_folder_rescan_does_not_reenable_operator_disabled_mappings(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    managed = tmp_path / "managed" / "intel"
+    managed.mkdir(parents=True)
+    source = managed / "status.txt"
+    source.write_text("status\n", encoding="utf-8")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_bbs_library_schema(conn)
+        sync_bbs_location_from_folder(
+            conn,
+            location_id="intel",
+            name="Intel",
+            source_dir=str(managed),
+            enabled=True,
+            metadata={"retention_mode": "manual"},
+        )
+        artifact_id = conn.execute(
+            "SELECT artifact_id FROM bbs_artifacts WHERE source_path=? LIMIT 1",
+            (str(source.resolve()),),
+        ).fetchone()[0]
+        remove_bbs_artifact_from_all_locations(conn, artifact_id=artifact_id)
+        before = conn.execute(
+            """
+            SELECT publish_enabled, disabled_reason
+            FROM bbs_location_artifacts
+            WHERE location_id='intel' AND artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        sync_bbs_location_from_folder(
+            conn,
+            location_id="intel",
+            name="Intel",
+            source_dir=str(managed),
+            enabled=True,
+            metadata={"retention_mode": "manual"},
+        )
+        after = conn.execute(
+            """
+            SELECT publish_enabled, disabled_reason
+            FROM bbs_location_artifacts
+            WHERE location_id='intel' AND artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        admin_row = list_bbs_admin_rows(
+            conn,
+            location_id="intel",
+            now_utc=dt.datetime(2026, 1, 10, tzinfo=dt.timezone.utc),
+        )[0]
+
+    assert before == (0, "operator_disabled")
+    assert after == (0, "operator_disabled")
+    assert admin_row.publication_state == "operator_disabled"
+    assert source.read_text(encoding="utf-8") == "status\n"

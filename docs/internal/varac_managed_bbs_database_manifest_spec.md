@@ -95,14 +95,15 @@ retention is still enforced from the source modification time.
 ## Administration And Message Contract
 
 Top-level `BBS` is the first-class station service. Its guided tabs are ordered
-`Overview`, `Radio Service`, `Locations & Access`, `Publishing`, `Visitor
-Preview`, and `System Helpers`. It provides:
+`Radio Service`, `Locations & Access`, `Publishing`, `Visitor Preview`, and
+`Visitor Helpers`. It provides:
 
 - a logical location tree with access, retention, and disabled state;
 - progressive Add/Edit/Save/Disable location administration;
 - callsign and access-code location rules with salted hashes rather than stored
   plaintext;
-- a bounded newest-first artifact view with a visible publication checkbox;
+- a bounded newest-first artifact view with explicit Published, Expired, and
+  Removed filters plus a visible publication checkbox;
 - origin, source path, size, age/modified time, access, retention/expiry, and
   publication health details;
 - compact reflow with opt-in details at 1000 pixels and below.
@@ -119,27 +120,38 @@ station/location allowed-callsign policy; it then shows only effectively
 published artifacts for the selected visible location.
 
 Location Save is catalog-only: it never creates or scans a folder. Disable is
-non-destructive. The selected location scopes the checkbox while the bounded
-catalog-wide artifact list permits adding an existing artifact to a new
-location.
+non-destructive. The selected location chip scopes the checkbox while the
+bounded catalog-wide artifact list permits adding an existing artifact to a new
+location. Membership edits remain in memory until `Apply Changes` commits them
+atomically; `Revert` restores persisted state.
+
+`Remove from BBS` disables every mapping for an artifact but retains its source
+and catalog row. `Keep in BBS` sets the existing mapping `retention_class` to
+`keep` and clears expiry. `Republish` restores the selected mapping with normal
+retention and calculates a fresh expiry from action time. These actions require
+no schema migration.
 
 Messages `+BBS` opens the same logical location choices. Accepting the dialog
 atomically replaces that artifact's station memberships; unchecking every
 location removes publication everywhere while leaving the received source
 file unchanged. No live directory is copied from or deleted on the UI thread.
 
-Generated VarAC helper/navigation files are rendered only in `System Helpers`.
+Generated VarAC helper/navigation files are rendered only in `Visitor Helpers`.
 They are excluded from the operator artifact publication table and have no
-membership checkbox. This is a presentation/ownership distinction; compatible
-generated files may still exist in each live VarAC BBS folder.
+membership checkbox.
 
 ## Visitor Helpers
 
-Visitor-facing labels omit the confusing `.txt` suffix, while compatibility
-files written to VarAC retain it on disk. Helpers no longer promise a fixed
-ten-second delay. Asynchronous actions say: `Request sent—refresh when the
-updated listing is ready`. Historical helper filenames remain recognized so
-old generated files can be filtered and reconciled.
+New visitor helper labels and physical filenames omit the confusing `.txt`
+suffix. The first entry is `00 HOW TO USE - Type command then refresh BBS`.
+Helpers no longer promise a fixed ten-second delay. Asynchronous actions say:
+`Request sent—refresh when the updated listing is ready`. Historical `.txt`
+helper filenames remain recognized so old generated files can be filtered and
+reconciled when an extensionless projection supersedes them.
+
+The legacy `Reset To Default` operation resets only transient live visitor
+navigation. If exposed, it is named `Return Live BBS Home` and explicitly states
+that configuration, membership, and source files are unchanged.
 
 ## Automated Acceptance Record
 
@@ -160,3 +172,9 @@ old generated files can be filtered and reconciled.
 - Visual review: Light/Normal at 1200x800 and Dark/Large Text at 900x560;
   compact details remain reachable without consuming the default artifact
   workspace.
+- Refinement contract: Keep survives recalculation/reconciliation, Republish
+  uses an action-time retention window, Remove preserves source/catalog, staged
+  publication edits require Apply, and extensionless helpers retain historical
+  cleanup compatibility.
+- Refinement gate: 144 focused BBS tests pass with one environment skip; all
+  172 repository test files pass in isolated processes with two skip-only files.

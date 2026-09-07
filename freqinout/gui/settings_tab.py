@@ -1826,7 +1826,7 @@ class SettingsTab(QWidget):
         )
         if location_id == DEFAULT_LOCATION_ID:
             text = (
-                "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
+                "All BBS views include: 00 HOW TO USE — Type command then refresh BBS\n"
                 "Default is the FIO Managed Root BBS menu. It publishes helper files for visible locations "
                 "and any files placed in the Default folder."
             )
@@ -1851,7 +1851,7 @@ class SettingsTab(QWidget):
                 order=20,
             )
             text = (
-                "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
+                "All BBS views include: 00 HOW TO USE — Type command then refresh BBS\n"
                 f"{helper_name}"
             )
         self.varac_bbs_vault_helper_preview_label.setText(text)
@@ -2187,7 +2187,7 @@ class SettingsTab(QWidget):
             f"Access-code policy: {global_code_policy}",
             "",
             "Root menu callers will see:",
-            "- 00 READ FIRST — type a command, then refresh BBS",
+            "- 00 HOW TO USE — Type command then refresh BBS",
         ]
         if root_locations:
             for index, row in enumerate(root_locations, start=20):
@@ -2214,7 +2214,7 @@ class SettingsTab(QWidget):
         else:
             lines.append("- No enabled non-hidden locations are listed in the root menu.")
         lines.extend(["", "Root view visitor files:"])
-        lines.append("- 00 READ FIRST — type a command, then refresh BBS")
+        lines.append("- 00 HOW TO USE — Type command then refresh BBS")
         lines.append("- 01 COMMANDS — type one command below")
         if root_locations:
             for index, row in enumerate(root_locations, start=20):
@@ -2292,7 +2292,7 @@ class SettingsTab(QWidget):
             )
             if bool(row.get("enabled", True)) and visibility != "Hidden":
                 lines.append("  Visitor files: published mapping")
-                lines.append("  - 00 READ FIRST — type a command, then refresh BBS")
+                lines.append("  - 00 HOW TO USE — Type command then refresh BBS")
                 lines.append("  - 01 COMMANDS — type one command below")
                 if location_id != DEFAULT_LOCATION_ID:
                     lines.append("  - 10 type ROOT — return to main menu")
@@ -7742,8 +7742,8 @@ class SettingsTab(QWidget):
         varac_sync_note_row.addWidget(self.varac_bbs_sync_note_label, 1)
         bbs_settings_v.addLayout(varac_sync_note_row)
         bbs_file_management_note = QLabel(
-            "BBS file management lives in Messages -> BBS. Operators can review, archive, or delete live BBS files, "
-            "incoming files, outgoing files, and managed-location copies from FIO without editing VarAC folders by hand."
+            "Station BBS administration lives in the top-level BBS service. Radio Settings retain only native VarAC "
+            "launcher, inbox, outbox, and live-folder integration paths."
         )
         bbs_file_management_note.setWordWrap(True)
         bbs_settings_v.addWidget(bbs_file_management_note)
@@ -7785,7 +7785,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_initialize_btn = QPushButton("Initialize Library")
         self.varac_bbs_vault_initialize_btn.clicked.connect(self._initialize_varac_bbs_vault)
         vault_enabled_top.addWidget(self.varac_bbs_vault_initialize_btn)
-        self.varac_bbs_vault_reset_btn = QPushButton("Reset To Default")
+        self.varac_bbs_vault_reset_btn = QPushButton("Return Live BBS Home")
         self.varac_bbs_vault_reset_btn.clicked.connect(self._reset_varac_bbs_vault_to_default)
         vault_enabled_top.addWidget(self.varac_bbs_vault_reset_btn)
         self.varac_bbs_vault_preview_btn = QPushButton("Preview BBS")

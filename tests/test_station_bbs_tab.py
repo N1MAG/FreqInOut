@@ -96,38 +96,46 @@ def _tree_texts(tree) -> list[str]:
 def test_station_bbs_checkbox_replaces_membership_without_deleting_source(tmp_path):
     app = _qapplication_or_skip()
     settings, source, artifact_id = _seed_catalog(tmp_path)
+    with connect_sqlite(settings.db_path) as conn:
+        with conn:
+            set_bbs_location_artifact(conn, location_id="public", artifact_id=artifact_id, publish_enabled=True)
+            set_bbs_location_artifact(conn, location_id="restricted", artifact_id=artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "public"))
         app.processEvents()
         checkbox = tab.artifact_table.item(0, 0)
         assert checkbox is not None
-        assert checkbox.checkState() == Qt.Unchecked
+        assert checkbox.checkState() == Qt.Checked
         assert "publish" in checkbox.toolTip().lower()
 
-        checkbox.setCheckState(Qt.Checked)
-        app.processEvents()
-        with connect_sqlite(settings.db_path) as conn:
-            assert list_bbs_artifact_location_ids(conn, artifact_id) == ("public",)
-        assert source.exists()
-
-        # A location without a pre-existing mapping still shows catalog files,
-        # so the same artifact can be checked into a second managed location.
-        tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
-        app.processEvents()
-        checkbox = tab.artifact_table.item(0, 0)
-        assert checkbox.checkState() == Qt.Unchecked
-        checkbox.setCheckState(Qt.Checked)
+        checkbox.setCheckState(Qt.Unchecked)
         app.processEvents()
         with connect_sqlite(settings.db_path) as conn:
             assert list_bbs_artifact_location_ids(conn, artifact_id) == ("public", "restricted")
         assert source.exists()
 
+        tab.apply_changes_btn.click()
+        app.processEvents()
+        tab.location_tree.setCurrentItem(_location_item(tab, "restricted"))
+        app.processEvents()
         checkbox = tab.artifact_table.item(0, 0)
+        assert checkbox is not None
+        with connect_sqlite(settings.db_path) as conn:
+            assert list_bbs_artifact_location_ids(conn, artifact_id) == ("restricted",)
+        assert source.exists()
+
+        assert checkbox.checkState() == Qt.Checked
         checkbox.setCheckState(Qt.Unchecked)
         app.processEvents()
         with connect_sqlite(settings.db_path) as conn:
-            assert list_bbs_artifact_location_ids(conn, artifact_id) == ("public",)
+            assert list_bbs_artifact_location_ids(conn, artifact_id) == ("restricted",)
+        tab.revert_changes_btn.click()
+        app.processEvents()
+        checkbox = tab.artifact_table.item(0, 0)
+        assert checkbox.checkState() == Qt.Checked
+        with connect_sqlite(settings.db_path) as conn:
+            assert list_bbs_artifact_location_ids(conn, artifact_id) == ("restricted",)
         assert source.exists()
     finally:
         tab.deleteLater()
@@ -159,16 +167,16 @@ def test_station_bbs_reads_are_bounded_and_compact_layout_stacks(monkeypatch, tm
         tab.service_tabs.setCurrentWidget(tab.publishing_page)
         app.processEvents()
         assert tab.splitter.orientation() == Qt.Vertical
-        assert tab.detail_toggle_btn.isVisible()
-        assert not tab.detail_group.isVisible()
+        assert not tab.detail_toggle_btn.isHidden()
+        assert tab.detail_group.isHidden()
         tab.detail_toggle_btn.setChecked(True)
         app.processEvents()
-        assert tab.detail_group.isVisible()
+        assert not tab.detail_group.isHidden()
         tab.resize(1200, 620)
         app.processEvents()
         assert tab.splitter.orientation() == Qt.Horizontal
-        assert not tab.detail_toggle_btn.isVisible()
-        assert tab.detail_group.isVisible()
+        assert tab.detail_toggle_btn.isHidden()
+        assert not tab.detail_group.isHidden()
     finally:
         tab.close()
         tab.deleteLater()
@@ -264,6 +272,9 @@ def test_station_location_disable_is_non_destructive_and_remains_visible(tmp_pat
 def test_artifact_details_display_source_kind(tmp_path):
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    with connect_sqlite(settings.db_path) as conn:
+        with conn:
+            set_bbs_location_artifact(conn, location_id="public", artifact_id=_artifact_id, publish_enabled=True)
     tab = StationBbsTab(settings=settings)
     try:
         tab.location_tree.setCurrentItem(_location_item(tab, "public"))
@@ -271,8 +282,9 @@ def test_artifact_details_display_source_kind(tmp_path):
         tab.artifact_table.selectRow(0)
         app.processEvents()
         assert tab.detail_labels["origin"].text() == "Operator File"
-        assert tab.artifact_table.horizontalHeaderItem(3).text() == "Age"
-        assert tab.artifact_table.item(0, 3).text().endswith("d")
+        assert tab.artifact_table.horizontalHeaderItem(2).text() == "Age"
+        assert tab.artifact_table.horizontalHeaderItem(3).text() == "Expires"
+        assert tab.artifact_table.item(0, 2).text().endswith("d")
         assert "Local " in tab.detail_labels["age"].text()
         assert "UTC " in tab.detail_labels["age"].text()
     finally:
@@ -290,11 +302,28 @@ def test_visitor_preview_filters_tree_and_is_read_only(tmp_path):
     try:
         tab.service_tabs.setCurrentWidget(tab.visitor_preview_page)
         app.processEvents()
-        assert not any(text.startswith("Restricted") for text in _tree_texts(tab.visitor_preview_tree))
+        assert [tab.visitor_artifact_table.horizontalHeaderItem(index).text() for index in range(tab.visitor_artifact_table.columnCount())] == [
+            "File",
+            "Location",
+            "Access",
+            "Health",
+        ]
+        chip_texts = [
+            tab.visitor_chips_layout.itemAt(index).widget().text()
+            for index in range(tab.visitor_chips_layout.count())
+            if tab.visitor_chips_layout.itemAt(index).widget() is not None
+        ]
+        assert "All visible" in chip_texts
+        assert "Restricted" not in chip_texts
 
         tab.visitor_callsign_edit.setText("N1MAG")
         app.processEvents()
-        assert any(text.startswith("Restricted") for text in _tree_texts(tab.visitor_preview_tree))
+        chip_texts = [
+            tab.visitor_chips_layout.itemAt(index).widget().text()
+            for index in range(tab.visitor_chips_layout.count())
+            if tab.visitor_chips_layout.itemAt(index).widget() is not None
+        ]
+        assert "Restricted" in chip_texts
         assert tab.visitor_artifact_table.rowCount() == 1
         file_item = tab.visitor_artifact_table.item(0, 0)
         assert file_item is not None
@@ -331,10 +360,10 @@ def test_location_access_code_is_hashed_and_not_stored_as_plaintext(tmp_path):
         app.processEvents()
 
 
-def test_bbs_guided_tabs_and_system_helpers_are_separate_from_publishing(tmp_path):
+def test_bbs_guided_tabs_and_visitor_helpers_are_separate_from_publishing(tmp_path):
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
-    helper = tmp_path / "00 READ FIRST - type command, then refresh BBS.txt"
+    helper = tmp_path / "00 HOW TO USE - Type command then refresh BBS.txt"
     helper.write_text("system helper", encoding="utf-8")
     with connect_sqlite(settings.db_path) as conn:
         with conn:
@@ -343,13 +372,13 @@ def test_bbs_guided_tabs_and_system_helpers_are_separate_from_publishing(tmp_pat
 
     tab = StationBbsTab(settings=settings)
     try:
+        assert tab.service_tabs.count() == 5
         assert [tab.service_tabs.tabText(index) for index in range(tab.service_tabs.count())] == [
-            "Overview",
             "Radio Service",
-            "Locations & Access",
+            "Locations && Access",
             "Publishing",
             "Visitor Preview",
-            "System Helpers",
+            "Visitor Helpers",
         ]
         publishing_names = [
             tab.artifact_table.item(row, 1).text()
@@ -357,10 +386,47 @@ def test_bbs_guided_tabs_and_system_helpers_are_separate_from_publishing(tmp_pat
         ]
         assert helper.name not in publishing_names
         assert tab.helpers_table.rowCount() == 1
+        assert tab.helpers_table.columnCount() == 5
+        assert [tab.helpers_table.horizontalHeaderItem(index).text() for index in range(tab.helpers_table.columnCount())] == [
+            "Helper",
+            "Purpose",
+            "Locations",
+            "Age",
+            "Health",
+        ]
         assert tab.helpers_table.item(0, 0).text() == helper.stem
-        assert tab.helpers_table.item(0, 2).text() == helper.name
-        assert tab.helpers_table.horizontalHeaderItem(4).text() == "Age"
+        assert tab.helpers_table.item(0, 1).text() == "Visitor start"
+        assert tab.helpers_table.item(0, 2).text() == "Public"
+        assert tab.helpers_table.item(0, 4).text() == "Published"
     finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
+def test_location_chips_have_width_without_waiting_for_a_window_resize(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    tab = StationBbsTab(settings=settings)
+    try:
+        tab.resize(900, 560)
+        tab.show()
+        tab.service_tabs.setCurrentWidget(tab.publishing_page)
+        app.processEvents()
+
+        chips = [
+            tab.publishing_chips_layout.itemAt(index).widget()
+            for index in range(tab.publishing_chips_layout.count())
+            if tab.publishing_chips_layout.itemAt(index).widget() is not None
+        ]
+        assert [chip.text() for chip in chips] == ["Public", "Restricted"]
+        assert all(chip.width() > 0 and chip.isVisible() for chip in chips)
+
+        tab.service_tabs.setCurrentWidget(tab.locations_page)
+        app.processEvents()
+        assert tab.location_name_edit.text() in {"Public", "Restricted"}
+        assert "Editing station-owned location" in tab.location_editor_status.text()
+    finally:
+        tab.close()
         tab.deleteLater()
         app.processEvents()
 
@@ -403,6 +469,37 @@ def test_radio_service_saves_bbs_fields_without_changing_native_varac_paths(tmp_
         app.processEvents()
 
 
+def test_station_bbs_radio_service_rejects_enabling_without_live_folder(tmp_path):
+    app = _qapplication_or_skip()
+    settings, _source, _artifact_id = _seed_catalog(tmp_path)
+    store = MultiRadioStore(Path(settings.db_path))
+    profile = store.save_device_profile(
+        {
+            "name": "FIO-A",
+            "system_key": "fio-a",
+            "use_varac": 1,
+            "varac_install_path": "/native/varac",
+            "varac_outbox_dir": "/native/outbox",
+        }
+    )
+    tab = StationBbsTab(settings=settings)
+    try:
+        assert tab.radio_service_table.rowCount() == 1
+        tab.radio_service_enabled_chk.setChecked(True)
+        tab.radio_publish_enabled_chk.setChecked(True)
+        tab.radio_live_dir_edit.clear()
+        tab._save_selected_radio_service()
+        saved = store.get_device_profile(int(profile["id"]))
+        assert saved is not None
+        assert bool(saved["varac_bbs_enabled"]) is False
+        assert bool(saved["varac_bbs_vault_enabled"]) is False
+        assert saved["varac_bbs_dir"] == ""
+        assert "live BBS folder" in tab.radio_service_status.text()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_disabled_location_is_not_a_publishing_target(tmp_path):
     app = _qapplication_or_skip()
     settings, _source, _artifact_id = _seed_catalog(tmp_path)
@@ -412,7 +509,12 @@ def test_disabled_location_is_not_a_publishing_target(tmp_path):
         tab.location_edit_btn.setChecked(True)
         tab._disable_location()
         app.processEvents()
-        assert tab.publishing_location_combo.findData("restricted") == -1
+        chip_texts = [
+            tab.publishing_chips_layout.itemAt(index).widget().text()
+            for index in range(tab.publishing_chips_layout.count())
+            if tab.publishing_chips_layout.itemAt(index).widget() is not None
+        ]
+        assert "Restricted" not in chip_texts
         assert tab._publishing_location_id != "restricted"
     finally:
         tab.deleteLater()

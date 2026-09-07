@@ -1352,3 +1352,58 @@ with 37 environment-dependent skips; the two skip-only files return pytest code
 Python compilation and `git diff --check` pass. The Slice 2 software exit gate
 is closed; the T1000-E direct reconnect remains a documented hardware follow-up,
 with restart-assisted recovery accepted for the present production review.
+
+## 2026-09-07 — Slice 2 BBS workflow and retention refinement
+
+Production screenshots were reviewed against the BBS ownership and responsive
+UI contracts before implementation. The BBS workspace now follows the operator
+sequence directly: `Radio Service`, `Locations & Access`, `Publishing`,
+`Visitor Preview`, and `Visitor Helpers`. The low-value standalone Overview was
+folded into Locations & Access. Radio Service uses a side-by-side selector and
+editor at normal width and a compact radio selector at 900x560, preventing the
+configured-radio list from crushing the selected service controls.
+
+Locations & Access keeps hierarchy visible while placing the wrapped selected
+policy and editor together. Publishing and Visitor Preview use horizontally
+scrollable location chips. Publishing is file-first and defaults to `In BBS`,
+with separate Expired, Removed, and All views; checkbox edits are staged until
+Apply Changes and may be reverted. Explicit Remove from BBS, Keep in BBS / Use
+Retention, and Republish operations preserve both source files and catalog
+identity. Age, remaining expiry, publication health, and exact expiry details
+are distinct. Visitor Preview dedicates the flexible column to the full file
+name and moves location/access/health into compact columns.
+
+Retention work reused the existing per-mapping `retention_class` and therefore
+required no schema migration. Keep clears effective expiry and remains stable
+through retention recalculation and reconciliation. Republish starts a fresh
+window from the operator action without modifying the source mtime. Remove from
+BBS disables every mapping and clears stale expiry without deleting the source
+or catalog record. `Return Live BBS Home` was retained as a narrowly named
+runtime recovery action; it is not a configuration reset and does not belong in
+the primary publishing workflow.
+
+Visitor-generated helper files are now extensionless on disk as well as in the
+UI. The first helper is exactly `00 HOW TO USE - Type command then refresh BBS`.
+Historical `.txt` forms remain recognized for safe cleanup and transition.
+Visitor Helpers omits the confusing compatibility-filename column and keeps
+generated navigation material outside operator Publishing.
+
+Delegation and review: Terra/high implemented the bounded Qt layout package;
+Luna/high implemented the retention/action and helper mechanics; Mini/high
+updated focused UI, persistence, helper, and source-contract tests. The
+high-reasoning primary model owned the information architecture, persistence
+semantics, specification changes, integration review, and final corrections.
+Primary visual review found and fixed a zero-width chip-content issue, initial
+location-editor loading through a hidden parent tab, live-folder path cursor
+position, selected-filter leakage into the global catalog count, and stale
+expiry presentation after removal.
+
+Verification: the focused BBS matrix passes 144 tests with one environment
+skip. Related shell, navigation, and Settings coverage passes 289 tests with 19
+environment skips. Offscreen visual review covered all five pages at 1200x800
+Light/Normal and the core pages at 900x560 Dark/Large Text. A monolithic run
+reproduced the repository's known long-lived Qt test-process segmentation fault
+at 65 percent in an unrelated log-viewer construction test; that test passes in
+isolation. The authoritative fresh-process gate covered all 172 test files with
+zero failing files and two skip-only files. Python compilation and
+`git diff --check` pass.

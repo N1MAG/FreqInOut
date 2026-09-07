@@ -334,20 +334,29 @@ compact rail, and Messages `+BBS`. BBS is station-owned but is not nested under
 Station in the navigation: operators understand it as a distinct service
 served by VarAC, not as a radio setting or a station-health screen.
 
-The service guides setup and daily administration from left to right:
+The service guides setup and daily administration from left to right. The
+first tab answers **where the BBS is served**; the remaining tabs manage what
+the caller can use and why:
 
-1. `Overview` — service purpose, bounded health/count summary, and the
-   Library → Locations → Live Radio Services relationship;
-2. `Radio Service` — the configured VarAC radio instances that serve the one
+1. `Radio Service` — the configured VarAC radio instances that serve the one
    catalog, their live BBS folders, enablement, and publication health;
-3. `Locations & Access` — logical tree, hierarchy, caller access, and
-   retention;
-4. `Publishing` — the existing location-scoped checkbox workflow and artifact
-   detail;
-5. `Visitor Preview` — a dedicated read-only caller simulation rather than a
-   mode switch embedded in publication management;
-6. `System Helpers` — generated navigation/command files, clearly separated
+2. `Locations & Access` — bounded service overview plus logical hierarchy,
+   caller access, and retention;
+3. `Publishing` — staged, location-scoped membership and artifact lifecycle
+   actions;
+4. `Visitor Preview` — a dedicated read-only caller simulation;
+5. `Visitor Helpers` — generated navigation/command files, clearly separated
    from operator-published content.
+
+Radio Service gives the selected service editor the primary workspace. On a
+wide display, the bounded one-to-three-radio selector and editor sit side by
+side; in compact mode the selector sits above a scrollable editor. A table must
+not consume the remaining height merely because it stretches to fill the page.
+
+Locations & Access absorbs the useful overview/status content. The selected
+location's enabled state, access, retention, and source policy wrap in the
+right pane, with the complete editor directly below it. The editor must not be
+compressed into the narrow location-list column.
 
 Selected-radio VarAC settings retain only native VarAC configuration:
 
@@ -364,22 +373,42 @@ surface in VarAC Settings.
 
 ### Graphical publication workspace
 
-The default view is a tree/list hybrid:
+Publishing and Visitor Preview use a clear location-chip selector instead of a
+small drop-down above a dominant table. Chips keep the current location visible
+and allow a bounded horizontal scroll or wrap when many locations exist.
 
-- left: logical BBS location tree with access and retention badges;
-- center: bounded artifact list for the selected location;
-- each artifact has a visible publication checkbox;
-- right/detail drawer: origin, exact path, size, age, modified time, access,
-  retention/expiry, and publication health.
+The Publishing table is file-first and shows publication state, filename, age,
+remaining expiry, and health. Origin, exact path, size, modified time, access,
+retention, and exact expiry remain in the detail disclosure. Age is shown as
+whole days (`0d`, `1d`, `24d`). Expires shows `Never`, `Expired`, `Today`, or
+the number of days remaining; exact Local/UTC timestamps remain available in
+detail/tooltip.
 
-Checking a box adds or enables a location-artifact mapping. Unchecking disables
-the mapping and ends publication; it does not delete the source file. The same
-component is used by BBS administration, preview, and the Messages `+BBS`
-workflow. Visitor Preview shows the effective permission-filtered tree, not a
-plain-text dump.
+Checkbox edits are staged in memory. `Apply Changes` commits all pending
+location memberships in one transaction, confirms what changed, and triggers
+the normal background projection; `Revert` returns to persisted state. Moving
+between location chips must not silently discard staged edits.
 
-Age is shown as whole days (`0d`, `1d`, `24d`) with the exact local/UTC modified
-time in detail/tooltip.
+Artifact actions have explicit, non-destructive semantics:
+
+- `Remove from BBS` disables all location mappings for the selected artifact,
+  removes it from the normal BBS content view, and preserves the catalog record
+  and source file. A Removed filter permits recovery.
+- `Keep in BBS` applies to the selected location, uses the existing mapping
+  retention override, and publishes without expiry until the operator restores
+  normal retention or removes it.
+- `Republish` applies to the selected location, restores publication, clears a
+  Keep override, and starts a fresh resolved retention period from the operator
+  action time. It never changes the source file timestamp.
+
+The normal Published view, Expired view, and Removed view must make artifact
+state explicit without forcing expired and removed history into the primary
+workspace.
+
+Visitor Preview is also file-first. Its caller-visible location chips and a
+short wrapping policy summary replace the oversized location tree. The filename
+column receives the stretch width automatically so normal file names do not
+require manual column resizing.
 
 ### Retention and source reconciliation
 
@@ -388,6 +417,12 @@ time in detail/tooltip.
   not hidden only in opaque metadata.
 - At expiry, the mapping is disabled with reason `retention_expired`. The source
   artifact is not deleted unless a separate explicit purge policy authorizes it.
+- A per-artifact/location `keep` retention-class override suppresses automatic
+  expiry without changing the location's default policy. It uses the existing
+  mapping column and requires no schema migration.
+- Republish calculates a new mapping expiry from receipt of the operator action
+  plus the resolved location retention. Initial publication continues to use
+  the source modification time unless explicitly republished.
 - Manifest reads exclude disabled, expired, deleted, and missing artifacts.
 - A lightweight reconciler stats only currently publishable file-backed rows in
   bounded batches. A missing source becomes `missing` and is unpublished
@@ -404,24 +439,34 @@ time in detail/tooltip.
 - Every location advertises the exact command needed to request/source it.
 - The obsolete `wait 10 seconds` wording is removed. Runtime state instead says
   `Request sent—refresh when the updated listing is ready` when asynchronous.
-- Visitor-facing labels omit `.txt` for logical commands/notices.
-- Before changing generated filenames, an adapter test verifies what VarAC
-  accepts. If an extension is technically required, FIO keeps it only in the
-  generated compatibility filename while the UI presents the clean logical
-  label.
+- New visitor helper filenames and labels omit `.txt`; VarAC exposes arbitrary
+  files from its configured BBS directory, so the generated instruction files
+  do not need a text extension. Historical `.txt` helper names remain
+  recognized and are removed by managed reconciliation when superseded.
+- The first helper is `00 HOW TO USE - Type command then refresh BBS`. Helper
+  copy remains short and does not promise a fixed wait interval.
 - Generated helper/navigation files are system output, not operator artifacts.
-  They never appear in the `Publishing` content list. The `System Helpers`
-  view shows their logical extensionless label, purpose, physical compatibility
-  name, age, and health without offering a publication-membership checkbox.
+  They never appear in the `Publishing` content list. The `Visitor Helpers`
+  view shows their name, purpose, locations, age, and health without offering a
+  publication-membership checkbox.
+
+`Return Live BBS Home` is an operational recovery action, not a configuration
+reset. It restores the currently served visitor view to the configured home
+location and clears transient caller/session overlays; it does not alter radio
+configuration, locations, access, retention, catalog membership, or source
+files. The ambiguous `Reset To Default` label must not appear in the primary
+administration workflow.
 
 ### BBS acceptance
 
 - One edit controls publication across all configured radio BBS instances.
 - Tree, access, publication checkbox, file age, retention, and missing-source
   state are visible without opening radio settings.
-- Unchecking immediately removes the item from the next effective manifest;
-  source content remains intact.
+- Applying staged checkbox changes removes unchecked items from the next
+  effective manifest; source content remains intact.
 - Expired or deleted-on-disk files stop publishing without error loops.
+- Keep, republish, remove, and recover-from-Removed behavior pass fixed-clock,
+  source-preservation, and manifest tests.
 - A location rescan never re-enables an operator-disabled mapping.
 - Messages `+BBS` and BBS administration show identical checked locations.
 
@@ -1072,14 +1117,19 @@ retention expiry, and location enablement are modeled independently. The
 background service reconciles missing sources and expiries in bounded batches.
 
 Top-level `BBS` now owns the graphical service workflow. Its guided tabs cover
-Overview, Radio Service, Locations & Access, Publishing, Visitor Preview, and
-System Helpers. The location workflow retains access and retention policy plus
-Add/Edit/Disable; Publishing retains the bounded newest-first artifact view,
-membership checkboxes, and artifact health/detail. Compact layout stacks the
-location editor and policy summary and makes publication detail opt-in so
-900x560 Large Text preserves the main workspace. Visitor Preview is a dedicated
-read-only caller view. Location access supports public, callsign, access-code,
-and combined rules; new codes are salted and hashed. Radio Settings retain only
+Radio Service, Locations & Access, Publishing, Visitor Preview, and Visitor
+Helpers. Radio Service is first because it answers where the station BBS is
+served; its selector and editor share the available workspace instead of
+stacking a tall table over a compressed form. Locations & Access includes the
+useful service summary and puts the selected location's wrapped policy and
+editor together. Publishing uses location chips, a bounded newest-first file
+view, staged membership checkboxes with Apply/Revert confirmation, explicit
+Remove from BBS, Keep in BBS, and Republish actions, and Age/Expires/Health
+signals. Compact layout stacks where needed and makes publication detail opt-in
+so 900x560 Large Text preserves the main workspace. Visitor Preview is a
+dedicated read-only, file-first caller view with location chips and a selected
+policy summary. Location access supports public, callsign, access-code, and
+combined rules; new codes are salted and hashed. Radio Settings retain only
 native VarAC paths and inbound guard plus a link to BBS; live BBS folders and
 service enablement are managed under Radio Service. Messages `+BBS` uses the
 identical station locations and atomically replaces memberships, including
@@ -1089,11 +1139,11 @@ Each radio live directory has a distinct manifest keyed to its resolved path,
 so one catalog projects independently through one or multiple VarAC instances.
 Compatibility callers without an explicit database identity remain on the
 folder-backed path and cannot accidentally read the process-global catalog.
-Visitor helper labels are extensionless in the UI while on-disk compatibility
-files retain `.txt`; fixed-delay instructions were replaced by asynchronous
-refresh guidance. Generated helpers are excluded from Publishing and appear
-only in System Helpers with purpose, compatibility filename, locations, age,
-and health.
+New Visitor Helper filenames are extensionless both in the UI and on disk;
+historical `.txt` helper names remain recognized for cleanup and transition.
+The first helper is `00 HOW TO USE - Type command then refresh BBS`, with no
+fixed-delay instruction. Generated helpers are excluded from Publishing and
+appear only in Visitor Helpers with purpose, locations, age, and health.
 
 Exit gate: migration is backup-safe/idempotent; one catalog publishes correctly
 through one and multiple radio instances; expiration and missing-file tests pass.
@@ -1109,6 +1159,16 @@ and max 2.82 ms on the development Mac. Light/Normal 1200x800 and Dark/Large
 Text 900x560 were visually reviewed. The full fresh-process regression partitions
 are recorded in the work log; the final BBS/Settings/navigation refinement set
 passes 282 tests with one environment skip.
+
+Refinement exit-gate result (2026-09-07): passed. The five-tab workflow,
+staged Apply/Revert publication model, remove/keep/republish persistence,
+extensionless helper transition, file-first Visitor Preview, and responsive
+location chips pass 144 focused BBS tests with one environment skip. Related
+shell/navigation/Settings coverage passes 289 tests with 19 environment skips.
+All 172 repository test files pass in fresh processes; two files contain only
+environment-dependent skips. The monolithic Qt run remains unsuitable as a
+release gate because its long-lived process reproduces the pre-existing
+log-viewer/thread-lifetime segmentation fault.
 
 Risk: **high**, due persistence migration and external file publication.
 

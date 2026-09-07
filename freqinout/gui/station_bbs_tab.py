@@ -11,6 +11,7 @@ thread. Those operations remain owned by their background services.
 from collections import defaultdict
 from dataclasses import dataclass
 import datetime as dt
+import math
 import re
 from pathlib import Path
 from typing import Iterable, Optional
@@ -18,18 +19,21 @@ from typing import Iterable, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
     QSplitter,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -41,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core import varac_bbs_library_store as bbs_library_store
 from freqinout.core.message_file_scanner import is_fio_bbs_helper_file_name
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.sqlite_utils import connect_sqlite
@@ -131,6 +136,36 @@ def _modified_detail(value: object) -> str:
         return f"modified {raw}"
 
 
+def _expires_text(row: BbsArtifactAdminRow, *, now_utc: dt.datetime | None = None) -> str:
+    """Return a short operator-facing expiry without changing persisted state."""
+
+    state = str(row.publication_state or "").strip().lower()
+    if state == "operator_disabled":
+        return "Removed"
+    if state == "retention_expired":
+        return "Expired"
+    if str(getattr(row, "retention_class", "") or "").strip().lower() == "keep":
+        return "Never"
+    if str(row.retention_mode or "").strip().lower() == "manual":
+        return "Never"
+    raw = str(row.expires_utc or "").strip()
+    if not raw:
+        return "Not set"
+    try:
+        expires = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "Unknown"
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=dt.timezone.utc)
+    now = (now_utc or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
+    remaining = (expires.astimezone(dt.timezone.utc) - now).total_seconds()
+    if remaining <= 0:
+        return "Expired"
+    if remaining <= 86400:
+        return "Today"
+    return f"{int(math.ceil(remaining / 86400.0))}d"
+
+
 class StationBbsTab(QWidget):
     """A bounded, database-backed catalog view for station Managed BBS work."""
 
@@ -139,9 +174,12 @@ class StationBbsTab(QWidget):
         self.settings = settings if settings is not None else SettingsManager()
         self._selected_location_id = ""
         self._publishing_location_id = ""
+        self._visitor_location_id = ""
         self._locations_by_id: dict[str, BbsLocationRecord] = {}
         self._display_rows: dict[str, _ArtifactDisplay] = {}
         self._loading = False
+        self._pending_publication: dict[tuple[str, str], bool] = {}
+        self._artifact_filter = "in_bbs"
         self._compact_layout = False
         self._editing_location_id = ""
         self._location_editor_loading = False
@@ -190,25 +228,9 @@ class StationBbsTab(QWidget):
         self.service_tabs.setDocumentMode(True)
         layout.addWidget(self.service_tabs, 1)
 
-        self.overview_page = QWidget(self.service_tabs)
-        overview_layout = QVBoxLayout(self.overview_page)
-        overview_layout.setContentsMargins(10, 10, 10, 10)
-        overview_layout.setSpacing(10)
-        overview_title = QLabel("BBS service overview")
-        overview_title.setStyleSheet("font-weight: 700; font-size: 15px;")
-        overview_layout.addWidget(overview_title)
-        overview_copy = QLabel(
-            "Follow the tabs from left to right: choose which radios serve the BBS, organize locations and access, "
-            "publish operator files, then verify the visitor view and generated system helpers."
-        )
-        overview_copy.setWordWrap(True)
-        overview_copy.setAccessibleName("BBS overview guidance")
-        overview_layout.addWidget(overview_copy)
         self.overview_status_label = QLabel("Catalog status is loading…")
         self.overview_status_label.setWordWrap(True)
         self.overview_status_label.setAccessibleName("BBS overview status")
-        overview_layout.addWidget(self.overview_status_label)
-        overview_layout.addStretch(1)
 
         self.radio_service_page = QWidget(self.service_tabs)
         radio_layout = QVBoxLayout(self.radio_service_page)
@@ -224,7 +246,16 @@ class StationBbsTab(QWidget):
         radio_copy.setWordWrap(True)
         radio_copy.setAccessibleName("Radio Service summary")
         radio_layout.addWidget(radio_copy)
-        self.radio_service_table = QTableWidget(0, 4, self.radio_service_page)
+        self.radio_service_selector = QComboBox(self.radio_service_page)
+        self.radio_service_selector.setAccessibleName("BBS radio selector")
+        self.radio_service_selector.setToolTip("Choose one of up to three configured radios to edit its BBS service.")
+        self.radio_service_selector.currentIndexChanged.connect(self._on_radio_selector_changed)
+        self.radio_service_selector.setVisible(False)
+        radio_layout.addWidget(self.radio_service_selector)
+        self.radio_splitter = QSplitter(Qt.Horizontal, self.radio_service_page)
+        self.radio_splitter.setChildrenCollapsible(False)
+        radio_layout.addWidget(self.radio_splitter, 1)
+        self.radio_service_table = QTableWidget(0, 4, self.radio_splitter)
         self.radio_service_table.setObjectName("stationBbsRadioServiceTable")
         self.radio_service_table.setHorizontalHeaderLabels(["Radio", "FIO BBS", "Live folder", "Status"])
         self.radio_service_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -233,9 +264,9 @@ class StationBbsTab(QWidget):
         self.radio_service_table.verticalHeader().setVisible(False)
         self.radio_service_table.horizontalHeader().setStretchLastSection(True)
         self.radio_service_table.itemSelectionChanged.connect(self._load_selected_radio_service)
-        radio_layout.addWidget(self.radio_service_table, 1)
+        self.radio_splitter.addWidget(self.radio_service_table)
 
-        radio_editor = QGroupBox("Selected radio BBS service", self.radio_service_page)
+        radio_editor = QGroupBox("Selected radio BBS service", self.radio_splitter)
         radio_editor_layout = QGridLayout(radio_editor)
         radio_editor_layout.setContentsMargins(8, 8, 8, 8)
         radio_editor_layout.setHorizontalSpacing(8)
@@ -268,29 +299,50 @@ class StationBbsTab(QWidget):
         self.radio_service_status.setWordWrap(True)
         self.radio_service_status.setAccessibleName("Radio Service status")
         radio_editor_layout.addWidget(self.radio_service_status, 4, 0, 1, 3)
-        radio_layout.addWidget(radio_editor, 0)
+        self.radio_editor_scroll = QScrollArea(self.radio_splitter)
+        self.radio_editor_scroll.setWidgetResizable(True)
+        self.radio_editor_scroll.setFrameShape(QFrame.NoFrame)
+        self.radio_editor_scroll.setWidget(radio_editor)
+        self.radio_splitter.addWidget(self.radio_editor_scroll)
+        self.radio_splitter.setStretchFactor(0, 0)
+        self.radio_splitter.setStretchFactor(1, 1)
+        self.radio_splitter.setSizes([360, 620])
         self._radio_profiles_by_id: dict[int, dict[str, object]] = {}
         self._radio_service_loading = False
 
         self.locations_page = QWidget(self.service_tabs)
         locations_layout = QVBoxLayout(self.locations_page)
         locations_layout.setContentsMargins(0, 0, 0, 0)
+        locations_layout.addWidget(self.overview_status_label)
         self.publishing_page = QWidget(self.service_tabs)
         publishing_layout = QVBoxLayout(self.publishing_page)
         publishing_layout.setContentsMargins(0, 0, 0, 0)
         publishing_scope_row = QHBoxLayout()
         publishing_scope_row.setContentsMargins(8, 8, 8, 0)
         publishing_scope_row.addWidget(QLabel("Publish in"))
-        self.publishing_location_combo = QComboBox(self.publishing_page)
-        self.publishing_location_combo.setAccessibleName("Publishing location")
-        self.publishing_location_combo.currentIndexChanged.connect(self._on_publishing_location_changed)
-        publishing_scope_row.addWidget(self.publishing_location_combo, 1)
+        self.publishing_chips_layout = self._add_chip_strip(publishing_scope_row, self.publishing_page, "Publishing location")
         self.manage_locations_btn = QPushButton("Manage Locations")
         self.manage_locations_btn.clicked.connect(
             lambda: self.service_tabs.setCurrentWidget(self.locations_page)
         )
         publishing_scope_row.addWidget(self.manage_locations_btn)
         publishing_layout.addLayout(publishing_scope_row)
+        publishing_filter_row = QHBoxLayout()
+        publishing_filter_row.setContentsMargins(8, 0, 8, 0)
+        publishing_filter_row.addWidget(QLabel("Show"))
+        self.artifact_filter_combo = QComboBox(self.publishing_page)
+        self.artifact_filter_combo.setAccessibleName("Publishing file filter")
+        self.artifact_filter_combo.addItem("In BBS", "in_bbs")
+        self.artifact_filter_combo.addItem("Expired", "expired")
+        self.artifact_filter_combo.addItem("Removed", "removed")
+        self.artifact_filter_combo.addItem("All", "all")
+        self.artifact_filter_combo.currentIndexChanged.connect(self._on_artifact_filter_changed)
+        publishing_filter_row.addWidget(self.artifact_filter_combo)
+        publishing_filter_row.addStretch(1)
+        self.publication_status_label = QLabel("No pending changes.")
+        self.publication_status_label.setAccessibleName("Publishing change status")
+        publishing_filter_row.addWidget(self.publication_status_label)
+        publishing_layout.addLayout(publishing_filter_row)
 
         self.visitor_preview_page = QWidget(self.service_tabs)
         visitor_layout = QVBoxLayout(self.visitor_preview_page)
@@ -320,47 +372,58 @@ class StationBbsTab(QWidget):
         self.visitor_preview_status.setWordWrap(True)
         self.visitor_preview_status.setAccessibleName("Visitor Preview status")
         visitor_layout.addWidget(self.visitor_preview_status)
-        self.visitor_preview_tree = QTreeWidget(self.visitor_preview_page)
-        self.visitor_preview_tree.setHeaderHidden(True)
-        self.visitor_preview_tree.setAccessibleName("Visitor visible BBS locations")
-        self.visitor_preview_tree.setToolTip("Read-only locations visible to the entered visitor callsign.")
-        visitor_layout.addWidget(self.visitor_preview_tree, 1)
+        visitor_chip_row = QHBoxLayout()
+        visitor_chip_row.addWidget(QLabel("Location"))
+        self.visitor_chips_layout = self._add_chip_strip(visitor_chip_row, self.visitor_preview_page, "Visitor preview location")
+        visitor_layout.addLayout(visitor_chip_row)
+        self.visitor_policy_label = QLabel("Select a visible location to review its access policy.")
+        self.visitor_policy_label.setWordWrap(True)
+        self.visitor_policy_label.setAccessibleName("Visitor selected location policy")
+        visitor_layout.addWidget(self.visitor_policy_label)
         self.visitor_artifact_table = QTableWidget(0, 4, self.visitor_preview_page)
         self.visitor_artifact_table.setHorizontalHeaderLabels(["File", "Location", "Access", "Health"])
         self.visitor_artifact_table.setAccessibleName("Visitor visible BBS artifacts")
         self.visitor_artifact_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.visitor_artifact_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.visitor_artifact_table.verticalHeader().setVisible(False)
-        self.visitor_artifact_table.horizontalHeader().setStretchLastSection(True)
+        visitor_header = self.visitor_artifact_table.horizontalHeader()
+        visitor_header.setStretchLastSection(False)
+        visitor_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3):
+            visitor_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         visitor_layout.addWidget(self.visitor_artifact_table, 1)
 
         self.helpers_page = QWidget(self.service_tabs)
         helpers_layout = QVBoxLayout(self.helpers_page)
         helpers_layout.setContentsMargins(10, 10, 10, 10)
         helpers_layout.setSpacing(7)
-        helpers_title = QLabel("System Helpers")
+        helpers_title = QLabel("Visitor Helpers")
         helpers_title.setStyleSheet("font-weight: 700; font-size: 15px;")
         helpers_layout.addWidget(helpers_title)
         helpers_copy = QLabel(
-            "Generated helper files are system-owned support material. They are intentionally excluded from Publishing, "
+            "Generated visitor helper files are system-owned support material. They are intentionally excluded from Publishing, "
             "so changing catalog membership can never replace or delete them."
         )
         helpers_copy.setWordWrap(True)
-        helpers_copy.setAccessibleName("System Helpers explanation")
+        helpers_copy.setAccessibleName("Visitor Helpers explanation")
         helpers_layout.addWidget(helpers_copy)
         self.helpers_status = QLabel("No generated helper files are present in the bounded catalog view.")
         self.helpers_status.setWordWrap(True)
-        self.helpers_status.setAccessibleName("System Helpers status")
+        self.helpers_status.setAccessibleName("Visitor Helpers status")
         helpers_layout.addWidget(self.helpers_status)
-        self.helpers_table = QTableWidget(0, 6, self.helpers_page)
+        self.helpers_table = QTableWidget(0, 5, self.helpers_page)
         self.helpers_table.setHorizontalHeaderLabels(
-            ["Helper", "Purpose", "Compatibility file", "Locations", "Age", "Health"]
+            ["Helper", "Purpose", "Locations", "Age", "Health"]
         )
-        self.helpers_table.setAccessibleName("System generated BBS helpers")
+        self.helpers_table.setAccessibleName("Visitor BBS helpers")
         self.helpers_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.helpers_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.helpers_table.verticalHeader().setVisible(False)
-        self.helpers_table.horizontalHeader().setStretchLastSection(True)
+        helper_header = self.helpers_table.horizontalHeader()
+        helper_header.setStretchLastSection(False)
+        helper_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in (1, 2, 3, 4):
+            helper_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         helpers_layout.addWidget(self.helpers_table, 1)
 
         self.splitter = QSplitter(Qt.Horizontal, self.locations_page)
@@ -401,7 +464,7 @@ class StationBbsTab(QWidget):
 
         self.location_editor = QFrame(tree_panel)
         self.location_editor.setObjectName("stationBbsLocationEditor")
-        self.location_editor.setVisible(False)
+        self.location_editor.setVisible(True)
         editor_layout = QVBoxLayout(self.location_editor)
         editor_layout.setContentsMargins(8, 8, 8, 8)
         editor_layout.setSpacing(5)
@@ -494,10 +557,12 @@ class StationBbsTab(QWidget):
         self.location_editor_status.setWordWrap(True)
         self.location_editor_status.setAccessibleName("Location editor status")
         editor_layout.addWidget(self.location_editor_status)
-        tree_layout.addWidget(self.location_editor, 0)
         self.splitter.addWidget(tree_panel)
 
-        location_context_panel = QWidget(self.splitter)
+        self.location_context_scroll = QScrollArea(self.splitter)
+        self.location_context_scroll.setWidgetResizable(True)
+        self.location_context_scroll.setFrameShape(QFrame.NoFrame)
+        location_context_panel = QWidget(self.location_context_scroll)
         location_context_layout = QVBoxLayout(location_context_panel)
         location_context_layout.setContentsMargins(10, 10, 10, 10)
         location_context_layout.setSpacing(8)
@@ -510,8 +575,10 @@ class StationBbsTab(QWidget):
         self.location_context_label.setWordWrap(True)
         self.location_context_label.setAccessibleName("Selected location policy summary")
         location_context_layout.addWidget(self.location_context_label)
-        location_context_layout.addStretch(1)
-        self.splitter.addWidget(location_context_panel)
+        location_context_layout.addWidget(self.location_editor, 1)
+        location_context_layout.addStretch(0)
+        self.location_context_scroll.setWidget(location_context_panel)
+        self.splitter.addWidget(self.location_context_scroll)
 
         content_panel = QWidget(self.publishing_page)
         content_layout = QVBoxLayout(content_panel)
@@ -533,11 +600,11 @@ class StationBbsTab(QWidget):
         self.detail_toggle_btn.setVisible(False)
         artifact_title_row.addWidget(self.detail_toggle_btn)
         content_layout.addLayout(artifact_title_row)
-        self.artifact_table = QTableWidget(0, 6, content_panel)
+        self.artifact_table = QTableWidget(0, 5, content_panel)
         self.artifact_table.setObjectName("stationBbsArtifactTable")
         self.artifact_table.setAccessibleName("Managed BBS artifacts")
         self.artifact_table.setToolTip("Published is a managed catalog membership, not a live-folder copy.")
-        self.artifact_table.setHorizontalHeaderLabels(["Published", "File", "Locations", "Age", "Retention", "Health"])
+        self.artifact_table.setHorizontalHeaderLabels(["Published", "File", "Age", "Expires", "Health"])
         self.artifact_table.verticalHeader().setVisible(False)
         self.artifact_table.setAlternatingRowColors(True)
         self.artifact_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -546,15 +613,43 @@ class StationBbsTab(QWidget):
         self.artifact_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.artifact_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         header = self.artifact_table.horizontalHeader()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for column in (0, 2, 3, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.artifact_table.setColumnWidth(0, 84)
         self.artifact_table.setColumnWidth(1, 230)
-        self.artifact_table.setColumnWidth(2, 180)
-        self.artifact_table.setColumnWidth(3, 64)
-        self.artifact_table.setColumnWidth(4, 170)
+        self.artifact_table.setColumnWidth(2, 64)
+        self.artifact_table.setColumnWidth(3, 130)
         self.artifact_table.itemSelectionChanged.connect(self._refresh_detail_panel)
         self.artifact_table.itemChanged.connect(self._on_publication_item_changed)
         content_layout.addWidget(self.artifact_table, 1)
+
+        self.publication_actions = QGridLayout()
+        publication_actions = self.publication_actions
+        publication_actions.setContentsMargins(0, 0, 0, 0)
+        self.apply_changes_btn = QPushButton("Apply Changes")
+        self.apply_changes_btn.setAccessibleName("Apply staged BBS membership changes")
+        self.apply_changes_btn.clicked.connect(self._apply_publication_changes)
+        publication_actions.addWidget(self.apply_changes_btn, 0, 0)
+        self.revert_changes_btn = QPushButton("Revert")
+        self.revert_changes_btn.setAccessibleName("Revert staged BBS membership changes")
+        self.revert_changes_btn.clicked.connect(self._revert_publication_changes)
+        publication_actions.addWidget(self.revert_changes_btn, 0, 1)
+        publication_actions.setColumnStretch(2, 1)
+        self.remove_from_bbs_btn = QPushButton("Remove from BBS")
+        self.remove_from_bbs_btn.setToolTip("Remove the selected file from every BBS location. The catalog and source are preserved.")
+        self.remove_from_bbs_btn.clicked.connect(self._remove_selected_from_bbs)
+        publication_actions.addWidget(self.remove_from_bbs_btn, 0, 3)
+        self.keep_in_bbs_btn = QPushButton("Keep in BBS")
+        self.keep_in_bbs_btn.setToolTip("Keep the selected file in the selected BBS location.")
+        self.keep_in_bbs_btn.clicked.connect(self._keep_selected_in_bbs)
+        publication_actions.addWidget(self.keep_in_bbs_btn, 0, 4)
+        self.republish_btn = QPushButton("Republish")
+        self.republish_btn.setToolTip("Request republication of the selected file in the selected BBS location.")
+        self.republish_btn.clicked.connect(self._republish_selected_in_bbs)
+        publication_actions.addWidget(self.republish_btn, 0, 5)
+        content_layout.addLayout(publication_actions)
 
         self.detail_group = QGroupBox("Artifact details", content_panel)
         self.detail_group.setObjectName("stationBbsArtifactDetails")
@@ -590,13 +685,15 @@ class StationBbsTab(QWidget):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([280, 760])
 
-        self.service_tabs.addTab(self.overview_page, "Overview")
         self.service_tabs.addTab(self.radio_service_page, "Radio Service")
-        self.service_tabs.addTab(self.locations_page, "Locations & Access")
+        self.service_tabs.addTab(self.locations_page, "Locations && Access")
+        self.service_tabs.setTabToolTip(1, "Locations & Access")
         self.service_tabs.addTab(self.publishing_page, "Publishing")
         self.service_tabs.addTab(self.visitor_preview_page, "Visitor Preview")
-        self.service_tabs.addTab(self.helpers_page, "System Helpers")
+        self.service_tabs.addTab(self.helpers_page, "Visitor Helpers")
+        self.location_edit_btn.setChecked(True)
         self.apply_theme()
+        self._set_publication_status()
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -608,6 +705,11 @@ class StationBbsTab(QWidget):
         self.location_save_btn.setStyleSheet(button_style("primary", theme))
         self.location_disable_btn.setStyleSheet(button_style("warning", theme))
         self.manage_locations_btn.setStyleSheet(button_style("muted", theme))
+        self.apply_changes_btn.setStyleSheet(button_style("primary", theme))
+        self.revert_changes_btn.setStyleSheet(button_style("muted", theme))
+        self.remove_from_bbs_btn.setStyleSheet(button_style("warning", theme))
+        self.keep_in_bbs_btn.setStyleSheet(button_style("muted", theme))
+        self.republish_btn.setStyleSheet(button_style("muted", theme))
         self.detail_group.setStyleSheet(
             f"QGroupBox {{ border: 1px solid {theme.get('border', '#d0d7de')}; border-radius: 4px; margin-top: 8px; }} "
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
@@ -615,6 +717,87 @@ class StationBbsTab(QWidget):
         self.location_editor.setStyleSheet(
             f"QFrame#stationBbsLocationEditor {{ border: 1px solid {theme.get('border', '#d0d7de')}; border-radius: 4px; }}"
         )
+
+    @staticmethod
+    def _clear_chip_layout(layout: QHBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _add_chip_strip(self, row: QHBoxLayout, parent: QWidget, accessible_name: str) -> QHBoxLayout:
+        scroll = QScrollArea(parent)
+        scroll.setWidgetResizable(False)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chip_height = max(36, self.fontMetrics().height() + 18)
+        scroll.setMinimumHeight(chip_height)
+        scroll.setMaximumHeight(chip_height + 10)
+        body = QWidget(scroll)
+        chips = QHBoxLayout(body)
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(5)
+        chips.setAlignment(Qt.AlignLeft)
+        scroll.setWidget(body)
+        scroll.setAccessibleName(accessible_name)
+        row.addWidget(scroll, 1)
+        return chips
+
+    def _add_location_chips(
+        self,
+        layout: QHBoxLayout,
+        locations: Iterable[BbsLocationRecord],
+        *,
+        selected_id: str,
+        on_select,
+        include_all: bool,
+        accessible_prefix: str,
+    ) -> None:
+        self._clear_chip_layout(layout)
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        if include_all:
+            rows: list[tuple[str, str]] = [("", "All visible")]
+        else:
+            rows = []
+        rows.extend((location.location_id, location.name) for location in locations if location.enabled)
+        theme = resolve_theme(self.settings)
+        for location_id, label in rows:
+            chip = QToolButton()
+            chip.setText(label)
+            chip.setCheckable(True)
+            chip.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            chip.setAccessibleName(f"{accessible_prefix}: {label}")
+            chip.setToolTip(label)
+            chip.setStyleSheet(
+                "QToolButton {"
+                f"background: {theme.get('surface_alt', '#DDE1E6')}; color: {theme.get('text', '#1C1F21')}; "
+                f"border: 1px solid {theme.get('border', '#D3D7DD')}; border-radius: 10px; padding: 3px 10px;"
+                "} QToolButton:checked {"
+                f"background: {theme.get('accent', '#2E6F9E')}; color: white; "
+                f"border-color: {theme.get('accent_active', '#1F5A83')};"
+                "}"
+            )
+            chip.setChecked(location_id == selected_id or (include_all and not selected_id and not location_id))
+            chip.clicked.connect(lambda _checked=False, value=location_id: on_select(value))
+            group.addButton(chip)
+            layout.addWidget(chip)
+        layout.addStretch(1)
+        # Non-resizable scroll-area contents do not automatically adopt a new
+        # layout size after the chip set is rebuilt. Without this hint Qt can
+        # leave the strip at zero width until the window is resized.
+        chip_body = layout.parentWidget()
+        if chip_body is not None:
+            layout.activate()
+            chip_body.setMinimumWidth(max(1, layout.sizeHint().width()))
+            chip_body.adjustSize()
+        # Keep ownership alive with the widgets; QButtonGroup otherwise has no parent relationship to the strip.
+        if accessible_prefix.startswith("Publishing"):
+            self._publishing_chip_group = group
+        else:
+            self._visitor_chip_group = group
 
     def _radio_store(self) -> MultiRadioStore:
         host_store = getattr(self.window(), "multi_radio_store", None)
@@ -642,6 +825,8 @@ class StationBbsTab(QWidget):
         }
         self._radio_service_loading = True
         try:
+            self.radio_service_selector.blockSignals(True)
+            self.radio_service_selector.clear()
             self.radio_service_table.clearContents()
             self.radio_service_table.setRowCount(len(profiles))
             selected_row = -1
@@ -667,6 +852,7 @@ class StationBbsTab(QWidget):
                     service_text = "Paused"
                     status = "Catalog publication off"
                 values = (name, service_text, live_dir or "—", status)
+                self.radio_service_selector.addItem(name, profile_id)
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     item.setData(_LOCATION_ID_ROLE, profile_id)
@@ -676,9 +862,21 @@ class StationBbsTab(QWidget):
                     selected_row = row_index
             if profiles:
                 self.radio_service_table.selectRow(selected_row if selected_row >= 0 else 0)
+                self.radio_service_selector.setCurrentIndex(selected_row if selected_row >= 0 else 0)
         finally:
+            self.radio_service_selector.blockSignals(False)
             self._radio_service_loading = False
         self._load_selected_radio_service()
+
+    def _on_radio_selector_changed(self, index: int) -> None:
+        if self._radio_service_loading:
+            return
+        profile_id = int(self.radio_service_selector.itemData(index) or 0) if index >= 0 else 0
+        for row in range(self.radio_service_table.rowCount()):
+            item = self.radio_service_table.item(row, 0)
+            if item is not None and int(item.data(_LOCATION_ID_ROLE) or 0) == profile_id:
+                self.radio_service_table.selectRow(row)
+                break
 
     def _selected_radio_service_id(self) -> int:
         row_index = self.radio_service_table.currentRow() if hasattr(self, "radio_service_table") else -1
@@ -714,11 +912,17 @@ class StationBbsTab(QWidget):
                 self.radio_service_status.setText("No configured radio is selected.")
                 self._set_radio_service_editor_enabled(False)
                 return
+            selector_index = self.radio_service_selector.findData(int(profile.get("id", 0) or 0))
+            if selector_index >= 0 and self.radio_service_selector.currentIndex() != selector_index:
+                self.radio_service_selector.blockSignals(True)
+                self.radio_service_selector.setCurrentIndex(selector_index)
+                self.radio_service_selector.blockSignals(False)
             use_varac = bool(profile.get("use_varac", False))
             self.radio_service_enabled_chk.setChecked(bool(profile.get("varac_bbs_enabled", False)))
             self.radio_publish_enabled_chk.setChecked(bool(profile.get("varac_bbs_vault_enabled", False)))
             self.radio_announce_enabled_chk.setChecked(bool(profile.get("varac_bbs_announce_enabled", False)))
             self.radio_live_dir_edit.setText(str(profile.get("varac_bbs_dir", "") or ""))
+            self.radio_live_dir_edit.setCursorPosition(0)
             install = str(profile.get("varac_install_path", "") or "Not configured")
             outbox = str(profile.get("varac_outbox_dir", "") or "Not configured")
             self.radio_native_paths_label.setText(
@@ -996,6 +1200,30 @@ class StationBbsTab(QWidget):
         self._compact_layout = compact
         self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.splitter.setSizes([160, 600] if compact else [320, 760])
+        self.radio_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.radio_service_selector.setVisible(compact)
+        self.radio_service_table.setVisible(not compact)
+        self.radio_splitter.setSizes([1, 760] if compact else [360, 620])
+        for button in (
+            self.apply_changes_btn,
+            self.revert_changes_btn,
+            self.remove_from_bbs_btn,
+            self.keep_in_bbs_btn,
+            self.republish_btn,
+        ):
+            self.publication_actions.removeWidget(button)
+        if compact:
+            self.publication_actions.addWidget(self.apply_changes_btn, 0, 0)
+            self.publication_actions.addWidget(self.revert_changes_btn, 0, 1)
+            self.publication_actions.addWidget(self.remove_from_bbs_btn, 1, 0)
+            self.publication_actions.addWidget(self.keep_in_bbs_btn, 1, 1)
+            self.publication_actions.addWidget(self.republish_btn, 1, 2)
+        else:
+            self.publication_actions.addWidget(self.apply_changes_btn, 0, 0)
+            self.publication_actions.addWidget(self.revert_changes_btn, 0, 1)
+            self.publication_actions.addWidget(self.remove_from_bbs_btn, 0, 3)
+            self.publication_actions.addWidget(self.keep_in_bbs_btn, 0, 4)
+            self.publication_actions.addWidget(self.republish_btn, 0, 5)
         self.detail_toggle_btn.setVisible(compact)
         self._update_detail_visibility()
 
@@ -1057,11 +1285,21 @@ class StationBbsTab(QWidget):
                 "",
             )
         self._populate_locations(locations)
-        self._load_artifacts()
+        self._on_location_selection_changed()
         self._refresh_visitor_preview()
 
     def _refresh_visitor_preview(self, *_args) -> None:
         locations = [row for row in self._locations_by_id.values() if self._visitor_can_see_location(row)]
+        if self._visitor_location_id not in {location.location_id for location in locations}:
+            self._visitor_location_id = ""
+        self._add_location_chips(
+            self.visitor_chips_layout,
+            locations,
+            selected_id=self._visitor_location_id,
+            on_select=self._on_visitor_location_selected,
+            include_all=True,
+            accessible_prefix="Visitor preview location",
+        )
         self._populate_visitor_preview(locations)
         try:
             with connect_sqlite(bbs_library_db_path_from_settings(self.settings)) as conn:
@@ -1073,7 +1311,10 @@ class StationBbsTab(QWidget):
         visible_ids = {location.location_id for location in locations}
         visible_rows = [
             row for row in rows
-            if row.published and row.location_id in visible_ids and not is_fio_bbs_helper_file_name(row.display_name or row.source_path)
+            if row.published
+            and row.location_id in visible_ids
+            and (not self._visitor_location_id or row.location_id == self._visitor_location_id)
+            and not is_fio_bbs_helper_file_name(row.display_name or row.source_path)
         ][:MAX_ARTIFACT_ROWS]
         self.visitor_artifact_table.setRowCount(len(visible_rows))
         for index, row in enumerate(visible_rows):
@@ -1170,22 +1411,31 @@ class StationBbsTab(QWidget):
             self.location_tree.setCurrentItem(wanted)
         finally:
             self.location_tree.blockSignals(False)
-        self._sync_publishing_location_choices(location_rows)
+        self._sync_location_chips(location_rows)
 
-    def _sync_publishing_location_choices(self, locations: Iterable[BbsLocationRecord]) -> None:
+    def _sync_location_chips(self, locations: Iterable[BbsLocationRecord]) -> None:
         rows = [location for location in locations if location.enabled]
-        self.publishing_location_combo.blockSignals(True)
-        try:
-            self.publishing_location_combo.clear()
-            for location in rows:
-                self.publishing_location_combo.addItem(location.name, location.location_id)
-            index = self.publishing_location_combo.findData(self._publishing_location_id)
-            if index < 0 and self.publishing_location_combo.count() > 0:
-                index = 0
-                self._publishing_location_id = str(self.publishing_location_combo.itemData(0) or "")
-            self.publishing_location_combo.setCurrentIndex(index)
-        finally:
-            self.publishing_location_combo.blockSignals(False)
+        if self._publishing_location_id not in {location.location_id for location in rows}:
+            self._publishing_location_id = rows[0].location_id if rows else ""
+        self._add_location_chips(
+            self.publishing_chips_layout,
+            rows,
+            selected_id=self._publishing_location_id,
+            on_select=self._on_publishing_location_selected,
+            include_all=False,
+            accessible_prefix="Publishing location",
+        )
+        visible_rows = [location for location in rows if self._visitor_can_see_location(location)]
+        if self._visitor_location_id not in {location.location_id for location in visible_rows}:
+            self._visitor_location_id = ""
+        self._add_location_chips(
+            self.visitor_chips_layout,
+            visible_rows,
+            selected_id=self._visitor_location_id,
+            on_select=self._on_visitor_location_selected,
+            include_all=True,
+            accessible_prefix="Visitor preview location",
+        )
 
     def _location_tree_item(self, location_id: str) -> QTreeWidgetItem | None:
         root = self.location_tree.topLevelItem(0)
@@ -1197,47 +1447,38 @@ class StationBbsTab(QWidget):
             pending.extend(item.child(index) for index in range(item.childCount()))
         return None
 
-    def _on_publishing_location_changed(self, _index: int = -1) -> None:
-        location_id = str(self.publishing_location_combo.currentData() or "")
+    def _on_publishing_location_selected(self, location_id: str) -> None:
         if not location_id or location_id == self._publishing_location_id:
             return
         self._publishing_location_id = location_id
         self._load_artifacts()
 
+    def _on_visitor_location_selected(self, location_id: str) -> None:
+        self._visitor_location_id = location_id
+        self._refresh_visitor_preview()
+
+    def _on_artifact_filter_changed(self, _index: int = -1) -> None:
+        self._artifact_filter = str(self.artifact_filter_combo.currentData() or "all")
+        self._load_artifacts()
+
     def _populate_visitor_preview(self, locations: Iterable[BbsLocationRecord]) -> None:
-        rows = list(locations)
-        self.visitor_preview_tree.clear()
-        root = QTreeWidgetItem(["Visitor BBS view"])
-        root.setToolTip(0, "Enabled locations visible to this visitor. This preview is read-only.")
-        self.visitor_preview_tree.addTopLevelItem(root)
-        parents: dict[str, QTreeWidgetItem] = {"": root}
-        unresolved = rows
-        while unresolved:
-            deferred: list[BbsLocationRecord] = []
-            progressed = False
-            for location in unresolved:
-                parent = parents.get(location.parent_location_id) or root
-                if location.parent_location_id and location.parent_location_id not in parents:
-                    deferred.append(location)
-                    continue
-                item = QTreeWidgetItem(
-                    [f"{location.name} — {_access_text(location.access_rule)}; {_retention_text(location.retention_mode, location.retention_days)}"]
-                )
-                item.setToolTip(0, "Read-only visitor-visible location.")
-                parent.addChild(item)
-                parents[location.location_id] = item
-                progressed = True
-            if not deferred or not progressed:
-                for location in deferred:
-                    root.addChild(QTreeWidgetItem([location.name]))
-                break
-            unresolved = deferred
-        root.setExpanded(True)
+        selected = next((row for row in locations if row.location_id == self._visitor_location_id), None)
+        if selected is None:
+            self.visitor_policy_label.setText(
+                "All visible locations are shown. Choose a location chip to review its access and retention policy."
+            )
+        else:
+            self.visitor_policy_label.setText(
+                f"{selected.name}: {_access_text(selected.access_rule)}; "
+                f"{_retention_text(selected.retention_mode, selected.retention_days)}. Read-only visitor view."
+            )
 
     def _on_location_selection_changed(self) -> None:
         selected = self.location_tree.currentItem()
         self._selected_location_id = str(selected.data(0, _LOCATION_ID_ROLE) or "") if selected is not None else ""
-        if self.location_editor.isVisible():
+        # isVisible() is false while an ancestor tab is hidden; isHidden()
+        # reflects the operator's actual Edit/Hide choice.
+        if not self.location_editor.isHidden():
             self._load_location_editor(self._locations_by_id.get(self._selected_location_id))
         location = self._locations_by_id.get(self._selected_location_id)
         if location is None:
@@ -1253,12 +1494,7 @@ class StationBbsTab(QWidget):
             )
             if location.enabled:
                 self._publishing_location_id = location.location_id
-        publishing_index = self.publishing_location_combo.findData(self._publishing_location_id)
-        self.publishing_location_combo.blockSignals(True)
-        try:
-            self.publishing_location_combo.setCurrentIndex(publishing_index)
-        finally:
-            self.publishing_location_combo.blockSignals(False)
+        self._sync_location_chips(self._locations_by_id.values())
         self._load_artifacts()
 
     def _load_artifacts(self) -> None:
@@ -1280,9 +1516,10 @@ class StationBbsTab(QWidget):
             self.overview_status_label.setText(self.summary_label.text())
             return
         helper_rows = [row for row in rows if is_fio_bbs_helper_file_name(row.display_name or row.source_path)]
-        displays = self._display_artifacts(
+        catalog_displays = self._display_artifacts(
             row for row in rows if not is_fio_bbs_helper_file_name(row.display_name or row.source_path)
         )
+        displays = self._filter_artifact_displays(catalog_displays)
         self._populate_artifacts(displays)
         self._populate_helpers(helper_rows)
         location_name = self._locations_by_id.get(self._publishing_location_id)
@@ -1296,19 +1533,41 @@ class StationBbsTab(QWidget):
         )
         self.summary_label.setText(
             f"{len(self._locations_by_id)} location{'s' if len(self._locations_by_id) != 1 else ''}; "
-            f"{len(displays)} artifact{'s' if len(displays) != 1 else ''}{clipped}. {guidance}"
+            f"{len(catalog_displays)} artifact{'s' if len(catalog_displays) != 1 else ''}{clipped}. {guidance}"
         )
         self.overview_status_label.setText(self.summary_label.text())
+
+    def _filter_artifact_displays(self, displays: Iterable[_ArtifactDisplay]) -> list[_ArtifactDisplay]:
+        mode = self._artifact_filter
+        if mode == "all":
+            return list(displays)
+        filtered: list[_ArtifactDisplay] = []
+        for display in displays:
+            selected_row = next(
+                (row for row in display.rows if row.location_id == self._publishing_location_id),
+                None,
+            )
+            state = str(selected_row.publication_state or "").lower() if selected_row is not None else ""
+            if mode == "in_bbs" and state == "published":
+                filtered.append(display)
+            elif mode == "expired" and state == "retention_expired":
+                filtered.append(display)
+            elif mode == "removed" and state == "operator_disabled":
+                filtered.append(display)
+        return filtered
 
     @staticmethod
     def _helper_display_name(row: BbsArtifactAdminRow) -> str:
         name = Path(row.display_name or row.source_path or row.artifact_id).name
-        return name[:-4] if name.lower().endswith(".txt") else name
+        clean = name[:-4] if name.lower().endswith(".txt") else name
+        if clean.upper().startswith("00 READ FIRST"):
+            return "00 HOW TO USE - Type command then refresh BBS"
+        return clean
 
     @staticmethod
     def _helper_purpose(row: BbsArtifactAdminRow) -> str:
         name = Path(row.display_name or row.source_path or row.artifact_id).name.upper()
-        if name.startswith("00 READ FIRST") or name.startswith("00 NOTICE"):
+        if name.startswith("00 HOW TO USE") or name.startswith("00 READ FIRST") or name.startswith("00 NOTICE"):
             return "Visitor start"
         if name.startswith("01 COMMANDS"):
             return "Command index"
@@ -1330,12 +1589,10 @@ class StationBbsTab(QWidget):
         self.helpers_table.setRowCount(len(helpers))
         for index, helper_rows in enumerate(helpers):
             row = helper_rows[0]
-            compatibility_name = Path(row.display_name or row.source_path or row.artifact_id).name
             locations = ", ".join(dict.fromkeys(item.location_name for item in helper_rows if item.location_name))
             values = (
                 self._helper_display_name(row),
                 self._helper_purpose(row),
-                compatibility_name,
                 locations or "System projection",
                 f"{row.age_days}d",
                 _health_text(row),
@@ -1348,9 +1605,9 @@ class StationBbsTab(QWidget):
                 )
                 self.helpers_table.setItem(index, column, item)
         self.helpers_status.setText(
-            f"{len(helpers)} system-generated helper{'s' if len(helpers) != 1 else ''} in the bounded catalog view."
+            f"{len(helpers)} generated visitor helper{'s' if len(helpers) != 1 else ''} in the bounded catalog view."
             if helpers
-            else "No generated helper files are present in the bounded catalog view. They remain excluded from Publishing."
+            else "No generated visitor helper files are present in the bounded catalog view. They remain excluded from Publishing."
         )
 
     def _display_artifacts(self, rows: Iterable[BbsArtifactAdminRow]) -> list[_ArtifactDisplay]:
@@ -1386,24 +1643,31 @@ class StationBbsTab(QWidget):
                     published.setText("Choose location")
                 else:
                     published.setToolTip("Check to publish this artifact in the selected managed location. Clearing it never deletes the source file.")
-                    published.setCheckState(
-                        Qt.Checked if self._publishing_location_id in display.published_location_ids else Qt.Unchecked
-                    )
+                    staged = self._pending_publication.get((row.artifact_id, self._publishing_location_id))
+                    checked = self._publishing_location_id in display.published_location_ids if staged is None else staged
+                    published.setCheckState(Qt.Checked if checked else Qt.Unchecked)
                 self.artifact_table.setItem(index, 0, published)
                 name = QTableWidgetItem(row.display_name or row.artifact_id)
                 name.setToolTip(row.source_path)
                 self.artifact_table.setItem(index, 1, name)
-                locations = QTableWidgetItem(", ".join(display.location_names) or row.location_name)
-                locations.setToolTip("Managed locations currently represented in this bounded view.")
-                self.artifact_table.setItem(index, 2, locations)
                 age = QTableWidgetItem(f"{row.age_days}d")
                 age.setToolTip(_modified_detail(row.modified_utc))
-                self.artifact_table.setItem(index, 3, age)
-                retention = QTableWidgetItem(_retention_text(row.retention_mode, row.retention_days))
-                self.artifact_table.setItem(index, 4, retention)
-                health = QTableWidgetItem(_health_text(row))
-                health.setToolTip(f"Source state: {row.source_state or 'unknown'}; publication state: {row.publication_state or 'unknown'}")
-                self.artifact_table.setItem(index, 5, health)
+                self.artifact_table.setItem(index, 2, age)
+                selected_row = next(
+                    (candidate for candidate in display.rows if candidate.location_id == self._publishing_location_id),
+                    None,
+                ) or row
+                expires = QTableWidgetItem(_expires_text(selected_row))
+                expires.setToolTip(
+                    f"Exact expiry: {selected_row.expires_utc or 'none'}. Expiration never deletes the source file."
+                )
+                self.artifact_table.setItem(index, 3, expires)
+                health = QTableWidgetItem(_health_text(selected_row))
+                health.setToolTip(
+                    f"Source state: {selected_row.source_state or 'unknown'}; "
+                    f"publication state: {selected_row.publication_state or 'unknown'}"
+                )
+                self.artifact_table.setItem(index, 4, health)
         finally:
             self.artifact_table.blockSignals(False)
             self._loading = False
@@ -1422,12 +1686,34 @@ class StationBbsTab(QWidget):
         for label in self.detail_labels.values():
             label.setText("Select an artifact.")
             label.setToolTip("")
+        self._update_selected_action_buttons(False)
+
+    def _update_selected_action_buttons(self, selected: bool | None = None) -> None:
+        has_selected = self._selected_display() is not None if selected is None else bool(selected)
+        self.remove_from_bbs_btn.setEnabled(has_selected)
+        location = self._locations_by_id.get(self._publishing_location_id)
+        can_target = has_selected and location is not None and location.enabled
+        self.keep_in_bbs_btn.setEnabled(can_target)
+        self.republish_btn.setEnabled(can_target)
+        display = self._selected_display() if has_selected else None
+        selected_row = next(
+            (row for row in display.rows if row.location_id == self._publishing_location_id),
+            None,
+        ) if display is not None else None
+        keep = bool(selected_row and str(getattr(selected_row, "retention_class", "") or "").lower() == "keep")
+        self.keep_in_bbs_btn.setText("Use Retention" if keep else "Keep in BBS")
+        self.keep_in_bbs_btn.setToolTip(
+            "Restore this file to the selected location's normal retention policy."
+            if keep
+            else "Keep the selected file in this BBS location without expiry."
+        )
 
     def _refresh_detail_panel(self) -> None:
         display = self._selected_display()
         if display is None:
             self._clear_detail_panel()
             return
+        self._update_selected_action_buttons(True)
         row = display.row
         location = self._locations_by_id.get(self._publishing_location_id or row.location_id)
         selected_location_id = self._publishing_location_id
@@ -1440,13 +1726,14 @@ class StationBbsTab(QWidget):
         else:
             health_text = _health_text(selected_row or row)
         retention_row = selected_row or row
+        keep_override = str(getattr(retention_row, "retention_class", "") or "").lower() == "keep"
         values = {
             "origin": (row.source_kind or "Managed BBS catalog").replace("_", " ").title(),
             "path": row.source_path or "No source path recorded",
             "size": _byte_text(row.size),
             "age": f"{row.age_days}d; {_modified_detail(row.modified_utc)}",
             "access": _access_text(location.access_rule if location is not None else "public"),
-            "retention": _retention_text(retention_row.retention_mode, retention_row.retention_days)
+            "retention": ("Keep in BBS override" if keep_override else _retention_text(retention_row.retention_mode, retention_row.retention_days))
             + (f"; expires {retention_row.expires_utc}" if retention_row.expires_utc else "; no expiry recorded"),
             "health": health_text,
         }
@@ -1460,15 +1747,127 @@ class StationBbsTab(QWidget):
         artifact_id = str(item.data(_ARTIFACT_ID_ROLE) or "").strip()
         if not artifact_id:
             return
+        display = self._display_rows.get(artifact_id)
+        persisted = bool(display and self._publishing_location_id in display.published_location_ids)
+        requested = item.checkState() == Qt.Checked
+        key = (artifact_id, self._publishing_location_id)
+        if requested == persisted:
+            self._pending_publication.pop(key, None)
+        else:
+            self._pending_publication[key] = requested
+        self._set_publication_status()
+
+    def _set_publication_status(self, message: str = "") -> None:
+        pending = len(self._pending_publication)
+        self.apply_changes_btn.setEnabled(bool(pending))
+        self.revert_changes_btn.setEnabled(bool(pending))
+        self.publication_status_label.setText(message or (f"{pending} staged change{'s' if pending != 1 else ''}." if pending else "No pending changes."))
+
+    def _apply_publication_changes(self) -> None:
+        if not self._pending_publication:
+            self._set_publication_status()
+            return
         try:
             with connect_sqlite(bbs_library_db_path_from_settings(self.settings)) as conn:
                 with conn:
-                    current = set(list_bbs_artifact_location_ids(conn, artifact_id))
-                    if item.checkState() == Qt.Checked:
-                        current.add(self._publishing_location_id)
-                    else:
-                        current.discard(self._publishing_location_id)
-                    set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=current)
+                    by_artifact: dict[str, dict[str, bool]] = defaultdict(dict)
+                    for (artifact_id, location_id), enabled in self._pending_publication.items():
+                        by_artifact[artifact_id][location_id] = enabled
+                    for artifact_id, changes in by_artifact.items():
+                        current = set(list_bbs_artifact_location_ids(conn, artifact_id))
+                        for location_id, enabled in changes.items():
+                            if enabled:
+                                current.add(location_id)
+                            else:
+                                current.discard(location_id)
+                        set_bbs_artifact_locations(conn, artifact_id=artifact_id, location_ids=current)
+                        for location_id, enabled in changes.items():
+                            if enabled:
+                                bbs_library_store.republish_bbs_artifact(
+                                    conn,
+                                    artifact_id=artifact_id,
+                                    location_id=location_id,
+                                )
         except Exception as exc:
-            self.summary_label.setText(f"Managed BBS membership was not changed: {exc}")
+            self._set_publication_status(f"Changes were not applied: {exc}")
+            return
+        count = len(self._pending_publication)
+        self._pending_publication.clear()
+        self._set_publication_status(f"Applied {count} staged change{'s' if count != 1 else ''}. Source files were not deleted.")
         self._load_artifacts()
+
+    def _revert_publication_changes(self) -> None:
+        self._pending_publication.clear()
+        self._set_publication_status("Staged changes reverted.")
+        self._load_artifacts()
+
+    def _selected_artifact_id(self) -> str:
+        display = self._selected_display()
+        return display.row.artifact_id if display is not None else ""
+
+    def _run_selected_bbs_action(self, function_name: str, action_label: str, *, all_locations: bool = False) -> None:
+        artifact_id = self._selected_artifact_id()
+        if not artifact_id:
+            self._set_publication_status("Select a file before using this action.")
+            return
+        if not all_locations and not self._publishing_location_id:
+            self._set_publication_status("Select a publishing location before using this action.")
+            return
+        operation = getattr(bbs_library_store, function_name, None)
+        if not callable(operation):
+            self._set_publication_status(f"{action_label} is unavailable in this build.")
+            return
+        try:
+            with connect_sqlite(bbs_library_db_path_from_settings(self.settings)) as conn:
+                with conn:
+                    kwargs = {"artifact_id": artifact_id}
+                    if not all_locations:
+                        kwargs["location_id"] = self._publishing_location_id
+                    operation(conn, **kwargs)
+        except Exception as exc:
+            self._set_publication_status(f"{action_label} failed: {exc}")
+            return
+        self._pending_publication = {
+            key: value for key, value in self._pending_publication.items() if key[0] != artifact_id
+        }
+        self._set_publication_status(f"{action_label} completed. Source and catalog records were preserved.")
+        self._load_artifacts()
+
+    def _remove_selected_from_bbs(self) -> None:
+        self._run_selected_bbs_action("remove_bbs_artifact_from_all_locations", "Remove from BBS", all_locations=True)
+
+    def _keep_selected_in_bbs(self) -> None:
+        display = self._selected_display()
+        selected_row = next(
+            (row for row in display.rows if row.location_id == self._publishing_location_id),
+            None,
+        ) if display is not None else None
+        keep = not bool(
+            selected_row
+            and str(getattr(selected_row, "retention_class", "") or "").lower() == "keep"
+        )
+        artifact_id = self._selected_artifact_id()
+        if not artifact_id or not self._publishing_location_id:
+            self._set_publication_status("Select a file and publishing location before changing retention.")
+            return
+        try:
+            with connect_sqlite(bbs_library_db_path_from_settings(self.settings)) as conn:
+                with conn:
+                    bbs_library_store.set_bbs_artifact_keep(
+                        conn,
+                        artifact_id=artifact_id,
+                        location_id=self._publishing_location_id,
+                        keep=keep,
+                    )
+        except Exception as exc:
+            self._set_publication_status(f"Retention was not changed: {exc}")
+            return
+        self._set_publication_status(
+            "File will remain in this BBS location until removed."
+            if keep
+            else "Normal location retention was restored."
+        )
+        self._load_artifacts()
+
+    def _republish_selected_in_bbs(self) -> None:
+        self._run_selected_bbs_action("republish_bbs_artifact", "Republish")

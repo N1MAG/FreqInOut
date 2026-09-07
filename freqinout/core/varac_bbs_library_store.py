@@ -20,6 +20,8 @@ DEFAULT_BBS_RETENTION_DAYS = 14
 RETENTION_MANUAL = "manual"
 RETENTION_GLOBAL_DEFAULT = "global_default"
 RETENTION_EXPIRE_AFTER_DAYS = "expire_after_days"
+RETENTION_CLASS_KEEP = "keep"
+RETENTION_CLASS_NORMAL = "normal"
 SOURCE_PRESENT = "present"
 SOURCE_MISSING = "missing"
 SOURCE_DELETED = "deleted"
@@ -70,6 +72,7 @@ class BbsArtifactAdminRow:
     disabled_reason: str
     retention_mode: str
     retention_days: int
+    retention_class: str
     expires_utc: str
     modified_utc: str
     age_days: int
@@ -237,9 +240,17 @@ def set_bbs_location_artifact(
     if not location_key or not artifact_key:
         raise ValueError("location_id and artifact_id are required")
     now = utc_now_iso()
+    retention_class_key = _normalize_retention_class(retention_class)
     resolved_expiry = str(expires_utc or "").strip()
-    if publish_enabled and not resolved_expiry:
-        resolved_expiry = _mapping_expiry_utc(conn, location_key, artifact_key)
+    if retention_class_key == RETENTION_CLASS_KEEP:
+        resolved_expiry = ""
+    elif publish_enabled and not resolved_expiry:
+        resolved_expiry = _mapping_expiry_utc(
+            conn,
+            location_key,
+            artifact_key,
+            retention_class=retention_class_key,
+        )
     conn.execute(
         """
         INSERT INTO bbs_location_artifacts(
@@ -264,7 +275,7 @@ def set_bbs_location_artifact(
             str(live_name or "").strip(),
             int(sort_order or 0),
             str(visibility_rule or "public").strip() or "public",
-            str(retention_class or "normal").strip() or "normal",
+            retention_class_key,
             1 if publish_enabled else 0,
             now,
             now,
@@ -311,6 +322,186 @@ def unpublish_bbs_artifact_path_from_location(
     return int(cur.rowcount or 0)
 
 
+def remove_bbs_artifact_from_all_locations(
+    conn: sqlite3.Connection,
+    *,
+    artifact_id: object,
+) -> int:
+    """Disable every BBS mapping for an artifact without touching its source."""
+
+    ensure_bbs_library_schema(conn)
+    artifact_key = str(artifact_id or "").strip()
+    if not artifact_key:
+        return 0
+    if not conn.execute(
+        "SELECT 1 FROM bbs_artifacts WHERE artifact_id=? LIMIT 1", (artifact_key,)
+    ).fetchone():
+        return 0
+    now = utc_now_iso()
+    cur = conn.execute(
+        """
+        UPDATE bbs_location_artifacts
+           SET publish_enabled=0,
+               retention_class=?,
+               disabled_reason=?,
+               expires_utc=NULL,
+               updated_utc=?
+         WHERE artifact_id=?
+           AND (publish_enabled<>0 OR disabled_reason<>? OR retention_class<>?)
+        """,
+        (
+            RETENTION_CLASS_NORMAL,
+            DISABLED_OPERATOR,
+            now,
+            artifact_key,
+            DISABLED_OPERATOR,
+            RETENTION_CLASS_NORMAL,
+        ),
+    )
+    return int(cur.rowcount or 0)
+
+
+def set_bbs_artifact_keep(
+    conn: sqlite3.Connection,
+    *,
+    artifact_id: object,
+    location_id: object,
+    keep: bool = True,
+) -> str:
+    """Set or clear a per-location keep override and return the resulting expiry."""
+
+    ensure_bbs_library_schema(conn)
+    artifact_key = str(artifact_id or "").strip()
+    location_key = str(location_id or "").strip()
+    if not artifact_key or not location_key:
+        raise ValueError("artifact_id and location_id are required")
+    if not conn.execute(
+        "SELECT 1 FROM bbs_artifacts WHERE artifact_id=? LIMIT 1", (artifact_key,)
+    ).fetchone():
+        raise ValueError(f"Unknown BBS artifact id: {artifact_key}")
+    if not conn.execute(
+        "SELECT 1 FROM bbs_locations WHERE location_id=? LIMIT 1", (location_key,)
+    ).fetchone():
+        raise ValueError(f"Unknown BBS location id: {location_key}")
+
+    mapping = conn.execute(
+        """
+        SELECT live_name, sort_order, visibility_rule, publish_enabled, disabled_reason
+        FROM bbs_location_artifacts
+        WHERE location_id=? AND artifact_id=?
+        LIMIT 1
+        """,
+        (location_key, artifact_key),
+    ).fetchone()
+    if keep:
+        set_bbs_location_artifact(
+            conn,
+            location_id=location_key,
+            artifact_id=artifact_key,
+            live_name=str(mapping[0] or "") if mapping else "",
+            sort_order=int(mapping[1] or 0) if mapping else 0,
+            visibility_rule=str(mapping[2] or "public") if mapping else "public",
+            retention_class=RETENTION_CLASS_KEEP,
+            publish_enabled=True,
+            expires_utc="",
+        )
+        return ""
+
+    if mapping is None:
+        return ""
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE bbs_location_artifacts
+           SET retention_class=?, updated_utc=?
+         WHERE location_id=? AND artifact_id=?
+        """,
+        (
+            RETENTION_CLASS_NORMAL,
+            now,
+            location_key,
+            artifact_key,
+        ),
+    )
+    expiry = _mapping_expiry_utc(conn, location_key, artifact_key)
+    conn.execute(
+        """
+        UPDATE bbs_location_artifacts
+           SET expires_utc=?, updated_utc=?
+         WHERE location_id=? AND artifact_id=?
+        """,
+        (expiry or None, utc_now_iso(), location_key, artifact_key),
+    )
+    return expiry
+
+
+def republish_bbs_artifact(
+    conn: sqlite3.Connection,
+    *,
+    artifact_id: object,
+    location_id: object,
+    now_utc: dt.datetime | None = None,
+) -> str:
+    """Republish a mapping with a fresh retention window, without touching the source."""
+
+    ensure_bbs_library_schema(conn)
+    artifact_key = str(artifact_id or "").strip()
+    location_key = str(location_id or "").strip()
+    if not artifact_key or not location_key:
+        raise ValueError("artifact_id and location_id are required")
+    if not conn.execute(
+        "SELECT 1 FROM bbs_artifacts WHERE artifact_id=? LIMIT 1", (artifact_key,)
+    ).fetchone():
+        raise ValueError(f"Unknown BBS artifact id: {artifact_key}")
+    if not conn.execute(
+        "SELECT 1 FROM bbs_locations WHERE location_id=? LIMIT 1", (location_key,)
+    ).fetchone():
+        raise ValueError(f"Unknown BBS location id: {location_key}")
+
+    now = now_utc or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    else:
+        now = now.astimezone(dt.timezone.utc)
+    mode, days = _resolved_location_retention(conn, location_key)
+    expiry = "" if mode == RETENTION_MANUAL or days <= 0 else (now + dt.timedelta(days=days)).isoformat()
+    mapping = conn.execute(
+        """
+        SELECT live_name, sort_order, visibility_rule
+        FROM bbs_location_artifacts
+        WHERE location_id=? AND artifact_id=?
+        LIMIT 1
+        """,
+        (location_key, artifact_key),
+    ).fetchone()
+    if mapping is None:
+        set_bbs_location_artifact(
+            conn,
+            location_id=location_key,
+            artifact_id=artifact_key,
+            retention_class=RETENTION_CLASS_NORMAL,
+            publish_enabled=True,
+            expires_utc=expiry,
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE bbs_location_artifacts
+               SET retention_class=?, publish_enabled=1, disabled_reason='',
+                   expires_utc=?, updated_utc=?
+             WHERE location_id=? AND artifact_id=?
+            """,
+            (
+                RETENTION_CLASS_NORMAL,
+                expiry or None,
+                utc_now_iso(),
+                location_key,
+                artifact_key,
+            ),
+        )
+    return expiry
+
+
 def _json(value: object, default: str = "{}") -> str:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -329,6 +520,11 @@ def _normalize_retention_mode(value: object) -> str:
     if raw not in {RETENTION_MANUAL, RETENTION_GLOBAL_DEFAULT, RETENTION_EXPIRE_AFTER_DAYS}:
         return RETENTION_GLOBAL_DEFAULT
     return raw
+
+
+def _normalize_retention_class(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    return RETENTION_CLASS_KEEP if raw == RETENTION_CLASS_KEEP else RETENTION_CLASS_NORMAL
 
 
 def _normalize_access_rule(value: object) -> str:
@@ -467,7 +663,28 @@ def _resolved_location_retention(conn: sqlite3.Connection, location_id: str) -> 
     return mode, days
 
 
-def _mapping_expiry_utc(conn: sqlite3.Connection, location_id: str, artifact_id: str) -> str:
+def _mapping_expiry_utc(
+    conn: sqlite3.Connection,
+    location_id: str,
+    artifact_id: str,
+    *,
+    retention_class: object | None = None,
+) -> str:
+    if retention_class is None:
+        retention_row = conn.execute(
+            """
+            SELECT retention_class
+            FROM bbs_location_artifacts
+            WHERE location_id=? AND artifact_id=?
+            LIMIT 1
+            """,
+            (location_id, artifact_id),
+        ).fetchone()
+        effective_class = _normalize_retention_class(retention_row[0]) if retention_row else RETENTION_CLASS_NORMAL
+    else:
+        effective_class = _normalize_retention_class(retention_class)
+    if effective_class == RETENTION_CLASS_KEEP:
+        return ""
     mode, days = _resolved_location_retention(conn, location_id)
     if mode == RETENTION_MANUAL or days <= 0:
         return ""
@@ -1193,8 +1410,8 @@ def list_bbs_admin_rows(
         f"""
         SELECT a.artifact_id, a.source_path, a.source_kind, a.display_name, a.size, a.mtime_ns,
                a.source_state, la.location_id, l.name, la.publish_enabled,
-               la.disabled_reason, l.retention_mode, l.retention_days, la.expires_utc
-               , a.deleted
+               la.disabled_reason, l.retention_mode, l.retention_days,
+               la.retention_class, la.expires_utc, a.deleted
         FROM bbs_location_artifacts la
         JOIN bbs_artifacts a ON a.artifact_id=la.artifact_id
         JOIN bbs_locations l ON l.location_id=la.location_id
@@ -1212,14 +1429,15 @@ def list_bbs_admin_rows(
         source_state = str(row[6] or SOURCE_PRESENT)
         enabled = bool(row[9])
         disabled_reason = str(row[10] or "")
-        expiry = _parse_utc(row[13])
+        retention_class = _normalize_retention_class(row[13])
+        expiry = _parse_utc(row[14])
         if not enabled:
             state = disabled_reason or DISABLED_OPERATOR
         elif source_state == SOURCE_MISSING:
             state = "source_missing"
-        elif source_state == SOURCE_DELETED or bool(row[14]):
+        elif source_state == SOURCE_DELETED or bool(row[15]):
             state = SOURCE_DELETED
-        elif expiry is not None and expiry <= now:
+        elif retention_class != RETENTION_CLASS_KEEP and expiry is not None and expiry <= now:
             state = DISABLED_RETENTION
         else:
             state = "published"
@@ -1248,7 +1466,8 @@ def list_bbs_admin_rows(
                 disabled_reason=disabled_reason,
                 retention_mode=mode,
                 retention_days=days,
-                expires_utc=str(row[13] or ""),
+                retention_class=retention_class,
+                expires_utc=str(row[14] or ""),
                 modified_utc=modified.isoformat(),
                 age_days=max(0, int((now - modified).total_seconds() // 86400)),
             )
@@ -1282,14 +1501,25 @@ def reconcile_bbs_publications(
                 "UPDATE bbs_location_artifacts SET expires_utc=? WHERE location_id=? AND artifact_id=?",
                 (expiry, str(location_id or ""), str(artifact_id or "")),
             )
+    # A keep override is intentionally expiry-free, even if an older row
+    # retained a stale timestamp from before the override was applied.
+    conn.execute(
+        """
+        UPDATE bbs_location_artifacts
+           SET expires_utc=NULL
+         WHERE retention_class=? AND expires_utc IS NOT NULL AND expires_utc<>''
+        """,
+        (RETENTION_CLASS_KEEP,),
+    )
     expired_cur = conn.execute(
         """
         UPDATE bbs_location_artifacts
            SET publish_enabled=0, disabled_reason=?, last_reconciled_utc=?, updated_utc=?
          WHERE publish_enabled=1
+           AND retention_class<>?
            AND expires_utc IS NOT NULL AND expires_utc<>'' AND expires_utc<=?
         """,
-        (DISABLED_RETENTION, now_iso, now_iso, now_iso),
+        (DISABLED_RETENTION, now_iso, now_iso, RETENTION_CLASS_KEEP, now_iso),
     )
     rows = conn.execute(
         """
