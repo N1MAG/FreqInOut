@@ -13,7 +13,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
+    QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
     QScrollArea, QSplitter, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -28,7 +28,8 @@ from freqinout.core.js8_expect_runtime import (
 )
 from freqinout.core.js8_expect_store import (
     delete_expect_allow_policy, delete_expect_entry, list_expect_allow_policies, list_expect_entries,
-    list_expect_runtime_audit, save_expect_allow_policy, save_expect_entry,
+    list_expect_operator_access_catalog, list_expect_runtime_audit,
+    save_expect_allow_policy, save_expect_entry,
 )
 from freqinout.core.js8_spotter_forms import (
     MAPPER_SETTINGS_KEY,
@@ -65,6 +66,39 @@ def _when(value: object) -> str:
     return dt.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
 
 
+class _CsvCompleterLineEdit(QLineEdit):
+    """Complete only the comma-delimited token currently being edited."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._completion_values: list[str] = []
+        self._token_completer = QCompleter([], self)
+        self._token_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._token_completer.setFilterMode(Qt.MatchContains)
+        self._token_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._token_completer.activated[str].connect(self._insert_completion)
+        self.textEdited.connect(self._complete_token)
+
+    def set_completion_values(self, values: list[str]) -> None:
+        self._completion_values = sorted({str(value or "").strip().upper() for value in values if str(value or "").strip()})
+        self._token_completer.model().setStringList(self._completion_values)
+
+    def _current_token(self) -> str:
+        return self.text().rsplit(",", 1)[-1].strip()
+
+    def _complete_token(self, _text: str) -> None:
+        token = self._current_token()
+        if not token:
+            return
+        self._token_completer.setCompletionPrefix(token)
+        self._token_completer.complete()
+
+    def _insert_completion(self, value: str) -> None:
+        prefix = self.text().rsplit(",", 1)[0].strip() if "," in self.text() else ""
+        self.setText(f"{prefix}, {value}" if prefix else value)
+        self.setCursorPosition(len(self.text()))
+
+
 class FioSpotterTab(QWidget):
     """A bounded browser for FIO's existing Spotter facilities.
 
@@ -94,6 +128,7 @@ class FioSpotterTab(QWidget):
         self._entry_rows: list[dict[str, Any]] = []
         self._activity_rows: list[dict[str, Any]] = []
         self._watch_rows: list[dict[str, Any]] = []
+        self._expect_access_catalog_loaded_at = 0.0
         self._compact = False
         self.setObjectName("fioSpotterTab")
         outer = QVBoxLayout(self)
@@ -130,7 +165,50 @@ class FioSpotterTab(QWidget):
             self._compact = compact
             for splitter in self.findChildren(QSplitter):
                 splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+            self._apply_expect_responsive_layout()
         super().resizeEvent(event)
+
+    def _apply_expect_responsive_layout(self) -> None:
+        if not hasattr(self, "expect_editor_split"):
+            return
+        compact = self.width() <= 1000
+        orientation = Qt.Vertical if compact else Qt.Horizontal
+        self.expect_editor_split.setOrientation(orientation)
+        self.expect_history_split.setOrientation(orientation)
+        self.expect_editor_split.setSizes([320, 620] if compact else [520, 620])
+        self.expect_editor_split.widget(0).setMaximumHeight(210 if compact else 16777215)
+        self.expect_history_split.setMaximumHeight(300 if compact else 190)
+
+    def _load_expect_access_completions(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self._expect_access_catalog_loaded_at and (now - self._expect_access_catalog_loaded_at) < 60.0:
+            return
+        try:
+            catalog = list_expect_operator_access_catalog(limit=2000)
+        except Exception:
+            catalog = []
+        callsigns = [str(row.get("callsign") or "") for row in catalog]
+        groups = sorted({
+            str(group or "").strip().upper()
+            for row in catalog for group in (row.get("groups") or [])
+            if str(group or "").strip()
+        })
+        addressed_groups = [f"@{group.lstrip('@')}" for group in groups]
+        for widget in (self.expect_calls, self.expect_blocked, self.policy_calls, self.policy_blocked):
+            widget.set_completion_values(callsigns)
+        for widget in (self.expect_groups, self.policy_groups):
+            widget.set_completion_values(addressed_groups)
+        for widget in (self.expect_trusted_groups, self.policy_trusted_groups):
+            widget.set_completion_values(groups)
+        historical = sum(1 for row in catalog if row.get("historical"))
+        trusted = len({str(row.get("current_callsign") or "") for row in catalog if row.get("trusted")})
+        self.expect_access_catalog_state.setText(
+            f"Operator History lookup: {len(callsigns)} callsigns ({historical} former); "
+            f"{trusted} trusted operators; {len(groups)} groups."
+            if catalog else
+            "Operator History lookup is empty. Explicit callsigns and * remain available."
+        )
+        self._expect_access_catalog_loaded_at = now
 
     def _activate_tab(self, index: int) -> None:
         if index not in self._built:
@@ -526,9 +604,10 @@ class FioSpotterTab(QWidget):
         runtime_grid.addWidget(self.dynamic_flamp_state, 2, 0, 1, 3)
         layout.addWidget(runtime)
         split = QSplitter(Qt.Horizontal)
+        self.expect_editor_split = split
         left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QLabel("Expect rules"))
-        self.expect_entries_table = self._table(["Use", "Key", "Policy", "Auto", "Replies", "Cooldown", "Source"], name="fioSpotterExpectEntriesTable")
+        self.expect_entries_table = self._table(["Use", "Key", "Access", "Auto", "Replies", "Cooldown", "Source"], name="fioSpotterExpectEntriesTable")
         self.expect_entries_table.itemSelectionChanged.connect(self._load_selected_entry)
         left_layout.addWidget(self.expect_entries_table, 1)
         right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(0, 0, 0, 0)
@@ -537,22 +616,36 @@ class FioSpotterTab(QWidget):
         self.expect_key = QLineEdit(); self.expect_key.setPlaceholderText("Token, e.g. INFO")
         self.expect_reply = QLineEdit(); self.expect_reply.setPlaceholderText("Reply text")
         self.expect_policy = QComboBox(); self.expect_policy.addItem("No allow policy", 0)
-        self.expect_calls = QLineEdit(); self.expect_calls.setPlaceholderText("Allowed callers, comma separated")
-        self.expect_groups = QLineEdit(); self.expect_groups.setPlaceholderText("Allowed groups, comma separated")
-        self.expect_blocked = QLineEdit(); self.expect_blocked.setPlaceholderText("Blocked callers, comma separated")
+        access_help = QLabel(
+            "Enter callsigns separated by commas; * allows any caller. Addressed groups authorize group replies. "
+            "Trusted roster access uses Operator History and includes linked former callsigns. Blocked callers always win."
+        )
+        access_help.setWordWrap(True)
+        access_help.setObjectName("fioSpotterExpectAccessHelp")
+        right_layout.addWidget(access_help)
+        self.expect_access_catalog_state = QLabel()
+        self.expect_access_catalog_state.setWordWrap(True)
+        self.expect_access_catalog_state.setObjectName("fioSpotterExpectAccessCatalogState")
+        right_layout.addWidget(self.expect_access_catalog_state)
+        self.expect_calls = _CsvCompleterLineEdit(); self.expect_calls.setPlaceholderText("K7ETC, W5TTA, or *")
+        self.expect_groups = _CsvCompleterLineEdit(); self.expect_groups.setPlaceholderText("@MAGNET, @MR08")
+        self.expect_blocked = _CsvCompleterLineEdit(); self.expect_blocked.setPlaceholderText("Blocked callers, comma separated")
+        self.expect_trusted = QCheckBox("Allow all trusted operators")
+        self.expect_trusted_groups = _CsvCompleterLineEdit(); self.expect_trusted_groups.setPlaceholderText("MAGNET, MR08")
         self.expect_source_scope = QComboBox(); self.expect_source_scope.addItems(("radio", "all"))
         self.expect_source_radio = QLineEdit(); self.expect_source_radio.setPlaceholderText("Receiving radio ID")
         self.expect_js8_instance = QLineEdit(); self.expect_js8_instance.setPlaceholderText("JS8 instance ID")
         self.expect_schedule = QLineEdit(); self.expect_schedule.setPlaceholderText("Optional schedule")
         self.expect_max = QSpinBox(); self.expect_max.setRange(1, 99); self.expect_max.setValue(1)
         self.expect_cooldown = QSpinBox(); self.expect_cooldown.setRange(0, 86400); self.expect_cooldown.setSuffix(" sec")
-        self.expect_allow_any = QCheckBox("Allow any caller (use cautiously)")
+        self.expect_allow_any = QCheckBox("Allow all callers (*) — use cautiously")
+        self.expect_allow_any.toggled.connect(self._sync_allow_any_callers)
         self.expect_enabled = QCheckBox("Rule enabled")
         self.expect_auto = QCheckBox("Auto reply")
         self.expect_unattended = QCheckBox("Unattended auto reply")
-        for label, widget in (("Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Callers", self.expect_calls), ("Groups", self.expect_groups), ("Blocked", self.expect_blocked), ("Source scope", self.expect_source_scope), ("Radio", self.expect_source_radio), ("JS8 instance", self.expect_js8_instance), ("Schedule", self.expect_schedule), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
+        for label, widget in (("Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Allowed callers", self.expect_calls), ("Addressed groups", self.expect_groups), ("Trusted roster groups", self.expect_trusted_groups), ("Blocked callers", self.expect_blocked), ("Source scope", self.expect_source_scope), ("Radio", self.expect_source_radio), ("JS8 instance", self.expect_js8_instance), ("Schedule", self.expect_schedule), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
             form.addRow(label, widget)
-        form.addRow(self.expect_allow_any); form.addRow(self.expect_enabled); form.addRow(self.expect_auto); form.addRow(self.expect_unattended)
+        form.addRow(self.expect_allow_any); form.addRow(self.expect_trusted); form.addRow(self.expect_enabled); form.addRow(self.expect_auto); form.addRow(self.expect_unattended)
         right_layout.addLayout(form)
         actions = QGridLayout()
         save = QPushButton("Save rule"); save.clicked.connect(self._save_entry)
@@ -568,9 +661,11 @@ class FioSpotterTab(QWidget):
         self.policy_manage = QComboBox(); self.policy_manage.addItem("New policy", 0)
         self.policy_manage.currentIndexChanged.connect(self._load_policy_editor)
         self.policy_name = QLineEdit(); self.policy_name.setPlaceholderText("Policy name")
-        self.policy_calls = QLineEdit(); self.policy_calls.setPlaceholderText("Allowed callers")
-        self.policy_groups = QLineEdit(); self.policy_groups.setPlaceholderText("Allowed groups")
-        self.policy_blocked = QLineEdit(); self.policy_blocked.setPlaceholderText("Blocked callers")
+        self.policy_calls = _CsvCompleterLineEdit(); self.policy_calls.setPlaceholderText("K7ETC, W5TTA, or *")
+        self.policy_groups = _CsvCompleterLineEdit(); self.policy_groups.setPlaceholderText("@MAGNET, @MR08")
+        self.policy_trusted = QCheckBox("Allow all trusted operators")
+        self.policy_trusted_groups = _CsvCompleterLineEdit(); self.policy_trusted_groups.setPlaceholderText("MAGNET, MR08")
+        self.policy_blocked = _CsvCompleterLineEdit(); self.policy_blocked.setPlaceholderText("Blocked callers")
         self.policy_scope = QComboBox(); self.policy_scope.addItems(("all", "radio"))
         self.policy_radios = QLineEdit(); self.policy_radios.setPlaceholderText("Radio IDs, comma separated")
         self.policy_enabled = QCheckBox("Policy enabled"); self.policy_enabled.setChecked(True)
@@ -582,19 +677,24 @@ class FioSpotterTab(QWidget):
         delete_policy = QPushButton("Delete"); delete_policy.clicked.connect(self._delete_policy)
         policy_actions_layout.addWidget(save_policy); policy_actions_layout.addWidget(new_policy); policy_actions_layout.addWidget(delete_policy); policy_actions_layout.addStretch(1)
         policy_form.addRow("Manage", self.policy_manage)
-        policy_form.addRow("Name", self.policy_name); policy_form.addRow("Callers", self.policy_calls)
-        policy_form.addRow("Groups", self.policy_groups); policy_form.addRow("Blocked", self.policy_blocked)
+        policy_form.addRow("Name", self.policy_name); policy_form.addRow("Allowed callers", self.policy_calls)
+        policy_form.addRow("Addressed groups", self.policy_groups)
+        policy_form.addRow("Trusted roster groups", self.policy_trusted_groups)
+        policy_form.addRow(self.policy_trusted); policy_form.addRow("Blocked callers", self.policy_blocked)
         policy_form.addRow("Source scope", self.policy_scope); policy_form.addRow("Radios", self.policy_radios)
         policy_form.addRow(self.policy_enabled); policy_form.addRow(policy_actions)
         right_layout.addWidget(policy_box)
         split.addWidget(left); split.addWidget(right); split.setSizes([560, 460])
         layout.addWidget(split, 1)
         histories = QSplitter(Qt.Horizontal)
+        self.expect_history_split = histories
         self.expect_requests_table = self._table(["When", "Decision", "Key", "Caller", "Reason"], name="fioSpotterExpectRequestsTable")
         self.expect_replies_table = self._table(["When", "Decision", "Reply radio", "Response"], name="fioSpotterExpectRepliesTable")
         histories.addWidget(self.expect_requests_table); histories.addWidget(self.expect_replies_table)
         histories.setMaximumHeight(190)
         layout.addWidget(histories)
+        self._load_expect_access_completions()
+        self._apply_expect_responsive_layout()
 
     def _save_runtime_state(self) -> None:
         if not hasattr(self, "expect_runtime_enabled"):
@@ -604,6 +704,15 @@ class FioSpotterTab(QWidget):
         except Exception:
             pass
         self._refresh_runtime_state()
+
+    def _sync_allow_any_callers(self, checked: bool) -> None:
+        if not hasattr(self, "expect_calls"):
+            return
+        values = _csv(self.expect_calls.text())
+        values = [value for value in values if value != "*"]
+        if checked:
+            values.insert(0, "*")
+        self.expect_calls.setText(", ".join(values))
 
     def _refresh_runtime_state(self) -> None:
         state = load_expect_automation_runtime_state(self.settings)
@@ -647,6 +756,7 @@ class FioSpotterTab(QWidget):
     def refresh_expect(self) -> None:
         if not hasattr(self, "expect_entries_table"):
             return
+        self._load_expect_access_completions()
         self._refresh_runtime_state()
         try:
             self._policy_rows = list_expect_allow_policies()
@@ -665,10 +775,33 @@ class FioSpotterTab(QWidget):
         self.expect_policy.blockSignals(False); self.policy_manage.blockSignals(False)
         table = self.expect_entries_table; table.setRowCount(len(self._entry_rows))
         for i, row in enumerate(self._entry_rows):
-            values = ("●" if row.get("enabled") else "○", row.get("expect_key"), row.get("allow_policy_name"), "●" if row.get("auto_reply_enabled") else "○", row.get("max_replies"), row.get("cooldown_seconds"), row.get("source_radio_id") or row.get("source_scope"))
+            values = ("●" if row.get("enabled") else "○", row.get("expect_key"), self._expect_access_summary(row), "●" if row.get("auto_reply_enabled") else "○", row.get("max_replies"), row.get("cooldown_seconds"), row.get("source_radio_id") or row.get("source_scope"))
             for col, value in enumerate(values): self._put(table, i, col, value, data=row if col == 0 else None)
         self._refresh_runtime_state()
         self._refresh_expect_history()
+
+    @staticmethod
+    def _expect_access_summary(row: dict[str, Any]) -> str:
+        allowed = list(row.get("allowed_callsigns") or [])
+        parts: list[str] = []
+        if row.get("allow_any") or "*" in allowed:
+            parts.append("Any caller")
+        else:
+            explicit = len([value for value in allowed if value != "*"])
+            if explicit:
+                parts.append(f"{explicit} caller{'s' if explicit != 1 else ''}")
+            if row.get("allow_trusted_operators"):
+                parts.append("Trusted")
+            trusted_groups = len(row.get("trusted_operator_groups") or [])
+            if trusted_groups:
+                parts.append(f"{trusted_groups} trusted group{'s' if trusted_groups != 1 else ''}")
+        addressed = len(row.get("allowed_groups") or [])
+        if addressed:
+            parts.append(f"{addressed} addressed group{'s' if addressed != 1 else ''}")
+        policy = _text(row.get("allow_policy_name"))
+        if policy:
+            parts.append(policy)
+        return " · ".join(parts) or "No callers"
 
     def _refresh_expect_history(self) -> None:
         try:
@@ -690,16 +823,18 @@ class FioSpotterTab(QWidget):
         self.expect_key.setText(_text(row.get("expect_key"))); self.expect_reply.setText(_text(row.get("response_text")))
         self.expect_policy.setCurrentIndex(max(0, self.expect_policy.findData(row.get("allow_policy_id") or 0)))
         self.expect_calls.setText(", ".join(row.get("allowed_callsigns") or ())); self.expect_groups.setText(", ".join(row.get("allowed_groups") or ())); self.expect_blocked.setText(", ".join(row.get("blocked_callsigns") or ()))
+        self.expect_trusted_groups.setText(", ".join(row.get("trusted_operator_groups") or ()))
         self.expect_source_scope.setCurrentText(_text(row.get("source_scope")) or "radio")
         self.expect_source_radio.setText(_text(row.get("source_radio_id")))
         self.expect_js8_instance.setText(_text(row.get("js8_instance_id")))
         self.expect_schedule.setText(_text(row.get("auto_tx_schedule")))
         self.expect_max.setValue(int(row.get("max_replies") or 1)); self.expect_cooldown.setValue(int(row.get("cooldown_seconds") or 0))
-        self.expect_allow_any.setChecked(bool(row.get("allow_any")))
+        self.expect_allow_any.setChecked(bool(row.get("allow_any") or "*" in (row.get("allowed_callsigns") or ())))
+        self.expect_trusted.setChecked(bool(row.get("allow_trusted_operators")))
         self.expect_enabled.setChecked(bool(row.get("enabled"))); self.expect_auto.setChecked(bool(row.get("auto_reply_enabled"))); self.expect_unattended.setChecked(bool(row.get("unattended_auto_reply_enabled")))
 
     def _clear_entry(self) -> None:
-        self.expect_entries_table.clearSelection(); self.expect_key.clear(); self.expect_reply.clear(); self.expect_policy.setCurrentIndex(0); self.expect_calls.clear(); self.expect_groups.clear(); self.expect_blocked.clear(); self.expect_source_scope.setCurrentText("radio"); self.expect_source_radio.clear(); self.expect_js8_instance.clear(); self.expect_schedule.clear(); self.expect_max.setValue(1); self.expect_cooldown.setValue(0); self.expect_allow_any.setChecked(False); self.expect_enabled.setChecked(False); self.expect_auto.setChecked(False); self.expect_unattended.setChecked(False)
+        self.expect_entries_table.clearSelection(); self.expect_key.clear(); self.expect_reply.clear(); self.expect_policy.setCurrentIndex(0); self.expect_calls.clear(); self.expect_groups.clear(); self.expect_trusted_groups.clear(); self.expect_blocked.clear(); self.expect_source_scope.setCurrentText("radio"); self.expect_source_radio.clear(); self.expect_js8_instance.clear(); self.expect_schedule.clear(); self.expect_max.setValue(1); self.expect_cooldown.setValue(0); self.expect_allow_any.setChecked(False); self.expect_trusted.setChecked(False); self.expect_enabled.setChecked(False); self.expect_auto.setChecked(False); self.expect_unattended.setChecked(False)
 
     def _new_dynamic_q_entry(self) -> None:
         self._clear_entry()
@@ -718,7 +853,11 @@ class FioSpotterTab(QWidget):
         selected = self.expect_entries_table.selectedItems(); existing = selected[0].data(Qt.UserRole) if selected else {}
         try:
             is_dynamic_q = self.expect_key.text().strip().upper() == "Q"
-            payload = {"expect_key": self.expect_key.text(), "response_text": self.expect_reply.text(), "allow_policy_id": self.expect_policy.currentData() or None, "allowed_callsigns": _csv(self.expect_calls.text()), "allowed_groups": _csv(self.expect_groups.text()), "allow_any": self.expect_allow_any.isChecked(), "blocked_callsigns": _csv(self.expect_blocked.text()), "max_replies": self.expect_max.value(), "cooldown_seconds": self.expect_cooldown.value(), "auto_tx_schedule": self.expect_schedule.text(), "enabled": self.expect_enabled.isChecked(), "auto_reply_enabled": self.expect_auto.isChecked(), "unattended_auto_reply_enabled": self.expect_unattended.isChecked(), "source_radio_id": self.expect_source_radio.text(), "source_scope": self.expect_source_scope.currentText() or ("all" if is_dynamic_q else "radio"), "js8_instance_id": self.expect_js8_instance.text(), "import_source": "fio-spotter"}
+            allowed_calls = _csv(self.expect_calls.text())
+            allow_any = self.expect_allow_any.isChecked() or "*" in allowed_calls
+            if allow_any and "*" not in allowed_calls:
+                allowed_calls.insert(0, "*")
+            payload = {"expect_key": self.expect_key.text(), "response_text": self.expect_reply.text(), "allow_policy_id": self.expect_policy.currentData() or None, "allowed_callsigns": allowed_calls, "allowed_groups": _csv(self.expect_groups.text()), "allow_any": allow_any, "allow_trusted_operators": self.expect_trusted.isChecked(), "trusted_operator_groups": _csv(self.expect_trusted_groups.text()), "blocked_callsigns": _csv(self.expect_blocked.text()), "max_replies": self.expect_max.value(), "cooldown_seconds": self.expect_cooldown.value(), "auto_tx_schedule": self.expect_schedule.text(), "enabled": self.expect_enabled.isChecked(), "auto_reply_enabled": self.expect_auto.isChecked(), "unattended_auto_reply_enabled": self.expect_unattended.isChecked(), "source_radio_id": self.expect_source_radio.text(), "source_scope": self.expect_source_scope.currentText() or ("all" if is_dynamic_q else "radio"), "js8_instance_id": self.expect_js8_instance.text(), "import_source": "fio-spotter"}
             save_expect_entry(payload)
         except Exception as exc:
             self.expect_runtime_state.setText(f"○ Rule not saved: {exc}")
@@ -739,6 +878,8 @@ class FioSpotterTab(QWidget):
                 "name": self.policy_name.text(),
                 "allowed_callsigns": _csv(self.policy_calls.text()),
                 "allowed_groups": _csv(self.policy_groups.text()),
+                "allow_trusted_operators": self.policy_trusted.isChecked(),
+                "trusted_operator_groups": _csv(self.policy_trusted_groups.text()),
                 "blocked_callsigns": _csv(self.policy_blocked.text()),
                 "enabled": self.policy_enabled.isChecked(),
                 "source_scope": self.policy_scope.currentText(),
@@ -760,6 +901,8 @@ class FioSpotterTab(QWidget):
         self.policy_name.setText(_text(row.get("name")))
         self.policy_calls.setText(", ".join(row.get("allowed_callsigns") or ()))
         self.policy_groups.setText(", ".join(row.get("allowed_groups") or ()))
+        self.policy_trusted.setChecked(bool(row.get("allow_trusted_operators")))
+        self.policy_trusted_groups.setText(", ".join(row.get("trusted_operator_groups") or ()))
         self.policy_blocked.setText(", ".join(row.get("blocked_callsigns") or ()))
         self.policy_scope.setCurrentText(_text(row.get("source_scope")) or "all")
         self.policy_radios.setText(", ".join(row.get("source_radio_ids") or ()))
@@ -768,7 +911,7 @@ class FioSpotterTab(QWidget):
     def _clear_policy_editor(self, *, reset_selection: bool = True) -> None:
         if reset_selection:
             self.policy_manage.setCurrentIndex(0)
-        self.policy_name.clear(); self.policy_calls.clear(); self.policy_groups.clear(); self.policy_blocked.clear(); self.policy_scope.setCurrentText("all"); self.policy_radios.clear(); self.policy_enabled.setChecked(True)
+        self.policy_name.clear(); self.policy_calls.clear(); self.policy_groups.clear(); self.policy_trusted.setChecked(False); self.policy_trusted_groups.clear(); self.policy_blocked.clear(); self.policy_scope.setCurrentText("all"); self.policy_radios.clear(); self.policy_enabled.setChecked(True)
 
     def _delete_policy(self) -> None:
         policy_id = int(self.policy_manage.currentData() or 0)

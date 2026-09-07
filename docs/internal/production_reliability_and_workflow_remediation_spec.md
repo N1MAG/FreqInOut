@@ -565,6 +565,33 @@ index. Autocomplete queries the bounded operator/group indexes and still allows
 an explicit unknown callsign or term. Existing Settings controls migrate to or
 deep-link into this workspace; there is one writer for each rule.
 
+Expect caller authorization follows the same operator-centered mental model as
+managed BBS access while keeping JS8 destination groups distinct:
+
+- `*` in **Allowed callers** is the familiar JS8Spotter-compatible spelling for
+  any caller. It persists as the rule's `allow_any` state, and an explicit
+  blocked caller still takes precedence.
+- Explicit allowed and blocked callsigns resolve through Operator History. A
+  callsign change therefore preserves an intentional access decision across the
+  current and former callsigns associated with that operator identity.
+- **Allow all trusted operators** authorizes any Operator History identity whose
+  roster record has the `trusted` flag.
+- **Trusted roster groups** authorize only trusted operators associated with at
+  least one selected operator group. These groups describe who the caller is;
+  they do not authorize an automatic reply to a JS8 group destination.
+- **Addressed groups** separately list JS8 group destinations to which a group
+  reply is allowed. Dynamic FLAMP group replies continue to require this
+  explicit destination opt-in even when `*` or trusted-operator access permits
+  the sender.
+- Callsign and group suggestions come from the bounded Operator History identity
+  index only when the Expect page is opened. This lookup must not run during
+  application startup, UI paint/resize, or the on-air request path.
+
+The editor completes the current comma-delimited token using current and former
+callsigns or roster groups. At narrow widths, the rule list/editor and audit
+panes stack vertically inside the page scroll area; no page-level horizontal
+scrolling or clipped controls are acceptable in Normal or Large Text modes.
+
 The same rule service supplies ingestion alerts, Inbox focus, Ops Center
 attention, and Map pins so different screens cannot disagree. Messages remains
 the complete traffic triage surface; FIO Spotter is the administration and

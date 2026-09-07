@@ -9,6 +9,12 @@ from typing import Any, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
+from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.operator_identity import (
+    canonical_callsign,
+    ensure_operator_identity_schema,
+    resolve_operator_identity,
+)
 from freqinout.core.sqlite_utils import connect_sqlite
 
 
@@ -264,6 +270,152 @@ def _matches_group(configured: object, target_group: str) -> bool:
     return bool(left and right and left == right)
 
 
+def _operator_row_groups(row: Mapping[str, Any]) -> set[str]:
+    values: list[object] = [
+        row.get("group1"), row.get("group2"), row.get("group3"),
+        row.get("roster_parent_group"), row.get("roster_region"),
+    ]
+    try:
+        parsed = json.loads(str(row.get("groups_json") or "[]"))
+        if isinstance(parsed, list):
+            values.extend(parsed)
+    except Exception:
+        pass
+    return {normalize_group_name(value) for value in values if normalize_group_name(value)}
+
+
+def _operator_access_profile(conn, callsign: object) -> dict[str, Any]:
+    """Resolve trust and roster groups through current/historical identity."""
+    call = canonical_callsign(callsign)
+    if not call:
+        return {"known": False, "operator_id": "", "trusted": False, "groups": set(), "aliases": set()}
+    try:
+        identity = resolve_operator_identity(conn, call)
+    except Exception:
+        identity = None
+    operator_id = str(identity.operator_id if identity else "")
+    aliases = {call}
+    if operator_id:
+        rows = conn.execute(
+            "SELECT callsign FROM operator_callsign_history WHERE operator_id=?",
+            (operator_id,),
+        ).fetchall()
+        aliases.update(canonical_callsign(row[0]) for row in rows if row and canonical_callsign(row[0]))
+    columns = {str(row[1] or "") for row in conn.execute("PRAGMA table_info(operator_checkins)").fetchall()}
+    if not columns:
+        return {"known": bool(operator_id), "operator_id": operator_id, "trusted": False, "groups": set(), "aliases": aliases}
+    wanted = ("callsign", "operator_id", "trusted", "group1", "group2", "group3", "groups_json", "roster_parent_group", "roster_region")
+    select = ", ".join(name if name in columns else f"NULL AS {name}" for name in wanted)
+    params: list[object] = []
+    clauses: list[str] = []
+    if operator_id and "operator_id" in columns:
+        clauses.append("operator_id=?")
+        params.append(operator_id)
+    if aliases and "callsign" in columns:
+        marks = ",".join("?" for _ in aliases)
+        clauses.append(f"UPPER(TRIM(callsign)) IN ({marks})")
+        params.extend(sorted(aliases))
+    if not clauses:
+        return {"known": bool(operator_id), "operator_id": operator_id, "trusted": False, "groups": set(), "aliases": aliases}
+    roster_rows = conn.execute(
+        f"SELECT {select} FROM operator_checkins WHERE " + " OR ".join(clauses),
+        tuple(params),
+    ).fetchall()
+    trusted = False
+    groups: set[str] = set()
+    for raw in roster_rows:
+        row = dict(raw) if hasattr(raw, "keys") else dict(zip(wanted, raw))
+        trusted = trusted or bool(int(row.get("trusted") or 0))
+        groups.update(_operator_row_groups(row))
+        roster_call = canonical_callsign(row.get("callsign"))
+        if roster_call:
+            aliases.add(roster_call)
+    return {
+        "known": bool(operator_id or roster_rows),
+        "operator_id": operator_id,
+        "trusted": trusted,
+        "groups": groups,
+        "aliases": aliases,
+    }
+
+
+def list_expect_operator_access_catalog(
+    *, db_path: Optional[Path] = None, limit: int = 2000
+) -> list[dict[str, Any]]:
+    """Return a bounded, lazy autocomplete catalog from Operator History."""
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    if not path.exists():
+        return []
+    conn = connect_sqlite(path)
+    try:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_checkins'"
+        ).fetchone() is None:
+            return []
+        ensure_operator_identity_schema(conn, backfill_operator_rows=False)
+        row_limit = max(1, min(int(limit or 2000), 5000))
+        alias_rows = conn.execute(
+            """
+            SELECT UPPER(TRIM(h.callsign)), h.operator_id,
+                   UPPER(TRIM(i.current_callsign)), h.effective_to
+              FROM operator_callsign_history h
+              JOIN operator_identities i ON i.operator_id=h.operator_id
+             ORDER BY i.current_callsign COLLATE NOCASE,
+                      CASE WHEN h.effective_to IS NULL THEN 0 ELSE 1 END,
+                      h.effective_from DESC
+             LIMIT ?
+            """,
+            (row_limit,),
+        ).fetchall()
+        if not alias_rows:
+            return []
+        roster_rows = conn.execute(
+            """
+            SELECT COALESCE(operator_id,''), UPPER(TRIM(COALESCE(callsign,''))),
+                   COALESCE(name,''), COALESCE(trusted,0), COALESCE(group1,''),
+                   COALESCE(group2,''), COALESCE(group3,''), COALESCE(groups_json,''),
+                   COALESCE(roster_parent_group,''), COALESCE(roster_region,'')
+              FROM operator_checkins
+             WHERE COALESCE(callsign,'') <> ''
+             ORDER BY callsign COLLATE NOCASE
+             LIMIT ?
+            """,
+            (row_limit,),
+        ).fetchall()
+        roster_by_id: dict[str, list[Mapping[str, Any]]] = {}
+        roster_by_call: dict[str, list[Mapping[str, Any]]] = {}
+        keys = ("operator_id", "callsign", "name", "trusted", "group1", "group2", "group3", "groups_json", "roster_parent_group", "roster_region")
+        for raw in roster_rows:
+            row = dict(raw) if hasattr(raw, "keys") else dict(zip(keys, raw))
+            roster_by_id.setdefault(str(row.get("operator_id") or ""), []).append(row)
+            roster_by_call.setdefault(canonical_callsign(row.get("callsign")), []).append(row)
+        out: list[dict[str, Any]] = []
+        for alias, operator_id, current_callsign, effective_to in alias_rows:
+            alias = str(alias or "").upper()
+            current_callsign = str(current_callsign or "").upper()
+            related = roster_by_id.get(str(operator_id or ""), []) or roster_by_call.get(current_callsign, [])
+            groups: set[str] = set()
+            trusted = False
+            name = ""
+            for row in related:
+                trusted = trusted or bool(int(row.get("trusted") or 0))
+                groups.update(_operator_row_groups(row))
+                name = name or str(row.get("name") or "").strip()
+            out.append({
+                "callsign": alias,
+                "current_callsign": current_callsign,
+                "historical": bool(effective_to is not None or alias != current_callsign),
+                "name": name,
+                "trusted": trusted,
+                "groups": sorted(groups),
+            })
+            if len(out) >= row_limit:
+                break
+        return out
+    finally:
+        conn.close()
+
+
 def _source_matches(entry: Mapping[str, Any], source_radio_id: str, js8_instance_id: str) -> bool:
     scope = str(entry.get("source_scope", "") or "all").strip().lower()
     entry_radio = str(entry.get("source_radio_id", "") or "").strip()
@@ -344,6 +496,8 @@ def save_expect_allow_policy(
             "name": name,
             "allowed_callsigns_json": _json_list(values.get("allowed_callsigns")),
             "allowed_groups_json": _json_list(values.get("allowed_groups")),
+            "allow_trusted_operators": 1 if bool(values.get("allow_trusted_operators", False)) else 0,
+            "trusted_operator_groups_json": _json_list(values.get("trusted_operator_groups")),
             "blocked_callsigns_json": _json_list(values.get("blocked_callsigns")),
             "source_scope": str(values.get("source_scope", "") or "all").strip() or "all",
             "source_radio_ids_json": _json_list(values.get("source_radio_ids")),
@@ -357,7 +511,8 @@ def save_expect_allow_policy(
             conn.execute(
                 """
                 UPDATE js8_expect_allow_policies
-                SET name=?, allowed_callsigns_json=?, allowed_groups_json=?, blocked_callsigns_json=?,
+                SET name=?, allowed_callsigns_json=?, allowed_groups_json=?,
+                    allow_trusted_operators=?, trusted_operator_groups_json=?, blocked_callsigns_json=?,
                     source_scope=?, source_radio_ids_json=?, enabled=?, import_source=?, notes=?, updated_ts=?
                 WHERE id=?
                 """,
@@ -365,6 +520,8 @@ def save_expect_allow_policy(
                     payload["name"],
                     payload["allowed_callsigns_json"],
                     payload["allowed_groups_json"],
+                    payload["allow_trusted_operators"],
+                    payload["trusted_operator_groups_json"],
                     payload["blocked_callsigns_json"],
                     payload["source_scope"],
                     payload["source_radio_ids_json"],
@@ -404,7 +561,8 @@ def list_expect_allow_policies(
         where = "WHERE COALESCE(enabled, 1) != 0" if enabled_only else ""
         rows = conn.execute(
             f"""
-            SELECT id, name, allowed_callsigns_json, allowed_groups_json, blocked_callsigns_json,
+            SELECT id, name, allowed_callsigns_json, allowed_groups_json,
+                   allow_trusted_operators, trusted_operator_groups_json, blocked_callsigns_json,
                    source_scope, source_radio_ids_json, enabled, import_source, notes
             FROM js8_expect_allow_policies
             {where}
@@ -423,15 +581,18 @@ def list_expect_allow_policies(
                 "name": row[1],
                 "allowed_callsigns_json": row[2],
                 "allowed_groups_json": row[3],
-                "blocked_callsigns_json": row[4],
-                "source_scope": row[5],
-                "source_radio_ids_json": row[6],
-                "enabled": row[7],
-                "import_source": row[8],
-                "notes": row[9],
+                "allow_trusted_operators": row[4],
+                "trusted_operator_groups_json": row[5],
+                "blocked_callsigns_json": row[6],
+                "source_scope": row[7],
+                "source_radio_ids_json": row[8],
+                "enabled": row[9],
+                "import_source": row[10],
+                "notes": row[11],
             }
         raw["allowed_callsigns"] = _json_load_list(raw.get("allowed_callsigns_json"))
         raw["allowed_groups"] = _json_load_list(raw.get("allowed_groups_json"))
+        raw["trusted_operator_groups"] = _json_load_list(raw.get("trusted_operator_groups_json"))
         raw["blocked_callsigns"] = _json_load_list(raw.get("blocked_callsigns_json"))
         raw["source_radio_ids"] = _json_load_list(raw.get("source_radio_ids_json"))
         out.append(raw)
@@ -467,6 +628,7 @@ def list_expect_entries(
                    p.name AS allow_policy_name, e.expect_key, e.response_text,
                    e.msg_auth_sign_enabled, e.msg_auth_sign_callsign, e.msg_auth_include_datecode, e.msg_auth_datecode,
                    e.allowed_callsigns_json, e.allowed_groups_json, e.allow_any,
+                   e.allow_trusted_operators, e.trusted_operator_groups_json,
                    e.blocked_callsigns_json, e.max_replies, e.cooldown_seconds, e.tx_speed,
                    e.auto_tx_schedule, e.auto_reply_enabled, e.unattended_auto_reply_enabled,
                    e.enabled, e.import_source, e.created_ts, e.updated_ts
@@ -499,20 +661,23 @@ def list_expect_entries(
                 "allowed_callsigns_json": row[12],
                 "allowed_groups_json": row[13],
                 "allow_any": row[14],
-                "blocked_callsigns_json": row[15],
-                "max_replies": row[16],
-                "cooldown_seconds": row[17],
-                "tx_speed": row[18],
-                "auto_tx_schedule": row[19],
-                "auto_reply_enabled": row[20],
-                "unattended_auto_reply_enabled": row[21],
-                "enabled": row[22],
-                "import_source": row[23],
-                "created_ts": row[24],
-                "updated_ts": row[25],
+                "allow_trusted_operators": row[15],
+                "trusted_operator_groups_json": row[16],
+                "blocked_callsigns_json": row[17],
+                "max_replies": row[18],
+                "cooldown_seconds": row[19],
+                "tx_speed": row[20],
+                "auto_tx_schedule": row[21],
+                "auto_reply_enabled": row[22],
+                "unattended_auto_reply_enabled": row[23],
+                "enabled": row[24],
+                "import_source": row[25],
+                "created_ts": row[26],
+                "updated_ts": row[27],
             }
         raw["allowed_callsigns"] = _json_load_list(raw.get("allowed_callsigns_json"))
         raw["allowed_groups"] = _json_load_list(raw.get("allowed_groups_json"))
+        raw["trusted_operator_groups"] = _json_load_list(raw.get("trusted_operator_groups_json"))
         raw["blocked_callsigns"] = _json_load_list(raw.get("blocked_callsigns_json"))
         out.append(raw)
     return out
@@ -530,7 +695,8 @@ def update_expect_entry_controls(
         _ensure_js8_expect_tables(conn)
         row = conn.execute(
             """
-            SELECT id, expect_key, source_radio_id, source_scope, js8_instance_id, import_source
+            SELECT id, expect_key, source_radio_id, source_scope, js8_instance_id, import_source,
+                   allow_trusted_operators, trusted_operator_groups_json
             FROM js8_expect_entries
             WHERE id=?
             """,
@@ -548,16 +714,28 @@ def update_expect_entry_controls(
                 "source_scope": row[3],
                 "js8_instance_id": row[4],
                 "import_source": row[5],
+                "allow_trusted_operators": row[6],
+                "trusted_operator_groups_json": row[7],
             }
         enabled = 1 if bool(values.get("enabled", False)) else 0
         auto_reply = 1 if bool(values.get("auto_reply_enabled", False)) else 0
         unattended = 1 if bool(values.get("unattended_auto_reply_enabled", False)) else 0
         allow_policy_raw = values.get("allow_policy_id")
         allow_policy_id = int(allow_policy_raw or 0) if str(allow_policy_raw or "").strip() else None
+        if "allow_trusted_operators" in values:
+            allow_trusted_operators = 1 if bool(values.get("allow_trusted_operators")) else 0
+        else:
+            allow_trusted_operators = 1 if bool(audit_base.get("allow_trusted_operators")) else 0
+        trusted_operator_groups_json = (
+            _json_list(values.get("trusted_operator_groups"))
+            if "trusted_operator_groups" in values
+            else str(audit_base.get("trusted_operator_groups_json") or "[]")
+        )
         conn.execute(
             """
             UPDATE js8_expect_entries
             SET allow_policy_id=?, allowed_callsigns_json=?, allowed_groups_json=?, allow_any=?,
+                allow_trusted_operators=?, trusted_operator_groups_json=?,
                 blocked_callsigns_json=?, max_replies=?, cooldown_seconds=?,
                 auto_reply_enabled=?, unattended_auto_reply_enabled=?, enabled=?, updated_ts=?
             WHERE id=?
@@ -566,7 +744,9 @@ def update_expect_entry_controls(
                 allow_policy_id,
                 _json_list(values.get("allowed_callsigns")),
                 _json_list(values.get("allowed_groups")),
-                1 if bool(values.get("allow_any", False)) else 0,
+                1 if bool(values.get("allow_any", False) or "*" in _json_load_list(_json_list(values.get("allowed_callsigns")))) else 0,
+                allow_trusted_operators,
+                trusted_operator_groups_json,
                 _json_list(values.get("blocked_callsigns")),
                 int(values.get("max_replies", 1) or 1),
                 int(values.get("cooldown_seconds", 0) or 0),
@@ -668,7 +848,9 @@ def save_expect_entry(
             "msg_auth_datecode": str(entry.get("msg_auth_datecode", "") or "").strip().upper(),
             "allowed_callsigns_json": _json_list(entry.get("allowed_callsigns")),
             "allowed_groups_json": _json_list(entry.get("allowed_groups")),
-            "allow_any": 1 if bool(entry.get("allow_any", False)) else 0,
+            "allow_any": 1 if bool(entry.get("allow_any", False) or "*" in _json_load_list(_json_list(entry.get("allowed_callsigns")))) else 0,
+            "allow_trusted_operators": 1 if bool(entry.get("allow_trusted_operators", False)) else 0,
+            "trusted_operator_groups_json": _json_list(entry.get("trusted_operator_groups")),
             "blocked_callsigns_json": _json_list(entry.get("blocked_callsigns")),
             "max_replies": int(entry.get("max_replies", 1) or 1),
             "cooldown_seconds": int(entry.get("cooldown_seconds", 0) or 0),
@@ -833,6 +1015,19 @@ def evaluate_expect_request(
     else:
         entries = [row for row in list_expect_entries(db_path=path, enabled_only=False) if str(row.get("expect_key", "") or "").upper() == key]
         policies = {int(row.get("id", 0) or 0): row for row in list_expect_allow_policies(db_path=path, enabled_only=False)}
+        caller_profile: dict[str, Any] | None = None
+
+        def operator_profile() -> dict[str, Any]:
+            nonlocal caller_profile
+            if caller_profile is None:
+                access_conn = connect_sqlite(path)
+                try:
+                    caller_profile = _operator_access_profile(access_conn, call)
+                finally:
+                    access_conn.close()
+            assert caller_profile is not None
+            return caller_profile
+
         result = ExpectEvaluationResult(decision="no-match", reason=f"No Expect entry for {key}.", expect_key=key)
         source_mismatch_seen = False
         disabled_seen = False
@@ -872,7 +1067,7 @@ def evaluate_expect_request(
                 continue
             blocked = {_norm_call(value) for value in entry.get("blocked_callsigns", [])}
             blocked.update(_norm_call(value) for value in policy.get("blocked_callsigns", []) if policy)
-            if call in blocked:
+            if call in blocked or (bool(blocked) and bool(blocked.intersection(operator_profile()["aliases"]))):
                 result = ExpectEvaluationResult(decision="blocked", reason=f"{call} is blocked.", expect_entry_id=entry_id, expect_key=key)
                 break
             allowed_calls = {_norm_call(value) for value in entry.get("allowed_callsigns", [])}
@@ -880,21 +1075,52 @@ def evaluate_expect_request(
             allowed_groups = list(entry.get("allowed_groups", []) or [])
             if policy:
                 allowed_groups.extend(policy.get("allowed_groups", []) or [])
-            allow_any = bool(entry.get("allow_any", False))
-            call_allowed = bool(call and call in allowed_calls)
+            trusted_groups = list(entry.get("trusted_operator_groups", []) or [])
+            if policy:
+                trusted_groups.extend(policy.get("trusted_operator_groups", []) or [])
+            normalized_trusted_groups = {
+                normalize_group_name(value) for value in trusted_groups if normalize_group_name(value)
+            }
+            allow_any = bool(entry.get("allow_any", False) or "*" in allowed_calls)
+            allow_trusted = bool(entry.get("allow_trusted_operators", False))
+            if policy:
+                allow_trusted = allow_trusted or bool(policy.get("allow_trusted_operators", False))
+            allowed_calls.discard("*")
+            call_allowed = bool(call and (
+                call in allowed_calls or (
+                    bool(allowed_calls) and bool(allowed_calls.intersection(operator_profile()["aliases"]))
+                )
+            ))
             group_allowed = bool(group and any(_matches_group(value, group) for value in allowed_groups))
-            if not allow_any and not call_allowed and not group_allowed:
+            trusted_allowed = bool(allow_trusted and operator_profile()["trusted"])
+            trusted_group_allowed = bool(
+                normalized_trusted_groups
+                and operator_profile()["trusted"]
+                and normalized_trusted_groups.intersection(operator_profile()["groups"])
+            )
+            if not allow_any and not call_allowed and not group_allowed and not trusted_allowed and not trusted_group_allowed:
                 result = ExpectEvaluationResult(
                     decision="blocked",
-                    reason="Request did not match allowed callsigns or groups.",
+                    reason="Request did not match allowed callers, addressed groups, or trusted Operator History access.",
                     expect_entry_id=entry_id,
                     expect_key=key,
                 )
                 continue
             auto_reply = bool(entry.get("auto_reply_enabled", False))
+            access_reason = (
+                "any caller (*)" if allow_any else
+                "explicit caller identity" if call_allowed else
+                "addressed group" if group_allowed else
+                "trusted operator" if trusted_allowed else
+                "trusted operator group"
+            )
             result = ExpectEvaluationResult(
                 decision="reply-ready" if auto_reply else "matched-manual-review",
-                reason="Matched enabled Expect entry." if auto_reply else "Matched Expect entry; auto-reply is not enabled.",
+                reason=(
+                    f"Matched enabled Expect entry via {access_reason}."
+                    if auto_reply else
+                    f"Matched Expect entry via {access_reason}; auto-reply is not enabled."
+                ),
                 expect_entry_id=entry_id,
                 expect_key=key,
                 response_text=str(entry.get("response_text", "") or ""),

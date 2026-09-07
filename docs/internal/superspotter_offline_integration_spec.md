@@ -108,6 +108,16 @@ The full parser, confidence, indexed lookup, group opt-in, durable dedupe,
 cooldown, endpoint serialization, and acceptance matrix are defined in the
 production-remediation Slice 3 contract.
 
+Expect allowlists accept the JS8Spotter-compatible `*` token for any caller.
+Blocked callers retain precedence. An operator can instead authorize all
+trusted Operator History identities or only trusted identities associated with
+selected roster groups. Explicit allowed/blocked callsigns are resolved through
+the stable identity and callsign-history tables, so a managed callsign change
+does not silently lose the access relationship. These roster groups are caller
+attributes and remain distinct from the explicitly allowed JS8 destination
+groups required for automatic group replies. The Expect UI offers bounded,
+lazy completion over current callsigns, former callsigns, and roster groups.
+
 Future-facing notes:
 
 - Email-like workflows may later map to Reticulum, mesh MQTT, or other offline

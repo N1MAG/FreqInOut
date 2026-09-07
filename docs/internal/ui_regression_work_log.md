@@ -1484,3 +1484,53 @@ The monolithic process again reached the unrelated long-lived Qt log-viewer
 lifecycle fault after 68 percent; the affected tests pass in fresh processes.
 Python compilation and `git diff --check` pass. Slice 3 is closed, and Slice 4
 has not begun.
+
+## 2026-09-07 — Slice 3 follow-up: identity-aware Expect access
+
+FIO Spotter Expect access now accepts `*` as the JS8Spotter-compatible spelling
+for any caller. The UI keeps the explicit “Allow all callers” control synchronized
+with that token, while blocked callers retain precedence. Rules and reusable
+allow policies can also permit every trusted Operator History identity or only
+trusted identities associated with selected roster groups. Addressed JS8 groups
+remain a separate field and safety boundary; dynamic FLAMP replies to a group
+still require that destination group to be explicitly enabled.
+
+Explicit allowed and blocked callsigns resolve through stable operator identity
+and callsign history. The lazy Expect catalog exposes current and former
+callsigns plus roster groups through comma-token autocomplete. It is bounded to
+2,000 rows, refreshed no more than once per minute while Expect is active, and
+is not loaded during startup, paint, resize, or the wildcard-only RF decision
+path. The rule list now summarizes its effective access mode rather than showing
+only a policy name. Narrow layouts stack rule/editor and audit splitters, cap the
+rule-list height, and preserve zero page-level horizontal overflow.
+
+The compatibility review also closed a legacy-editor hazard: saving an Expect
+entry from the older Settings surface now preserves trusted-operator and trusted-
+group access fields that surface does not expose. A focused regression protects
+the richer policy from being silently cleared by checkbox or legacy control
+updates.
+
+The supplied Linux log identifies `/home/bill/.freqinout` as the active runtime
+root. Its latest recorded launch took 82.4 seconds to startup completion and
+82.0 seconds to first usable shell. Named main-thread costs include database
+initialization at 11.7 seconds, eager Settings construction at 12.4 seconds,
+Ops Center construction at 2.3 seconds, and focus-index backfill at 2.9 seconds.
+The log also records an event-loop stall during startup and repeated Station
+Control Bar callbacks ranging into seconds. The log contains elapsed-time data,
+not process CPU samples, so it supports a startup/work-scheduling diagnosis but
+does not by itself quantify CPU utilization. MeshCore service-discovery retries
+also overlap the launch, and a subsequent FIO Spotter navigation records an
+85.5-second `main_window.set_screen` interval while the watchdog reports another
+stall; the Spotter page's own lazy construction accounts for only 0.8 seconds of
+that interval. This access follow-up deliberately adds no eager startup work;
+database-init/schema repetition, eager Settings, the uninstrumented remainder of
+main-window construction, command-bar dependency polling, and main-thread mesh
+retry interaction remain the next measured performance targets.
+
+Verification: the final focused access/store regression run passes 17 tests.
+The combined Slice 3, background, shell, Operator History/group, BBS
+compatibility, condition-alert, and multi-rig integration gate passes 315 tests
+with one environment skip.
+Offscreen visual review at 900x560 with Large Text and 1400x900 with Normal Text
+shows responsive vertical/horizontal split transitions and zero page-level
+horizontal overflow. Python compilation and `git diff --check` pass.
