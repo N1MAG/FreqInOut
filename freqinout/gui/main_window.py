@@ -136,6 +136,7 @@ from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.station_health_tab import StationHealthTab
 from freqinout.gui.station_bbs_tab import StationBbsTab
+from freqinout.gui.fio_spotter_tab import FioSpotterTab
 from freqinout.gui.station_command_presenter import (
     countdown_text as station_command_countdown_text,
     frequency_controls_available,
@@ -333,6 +334,7 @@ class MainWindow(QMainWindow):
         self.station_overview_tab: StationOverviewTab | None = None
         self.station_health_tab: StationHealthTab | None = None
         self.station_bbs_tab: StationBbsTab | None = None
+        self.fio_spotter_tab: FioSpotterTab | None = None
         self._refresh_station_health_scope_map()
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
@@ -358,6 +360,7 @@ class MainWindow(QMainWindow):
             "Station Overview": self._create_station_overview_tab,
             "Station Health": self._create_station_health_tab,
             "Managed BBS": self._create_station_bbs_tab,
+            "FIO Spotter": self._create_fio_spotter_tab,
             "HF Operators": self._create_operator_history_tab,
             "Local Operators": self._create_local_operator_tab,
             "Local Reports": self._create_local_report_history_tab,
@@ -371,6 +374,7 @@ class MainWindow(QMainWindow):
             ("ControlFreq", self.controlfreq_tab),
             ("Station Overview", self._placeholder_widget("Station Overview")),
             ("Managed BBS", self._placeholder_widget("Managed BBS")),
+            ("FIO Spotter", self._placeholder_widget("FIO Spotter")),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
@@ -419,6 +423,7 @@ class MainWindow(QMainWindow):
             ("Inbox", "Messages"),
             ("Compose", "Messages"),
             ("BBS", "Managed BBS"),
+            ("FIO Spotter", "FIO Spotter"),
             ("FLDigi / SSB", "NCS-FLDigi/SSB"),
             ("JS8Call", "NCS-JS8"),
             ("VHF/UHF", "NCS-Local"),
@@ -3543,6 +3548,7 @@ class MainWindow(QMainWindow):
             ("Map", "Map", "Map", "map.svg"),
             ("Msgs", "Messages", "Messages", "messages.svg"),
             ("BBS", "FIO BBS", "Managed BBS", "bbs.svg"),
+            ("Spotter", "FIO Spotter", "FIO Spotter", "spotter.svg"),
             ("Net Ctrl", "Net Control", "NCS", "net-control.svg"),
             ("Calls", "Operators", "Operators", "operators.svg"),
             ("Plans", "Plans", "Plan Builder", "plans.svg"),
@@ -4117,6 +4123,12 @@ class MainWindow(QMainWindow):
     def open_station_bbs(self) -> None:
         """Open the top-level, station-owned FIO BBS service."""
         idx = self._screen_index_by_label.get("Managed BBS", -1)
+        if idx >= 0:
+            self._set_screen(idx)
+
+    def open_fio_spotter(self) -> None:
+        """Open the primary FIO Spotter service workspace."""
+        idx = self._screen_index_by_label.get("FIO Spotter", -1)
         if idx >= 0:
             self._set_screen(idx)
 
@@ -5438,6 +5450,30 @@ class MainWindow(QMainWindow):
         with perf_span("main_window.create_station_bbs_tab", settings=self.settings, min_ms=5.0):
             tab = StationBbsTab(self, settings=self.settings)
             self.station_bbs_tab = tab
+            return tab
+
+    def _create_fio_spotter_tab(self) -> QWidget:
+        with perf_span("main_window.create_fio_spotter_tab", settings=self.settings, min_ms=5.0):
+            tab = FioSpotterTab(
+                self,
+                settings=self.settings,
+                open_compose=lambda: self.open_messages_section("compose"),
+                open_inbox=lambda row: self.open_messages_section(
+                    "inbox",
+                    query_filter=str(row.get("from_call") or row.get("group_name") or ""),
+                    source_family=str(row.get("source_family") or ""),
+                ),
+                open_map=lambda row: self.open_spotter_map(
+                    group_filter=str(row.get("group_name") or ""),
+                    query_filter=str(row.get("from_call") or ""),
+                    state_filter=str(row.get("state_code") or ""),
+                    grid_filter=str(row.get("grid") or ""),
+                ),
+                open_operator=lambda _row: self._set_screen(
+                    self._screen_index_by_label.get("HF Operators", -1)
+                ),
+            )
+            self.fio_spotter_tab = tab
             return tab
 
     def _create_operator_history_tab(self) -> QWidget:

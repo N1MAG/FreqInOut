@@ -1,18 +1,29 @@
 from pathlib import Path
+import datetime
 import json
 import sqlite3
 
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.js8_expect_dispatcher import list_expect_dispatch_audit
 from freqinout.core.js8_expect_store import list_expect_runtime_audit, save_expect_entry
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.observation_store import list_observations
+from freqinout.core.operator_identity import change_operator_callsign
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 from tests.test_js8_send_service import _safe_server
 
 
-def _write_js8_inbox(path: Path, *, row_id: int, from_call: str, text: str, utc: str = "2026-08-08 12:34:56") -> None:
+def _write_js8_inbox(
+    path: Path,
+    *,
+    row_id: int,
+    from_call: str,
+    text: str,
+    utc: str | None = None,
+) -> None:
+    utc = utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(path)
     try:
         conn.execute("CREATE TABLE inbox_v1 (id INTEGER PRIMARY KEY, json TEXT, type TEXT, value TEXT)")
@@ -33,6 +44,32 @@ def _write_js8_inbox(path: Path, *, row_id: int, from_call: str, text: str, utc:
                 ),
             ),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _current_utc_parts() -> tuple[str, float]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.strftime("%Y-%m-%d %H:%M:%S"), now.timestamp()
+
+
+def _seed_operator_identity_history(db_path: Path, *, old_call: str, current_call: str, group: str = "MAGNET") -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_operator_checkins_schema(conn)
+        _, utc_ts = _current_utc_parts()
+        utc_day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+        conn.execute(
+            """
+            INSERT INTO operator_checkins(
+                callsign, name, group1, group_role, trusted, first_seen_utc, last_seen_utc
+            ) VALUES (?, 'Operator', ?, 'HUB', 1, ?, ?)
+            """,
+            (old_call, group, utc_day, utc_day),
+        )
+        ensure_operator_checkins_schema(conn)
+        change_operator_callsign(conn, old_call, current_call, effective_at=utc_ts - 3600.0)
         conn.commit()
     finally:
         conn.close()
@@ -378,6 +415,153 @@ def test_spotter_js8_event_ingest_adds_source_and_expect_audit(monkeypatch, tmp_
     assert observations[0].source_radio_id == 8
     assert observations[0].source_app == "fio-b"
     assert observations[0].provenance["ingest_source"] == "js8-api"
+
+
+def test_directed_txt_relevant_directed_message_uses_historical_callsign_and_skips_noise(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    current_call = "K1OLD"
+    historical_call = "K1NEW"
+    _seed_operator_identity_history(db_path, old_call=historical_call, current_call=current_call, group="MAGNET")
+    settings.set("operator_callsign", current_call)
+    utc_str, _ = _current_utc_parts()
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "\n".join(
+            [
+                f"{utc_str}\t7078000\t0\t-10\tN0CALL: {historical_call} CHECKING IN FROM FIELD ♢",
+                f"{utc_str}\t7078000\t0\t-10\tN0CALL: {historical_call} SNR -13 ♢",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    ingestor = MessageIngestor(settings)
+    first = ingestor.ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=7,
+        js8_instance_id="fio-a",
+        source_key="radio:7",
+        offset_key="spotter_directed_offset_radio_7",
+    )
+    second = ingestor.ingest_spotter_from_directed(
+        directed_path=directed,
+        source_radio_id=7,
+        js8_instance_id="fio-a",
+        source_key="radio:7",
+        offset_key="spotter_directed_offset_radio_7",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT from_call, to_call, raw_text, source_radio_id, js8_instance_id, source_key FROM js8_messages"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert first == 1
+    assert second == 0
+    assert rows == [
+        (
+            "N0CALL",
+            historical_call,
+            "CHECKING IN FROM FIELD",
+            "7",
+            "fio-a",
+            "radio:7",
+        )
+    ]
+
+
+def test_js8_event_directed_message_uses_associated_group_and_dedupes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    settings = SettingsManager()
+    db_path = cfg_root / "config" / "freqinout_nets.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.set("operator_callsign", "K1MAG")
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_operator_checkins_schema(conn)
+        utc_day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+        conn.execute(
+            """
+            INSERT INTO operator_checkins(
+                callsign, name, group1, group_role, trusted, first_seen_utc, last_seen_utc
+            ) VALUES (?, 'Operator', 'MAGNET', 'HUB', 1, ?, ?)
+            """,
+            ("K1MAG", utc_day, utc_day),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    utc_str, _ = _current_utc_parts()
+    event = {
+        "type": "RX.DIRECTED",
+        "value": "N0CALL: @MAGNET CHECKING IN FROM FIELD",
+        "params": {
+            "FROM": "N0CALL",
+            "TO": "@MAGNET",
+            "TEXT": "N0CALL: @MAGNET CHECKING IN FROM FIELD",
+            "UTC": utc_str,
+        },
+    }
+    noise = {
+        "type": "RX.DIRECTED",
+        "value": "N0CALL: @MAGNET HEARTBEAT SNR -12",
+        "params": {
+            "FROM": "N0CALL",
+            "TO": "@MAGNET",
+            "TEXT": "N0CALL: @MAGNET HEARTBEAT SNR -12",
+            "UTC": utc_str,
+        },
+    }
+
+    ingestor = MessageIngestor(settings)
+    first = ingestor.ingest_spotter_from_js8_events(
+        [noise, event],
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+        source_key="api:8",
+    )
+    second = ingestor.ingest_spotter_from_js8_events(
+        [noise, event],
+        source_radio_id=8,
+        js8_instance_id="fio-b",
+        source_key="api:8",
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT from_call, to_call, raw_text, source_radio_id, js8_instance_id, source_key FROM js8_messages"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert first == 1
+    assert second == 0
+    assert rows == [
+        (
+            "N0CALL",
+            "@MAGNET",
+            "CHECKING IN FROM FIELD",
+            "8",
+            "fio-b",
+            "api:8",
+        )
+    ]
 
 
 def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monkeypatch, tmp_path: Path) -> None:

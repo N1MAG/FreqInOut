@@ -820,6 +820,27 @@ def test_js8_link_indexer_ignores_group_targets_but_keeps_station_relays(tmp_pat
     assert rows == [("KC7WOK", "N1MAG")]
 
 
+def test_js8_link_indexer_ignores_heartbeat_snr_directed_traffic(tmp_path: Path) -> None:
+    directed = tmp_path / "DIRECTED.TXT"
+    directed.write_text(
+        "2026-08-12 10:00:00\t7.115000\t1500\t+05\tN1MAG: K7AAA HEARTBEAT SNR -12\n"
+        "2026-08-12 10:01:00\t7.115000\t1500\t+04\tN1MAG: K7BBB SNR -10\n",
+        encoding="utf-8",
+    )
+    settings = DictSettings({"operating_groups": []})
+    indexer = JS8LogLinkIndexer(settings, tmp_path / "fio.db")  # type: ignore[arg-type]
+
+    inserted = indexer.update_from_directed_path(directed)
+
+    assert inserted == 1
+    conn = sqlite3.connect(tmp_path / "fio.db")
+    try:
+        rows = conn.execute("SELECT origin, destination, band FROM js8_links").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("K7BBB", "N1MAG", "40M")]
+
+
 def test_js8_link_indexer_does_not_infer_local_heard_edges_from_directed_sender(tmp_path: Path) -> None:
     directed = tmp_path / "DIRECTED.TXT"
     directed.write_text(

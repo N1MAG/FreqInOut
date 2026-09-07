@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
+from freqinout.core.fio_spotter_store import ensure_fio_spotter_schema
 from freqinout.core.js8_expect_store import default_expect_db_path, save_expect_entry
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text
 from freqinout.core.message_intelligence import analyze_spotter_text
@@ -27,12 +30,29 @@ class JS8SpotterImportStats:
     expect_scanned: int = 0
     expect_imported: int = 0
     expect_skipped: int = 0
+    watches_scanned: int = 0
+    watches_imported: int = 0
+    watches_skipped: int = 0
     archive_scanned: int = 0
     archive_imported: int = 0
     archive_skipped: int = 0
     grid_operators_updated: int = 0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class JS8SpotterImportPreview:
+    source_db: str
+    candidates: int = 0
+    duplicates: int = 0
+    skipped: int = 0
+    conflicts: int = 0
+    forms: int = 0
+    expect: int = 0
+    watches: int = 0
+    archive: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 def _ensure_spotter_traffic_table(conn) -> None:
@@ -121,6 +141,91 @@ def ensure_js8spotter_import_tables(conn) -> None:
     _ensure_spotter_traffic_table(conn)
     _ensure_js8_expect_tables(conn)
     _ensure_import_log_table(conn)
+    ensure_fio_spotter_schema(conn)
+
+
+def preview_js8spotter_import(
+    source_db: str | Path,
+    *,
+    target_db: str | Path | None = None,
+    limit_per_table: int = 100_000,
+) -> JS8SpotterImportPreview:
+    """Return a bounded, read-only import plan without copying source rows."""
+
+    source_path = Path(source_db).expanduser()
+    target_path = Path(target_db) if target_db is not None else default_expect_db_path()
+    if not source_path.is_file():
+        return JS8SpotterImportPreview(str(source_path), warnings=("Source database was not found.",))
+    maximum = max(1, min(100_000, int(limit_per_table or 100_000)))
+    src = connect_sqlite(source_path, row_factory=sqlite3.Row)
+    dst = connect_sqlite(target_path, row_factory=sqlite3.Row) if target_path.exists() else None
+    try:
+        imported: set[tuple[str, str, str]] = set()
+        existing_expect: set[str] = set()
+        if dst is not None:
+            if table_exists(dst, "js8spotter_import_log"):
+                imported = {
+                    (str(row[0]), str(row[1]), str(row[2]))
+                    for row in dst.execute(
+                        "SELECT source_table, source_id, source_fingerprint FROM js8spotter_import_log WHERE source_db=?",
+                        (str(source_path.resolve()),),
+                    )
+                }
+            if table_exists(dst, "js8_expect_entries"):
+                existing_expect = {
+                    str(row[0] or "").strip().upper()
+                    for row in dst.execute("SELECT expect_key FROM js8_expect_entries")
+                    if str(row[0] or "").strip()
+                }
+        candidates = duplicates = skipped = conflicts = 0
+        counts = {"forms": 0, "expect": 0, "watches": 0, "archive": 0}
+        archive_tables = ("profile", "activity", "grid", "signal", "notify", "csstatrep", "setting")
+        for table_name in ("forms", "expect", "search", *archive_tables):
+            if not table_exists(src, table_name):
+                continue
+            rows = list(src.execute(f'SELECT * FROM "{table_name}" LIMIT ?', (maximum,)))
+            for ordinal, raw in enumerate(rows):
+                row = _row_dict(raw)
+                source_id = (
+                    _source_id_for_archive(table_name, row)
+                    if table_name in archive_tables or table_name == "search"
+                    else str(row.get("id") or row.get("expect") or ordinal)
+                )
+                fingerprint = _fingerprint(row)
+                if (table_name, str(source_id), fingerprint) in imported:
+                    duplicates += 1
+                    continue
+                if table_name == "forms" and not _spotter_form_id(row):
+                    skipped += 1
+                    continue
+                if table_name == "expect":
+                    key = str(row.get("expect", "") or "").strip().upper()
+                    if not key:
+                        skipped += 1
+                        continue
+                    if key in existing_expect:
+                        conflicts += 1
+                if table_name == "search" and not str(row.get("keyword", "") or "").strip():
+                    skipped += 1
+                    continue
+                candidates += 1
+                category = (
+                    "forms" if table_name == "forms"
+                    else "expect" if table_name == "expect"
+                    else "watches" if table_name == "search"
+                    else "archive"
+                )
+                counts[category] += 1
+        return JS8SpotterImportPreview(
+            str(source_path), candidates, duplicates, skipped, conflicts,
+            counts["forms"], counts["expect"], counts["watches"], counts["archive"],
+        )
+    except Exception as exc:
+        return JS8SpotterImportPreview(str(source_path), warnings=(str(exc),))
+    finally:
+        src.close()
+        if dst is not None:
+            dst.close()
 
 
 def _row_dict(row: object) -> dict[str, Any]:
@@ -378,6 +483,7 @@ def import_js8spotter_database(
     js8_instance_id: object = "",
     import_forms: bool = True,
     import_expect: bool = True,
+    import_watches: bool = True,
     import_archive: bool = True,
 ) -> JS8SpotterImportStats:
     source_path = Path(source_db).expanduser()
@@ -517,8 +623,77 @@ def import_js8spotter_database(
                     imported_id=result.id,
                 )
                 stats.expect_imported += 1
+        if import_watches:
+            profiles = {
+                str(row.get("id", "") or ""): str(row.get("title", "") or "").strip()
+                for row in _iter_rows(src, "profile")
+            }
+            for row in _iter_rows(src, "search"):
+                stats.watches_scanned += 1
+                source_id = _source_id_for_archive("search", row)
+                keyword = str(row.get("keyword", "") or "").strip()
+                if not keyword:
+                    stats.watches_skipped += 1
+                    continue
+                fp = _fingerprint(row)
+                if _has_imported(dst, source_identity, "search", source_id, fp):
+                    stats.watches_skipped += 1
+                    continue
+                raw_mode = str(row.get("matchmode", "") or "contains").strip().lower()
+                match_mode = "whole-word" if raw_mode in {"whole_word", "whole-word", "word"} else "contains"
+                upper = keyword.upper()
+                if upper.startswith("@"):
+                    watch_kind = "group"
+                elif re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9/]{1,7}", upper):
+                    watch_kind = "callsign"
+                else:
+                    watch_kind = "keyword"
+                profile_name = profiles.get(str(row.get("profile_id", "") or ""), "")
+                comment = str(row.get("comment", "") or "").strip()
+                display_name = comment or f"Watch {keyword}"
+                notes = "; ".join(
+                    part for part in (
+                        f"Imported JS8Spotter profile: {profile_name}" if profile_name else "",
+                        f"Legacy last match: {row.get('last_seen')}" if row.get("last_seen") else "",
+                    ) if part
+                )
+                now = time.time()
+                dst.execute(
+                    """
+                    INSERT INTO fio_spotter_watches
+                        (name, watch_kind, pattern, match_mode, priority,
+                         source_families_json, source_radio_ids_json,
+                         notification_mode, expires_ts, enabled, last_match_ts,
+                         match_count, health, import_source, notes, created_ts, updated_ts)
+                    VALUES (?, ?, ?, ?, 'watch', '["js8","spotter"]', ?,
+                            'in-app', 0, 1, 0, 0, 'ready', ?, ?, ?, ?)
+                    """,
+                    (
+                        display_name,
+                        watch_kind,
+                        keyword,
+                        match_mode,
+                        json.dumps([str(source_radio_id or "")], separators=(",", ":"))
+                        if str(source_radio_id or "").strip() else "[]",
+                        f"js8spotter-db-import:{source_identity}",
+                        notes,
+                        now,
+                        now,
+                    ),
+                )
+                imported_id = int(dst.execute("SELECT last_insert_rowid()").fetchone()[0])
+                _record_import(
+                    dst,
+                    source_db=source_identity,
+                    source_table="search",
+                    source_id=source_id,
+                    fingerprint=fp,
+                    imported_kind="fio_spotter_watches",
+                    imported_id=imported_id,
+                )
+                stats.watches_imported += 1
         if import_archive:
-            for table_name in ("profile", "activity", "search", "grid", "signal", "notify", "csstatrep", "setting"):
+            for table_name in ("profile", "activity", "grid", "signal", "notify", "csstatrep", "setting"):
                 for row in _iter_rows(src, table_name):
                     stats.archive_scanned += 1
                     source_id = _source_id_for_archive(table_name, row)

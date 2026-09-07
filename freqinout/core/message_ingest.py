@@ -6,11 +6,14 @@ import json
 import re
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.js8_expect_dispatcher import dispatch_expect_auto_reply, record_expect_dispatch_hold
+from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.operator_identity import callsigns_for_operator, canonical_callsign, ensure_operator_identity_schema, resolve_operator_identity
 from freqinout.core.js8_spotter_forms import (
     MAPPER_SETTINGS_KEY,
     form_id_enabled,
@@ -19,7 +22,14 @@ from freqinout.core.js8_spotter_forms import (
     normalize_form_code,
 )
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text
-from freqinout.core.js8_expect_store import ExpectEvaluationResult, evaluate_expect_request
+from freqinout.core.js8_expect_store import (
+    ExpectEvaluationResult,
+    ExpectRequestClaimResult,
+    claim_expect_request,
+    complete_expect_request_claim,
+    evaluate_dynamic_flamp_request,
+    evaluate_expect_request,
+)
 from freqinout.core.logger import log
 from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
@@ -27,14 +37,25 @@ from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.observation_projection import observation_from_message_intelligence
 from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.traffic_actionability import configured_group_names, load_operator_traffic_context
+from freqinout.core.varac_bbs_vault import (
+    flamp_transfer_index_status,
+    index_flamp_transfer_state,
+    lookup_flamp_transfer_state,
+    parse_dynamic_flamp_query,
+)
 
 
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+FLAMP_TRANSFER_INDEX_MAX_AGE_SECONDS = 10 * 60
+DYNAMIC_EXPECT_REQUEST_MAX_AGE_SECONDS = 30 * 60
 SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
 SPOTTER_STATUS_FORMS = {"104", "301", "304"}
 MCF304_EXPECTED_RESPONSES = 8
 SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
 SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
+JS8_DIRECTED_HEARTBEAT_RE = re.compile(r"^\s*(?:HB|HEARTBEAT)(?:\s+SNR\s+[-+]?\d+(?:\.\d+)?(?:\s*dB)?)?\s*$", re.IGNORECASE)
+JS8_DIRECTED_SNR_ONLY_RE = re.compile(r"^\s*SNR\s+[-+]?\d+(?:\.\d+)?(?:\s*dB)?\s*$", re.IGNORECASE)
 
 
 class JS8FormDecoder:
@@ -285,6 +306,7 @@ class MessageIngestor:
         if not directed_path or not directed_path.exists():
             return 0
         self._ensure_spotter_table()
+        self._ensure_local_js8_tables()
         imported = 0
         try:
             offset = int(self.settings.get(offset_key or self._spotter_offset_key(directed_path, source_radio_id), 0) or 0)
@@ -296,6 +318,7 @@ class MessageIngestor:
             size_now = directed_path.stat().st_size
             if offset < 0 or offset > size_now:
                 offset = 0
+            directed_callsigns, directed_groups = self._directed_js8_recipients()
             with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
                 if offset:
                     fh.seek(offset)
@@ -305,37 +328,191 @@ class MessageIngestor:
                     if not line:
                         break
                     last_pos = fh.tell()
+                    dynamic = self._parse_dynamic_directed_line(line)
+                    if dynamic:
+                        self._handle_dynamic_flamp_query(
+                            dynamic,
+                            source_radio_id=source_radio_id,
+                            js8_instance_id=js8_instance_id,
+                            source_key=source_key,
+                            source_path=directed_path,
+                        )
+                        continue
                     parsed = self._parse_directed_spotter_line(line)
-                    if not parsed:
+                    if parsed:
+                        form_id = str(parsed.get("form_id") or "").strip()
+                        raw_form = str(parsed.get("raw_form") or "").strip()
+                        if not form_id or not raw_form:
+                            continue
+                        from_call = str(parsed.get("from_call") or "").strip().upper()
+                        token = str(parsed.get("spotter_token") or "").strip().upper()
+                        if not from_call:
+                            continue
+                        if self._spotter_exists(
+                            from_call,
+                            form_id,
+                            token,
+                            raw_form,
+                            source_radio_id=source_radio_id,
+                            js8_instance_id=js8_instance_id,
+                            source_key=source_key,
+                        ):
+                            continue
+                        form_part, resp, comment = self._parse_form_parts(raw_form)
+                        decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+                        if not decoded or decoded == raw_form:
+                            decoded = decode_spotter_form_text(raw_form)
+                        db_path = self._db_path()
+                        if not db_path:
+                            continue
+                        conn = sqlite3.connect(db_path)
+                        cur = conn.cursor()
+                        ingested_ts = float(time.time())
+                        cur.execute(
+                            """
+                            INSERT INTO spotter_traffic
+                                (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
+                                 raw_text, decoded_text, state, read_ts, relay_via,
+                                 source_radio_id, js8_instance_id, source_key, ingested_ts)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                float(parsed.get("utc_ts") or 0.0),
+                                str(parsed.get("utc_str") or ""),
+                                from_call,
+                                str(parsed.get("to_call") or "").strip().upper(),
+                                form_id,
+                                token,
+                                raw_form,
+                                decoded or raw_form,
+                                str(parsed.get("relay_via") or "").strip().upper(),
+                                str(source_radio_id or ""),
+                                str(js8_instance_id or ""),
+                                str(source_key or ""),
+                                ingested_ts,
+                            ),
+                        )
+                        imported_id = int(cur.lastrowid or 0)
+                        self._upsert_spotter_station_status(
+                            cur,
+                            from_call=from_call,
+                            form_id=form_id,
+                            response_code=resp,
+                            raw_form=raw_form,
+                            utc_ts=float(parsed.get("utc_ts") or 0.0),
+                            utc_str=str(parsed.get("utc_str") or ""),
+                            ingested_ts=ingested_ts,
+                        )
+                        self._mirror_spotter_observation(
+                            conn,
+                            imported_id=imported_id,
+                            raw_form=raw_form,
+                            form_id=form_id,
+                            from_call=from_call,
+                            to_call=str(parsed.get("to_call") or "").strip().upper(),
+                            utc_str=str(parsed.get("utc_str") or ""),
+                            source_radio_id=source_radio_id,
+                            js8_instance_id=js8_instance_id,
+                            source_kind="directed",
+                        )
+                        conn.commit()
+                        conn.close()
+                        imported += 1
+                        if evaluate_expect:
+                            try:
+                                event_id = f"directed:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
+                                evaluation = evaluate_expect_request(
+                                    expect_key=f"F!{form_id}",
+                                    requesting_callsign=from_call,
+                                    target_group=str(parsed.get("to_call") or ""),
+                                    source_radio_id=source_radio_id,
+                                    js8_instance_id=js8_instance_id,
+                                    event_id=event_id,
+                                )
+                                self._maybe_dispatch_expect_auto_reply(
+                                    evaluation,
+                                    event_id=event_id,
+                                    source_radio_id=source_radio_id,
+                                    source_js8_instance_id=js8_instance_id,
+                                    requesting_callsign=from_call,
+                                    target_group=str(parsed.get("to_call") or ""),
+                                )
+                            except Exception as exc:
+                                log.debug("MessageIngest: Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
                         continue
-                    form_id = str(parsed.get("form_id") or "").strip()
-                    raw_form = str(parsed.get("raw_form") or "").strip()
-                    if not form_id or not raw_form:
-                        continue
-                    from_call = str(parsed.get("from_call") or "").strip().upper()
-                    token = str(parsed.get("spotter_token") or "").strip().upper()
-                    if not from_call:
-                        continue
-                    if self._spotter_exists(
-                        from_call,
-                        form_id,
-                        token,
-                        raw_form,
+                    message_row = self._parse_directed_js8_message_line(
+                        line,
+                        directed_callsigns=directed_callsigns,
+                        directed_groups=directed_groups,
                         source_radio_id=source_radio_id,
                         js8_instance_id=js8_instance_id,
                         source_key=source_key,
-                    ):
+                        source_path=directed_path,
+                    )
+                    if not message_row:
                         continue
-                    form_part, resp, comment = self._parse_form_parts(raw_form)
-                    decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
-                    if not decoded or decoded == raw_form:
-                        decoded = decode_spotter_form_text(raw_form)
-                    db_path = self._db_path()
-                    if not db_path:
-                        continue
+                    if self._store_directed_js8_message(message_row):
+                        imported += 1
+                self.settings.set(offset_key or self._spotter_offset_key(directed_path, source_radio_id), int(last_pos))
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception as e:
+            log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
+        return imported
+
+    def ingest_spotter_from_js8_events(
+        self,
+        messages: Iterable[Dict[str, Any]],
+        *,
+        source_radio_id: object = "",
+        js8_instance_id: object = "",
+        source_key: object = "",
+        evaluate_expect: bool = True,
+    ) -> int:
+        self._ensure_spotter_table()
+        self._ensure_local_js8_tables()
+        imported = 0
+        directed_callsigns, directed_groups = self._directed_js8_recipients()
+        for event in list(messages or []):
+            dynamic = self._parse_dynamic_js8_event(event)
+            if dynamic:
+                self._handle_dynamic_flamp_query(
+                    dynamic,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    source_key=source_key,
+                    source_path=None,
+                )
+                continue
+            parsed = self._parse_js8_spotter_event(event)
+            if parsed:
+                form_id = str(parsed.get("form_id") or "").strip()
+                raw_form = str(parsed.get("raw_form") or "").strip()
+                from_call = str(parsed.get("from_call") or "").strip().upper()
+                token = str(parsed.get("spotter_token") or "").strip().upper()
+                if not form_id or not raw_form or not from_call:
+                    continue
+                if self._spotter_exists(
+                    from_call,
+                    form_id,
+                    token,
+                    raw_form,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    source_key=source_key,
+                ):
+                    continue
+                form_part, resp, comment = self._parse_form_parts(raw_form)
+                decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+                if not decoded or decoded == raw_form:
+                    decoded = decode_spotter_form_text(raw_form)
+                db_path = self._db_path()
+                if not db_path:
+                    continue
+                ingested_ts = float(time.time())
+                try:
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
-                    ingested_ts = float(time.time())
                     cur.execute(
                         """
                         INSERT INTO spotter_traffic
@@ -381,164 +558,63 @@ class MessageIngestor:
                         utc_str=str(parsed.get("utc_str") or ""),
                         source_radio_id=source_radio_id,
                         js8_instance_id=js8_instance_id,
-                        source_kind="directed",
+                        source_kind="js8-api",
                     )
                     conn.commit()
                     conn.close()
-                    imported += 1
-                    if evaluate_expect:
-                        try:
-                            event_id = f"directed:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
-                            evaluation = evaluate_expect_request(
-                                expect_key=f"F!{form_id}",
-                                requesting_callsign=from_call,
-                                target_group=str(parsed.get("to_call") or ""),
-                                source_radio_id=source_radio_id,
-                                js8_instance_id=js8_instance_id,
-                                event_id=event_id,
-                            )
-                            self._maybe_dispatch_expect_auto_reply(
-                                evaluation,
-                                event_id=event_id,
-                                source_radio_id=source_radio_id,
-                                source_js8_instance_id=js8_instance_id,
-                                requesting_callsign=from_call,
-                                target_group=str(parsed.get("to_call") or ""),
-                            )
-                        except Exception as exc:
-                            log.debug("MessageIngest: Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
-                self.settings.set(offset_key or self._spotter_offset_key(directed_path, source_radio_id), int(last_pos))
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-        except Exception as e:
-            log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
-        return imported
-
-    def ingest_spotter_from_js8_events(
-        self,
-        messages: Iterable[Dict[str, Any]],
-        *,
-        source_radio_id: object = "",
-        js8_instance_id: object = "",
-        source_key: object = "",
-        evaluate_expect: bool = True,
-    ) -> int:
-        self._ensure_spotter_table()
-        imported = 0
-        for event in list(messages or []):
-            parsed = self._parse_js8_spotter_event(event)
-            if not parsed:
+                except Exception as exc:
+                    log.debug("MessageIngest: JS8 event Spotter insert failed: %s", exc)
+                    continue
+                imported += 1
+                if evaluate_expect:
+                    try:
+                        event_id = f"js8-api:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
+                        evaluation = evaluate_expect_request(
+                            expect_key=f"F!{form_id}",
+                            requesting_callsign=from_call,
+                            target_group=str(parsed.get("to_call") or ""),
+                            source_radio_id=source_radio_id,
+                            js8_instance_id=js8_instance_id,
+                            event_id=event_id,
+                        )
+                        self._maybe_dispatch_expect_auto_reply(
+                            evaluation,
+                            event_id=event_id,
+                            source_radio_id=source_radio_id,
+                            source_js8_instance_id=js8_instance_id,
+                            requesting_callsign=from_call,
+                            target_group=str(parsed.get("to_call") or ""),
+                        )
+                    except Exception as exc:
+                        log.debug("MessageIngest: JS8 event Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
                 continue
-            form_id = str(parsed.get("form_id") or "").strip()
-            raw_form = str(parsed.get("raw_form") or "").strip()
-            from_call = str(parsed.get("from_call") or "").strip().upper()
-            token = str(parsed.get("spotter_token") or "").strip().upper()
-            if not form_id or not raw_form or not from_call:
-                continue
-            if self._spotter_exists(
-                from_call,
-                form_id,
-                token,
-                raw_form,
+            message_row = self._parse_directed_js8_message_event(
+                event,
+                directed_callsigns=directed_callsigns,
+                directed_groups=directed_groups,
                 source_radio_id=source_radio_id,
                 js8_instance_id=js8_instance_id,
                 source_key=source_key,
-            ):
+            )
+            if not message_row:
                 continue
-            form_part, resp, comment = self._parse_form_parts(raw_form)
-            decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
-            if not decoded or decoded == raw_form:
-                decoded = decode_spotter_form_text(raw_form)
-            db_path = self._db_path()
-            if not db_path:
-                continue
-            ingested_ts = float(time.time())
-            try:
-                conn = sqlite3.connect(db_path)
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO spotter_traffic
-                        (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
-                         raw_text, decoded_text, state, read_ts, relay_via,
-                         source_radio_id, js8_instance_id, source_key, ingested_ts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        float(parsed.get("utc_ts") or 0.0),
-                        str(parsed.get("utc_str") or ""),
-                        from_call,
-                        str(parsed.get("to_call") or "").strip().upper(),
-                        form_id,
-                        token,
-                        raw_form,
-                        decoded or raw_form,
-                        str(parsed.get("relay_via") or "").strip().upper(),
-                        str(source_radio_id or ""),
-                        str(js8_instance_id or ""),
-                        str(source_key or ""),
-                        ingested_ts,
-                    ),
-                )
-                imported_id = int(cur.lastrowid or 0)
-                self._upsert_spotter_station_status(
-                    cur,
-                    from_call=from_call,
-                    form_id=form_id,
-                    response_code=resp,
-                    raw_form=raw_form,
-                    utc_ts=float(parsed.get("utc_ts") or 0.0),
-                    utc_str=str(parsed.get("utc_str") or ""),
-                    ingested_ts=ingested_ts,
-                )
-                self._mirror_spotter_observation(
-                    conn,
-                    imported_id=imported_id,
-                    raw_form=raw_form,
-                    form_id=form_id,
-                    from_call=from_call,
-                    to_call=str(parsed.get("to_call") or "").strip().upper(),
-                    utc_str=str(parsed.get("utc_str") or ""),
-                    source_radio_id=source_radio_id,
-                    js8_instance_id=js8_instance_id,
-                    source_kind="js8-api",
-                )
-                conn.commit()
-                conn.close()
+            if self._store_directed_js8_message(message_row):
                 imported += 1
-            except Exception as exc:
-                log.debug("MessageIngest: JS8 event Spotter insert failed: %s", exc)
-                continue
-            if evaluate_expect:
-                try:
-                    event_id = f"js8-api:{str(source_radio_id or '')}:{str(js8_instance_id or '')}:{int(parsed.get('utc_ts') or 0)}:{from_call}:{form_id}:{token or raw_form[:24]}"
-                    evaluation = evaluate_expect_request(
-                        expect_key=f"F!{form_id}",
-                        requesting_callsign=from_call,
-                        target_group=str(parsed.get("to_call") or ""),
-                        source_radio_id=source_radio_id,
-                        js8_instance_id=js8_instance_id,
-                        event_id=event_id,
-                    )
-                    self._maybe_dispatch_expect_auto_reply(
-                        evaluation,
-                        event_id=event_id,
-                        source_radio_id=source_radio_id,
-                        source_js8_instance_id=js8_instance_id,
-                        requesting_callsign=from_call,
-                        target_group=str(parsed.get("to_call") or ""),
-                    )
-                except Exception as exc:
-                    log.debug("MessageIngest: JS8 event Expect evaluation failed for F!%s from %s: %s", form_id, from_call, exc)
         return imported
 
     def _expect_auto_reply_runtime_enabled(self) -> bool:
         if self._expect_auto_reply_enabled_override is not None:
-            return bool(self._expect_auto_reply_enabled_override)
+            enabled = bool(self._expect_auto_reply_enabled_override)
+        else:
+            try:
+                enabled = bool(self.settings.get("js8_expect_unattended_auto_reply_enabled", False))
+            except Exception:
+                enabled = False
         try:
-            return bool(self.settings.get("js8_expect_unattended_auto_reply_enabled", False))
+            paused = bool(self.settings.get("js8_expect_unattended_auto_reply_paused", False))
         except Exception:
-            return False
+            paused = False
+        return bool(enabled and not paused)
 
     def _mirror_spotter_observation(
         self,
@@ -605,13 +681,49 @@ class MessageIngestor:
         source_js8_instance_id: object = "",
         requesting_callsign: object = "",
         target_group: object = "",
+        db_path: Optional[Path] = None,
+        claim_event_key: str = "",
+        claim_q_id: str = "",
     ) -> None:
         if evaluation.decision != "reply-ready":
             return
         if not self._expect_auto_reply_runtime_enabled():
             return
+        claim: Optional[ExpectRequestClaimResult] = None
+        if claim_event_key:
+            claim = claim_expect_request(
+                event_key=claim_event_key,
+                expect_entry_id=int(evaluation.expect_entry_id or 0),
+                q_id=str(claim_q_id or evaluation.q_id or evaluation.expect_key or ""),
+                source_radio_id=source_radio_id,
+                source_js8_instance_id=source_js8_instance_id,
+                requesting_callsign=requesting_callsign,
+                target_group=target_group,
+                max_replies=int(evaluation.max_replies or 1),
+                cooldown_seconds=int(evaluation.cooldown_seconds or 0),
+                db_path=db_path,
+            )
+            if not claim.acquired:
+                record_expect_dispatch_hold(
+                    evaluation=evaluation,
+                    reason=claim.reason,
+                    event_id=event_id,
+                    source_radio_id=source_radio_id,
+                    source_js8_instance_id=source_js8_instance_id,
+                    requesting_callsign=requesting_callsign,
+                    target_group=target_group,
+                    db_path=db_path,
+                )
+                return
         client_factory = self._expect_dispatch_client_factory
         if client_factory is None:
+            if claim is not None:
+                complete_expect_request_claim(
+                    event_key=claim.event_key,
+                    status="held",
+                    reason="No JS8 client factory is configured for Expect auto-reply.",
+                    db_path=db_path,
+                )
             record_expect_dispatch_hold(
                 evaluation=evaluation,
                 reason="No JS8 client factory is configured for Expect auto-reply.",
@@ -620,6 +732,7 @@ class MessageIngestor:
                 source_js8_instance_id=source_js8_instance_id,
                 requesting_callsign=requesting_callsign,
                 target_group=target_group,
+                db_path=db_path,
             )
             log.debug("MessageIngest: Expect auto-reply runtime enabled, but no JS8 client factory is configured.")
             return
@@ -634,6 +747,13 @@ class MessageIngestor:
                 status_reason = str(getattr(status, "reason", "") or "").strip()
                 if status_reason:
                     reason = status_reason
+                if claim is not None:
+                    complete_expect_request_claim(
+                        event_key=claim.event_key,
+                        status="held",
+                        reason=reason,
+                        db_path=db_path,
+                    )
                 record_expect_dispatch_hold(
                     evaluation=evaluation,
                     reason=reason,
@@ -642,6 +762,7 @@ class MessageIngestor:
                     source_js8_instance_id=source_js8_instance_id,
                     requesting_callsign=requesting_callsign,
                     target_group=target_group,
+                    db_path=db_path,
                 )
                 log.debug("MessageIngest: Expect auto-reply client factory returned no client for radio=%s js8=%s.", reply_radio_id, reply_js8_instance_id)
                 return
@@ -654,8 +775,20 @@ class MessageIngestor:
                 source_js8_instance_id=source_js8_instance_id,
                 requesting_callsign=requesting_callsign,
                 target_group=target_group,
+                db_path=db_path,
+                claim_event_key=claim_event_key,
+                claim_q_id=claim_q_id,
+                claim_already_acquired=claim is not None,
             )
         except Exception as exc:
+            if claim is not None:
+                complete_expect_request_claim(
+                    event_key=claim.event_key,
+                    status="failed",
+                    reason=str(exc),
+                    db_path=db_path,
+                    retry_after_seconds=30,
+                )
             log.debug("MessageIngest: Expect auto-reply dispatch failed for %s: %s", event_id, exc)
 
     def _db_path(self) -> Path | None:
@@ -838,6 +971,384 @@ class MessageIngestor:
             return exists
         except Exception:
             return False
+
+    def _parse_dynamic_directed_line(self, line: str) -> Optional[Dict[str, Any]]:
+        if not line or not line.rstrip().endswith("\u2662"):
+            return None
+        parts = [part for part in line.strip().split("\t") if part]
+        if len(parts) < 5:
+            parts = re.split(r"\s+", line.strip(), maxsplit=4)
+        if len(parts) < 5 or ":" not in parts[4]:
+            return None
+        try:
+            timestamp = datetime.datetime.strptime(str(parts[0])[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except Exception:
+            return None
+        relay_via, rest = str(parts[4]).split(":", 1)
+        rest = rest.strip()
+        words = rest.split(None, 1)
+        if len(words) != 2:
+            return None
+        target = words[0].split(">", 1)[0].strip(" ,").upper()
+        query = parse_dynamic_flamp_query(words[1].rstrip("\u2662").strip())
+        if not target or query is None:
+            return None
+        text_upper = str(parts[4]).upper()
+        relayed = bool(re.search(r"\*DE\*\s*[A-Z0-9/]+", text_upper))
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", text_upper)
+        sender = (de_match.group(1) if de_match else relay_via).strip().upper()
+        event_id = "directed-q:" + hashlib.sha256(line.encode("utf-8", errors="replace")).hexdigest()
+        return {
+            "q_id": query.q_id,
+            "confidence": query.confidence,
+            "from_call": sender,
+            "to_call": target,
+            "relayed": relayed,
+            "event_id": event_id,
+            "utc_ts": timestamp.timestamp(),
+        }
+
+    def _parse_dynamic_js8_event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(event, dict):
+            return None
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        text = str(params.get("TEXT") or event.get("value") or "").strip()
+        query = parse_dynamic_flamp_query(text)
+        sender = str(params.get("FROM") or "").strip().upper()
+        target = str(params.get("TO") or "").strip().upper()
+        if not sender or not target:
+            return None
+        # JS8Call builds differ: some RX.DIRECTED events expose only the
+        # payload, while others retain the addressed prefix in TEXT.  Accept
+        # the latter only when that prefix exactly matches API TO.
+        if query is None:
+            target_token = target
+            prefixed = re.fullmatch(
+                rf"\s*{re.escape(target_token)}\s*[>:]?\s+(E\?\s+Q\s+[0-9A-F]{{4}})\s*",
+                text,
+                flags=re.IGNORECASE,
+            )
+            query = parse_dynamic_flamp_query(prefixed.group(1) if prefixed else "")
+        if query is None:
+            return None
+        relayed = bool(re.search(r"\*DE\*\s*[A-Z0-9/]+", text.upper()))
+        stable = str(params.get("ID") or params.get("MSG_ID") or event.get("id") or "").strip()
+        if not stable:
+            stable = hashlib.sha256(
+                json.dumps(
+                    {"from": sender, "to": target, "text": text, "utc": params.get("UTC") or event.get("time")},
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        utc_ts = time.time()
+        raw_utc = str(params.get("UTC") or event.get("time") or "").strip()
+        if raw_utc:
+            try:
+                utc_ts = datetime.datetime.strptime(
+                    raw_utc[:19], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=datetime.timezone.utc).timestamp()
+            except Exception:
+                utc_ts = time.time()
+        return {
+            "q_id": query.q_id,
+            "confidence": query.confidence,
+            "from_call": sender,
+            "to_call": target,
+            "relayed": relayed,
+            "event_id": f"js8-api-q:{stable}",
+            "utc_ts": utc_ts,
+        }
+
+    def _flamp_dynamic_enabled(self) -> bool:
+        try:
+            # The existing unattended-Expect runtime flag remains the safety
+            # gate.  The dynamic service is a separate, explicit opt-in so an
+            # upgraded station cannot begin answering Q traffic silently.
+            return bool(self.settings.get("js8_expect_dynamic_flamp_enabled", False))
+        except Exception:
+            return False
+
+    def _flamp_relay_dir_for_source(self, source_radio_id: object, js8_instance_id: object) -> str:
+        try:
+            raw = self.settings.get("varac_bbs_vault_flamp_relay_dir", "")
+        except Exception:
+            raw = ""
+        if isinstance(raw, dict):
+            keys = (
+                str(source_radio_id or "").strip(),
+                str(js8_instance_id or "").strip(),
+                f"{str(source_radio_id or '').strip()}:{str(js8_instance_id or '').strip()}",
+                "default",
+            )
+            for key in keys:
+                if key and str(raw.get(key, "") or "").strip():
+                    return str(raw[key]).strip()
+            return ""
+        return str(raw or "").strip()
+
+    def refresh_dynamic_flamp_state(
+        self, *, source_radio_id: object, js8_instance_id: object
+    ) -> int:
+        """Refresh the source-scoped FLAMP projection outside the RF request path."""
+
+        db_path = self._db_path()
+        if db_path is None:
+            return 0
+        return index_flamp_transfer_state(
+            self._flamp_relay_dir_for_source(source_radio_id, js8_instance_id),
+            db_path=db_path,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+        )
+
+    def _dynamic_flamp_hold(
+        self,
+        *,
+        q_id: str,
+        reason: str,
+        event_id: str,
+        source_radio_id: object,
+        js8_instance_id: object,
+        from_call: str,
+        target: str,
+        db_path: Optional[Path],
+    ) -> None:
+        from freqinout.core.js8_expect_dispatcher import record_expect_dispatch_hold
+
+        evaluation = ExpectEvaluationResult(
+            decision="held",
+            reason=reason,
+            expect_key=f"Q {q_id}",
+            q_id=q_id,
+        )
+        record_expect_dispatch_hold(
+            evaluation=evaluation,
+            reason=reason,
+            event_id=event_id,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+            requesting_callsign=from_call,
+            target_group=target,
+            db_path=db_path,
+        )
+
+    def _handle_dynamic_flamp_query(
+        self,
+        parsed: Mapping[str, Any],
+        *,
+        source_radio_id: object,
+        js8_instance_id: object,
+        source_key: object,
+        source_path: Optional[Path],
+    ) -> None:
+        q_id = str(parsed.get("q_id") or "").strip().upper()
+        event_id = str(parsed.get("event_id") or "").strip()
+        from_call = str(parsed.get("from_call") or "").strip().upper()
+        target = str(parsed.get("to_call") or "").strip().upper()
+        db_path = self._db_path()
+        if not q_id or not event_id or not from_call or not target:
+            return
+        event_id = f"{event_id}|radio={str(source_radio_id or '').strip()}|js8={str(js8_instance_id or '').strip()}|from={from_call}|to={target}|q={q_id}"
+        received_ts = float(parsed.get("utc_ts") or time.time())
+        request_age = time.time() - received_ts
+        if request_age > DYNAMIC_EXPECT_REQUEST_MAX_AGE_SECONDS or request_age < -120:
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Dynamic Q request is outside the safe live-request window.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if not str(source_radio_id or "").strip() or not str(js8_instance_id or "").strip():
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Dynamic Q request is missing a concrete source radio/JS8 instance.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if bool(parsed.get("relayed")):
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Relayed dynamic Q requests require an explicit trusted-relay policy.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if float(parsed.get("confidence") or 0.0) < 1.0:
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Dynamic Q request did not meet the high-confidence directed-message gate.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if not self._flamp_dynamic_enabled():
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Dynamic FLAMP Expect service is disabled.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        if not self._expect_auto_reply_runtime_enabled():
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="Runtime unattended Expect auto-reply is disabled or paused.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        evaluation = evaluate_dynamic_flamp_request(
+            q_id=q_id,
+            requesting_callsign=from_call,
+            target_group=target if target.startswith("@") else "",
+            source_radio_id=source_radio_id,
+            js8_instance_id=js8_instance_id,
+            event_id=event_id,
+            db_path=db_path,
+        )
+        if evaluation.decision != "reply-ready":
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason=evaluation.reason,
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        index_status = flamp_transfer_index_status(
+            db_path=db_path,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+        ) if db_path else None
+        index_age = time.time() - float((index_status or {}).get("scanned_ts") or 0.0)
+        if (
+            not index_status
+            or not bool(index_status.get("scan_success"))
+            or index_age > FLAMP_TRANSFER_INDEX_MAX_AGE_SECONDS
+        ):
+            detail = str((index_status or {}).get("error_text") or "").strip()
+            reason = "FLAMP transfer index has not completed a recent successful background scan."
+            if detail:
+                reason += f" {detail}"
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason=reason,
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
+        state = lookup_flamp_transfer_state(
+            q_id,
+            db_path=db_path,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+        ) if db_path else None
+        if state is None:
+            payload = f"Q {q_id} NO"
+        else:
+            state_name = str(state.get("state") or "unavailable").lower()
+            source_file = Path(str(state.get("source_path") or ""))
+            if state_name == "unavailable" and source_file.exists():
+                self._dynamic_flamp_hold(
+                    q_id=q_id,
+                    reason="FLAMP transfer exists but its total/block set is not authoritative.",
+                    event_id=event_id,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    from_call=from_call,
+                    target=target,
+                    db_path=db_path,
+                )
+                return
+            if state_name == "complete" and state.get("total_blocks") and not state.get("missing_blocks"):
+                payload = f"Q {q_id} YES"
+            elif state_name == "partial" and state.get("total_blocks") and float(state.get("parser_confidence") or 0.0) >= 1.0:
+                missing = sorted({int(item) for item in (state.get("missing_blocks") or [])})
+                body = ",".join(str(item) for item in missing)
+                if not missing or len(f"Q {q_id} {body}") > 180:
+                    self._dynamic_flamp_hold(
+                        q_id=q_id,
+                        reason="Authoritative missing-block list is empty or exceeds the JS8 response budget.",
+                        event_id=event_id,
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        from_call=from_call,
+                        target=target,
+                        db_path=db_path,
+                    )
+                    return
+                payload = f"Q {q_id} {body}"
+            elif state_name == "unavailable":
+                payload = f"Q {q_id} NO"
+            else:
+                self._dynamic_flamp_hold(
+                    q_id=q_id,
+                    reason="FLAMP transfer state is not authoritative enough to answer.",
+                    event_id=event_id,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    from_call=from_call,
+                    target=target,
+                    db_path=db_path,
+                )
+                return
+        # Dynamic replies always use the receiving source endpoint.  A broad
+        # ``all`` policy must never redirect a reply through a primary radio.
+        evaluation = replace(
+            evaluation,
+            response_text=payload,
+            expect_key=f"Q {q_id}",
+            q_id=q_id,
+            reply_radio_id=str(source_radio_id or "").strip(),
+            reply_js8_instance_id=str(js8_instance_id or "").strip(),
+        )
+        self._maybe_dispatch_expect_auto_reply(
+            evaluation,
+            event_id=event_id,
+            source_radio_id=source_radio_id,
+            source_js8_instance_id=js8_instance_id,
+            requesting_callsign=from_call,
+            target_group=target if target.startswith("@") else "",
+            db_path=db_path,
+            claim_event_key=event_id,
+            claim_q_id=q_id,
+        )
 
     def _parse_directed_spotter_line(self, line: str) -> Optional[Dict[str, str | float]]:
         if not line:
@@ -1422,6 +1933,305 @@ class MessageIngestor:
         digest_src = f"{source_key}|{native_int}"
         return int(hashlib.sha1(digest_src.encode("utf-8", errors="ignore")).hexdigest()[:15], 16)
 
+    @staticmethod
+    def _js8_signature_id(signature: object, source_key: str = "") -> int:
+        digest_src = f"{str(source_key or '').strip()}|{str(signature or '').strip()}"
+        if not digest_src.strip("|"):
+            digest_src = "default"
+        return int(hashlib.sha1(digest_src.encode("utf-8", errors="ignore")).hexdigest()[:15], 16)
+
+    def _directed_js8_recipients(self) -> tuple[set[str], set[str]]:
+        own_call = canonical_callsign(
+            self.settings.get("operator_callsign", "")
+            or self.settings.get("callsign", "")
+            or ""
+        )
+        hf_groups, local_groups = configured_group_names(self.settings)
+        context = load_operator_traffic_context(
+            self._db_path(),
+            callsign=own_call,
+            configured_operating_groups=hf_groups,
+            configured_local_groups=local_groups,
+        )
+        call_aliases: set[str] = {canonical_callsign(context.callsign)} if context.callsign else set()
+        group_names: set[str] = {
+            normalize_group_name(group)
+            for group in context.groups
+            if normalize_group_name(group)
+        }
+        db_path = self._db_path()
+        if db_path and db_path.exists() and own_call:
+            try:
+                conn = sqlite3.connect(db_path)
+                ensure_operator_identity_schema(conn, backfill_operator_rows=False)
+                identity = resolve_operator_identity(conn, own_call)
+                if identity is not None:
+                    call_aliases.update(
+                        canonical_callsign(call)
+                        for call in callsigns_for_operator(conn, identity.operator_id)
+                        if canonical_callsign(call)
+                    )
+                conn.close()
+            except Exception:
+                pass
+        if own_call:
+            call_aliases.add(own_call)
+        return {call for call in call_aliases if call}, group_names
+
+    @staticmethod
+    def _split_directed_js8_text(text: str) -> tuple[str, str, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", "", ""
+        sender = ""
+        dest = ""
+        payload = raw
+        if ":" in raw:
+            sender, rest = raw.split(":", 1)
+            sender = sender.strip().upper()
+            tokens = rest.strip().split(None, 1)
+            if tokens:
+                dest_token = tokens[0].strip().strip(",")
+                dest = dest_token.split(">", 1)[0].strip().upper()
+                payload = tokens[1].strip().rstrip("\u2662").rstrip() if len(tokens) > 1 else ""
+        return sender, dest, payload
+
+    def _directed_js8_target_matches(self, dest: object, call_aliases: set[str], group_names: set[str]) -> bool:
+        target = str(dest or "").strip().upper()
+        if not target:
+            return False
+        normalized_group = normalize_group_name(target)
+        if target.startswith("@") or normalized_group in group_names:
+            return normalized_group in group_names
+        return canonical_callsign(target) in call_aliases
+
+    @staticmethod
+    def _is_js8_directed_noise(text: object) -> bool:
+        payload = str(text or "").strip().upper()
+        if not payload:
+            return True
+        return bool(JS8_DIRECTED_HEARTBEAT_RE.fullmatch(payload) or JS8_DIRECTED_SNR_ONLY_RE.fullmatch(payload))
+
+    def _parse_directed_js8_message_line(
+        self,
+        line: str,
+        *,
+        directed_callsigns: set[str],
+        directed_groups: set[str],
+        source_radio_id: object,
+        js8_instance_id: object,
+        source_key: object,
+        source_path: Optional[Path],
+    ) -> Optional[Dict[str, Any]]:
+        if not line or not line.rstrip().endswith("\u2662"):
+            return None
+        parts = [part for part in line.strip().split("\t") if part]
+        if len(parts) < 5:
+            parts = re.split(r"\s+", line.strip(), maxsplit=4)
+        if len(parts) < 5:
+            return None
+        try:
+            timestamp = datetime.datetime.strptime(str(parts[0])[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except Exception:
+            return None
+        raw_text = str(parts[4]).strip()
+        sender, dest, payload = self._split_directed_js8_text(raw_text)
+        if not sender or not dest:
+            return None
+        if self._is_js8_directed_noise(payload):
+            return None
+        if parse_dynamic_flamp_query(payload) is not None:
+            return None
+        if re.search(r"\bF![0-9]{3}[A-Z]?\b", raw_text, flags=re.IGNORECASE):
+            return None
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", raw_text.upper())
+        if de_match:
+            sender = de_match.group(1).strip().upper()
+        if not self._directed_js8_target_matches(dest, directed_callsigns, directed_groups):
+            return None
+        source_key_text = self._js8_source_key(
+            source_key=str(source_key or ""),
+            source_radio_id=source_radio_id,
+            js8_instance_id=js8_instance_id,
+        )
+        signature = "|".join(
+            (
+                "directed-line",
+                str(source_radio_id or "").strip(),
+                str(js8_instance_id or "").strip(),
+                str(source_path or ""),
+                raw_text,
+                timestamp.isoformat(),
+            )
+        )
+        source_id = self._js8_signature_id(signature, source_key_text)
+        return {
+            "msg_id": source_id,
+            "from_call": sender,
+            "to_call": dest,
+            "msg_type": "MSG",
+            "utc_str": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "utc_ts": timestamp.timestamp(),
+            "raw_text": payload,
+            "decoded_text": payload,
+            "state": "UNREAD",
+            "read_ts": 0.0,
+            "source_key": source_key_text,
+            "source_id": source_id,
+            "source_radio_id": source_radio_id,
+            "js8_instance_id": js8_instance_id,
+            "source_path": str(source_path or ""),
+        }
+
+    def _parse_directed_js8_message_event(
+        self,
+        event: Dict[str, Any],
+        *,
+        directed_callsigns: set[str],
+        directed_groups: set[str],
+        source_radio_id: object,
+        js8_instance_id: object,
+        source_key: object,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(event, dict):
+            return None
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        text = str(params.get("TEXT") or event.get("value") or "").strip()
+        if not text:
+            return None
+        sender = str(params.get("FROM") or "").strip().upper()
+        dest = str(params.get("TO") or params.get("CALL") or "").strip().upper()
+        parsed_sender, parsed_dest, payload = self._split_directed_js8_text(text)
+        if not sender:
+            sender = parsed_sender
+        if not dest:
+            dest = parsed_dest
+        if not sender or not dest:
+            return None
+        if self._is_js8_directed_noise(payload or text):
+            return None
+        if parse_dynamic_flamp_query(payload or text) is not None:
+            return None
+        if re.search(r"\bF![0-9]{3}[A-Z]?\b", text, flags=re.IGNORECASE):
+            return None
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", text.upper())
+        if de_match:
+            sender = de_match.group(1).strip().upper()
+        if not self._directed_js8_target_matches(dest, directed_callsigns, directed_groups):
+            return None
+        utc_str = str(params.get("UTC") or event.get("time") or "").strip()
+        utc_ts = 0.0
+        if utc_str:
+            try:
+                utc_ts = datetime.datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc
+                ).timestamp()
+            except Exception:
+                utc_ts = 0.0
+        if utc_ts <= 0:
+            utc_ts = float(time.time())
+            utc_str = datetime.datetime.fromtimestamp(utc_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        stable = str(params.get("ID") or params.get("MSG_ID") or event.get("id") or "").strip()
+        if not stable:
+            stable = hashlib.sha256(
+                json.dumps(
+                    {
+                        "from": sender,
+                        "to": dest,
+                        "text": text,
+                        "utc": utc_str,
+                        "source_radio_id": str(source_radio_id or "").strip(),
+                        "js8_instance_id": str(js8_instance_id or "").strip(),
+                        "source_key": str(source_key or "").strip(),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        source_key_text = self._js8_source_key(
+            source_key=str(source_key or ""),
+            source_radio_id=source_radio_id,
+            js8_instance_id=js8_instance_id,
+        )
+        source_id = self._js8_signature_id(
+            f"directed-event|{stable}|{sender}|{dest}|{utc_str}|{text}",
+            source_key_text,
+        )
+        return {
+            "msg_id": source_id,
+            "from_call": sender,
+            "to_call": dest,
+            "msg_type": "MSG",
+            "utc_str": utc_str,
+            "utc_ts": utc_ts,
+            "raw_text": payload or text,
+            "decoded_text": payload or text,
+            "state": "UNREAD",
+            "read_ts": 0.0,
+            "source_key": source_key_text,
+            "source_id": source_id,
+            "source_radio_id": source_radio_id,
+            "js8_instance_id": js8_instance_id,
+            "source_path": "",
+        }
+
+    def _store_directed_js8_message(self, row: Mapping[str, Any]) -> bool:
+        try:
+            db_path = self._local_js8_db()
+            if not db_path:
+                return False
+            conn = sqlite3.connect(db_path)
+            try:
+                existing = conn.execute(
+                    "SELECT 1 FROM js8_messages WHERE source_key=? AND source_id=? LIMIT 1",
+                    (str(row.get("source_key") or ""), int(row.get("source_id", row.get("msg_id", 0)) or 0)),
+                ).fetchone()
+                if existing is not None:
+                    conn.close()
+                    return False
+                conn.close()
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return False
+            inserted = self._insert_js8_local(
+                row.get("msg_id", 0),
+                str(row.get("from_call") or "").strip().upper(),
+                str(row.get("to_call") or "").strip().upper(),
+                str(row.get("msg_type") or "MSG"),
+                str(row.get("utc_str") or ""),
+                float(row.get("utc_ts") or 0.0),
+                str(row.get("raw_text") or ""),
+                str(row.get("decoded_text") or row.get("raw_text") or ""),
+                str(row.get("state") or "UNREAD"),
+                float(row.get("read_ts") or 0.0),
+                source_key=str(row.get("source_key") or ""),
+                source_id=row.get("source_id", row.get("msg_id", 0)),
+                source_radio_id=row.get("source_radio_id", ""),
+                js8_instance_id=row.get("js8_instance_id", ""),
+                source_path=row.get("source_path", ""),
+            )
+            if inserted:
+                try:
+                    self._enqueue_next_msg_id(
+                        str(row.get("from_call") or ""),
+                        str(row.get("raw_text") or ""),
+                        source_key=str(row.get("source_key") or ""),
+                        source_radio_id=row.get("source_radio_id", ""),
+                        js8_instance_id=row.get("js8_instance_id", ""),
+                        source_path=row.get("source_path", ""),
+                    )
+                except Exception:
+                    pass
+            return inserted
+        except Exception as exc:
+            log.debug("MessageIngest: failed to store directed JS8 message: %s", exc)
+            return False
+
     def _insert_js8_local(
         self,
         msg_id: int,
@@ -1440,15 +2250,30 @@ class MessageIngestor:
         source_radio_id: object = "",
         js8_instance_id: object = "",
         source_path: object = "",
-    ) -> None:
+    ) -> bool:
         db_path = self._local_js8_db()
         if not db_path:
-            return
+            return False
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             native_id = int(source_id or msg_id or 0)
             local_id = self._js8_local_row_id(native_id, source_key)
+            if float(utc_ts or 0.0) > 0.0:
+                existing = cur.execute(
+                    """
+                    SELECT 1 FROM js8_messages
+                    WHERE UPPER(COALESCE(from_call, ''))=UPPER(?)
+                      AND UPPER(COALESCE(to_call, ''))=UPPER(?)
+                      AND COALESCE(raw_text, '')=?
+                      AND ABS(COALESCE(utc_ts, 0)-?) <= 1.0
+                    LIMIT 1
+                    """,
+                    (from_call, to_call, raw_text, float(utc_ts)),
+                ).fetchone()
+                if existing is not None:
+                    conn.close()
+                    return False
             cur.execute(
                 """
                 INSERT INTO js8_messages
@@ -1475,7 +2300,10 @@ class MessageIngestor:
                     str(source_path or ""),
                 ),
             )
+            inserted = int(cur.rowcount or 0) > 0
             conn.commit()
             conn.close()
+            return inserted
         except Exception as e:
             log.debug("MessageIngest: failed to insert local js8 message: %s", e)
+            return False

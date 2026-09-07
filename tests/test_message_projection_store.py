@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sqlite3
 
+from freqinout.core.fio_spotter_store import list_spotter_activity
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
     MessageArtifactRecord,
@@ -186,6 +187,34 @@ def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -
         assert conn.execute("SELECT COUNT(*) FROM message_external_refs").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_projected_message_query_stays_bounded_on_large_corpus(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = _source()
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        with conn:
+            upsert_message_source(conn, source)
+            for idx in range(100050):
+                message_id = stable_message_id(source.source_id, "bulk", idx)
+                upsert_message_projection(conn, _message(message_id, event_ts=1_780_000_000.0 + idx))
+    finally:
+        conn.close()
+
+    rows = list_projected_messages(db_path, limit=100050)
+    spotter_rows = list_spotter_activity(
+        db_path=db_path,
+        source_families=(source.source_family,),
+        limit=100000,
+    )
+
+    assert len(rows) == 20000
+    assert len(spotter_rows) == 500
+    assert rows[0]["event_ts"] > rows[-1]["event_ts"]
+    assert rows[0]["message_id"] == stable_message_id(source.source_id, "bulk", 100049)
+    assert rows[-1]["message_id"] == stable_message_id(source.source_id, "bulk", 80050)
 
 
 def test_projected_message_query_accepts_multiple_source_families(tmp_path) -> None:

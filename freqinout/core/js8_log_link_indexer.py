@@ -116,6 +116,8 @@ class JS8LogLinkIndexer:
         if len(parts) < 5:
             return None
         dt_str, freq_txt, _shift, snr_txt, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
+        if self._is_heartbeat_traffic(msg):
+            return None
         origin, dest, relay_via = self._extract_origin_dest_relay(msg)
         if not origin or not dest:
             return None
@@ -501,6 +503,8 @@ class JS8LogLinkIndexer:
             msg_part = line.split(":", 1)[1]
         # Trim leading colon/space
         msg_part = msg_part.lstrip(": ").strip()
+        if self._is_heartbeat_traffic(msg_part):
+            return None
         origin, dest, relay_via = self._extract_origin_dest_relay(msg_part)
         if not origin or not dest:
             return None
@@ -543,6 +547,11 @@ class JS8LogLinkIndexer:
         if text in {"ALLCALL", "ALL", "CQ", "HEARTBEAT", "HB"}:
             return False
         return bool(re.match(r"^[A-Z0-9]+(?:/[A-Z0-9]{1,4})?$", text))
+
+    @staticmethod
+    def _is_heartbeat_traffic(msg: str) -> bool:
+        text = (msg or "").upper()
+        return bool(re.search(r"\b(?:HEARTBEAT|HB)\b", text))
 
     def _extract_origin_dest_relay(self, msg: str) -> tuple[str, str, str]:
         if ":" not in msg:
@@ -779,6 +788,8 @@ class JS8LogLinkIndexer:
                         last_pos = fh.tell()
                         parts = line.split("\t", 4)
                         msg = parts[4] if len(parts) >= 5 else ""
+                        if self._is_heartbeat_traffic(msg):
+                            continue
                         origin = self._extract_origin_call(msg)
                         freq_hz = None
                         try:
@@ -817,6 +828,8 @@ class JS8LogLinkIndexer:
                             elif ":" in line:
                                 msg_part = line.split(":", 1)[1]
                             msg_part = msg_part.lstrip(": ").strip()
+                            if self._is_heartbeat_traffic(msg_part):
+                                continue
                             origin = self._extract_origin_call(msg_part)
                             freq_hz = None
                             try:

@@ -1407,3 +1407,80 @@ at 65 percent in an unrelated log-viewer construction test; that test passes in
 isolation. The authoritative fresh-process gate covered all 172 test files with
 zero failing files and two skip-only files. Python compilation and
 `git diff --check` pass.
+
+## 2026-09-07 — Slice 3 FIO Spotter and message-ingestion reliability
+
+FIO Spotter is now a lazy top-level station service in both expanded and
+compact navigation. Its browser workflow is `Activity`, `Watches`, `Expect`,
+`Forms`, and `Imports`. Activity uses the existing bounded message projection
+and provides Inbox, Map, Operator, and Compose handoffs. Watches owns CRUD,
+enable/disable, expiry, source/radio scope, test matching, last-match count, and
+health in the shared station watch store. Imported SuperSpotter search rows are
+converted into these watches with provenance instead of remaining only as an
+opaque archive.
+
+Expect administration now combines the runtime enabled/paused state, editable
+rules and allow policies, caller/group blocks, allow-any, source scope, radio
+and JS8 identity, schedule, reply limits, cooldown, and request/reply history.
+Forms provides the bounded MCF catalog, purpose and FIO-routing checkboxes,
+factory classification, source preview, persistent mapping save, and Messages
+Compose handoff. Imports remains preview-first and reports candidates,
+duplicates, skips, conflicts, and applied counts. Every page owns its vertical
+overflow; page-level horizontal scrolling is disabled, and compact action rows
+reflow rather than expanding the shell.
+
+The optional dynamic FLAMP Expect service recognizes only exact,
+case-insensitive `E? Q <four hexadecimal characters>` requests. It is off by
+default and shares the normal unattended-enable, pause, caller/group policy,
+source resolution, RF Guard, and audit controls. A source-scoped additive
+projection preserves digit-leading Q IDs and distinguishes complete,
+authoritative partial, unavailable, and absent state. `YES` requires a known
+total and complete block set; a missing-block response requires a validated
+total/block set; ambiguous partial data is held. `NO` requires a recent
+successful source scan. Old/replayed and relayed requests are held rather than
+transmitted.
+
+The request path performs indexed database reads only. Background projection
+runs only while the dynamic service is enabled, performs one directory index,
+and reuses unchanged mtime/hash records without reparsing or rehashing files.
+Durable atomic request claims enforce replay dedupe, maximum replies, cooldown,
+and bounded failed-send retry. A per-endpoint transaction lock covers selected
+target handling, preflight, transmit-text setup, send, and claim/audit outcome.
+
+Relevant free-form JS8 traffic now enters Messages from both `DIRECTED.TXT` and
+JS8 API events when addressed to the station's current callsign, a historical
+callsign alias, or an associated group. Specialized FIO Spotter forms and
+dynamic Q traffic retain their dedicated paths. Heartbeat and SNR-only records
+are excluded before link/projection work. Source radio, JS8 instance, source
+key, and source path are preserved, while semantic cross-adapter dedupe prevents
+the same traffic from appearing twice after refresh, rotation, or replay.
+
+Delegation and review: Terra/high audited JS8SuperSpotter 2.6 and implemented
+the primary five-tab UI/navigation package; Luna/high implemented the FLAMP
+parser/projection, Expect claim/dispatch, and endpoint serialization package;
+Mini/high implemented focused heartbeat, bounded-query, and directed-message
+tests plus a mechanical directed-ingest pass. The high-reasoning primary model
+owned the product boundary, migration and concurrency review, background-scan
+safety, historical identity and cross-adapter integration, Forms/Expect
+completion, all delegated-diff review, visual QA, and the final exit gate.
+
+Primary review corrected missing local-table initialization on the new directed
+path, end-marker interference with noise filtering, duplicate follow-on queue
+work, unsafe live relay-directory scanning, repeated O(N²) FLAMP indexing, an
+unisolated settings test, stale fixture dates, and compact page overflow. The
+new schemas are additive and idempotent; an explicit migration test preserves
+an existing watch row across repeated initialization.
+
+Verification: the focused Message/FIO Spotter/CommStat regression set passed
+485 tests with two environment skips before final refinements; the final
+integrated Slice 3/core/background/shell selection passed 178 tests with one
+environment skip. A 100,050-row retained-message fixture proves the 20,000-row core cap,
+500-row Spotter service cap, newest-first ordering, and the UI's separate
+200-row request limit. Offscreen visual review covered Expect at 1400x900
+Light/Normal and Expect plus Forms at 900x560 Dark/Large Text with zero
+page-level horizontal overflow. The final authoritative fresh-process run
+passed 2,519 tests with 37 environment-dependent skips and no failing files.
+The monolithic process again reached the unrelated long-lived Qt log-viewer
+lifecycle fault after 68 percent; the affected tests pass in fresh processes.
+Python compilation and `git diff --check` pass. Slice 3 is closed, and Slice 4
+has not begun.

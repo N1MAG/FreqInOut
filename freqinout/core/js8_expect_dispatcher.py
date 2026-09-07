@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Optional
 
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
-from freqinout.core.js8_expect_store import ExpectEvaluationResult, default_expect_db_path
+from freqinout.core.js8_expect_store import (
+    ExpectEvaluationResult,
+    ExpectRequestClaimResult,
+    claim_expect_request,
+    complete_expect_request_claim,
+    default_expect_db_path,
+)
 from freqinout.core.js8_msg_auth import sign_js8_text
 from freqinout.core.js8_msg_auth_store import MSG_AUTH_SCOPE_SIGNING, load_msg_auth_keys
 from freqinout.core.js8_send_service import JS8SendResult, send_js8_message_guarded
@@ -219,6 +225,9 @@ def dispatch_expect_auto_reply(
     target_group: object = "",
     db_path: Optional[str | Path] = None,
     timeout_s: float = 0.8,
+    claim_event_key: str = "",
+    claim_q_id: str = "",
+    claim_already_acquired: bool = False,
 ) -> ExpectDispatchResult:
     if evaluation.decision != "reply-ready":
         result = ExpectDispatchResult("skipped", f"Expect decision is {evaluation.decision}; no auto-reply sent.")
@@ -297,6 +306,38 @@ def dispatch_expect_auto_reply(
         )
         return result
 
+    claim = None
+    if str(claim_event_key or "").strip():
+        if claim_already_acquired:
+            claim = ExpectRequestClaimResult(True, "claimed", "Request claim was acquired by source dispatch.", str(claim_event_key))
+        else:
+            claim = claim_expect_request(
+                event_key=str(claim_event_key),
+                expect_entry_id=int(evaluation.expect_entry_id or 0),
+                q_id=str(claim_q_id or evaluation.q_id or evaluation.expect_key or ""),
+                source_radio_id=source_radio_id,
+                source_js8_instance_id=source_js8_instance_id,
+                requesting_callsign=requesting_callsign,
+                target_group=target_group,
+                max_replies=int(evaluation.max_replies or 1),
+                cooldown_seconds=int(evaluation.cooldown_seconds or 0),
+                db_path=Path(db_path) if db_path is not None else None,
+            )
+        if not claim.acquired:
+            result = ExpectDispatchResult(claim.status, claim.reason)
+            _record_dispatch_audit(
+                evaluation=evaluation,
+                decision=result.decision,
+                reason=result.reason,
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                source_js8_instance_id=source_js8_instance_id,
+                requesting_callsign=requesting_callsign,
+                target_group=target_group,
+                db_path=db_path,
+            )
+            return result
+
     send_result = send_js8_message_guarded(client, response_text, timeout_s=timeout_s)
     decision = "sent" if send_result.sent else "blocked"
     reason = send_result.detail
@@ -309,6 +350,15 @@ def dispatch_expect_auto_reply(
         transmitted_text=send_result.transmitted_text,
         send_result=send_result,
     )
+    if claim is not None:
+        complete_expect_request_claim(
+            event_key=claim.event_key,
+            status="sent" if result.sent else "failed",
+            reason=reason,
+            reply_text=result.transmitted_text,
+            db_path=Path(db_path) if db_path is not None else None,
+            retry_after_seconds=30 if not result.sent else 0,
+        )
     _record_dispatch_audit(
         evaluation=evaluation,
         decision=result.decision,

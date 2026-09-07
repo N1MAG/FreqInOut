@@ -1,8 +1,8 @@
 # Production Reliability And Workflow Remediation Spec
 
-Status: Slices 0–1 implemented; Slice 1 automated gate passed 2026-09-06;
-physical macOS reconnect and Linux/live-device gates pending; Slices 2–6 not
-started
+Status: Slices 0, 2, and 3 implemented with automated gates passed; Slice 1
+software gate passed 2026-09-06 with the T1000-E reconnect hardware exception
+documented; Slices 4–6 not started
 
 Date: 2026-09-06
 
@@ -68,7 +68,7 @@ line numbers are intentionally omitted because the affected files are active.
 | BBS catalog | `core/varac_bbs_library_store.py`, `varac_bbs_vault.py`, `varac_bbs_inventory.py` | station-owned catalog/query/reconciliation services |
 | BBS UI/actions | VarAC BBS tabs in `gui/settings_tab.py`; publication actions in `gui/message_viewer_tab.py` | one reusable tree/publication component in a station BBS workspace |
 | Messages | `gui/message_viewer_tab.py`, `core/message_ingest.py`, `message_source_projectors.py`, `message_projection_store.py`, `message_file_scanner.py` | incremental source adapters plus bounded projection query/model |
-| FIOSpotter | `core/js8spotter_importer.py`, Spotter ingest/projection, read-only review in Settings | station-owned watch/alert rule service and administration workspace |
+| FIO Spotter | `core/js8spotter_importer.py`, `core/js8_expect_*`, Spotter ingest/projection, forms, and legacy administration in Settings | top-level station service with Activity, Watches, Expect, Forms, and Imports browser tabs backed by shared FIO data |
 | Launch Control | `core/launch_orchestrator.py`, launch section in `gui/settings_tab.py`, profile fields in `core/multi_radio_store.py` | per-radio bundle repository plus one station launch planner |
 | SOP Builder | `gui/sop_tab.py` | widget-independent action model, stacked card editor, responsive conflict drawer |
 | Plan Builder | `gui/freq_planner_tab.py` | bounded plan projection model and wide/compact layouts |
@@ -516,23 +516,134 @@ The redundant generic `Kind = CommStat` column is removed from CommStat focus.
 other aggregation. Operational report severity never changes when a message is
 marked read.
 
-### FIOSpotter administration
+### FIO Spotter product boundary and navigation
 
-Add a station-scoped **FIOSpotter Watches & Alerts** workspace reachable from
-Messages tools and Settings. It owns:
+**FIO Spotter is a top-level, station-owned service**, not a subordinate
+Messages tool and not merely a compatibility page for JS8Spotter. It receives a
+first-class expanded-navigation row and a dedicated compact-navigation icon.
+The label is `FIO Spotter` where space permits and `Spotter` on the compact
+rail. Settings may link into the service but must not remain the primary home
+for Spotter administration.
 
-- callsign, group, topic/keyword, status, and location watch rules;
-- enablement, priority/severity, notification behavior, source/radio scope, and
-  optional expiry;
-- concise last-match, match-count, and health state;
-- add/edit/disable/delete/test actions;
-- staged import/review from SuperSpotter/original JS8Spotter data where
-  compatible.
+FIO Spotter uses a browser-tab workflow familiar to JS8Spotter and
+JS8SuperSpotter users without reproducing their monolithic UI or separate data
+silos. Tabs proceed left to right:
 
-Known operators and their explicitly associated groups populate autocomplete
-and bulk-selection choices. They do not silently create enabled watches. The
-same rule service supplies ingestion alerts, Inbox focus, Ops Center attention,
-and Map pins so different screens cannot disagree.
+1. **Activity** — bounded recent/matched traffic with age, source, group,
+   callsign, form, topic, status, and radio chips; a selected record exposes the
+   decoded content, evidence, and actions to open Inbox, Map, operator history,
+   or compose a reply.
+2. **Watches** — station-owned callsign, group, topic/keyword, status, and
+   location rules with enablement, priority, source/radio scope, optional
+   expiry, last match, count, and health. Add, edit, disable, delete, and test
+   are first-class actions.
+3. **Expect** — one master rule list plus a readable detail/editor area for
+   request token, reply, allowed callers/groups, blocked callers, source/radio,
+   maximum replies, cooldown, expiry/schedule, enabled state, and separate
+   unattended auto-reply permission. Persistent chips show whether replies and
+   automatic transmission are active or paused. A Requests/Replies history
+   view shows request, decision, reason, source, age, and transmitted response.
+4. **Forms** — FIO's known MCF/form catalog, categories, mappings, validation,
+   import folder, and compose/preview actions. Human names lead; protocol codes
+   remain supporting detail.
+5. **Imports** — previewed, staged import of compatible JS8Spotter and
+   JS8SuperSpotter history, searches/watches, Expect rules, operator/grid
+   references, and forms. The preview reports candidate, duplicate, skipped,
+   conflict, and applied counts and retains source/provenance.
+
+Tabs use text plus familiar icons, graphical state chips, and a responsive
+master/detail layout. Chips wrap or scroll before controls collapse into long
+dropdowns. Icon-only controls require accessible names and tooltips. Compact
+layouts stack the detail panel below the selected bounded table rather than
+compressing columns. The Station Control Bar remains the Where/When surface;
+FIO Spotter explains the What and Why of watches, matches, requests, and replies.
+
+Known operators, callsign aliases, associated groups, location evidence,
+traffic projections, and watch matches come from existing FIO stores. FIO
+Spotter does not create a parallel roster, map, message database, or search
+index. Autocomplete queries the bounded operator/group indexes and still allows
+an explicit unknown callsign or term. Existing Settings controls migrate to or
+deep-link into this workspace; there is one writer for each rule.
+
+The same rule service supplies ingestion alerts, Inbox focus, Ops Center
+attention, and Map pins so different screens cannot disagree. Messages remains
+the complete traffic triage surface; FIO Spotter is the administration and
+focused operational browser for Spotter-specific behavior.
+
+### Dynamic FLAMP Expect query service
+
+FIO Spotter may explicitly enable a built-in dynamic Expect service for the exact,
+case-insensitive request `E? Q <qid>`, where `<qid>` is exactly four hexadecimal
+characters. The query value is supplied by the received message; operators do
+not create one rule per Q ID. For `E? Q 970F`, the only valid response payloads
+are:
+
+- `Q 970F YES` when an authoritative current FLAMP transfer has a known total
+  block count, every required block is present, and the source artifact still
+  exists;
+- `Q 970F NO` when no eligible transfer is held by the receiving station; or
+- `Q 970F 22,23` when an authoritative partial-transfer record proves those
+  exact blocks are missing.
+
+The missing-block response is confidence-gated. FIO must not derive a missing
+list from filename fragments, a highest-seen-block fallback, or a generated BBS
+block-list helper. A partial transfer whose total or available-block set cannot
+be validated is held for review and audited; it must not be described as
+complete and must not emit a misleading `NO`. Missing numbers are sorted,
+deduplicated, range-checked, and bounded to the JS8 response budget. If the list
+cannot fit safely, the request is held with a visible reason.
+
+The FLAMP transfer projection persists canonical digit-leading identifiers such
+as `970F`, source radio/JS8 instance, relay path, known total, available/missing
+blocks, state (`complete`, `partial`, `unavailable`), source mtime/hash,
+observation time, and parser confidence. A companion source-scan record stores
+the radio/JS8 identity, relay directory, success, bounded file count, error, and
+scan time. The existing background ingest worker refreshes this projection;
+on-air request handling performs database-only lookup and never walks or hashes
+the relay directory. `NO` is allowed only after a recent successful scan proves
+the source has no matching transfer. A missing, failed, or stale scan holds the
+request with a visible reason. Missing source files transition the record to
+unavailable without an error loop.
+
+Dynamic Q service safety is cumulative:
+
+- the dynamic service defaults off after upgrade; the service, normal Expect
+  processing, unattended replies, and the matching
+  caller/group allow policy are enabled;
+- the message is a complete directed record addressed to this station, or to an
+  explicitly enabled group policy; group replies are opt-in to avoid a reply
+  storm;
+- sender, target, source radio/JS8 instance, event identity, and Q ID validate;
+- relayed `*DE*` requests are held unless a separate trusted-relay policy is
+  explicitly enabled;
+- the receiving radio resolves to one concrete JS8 endpoint and RF Guard passes
+  immediately before transmit; there is no primary/global-radio fallback;
+- one durable request claim is acquired before transmit, and cooldown/max-reply
+  policy is enforced atomically across restart and replay; and
+- an endpoint-level transaction lock prevents another worker from interleaving
+  preflight, target selection, text setup, send, and claim/audit completion.
+
+A directed request older than the bounded live-request window is held rather
+than replayed after an offset reset or first installation. The Expect tab owns
+the dynamic-service switch, a `New FLAMP Q rule` guided action, the source-index
+health summary, normal pause/unattended controls, and request/reply audit views.
+
+Reply routing is direct to the requesting callsign for a station-addressed
+request and to the addressed group only when group-query replies were expressly
+enabled. Every accepted, blocked, held, failed, deduplicated, and sent decision
+is visible in Expect history with source and reason. A failed send uses bounded
+backoff and never immediately loops.
+
+### SuperSpotter familiarity contract
+
+The reviewed JS8SuperSpotter 2.6 concepts retained in the FIO design are its
+operational activity/search browser, Expect rule list and reply history, clear
+pause/automatic-TX state, MCForms catalog, roster/location context, watch/search
+terms, map handoffs, and previewed import. FIO deliberately replaces separate
+SuperSpotter roster, map, CommStat, and message stores with its existing
+operator, observation, Map, CommStat, Inbox, and Message Intelligence services.
+Email/APRS gateways, downloaded map tiles, and SuperSpotter's unguarded direct
+socket-send behavior remain out of scope.
 
 ### Message performance acceptance
 
@@ -545,6 +656,17 @@ and Map pins so different screens cannot disagree.
   excluded; rotation and delayed traffic are covered.
 - CommStat read state, report severity, summary, and source remain independent
   through mark-read, filter, restart, and reprojection.
+- Opening FIO Spotter does not construct or load its history until first use.
+  Each browser tab uses bounded indexed queries and shows an explicit result
+  scope; changing chips does not rebuild unrelated tabs.
+- Dynamic Q lookup is indexed and bounded, request evaluation and transport run
+  off the GUI thread, and the Station Control Bar remains responsive during
+  import, history refresh, or Expect dispatch.
+- A restart/replay or concurrent duplicate dynamic request produces one durable
+  claim and at most one transmitted reply.
+- The exact `E? Q 970F` fixture covers absent, complete, authoritative partial,
+  unknown-total, malformed, wrong-source, paused, RF-guard-held, send-failed,
+  duplicate, cooldown, and restart cases.
 
 ## Launch Control Remediation
 
@@ -1176,12 +1298,43 @@ Risk: **high**, due persistence migration and external file publication.
 
 Deliverables: incremental relevant-directed JS8 ingest, unified dedupe, bounded
 query/model path, always-visible select-all, newest-first stability, separated
-CommStat fields, and FIOSpotter watch administration.
+CommStat fields, a top-level lazy FIO Spotter service with Activity/Watches/
+Expect/Forms/Imports tabs, complete Expect administration and history, and the
+guarded dynamic `E? Q <qid>` FLAMP response service. Existing FIO operators,
+groups, aliases, observations, messages, map routes, forms, and imports remain
+the authoritative data sources.
 
 Exit gate: production-scale corpus meets budgets and all source/read/severity
-contracts pass across restart/reprojection.
+contracts pass across restart/reprojection; FIO Spotter passes Normal/Large Text
+and light/dark compact/wide navigation tests; Expect administration persists;
+and the dynamic Q matrix proves exact parsing, source-scoped indexed state,
+confidence-gated responses, RF/source guard behavior, durable duplicate and
+cooldown enforcement, restart safety, and one non-interleaved same-endpoint
+transmission. Missing-block replies remain disabled unless the authoritative
+partial-transfer fixture passes.
 
 Risk: **high** for ingest/dedupe and **medium** for presentation/admin UI.
+
+Implementation result (2026-09-07): **exit gate passed**. Relevant free-form
+JS8 traffic addressed to the current or historical station callsign or an
+associated group is projected once from `DIRECTED.TXT` and API seams with
+source identity preserved; heartbeat/SNR traffic remains excluded. FIO Spotter
+is a lazy top-level service with the five specified browser tabs. Watches and
+legacy searches share the station watch store; Expect rules, allow policies,
+runtime state, source routing, schedules, audit history, and the guarded dynamic
+FLAMP Q service are administered together. Forms exposes editable routing
+mappings, factory classification, bounded preview, and Compose handoff.
+
+The dynamic service is off by default. Its additive tables are initialized
+idempotently, its live request path is database-only, and its background
+projection reuses unchanged file mtime/hash state rather than reparsing relay
+files. Missing-block replies are enabled only for authoritative total/block
+fixtures. A 100,050-row retained-message fixture proves the core query cap and
+the stricter FIO Spotter cap; compact Dark/Large Text and wide Light/Normal
+visual gates pass without page-level horizontal scrolling. The authoritative
+fresh-process repository gate passes 2,519 tests with 37 environment skips.
+The known monolithic Qt lifetime fault remains reproducible only after many
+test modules share one process; the same files pass in isolated processes.
 
 ### Slice 4 — Radio launch bundles
 

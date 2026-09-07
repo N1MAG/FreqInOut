@@ -1279,10 +1279,27 @@ class BackgroundIngestController(QObject):
                     expect_dispatch_client_factory=coordinator.client_factory_for_ingest(),
                     expect_auto_reply_enabled=coordinator.runtime_unattended_enabled(),
                 )
+                js8_instance_id = str(
+                    profile.get("js8_instance_id", "")
+                    or profile.get("name", "")
+                    or radio_id
+                )
+                if bool(profile_settings.get("js8_expect_dynamic_flamp_enabled", False)):
+                    try:
+                        ingestor.refresh_dynamic_flamp_state(
+                            source_radio_id=radio_id,
+                            js8_instance_id=js8_instance_id,
+                        )
+                    except Exception as exc:
+                        log.debug(
+                            "BackgroundIngest: FLAMP transfer projection failed for %s: %s",
+                            profile_name,
+                            exc,
+                        )
                 inserted = ingestor.ingest_spotter_from_directed(
                     directed_path=Path(directed).expanduser(),
                     source_radio_id=radio_id,
-                    js8_instance_id=str(profile.get("js8_instance_id", "") or profile.get("name", "") or radio_id),
+                    js8_instance_id=js8_instance_id,
                     source_key=directed_source_id,
                     offset_key=f"spotter_directed_offset_{directed_source_id}" if directed_source_id else f"spotter_directed_offset_radio_{radio_id}",
                     evaluate_expect=True,

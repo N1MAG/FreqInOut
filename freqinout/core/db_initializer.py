@@ -555,6 +555,200 @@ def _ensure_js8_expect_tables(conn: sqlite3.Connection) -> None:
         ON js8_expect_management_audit(created_ts DESC, expect_entry_id)
         """
     )
+    _ensure_fio_spotter_tables(conn)
+    _ensure_flamp_dynamic_tables(conn)
+
+
+def _ensure_fio_spotter_tables(conn: sqlite3.Connection) -> None:
+    """Create the additive station-owned watch service schema."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fio_spotter_watches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            watch_kind TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            match_mode TEXT NOT NULL DEFAULT 'contains',
+            priority TEXT NOT NULL DEFAULT 'watch',
+            source_families_json TEXT NOT NULL DEFAULT '[]',
+            source_radio_ids_json TEXT NOT NULL DEFAULT '[]',
+            notification_mode TEXT NOT NULL DEFAULT 'in-app',
+            expires_ts REAL NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_match_ts REAL NOT NULL DEFAULT 0,
+            match_count INTEGER NOT NULL DEFAULT 0,
+            health TEXT NOT NULL DEFAULT 'ready',
+            import_source TEXT,
+            notes TEXT,
+            created_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "fio_spotter_watches",
+        {
+            "name": "TEXT NOT NULL DEFAULT ''",
+            "watch_kind": "TEXT NOT NULL DEFAULT 'keyword'",
+            "pattern": "TEXT NOT NULL DEFAULT ''",
+            "match_mode": "TEXT NOT NULL DEFAULT 'contains'",
+            "priority": "TEXT NOT NULL DEFAULT 'watch'",
+            "source_families_json": "TEXT NOT NULL DEFAULT '[]'",
+            "source_radio_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "notification_mode": "TEXT NOT NULL DEFAULT 'in-app'",
+            "expires_ts": "REAL NOT NULL DEFAULT 0",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "last_match_ts": "REAL NOT NULL DEFAULT 0",
+            "match_count": "INTEGER NOT NULL DEFAULT 0",
+            "health": "TEXT NOT NULL DEFAULT 'ready'",
+            "import_source": "TEXT",
+            "notes": "TEXT",
+            "created_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watches_enabled_kind "
+        "ON fio_spotter_watches(enabled, watch_kind, priority, updated_ts DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fio_spotter_watches_expiry "
+        "ON fio_spotter_watches(expires_ts, enabled)"
+    )
+
+
+def _ensure_flamp_dynamic_tables(conn: sqlite3.Connection) -> None:
+    """Create the durable, source-scoped state used by dynamic FLAMP Expect.
+
+    These tables are additive and intentionally do not alter or delete any
+    existing traffic/message rows.  They live beside the Expect tables because
+    both the transfer projection and request claims are part of the FIO Spotter
+    runtime database.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS flamp_transfer_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            q_id TEXT NOT NULL,
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            source_path TEXT NOT NULL DEFAULT '',
+            source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+            source_sha256 TEXT NOT NULL DEFAULT '',
+            total_blocks INTEGER,
+            available_blocks_json TEXT NOT NULL DEFAULT '[]',
+            missing_blocks_json TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'unavailable',
+            parser_confidence REAL NOT NULL DEFAULT 0,
+            observed_ts REAL NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL DEFAULT 0,
+            UNIQUE(q_id, source_radio_id, source_js8_instance_id)
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "flamp_transfer_state",
+        {
+            "q_id": "TEXT NOT NULL DEFAULT ''",
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "source_path": "TEXT NOT NULL DEFAULT ''",
+            "source_mtime_ns": "INTEGER NOT NULL DEFAULT 0",
+            "source_sha256": "TEXT NOT NULL DEFAULT ''",
+            "total_blocks": "INTEGER",
+            "available_blocks_json": "TEXT NOT NULL DEFAULT '[]'",
+            "missing_blocks_json": "TEXT NOT NULL DEFAULT '[]'",
+            "state": "TEXT NOT NULL DEFAULT 'unavailable'",
+            "parser_confidence": "REAL NOT NULL DEFAULT 0",
+            "observed_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_flamp_transfer_state_source ON flamp_transfer_state(q_id, source_radio_id, source_js8_instance_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flamp_transfer_state_lookup ON flamp_transfer_state(q_id, state, source_radio_id, source_js8_instance_id)"
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS flamp_transfer_state_scans (
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            relay_dir TEXT NOT NULL DEFAULT '',
+            scan_success INTEGER NOT NULL DEFAULT 0,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            error_text TEXT NOT NULL DEFAULT '',
+            scanned_ts REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(source_radio_id, source_js8_instance_id)
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "flamp_transfer_state_scans",
+        {
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "relay_dir": "TEXT NOT NULL DEFAULT ''",
+            "scan_success": "INTEGER NOT NULL DEFAULT 0",
+            "file_count": "INTEGER NOT NULL DEFAULT 0",
+            "error_text": "TEXT NOT NULL DEFAULT ''",
+            "scanned_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS js8_expect_request_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            expect_entry_id INTEGER NOT NULL DEFAULT 0,
+            q_id TEXT NOT NULL DEFAULT '',
+            source_radio_id TEXT NOT NULL DEFAULT '',
+            source_js8_instance_id TEXT NOT NULL DEFAULT '',
+            requesting_callsign TEXT NOT NULL DEFAULT '',
+            target_group TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'claimed',
+            reply_text TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 1,
+            claimed_ts REAL NOT NULL DEFAULT 0,
+            sent_ts REAL,
+            next_retry_ts REAL NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL DEFAULT 0
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "js8_expect_request_claims",
+        {
+            "event_key": "TEXT NOT NULL DEFAULT ''",
+            "expect_entry_id": "INTEGER NOT NULL DEFAULT 0",
+            "q_id": "TEXT NOT NULL DEFAULT ''",
+            "source_radio_id": "TEXT NOT NULL DEFAULT ''",
+            "source_js8_instance_id": "TEXT NOT NULL DEFAULT ''",
+            "requesting_callsign": "TEXT NOT NULL DEFAULT ''",
+            "target_group": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'claimed'",
+            "reply_text": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "attempts": "INTEGER NOT NULL DEFAULT 1",
+            "claimed_ts": "REAL NOT NULL DEFAULT 0",
+            "sent_ts": "REAL",
+            "next_retry_ts": "REAL NOT NULL DEFAULT 0",
+            "updated_ts": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_js8_expect_claims_policy ON js8_expect_request_claims(expect_entry_id, q_id, source_radio_id, source_js8_instance_id, requesting_callsign, status)"
+    )
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:

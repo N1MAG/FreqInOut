@@ -11,6 +11,7 @@ from freqinout.core.js8_send_service import (
     preflight_js8_send,
     send_js8_message_guarded,
 )
+from freqinout.core import js8_send_service
 from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiEndpoint
 
 
@@ -202,6 +203,38 @@ def test_guarded_send_does_not_transmit_when_queue_not_empty() -> None:
     finally:
         client.stop()
         server.stop()
+
+
+def test_guarded_send_serializes_the_full_transaction_per_endpoint(monkeypatch) -> None:
+    class _Client:
+        endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+
+    events: list[str] = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def fake_unlocked(_client, message: str, **_kwargs):
+        events.append(f"start:{message}")
+        if message == "one":
+            first_entered.set()
+            assert release_first.wait(timeout=1.0)
+        events.append(f"end:{message}")
+        return message
+
+    monkeypatch.setattr(js8_send_service, "_send_js8_message_guarded_unlocked", fake_unlocked)
+    client = _Client()
+    first = threading.Thread(target=send_js8_message_guarded, args=(client, "one"))
+    second = threading.Thread(target=send_js8_message_guarded, args=(client, "two"))
+    first.start()
+    assert first_entered.wait(timeout=1.0)
+    second.start()
+    time.sleep(0.03)
+    assert events == ["start:one"]
+    release_first.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+    assert not first.is_alive() and not second.is_alive()
+    assert events == ["start:one", "end:one", "start:two", "end:two"]
 
 
 def test_endpoint_from_radio_profile_prefers_profile_values() -> None:

@@ -1,5 +1,24 @@
 # SuperSpotter Offline Integration Spec
 
+## Status And Slice 3 Authority
+
+The production-remediation Slice 3 contract in
+`production_reliability_and_workflow_remediation_spec.md` now promotes **FIO
+Spotter** to a top-level station service. Where this older document describes
+Spotter as a Messages or Settings sub-workspace, the Slice 3 contract controls.
+FIO Spotter uses the shared FIO stores and services described here; it is not a
+renamed external JS8Spotter process.
+
+Slice 3 implementation and its automated exit gate completed 2026-09-07. The
+remaining items in this document are future refinements unless the production
+remediation specification explicitly assigns them to a later slice.
+
+The first-class service uses five browser tabs: `Activity`, `Watches`, `Expect`,
+`Forms`, and `Imports`. This preserves the recognizable SuperSpotter concepts of
+matched activity, searches/watches, Expect rules and reply history, MCForms,
+roster/location context, map handoffs, and migration tools while giving each
+task a bounded, responsive FIO-native surface.
+
 ## Intent
 
 FIO should absorb the strongest offline operational ideas from JS8SuperSpotter
@@ -7,7 +26,8 @@ FIO should absorb the strongest offline operational ideas from JS8SuperSpotter
 The goal is a unified operator workflow across Messages, Map, ControlFreq, and
 SOP Builder:
 
-- Messages remains the detailed triage and compose surface.
+- Messages remains the detailed triage and compose surface; FIO Spotter owns
+  Spotter-specific operational browsing and administration.
 - Map shows spatial operational awareness from every ingest source.
 - ControlFreq shows what matters now for the selected operating context.
 - SOP Builder turns received traffic into actionable "what to do when I am
@@ -54,6 +74,39 @@ are directly relevant to FIO:
 - Do not make auto-TX behavior easy to enable accidentally. Expect auto-reply
   remains explicit, reviewable, and policy-controlled.
 - Do not hard-code MagNet-only condition logic into FIO.
+- Do not duplicate FIO operators, groups, observations, maps, messages, or form
+  metadata merely to make the Spotter service look familiar.
+- Do not copy SuperSpotter's unguarded JS8 socket transmit sequence. FIO's
+  source resolution, RF Guard, runtime pause, durable request claim, cooldown,
+  and dispatch audit remain mandatory.
+
+## Dynamic FLAMP Q Expect Service
+
+Slice 3 adds an optional built-in Expect service for `E? Q <four-hex-qid>`.
+The dynamic query is evaluated before fixed `F!xxx` form Expect matching but
+uses the same enabled/paused runtime, allow policies, source resolution, RF
+Guard, and dispatch audit. It replies through the JS8 instance that received the
+request and never falls back to another radio.
+
+FIO persists authoritative FLAMP transfer state because current compatibility
+parsers do not reliably retain digit-leading IDs such as `970F` and can mistake
+the highest observed block for a known transfer total. `Q <id> YES` requires a
+known total and complete validated block set; `Q <id> <missing-list>` requires
+an authoritative total and available-block set; no eligible transfer produces
+`Q <id> NO`. Ambiguous partial state is held and audited without transmission.
+Generated BBS block-list helpers and filename-only inference are not proof.
+
+The service is off by default after upgrade. Its source-scoped FLAMP index is
+refreshed by background ingest and records scan success/freshness; the live RF
+request path performs only indexed database reads. An absent Q ID may produce
+`NO` only after a recent successful scan. A stale, failed, or never-run scan is
+held and audited, as is an old request replayed after an offset reset. The FIO
+Spotter Expect tab exposes the opt-in switch, guided Q-rule setup, source index
+health, pause state, and request/reply history.
+
+The full parser, confidence, indexed lookup, group opt-in, durable dedupe,
+cooldown, endpoint serialization, and acceptance matrix are defined in the
+production-remediation Slice 3 contract.
 
 Future-facing notes:
 
@@ -373,6 +426,16 @@ Implementation status:
   plus `-sig` defaults, and saved group overrides.
 
 ## UX Model
+
+### FIO Spotter
+
+FIO Spotter is a lazy top-level workspace with graphical status chips and a
+responsive master/detail layout. Its Activity browser is a focused view of
+existing message/observation projections; Watches edits the shared alert rules;
+Expect owns fixed and dynamic query administration plus Requests/Replies audit;
+Forms owns the known catalog/mappings and compose handoff; Imports previews and
+applies compatible legacy data with provenance. Settings exposes links and
+low-level paths only.
 
 ### Messages
 

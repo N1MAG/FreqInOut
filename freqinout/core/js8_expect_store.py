@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -54,6 +55,146 @@ class ExpectEvaluationResult:
     msg_auth_sign_callsign: str = ""
     msg_auth_include_datecode: bool = False
     msg_auth_datecode: str = ""
+    q_id: str = ""
+    max_replies: int = 1
+    cooldown_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class ExpectRequestClaimResult:
+    acquired: bool
+    status: str
+    reason: str
+    event_key: str
+    attempts: int = 0
+
+
+def claim_expect_request(
+    *,
+    event_key: str,
+    expect_entry_id: int,
+    q_id: str,
+    source_radio_id: object,
+    source_js8_instance_id: object,
+    requesting_callsign: object,
+    target_group: object = "",
+    max_replies: int = 1,
+    cooldown_seconds: int = 0,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> ExpectRequestClaimResult:
+    """Atomically claim a dynamic request across workers and restarts."""
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(event_key or "").strip()
+    canonical_q = str(q_id or "").strip().upper()
+    radio = str(source_radio_id or "").strip()
+    js8_id = str(source_js8_instance_id or "").strip()
+    caller = _norm_call(requesting_callsign)
+    group = _norm_group(target_group)
+    current = float(now if now is not None else time.time())
+    limit = max(1, int(max_replies or 1))
+    cooldown = max(0, int(cooldown_seconds or 0))
+    if not key or not canonical_q or not caller:
+        return ExpectRequestClaimResult(False, "invalid", "Request claim identity is incomplete.", key)
+    conn = connect_sqlite(path, timeout=5.0, busy_timeout_ms=5000)
+    try:
+        _ensure_js8_expect_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT status, attempts, next_retry_ts FROM js8_expect_request_claims WHERE event_key=?",
+            (key,),
+        ).fetchone()
+        if existing is not None:
+            status = str(existing[0] or "claimed")
+            attempts = int(existing[1] or 0)
+            retry_ts = float(existing[2] or 0.0)
+            if status == "failed" and retry_ts > 0 and retry_ts <= current:
+                conn.execute(
+                    "UPDATE js8_expect_request_claims SET status='claimed', attempts=attempts+1, reason='', updated_ts=? WHERE event_key=?",
+                    (current, key),
+                )
+                conn.commit()
+                return ExpectRequestClaimResult(True, "claimed", "Retry claim acquired after bounded backoff.", key, attempts + 1)
+            conn.rollback()
+            return ExpectRequestClaimResult(False, "duplicate", f"Request already has durable claim ({status}).", key, attempts)
+        sent_count_row = conn.execute(
+            """
+            SELECT COUNT(1), MAX(sent_ts)
+            FROM js8_expect_request_claims
+            WHERE expect_entry_id=? AND q_id=? AND source_radio_id=? AND source_js8_instance_id=?
+              AND requesting_callsign=? AND status='sent'
+            """,
+            (int(expect_entry_id or 0), canonical_q, radio, js8_id, caller),
+        ).fetchone()
+        sent_count = int(sent_count_row[0] or 0)
+        last_sent = float(sent_count_row[1] or 0.0)
+        if sent_count >= limit:
+            conn.rollback()
+            return ExpectRequestClaimResult(False, "max-replies", "Expect max-replies policy has been reached.", key)
+        if cooldown and last_sent and (current - last_sent) < cooldown:
+            remaining = max(1, int(cooldown - (current - last_sent)))
+            conn.rollback()
+            return ExpectRequestClaimResult(False, "cooldown", f"Expect cooldown is active ({remaining}s remaining).", key)
+        conn.execute(
+            """
+            INSERT INTO js8_expect_request_claims
+                (event_key, expect_entry_id, q_id, source_radio_id, source_js8_instance_id,
+                 requesting_callsign, target_group, status, attempts, claimed_ts, updated_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed', 1, ?, ?)
+            """,
+            (key, int(expect_entry_id or 0), canonical_q, radio, js8_id, caller, group, current, current),
+        )
+        conn.commit()
+        return ExpectRequestClaimResult(True, "claimed", "Request claim acquired.", key, 1)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def complete_expect_request_claim(
+    *,
+    event_key: str,
+    status: str,
+    reason: str = "",
+    reply_text: str = "",
+    db_path: Optional[Path] = None,
+    retry_after_seconds: int = 0,
+    now: Optional[float] = None,
+) -> None:
+    path = Path(db_path) if db_path is not None else default_expect_db_path()
+    current = float(now if now is not None else time.time())
+    normalized = str(status or "failed").strip().lower()
+    if normalized not in {"sent", "failed", "held", "duplicate"}:
+        normalized = "failed"
+    conn = connect_sqlite(path, timeout=5.0, busy_timeout_ms=5000)
+    try:
+        _ensure_js8_expect_tables(conn)
+        conn.execute(
+            """
+            UPDATE js8_expect_request_claims
+            SET status=?, reason=?, reply_text=?, sent_ts=?,
+                next_retry_ts=?, updated_ts=?
+            WHERE event_key=?
+            """,
+            (
+                normalized,
+                str(reason or ""),
+                str(reply_text or ""),
+                current if normalized == "sent" else None,
+                current + max(0, int(retry_after_seconds or 0)) if normalized == "failed" else 0,
+                current,
+                str(event_key or "").strip(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _record_expect_management_audit(conn, *, entry_id: int, action: str, values: Mapping[str, Any]) -> None:
@@ -716,6 +857,8 @@ def evaluate_expect_request(
                     reply_js8_instance_id=str(entry.get("js8_instance_id", "") or ""),
                     auto_reply_enabled=bool(entry.get("auto_reply_enabled", False)),
                     unattended_auto_reply_enabled=bool(entry.get("unattended_auto_reply_enabled", False)),
+                    max_replies=max(1, int(entry.get("max_replies", 1) or 1)),
+                    cooldown_seconds=max(0, int(entry.get("cooldown_seconds", 0) or 0)),
                 )
                 continue
             policy = policies.get(int(entry.get("allow_policy_id", 0) or 0), {})
@@ -763,6 +906,8 @@ def evaluate_expect_request(
                 reply_js8_instance_id=str(entry.get("js8_instance_id", "") or js8_id),
                 auto_reply_enabled=auto_reply,
                 unattended_auto_reply_enabled=bool(entry.get("unattended_auto_reply_enabled", False)),
+                max_replies=max(1, int(entry.get("max_replies", 1) or 1)),
+                cooldown_seconds=max(0, int(entry.get("cooldown_seconds", 0) or 0)),
             )
             break
         if result.decision == "no-match" and source_mismatch_seen:
@@ -790,4 +935,53 @@ def evaluate_expect_request(
             conn.commit()
         finally:
             conn.close()
+    return result
+
+
+def evaluate_dynamic_flamp_request(
+    *,
+    q_id: str,
+    requesting_callsign: str,
+    target_group: str = "",
+    source_radio_id: object = "",
+    js8_instance_id: object = "",
+    event_id: str = "",
+    db_path: Optional[Path] = None,
+    write_audit: bool = True,
+) -> ExpectEvaluationResult:
+    """Evaluate the single dynamic ``Q`` policy, independent of Q ID.
+
+    Operators configure one ``Q`` Expect entry/policy; they do not need to
+    create a rule for each transfer identifier.  The concrete Q ID is attached
+    to the returned result for audit/claim/response handling.
+    """
+    canonical = str(q_id or "").strip().upper()
+    if not re.fullmatch(r"[0-9A-F]{4}", canonical):
+        return ExpectEvaluationResult(decision="invalid", reason="Q ID must be exactly four hexadecimal characters.", expect_key=f"Q {canonical}", q_id=canonical)
+    result = evaluate_expect_request(
+        expect_key="Q",
+        requesting_callsign=requesting_callsign,
+        target_group=target_group,
+        source_radio_id=source_radio_id,
+        js8_instance_id=js8_instance_id,
+        event_id=event_id,
+        db_path=db_path,
+        write_audit=write_audit,
+    )
+    result = replace(result, expect_key=f"Q {canonical}", q_id=canonical)
+    # A group reply is opt-in even if a Q policy uses allow_any for direct
+    # callers.  Explicit group membership may come from the entry or policy.
+    group = _norm_group(target_group)
+    if result.decision == "reply-ready" and group:
+        rows = list_expect_entries(db_path=Path(db_path) if db_path is not None else None, enabled_only=False)
+        entry = next((row for row in rows if int(row.get("id", 0) or 0) == int(result.expect_entry_id or 0)), None)
+        allowed_groups = list(entry.get("allowed_groups", []) if entry else [])
+        policy_id = int(entry.get("allow_policy_id", 0) or 0) if entry else 0
+        if policy_id:
+            policies = list_expect_allow_policies(db_path=Path(db_path) if db_path is not None else None, enabled_only=False)
+            policy = next((row for row in policies if int(row.get("id", 0) or 0) == policy_id), None)
+            if policy:
+                allowed_groups.extend(policy.get("allowed_groups", []) or [])
+        if not any(_matches_group(value, group) for value in allowed_groups):
+            result = replace(result, decision="blocked", reason="Dynamic Q group replies require explicit group policy.")
     return result

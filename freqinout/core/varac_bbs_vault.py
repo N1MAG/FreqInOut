@@ -19,6 +19,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
+from freqinout.core.db_initializer import _ensure_flamp_dynamic_tables
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_bbs_library_store import (
     bbs_location_catalog_source_dir,
@@ -91,6 +92,7 @@ LIST_Q_RE = re.compile(r"^LIST\s+Q\s*$", re.IGNORECASE)
 LIST_BLOCKS_RE = re.compile(r"^(?:LIST\s+(?:BLKS|BLOCKS)\s+|LIST\s+)([A-F0-9]{4})\s*$", re.IGNORECASE)
 BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([0-9][0-9,\s]*?)\s*([A-F0-9]{4})\s*$", re.IGNORECASE)
 INVALID_BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
+DYNAMIC_FLAMP_QUERY_RE = re.compile(r"^\s*E\?\s+Q\s+([0-9A-F]{4})\s*$", re.IGNORECASE)
 ALIAS_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:/+\-]{0,31}$")
 
 
@@ -234,6 +236,25 @@ class VaracBbsVaultRunResult:
 class _VirtualFile:
     name: str
     content: str
+
+
+@dataclass(frozen=True)
+class DynamicFlampQuery:
+    q_id: str
+    confidence: float = 1.0
+
+
+def parse_dynamic_flamp_query(value: object) -> Optional[DynamicFlampQuery]:
+    """Parse only the exact dynamic FLAMP query form.
+
+    Destination/source framing is deliberately handled by the JS8 ingest
+    adapters.  This helper accepts only the payload itself and therefore cannot
+    accidentally turn a relayed or partial message into a query.
+    """
+    match = DYNAMIC_FLAMP_QUERY_RE.fullmatch(str(value or ""))
+    if not match:
+        return None
+    return DynamicFlampQuery(q_id=match.group(1).upper(), confidence=1.0)
 
 
 def _normalize_callsign(value: object) -> str:
@@ -2103,6 +2124,7 @@ class FlampRelayStore:
         file_size = None
         block_len = None
         blocks: Dict[int, str] = {}
+        block_file_ids: Dict[int, str] = {}
         header_lines: List[str] = []
         try:
             with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -2127,7 +2149,9 @@ class FlampRelayStore:
                         fid = fid.upper()
                         if not file_id:
                             file_id = fid
-                        blocks[int(block_num)] = line
+                        number = int(block_num)
+                        blocks[number] = line
+                        block_file_ids[number] = fid
         except Exception:
             return None
         if not blocks:
@@ -2140,6 +2164,7 @@ class FlampRelayStore:
             "file_size": file_size,
             "block_len": block_len,
             "blocks": blocks,
+            "block_file_ids": block_file_ids,
             "header": header_lines,
         }
 
@@ -2148,6 +2173,369 @@ class FlampRelayStore:
         total = int(relay_info.get("total_blocks") or (blocks[-1] if blocks else 0))
         missing = [num for num in range(1, total + 1) if num not in blocks]
         return blocks, missing
+
+    def authoritative_transfer(self, queue_id: object) -> Optional[Dict[str, object]]:
+        """Return validated transfer facts suitable for a dynamic Q reply.
+
+        This path intentionally does not use ``available_blocks_text``: that
+        compatibility helper has a highest-seen-block fallback which is useful
+        for old BBS views but is not proof of a FLAMP transfer total.
+        """
+        q_id = str(queue_id or "").strip().upper()
+        if not self.VALID_Q_RE.fullmatch(q_id):
+            return None
+        relay_info = self.parse_queue(q_id)
+        if not relay_info:
+            return None
+        return self._authoritative_transfer_from_info(q_id, relay_info)
+
+    def authoritative_file(self, file_path: Path, queue_id: object) -> Optional[Dict[str, object]]:
+        """Parse one already-resolved relay file without rebuilding the directory index."""
+
+        q_id = str(queue_id or "").strip().upper()
+        if not self.VALID_Q_RE.fullmatch(q_id):
+            return None
+        relay_info = self.parse_file(file_path)
+        if not relay_info:
+            return None
+        return self._authoritative_transfer_from_info(q_id, relay_info)
+
+    def _authoritative_transfer_from_info(
+        self, q_id: str, relay_info: Mapping[str, object]
+    ) -> Dict[str, object]:
+        file_id = str(relay_info.get("file_id") or "").strip().upper()
+        total_raw = relay_info.get("total_blocks")
+        try:
+            total = int(total_raw) if total_raw is not None else 0
+        except Exception:
+            total = 0
+        if file_id != q_id or total <= 0:
+            return {
+                "q_id": q_id,
+                "path": str(relay_info.get("path") or ""),
+                "total_blocks": None,
+                "available_blocks": [],
+                "missing_blocks": [],
+                "state": "unavailable",
+                "parser_confidence": 0.0,
+            }
+        blocks = relay_info.get("blocks") if isinstance(relay_info.get("blocks"), Mapping) else {}
+        file_ids = relay_info.get("block_file_ids") if isinstance(relay_info.get("block_file_ids"), Mapping) else {}
+        available = sorted({int(number) for number in blocks.keys() if 1 <= int(number) <= total})
+        invalid_numbers = [int(number) for number in blocks.keys() if int(number) < 1 or int(number) > total]
+        mismatched_ids = [number for number in available if str(file_ids.get(number) or q_id).upper() != q_id]
+        if invalid_numbers or mismatched_ids:
+            state = "unavailable"
+            confidence = 0.0
+            missing: List[int] = []
+        else:
+            missing = [number for number in range(1, total + 1) if number not in available]
+            state = "complete" if not missing else "partial"
+            confidence = 1.0
+        return {
+            "q_id": q_id,
+            "path": str(relay_info.get("path") or ""),
+            "total_blocks": total,
+            "available_blocks": available,
+            "missing_blocks": missing,
+            "state": state,
+            "parser_confidence": confidence,
+        }
+
+
+def index_flamp_transfer_state(
+    relay_dir: object,
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+    observed_ts: Optional[float] = None,
+) -> int:
+    """Persist validated, source-scoped FLAMP transfer state.
+
+    This is an additive projection.  A missing source file becomes
+    ``unavailable`` instead of raising or repeatedly attempting to parse it.
+    """
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    radio_id = str(source_radio_id or "").strip()
+    js8_id = str(source_js8_instance_id or "").strip()
+    now = float(observed_ts if observed_ts is not None else time.time())
+    store = FlampRelayStore(relay_dir)
+    conn = connect_sqlite(path)
+    try:
+        _ensure_flamp_dynamic_tables(conn)
+        relay_root = store.relay_dir
+        if relay_root is None or not relay_root.exists() or not relay_root.is_dir():
+            conn.execute(
+                """
+                UPDATE flamp_transfer_state
+                SET state='unavailable', parser_confidence=0,
+                    available_blocks_json='[]', missing_blocks_json='[]',
+                    total_blocks=NULL, updated_ts=?
+                WHERE source_radio_id=? AND source_js8_instance_id=?
+                """,
+                (now, radio_id, js8_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state_scans
+                    (source_radio_id, source_js8_instance_id, relay_dir,
+                     scan_success, file_count, error_text, scanned_ts)
+                VALUES (?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    relay_dir=excluded.relay_dir,
+                    scan_success=excluded.scan_success,
+                    file_count=excluded.file_count,
+                    error_text=excluded.error_text,
+                    scanned_ts=excluded.scanned_ts
+                """,
+                (radio_id, js8_id, str(relay_dir or ""), "FLAMP relay folder is unavailable.", now),
+            )
+            conn.commit()
+            return 0
+        existing_rows = conn.execute(
+            """
+            SELECT q_id, source_path, source_mtime_ns, source_sha256
+            FROM flamp_transfer_state
+            WHERE source_radio_id=? AND source_js8_instance_id=?
+            """,
+            (radio_id, js8_id),
+        ).fetchall()
+        existing = {
+            str(row[0] or "").upper(): {
+                "source_path": str(row[1] or ""),
+                "source_mtime_ns": int(row[2] or 0),
+                "source_sha256": str(row[3] or ""),
+            }
+            for row in existing_rows
+        }
+        seen: set[str] = set()
+        count = 0
+        for q_id, relay_path in store.queue_index().items():
+            seen.add(q_id)
+            try:
+                stat = relay_path.stat()
+                source_mtime_ns = int(stat.st_mtime_ns)
+            except OSError:
+                source_mtime_ns = 0
+            prior = existing.get(q_id)
+            if (
+                prior
+                and source_mtime_ns > 0
+                and int(prior.get("source_mtime_ns") or 0) == source_mtime_ns
+                and str(prior.get("source_path") or "") == str(relay_path)
+                and str(prior.get("source_sha256") or "")
+            ):
+                count += 1
+                continue
+            facts = store.authoritative_file(relay_path, q_id) or {
+                "q_id": q_id,
+                "path": str(relay_path),
+                "total_blocks": None,
+                "available_blocks": [],
+                "missing_blocks": [],
+                "state": "unavailable",
+                "parser_confidence": 0.0,
+            }
+            try:
+                source_sha256 = hashlib.sha256(relay_path.read_bytes()).hexdigest()
+            except OSError:
+                source_sha256 = ""
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state
+                    (q_id, source_radio_id, source_js8_instance_id, source_path,
+                     source_mtime_ns, source_sha256, total_blocks,
+                     available_blocks_json, missing_blocks_json, state,
+                     parser_confidence, observed_ts, updated_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(q_id, source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    source_path=excluded.source_path,
+                    source_mtime_ns=excluded.source_mtime_ns,
+                    source_sha256=excluded.source_sha256,
+                    total_blocks=excluded.total_blocks,
+                    available_blocks_json=excluded.available_blocks_json,
+                    missing_blocks_json=excluded.missing_blocks_json,
+                    state=excluded.state,
+                    parser_confidence=excluded.parser_confidence,
+                    observed_ts=excluded.observed_ts,
+                    updated_ts=excluded.updated_ts
+                """,
+                (
+                    q_id,
+                    radio_id,
+                    js8_id,
+                    str(facts.get("path") or relay_path),
+                    source_mtime_ns,
+                    source_sha256,
+                    facts.get("total_blocks"),
+                    json.dumps(list(facts.get("available_blocks") or []), separators=(",", ":")),
+                    json.dumps(list(facts.get("missing_blocks") or []), separators=(",", ":")),
+                    str(facts.get("state") or "unavailable"),
+                    float(facts.get("parser_confidence") or 0.0),
+                    now,
+                    now,
+                ),
+            )
+            count += 1
+        # Do not leave a deleted/rotated source looking current.
+        rows = conn.execute(
+            "SELECT id, q_id FROM flamp_transfer_state WHERE source_radio_id=? AND source_js8_instance_id=?",
+            (radio_id, js8_id),
+        ).fetchall()
+        for row in rows:
+            if str(row[1] or "").upper() in seen:
+                continue
+            conn.execute(
+                """
+                UPDATE flamp_transfer_state
+                SET state='unavailable', parser_confidence=0, available_blocks_json='[]',
+                    missing_blocks_json='[]', total_blocks=NULL, updated_ts=?
+                WHERE id=?
+                """,
+                (now, int(row[0])),
+            )
+        conn.execute(
+            """
+            INSERT INTO flamp_transfer_state_scans
+                (source_radio_id, source_js8_instance_id, relay_dir,
+                 scan_success, file_count, error_text, scanned_ts)
+            VALUES (?, ?, ?, 1, ?, '', ?)
+            ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                relay_dir=excluded.relay_dir,
+                scan_success=excluded.scan_success,
+                file_count=excluded.file_count,
+                error_text=excluded.error_text,
+                scanned_ts=excluded.scanned_ts
+            """,
+            (radio_id, js8_id, str(relay_root), count, now),
+        )
+        conn.commit()
+        return count
+    finally:
+        conn.close()
+
+
+def flamp_transfer_index_status(
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+) -> Optional[Dict[str, object]]:
+    """Return the last source-scoped background projection result."""
+
+    conn = connect_sqlite(Path(db_path))
+    try:
+        _ensure_flamp_dynamic_tables(conn)
+        row = conn.execute(
+            """
+            SELECT relay_dir, scan_success, file_count, error_text, scanned_ts
+            FROM flamp_transfer_state_scans
+            WHERE source_radio_id=? AND source_js8_instance_id=?
+            LIMIT 1
+            """,
+            (
+                str(source_radio_id or "").strip(),
+                str(source_js8_instance_id or "").strip(),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "relay_dir": str(row[0] or ""),
+        "scan_success": bool(row[1]),
+        "file_count": int(row[2] or 0),
+        "error_text": str(row[3] or ""),
+        "scanned_ts": float(row[4] or 0.0),
+    }
+
+
+def list_flamp_transfer_index_statuses(
+    *, db_path: Path, limit: int = 100
+) -> List[Dict[str, object]]:
+    """Bounded status rows for FIO Spotter administration."""
+
+    conn = connect_sqlite(Path(db_path))
+    try:
+        _ensure_flamp_dynamic_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT source_radio_id, source_js8_instance_id, relay_dir,
+                   scan_success, file_count, error_text, scanned_ts
+            FROM flamp_transfer_state_scans
+            ORDER BY scanned_ts DESC, source_radio_id, source_js8_instance_id
+            LIMIT ?
+            """,
+            (max(1, min(500, int(limit or 100))),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "source_radio_id": str(row[0] or ""),
+            "source_js8_instance_id": str(row[1] or ""),
+            "relay_dir": str(row[2] or ""),
+            "scan_success": bool(row[3]),
+            "file_count": int(row[4] or 0),
+            "error_text": str(row[5] or ""),
+            "scanned_ts": float(row[6] or 0.0),
+        }
+        for row in rows
+    ]
+
+
+def lookup_flamp_transfer_state(
+    q_id: object,
+    *,
+    db_path: Path,
+    source_radio_id: object = "",
+    source_js8_instance_id: object = "",
+) -> Optional[Dict[str, object]]:
+    canonical = str(q_id or "").strip().upper()
+    if not FlampRelayStore.VALID_Q_RE.fullmatch(canonical):
+        return None
+    conn = connect_sqlite(Path(db_path))
+    try:
+        _ensure_flamp_dynamic_tables(conn)
+        row = conn.execute(
+            """
+            SELECT q_id, source_path, source_mtime_ns, source_sha256, total_blocks,
+                   available_blocks_json, missing_blocks_json, state, parser_confidence,
+                   observed_ts, updated_ts
+            FROM flamp_transfer_state
+            WHERE q_id=? AND source_radio_id=? AND source_js8_instance_id=?
+            LIMIT 1
+            """,
+            (canonical, str(source_radio_id or "").strip(), str(source_js8_instance_id or "").strip()),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        available = [int(item) for item in json.loads(str(row[5] or "[]"))]
+    except Exception:
+        available = []
+    try:
+        missing = [int(item) for item in json.loads(str(row[6] or "[]"))]
+    except Exception:
+        missing = []
+    return {
+        "q_id": str(row[0] or "").upper(),
+        "source_path": str(row[1] or ""),
+        "source_mtime_ns": int(row[2] or 0),
+        "source_sha256": str(row[3] or ""),
+        "total_blocks": int(row[4]) if row[4] is not None else None,
+        "available_blocks": available,
+        "missing_blocks": missing,
+        "state": str(row[7] or "unavailable"),
+        "parser_confidence": float(row[8] or 0.0),
+        "observed_ts": float(row[9] or 0.0),
+        "updated_ts": float(row[10] or 0.0),
+    }
 
 
 def _flamp_queue_files(store: FlampRelayStore) -> List[_VirtualFile]:

@@ -2,8 +2,9 @@ from pathlib import Path
 import sqlite3
 
 from freqinout.core.js8_expect_store import list_expect_entries
+from freqinout.core.fio_spotter_store import list_spotter_watches
 from freqinout.core.js8_spotter_decode import decode_spotter_form_text, summarize_spotter_form_text
-from freqinout.core.js8spotter_importer import import_js8spotter_database
+from freqinout.core.js8spotter_importer import import_js8spotter_database, preview_js8spotter_import
 from freqinout.core.observation_store import list_observations
 
 
@@ -66,6 +67,24 @@ def _make_spotter_db(path: Path) -> None:
         conn.execute("INSERT INTO profile(title, def, bgscan, sort) VALUES ('Default', 1, 0, 1)")
         conn.execute(
             """
+            CREATE TABLE search (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER,
+                keyword TEXT,
+                last_seen TIMESTAMP,
+                comment TEXT,
+                matchmode TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO search(profile_id, keyword, last_seen, comment, matchmode)
+            VALUES (1, 'WILDFIRE', '2026-08-08 12:37:00', 'Wildfire traffic', 'whole_word')
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE grid (
                 grid_callsign VARCHAR(64) PRIMARY KEY,
                 grid_grid VARCHAR(16),
@@ -92,8 +111,20 @@ def test_js8spotter_importer_imports_forms_and_expect_idempotently(tmp_path: Pat
     target_db = tmp_path / "freqinout_nets.db"
     _make_spotter_db(source_db)
 
+    preview = preview_js8spotter_import(source_db, target_db=target_db)
+    assert preview.candidates == 5
+    assert preview.forms == 1
+    assert preview.expect == 1
+    assert preview.watches == 1
+    assert preview.archive == 2
+    assert preview.duplicates == 0
+
     first = import_js8spotter_database(source_db, target_db=target_db, source_radio_id=7, js8_instance_id="fio-a")
     second = import_js8spotter_database(source_db, target_db=target_db, source_radio_id=7, js8_instance_id="fio-a")
+
+    after = preview_js8spotter_import(source_db, target_db=target_db)
+    assert after.candidates == 0
+    assert after.duplicates == 5
 
     assert first.errors == []
     assert first.warnings == []
@@ -101,8 +132,11 @@ def test_js8spotter_importer_imports_forms_and_expect_idempotently(tmp_path: Pat
     assert first.forms_imported == 1
     assert first.expect_scanned == 1
     assert first.expect_imported == 1
+    assert first.watches_scanned == 1
+    assert first.watches_imported == 1
     assert second.forms_imported == 0
     assert second.expect_imported == 0
+    assert second.watches_imported == 0
     assert first.archive_imported == 2
     assert first.grid_operators_updated == 1
     assert second.archive_imported == 0
@@ -121,6 +155,7 @@ def test_js8spotter_importer_imports_forms_and_expect_idempotently(tmp_path: Pat
             ("forms", "spotter_traffic"),
             ("grid", "js8spotter_import_archive"),
             ("profile", "js8spotter_import_archive"),
+            ("search", "fio_spotter_watches"),
         ]
         archive_count = conn.execute("SELECT COUNT(*) FROM js8spotter_import_archive").fetchone()[0]
         assert archive_count == 2
@@ -135,6 +170,13 @@ def test_js8spotter_importer_imports_forms_and_expect_idempotently(tmp_path: Pat
     assert entries[0]["allowed_groups"] == ["@MAGNET"]
     assert entries[0]["allowed_callsigns"] == ["N0CALL"]
     assert entries[0]["max_replies"] == 3
+
+    watches = list_spotter_watches(db_path=target_db)
+    assert len(watches) == 1
+    assert watches[0]["name"] == "Wildfire traffic"
+    assert watches[0]["pattern"] == "WILDFIRE"
+    assert watches[0]["match_mode"] == "whole-word"
+    assert watches[0]["source_radio_ids"] == ["7"]
 
     observations = list_observations(target_db, source_family="spotter")
     assert len(observations) == 1

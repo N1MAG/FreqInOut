@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
+import threading
 import time
 
 from freqinout.radio_interface.js8_api_client import (
@@ -48,6 +49,20 @@ class JS8SendResult:
     preflight: JS8SendPreflight
     detail: str
     transmitted_text: str = ""
+
+
+_EXPECT_TX_LOCKS: dict[tuple[str, int], threading.RLock] = {}
+_EXPECT_TX_LOCKS_GUARD = threading.Lock()
+
+
+def _endpoint_tx_lock(client: JS8ApiClient) -> threading.RLock:
+    key = client.endpoint.normalized().key
+    with _EXPECT_TX_LOCKS_GUARD:
+        lock = _EXPECT_TX_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _EXPECT_TX_LOCKS[key] = lock
+        return lock
 
 
 def js8_endpoint_from_radio_profile(profile: Mapping[str, Any], *, fallback_settings: Any = None) -> JS8ApiEndpoint:
@@ -210,7 +225,7 @@ def set_js8_selected_target(client: JS8ApiClient, target: object = "", *, settle
         time.sleep(settle_s)
 
 
-def send_js8_message_guarded(
+def _send_js8_message_guarded_unlocked(
     client: JS8ApiClient,
     message: str,
     *,
@@ -254,3 +269,28 @@ def send_js8_message_guarded(
         )
         return JS8SendResult(False, failed, failed.summary)
     return JS8SendResult(True, preflight, "JS8Call message sent.", transmitted_text=message_text)
+
+
+def send_js8_message_guarded(
+    client: JS8ApiClient,
+    message: str,
+    *,
+    timeout_s: float = 0.8,
+    allow_dirty_tx_text: bool = False,
+    allow_selected_target: bool = False,
+    allow_uncertain_target_state: bool = False,
+    clear_selected_target: bool = False,
+    set_selected_target: object = None,
+) -> JS8SendResult:
+    """Serialize the complete preflight-to-send transaction per endpoint."""
+    with _endpoint_tx_lock(client):
+        return _send_js8_message_guarded_unlocked(
+            client,
+            message,
+            timeout_s=timeout_s,
+            allow_dirty_tx_text=allow_dirty_tx_text,
+            allow_selected_target=allow_selected_target,
+            allow_uncertain_target_state=allow_uncertain_target_state,
+            clear_selected_target=clear_selected_target,
+            set_selected_target=set_selected_target,
+        )
