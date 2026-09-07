@@ -166,10 +166,12 @@ Linux guided install:
 
 ## Phase 6: VarAC BBS
 
-VarAC BBS is a P2 workstream. The existing managed BBS vault, access-code,
-cluster, and location handling are useful groundwork, but the operator workflow
-needs to read as a complete message lifecycle instead of a collection of expert
-settings.
+Slice 2 of the production reliability remediation supersedes the earlier
+interim tab layout in this section. VarAC BBS remains a P2 workstream, but the
+station-owned catalog, first-class workspace, retention/source-state model, and
+shared Messages checkbox workflow are now implemented. Future assistant work
+must build on that ownership boundary rather than moving shared controls back
+under a selected radio.
 
 Safer multi-radio BBS model:
 
@@ -189,10 +191,11 @@ Safer multi-radio BBS model:
 - Keep VarAC Multi-Instance Cluster setup tied to radio-specific paths and
   launch. Cluster mode is runtime coordination for distinct VarAC instances; it
   is not required for a single VarAC instance or ordinary BBS monitoring.
-- Make scope obvious on every VarAC page. `Radio Paths` and `Radio Live BBS`
-  are radio-specific. `Shared Library`, `Visitor Preview`, `Shared Sweeper`,
-  and `Access Guard` describe shared BBS management unless a control explicitly
-  says it is publishing to the selected radio.
+- Make scope obvious on every VarAC page. `Radio Paths`, `Radio Live BBS`, and
+  `Inbound Guard` are radio-specific. Shared library, visitor-facing structure,
+  publication membership, retention, and access policy live in `Station >
+  Managed BBS` and are reachable from Messages `+BBS` and the radio Settings
+  link.
 - Rename `VGuard` in operator-facing UI to `BBS Access Guard`. The function is
   inbound file protection based on sender trust; it is separate from the Managed
   BBS Library and from message-signature/hash verification.
@@ -202,11 +205,10 @@ Safer multi-radio BBS model:
 
 Target behavior:
 
-- Make VarAC BBS configuration and status clear in Settings without mixing it
-  with unrelated JS8/Spotter/CommStat concepts. Initial implementation splits
-  VarAC administration into persistent `Radio Paths`, `Radio Live BBS`, `Shared
-  Library`, `Visitor Preview`, `Shared Sweeper`, and `Access Guard` tabs inside
-  the VarAC settings area.
+- Make VarAC BBS configuration and status clear without mixing station content
+  policy with a selected radio. The implemented radio Settings surface contains
+  `Radio Paths`, `Radio Live BBS`, and `Inbound Guard`; `Manage FIO BBS` opens
+  the station workspace.
 - Provide VarAC Cluster node configuration guidance that explains when cluster
   mode is useful, what each node contributes, and which radio/profile owns each
   VarAC instance. Initial guidance is now present in Settings and should remain
@@ -242,12 +244,14 @@ Target behavior:
   subject-contains filters and should allow one source rule to copy into
   multiple managed BBS locations. Initial implementation adds the pure sweeper
   rule model, matcher, copy-planning helper, and explicit safe copy helper for
-  VarAC BBS, FLMsg, and FLAmp sources plus a radio-scoped Settings review surface;
-  background copy application remains a future slice.
+  VarAC BBS, FLMsg, and FLAmp sources. Radio Settings exposes only its adapter;
+  station-owned review and publication live in Managed BBS. Background rule
+  application remains a future slice.
 - In Messages, preserve the existing `+BBS` action and add a clear way to remove
   FLMsg/FLAmp content from BBS sync without deleting the original message or
-  source artifact. Initial implementation changes copied rows to a `-BBS`
-  action that removes only the copied BBS artifact.
+  source artifact. The implemented checkbox dialog preselects current station
+  locations; clearing one or all locations disables those memberships while
+  preserving the source artifact.
 - `+BBS` applies equally to source-row and projection-first Inbox rendering.
   When more than one eligible live or managed BBS destination exists, selecting
   `+BBS` opens one checkbox list so the operator can publish to multiple

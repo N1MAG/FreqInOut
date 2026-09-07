@@ -1224,3 +1224,70 @@ and any requirement to Forget/Pair or repair firmware (workflow failure). The
 next device is a RAK WisMesh-style card marked MOKO SMART LW010-R; FIO discovery
 will establish its advertised identity before the exact firmware variant is
 assumed.
+
+## 2026-09-06 — Slice 2 station-owned Managed BBS
+
+The operator explicitly authorized Slice 2 while the Slice 1 Mesh production-
+hardware gate is deferred until tomorrow. The Mesh gate remains open and was
+not waived; Slice 3 did not begin.
+
+Architecture and migration: the high-reasoning primary model reviewed and
+integrated schema version 2, station ownership, runtime catalog identity,
+concurrency boundaries, and live-publication behavior. Schema and legacy-
+ownership mutations are independently backup-first and idempotent. The legacy
+radio location union is copied once with station rows winning conflicts and
+legacy fields retained for rollback. Source state, operator publication intent,
+retention expiry, and location enablement remain independent. Retention changes
+and source mtime updates recalculate existing mapping expiry.
+
+Runtime: one station catalog is reconciled in a bounded background job and then
+projected through each enabled radio. Per-radio live directories use distinct
+manifest identities, preventing one radio's reconciliation from deleting the
+other's output. Missing sources are effectively unpublished without generating
+errors; a folder refresh does not resurrect an operator-disabled mapping.
+Compatibility callers lacking an explicit catalog DB stay folder-backed rather
+than opening the operator's global DB.
+
+UI: Terra/high implemented and tested the first-class `Station > Managed BBS`
+workspace and station routing. The workspace combines a logical location tree,
+progressive Add/Edit/Disable policy controls, bounded newest-first artifacts,
+publication checkboxes, and origin/path/age/access/retention/health detail. At
+compact widths the tree and artifact surface stack and detail is opt-in. Radio
+Settings now exposes Radio Paths, Radio Live BBS, Inbound Guard, and a `Manage
+FIO BBS` link; legacy shared controls remain hidden compatibility state for
+rollback. Messages `+BBS` now edits the same station memberships atomically and
+never copies or deletes a received source file on the UI thread.
+
+Primary final review added the remaining product-contract details: visible
+whole-day age with exact Local/UTC modified time, a read-only caller-filtered
+Visitor Preview, canonical public/callsign/access-code rules, and salted-hash
+credential storage. Station-wide allowed-callsign policy is imported once and
+used by every radio projection rather than varying by selected radio.
+
+Helper/catalog identity: Luna/high removed the implicit global-database fallback,
+threaded explicit catalog identity through publication paths, and replaced
+fixed-ten-second visitor instructions with state-based refresh guidance.
+Logical labels no longer display `.txt`; VarAC compatibility filenames retain
+the extension on disk and old helper names remain recognized.
+
+Focused tests: Mini/high updated mechanical filename, checkbox, uncheck-all,
+source-preservation, and helper-contract tests. The primary model reviewed every
+delegated diff, corrected hidden Qt widget ownership, added retention-policy
+recalculation, selected a useful default location, and refined compact detail
+presentation.
+
+Verification: the focused BBS set passes 130 tests with one environment skip;
+the related background, adaptive-shell, and Station readiness set passes 42
+tests with five environment skips. Migration tests cover verified backup,
+rollback on backup failure, idempotency, retained data, and station precedence.
+Two-radio tests prove identical catalog content reaches distinct live folders
+with distinct manifests. A 10,000-mapping bounded administration query returned
+200 rows at p50 2.59 ms, p95 2.77 ms, and max 2.82 ms. Offscreen visual review
+covered Light/Normal at 1200x800 and Dark/Large Text at 900x560. Full fresh-
+process partitions covered 2,471 passing tests and 37 environment-dependent
+skips; three legacy source-contract assertions were updated for the intentional
+Station BBS move and pass on rerun. Python compilation and `git diff --check`
+pass.
+
+The final combined BBS, Settings, navigation, helper, and legacy-compatibility
+selection passes 282 tests with one environment skip.

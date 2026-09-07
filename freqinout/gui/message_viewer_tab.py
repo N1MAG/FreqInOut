@@ -357,11 +357,11 @@ from freqinout.core.varac_bbs_vault import (
 from freqinout.core.varac_bbs_library_store import (
     bbs_library_db_path_from_settings,
     ensure_bbs_library_schema,
-    list_bbs_location_manifest_rows,
-    set_bbs_location_artifact,
+    list_bbs_artifact_location_ids,
+    list_bbs_locations,
+    set_bbs_artifact_locations,
     unpublish_bbs_artifact_path_from_location,
     upsert_bbs_artifact_path,
-    upsert_bbs_location,
 )
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
@@ -2495,8 +2495,7 @@ class MessageActionDelegate(QStyledItemDelegate):
         gap_right = del_left - 10
         if bbs_copy_row:
             bbs_text = "+BBS"
-            bbs_alt_text = "-BBS"
-            bbs_width = max(fm.horizontalAdvance(bbs_text), fm.horizontalAdvance(bbs_alt_text))
+            bbs_width = fm.horizontalAdvance(bbs_text)
             bbs_right = del_left - 10
             bbs_left = bbs_right - bbs_width + 1
             bbs_rect = QRect(bbs_left, rect.y(), bbs_width, rect.height())
@@ -2636,7 +2635,7 @@ class MessageActionDelegate(QStyledItemDelegate):
             if bbs_copy_row:
                 if bbs_copy_present:
                     painter.setPen(self._flag_color_green)
-                    bbs_text = "-BBS"
+                    bbs_text = "+BBS"
                 elif bbs_copy_enabled:
                     painter.setPen(link_color)
                     bbs_text = "+BBS"
@@ -2722,10 +2721,7 @@ class MessageActionDelegate(QStyledItemDelegate):
                     self.parent()._copy_row_to_flamp_relay(row)
                 return True
             elif bbs_copy_row and bbs_rect.contains(pos):
-                if hasattr(parent_widget, "_is_row_already_in_varac_bbs") and parent_widget._is_row_already_in_varac_bbs(row):
-                    if hasattr(parent_widget, "_remove_row_from_varac_bbs"):
-                        parent_widget._remove_row_from_varac_bbs(row)
-                elif bbs_copy_enabled:
+                if bbs_copy_enabled:
                     self.parent()._copy_row_to_varac_bbs(row)
                 return True
             elif not live_bbs_row and not archived_bbs_row and aux_rect.contains(pos):
@@ -2738,10 +2734,7 @@ class MessageActionDelegate(QStyledItemDelegate):
             if live_bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_projected_file_message(row)
             elif bbs_copy_row and bbs_rect.contains(pos):
-                if hasattr(parent_widget, "_is_row_already_in_varac_bbs") and parent_widget._is_row_already_in_varac_bbs(row):
-                    if hasattr(parent_widget, "_remove_row_from_varac_bbs"):
-                        parent_widget._remove_row_from_varac_bbs(row)
-                elif bbs_copy_enabled:
+                if bbs_copy_enabled:
                     self.parent()._copy_row_to_varac_bbs(row)
                 return True
             elif del_rect.contains(pos):
@@ -9419,6 +9412,12 @@ class MessageViewerTab(QWidget):
 
     def _open_varac_bbs_manager(self) -> None:
         host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_station_bbs"):
+            try:
+                host.open_station_bbs()
+            except Exception:
+                pass
+            return
         if host is not None and hasattr(host, "open_settings_section"):
             try:
                 host.open_settings_section("varac")
@@ -17571,62 +17570,34 @@ class MessageViewerTab(QWidget):
         if cached and (now - cached_ts) < 5.0:
             return list(cached)
         targets: List[Dict[str, object]] = []
-        load_radio_targets = getattr(self, "_load_compose_radio_targets", None)
-        compose_bbs_targets = getattr(self, "_compose_bbs_targets_for_radio", None)
-        radio_targets = load_radio_targets() if callable(load_radio_targets) else []
-        if not radio_targets:
-            bbs_dir_txt = str(self.settings.get("varac_bbs_dir", "") or "").strip()
-            path = Path(bbs_dir_txt).expanduser() if bbs_dir_txt else None
-            targets = [
-                {
-                    "id": "live",
-                    "kind": "live",
-                    "label": "VarAC BBS",
-                    "radio_id": "",
-                    "radio_label": "",
-                    "bbs_label": "VarAC BBS",
-                    "detail": "Configured VarAC BBS folder",
-                    "path": path,
-                    "valid": path is not None and path.exists() and path.is_dir(),
-                    "file_count": 0,
-                    "due_now": 0,
-                    "is_default": True,
-                }
-            ]
-            self._bbs_copy_targets_cache = list(targets)
-            self._bbs_copy_targets_cache_ts = now
-            return targets
-        for radio_target in radio_targets:
-            bbs_targets = compose_bbs_targets(radio_target) if callable(compose_bbs_targets) else []
-            for bbs_target in bbs_targets:
-                path_txt = str(bbs_target.get("path", "") or "").strip()
-                path = Path(path_txt).expanduser() if path_txt else None
-                if path is not None and bbs_target.get("kind") == "managed":
-                    try:
-                        path.mkdir(parents=True, exist_ok=True)
-                    except Exception:
-                        pass
-                label = str(bbs_target.get("label", "") or "BBS")
-                radio_short_label = self._compose_radio_target_short_label(radio_target) or radio_target.label
+        try:
+            db_path = bbs_library_db_path_from_settings(self.settings)
+            with connect_sqlite(db_path) as conn:
+                locations = list_bbs_locations(conn, include_disabled=True)
+                default_row = conn.execute(
+                    "SELECT value FROM bbs_library_meta WHERE key='station_default_location_id' LIMIT 1"
+                ).fetchone()
+            default_id = str(default_row[0] or "") if default_row else ""
+            for location in locations:
                 targets.append(
                     {
-                        "id": str(bbs_target.get("id", "") or ""),
-                        "kind": "location" if bbs_target.get("kind") == "managed" else "live",
-                        "label": f"{radio_short_label}: {label}",
-                        "radio_id": str(radio_target.radio_id),
-                        "radio_label": radio_short_label,
-                        "bbs_label": label,
-                        "location_id": str(bbs_target.get("location_id", "") or ""),
-                        "location_name": str(bbs_target.get("location_name", "") or label),
-                        "detail": f"Radio: {radio_short_label}",
-                        "full_radio_label": radio_target.label,
-                        "path": path,
-                        "valid": path is not None and path.exists() and path.is_dir(),
-                        "file_count": 0,
-                        "due_now": 0,
-                        "is_default": "default" in label.lower(),
+                        "id": f"location:{location.location_id}",
+                        "kind": "location",
+                        "label": location.name,
+                        "bbs_label": location.name,
+                        "location_id": location.location_id,
+                        "location_name": location.name,
+                        "detail": (
+                            f"Access: {location.access_rule}; retention: {location.retention_mode}; "
+                            f"source: {location.source_dir or 'catalog artifact'}"
+                        ),
+                        "path": Path(location.source_dir).expanduser() if location.source_dir else None,
+                        "valid": bool(location.enabled),
+                        "is_default": location.location_id == default_id,
                     }
                 )
+        except Exception as exc:
+            log.debug("MessageViewer: station BBS targets unavailable: %s", exc)
         self._bbs_copy_targets_cache = list(targets)
         self._bbs_copy_targets_cache_ts = now
         return targets
@@ -17662,29 +17633,31 @@ class MessageViewerTab(QWidget):
             db_path = bbs_library_db_path_from_settings(self.settings)
             with connect_sqlite(db_path) as conn:
                 ensure_bbs_library_schema(conn)
-                for target in managed_targets:
-                    location_id = str(target.get("location_id", "") or "").strip()
-                    if not location_id:
-                        continue
-                    for row in list_bbs_location_manifest_rows(conn, location_id):
-                        try:
-                            row_path = str(Path(row.source_path).resolve())
-                        except Exception:
-                            row_path = str(row.source_path or "")
-                        path_key = os.path.normcase(os.path.normpath(row_path))
-                        published_index.setdefault(path_key, set()).add(str(target.get("id", "") or ""))
+                rows = conn.execute(
+                    """
+                    SELECT a.source_path, la.location_id
+                    FROM bbs_artifacts a
+                    JOIN bbs_location_artifacts la ON la.artifact_id=a.artifact_id
+                    WHERE la.publish_enabled=1
+                    """
+                ).fetchall()
+                for row_path_raw, location_id_raw in rows:
+                    try:
+                        row_path = str(Path(str(row_path_raw or "")).resolve())
+                    except Exception:
+                        row_path = str(row_path_raw or "")
+                    path_key = os.path.normcase(os.path.normpath(row_path))
+                    published_index.setdefault(path_key, set()).add(f"location:{str(location_id_raw or '')}")
         except Exception:
             return set()
         self._bbs_published_index_cache = published_index
         self._bbs_published_index_cache_ts = now
         return set(published_index.get(norm_resolved, set()))
 
-    def _select_varac_bbs_publish_targets(self, row: UnifiedMessage | None) -> List[Dict[str, object]]:
+    def _select_varac_bbs_publish_targets(self, row: UnifiedMessage | None) -> Optional[List[Dict[str, object]]]:
         targets = [target for target in self._varac_bbs_copy_targets() if bool(target.get("valid", False))]
         if not targets:
-            return []
-        if len(targets) == 1:
-            return targets
+            return None
         rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
         published_ids = self._managed_bbs_published_target_ids_for_record(rec)
         preferred_id = self._bbs_copy_target_session_id
@@ -17703,9 +17676,8 @@ class MessageViewerTab(QWidget):
         list_widget.setMinimumHeight(220)
         for target in targets:
             label = str(target.get("label", "") or target.get("bbs_label", "") or "BBS")
-            kind = "live copy" if target.get("kind") == "live" else "managed mapping"
-            path = str(target.get("path", "") or "")
-            item = QListWidgetItem(f"{label} ({kind})\n{path}")
+            detail = str(target.get("detail", "") or "")
+            item = QListWidgetItem(f"{label}\n{detail}")
             item.setData(Qt.UserRole, target)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             target_id = str(target.get("id", "") or "")
@@ -17714,7 +17686,10 @@ class MessageViewerTab(QWidget):
             list_widget.addItem(item)
         layout.addWidget(list_widget)
 
-        note = QLabel("Managed BBS selections update FIO's publish database. Live BBS root selections copy the file immediately.")
+        note = QLabel(
+            "These checkboxes update the one station Managed BBS catalog. Each enabled radio publishes the same selections "
+            "to its own live BBS folder; the received source file is never moved or deleted."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
@@ -17722,7 +17697,7 @@ class MessageViewerTab(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
-            return []
+            return None
         selected: List[Dict[str, object]] = []
         for index in range(list_widget.count()):
             item = list_widget.item(index)
@@ -17736,7 +17711,7 @@ class MessageViewerTab(QWidget):
         return selected
 
     def _select_varac_bbs_copy_target(self) -> Optional[Dict[str, object]]:
-        targets = self._select_varac_bbs_publish_targets(None)
+        targets = self._select_varac_bbs_publish_targets(None) or []
         return targets[0] if targets else None
 
     def _varac_bbs_destination_for_row(
@@ -17773,13 +17748,15 @@ class MessageViewerTab(QWidget):
         *,
         target: Optional[Dict[str, object]] = None,
     ) -> bool:
-        dst = self._varac_bbs_destination_for_row(row, target=target)
         rec = self._file_record_for_message_row(row, allow_detail_lookup=False)
-        if dst is None or not isinstance(rec, FileRecord):
+        if not isinstance(rec, FileRecord):
             return False
         target_id = str((target or {}).get("id", "") or "live")
         if str((target or {}).get("kind", "") or "") == "location":
             return target_id in self._managed_bbs_published_target_ids_for_record(rec)
+        dst = self._varac_bbs_destination_for_row(row, target=target)
+        if dst is None:
+            return False
         marker = self._bbs_copy_session_marker(row, target_id)
         if marker is not None and marker in self._bbs_copied_session_keys:
             return True
@@ -17797,12 +17774,7 @@ class MessageViewerTab(QWidget):
     def _is_row_bbs_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
         if not self._can_copy_row_to_varac_bbs(row):
             return False
-        targets = [target for target in self._varac_bbs_copy_targets() if bool(target.get("valid", False))]
-        if not targets:
-            return False
-        if len(targets) > 1:
-            return True
-        return not self._is_row_already_in_varac_bbs(row, target=targets[0])
+        return any(bool(target.get("valid", False)) for target in self._varac_bbs_copy_targets())
 
     def _mark_row_copied_to_varac_bbs_session(self, row: UnifiedMessage | None, target_id: str) -> None:
         marker = self._bbs_copy_session_marker(row, target_id)
@@ -17820,24 +17792,16 @@ class MessageViewerTab(QWidget):
         if not location_id:
             return False, "Managed BBS target is missing a location id."
         location_name = str(target.get("location_name", "") or target.get("bbs_label", "") or location_id).strip() or location_id
-        source_dir = str(target.get("path", "") or "").strip()
         try:
             db_path = bbs_library_db_path_from_settings(self.settings)
             with connect_sqlite(db_path) as conn:
                 ensure_bbs_library_schema(conn)
                 with conn:
-                    upsert_bbs_location(
-                        conn,
-                        location_id=location_id,
-                        name=location_name,
-                        source_dir=source_dir,
-                        enabled=True,
-                        metadata={
-                            "source": "messages_publish",
-                            "target_id": str(target.get("id", "") or ""),
-                            "radio_id": str(target.get("radio_id", "") or ""),
-                        },
-                    )
+                    if not conn.execute(
+                        "SELECT 1 FROM bbs_locations WHERE location_id=? LIMIT 1",
+                        (location_id,),
+                    ).fetchone():
+                        return False, f"{location_name}: managed location no longer exists"
                     artifact_id = upsert_bbs_artifact_path(
                         conn,
                         source_path=rec.path,
@@ -17850,12 +17814,12 @@ class MessageViewerTab(QWidget):
                             "origin": str(getattr(rec, "origin", "") or ""),
                         },
                     )
-                    set_bbs_location_artifact(
+                    current = set(list_bbs_artifact_location_ids(conn, artifact_id))
+                    current.add(location_id)
+                    set_bbs_artifact_locations(
                         conn,
-                        location_id=location_id,
                         artifact_id=artifact_id,
-                        live_name=MessageViewerTab._safe_varac_bbs_filename(rec.path.name),
-                        publish_enabled=True,
+                        location_ids=current,
                     )
             self._mark_row_copied_to_varac_bbs_session(row, str(target.get("id", "") or location_id))
             return True, f"{location_name}: published by DB mapping"
@@ -17970,57 +17934,47 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
             return
         targets = self._select_varac_bbs_publish_targets(row)
-        if not targets:
+        if targets is None:
             return
-        successes: List[str] = []
-        errors: List[str] = []
-        for target in targets:
-            kind = str(target.get("kind", "") or "")
-            target_label = str(target.get("label", "") or "VarAC BBS")
-            if kind == "location":
-                ok, detail = self._publish_row_to_managed_bbs_target(row, rec, target)
-                if ok:
-                    successes.append(detail)
-                else:
-                    errors.append(detail)
-                continue
-            if self._is_row_already_in_varac_bbs(row, target=target):
-                successes.append(f"{target_label}: already present")
-                continue
-            base_dst = self._varac_bbs_destination_for_row(row, target=target)
-            dst = self._varac_bbs_destination_for_row(row, unique=True, target=target)
-            if dst is None:
-                errors.append(f"{target_label}: configured BBS target is not valid" if base_dst is None else f"{target_label}: no unique filename")
-                continue
-            try:
-                if src.resolve() == dst.resolve():
-                    successes.append(f"{target_label}: source already in live BBS")
-                    continue
-            except Exception:
-                pass
-            if dst.exists():
-                successes.append(f"{target_label}: already present")
-                continue
-            try:
-                shutil.copy2(str(src), str(dst))
-                self._mark_row_copied_to_varac_bbs_session(row, str(target.get("id", "") or "live"))
-                successes.append(f"{target_label}: copied to {dst.name}")
-                safe_name = MessageViewerTab._safe_varac_bbs_filename(src.name)
-                if safe_name != src.name:
-                    successes.append(f"Filename cleaned from {src.name} to {safe_name}")
-                if dst.name != safe_name:
-                    successes.append(f"Existing BBS filename avoided; used {dst.name}")
-            except Exception as e:
-                errors.append(f"{target_label}: {e}")
-        if errors and not successes:
-            QMessageBox.warning(self, "Publish to BBS", "Publish failed:\n" + "\n".join(errors[:8]))
+        selected_location_ids = [
+            str(target.get("location_id", "") or "").strip()
+            for target in targets
+            if str(target.get("location_id", "") or "").strip()
+        ]
+        try:
+            db_path = bbs_library_db_path_from_settings(self.settings)
+            with connect_sqlite(db_path) as conn:
+                with conn:
+                    artifact_id = upsert_bbs_artifact_path(
+                        conn,
+                        source_path=rec.path,
+                        source_kind="message_file",
+                        source_id=str(getattr(row, "id", "") or getattr(row, "source_id", "") or ""),
+                        display_name=rec.path.name,
+                        metadata={
+                            "msg_type": str(getattr(row, "msg_type", "") or ""),
+                            "subject": str(getattr(row, "subject", "") or ""),
+                            "origin": str(getattr(rec, "origin", "") or ""),
+                        },
+                    )
+                    set_bbs_artifact_locations(
+                        conn,
+                        artifact_id=artifact_id,
+                        location_ids=selected_location_ids,
+                    )
+        except Exception as exc:
+            QMessageBox.warning(self, "Publish to BBS", f"Managed BBS update failed:\n{exc}")
             return
-        message = "Published BBS availability:\n" + "\n".join(f"- {item}" for item in successes[:10])
-        if errors:
-            message += "\n\nSome targets failed:\n" + "\n".join(f"- {item}" for item in errors[:8])
+        selected_names = [str(target.get("label", "") or "Managed BBS") for target in targets]
+        if selected_names:
+            message = "Published through the station Managed BBS catalog:\n" + "\n".join(
+                f"- {name}" for name in selected_names[:10]
+            )
+        else:
+            message = "Publication was removed from all Managed BBS locations. The source file remains unchanged."
         QMessageBox.information(
             self,
-            "Publish to BBS",
+            "Managed BBS Updated",
             message,
         )
         self._invalidate_bbs_action_cache()

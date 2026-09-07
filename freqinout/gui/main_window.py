@@ -135,6 +135,7 @@ from freqinout.gui.help_registry import get_help_context
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.station_health_tab import StationHealthTab
+from freqinout.gui.station_bbs_tab import StationBbsTab
 from freqinout.gui.station_command_presenter import (
     countdown_text as station_command_countdown_text,
     frequency_controls_available,
@@ -331,6 +332,7 @@ class MainWindow(QMainWindow):
         self.command_palette_shortcut.activated.connect(self._open_command_palette)
         self.station_overview_tab: StationOverviewTab | None = None
         self.station_health_tab: StationHealthTab | None = None
+        self.station_bbs_tab: StationBbsTab | None = None
         self._refresh_station_health_scope_map()
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
@@ -355,6 +357,7 @@ class MainWindow(QMainWindow):
             "NCS-Local": self._create_local_ncs_tab,
             "Station Overview": self._create_station_overview_tab,
             "Station Health": self._create_station_health_tab,
+            "Managed BBS": self._create_station_bbs_tab,
             "HF Operators": self._create_operator_history_tab,
             "Local Operators": self._create_local_operator_tab,
             "Local Reports": self._create_local_report_history_tab,
@@ -367,6 +370,7 @@ class MainWindow(QMainWindow):
         self._screens = [
             ("ControlFreq", self.controlfreq_tab),
             ("Station Overview", self._placeholder_widget("Station Overview")),
+            ("Managed BBS", self._placeholder_widget("Managed BBS")),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
@@ -426,6 +430,7 @@ class MainWindow(QMainWindow):
             ("HF Nets", "Net Schedule"),
             ("HF Peer Scheds", "Peer Schedules"),
             ("Control Center", "Station Overview"),
+            ("Managed BBS", "Managed BBS"),
             ("Health Details", "Station Health"),
             ("Main", "Settings"),
             ("Radios", "Settings"),
@@ -4108,6 +4113,12 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def open_station_bbs(self) -> None:
+        """Open the shared, station-owned Managed BBS workspace."""
+        idx = self._screen_index_by_label.get("Managed BBS", -1)
+        if idx >= 0:
+            self._set_screen(idx)
+
     def _open_station_health_runtime_source_related_view(self, payload: object) -> None:
         if not isinstance(payload, Mapping):
             return
@@ -5420,6 +5431,12 @@ class MainWindow(QMainWindow):
                 self._open_station_health_runtime_source_related_view,
             )
             self.station_health_tab = tab
+            return tab
+
+    def _create_station_bbs_tab(self) -> QWidget:
+        with perf_span("main_window.create_station_bbs_tab", settings=self.settings, min_ms=5.0):
+            tab = StationBbsTab(self, settings=self.settings)
+            self.station_bbs_tab = tab
             return tab
 
     def _create_operator_history_tab(self) -> QWidget:
@@ -11068,7 +11085,7 @@ class MainWindow(QMainWindow):
         screen = str(screen_label or "").strip()
         if screen in {"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}:
             return "NCS"
-        if screen in {"Station Overview", "Station Health"}:
+        if screen in {"Station Overview", "Station Health", "Managed BBS"}:
             return "Station"
         if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:
             return "Plan Builder"

@@ -36,6 +36,7 @@ from freqinout.core.observation_queries import ObservationQuery, query_observati
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
 from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.sop_manager import SOPManager
@@ -45,6 +46,12 @@ from freqinout.core.varac_bbs_vault import (
     VaracBbsVaultRunResult,
     build_varac_bbs_vault_activity_signature,
     run_varac_bbs_vault,
+)
+from freqinout.core.varac_bbs_library_store import (
+    bbs_library_db_path_from_settings,
+    ensure_bbs_library_schema,
+    import_legacy_station_bbs_profiles,
+    reconcile_bbs_publications,
 )
 from freqinout.core.varac_guard import run_varac_guard
 from freqinout.core.js8_log_link_indexer import JS8LogLinkIndexer
@@ -1578,6 +1585,27 @@ class BackgroundIngestController(QObject):
             profiles = self._active_varac_vault_profiles()
             if profiles:
                 store = MultiRadioStore()
+                try:
+                    catalog_db_path = bbs_library_db_path_from_settings(worker_settings)
+                    with connect_sqlite(catalog_db_path) as catalog_conn:
+                        ensure_bbs_library_schema(catalog_conn)
+                        with catalog_conn:
+                            import_legacy_station_bbs_profiles(
+                                catalog_conn,
+                                list(store.list_device_profiles()),
+                            )
+                            reconcile_result = reconcile_bbs_publications(catalog_conn)
+                    if reconcile_result.missing or reconcile_result.restored or reconcile_result.expired:
+                        log.info(
+                            "BBS_RECONCILE|checked=%s|missing=%s|restored=%s|expired=%s|remaining=%s",
+                            reconcile_result.checked,
+                            reconcile_result.missing,
+                            reconcile_result.restored,
+                            reconcile_result.expired,
+                            reconcile_result.remaining,
+                        )
+                except Exception as exc:
+                    log.warning("BackgroundIngest: station BBS catalog preparation failed: %s", exc)
                 results: list[VaracBbsVaultRunResult] = []
                 by_live_dir: Dict[str, list[Dict[str, object]]] = {}
                 for profile in profiles:

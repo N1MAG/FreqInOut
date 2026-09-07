@@ -306,7 +306,6 @@ from freqinout.core.varac_bbs_config import (
 )
 from freqinout.core.varac_bbs_vault import (
     DEFAULT_ACCESS_CODE_ITERATIONS,
-    DEFAULT_BBS_REFRESH_PAUSE_SECONDS,
     DEFAULT_COOLDOWN_SECONDS,
     DEFAULT_FAILED_ATTEMPT_LIMIT,
     DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS,
@@ -1827,7 +1826,7 @@ class SettingsTab(QWidget):
         )
         if location_id == DEFAULT_LOCATION_ID:
             text = (
-                f"All BBS views include: 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt\n"
+                "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
                 "Default is the FIO Managed Root BBS menu. It publishes helper files for visible locations "
                 "and any files placed in the Default folder."
             )
@@ -1852,7 +1851,7 @@ class SettingsTab(QWidget):
                 order=20,
             )
             text = (
-                f"All BBS views include: 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt\n"
+                "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
                 f"{helper_name}"
             )
         self.varac_bbs_vault_helper_preview_label.setText(text)
@@ -2188,7 +2187,7 @@ class SettingsTab(QWidget):
             f"Access-code policy: {global_code_policy}",
             "",
             "Root menu callers will see:",
-            f"- 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt",
+            "- 00 READ FIRST — type a command, then refresh BBS",
         ]
         if root_locations:
             for index, row in enumerate(root_locations, start=20):
@@ -2215,8 +2214,8 @@ class SettingsTab(QWidget):
         else:
             lines.append("- No enabled non-hidden locations are listed in the root menu.")
         lines.extend(["", "Root view visitor files:"])
-        lines.append(f"- 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt")
-        lines.append("- 01 COMMANDS - type one command below.txt")
+        lines.append("- 00 READ FIRST — type a command, then refresh BBS")
+        lines.append("- 01 COMMANDS — type one command below")
         if root_locations:
             for index, row in enumerate(root_locations, start=20):
                 location = VaultLocation(
@@ -2293,10 +2292,10 @@ class SettingsTab(QWidget):
             )
             if bool(row.get("enabled", True)) and visibility != "Hidden":
                 lines.append("  Visitor files: published mapping")
-                lines.append(f"  - 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt")
-                lines.append("  - 01 COMMANDS - type one command below.txt")
+                lines.append("  - 00 READ FIRST — type a command, then refresh BBS")
+                lines.append("  - 01 COMMANDS — type one command below")
                 if location_id != DEFAULT_LOCATION_ID:
-                    lines.append("  - 10 type ROOT - return to main menu.txt")
+                    lines.append("  - 10 type ROOT — return to main menu")
                 lines.extend(
                     self._varac_bbs_vault_source_file_preview_lines(
                         row,
@@ -3250,6 +3249,14 @@ class SettingsTab(QWidget):
         if host is not None and hasattr(host, "open_context_help"):
             try:
                 host.open_context_help(context_key)
+            except Exception:
+                pass
+
+    def _open_station_bbs_workspace(self) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_station_bbs"):
+            try:
+                host.open_station_bbs()
             except Exception:
                 pass
 
@@ -7417,7 +7424,16 @@ class SettingsTab(QWidget):
         )
         live_bbs_scope_note.setWordWrap(True)
         bbs_settings_v.addWidget(live_bbs_scope_note)
-        vault_tab = QWidget()
+        self.varac_manage_station_bbs_btn = QPushButton("Manage FIO BBS")
+        self.varac_manage_station_bbs_btn.setToolTip(
+            "Open the station-owned Managed BBS catalog, locations, retention, access, and publication workspace."
+        )
+        self.varac_manage_station_bbs_btn.clicked.connect(self._open_station_bbs_workspace)
+        bbs_settings_v.addWidget(self.varac_manage_station_bbs_btn, 0, Qt.AlignLeft)
+        # These legacy shared-library widgets remain as hidden compatibility
+        # state for rollback.  Keep them parented so Qt does not delete their
+        # C++ objects when the no-longer-visible tabs leave local scope.
+        vault_tab = QWidget(bbs_tabs)
         vault_guard_v = QVBoxLayout(vault_tab)
         vault_guard_v.setContentsMargins(8, 8, 8, 8)
         vault_guard_v.setSpacing(8)
@@ -7426,11 +7442,11 @@ class SettingsTab(QWidget):
         )
         library_scope_note.setWordWrap(True)
         vault_guard_v.addWidget(library_scope_note)
-        preview_tab = QWidget()
+        preview_tab = QWidget(bbs_tabs)
         preview_v = QVBoxLayout(preview_tab)
         preview_v.setContentsMargins(8, 8, 8, 8)
         preview_v.setSpacing(8)
-        sweeper_tab = QWidget()
+        sweeper_tab = QWidget(bbs_tabs)
         sweeper_v = QVBoxLayout(sweeper_tab)
         sweeper_v.setContentsMargins(8, 8, 8, 8)
         sweeper_v.setSpacing(8)
@@ -7445,10 +7461,7 @@ class SettingsTab(QWidget):
         vguard_v.addWidget(guard_scope_note)
         bbs_tabs.addTab(paths_tab, "Radio Paths")
         bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")
-        bbs_tabs.addTab(vault_tab, "Shared Library")
-        bbs_tabs.addTab(preview_tab, "Visitor Preview")
-        bbs_tabs.addTab(sweeper_tab, "Shared Sweeper")
-        bbs_tabs.addTab(vguard_tab, "Access Guard")
+        bbs_tabs.addTab(vguard_tab, "Inbound Guard")
         varac_v.addWidget(bbs_tabs)
 
         varac_row = QHBoxLayout()
@@ -7587,14 +7600,16 @@ class SettingsTab(QWidget):
         bbs_policy_row.setSpacing(8)
         self.varac_bbs_auto_archive_chk = QCheckBox("Enable Auto-Archive")
         bbs_policy_row.addWidget(self.varac_bbs_auto_archive_chk)
-        bbs_policy_row.addWidget(QLabel("After"))
+        bbs_policy_after_label = QLabel("After")
+        bbs_policy_row.addWidget(bbs_policy_after_label)
         self.varac_bbs_archive_days_combo = QComboBox()
         for day in (1, 3, 5, 7, 10, 14, 21, 30):
             self.varac_bbs_archive_days_combo.addItem(str(day), day)
         self.varac_bbs_archive_days_combo.setCurrentText("14")
         self.varac_bbs_archive_days_combo.setFixedWidth(80)
         bbs_policy_row.addWidget(self.varac_bbs_archive_days_combo)
-        bbs_policy_row.addWidget(QLabel("days"))
+        bbs_policy_days_label = QLabel("days")
+        bbs_policy_row.addWidget(bbs_policy_days_label)
         bbs_policy_row.addStretch()
         varac_hint = QLabel("Moves files older than selected days from BBS Directory to BBS Archive.")
         varac_hint.setWordWrap(True)
@@ -7605,7 +7620,8 @@ class SettingsTab(QWidget):
         policy_inner.setContentsMargins(0, 0, 0, 0)
         policy_inner.addLayout(bbs_policy_row)
         policy_inner.addWidget(varac_hint)
-        bbs_settings_v.addWidget(QLabel("Auto-Archive Policy"))
+        bbs_auto_archive_policy_label = QLabel("Auto-Archive Policy")
+        bbs_settings_v.addWidget(bbs_auto_archive_policy_label)
         bbs_settings_v.addLayout(policy_inner)
 
         bbs_access_checks_row = QHBoxLayout()
@@ -7636,7 +7652,8 @@ class SettingsTab(QWidget):
         bbs_settings_v.addWidget(QLabel("BBS Access"))
         bbs_settings_v.addLayout(bbs_access_inner)
 
-        bbs_settings_v.addWidget(QLabel("Allowed Callsigns"))
+        bbs_allowed_callsigns_label = QLabel("Allowed Callsigns")
+        bbs_settings_v.addWidget(bbs_allowed_callsigns_label)
         bbs_callsigns_wrap = QWidget()
         bbs_callsigns_layout = QVBoxLayout(bbs_callsigns_wrap)
         bbs_callsigns_layout.setContentsMargins(0, 0, 0, 0)
@@ -7719,6 +7736,26 @@ class SettingsTab(QWidget):
         )
         bbs_file_management_note.setWordWrap(True)
         bbs_settings_v.addWidget(bbs_file_management_note)
+
+        # Station-owned retention and caller permissions moved to Managed BBS.
+        # Keep the legacy widgets alive for rollback/persistence, but do not
+        # present duplicate administration under a selected radio.
+        for legacy_station_widget in (
+            bbs_archive_label,
+            self.varac_bbs_archive_dir_edit,
+            bbs_archive_browse,
+            self.varac_bbs_auto_archive_chk,
+            bbs_policy_after_label,
+            self.varac_bbs_archive_days_combo,
+            bbs_policy_days_label,
+            varac_hint,
+            bbs_auto_archive_policy_label,
+            self.varac_bbs_limit_access_chk,
+            bbs_allowed_callsigns_label,
+            bbs_callsigns_wrap,
+            bbs_file_management_note,
+        ):
+            legacy_station_widget.setVisible(False)
 
         self._varac_bbs_ini_sync_state = ""
 
@@ -8124,6 +8161,13 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_status_label.setWordWrap(True)
         vault_status_row.addWidget(self.varac_bbs_vault_status_label, 1)
         vault_guard_v.addLayout(vault_status_row)
+
+        self.varac_bbs_vault_enabled_chk_main.setText("Publish Managed BBS on this radio")
+        self.varac_bbs_vault_enabled_chk_main.setToolTip(
+            "Enable this radio's live projection of the one station Managed BBS catalog."
+        )
+        bbs_settings_v.insertWidget(1, self.varac_bbs_vault_enabled_chk_main)
+        bbs_settings_v.insertWidget(2, self.varac_bbs_vault_status_label)
 
         self.varac_bbs_vault_enabled_chk_main.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_enabled_chk_main.stateChanged.connect(self._refresh_section_titles)

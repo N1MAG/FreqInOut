@@ -19,6 +19,10 @@ from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
+from freqinout.core.varac_bbs_library_store import (
+    ensure_bbs_library_schema,
+    import_legacy_station_bbs_profiles,
+)
 
 def _config_dir() -> Path:
     """Resolve the active profile config directory at call time."""
@@ -36,6 +40,17 @@ def _ensure_settings_db() -> None:
     conn = connect_sqlite(db_path)
     try:
         ensure_multi_radio_settings_schema(conn)
+        conn.commit()
+        ensure_bbs_library_schema(conn)
+        conn.row_factory = sqlite3.Row
+        profile_rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM device_profiles ORDER BY runtime_primary DESC, runtime_active DESC, display_order, id"
+            ).fetchall()
+        ]
+        import_legacy_station_bbs_profiles(conn, profile_rows)
+        conn.commit()
     finally:
         conn.close()
 

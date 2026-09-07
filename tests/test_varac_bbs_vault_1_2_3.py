@@ -211,8 +211,10 @@ def test_varac_guard_ignores_fio_generated_helper_files(tmp_path: Path) -> None:
 def test_messages_helper_filter_hides_new_instruction_files() -> None:
     from freqinout.gui.message_viewer_tab import _is_fio_bbs_helper_file_name
 
-    assert _is_fio_bbs_helper_file_name("00 READ FIRST - type command, wait 10 sec, refresh BBS.txt")
-    assert _is_fio_bbs_helper_file_name("00 NOTICE - LIST BLKS 1AD1 received; wait 10 sec, refresh again.txt")
+    assert _is_fio_bbs_helper_file_name("00 READ FIRST - type command, then refresh BBS.txt")
+    assert _is_fio_bbs_helper_file_name(
+        "00 NOTICE - LIST BLKS 1AD1 received. Request sent—refresh when the updated listing is ready.txt"
+    )
     assert _is_fio_bbs_helper_file_name("01 COMMANDS - type one command below.txt")
     assert _is_fio_bbs_helper_file_name("21 type HUBS [CODE] - open HUBS with access code.txt")
     assert _is_fio_bbs_helper_file_name("BBS MSG - Type INTEL to open Intel then refresh BBS.txt")
@@ -589,7 +591,7 @@ def test_publish_root_view_appends_custom_helper_text_to_filename(tmp_path: Path
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 READ FIRST - type command, wait 10 sec, refresh BBS.txt" in names
+    assert "00 READ FIRST - type command, then refresh BBS.txt" in names
     assert "01 COMMANDS - type one command below.txt" in names
     assert "20 type INTEL - open Intel - Latest reports.txt" in names
 
@@ -1719,7 +1721,7 @@ def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 READ FIRST - type command, wait 10 sec, refresh BBS.txt" in names
+    assert "00 READ FIRST - type command, then refresh BBS.txt" in names
     assert "01 COMMANDS - type one command below.txt" in names
     assert "20 type FLAMP - show Flamp block fill commands.txt" in names
     assert not any("FLAMP CMDS LIST Q" in name for name in names)
@@ -2304,7 +2306,9 @@ def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Pat
     assert state.current_view_label == "FLAMP 41D6"
     assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
-    assert (live_bbs / "00 NOTICE - LIST BLKS 41D6 received; wait 10 sec, refresh again.txt").exists()
+    assert (
+        live_bbs / "00 NOTICE - LIST BLKS 41D6 received. Request sent—refresh when the updated listing is ready.txt"
+    ).exists()
 
 
 def test_run_varac_bbs_vault_db_handles_missing_qso_and_slashed_zero_queue(tmp_path: Path) -> None:
@@ -2794,8 +2798,8 @@ def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -
 
     assert (
         tab.varac_bbs_vault_helper_preview_label.text()
-        == "All BBS views include: 00 READ FIRST - type command, wait 10 sec, refresh BBS.txt\n"
-        "20 type INTEL - open Intel - Latest reports.txt"
+        == "All BBS views include: 00 READ FIRST — type a command, then refresh BBS\n"
+        "20 type INTEL - open Intel - Latest reports"
     )
 
 
@@ -2893,7 +2897,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     assert f"Managed root: {managed_root}" in text
     assert "Root menu callers will see:" in text
     assert "Root view visitor files:" in text
-    assert "20 type INTEL - open Intel - Latest reports.txt" in text
+    assert "20 type INTEL - open Intel - Latest reports" in text
     assert "Welcome.txt (7 bytes)" in text
     assert "HIDE - open Hidden" not in text
     assert "- Intel [INTEL] (enabled, Public, shown in root)" in text
@@ -2901,7 +2905,7 @@ def test_settings_tab_managed_bbs_structure_preview_is_operator_readable(tmp_pat
     assert "Retention: Archive files older than 7 days" in text
     assert f"Source: {intel_dir}" in text
     assert "Visitor files:" in text
-    assert "10 type ROOT - return to main menu.txt" in text
+    assert "10 type ROOT — return to main menu" in text
     assert "Storm Update.k2s (5 bytes)" in text
     assert "1 subfolder(s) ignored" in text
     assert "Private.txt" not in text

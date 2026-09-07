@@ -6,6 +6,7 @@ from pathlib import Path
 from freqinout.core.varac_bbs_library_store import (
     ensure_bbs_library_schema,
     list_bbs_location_manifest_rows,
+    sync_bbs_location_from_folder,
     set_bbs_location_artifact,
     upsert_bbs_artifact_path,
     upsert_bbs_location,
@@ -81,3 +82,125 @@ def test_db_unpublish_disables_membership_without_deleting_artifact_or_source(tm
     assert rows == []
     assert artifact_count == 1
     assert source.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_one_station_catalog_materializes_through_two_radio_live_directories(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    source = tmp_path / "canonical" / "shared-status.txt"
+    source.parent.mkdir()
+    source.write_text("shared station status\n", encoding="utf-8")
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    live_a = tmp_path / "FIO-A" / "BBS"
+    live_b = tmp_path / "FIO-B" / "BBS"
+
+    with sqlite3.connect(db_path) as conn:
+        artifact_id = upsert_bbs_artifact_path(conn, source_path=source)
+        upsert_bbs_location(conn, location_id="intel", name="Intel", retention_mode="manual")
+        set_bbs_location_artifact(conn, location_id="intel", artifact_id=artifact_id)
+        conn.commit()
+
+    location = VaultLocation(id="intel", name="Intel", source_dir="", alias="INTEL")
+    result_a = publish_location_view(
+        location,
+        live_bbs_dir=live_a,
+        managed_root=managed_root,
+        manifest_db_path=db_path,
+    )
+    result_b = publish_location_view(
+        location,
+        live_bbs_dir=live_b,
+        managed_root=managed_root,
+        manifest_db_path=db_path,
+    )
+
+    assert (live_a / source.name).read_text(encoding="utf-8") == "shared station status\n"
+    assert (live_b / source.name).read_text(encoding="utf-8") == "shared station status\n"
+    assert result_a.manifest_path != result_b.manifest_path
+    assert read_publish_manifest(result_a.manifest_path) == read_publish_manifest(result_b.manifest_path)
+
+
+def test_db_folder_sync_preserves_operator_disabled_membership_and_missing_source_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout.db"
+    source_dir = tmp_path / "managed" / "Intel"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "status.txt"
+    source.write_text("regional status\n", encoding="utf-8")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_bbs_library_schema(conn)
+        sync_bbs_location_from_folder(conn, location_id="intel", name="Intel", source_dir=source_dir, enabled=True)
+        artifact_id = conn.execute(
+            "SELECT artifact_id FROM bbs_artifacts WHERE source_path=? LIMIT 1",
+            (str(source.resolve()),),
+        ).fetchone()[0]
+        set_bbs_location_artifact(conn, location_id="intel", artifact_id=artifact_id, publish_enabled=False)
+        conn.commit()
+
+        sync_bbs_location_from_folder(conn, location_id="intel", name="Intel", source_dir=source_dir, enabled=True)
+        publish_row = conn.execute(
+            """
+            SELECT publish_enabled
+            FROM bbs_location_artifacts
+            WHERE location_id=? AND artifact_id=?
+            """,
+            ("intel", artifact_id),
+        ).fetchone()
+        artifact_row = conn.execute(
+            """
+            SELECT deleted
+            FROM bbs_artifacts
+            WHERE artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        manifest_rows = list_bbs_location_manifest_rows(conn, "intel")
+
+        source.unlink()
+        sync_bbs_location_from_folder(conn, location_id="intel", name="Intel", source_dir=source_dir, enabled=True)
+        missing_row = conn.execute(
+            """
+            SELECT publish_enabled
+            FROM bbs_location_artifacts
+            WHERE location_id=? AND artifact_id=?
+            """,
+            ("intel", artifact_id),
+        ).fetchone()
+        missing_artifact_row = conn.execute(
+            """
+            SELECT source_state, deleted
+            FROM bbs_artifacts
+            WHERE artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        missing_manifest_rows = list_bbs_location_manifest_rows(conn, "intel")
+
+        source.write_text("regional status\n", encoding="utf-8")
+        sync_bbs_location_from_folder(conn, location_id="intel", name="Intel", source_dir=source_dir, enabled=True)
+        restored_row = conn.execute(
+            """
+            SELECT publish_enabled
+            FROM bbs_location_artifacts
+            WHERE location_id=? AND artifact_id=?
+            """,
+            ("intel", artifact_id),
+        ).fetchone()
+        restored_artifact_row = conn.execute(
+            """
+            SELECT deleted
+            FROM bbs_artifacts
+            WHERE artifact_id=?
+            """,
+            (artifact_id,),
+        ).fetchone()
+        restored_manifest_rows = list_bbs_location_manifest_rows(conn, "intel")
+
+    assert publish_row == (0,)
+    assert artifact_row == (0,)
+    assert manifest_rows == []
+    assert missing_row == (0,)
+    assert missing_artifact_row == ("missing", 0)
+    assert missing_manifest_rows == []
+    assert restored_row == (0,)
+    assert restored_artifact_row == (0,)
+    assert restored_manifest_rows == []

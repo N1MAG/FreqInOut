@@ -83,7 +83,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '"Plan Builder": False' in source
     assert 'raw["Plan Builder"] = raw.get("FreqPlanner")' in source
     assert "self._suppress_initial_nav_group_auto_expand = True" in source
-    assert 'if screen in {"Station Overview", "Station Health"}:' in source
+    assert 'if screen in {"Station Overview", "Station Health", "Managed BBS"}:' in source
     assert 'return "Station"' in source
     assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
     assert 'return "Plan Builder"' in source
@@ -5125,6 +5125,8 @@ def test_phase7_settings_sections_use_bounded_fit_content_layouts() -> None:
 def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     spec = Path("docs/internal/settings_configuration_assistant_spec.md").read_text(encoding="utf-8")
     settings_source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
+    station_bbs_source = Path("freqinout/gui/station_bbs_tab.py").read_text(encoding="utf-8")
+    main_source = Path("freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
     assert "Condition Alerts" in spec
     assert "Operating Models" in spec
@@ -5141,14 +5143,16 @@ def test_settings_configuration_assistant_spec_tracks_next_ia_work() -> None:
     assert "preview of the managed BBS structure" in spec
     assert "configurable sweeper from VarAC BBS Inbox and FLMsg/FLAmp inputs" in spec
     assert "multiple managed BBS locations" in spec
-    assert "radio-scoped Settings review surface" in spec
+    assert "station-owned review and publication live in Managed BBS" in spec
     assert "varacBbsSettingsTabs" in settings_source
     assert 'bbs_tabs.addTab(paths_tab, "Radio Paths")' in settings_source
     assert 'bbs_tabs.addTab(bbs_settings_tab, "Radio Live BBS")' in settings_source
-    assert 'bbs_tabs.addTab(vault_tab, "Shared Library")' in settings_source
-    assert 'bbs_tabs.addTab(preview_tab, "Visitor Preview")' in settings_source
-    assert 'bbs_tabs.addTab(sweeper_tab, "Shared Sweeper")' in settings_source
-    assert 'bbs_tabs.addTab(vguard_tab, "Access Guard")' in settings_source
+    assert 'bbs_tabs.addTab(vguard_tab, "Inbound Guard")' in settings_source
+    assert 'bbs_tabs.addTab(vault_tab, "Shared Library")' not in settings_source
+    assert 'self.varac_manage_station_bbs_btn = QPushButton("Manage FIO BBS")' in settings_source
+    assert '("Managed BBS", "Managed BBS")' in main_source
+    assert 'title = QLabel("Managed BBS")' in station_bbs_source
+    assert 'self.artifact_table.setHorizontalHeaderLabels(["Published"' in station_bbs_source
     assert "shared Managed BBS Library as the source of truth" in settings_source
     assert "Radio-specific live BBS folder" in settings_source
     assert "BBS file management lives in Messages -> BBS" in settings_source

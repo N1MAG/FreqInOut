@@ -1008,8 +1008,52 @@ Deliverables: schema migration for explicit retention/state, station navigation,
 tree/checkbox publication component, missing-source reconciler, helper rewrite,
 and thin per-radio VarAC adapter settings.
 
+Implementation status (2026-09-06): complete. The operator explicitly
+authorized Slice 2 to proceed while the independent Slice 1 Mesh hardware gate
+is deferred until the next production-hardware session. This exception changes
+delivery sequencing only; it does not close or waive the Slice 1 exit gate.
+
+The station catalog is schema version 2. Startup performs verified,
+backup-first and idempotent schema/legacy-ownership migrations. Existing
+radio-owned locations are copied as a union with station rows taking precedence;
+legacy profile values remain for rollback. Source presence, operator intent,
+retention expiry, and location enablement are modeled independently. The
+background service reconciles missing sources and expiries in bounded batches.
+
+`Station > Managed BBS` now owns the graphical location tree, access and
+retention policy, Add/Edit/Disable workflow, bounded newest-first artifact view,
+publication checkboxes, and artifact health/detail. Compact layout stacks the
+tree and list and makes detail opt-in so 900x560 Large Text preserves the main
+workspace. Visitor Preview filters the effective tree by caller visibility and
+associated callsigns and makes publication controls read-only. Location access
+supports public, callsign, access-code, and combined rules; new codes are salted
+and hashed. Radio Settings retain only radio paths, the live BBS adapter, inbound
+guard, and a link to the station workspace. Messages `+BBS` uses the identical
+station locations and atomically replaces memberships, including uncheck-all,
+without copying or deleting the received source file.
+
+Each radio live directory has a distinct manifest keyed to its resolved path,
+so one catalog projects independently through one or multiple VarAC instances.
+Compatibility callers without an explicit database identity remain on the
+folder-backed path and cannot accidentally read the process-global catalog.
+Visitor helper labels are extensionless in the UI while on-disk compatibility
+files retain `.txt`; fixed-delay instructions were replaced by asynchronous
+refresh guidance.
+
 Exit gate: migration is backup-safe/idempotent; one catalog publishes correctly
 through one and multiple radio instances; expiration and missing-file tests pass.
+
+Exit-gate result: passed in automated acceptance. The focused BBS contract set
+passes 130 tests with one environment skip; BBS, navigation, Settings, and
+background-service integration adds 42 passes with five environment skips.
+Version migration, ownership import, rollback-on-backup-failure, two-radio
+projection, operator-disabled preservation, expiry, missing/restored source,
+atomic checkbox membership, and compact UI tests all pass. A synthetic 10,000-
+mapping/200-row bounded administration query measured p50 2.59 ms, p95 2.77 ms,
+and max 2.82 ms on the development Mac. Light/Normal 1200x800 and Dark/Large
+Text 900x560 were visually reviewed. The full fresh-process regression partitions
+are recorded in the work log; the final BBS/Settings/navigation refinement set
+passes 282 tests with one environment skip.
 
 Risk: **high**, due persistence migration and external file publication.
 

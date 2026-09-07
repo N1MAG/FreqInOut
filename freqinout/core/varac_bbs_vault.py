@@ -22,8 +22,9 @@ from freqinout.core.nbems_compose import safe_varac_bbs_filename
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_bbs_library_store import (
     bbs_location_catalog_source_dir,
-    bbs_library_db_path_from_settings,
+    bbs_library_db_path_from_settings,  # compatibility export; runtime paths are explicit below
     ensure_bbs_library_schema,
+    list_bbs_locations,
     list_bbs_location_manifest_rows,
     location_has_bbs_catalog,
     log_bbs_library_sync_failure,
@@ -52,6 +53,10 @@ DEFAULT_FLAMP_BLOCK_PREFIX = "BBS_BLOCK_LIST"
 DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
+# Kept as a compatibility constant for callers that imported the old setting.
+# Visitor-facing helper text must not promise a fixed delay; asynchronous state
+# uses ASYNC_REFRESH_NOTICE instead.
+ASYNC_REFRESH_NOTICE = "Request sent—refresh when the updated listing is ready"
 VAULT_ALIAS_HEALTH_KEY = "varac-bbs-vault-aliases"
 VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Library"
 
@@ -1060,9 +1065,13 @@ def bbs_file_management_roots(settings) -> List[Dict[str, str]]:
     return rows
 
 
-def _manifest_path_for(managed_root: object) -> Path:
+def _manifest_path_for(managed_root: object, live_bbs_dir: object = "") -> Path:
     paths = _managed_root_paths(managed_root)
-    return paths["manifests"] / "current_publish_manifest.json"
+    live_path = _resolve_path(live_bbs_dir)
+    if live_path is None:
+        return paths["manifests"] / "current_publish_manifest.json"
+    identity = hashlib.sha1(str(live_path).encode("utf-8")).hexdigest()[:12]
+    return paths["manifests"] / f"current_publish_manifest-{identity}.json"
 
 
 def _audit_log_path_for(managed_root: object) -> Path:
@@ -1334,7 +1343,12 @@ def _db_backed_manifest_entries(
     manifest_db_path: object = "",
     virtual_files: Sequence[_VirtualFile] = (),
 ) -> Optional[List[VaultPublishManifestEntry]]:
-    db_path = _resolve_path(manifest_db_path or bbs_library_db_path_from_settings(None))
+    # A caller that has a catalog identity must pass it explicitly.  Empty
+    # paths intentionally select the legacy filesystem manifest, rather than
+    # silently borrowing the process-wide FIO database.
+    if not str(manifest_db_path or "").strip():
+        return None
+    db_path = _resolve_path(manifest_db_path)
     if db_path is None or not db_path.exists():
         return None
     try:
@@ -1410,7 +1424,7 @@ def _publish_manifest_entries(
         raise ValueError("Live BBS directory is required")
     live_dir.mkdir(parents=True, exist_ok=True)
     src_root = _resolve_path(source_dir)
-    manifest_path = _manifest_path_for(managed_root)
+    manifest_path = _manifest_path_for(managed_root, live_bbs_dir)
     previous_manifest = read_publish_manifest(manifest_path)
     previous_map = _entry_map(previous_manifest)
     next_map = _entry_map(entries)
@@ -1470,6 +1484,11 @@ def _publish_manifest_entries(
     if not manifest_path.exists() or existing_manifest_text != next_manifest_text:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(next_manifest_text, encoding="utf-8")
+        # Keep the historical path as a diagnostics-only pointer to the most
+        # recently materialized instance. Runtime reconciliation always uses
+        # the radio-specific manifest above.
+        compatibility_manifest = _manifest_path_for(managed_root)
+        compatibility_manifest.write_text(next_manifest_text, encoding="utf-8")
     else:
         log.debug("VARAC_VAULT_MANIFEST|unchanged|entries=%s|write_skipped=true", len(entries))
 
@@ -1696,12 +1715,24 @@ def _extract_alias_request(text: str, alias_map: Mapping[str, str]) -> Tuple[str
     return "", ""
 
 
+def _logical_helper_label(value: object) -> str:
+    """Return a visitor-facing helper label without its compatibility suffix."""
+
+    text = " ".join(str(value or "").strip().split())
+    if text.lower().endswith(".txt"):
+        return text[:-4].rstrip()
+    return text
+
+
 def _menu_instruction_entry(text: str) -> _VirtualFile:
-    return _VirtualFile(name=f"{text}.txt", content=text + "\n")
+    # VarAC accepts the historical ``.txt`` compatibility filename, while the
+    # logical label and helper content stay extensionless for operators.
+    logical_label = _logical_helper_label(text)
+    return _VirtualFile(name=f"{logical_label}.txt", content=logical_label + "\n")
 
 
 def _read_first_entry() -> _VirtualFile:
-    text = f"00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS"
+    text = "00 READ FIRST - type command, then refresh BBS"
     return _menu_instruction_entry(text)
 
 
@@ -1736,7 +1767,7 @@ def _quick_refresh_notice_entry(command_text: object) -> _VirtualFile:
     command = str(command_text or "").strip().upper()
     if not command:
         command = "Command"
-    return _notice_entry(f"{command} received; wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh again")
+    return _notice_entry(f"{command} received. {ASYNC_REFRESH_NOTICE}")
 
 
 def root_location_helper_filename_preview(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int = 20) -> str:
@@ -1757,7 +1788,8 @@ def root_location_helper_filename_preview(location: VaultLocation, *, default_lo
         description = f"open {name}"
     if custom:
         description = f"{description} - {custom}"
-    return f"{max(0, min(99, int(order))):02d} type {command} - {description}.txt"
+    # This is a logical visitor label, not the on-disk compatibility filename.
+    return f"{max(0, min(99, int(order))):02d} type {command} - {description}"
 
 
 def _root_location_helper_entry(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int) -> _VirtualFile:
@@ -1767,8 +1799,7 @@ def _root_location_helper_entry(location: VaultLocation, *, default_location_id:
         global_code_policy=global_code_policy,
         order=order,
     )
-    stem = text[:-4] if text.upper().endswith(".TXT") else text
-    return _menu_instruction_entry(stem)
+    return _menu_instruction_entry(text)
 
 
 def _root_virtual_files(
@@ -1896,6 +1927,7 @@ def publish_location_access_prompt_view(
     live_bbs_dir: object,
     managed_root: object,
     reason: str = "code_required",
+    manifest_db_path: object = "",
 ) -> VaultPublishResult:
     virtual_files = _location_access_prompt_virtual_files(location, reason=reason)
     manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
@@ -2675,6 +2707,7 @@ def _publish_root_action(
     now_ts: float,
     flamp_enabled: bool,
     reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     publish_result = publish_root_view(
         sender=sender,
@@ -2687,6 +2720,7 @@ def _publish_root_action(
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
+        manifest_db_path=manifest_db_path,
     )
     summary = f"Managed BBS Library published root menu for {sender or 'public'}."
     next_state = _update_state(
@@ -2860,6 +2894,7 @@ def _publish_refresh_action(
     now_ts: float,
     flamp_enabled: bool,
     reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
     sender_norm = _normalize_callsign(sender)
@@ -2884,6 +2919,7 @@ def _publish_refresh_action(
             now_ts=now_ts,
             flamp_enabled=flamp_enabled,
             reason=reason,
+            manifest_db_path=manifest_db_path,
         )
     current_location = _location_by_id(locations, state.current_location_id)
     if current_location is None or not current_location.enabled:
@@ -2901,6 +2937,7 @@ def _publish_refresh_action(
             now_ts=now_ts,
             flamp_enabled=flamp_enabled,
             reason=reason,
+            manifest_db_path=manifest_db_path,
         )
     if state.current_view_mode == "access-prompt":
         prompt_reason = "code_required"
@@ -2915,6 +2952,7 @@ def _publish_refresh_action(
             live_bbs_dir=live_bbs_dir,
             managed_root=managed_root,
             reason=prompt_reason,
+            manifest_db_path=manifest_db_path,
         )
         summary = f"Managed BBS Library refreshed access prompt for {current_location.name}."
         next_state = _update_state(
@@ -2943,7 +2981,12 @@ def _publish_refresh_action(
             },
         )
         return VaultActionResult("refresh_access_prompt", True, summary, next_state, publish_result=publish_result)
-    publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+    publish_result = publish_location_view(
+        current_location,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        manifest_db_path=manifest_db_path,
+    )
     summary = f"Managed BBS Library refreshed {current_location.name} for {sender_norm or 'public'}."
     next_state = _update_state(
         state,
@@ -2988,6 +3031,7 @@ def apply_unlock_request(
     failed_attempt_limit: int = DEFAULT_FAILED_ATTEMPT_LIMIT,
     failed_attempt_window_seconds: int = DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS,
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     return _apply_open_request(
         sender=sender,
@@ -3008,6 +3052,7 @@ def apply_unlock_request(
         cooldown_seconds=cooldown_seconds,
         global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
         action_reason="legacy_code_open",
+        manifest_db_path=manifest_db_path,
     )
 
 
@@ -3026,12 +3071,14 @@ def _access_prompt_result(
     reason: str,
     cooldowns: Mapping[str, Mapping[str, float]],
     failed_attempts: Mapping[str, Sequence[float]],
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     publish_result = publish_location_access_prompt_view(
         location,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         reason=reason,
+        manifest_db_path=manifest_db_path,
     )
     next_state = _update_state(
         state,
@@ -3085,6 +3132,7 @@ def _apply_open_request(
     cooldown_seconds: int,
     global_code_policy: str,
     action_reason: str,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     sender = _normalize_callsign(sender)
@@ -3119,6 +3167,7 @@ def _apply_open_request(
                 reason="cooldown",
                 cooldowns=cooldowns,
                 failed_attempts={str(key): list(value) for key, value in state.failed_attempts.items()},
+                manifest_db_path=manifest_db_path,
             )
         return VaultActionResult("cooldown_active", False, summary, _update_state(state, last_action=summary, last_error="cooldown_active"))
 
@@ -3199,6 +3248,7 @@ def _apply_open_request(
             reason="callsign_restricted",
             cooldowns=cooldowns,
             failed_attempts=failed_attempts,
+            manifest_db_path=manifest_db_path,
         )
 
     if (
@@ -3240,9 +3290,15 @@ def _apply_open_request(
                 ),
                 cooldowns=cooldowns,
                 failed_attempts=failed_attempts,
+                manifest_db_path=manifest_db_path,
             )
 
-    publish_result = publish_location_view(matched_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+    publish_result = publish_location_view(
+        matched_location,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        manifest_db_path=manifest_db_path,
+    )
     failed_attempts.pop(sender, None)
     cooldowns.pop(sender, None)
     summary = f"Managed BBS Library published {matched_location.name} for {sender}."
@@ -3290,6 +3346,7 @@ def reset_to_default_location(
     flamp_enabled: bool = False,
     reason: str = "manual_reset",
     now_ts: Optional[float] = None,
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
@@ -3304,6 +3361,7 @@ def reset_to_default_location(
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=True,
+        manifest_db_path=manifest_db_path,
     )
     summary = f"Managed BBS Library returned to {DEFAULT_LOCATION_NAME}."
     next_state = _update_state(
@@ -3346,6 +3404,7 @@ def _restore_previous_view(
     flamp_enabled: bool,
     now_ts: Optional[float] = None,
     reason: str = "overlay_restore",
+    manifest_db_path: object = "",
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     if runtime_state.previous_view_mode == "location":
@@ -3363,8 +3422,14 @@ def _restore_previous_view(
                 flamp_enabled=flamp_enabled,
                 reason=reason,
                 now_ts=now_ts,
+                manifest_db_path=manifest_db_path,
             )
-        publish_result = publish_location_view(location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+        publish_result = publish_location_view(
+            location,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            manifest_db_path=manifest_db_path,
+        )
         summary = f"Managed BBS Library restored {location.name} after FLAMP overlay."
         next_state = _update_state(
             runtime_state,
@@ -3397,6 +3462,7 @@ def _restore_previous_view(
         now_ts=now_ts,
         flamp_enabled=flamp_enabled,
         reason=reason,
+        manifest_db_path=manifest_db_path,
     )
 
 
@@ -3412,13 +3478,19 @@ def _reconcile_current_location(
     limit_access_enabled: bool,
     global_code_policy: str,
     flamp_enabled: bool,
+    manifest_db_path: object = "",
 ) -> Tuple[VaultRuntimeState, bool]:
     try:
         if runtime_state.current_view_mode == "location":
             current_location = _location_by_id(locations, runtime_state.current_location_id)
             if current_location is None or not current_location.enabled:
                 return runtime_state, False
-            publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+            publish_result = publish_location_view(
+                current_location,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                manifest_db_path=manifest_db_path,
+            )
         elif runtime_state.current_view_mode == "access-prompt":
             current_location = _location_by_id(locations, runtime_state.current_location_id)
             if current_location is None or not current_location.enabled:
@@ -3435,6 +3507,7 @@ def _reconcile_current_location(
                 live_bbs_dir=live_bbs_dir,
                 managed_root=managed_root,
                 reason=prompt_reason,
+                manifest_db_path=manifest_db_path,
             )
         elif runtime_state.current_view_mode == "flamp-block-overlay":
             overlay_name = str(runtime_state.current_overlay_file or "").strip()
@@ -3487,6 +3560,7 @@ def _reconcile_current_location(
                 managed_root=managed_root,
                 flamp_enabled=flamp_enabled,
                 include_enabled_fallback=True,
+                manifest_db_path=manifest_db_path,
             )
     except Exception as exc:
         summary = f"Managed BBS Library degraded: {exc}"
@@ -3518,6 +3592,66 @@ def _summary_text(runtime_state: VaultRuntimeState) -> str:
     return summary
 
 
+def _station_catalog_vault_configuration(
+    db_path: object,
+    fallback_locations: Sequence[VaultLocation],
+) -> tuple[List[VaultLocation], Dict[str, str]]:
+    """Load station-owned location policy without scanning source folders."""
+
+    resolved = _resolve_path(db_path)
+    if resolved is None:
+        return list(fallback_locations), {}
+    try:
+        with connect_sqlite(resolved) as conn:
+            ensure_bbs_library_schema(conn)
+            records = list_bbs_locations(conn, include_disabled=True)
+            meta_rows = conn.execute(
+                "SELECT key, value FROM bbs_library_meta WHERE key LIKE 'station_%' OR key='global_retention_days'"
+            ).fetchall()
+    except Exception as exc:
+        log_bbs_library_sync_failure(exc)
+        return list(fallback_locations), {}
+    if not records:
+        return list(fallback_locations), {str(key or ""): str(value or "") for key, value in meta_rows}
+    location_data: List[Dict[str, object]] = []
+    for record in records:
+        payload = dict(record.metadata or {})
+        payload.update(
+            {
+                "id": record.location_id,
+                "name": record.name,
+                "source_dir": record.source_dir,
+                "enabled": record.enabled,
+                "open_rule": record.access_rule,
+                "visibility_rule": payload.get("visibility_rule", "Public"),
+                "retention_policy": {
+                    "manual": "Keep until manually removed",
+                    "expire_after_days": "Archive this location by age",
+                }.get(record.retention_mode, "Use global BBS archive policy"),
+                "retention_days": record.retention_days,
+            }
+        )
+        location_data.append(payload)
+    return load_vault_locations(location_data), {
+        str(key or ""): str(value or "") for key, value in meta_rows
+    }
+
+
+def _explicit_catalog_db_path(settings: object) -> object:
+    """Return only a database identity carried by this runtime settings object."""
+
+    current = settings
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for attr in ("db_path", "_config_path"):
+            value = getattr(current, attr, None)
+            if value:
+                return value
+        current = getattr(current, "fallback_settings", None)
+    return ""
+
+
 def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     enabled = bool(settings.get("varac_bbs_vault_enabled", False) if settings is not None else False)
     if not enabled:
@@ -3525,25 +3659,44 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
 
     live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
     managed_root = compute_default_managed_root(live_bbs_dir)
-    default_location_id = str(settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
     trigger_mode = DEFAULT_TRIGGER_MODE
     return_mode = DEFAULT_RETURN_MODE
     failed_attempt_limit = int(settings.get("varac_bbs_vault_failed_attempt_limit", DEFAULT_FAILED_ATTEMPT_LIMIT) or DEFAULT_FAILED_ATTEMPT_LIMIT)
     failed_attempt_window_seconds = int(settings.get("varac_bbs_vault_failed_attempt_window_seconds", DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS) or DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS)
     cooldown_seconds = int(settings.get("varac_bbs_vault_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS) or DEFAULT_COOLDOWN_SECONDS)
-    global_code_policy = DEFAULT_GLOBAL_CODE_POLICY
     flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False) if settings is not None else False)
     flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip() if settings is not None else ""
     flamp_listing_max_age_days = int(
         settings.get("varac_bbs_vault_flamp_listing_max_age_days", DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS)
         or DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
     )
-    locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    legacy_locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    # Lightweight/legacy callers without an explicit catalog identity remain
+    # on the folder-backed contract.  They must never borrow the operator's
+    # process-global station database by accident.
+    manifest_db_path = _explicit_catalog_db_path(settings)
+    locations, station_meta = _station_catalog_vault_configuration(manifest_db_path, legacy_locations)
+    default_location_id = str(
+        station_meta.get("station_default_location_id")
+        or settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID)
+        or DEFAULT_LOCATION_ID
+    ).strip() or DEFAULT_LOCATION_ID
+    global_code_policy = str(
+        station_meta.get("station_global_code_policy") or DEFAULT_GLOBAL_CODE_POLICY
+    ).strip() or DEFAULT_GLOBAL_CODE_POLICY
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
     initial_state_data = vault_runtime_state_to_data(runtime_state)
     initial_unmanaged_live_files = tuple(runtime_state.unmanaged_live_files)
-    global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
-    limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
+    global_allowed = parse_callsign_list(
+        station_meta.get("station_allowed_callsigns")
+        or (settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
+    )
+    if "station_limit_access_enabled" in station_meta:
+        limit_access_enabled = station_meta.get("station_limit_access_enabled") == "1"
+    else:
+        limit_access_enabled = bool(
+            settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False
+        )
 
     if not live_bbs_dir or not managed_root or not locations:
         summary = "Managed BBS Library needs setup before it can run."
@@ -3558,7 +3711,6 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         _persist_runtime_state(settings, error_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, error_state.current_location_id, error_state.current_session_callsign, summary)
 
-    manifest_db_path = bbs_library_db_path_from_settings(settings)
     try:
         sync_bbs_locations_from_folders(
             manifest_db_path,
@@ -3594,7 +3746,10 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     now_ts = time.time()
 
     if not runtime_state.last_publish_manifest_path:
-        runtime_state = _update_state(runtime_state, last_publish_manifest_path=str(_manifest_path_for(managed_root)))
+        runtime_state = _update_state(
+            runtime_state,
+            last_publish_manifest_path=str(_manifest_path_for(managed_root, live_bbs_dir)),
+        )
 
     configured_local_calls = [
         settings.get("operator_callsign", "") if settings is not None else "",
@@ -3647,6 +3802,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         flamp_enabled=flamp_enabled,
                         reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
+                        manifest_db_path=manifest_db_path,
                     )
                     runtime_state = result.runtime_state
                     published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3700,6 +3856,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     now_ts=event.timestamp_utc or now_ts,
                     flamp_enabled=flamp_enabled,
                     reason="root_request",
+                    manifest_db_path=manifest_db_path,
                 )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3720,6 +3877,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 now_ts=event.timestamp_utc or now_ts,
                 flamp_enabled=flamp_enabled,
                 reason="root_return",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3745,6 +3903,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 cooldown_seconds=cooldown_seconds,
                 global_code_policy=global_code_policy,
                 action_reason="legacy_code_open",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3771,6 +3930,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 cooldown_seconds=cooldown_seconds,
                 global_code_policy=global_code_policy,
                 action_reason="open_alias",
+                manifest_db_path=manifest_db_path,
             )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
@@ -3981,6 +4141,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         now_ts=event.timestamp_utc or now_ts,
                         flamp_enabled=flamp_enabled,
                         reason="log_root_request",
+                        manifest_db_path=manifest_db_path,
                     )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -4005,6 +4166,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     cooldown_seconds=cooldown_seconds,
                     global_code_policy=global_code_policy,
                     action_reason="legacy_code_open",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -4030,6 +4192,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     cooldown_seconds=cooldown_seconds,
                     global_code_policy=global_code_policy,
                     action_reason="log_open_alias",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -4049,6 +4212,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     now_ts=event.timestamp_utc or now_ts,
                     flamp_enabled=flamp_enabled,
                     reason="log_root_return",
+                    manifest_db_path=manifest_db_path,
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
@@ -4228,6 +4392,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         runtime_state=runtime_state,
                         reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
+                        manifest_db_path=manifest_db_path,
                     )
                     runtime_state = result.runtime_state
                     published = published or bool(result.publish_result and result.publish_result.changed)
@@ -4250,6 +4415,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         limit_access_enabled=limit_access_enabled,
         global_code_policy=global_code_policy,
         flamp_enabled=flamp_enabled,
+        manifest_db_path=manifest_db_path,
     )
     published = published or reconciled
 

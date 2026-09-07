@@ -145,9 +145,11 @@ def test_compose_visible_radio_status_uses_short_name() -> None:
     assert "for {radio_short_label}" in stage_block
     assert "for {radio_target.label}" not in stage_block
 
-    assert '"label": f"{radio_short_label}: {label}"' in source
-    assert '"radio_label": radio_short_label' in source
-    assert '"full_radio_label": radio_target.label' in source
+    # Managed BBS choices are station locations in Slice 2, not duplicated
+    # radio-prefixed targets. Radio-specific compose/send status above still
+    # uses the compact radio label.
+    assert '"id": f"location:{location.location_id}"' in source
+    assert '"label": location.name' in source
 
 
 def test_compose_blocks_manual_self_send() -> None:
