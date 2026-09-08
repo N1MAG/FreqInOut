@@ -503,7 +503,7 @@ class StationBbsTab(QWidget):
         editor_grid.addWidget(self.location_callsigns_label, 4, 0)
         self.location_callsigns_edit = QLineEdit()
         self.location_callsigns_edit.setAccessibleName("Location allowed callsigns")
-        self.location_callsigns_edit.setPlaceholderText("N1ABC, K2XYZ")
+        self.location_callsigns_edit.setPlaceholderText("Callsign; add more with commas")
         editor_grid.addWidget(self.location_callsigns_edit, 4, 1)
         self.location_code_label = QLabel("Access code")
         editor_grid.addWidget(self.location_code_label, 5, 0)

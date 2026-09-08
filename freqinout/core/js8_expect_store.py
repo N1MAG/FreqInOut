@@ -1160,7 +1160,7 @@ def evaluate_expect_request(
             if not allow_any and not call_allowed and not group_allowed and not trusted_allowed and not trusted_group_allowed:
                 result = ExpectEvaluationResult(
                     decision="blocked",
-                    reason="Request did not match allowed callers, addressed groups, or trusted Operator History access.",
+                    reason="Request did not match allowed callers, query groups, or trusted Operator History access.",
                     expect_entry_id=entry_id,
                     expect_key=key,
                 )
@@ -1169,7 +1169,7 @@ def evaluate_expect_request(
             access_reason = (
                 "any caller (*)" if allow_any else
                 "explicit caller identity" if call_allowed else
-                "addressed group" if group_allowed else
+                "query group" if group_allowed else
                 "trusted operator" if trusted_allowed else
                 "trusted operator group"
             )

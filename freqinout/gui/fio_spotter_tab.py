@@ -86,6 +86,7 @@ class _CsvCompleterLineEdit(QLineEdit):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._completion_values: list[str] = []
+        self._completion_lead = ""
         # Install the completer on its editor so Qt has an explicit popup
         # anchor and ownership path. Keep an explicit string model as well:
         # QCompleter.model() is not guaranteed to expose QStringListModel's
@@ -99,6 +100,7 @@ class _CsvCompleterLineEdit(QLineEdit):
         self.setCompleter(self._token_completer)
         self._token_completer.activated[str].connect(self._insert_completion)
         self.textEdited.connect(self._complete_token)
+        self.textChanged.connect(self._reset_completion_lead_if_empty)
 
     def set_completion_values(self, values: list[str]) -> None:
         self._completion_values = sorted({str(value or "").strip().upper() for value in values if str(value or "").strip()})
@@ -107,19 +109,32 @@ class _CsvCompleterLineEdit(QLineEdit):
     def _current_token(self) -> str:
         return self.text().rsplit(",", 1)[-1].strip()
 
+    def _reset_completion_lead_if_empty(self, value: str) -> None:
+        if not value.strip():
+            self._completion_lead = ""
+
     def _complete_token(self, _text: str) -> None:
         token = self._current_token()
         if not token:
+            self._completion_lead = ""
             self._token_completer.popup().hide()
             return
+        self._completion_lead = self.text().rsplit(",", 1)[0].strip() if "," in self.text() else ""
         self._token_completer.setCompletionPrefix(token)
         if self._token_completer.completionCount():
             self._token_completer.complete()
 
     def _insert_completion(self, value: str) -> None:
-        prefix = self.text().rsplit(",", 1)[0].strip() if "," in self.text() else ""
-        self.setText(f"{prefix}, {value}" if prefix else value)
+        # QLineEdit may stage the selected completion before this handler runs.
+        # Use the lead captured while typing so an accepted second/third lookup
+        # appends to, rather than replaces, the groups already entered.
+        prefix = self._completion_lead
+        values = [part.strip() for part in prefix.split(",") if part.strip()]
+        if value.strip().upper() not in {part.upper() for part in values}:
+            values.append(value.strip())
+        self.setText(", ".join(values))
         self.setCursorPosition(len(self.text()))
+        self._completion_lead = ", ".join(values)
 
 
 class FioSpotterTab(QWidget):
@@ -857,8 +872,10 @@ class FioSpotterTab(QWidget):
         self.expect_policy = QComboBox(); self.expect_policy.addItem("No allow policy (use rule fields below)", 0)
         self.expect_policy.setToolTip("Optional reusable policy. Save one below, then select it here to apply it to this rule.")
         access_help = QLabel(
-            "Enter callsigns separated by commas; * allows any caller. Addressed groups authorize group replies. "
-            "Trusted roster access uses Operator History and includes linked former callsigns. Blocked callers always win."
+            "Allowed callers controls who may ask; * allows anyone. Query groups are JS8 destinations whose "
+            "group-addressed E? requests may be answered. Trusted caller groups instead allow trusted operators "
+            "who belong to those Operator History groups. Add multiple values with commas; lookup appends each selection. "
+            "Blocked callers always win."
         )
         access_help.setWordWrap(True)
         access_help.setObjectName("fioSpotterExpectAccessHelp")
@@ -867,11 +884,11 @@ class FioSpotterTab(QWidget):
         self.expect_access_catalog_state.setWordWrap(True)
         self.expect_access_catalog_state.setObjectName("fioSpotterExpectAccessCatalogState")
         right_layout.addWidget(self.expect_access_catalog_state)
-        self.expect_calls = _CsvCompleterLineEdit(); self.expect_calls.setPlaceholderText("K7ETC, W5TTA, or *")
-        self.expect_groups = _CsvCompleterLineEdit(); self.expect_groups.setPlaceholderText("@MAGNET, @MR08")
+        self.expect_calls = _CsvCompleterLineEdit(); self.expect_calls.setPlaceholderText("Callsign or *")
+        self.expect_groups = _CsvCompleterLineEdit(); self.expect_groups.setPlaceholderText("Query group; add more with commas")
         self.expect_blocked = _CsvCompleterLineEdit(); self.expect_blocked.setPlaceholderText("Blocked callers, comma separated")
         self.expect_trusted = QCheckBox("Allow all trusted operators")
-        self.expect_trusted_groups = _CsvCompleterLineEdit(); self.expect_trusted_groups.setPlaceholderText("MAGNET, MR08")
+        self.expect_trusted_groups = _CsvCompleterLineEdit(); self.expect_trusted_groups.setPlaceholderText("Trusted caller group; add more with commas")
         self.expect_radio = QComboBox()
         self.expect_radio.setAccessibleName("Radios that accept this Expect query")
         self.expect_radio.setToolTip(
@@ -886,7 +903,7 @@ class FioSpotterTab(QWidget):
         self.expect_enabled = QCheckBox("Rule enabled")
         self.expect_auto = QCheckBox("Auto reply")
         self.expect_unattended = QCheckBox("Unattended auto reply")
-        for label, widget in (("E? Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Allowed callers", self.expect_calls), ("Addressed groups", self.expect_groups), ("Trusted roster groups", self.expect_trusted_groups), ("Blocked callers", self.expect_blocked), ("Radios", self.expect_radio), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
+        for label, widget in (("E? Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Allowed callers", self.expect_calls), ("Query groups", self.expect_groups), ("Trusted caller groups", self.expect_trusted_groups), ("Blocked callers", self.expect_blocked), ("Radios", self.expect_radio), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
             form.addRow(label, widget)
         radio_help = QLabel(
             "All JS8 radios is the normal choice. A reply uses the receiving radio's configured JS8Call service; "
@@ -911,10 +928,10 @@ class FioSpotterTab(QWidget):
         self.policy_manage = QComboBox(); self.policy_manage.addItem("New policy", 0)
         self.policy_manage.currentIndexChanged.connect(self._load_policy_editor)
         self.policy_name = QLineEdit(); self.policy_name.setPlaceholderText("Policy name")
-        self.policy_calls = _CsvCompleterLineEdit(); self.policy_calls.setPlaceholderText("K7ETC, W5TTA, or *")
-        self.policy_groups = _CsvCompleterLineEdit(); self.policy_groups.setPlaceholderText("@MAGNET, @MR08")
+        self.policy_calls = _CsvCompleterLineEdit(); self.policy_calls.setPlaceholderText("Callsign or *")
+        self.policy_groups = _CsvCompleterLineEdit(); self.policy_groups.setPlaceholderText("Query group; add more with commas")
         self.policy_trusted = QCheckBox("Allow all trusted operators")
-        self.policy_trusted_groups = _CsvCompleterLineEdit(); self.policy_trusted_groups.setPlaceholderText("MAGNET, MR08")
+        self.policy_trusted_groups = _CsvCompleterLineEdit(); self.policy_trusted_groups.setPlaceholderText("Trusted caller group; add more with commas")
         self.policy_blocked = _CsvCompleterLineEdit(); self.policy_blocked.setPlaceholderText("Blocked callers")
         self.policy_scope = QComboBox()
         self.policy_scope.addItem("All JS8 radios", "all")
@@ -936,8 +953,8 @@ class FioSpotterTab(QWidget):
         policy_actions_layout.addWidget(save_policy); policy_actions_layout.addWidget(new_policy); policy_actions_layout.addWidget(delete_policy); policy_actions_layout.addStretch(1)
         policy_form.addRow("Manage", self.policy_manage)
         policy_form.addRow("Name", self.policy_name); policy_form.addRow("Allowed callers", self.policy_calls)
-        policy_form.addRow("Addressed groups", self.policy_groups)
-        policy_form.addRow("Trusted roster groups", self.policy_trusted_groups)
+        policy_form.addRow("Query groups", self.policy_groups)
+        policy_form.addRow("Trusted caller groups", self.policy_trusted_groups)
         policy_form.addRow(self.policy_trusted); policy_form.addRow("Blocked callers", self.policy_blocked)
         policy_form.addRow("Radio scope", self.policy_scope); policy_form.addRow("Radio IDs", self.policy_radios)
         policy_form.addRow(self.policy_enabled); policy_form.addRow(policy_actions)
@@ -1074,7 +1091,7 @@ class FioSpotterTab(QWidget):
                 parts.append(f"{trusted_groups} trusted group{'s' if trusted_groups != 1 else ''}")
         addressed = len(row.get("allowed_groups") or [])
         if addressed:
-            parts.append(f"{addressed} addressed group{'s' if addressed != 1 else ''}")
+            parts.append(f"{addressed} query group{'s' if addressed != 1 else ''}")
         policy = _text(row.get("allow_policy_name"))
         if policy:
             parts.append(policy)

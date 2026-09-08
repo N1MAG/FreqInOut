@@ -236,6 +236,11 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         assert "K1OLD" in tab.expect_calls._completion_values
         assert "@MR08" in tab.expect_groups._completion_values
         assert "MR08" in tab.expect_trusted_groups._completion_values
+        assert tab.expect_calls.placeholderText() == "Callsign or *"
+        assert tab.expect_groups.placeholderText() == "Query group; add more with commas"
+        assert tab.expect_trusted_groups.placeholderText() == "Trusted caller group; add more with commas"
+        labels = {label.text() for label in tab.findChildren(spotter_ui.QLabel)}
+        assert {"Query groups", "Trusted caller groups"} <= labels
         assert tab.expect_editor_split.orientation() == Qt.Vertical
         tab.expect_calls.setText("K7ETC")
         tab.expect_allow_any.setChecked(True)
@@ -245,8 +250,14 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         tab.expect_key.setText("Q")
         tab.expect_calls.setText("*")
         tab.expect_trusted.setChecked(True)
-        tab.expect_trusted_groups.setText("MR08")
-        tab.expect_groups.setText("@MAGNET")
+        tab.expect_groups.setText("@MAGNET, @MR")
+        tab.expect_groups._complete_token(tab.expect_groups.text())
+        tab.expect_groups._token_completer.activated[str].emit("@MR08")
+        assert tab.expect_groups.text() == "@MAGNET, @MR08"
+        tab.expect_trusted_groups.setText("MAGNET, MR")
+        tab.expect_trusted_groups._complete_token(tab.expect_trusted_groups.text())
+        tab.expect_trusted_groups._token_completer.activated[str].emit("MR08")
+        assert tab.expect_trusted_groups.text() == "MAGNET, MR08"
         tab.expect_enabled.setChecked(True)
         tab.expect_auto.setChecked(True)
         tab.expect_unattended.setChecked(True)
@@ -254,10 +265,10 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         row = spotter_ui.list_expect_entries()[0]
         assert row["allow_any"] == 1
         assert row["allow_trusted_operators"] == 1
-        assert row["trusted_operator_groups"] == ["MR08"]
-        assert row["allowed_groups"] == ["@MAGNET"]
+        assert row["trusted_operator_groups"] == ["MAGNET", "MR08"]
+        assert row["allowed_groups"] == ["@MAGNET", "@MR08"]
         assert "Any caller" in tab._expect_access_summary(row)
-        assert "addressed group" in tab._expect_access_summary(row)
+        assert "query group" in tab._expect_access_summary(row)
     finally:
         tab.close()
         tab.deleteLater()

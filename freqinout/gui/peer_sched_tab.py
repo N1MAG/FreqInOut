@@ -333,7 +333,7 @@ class ManualPeerScheduleDialog(QDialog):
         layout.addLayout(form)
 
         self.callsign_edit = QLineEdit(initial.get("callsign", ""))
-        self.callsign_edit.setPlaceholderText("W1ABC")
+        self.callsign_edit.setPlaceholderText("Callsign")
         form.addRow("Callsign", self.callsign_edit)
 
         self.name_edit = QLineEdit(initial.get("name", ""))

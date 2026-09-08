@@ -44,6 +44,15 @@ Where/When displays when the control bar already provides that context. They may
 show task-specific details when those details are necessary to explain or perform
 the What.
 
+## UI Hint Neutrality Contract
+
+Placeholders, tooltips, empty-state prompts, field hints, and examples must not
+contain a real or plausible amateur-radio callsign. Use semantic copy such as
+`Callsign`, `Group`, or `Callsign or *`; live suggestions may show callsigns and
+groups only when they come from the operator's own configured data. This rule
+applies across FIO so sample identities are never mistaken for configuration,
+authorization, message traffic, or a recommended station.
+
 ## Station Control Bar Contract
 
 "Always visible" means essential Where/When context remains immediately

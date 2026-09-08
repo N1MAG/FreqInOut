@@ -1711,3 +1711,31 @@ gate passes all 175 test-bearing files plus 2 environment-skip-only files with
 no failure across the 2,582 collected tests. The known long-lived monolithic Qt
 process still reaches the pre-existing LogViewer/thread lifetime segmentation
 fault after 66%; the same files pass in isolation.
+
+## 2026-09-07 — Slice 3 follow-up: neutral hints and multi-group Expect access
+
+FIO now has a permanent product contract prohibiting real or plausible amateur
+callsigns in placeholders, tooltips, empty-state prompts, and other UI hints.
+Spotter Allowed callers uses `Callsign or *`; remaining hard-coded callsign
+examples were removed from BBS location access, Peer Schedule, MsgAuth guidance
+and bulk import, and the legacy BBS sweeper JSON hint. A repository-wide AST
+contract test scans GUI placeholder/tooltip/status-help calls so future examples
+cannot silently reintroduce identity-like hints. Live autocomplete remains based
+on the operator's configured data and is therefore intentionally not treated as
+sample copy.
+
+The Expect access vocabulary now distinguishes **Query groups** (JS8 group
+destinations whose group-addressed E? requests may be answered) from **Trusted
+caller groups** (Operator History memberships that authorize a trusted sender).
+The same labels and copy apply to reusable policies and rule summaries. Both
+group editors retain bounded Operator History lookup and now preserve the
+existing comma-delimited values when a second or later autocomplete result is
+accepted, including Qt's intermediate replacement behavior.
+
+Verification passes 79 focused Spotter, Expect, dynamic FLAMP Q, BBS, Peer
+Schedule, and MsgAuth tests. The authoritative fresh-process repository gate
+passes 176 test-bearing files plus 2 environment-skip-only files with no
+failure across 2,584 collected tests. Dark theme at 900x700 and 125% text scale
+was visually inspected at the Expect access editor: both group concepts,
+neutral hints, radio selection, checkboxes, and actions remain readable without
+horizontal page overflow.

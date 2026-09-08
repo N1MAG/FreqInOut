@@ -584,10 +584,10 @@ managed BBS access while keeping JS8 destination groups distinct:
   current and former callsigns associated with that operator identity.
 - **Allow all trusted operators** authorizes any Operator History identity whose
   roster record has the `trusted` flag.
-- **Trusted roster groups** authorize only trusted operators associated with at
+- **Trusted caller groups** authorize only trusted operators associated with at
   least one selected operator group. These groups describe who the caller is;
   they do not authorize an automatic reply to a JS8 group destination.
-- **Addressed groups** separately list JS8 group destinations to which a group
+- **Query groups** separately list JS8 group destinations to which a group
   reply is allowed. Dynamic FLAMP group replies continue to require this
   explicit destination opt-in even when `*` or trusted-operator access permits
   the sender.
@@ -607,7 +607,10 @@ The reusable allow policy is explicitly optional and its empty choice explains
 that rule-level access fields remain active. Saving a reusable policy keeps it
 selected for the rule being edited and confirms that **Save rule** attaches it.
 Comma-token completion uses an editor-owned string model and an explicitly
-installed completer; an empty completion set never opens a popup.
+installed completer; accepting a lookup appends the current token without
+replacing previously entered groups, and an empty completion set never opens a
+popup. All user-facing hints follow the product-wide UI Hint Neutrality Contract:
+they use semantic labels and never embed a real or plausible callsign.
 
 The same rule service supplies ingestion alerts, Inbox focus, Ops Center
 attention, and Map pins so different screens cannot disagree. Messages remains

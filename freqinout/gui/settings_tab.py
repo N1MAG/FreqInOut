@@ -6267,7 +6267,7 @@ class SettingsTab(QWidget):
         self.js8_expect_policy_name_edit = QLineEdit()
         self.js8_expect_policy_name_edit.setPlaceholderText("Policy name")
         self.js8_expect_allowed_groups_edit = QLineEdit()
-        self.js8_expect_allowed_groups_edit.setPlaceholderText("@MAGNET, @GROUP")
+        self.js8_expect_allowed_groups_edit.setPlaceholderText("@GROUP; add more with commas")
         self.js8_expect_allowed_callsigns_edit = QLineEdit()
         self.js8_expect_allowed_callsigns_edit.setPlaceholderText("CALL1, CALL2")
         self.js8_expect_blocked_callsigns_edit = QLineEdit()
@@ -6337,7 +6337,7 @@ class SettingsTab(QWidget):
         self.js8_expect_entry_policy_combo = QComboBox()
         self.js8_expect_entry_policy_combo.addItem("No policy", 0)
         self.js8_expect_entry_allowed_groups_edit = QLineEdit()
-        self.js8_expect_entry_allowed_groups_edit.setPlaceholderText("@MAGNET, @GROUP")
+        self.js8_expect_entry_allowed_groups_edit.setPlaceholderText("@GROUP; add more with commas")
         self.js8_expect_entry_allowed_callsigns_edit = QLineEdit()
         self.js8_expect_entry_allowed_callsigns_edit.setPlaceholderText("CALL1, CALL2")
         self.js8_expect_entry_blocked_callsigns_edit = QLineEdit()
@@ -6984,9 +6984,8 @@ class SettingsTab(QWidget):
         self.js8_msg_auth_bulk_import_edit = QPlainTextEdit()
         self.js8_msg_auth_bulk_import_edit.setPlaceholderText(
             "Paste one or many keys:\n"
-            "MAGNET, *, MAGNET Shared, ABC123KEY\n"
-            "MAGNET, K1ABC, K1ABC Active, XYZ987KEY\n"
-            "GHOSTNET K9XYZ Shared KEYVALUE"
+            "GROUP, *, Shared group key, KEYVALUE\n"
+            "GROUP, CALLSIGN, Sender key, KEYVALUE"
         )
         self.js8_msg_auth_bulk_import_edit.setFixedHeight(92)
         self.js8_msg_auth_bulk_import_btn = QPushButton("Import Pasted Keys")
@@ -8101,7 +8100,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_sweeper_rules_edit = QPlainTextEdit()
         self.varac_bbs_sweeper_rules_edit.setPlaceholderText(
             '[{"name":"Weather to Intel","enabled":false,"sources":["varac_bbs","flmsg","flamp"],'
-            '"from_calls":["K7ABC"],"subject_contains":["weather"],"target_location_ids":["intel"]}]'
+            '"from_calls":["CALLSIGN"],"subject_contains":["weather"],"target_location_ids":["intel"]}]'
         )
         self.varac_bbs_sweeper_rules_edit.setMaximumHeight(104)
         self.varac_bbs_sweeper_rules_edit.setToolTip(
