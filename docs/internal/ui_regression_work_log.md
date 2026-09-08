@@ -1572,3 +1572,41 @@ ingest writer holds an immediate transaction. Full integration verification is
 pass. The gate also corrected a test-only UTC-midnight fixture whose
 one-hour backdating could precede its day-granularity roster assignment; no
 production identity behavior changed.
+
+## 2026-09-07 — Production hang and Mesh retry-ownership remediation
+
+The supplied watchdog dump resolves the reported Spotter-rule crash as a GUI
+thread hang. The main thread was inside Settings save, then full runtime
+projection refresh, then the legacy Settings Spotter mapper's per-cell widget
+rebuild. FIO Spotter Forms already owns the same mappings, so the duplicate
+Settings mapper, its Refresh/Auto-Classify controls, callbacks, and rebuild
+paths were removed. Existing mapping records are preserved byte-for-byte by an
+unrelated Settings save. The save path no longer forces a full multi-radio
+projection refresh, eliminating the exact captured stack without changing the
+top-level Forms workflow or its data contract.
+
+The Linux MeshCore review found repeated replacement workers could lose their
+retry delay and begin a new saved-device service-discovery attempt while the
+prior attempt was still unwinding. Retry state now has a short process-local
+handoff across replacement, and one endpoint-scoped lease prevents overlapping
+connect attempts. A deferred replacement does not increment the failure count;
+manual Retry Now remains explicit. BLE failure logging now identifies link,
+service discovery, and Companion initialization separately. This work does not
+forget, pair, reset, write channels, or modify the mesh device, and introduces
+no persistent migration. The T1000-E Linux hardware gate remains open.
+
+Delegation and review: Terra/high removed the bounded legacy Settings surface
+and added mapping-preservation/save-scope regressions. Luna/high implemented
+the retry handoff, attempt lease, stage diagnostics, and focused lifecycle
+tests. Mini/high performed a read-only lifecycle/performance audit that kept
+the separate Station Control Bar polling concern out of this narrow incident
+fix. The high-reasoning primary model owned the incident diagnosis,
+concurrency/data-ownership review, delegated-diff integration, and acceptance
+gate.
+
+Focused verification passes 232 Settings, FIO Spotter, Mesh lifecycle,
+reconnect, settings, channel, and responsiveness tests. The authoritative
+fresh-process repository gate passes 2,534 tests with 37
+environment-dependent skips across 177 test files; the two skip-only files
+return pytest's no-tests-collected status and contain no failure. Python
+compilation and `git diff --check` pass.

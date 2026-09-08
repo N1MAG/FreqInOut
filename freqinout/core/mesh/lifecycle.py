@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
+import time
 
 
 class MeshOperationCancelled(RuntimeError):
@@ -68,6 +70,87 @@ class MeshRetryState:
 
     def remaining_ms(self, now_ms: int) -> int:
         return max(0, self.next_retry_ms - int(now_ms))
+
+    def copy(self) -> "MeshRetryState":
+        """Return a detached state for handoff between worker instances."""
+
+        return MeshRetryState(
+            failure_count=self.failure_count,
+            next_retry_ms=self.next_retry_ms,
+            operator_action_required=self.operator_action_required,
+        )
+
+    def defer(self, now_ms: int, delay_ms: int) -> int:
+        """Defer without counting another failure.
+
+        Used when another worker still owns the same connection attempt. A
+        replacement worker must not turn an in-flight cancellation/teardown
+        into a second simultaneous connect attempt.
+        """
+
+        self.next_retry_ms = int(now_ms) + max(250, int(delay_ms))
+        return max(250, int(delay_ms))
+
+
+_RETRY_HANDOFF_TTL_SEC = 30.0
+_retry_handoff_lock = threading.Lock()
+_retry_handoff: dict[object, tuple[float, MeshRetryState]] = {}
+
+
+def save_mesh_retry_handoff(key: object, state: MeshRetryState) -> None:
+    """Save retry state for an immediately replaced runtime worker.
+
+    This is deliberately process-local: it preserves a live app's backoff
+    across QThread replacement without creating a new settings or database
+    persistence contract.
+    """
+
+    with _retry_handoff_lock:
+        _retry_handoff[key] = (time.monotonic(), state.copy())
+
+
+def take_mesh_retry_handoff(key: object) -> MeshRetryState | None:
+    """Consume a recent retry state handoff, if one exists."""
+
+    now = time.monotonic()
+    with _retry_handoff_lock:
+        entry = _retry_handoff.pop(key, None)
+    if entry is None:
+        return None
+    saved_at, state = entry
+    if now - saved_at > _RETRY_HANDOFF_TTL_SEC:
+        return None
+    return state.copy()
+
+
+class MeshConnectAttemptLease:
+    """Process-local ownership gate for replacement-worker connect attempts."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owners: set[object] = set()
+
+    def try_acquire(self, key: object) -> bool:
+        with self._lock:
+            if key in self._owners:
+                return False
+            self._owners.add(key)
+            return True
+
+    def release(self, key: object) -> None:
+        with self._lock:
+            self._owners.discard(key)
+
+
+_MESH_CONNECT_ATTEMPT_LEASE = MeshConnectAttemptLease()
+
+
+def try_acquire_mesh_connect_attempt(key: object) -> bool:
+    return _MESH_CONNECT_ATTEMPT_LEASE.try_acquire(key)
+
+
+def release_mesh_connect_attempt(key: object) -> None:
+    _MESH_CONNECT_ATTEMPT_LEASE.release(key)
 
 
 def mesh_error_requires_operator_action(error: object) -> bool:

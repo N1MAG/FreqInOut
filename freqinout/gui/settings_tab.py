@@ -249,11 +249,6 @@ from freqinout.core.js8spotter_importer import import_js8spotter_database
 from freqinout.core.js8spotter_archive import load_js8spotter_archive_records
 from freqinout.core.js8_spotter_forms import (
     MAPPER_SETTINGS_KEY,
-    PURPOSE_OPTIONS,
-    discover_spotter_forms,
-    effective_mapping_rows,
-    factory_mapping_for_form,
-    normalize_mapping_rows,
 )
 from freqinout.core.multi_radio_store import (
     DEFAULT_HOLD_DURATION_MINUTES,
@@ -362,7 +357,6 @@ from freqinout.gui.theme import (
     normalize_ui_text_size,
     led_style,
     button_style,
-    fit_combo_box_to_contents,
 )
 from freqinout.version import __version__
 
@@ -872,7 +866,6 @@ class SettingsTab(QWidget):
         self._js8_expect_request_rows: List[Dict[str, Any]] = []
         self._js8spotter_watch_rows: List[Dict[str, Any]] = []
         self._js8spotter_activity_rows: List[Dict[str, Any]] = []
-        self._spotter_mapper_loading = False
         self._settings_radio_focus_id: Optional[int] = None
         self._settings_radio_selector_buttons: Dict[int, QPushButton] = {}
         self._software_radio_combo_loading = False
@@ -6260,42 +6253,6 @@ class SettingsTab(QWidget):
         )
         js8_v.addWidget(build_js8_path_row("MCF Forms Folder:", self.js8_forms_edit, self._choose_js8_forms_path))
 
-        mapper_header = QHBoxLayout()
-        mapper_header.setContentsMargins(0, 0, 0, 0)
-        mapper_header.setSpacing(8)
-        mapper_header.addWidget(QLabel("Spotter Form Mapper"))
-        mapper_header.addStretch()
-        self.spotter_mapper_refresh_btn = QPushButton("Refresh Forms")
-        self.spotter_mapper_auto_btn = QPushButton("Auto-Classify")
-        mapper_header.addWidget(self.spotter_mapper_refresh_btn)
-        mapper_header.addWidget(self.spotter_mapper_auto_btn)
-        js8_v.addLayout(mapper_header)
-        self.spotter_mapper_table = QTableWidget(0, 8)
-        self.spotter_mapper_table.setHorizontalHeaderLabels(
-            ["Form", "Title", "Purpose", "Messages", "Map", "Alert", "Net", "Status"]
-        )
-        self.spotter_mapper_table.verticalHeader().setVisible(False)
-        self.spotter_mapper_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.spotter_mapper_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.spotter_mapper_table.setAlternatingRowColors(True)
-        self.spotter_mapper_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
-        self.spotter_mapper_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.spotter_mapper_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.spotter_mapper_table.setWordWrap(False)
-        mapper_header_view = self.spotter_mapper_table.horizontalHeader()
-        mapper_header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        mapper_header_view.setSectionResizeMode(1, QHeaderView.Stretch)
-        mapper_header_view.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        for col in range(3, 8):
-            mapper_header_view.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        self.spotter_mapper_table.itemChanged.connect(self._on_spotter_mapper_item_changed)
-        js8_v.addWidget(self.spotter_mapper_table)
-        mapper_hint = QLabel(
-            "Map each JS8Spotter form to its operational purpose so FIO can route it to Messages, Map, Alerts, Net Control, or status workflows."
-        )
-        mapper_hint.setWordWrap(True)
-        js8_v.addWidget(mapper_hint)
-
         expect_header = QHBoxLayout()
         expect_header.setContentsMargins(0, 4, 0, 0)
         expect_header.setSpacing(8)
@@ -6508,11 +6465,8 @@ class SettingsTab(QWidget):
         self.js8_profile_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
-        self.js8_forms_edit.textChanged.connect(lambda _text: self._refresh_spotter_form_mapper())
         self.js8spotter_watch_refresh_btn.clicked.connect(self._refresh_js8spotter_watch_review)
         self.js8spotter_activity_refresh_btn.clicked.connect(self._refresh_js8spotter_activity_review)
-        self.spotter_mapper_refresh_btn.clicked.connect(self._refresh_spotter_form_mapper)
-        self.spotter_mapper_auto_btn.clicked.connect(self._auto_classify_spotter_forms)
         self.js8_expect_save_policy_btn.clicked.connect(self._save_js8_expect_policy_from_editor)
         self.js8_expect_new_policy_btn.clicked.connect(self._clear_js8_expect_policy_editor)
         self.js8_expect_delete_policy_btn.clicked.connect(self._delete_selected_js8_expect_policy)
@@ -12948,12 +12902,6 @@ class SettingsTab(QWidget):
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
         if hasattr(self, "js8spotter_import_db_edit"):
             self.js8spotter_import_db_edit.setText(str(data.get("js8spotter_import_db_path", "") or ""))
-        if MAPPER_SETTINGS_KEY not in data:
-            try:
-                self.settings.set(MAPPER_SETTINGS_KEY, normalize_mapping_rows([]))
-            except Exception:
-                pass
-        self._refresh_spotter_form_mapper()
         self._refresh_js8_expect_policies_table()
         self._refresh_js8_expect_entries_table()
         self._refresh_js8spotter_watch_review()
@@ -13415,7 +13363,8 @@ class SettingsTab(QWidget):
         data["js8spotter_import_db_path"] = (
             self.js8spotter_import_db_edit.text().strip() if hasattr(self, "js8spotter_import_db_edit") else ""
         )
-        data[MAPPER_SETTINGS_KEY] = self._collect_spotter_form_mappings()
+        # Form mappings are exclusively owned by the FIO Spotter Forms surface.
+        # Preserve its persisted data here without rebuilding or rewriting its UI.
         data["path_js8call"] = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
         data["path_js8spotter"] = (
             self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
@@ -13925,7 +13874,7 @@ class SettingsTab(QWidget):
             self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("SettingsTab: settings saved.")
-        self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=False)
+        self._refresh_runtime_projection_ui(refresh_multi_radio=False, emit_saved=False)
         self._ensure_fldigi_checkin_files()
         if show_message:
             radio_id, target = self._selected_settings_feedback_target()
@@ -14366,108 +14315,6 @@ class SettingsTab(QWidget):
                 QApplication.restoreOverrideCursor()
             except Exception:
                 pass
-
-    def _make_spotter_mapper_check_item(self, checked: bool) -> QTableWidgetItem:
-        item = QTableWidgetItem("")
-        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-        item.setTextAlignment(Qt.AlignCenter)
-        return item
-
-    def _refresh_spotter_form_mapper(self) -> None:
-        if not hasattr(self, "spotter_mapper_table"):
-            return
-        previous_signal_state = self.spotter_mapper_table.blockSignals(True)
-        self._spotter_mapper_loading = True
-        try:
-            self.spotter_mapper_table.setRowCount(0)
-            rows = effective_mapping_rows(self.settings, self.js8_forms_edit.text().strip())
-            if not rows:
-                rows = [
-                    factory_mapping_for_form("F!103", "Net Checkin"),
-                    factory_mapping_for_form("F!104", "@SITREP Basic Check-in"),
-                    factory_mapping_for_form("F!106", "Impromptu Net Notice"),
-                    factory_mapping_for_form("F!301", "Field Situation Report"),
-                    factory_mapping_for_form("F!304", "Individual Situation Report"),
-                ]
-            for row_idx, row in enumerate(rows):
-                self.spotter_mapper_table.insertRow(row_idx)
-                code_item = QTableWidgetItem(str(row.get("form_code") or "").strip())
-                code_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                title_item = QTableWidgetItem(str(row.get("title") or "").strip())
-                title_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                self.spotter_mapper_table.setItem(row_idx, 0, code_item)
-                self.spotter_mapper_table.setItem(row_idx, 1, title_item)
-
-                purpose_combo = QComboBox()
-                purpose_combo.addItems(list(PURPOSE_OPTIONS))
-                fit_combo_box_to_contents(purpose_combo)
-                purpose = str(row.get("purpose") or "Generic Message")
-                if purpose_combo.findText(purpose) < 0:
-                    purpose = "Generic Message"
-                purpose_combo.setCurrentText(purpose)
-                purpose_combo.currentIndexChanged.connect(self._on_spotter_mapper_changed)
-                self.spotter_mapper_table.setCellWidget(row_idx, 2, purpose_combo)
-
-                for col, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
-                    self.spotter_mapper_table.setItem(
-                        row_idx,
-                        col,
-                        self._make_spotter_mapper_check_item(bool(row.get(key, False))),
-                    )
-        finally:
-            self._spotter_mapper_loading = False
-            self.spotter_mapper_table.blockSignals(previous_signal_state)
-        self._fit_table_height_to_rows(self.spotter_mapper_table, min_rows=3, max_rows=6, extra_rows=0)
-        self._refresh_fit_content_section_height(getattr(self, "js8_section_group", None))
-
-    def _on_spotter_mapper_changed(self, *_args) -> None:
-        if self._spotter_mapper_loading:
-            return
-        self._mark_settings_dirty()
-
-    def _on_spotter_mapper_item_changed(self, _item: QTableWidgetItem) -> None:
-        self._on_spotter_mapper_changed()
-
-    def _collect_spotter_form_mappings(self) -> List[Dict[str, object]]:
-        if not hasattr(self, "spotter_mapper_table"):
-            return []
-        rows: List[Dict[str, object]] = []
-        for row_idx in range(self.spotter_mapper_table.rowCount()):
-            code_item = self.spotter_mapper_table.item(row_idx, 0)
-            title_item = self.spotter_mapper_table.item(row_idx, 1)
-            purpose_widget = self.spotter_mapper_table.cellWidget(row_idx, 2)
-            purpose = purpose_widget.currentText().strip() if isinstance(purpose_widget, QComboBox) else "Generic Message"
-            row = {
-                "form_code": code_item.text().strip() if code_item else "",
-                "title": title_item.text().strip() if title_item else "",
-                "purpose": purpose,
-            }
-            for col, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
-                item = self.spotter_mapper_table.item(row_idx, col)
-                row[key] = bool(item and item.checkState() == Qt.Checked)
-            rows.append(row)
-        return normalize_mapping_rows(rows)
-
-    def _auto_classify_spotter_forms(self) -> None:
-        rows = [
-            factory_mapping_for_form(definition.form_code, definition.title)
-            for definition in discover_spotter_forms(self.js8_forms_edit.text().strip())
-        ]
-        if not rows:
-            rows = [
-                factory_mapping_for_form("F!103", "Net Checkin"),
-                factory_mapping_for_form("F!104", "@SITREP Basic Check-in"),
-                factory_mapping_for_form("F!106", "Impromptu Net Notice"),
-                factory_mapping_for_form("F!301", "Field Situation Report"),
-                factory_mapping_for_form("F!304", "Individual Situation Report"),
-            ]
-        try:
-            self.settings.set(MAPPER_SETTINGS_KEY, normalize_mapping_rows(rows))
-        except Exception:
-            pass
-        self._refresh_spotter_form_mapper()
-        self._mark_settings_dirty()
 
     def _wire_dirty_tracking(self) -> None:
         edits = [
@@ -17655,7 +17502,6 @@ class SettingsTab(QWidget):
             self.js8_offset_edit.setText(str(coerce_js8_offset_hz(state.get("js8_offset_hz", ""))))
             self.js8_directed_edit.setText(str(state.get("js8_directed_path", "") or ""))
             self.js8_forms_edit.setText(str(state.get("js8_forms_path", "") or ""))
-            self._refresh_spotter_form_mapper()
             self.js8call_path_edit.setText(str(state.get("path_js8call", "") or "").strip())
             self.js8spotter_path_edit.setText(str(state.get("path_js8spotter", "") or "").strip())
             self.commstat_path_edit.setText(str(state.get("path_commstat", "") or "").strip())
@@ -31038,7 +30884,6 @@ class SettingsTab(QWidget):
             return
         self.js8_forms_edit.setText(fn)
         log.info("Spotter MCF forms folder staged for selected radio: %s", fn)
-        self._refresh_spotter_form_mapper()
         self._mark_settings_dirty()
         self._refresh_section_titles()
 

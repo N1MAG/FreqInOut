@@ -735,6 +735,7 @@ class MeshCoreBleAdapter:
         started_at = time.monotonic()
         target_label = str(getattr(target, "address", "") or target or "unspecified")
         client = self._make_client(bleak, target)
+        stage = "link_connect"
         try:
             log.info(
                 "MeshCore BLE stage adapter=%s stage=link_connect target=%s.",
@@ -750,6 +751,7 @@ class MeshCoreBleAdapter:
                 target_label,
                 (time.monotonic() - started_at) * 1000.0,
             )
+            stage = "service_discovery"
             await self._verify_meshcore_characteristics(client)
             log.info(
                 "MeshCore BLE stage adapter=%s stage=services_verified target=%s elapsed_ms=%.1f.",
@@ -757,6 +759,7 @@ class MeshCoreBleAdapter:
                 target_label,
                 (time.monotonic() - started_at) * 1000.0,
             )
+            stage = "companion_initialize"
             companion = MeshCoreBleCompanionClient(client)
             await companion.initialize()
             log.info(
@@ -766,7 +769,15 @@ class MeshCoreBleAdapter:
                 (time.monotonic() - started_at) * 1000.0,
             )
             return companion
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "MeshCore BLE stage failed adapter=%s stage=%s target=%s elapsed_ms=%.1f raw=%s",
+                self.adapter_id,
+                stage,
+                target_label,
+                (time.monotonic() - started_at) * 1000.0,
+                str(exc),
+            )
             disconnect = getattr(client, "disconnect", None)
             if callable(disconnect):
                 try:

@@ -14,6 +14,10 @@ from freqinout.core.mesh.lifecycle import (
     MeshRetryPolicy,
     MeshRetryState,
     mesh_error_requires_operator_action,
+    release_mesh_connect_attempt,
+    save_mesh_retry_handoff,
+    take_mesh_retry_handoff,
+    try_acquire_mesh_connect_attempt,
 )
 from freqinout.core.mesh.models import MeshAdapterEvent, MeshHealthSnapshot
 from freqinout.core.mesh.settings import MeshConnectionConfig
@@ -45,6 +49,8 @@ class MeshConnectionWorker(QObject):
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
+        configs = tuple(configs)
+        self._adapter_factory = adapter_factory
         self._manager = MeshConnectionManager(configs, adapter_factory=adapter_factory)
         self._poll_interval_ms = max(250, int(poll_interval_ms or 1000))
         self._node_poll_interval_ms = max(self._poll_interval_ms, int(node_poll_interval_ms or 300000))
@@ -56,7 +62,14 @@ class MeshConnectionWorker(QObject):
             initial_delay_ms=max(self._poll_interval_ms, int(reconnect_interval_ms or 15000)),
             maximum_delay_ms=max(self._poll_interval_ms, int(reconnect_max_interval_ms or 300000)),
         )
-        self._retry_states = {adapter_id: MeshRetryState() for adapter_id in self._manager.configured_ids()}
+        self._retry_context_keys = {
+            config.adapter_id: self._retry_context_key(config)
+            for config in configs
+        }
+        self._retry_states = {}
+        for config in configs:
+            restored = take_mesh_retry_handoff(self._retry_context_keys[config.adapter_id])
+            self._retry_states[config.adapter_id] = restored or MeshRetryState()
         self._last_node_poll_ms = 0
         self._last_channel_poll_ms = 0
         self._last_reconnect_ms = 0
@@ -81,14 +94,7 @@ class MeshConnectionWorker(QObject):
         try:
             now_ms = self._elapsed_ms()
             for adapter_id in self._manager.configured_ids():
-                operation = self._begin_operation(adapter_id, "connect")
-                snapshot = self._manager.start_adapter(adapter_id)
-                self._record_connection_result(adapter_id, snapshot.connected, now_ms, snapshot.last_error)
-                self._publish_operation(
-                    operation,
-                    "complete" if snapshot.connected else "error",
-                    detail=snapshot.last_error,
-                )
+                self._attempt_connection(adapter_id, now_ms, force=False, emit_connecting=False)
         except Exception as exc:
             self.error_ready.emit(str(exc))
         # Do not issue a contact/channel request on the first timer tick after
@@ -155,7 +161,8 @@ class MeshConnectionWorker(QObject):
             return
         state = self._retry_states.setdefault(str(adapter_id), MeshRetryState())
         state.retry_now()
-        self._retry_adapter(str(adapter_id), self._elapsed_ms())
+        self._persist_retry_state(str(adapter_id))
+        self._attempt_connection(str(adapter_id), self._elapsed_ms(), force=True, emit_connecting=True)
 
     @Slot(str)
     def refresh_channels(self, adapter_id: str) -> None:
@@ -289,31 +296,58 @@ class MeshConnectionWorker(QObject):
                 self.error_ready.emit(str(exc))
 
     def _retry_adapter(self, adapter_id: str, now_ms: int) -> None:
+        self._attempt_connection(adapter_id, now_ms, force=False, emit_connecting=True)
+
+    def _attempt_connection(
+        self,
+        adapter_id: str,
+        now_ms: int,
+        *,
+        force: bool,
+        emit_connecting: bool,
+    ) -> None:
         if self._stop_event.is_set():
             return
+        state = self._retry_states.setdefault(adapter_id, MeshRetryState())
+        if not force and not state.due(now_ms):
+            self.operation_state.emit(adapter_id, "retrying", state.remaining_ms(now_ms))
+            return
+        context_key = self._retry_context_keys.get(adapter_id, adapter_id)
+        if not try_acquire_mesh_connect_attempt(context_key):
+            delay = state.defer(now_ms, self._poll_interval_ms)
+            self._persist_retry_state(adapter_id)
+            self.operation_state.emit(adapter_id, "retrying", delay)
+            return
         operation = self._begin_operation(adapter_id, "connect")
-        self.operation_state.emit(adapter_id, "connecting", 0)
-        snapshot = self._manager.start_adapter(adapter_id)
-        self._record_connection_result(adapter_id, snapshot.connected, now_ms, snapshot.last_error)
-        self._publish_operation(
-            operation,
-            "complete" if snapshot.connected else "error",
-            detail=snapshot.last_error,
-        )
+        if emit_connecting:
+            self.operation_state.emit(adapter_id, "connecting", 0)
+        try:
+            snapshot = self._manager.start_adapter(adapter_id)
+            self._record_connection_result(adapter_id, snapshot.connected, now_ms, snapshot.last_error)
+            self._publish_operation(
+                operation,
+                "complete" if snapshot.connected else "error",
+                detail=snapshot.last_error,
+            )
+        finally:
+            release_mesh_connect_attempt(context_key)
 
     def _record_connection_result(self, adapter_id: str, connected: bool, now_ms: int, error: str = "") -> None:
         state = self._retry_states.setdefault(adapter_id, MeshRetryState())
         if connected:
             state.record_success()
+            self._persist_retry_state(adapter_id, clear=True)
             self.operation_state.emit(adapter_id, "connected", 0)
             return
         if mesh_error_requires_operator_action(error):
             state.record_operator_action_required()
+            self._persist_retry_state(adapter_id)
             self.operation_state.emit(adapter_id, "needs-attention", 0)
             if error:
                 self.error_ready.emit(str(error))
             return
         delay = state.record_failure(now_ms, self._retry_policy)
+        self._persist_retry_state(adapter_id)
         self.operation_state.emit(adapter_id, "retrying", delay)
         if error:
             self.error_ready.emit(str(error))
@@ -375,3 +409,22 @@ class MeshConnectionWorker(QObject):
     @staticmethod
     def _elapsed_ms() -> int:
         return monotonic_ns() // 1_000_000
+
+    def _retry_context_key(self, config: MeshConnectionConfig) -> tuple[object, ...]:
+        # Include the factory identity so isolated tests/custom adapters and
+        # unrelated runtime profiles cannot inherit one another's backoff.
+        return (
+            id(self._adapter_factory),
+            str(config.adapter_id),
+            str(config.protocol),
+            str(config.connection_type.value),
+            str(config.endpoint_address),
+        )
+
+    def _persist_retry_state(self, adapter_id: str, *, clear: bool = False) -> None:
+        key = self._retry_context_keys.get(adapter_id, adapter_id)
+        if clear:
+            # A successful connection consumes/overwrites any stale handoff.
+            take_mesh_retry_handoff(key)
+            return
+        save_mesh_retry_handoff(key, self._retry_states.setdefault(adapter_id, MeshRetryState()))

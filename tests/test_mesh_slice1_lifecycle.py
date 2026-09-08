@@ -521,6 +521,84 @@ def test_mesh_connection_worker_reuses_adapter_state_across_restart() -> None:
     app.processEvents()
 
 
+def test_mesh_connection_worker_preserves_backoff_across_replacement() -> None:
+    app = QApplication.instance() or QApplication([])
+    created: list[FakeLifecycleAdapter] = []
+
+    def factory(config: MeshConnectionConfig) -> FakeLifecycleAdapter:
+        adapter = FakeLifecycleAdapter(config, fail_connects=1)
+        created.append(adapter)
+        return adapter
+
+    config = MeshConnectionConfig(adapter_id="handoff-local", enabled=True, tcp_host="192.0.2.2")
+    first = MeshConnectionWorker(
+        [config],
+        poll_interval_ms=250,
+        reconnect_interval_ms=10_000,
+        reconnect_max_interval_ms=20_000,
+        adapter_factory=factory,
+    )
+    first.start()
+    assert created[0].connect_calls == 1
+    assert first._retry_states[config.adapter_id].remaining_ms(first._elapsed_ms()) > 0
+    first.stop()
+
+    replacement = MeshConnectionWorker(
+        [config],
+        poll_interval_ms=250,
+        reconnect_interval_ms=10_000,
+        reconnect_max_interval_ms=20_000,
+        adapter_factory=factory,
+    )
+    replacement.start()
+
+    assert len(created) == 1
+    assert first.manager()._adapters[config.adapter_id].connect_calls == 1
+    assert replacement.manager().active_adapter_ids() == ()
+    assert replacement._retry_states[config.adapter_id].remaining_ms(replacement._elapsed_ms()) > 0
+
+    replacement.stop()
+    app.processEvents()
+
+
+def test_mesh_connection_worker_defers_when_replacement_connect_is_in_flight() -> None:
+    app = QApplication.instance() or QApplication([])
+    connect_started = threading.Event()
+    release_connect = threading.Event()
+    created: list[FakeLifecycleAdapter] = []
+
+    class BlockingAdapter(FakeLifecycleAdapter):
+        def connect(self) -> None:
+            self.connect_calls += 1
+            connect_started.set()
+            assert release_connect.wait(1.0)
+            self.connected = True
+
+    def factory(config: MeshConnectionConfig) -> BlockingAdapter:
+        adapter = BlockingAdapter(config)
+        created.append(adapter)
+        return adapter
+
+    config = MeshConnectionConfig(adapter_id="lease-local", enabled=True, tcp_host="192.0.2.2")
+    first = MeshConnectionWorker([config], adapter_factory=factory)
+    first_thread = threading.Thread(target=first.start, daemon=True)
+    first_thread.start()
+    assert connect_started.wait(1.0)
+
+    replacement = MeshConnectionWorker([config], adapter_factory=factory)
+    replacement.start()
+    assert len(created) == 1
+    assert replacement._retry_states[config.adapter_id].remaining_ms(replacement._elapsed_ms()) >= 200
+
+    release_connect.set()
+    first_thread.join(1.0)
+    assert not first_thread.is_alive()
+
+    replacement.stop()
+    first.stop()
+    app.processEvents()
+
+
 def test_archive_mesh_channel_policy_keeps_an_auditable_ignored_row(tmp_path) -> None:
     db_path = tmp_path / "mesh-channel-policy.db"
     policy = MeshChannelPolicy(

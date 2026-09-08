@@ -835,7 +835,7 @@ def test_settings_group_tables_use_compact_height_policy() -> None:
     assert "self._refresh_fit_content_section_height(getattr(self, \"local_net_section_group\", None))" in local_refresh_block
 
 
-def test_settings_operating_model_and_spotter_tables_own_their_scroll_geometry() -> None:
+def test_settings_operating_model_table_owns_its_scroll_geometry_without_legacy_spotter_mapper() -> None:
     source = Path("freqinout/gui/settings_tab.py").read_text(encoding="utf-8")
     frequency_build_block = source[
         source.index("self.operating_profiles_table = QTableWidget(0, 6)")
@@ -845,24 +845,63 @@ def test_settings_operating_model_and_spotter_tables_own_their_scroll_geometry()
         source.index("def _refresh_operating_profiles_table")
         : source.index("def _refresh_device_assignments_table")
     ]
-    spotter_build_block = source[
-        source.index("self.spotter_mapper_table = QTableWidget(0, 8)")
-        : source.index("mapper_hint = QLabel(")
-    ]
-    spotter_refresh_block = source[
-        source.index("def _refresh_spotter_form_mapper")
-        : source.index("def _on_spotter_mapper_changed")
-    ]
-
     assert "self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in frequency_build_block
     assert "self.operating_profiles_table.setWordWrap(False)" in frequency_build_block
     assert "self._fit_table_height_to_rows(table, min_rows=1, max_rows=8, extra_rows=1)" in frequency_refresh_block
     assert "self._refresh_fit_content_section_height(getattr(self, \"operating_profiles_section_group\", None))" in frequency_refresh_block
-    assert "self.spotter_mapper_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in spotter_build_block
-    assert "self.spotter_mapper_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)" in spotter_build_block
-    assert "self.spotter_mapper_table.setWordWrap(False)" in spotter_build_block
-    assert "self._fit_table_height_to_rows(self.spotter_mapper_table, min_rows=3, max_rows=6, extra_rows=0)" in spotter_refresh_block
-    assert "self._refresh_fit_content_section_height(getattr(self, \"js8_section_group\", None))" in spotter_refresh_block
+    assert "spotter_mapper_table" not in source
+    assert "def _refresh_spotter_form_mapper" not in source
+    assert "def _auto_classify_spotter_forms" not in source
+
+    save_block = source[source.index("def _save_settings(") : source.index("def _on_theme_changed")]
+    assert "_refresh_runtime_projection_ui(refresh_multi_radio=False, emit_saved=False)" in save_block
+    assert "MAPPER_SETTINGS_KEY: data.get(MAPPER_SETTINGS_KEY, [])" in save_block
+
+
+def test_unrelated_settings_save_preserves_spotter_mappings_without_legacy_mapper(monkeypatch, tmp_path) -> None:
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.core.js8_spotter_forms import MAPPER_SETTINGS_KEY, effective_mapping_rows
+    from freqinout.gui.settings_tab import SettingsTab
+
+    mappings = [
+        {
+            "form_code": "F!103",
+            "title": "Net Checkin",
+            "purpose": "Net Checkin",
+            "messages": True,
+            "map": False,
+            "alert": False,
+            "net": True,
+            "status": False,
+        }
+    ]
+    SettingsManager().set(MAPPER_SETTINGS_KEY, mappings)
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+    monkeypatch.setattr(SettingsTab, "_refresh_running_status", lambda self, force=False: None)
+
+    tab = SettingsTab()
+    projection_calls: list[dict[str, bool]] = []
+    try:
+        monkeypatch.setattr(
+            tab,
+            "_refresh_runtime_projection_ui",
+            lambda **kwargs: projection_calls.append(dict(kwargs)),
+        )
+        monkeypatch.setattr(tab, "_ensure_fldigi_checkin_files", lambda: None)
+        tab.flrig_port_edit.setText("23456")
+        tab._save_settings(show_message=False)
+
+        saved = SettingsManager()
+        assert saved.get(MAPPER_SETTINGS_KEY) == mappings
+        assert [row["form_code"] for row in effective_mapping_rows(saved)] == ["F!103"]
+        assert projection_calls == [{"refresh_multi_radio": False, "emit_saved": False}]
+        assert not hasattr(tab, "spotter_mapper_table")
+    finally:
+        tab.deleteLater()
+        app.processEvents()
 
 
 def test_fit_table_height_to_rows_caps_body_and_keeps_header_scroll_space() -> None:
@@ -956,7 +995,7 @@ def test_settings_group_tables_visual_geometry_caps_to_internal_scroll(monkeypat
         app.processEvents()
 
 
-def test_settings_frequency_plan_and_spotter_table_geometry_caps_to_internal_scroll(monkeypatch, tmp_path) -> None:
+def test_settings_frequency_plan_table_geometry_caps_to_internal_scroll(monkeypatch, tmp_path) -> None:
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
     app = QApplication.instance() or QApplication([])
@@ -980,7 +1019,6 @@ def test_settings_frequency_plan_and_spotter_table_geometry_caps_to_internal_scr
         ]
         tab.multi_radio_store = types.SimpleNamespace(list_operating_profiles=lambda: list(plans))
         tab._refresh_operating_profiles_table(refresh_assignments=False)
-        tab._refresh_spotter_form_mapper()
         app.processEvents()
 
         frequency_table = tab.operating_profiles_table
@@ -1002,23 +1040,7 @@ def test_settings_frequency_plan_and_spotter_table_geometry_caps_to_internal_scr
         assert frequency_table.maximumHeight() == expected_frequency
         assert frequency_table.maximumHeight() < frequency_table.horizontalHeader().height() + (10 * row_height)
 
-        spotter_table = tab.spotter_mapper_table
-        assert spotter_table.rowCount() >= 5
-        assert spotter_table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-        assert spotter_table.sizePolicy().verticalPolicy() == QSizePolicy.Preferred
-        assert spotter_table.wordWrap() is False
-
-        spotter_default_row_height = max(spotter_table.verticalHeader().defaultSectionSize(), 24)
-        spotter_row_height = max(spotter_table.rowHeight(0), spotter_default_row_height)
-        expected_spotter = (
-            spotter_table.horizontalHeader().height()
-            + (min(spotter_table.rowCount(), 6) * spotter_row_height)
-            + spotter_table.horizontalScrollBar().sizeHint().height()
-            + (spotter_table.frameWidth() * 2)
-            + 8
-        )
-        assert spotter_table.minimumHeight() == expected_spotter
-        assert spotter_table.maximumHeight() == expected_spotter
+        assert not hasattr(tab, "spotter_mapper_table")
     finally:
         tab.deleteLater()
         app.processEvents()

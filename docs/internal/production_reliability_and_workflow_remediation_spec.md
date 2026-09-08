@@ -1181,10 +1181,17 @@ if needed, wait for advertising, and choose Connect once. Forget/re-pair
 guidance is reserved for explicit authentication, PIN/passkey, encryption-key,
 or removed-key evidence. Lifecycle logging records link connect, link ready,
 service verification, and Companion initialization as separate timed stages.
-A future low-risk improvement may preserve reconnect backoff across worker
-replacement so repeated clicks cannot repeatedly cancel service discovery;
-that behavioral change requires another hardware gate and is not introduced
-by this review.
+A production follow-up now preserves reconnect backoff for 30 seconds across
+an immediately replaced in-process worker and gives each saved endpoint one
+process-local connection-attempt lease. A replacement worker defers without
+counting another failure while the prior attempt still owns that lease, so
+repeated refresh/restart paths cannot overlap GATT setup for the same endpoint.
+Successful connection clears the handoff, explicit Retry Now remains the
+operator-controlled bypass, and failures identify link connect, service
+discovery, or Companion initialization as separate stages. This adds no
+database/configuration migration and does not change pairing, bonding, PIN,
+device-channel, or firmware behavior. The Linux/T1000-E hardware gate remains
+required.
 
 A two-device macOS follow-up with MOBL1 and a MOKO SMART LW010-R advertising as
 `MeshCore-N1MAG MOBL2` exposed a saved/runtime identity collision: both physical
@@ -1370,6 +1377,18 @@ visual gates pass without page-level horizontal scrolling. The authoritative
 fresh-process repository gate passes 2,519 tests with 37 environment skips.
 The known monolithic Qt lifetime fault remains reproducible only after many
 test modules share one process; the same files pass in isolated processes.
+
+Production hang follow-up (2026-09-07): a captured watchdog dump showed the
+main Qt thread blocked during an ordinary Settings save while the legacy
+Settings `Spotter Form Mapper` rebuilt a `QTableWidget` with per-row combo
+widgets. That mapper duplicated the completed top-level FIO Spotter `Forms`
+page and violated the one-writer service boundary above. The legacy Settings
+surface, its refresh/auto-classify handlers, and all save/load rebuild calls
+are removed. Existing `js8_spotter_form_mappings` data remains untouched and
+is still persisted through unrelated Settings saves; FIO Spotter Forms is the
+sole administration surface. Ordinary Settings save now refreshes only the
+runtime projections affected by the save instead of forcing the entire
+multi-radio table projection. No schema or migration changed.
 
 ### Slice 4 — Radio launch bundles
 
