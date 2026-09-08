@@ -1726,11 +1726,9 @@ sample copy.
 
 The Expect access vocabulary now distinguishes **Query groups** (JS8 group
 destinations whose group-addressed E? requests may be answered) from **Trusted
-caller groups** (Operator History memberships that authorize a trusted sender).
-The same labels and copy apply to reusable policies and rule summaries. Both
-group editors retain bounded Operator History lookup and now preserve the
-existing comma-delimited values when a second or later autocomplete result is
-accepted, including Qt's intermediate replacement behavior.
+operators from groups** (trusted Operator History identities authorized through
+their group memberships). The same labels and copy apply to reusable policies
+and rule summaries.
 
 Verification passes 79 focused Spotter, Expect, dynamic FLAMP Q, BBS, Peer
 Schedule, and MsgAuth tests. The authoritative fresh-process repository gate
@@ -1739,3 +1737,26 @@ failure across 2,584 collected tests. Dark theme at 900x700 and 125% text scale
 was visually inspected at the Expect access editor: both group concepts,
 neutral hints, radio selection, checkboxes, and actions remain readable without
 horizontal page overflow.
+
+## 2026-09-07 — Slice 3 follow-up: visible Expect access lists and Spotter icon
+
+Expect access editors now separate lookup/custom entry from the accepted-value
+list. Enter, autocomplete selection, or **Add** creates a removable chip and
+immediately leaves the field ready for another value. Callsigns and group names
+are normalized to uppercase, query groups receive one canonical `@` prefix, and
+duplicates are ignored whether they came from lookup, custom entry, pasted CSV,
+or case variants. Custom query and operator-group values remain supported.
+
+The caller-membership field is now labeled **Trusted operators from groups** so
+it cannot be mistaken for **Query groups**, which remains a destination rule.
+The FIO Spotter navigation asset now uses the same 24-pixel canvas, blue accent,
+stroke weight, and line geometry conventions as the other main-navigation icons.
+
+Verification passes 120 focused Spotter, Expect, dynamic FLAMP Q, shell, and
+navigation tests. The authoritative fresh-process repository gate passes all
+176 test-bearing files plus 2 environment-skip-only files with no failure across
+2,585 collected tests. Compact Expect layout tests cover Normal and 125% text at
+900x560 with populated chip lists, no page-level horizontal overflow, readable
+chip height, custom query groups, removal, and case/prefix duplicate suppression.
+The populated editor was also visually inspected in Dark theme at 1400x900 and
+125% text: the page scrolls instead of compressing chip, input, or Add controls.

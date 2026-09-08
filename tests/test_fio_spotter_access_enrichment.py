@@ -237,12 +237,19 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         assert "@MR08" in tab.expect_groups._completion_values
         assert "MR08" in tab.expect_trusted_groups._completion_values
         assert tab.expect_calls.placeholderText() == "Callsign or *"
-        assert tab.expect_groups.placeholderText() == "Query group; add more with commas"
-        assert tab.expect_trusted_groups.placeholderText() == "Trusted caller group; add more with commas"
+        assert tab.expect_groups.placeholderText() == "Find or enter a query group"
+        assert tab.expect_trusted_groups.placeholderText() == "Find an operator group"
         labels = {label.text() for label in tab.findChildren(spotter_ui.QLabel)}
-        assert {"Query groups", "Trusted caller groups"} <= labels
+        assert {"Query groups", "Trusted operators from groups"} <= labels
         assert tab.expect_editor_split.orientation() == Qt.Vertical
         tab.expect_calls.setText("K7ETC")
+        tab.expect_calls.input.setText("k7etc")
+        tab.expect_calls.input.returnPressed.emit()
+        assert tab.expect_calls.text() == "K7ETC"
+        tab.expect_calls.input.setText("K1NEW")
+        tab.expect_calls.input.returnPressed.emit()
+        assert tab.expect_calls.text() == "K7ETC, K1NEW"
+        tab.expect_calls._remove_value("K1NEW")
         tab.expect_allow_any.setChecked(True)
         assert tab.expect_calls.text() == "*, K7ETC"
         tab.expect_allow_any.setChecked(False)
@@ -250,13 +257,26 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         tab.expect_key.setText("Q")
         tab.expect_calls.setText("*")
         tab.expect_trusted.setChecked(True)
-        tab.expect_groups.setText("@MAGNET, @MR")
-        tab.expect_groups._complete_token(tab.expect_groups.text())
+        tab.expect_groups.setText("@MAGNET")
+        tab.expect_groups.input.setText("MR")
+        tab.expect_groups._complete_token(tab.expect_groups.input.text())
         tab.expect_groups._token_completer.activated[str].emit("@MR08")
         assert tab.expect_groups.text() == "@MAGNET, @MR08"
-        tab.expect_trusted_groups.setText("MAGNET, MR")
-        tab.expect_trusted_groups._complete_token(tab.expect_trusted_groups.text())
+        tab.expect_groups.input.setText("mr08")
+        tab.expect_groups.input.returnPressed.emit()
+        assert tab.expect_groups.text() == "@MAGNET, @MR08"
+        tab.expect_groups.input.setText("custom")
+        tab.expect_groups.input.returnPressed.emit()
+        assert tab.expect_groups.text() == "@MAGNET, @MR08, @CUSTOM"
+        tab.expect_groups._remove_value("@CUSTOM")
+
+        tab.expect_trusted_groups.setText("MAGNET")
+        tab.expect_trusted_groups.input.setText("MR")
+        tab.expect_trusted_groups._complete_token(tab.expect_trusted_groups.input.text())
         tab.expect_trusted_groups._token_completer.activated[str].emit("MR08")
+        assert tab.expect_trusted_groups.text() == "MAGNET, MR08"
+        tab.expect_trusted_groups.input.setText("mr08")
+        tab.expect_trusted_groups.input.returnPressed.emit()
         assert tab.expect_trusted_groups.text() == "MAGNET, MR08"
         tab.expect_enabled.setChecked(True)
         tab.expect_auto.setChecked(True)
@@ -345,7 +365,7 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
         app.processEvents()
 
 
-def test_trusted_roster_group_completion_is_attached_to_its_live_editor(monkeypatch, tmp_path: Path) -> None:
+def test_trusted_operator_group_completion_is_attached_to_its_live_editor(monkeypatch, tmp_path: Path) -> None:
     """Roster-group typing must use an editor-owned popup, not a detached Qt popup."""
     app = _app()
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
@@ -364,13 +384,15 @@ def test_trusted_roster_group_completion_is_attached_to_its_live_editor(monkeypa
         app.processEvents()
         editor = tab.expect_trusted_groups
         assert editor.completer() is editor._token_completer
-        assert editor._token_completer.widget() is editor
+        assert editor._token_completer.widget() is editor.input
         editor.setFocus()
-        QTest.keyClicks(editor, "MR")
+        QTest.keyClicks(editor.input, "MR")
         app.processEvents()
         assert editor._token_completer.completionCount() == 1
         editor._insert_completion("MR08")
         assert editor.text() == "MR08"
+        assert editor.input.text() == ""
+        assert [button.text() for button in editor._chip_buttons] == ["MR08  ×"]
     finally:
         tab.close()
         tab.deleteLater()

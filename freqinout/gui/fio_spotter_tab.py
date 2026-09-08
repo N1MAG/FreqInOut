@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QStringListModel
+from PySide6.QtCore import Qt, Signal, QStringListModel
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
@@ -80,61 +80,168 @@ def _when(value: object) -> str:
     return dt.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
 
 
-class _CsvCompleterLineEdit(QLineEdit):
-    """Complete only the comma-delimited token currently being edited."""
+class _TokenListEditor(QWidget):
+    """Visible, de-duplicated tokens plus a lookup/custom-value editor."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    valuesChanged = Signal()
+
+    def __init__(self, parent: QWidget | None = None, *, token_prefix: str = "") -> None:
         super().__init__(parent)
+        self._token_prefix = str(token_prefix or "").strip().upper()
+        self._values: list[str] = []
         self._completion_values: list[str] = []
-        self._completion_lead = ""
-        # Install the completer on its editor so Qt has an explicit popup
-        # anchor and ownership path. Keep an explicit string model as well:
-        # QCompleter.model() is not guaranteed to expose QStringListModel's
-        # mutation API across Qt bindings.
+        self._chip_buttons: list[QPushButton] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.chip_scroll = QScrollArea(self)
+        self.chip_scroll.setObjectName("fioSpotterTokenChips")
+        self.chip_scroll.setWidgetResizable(False)
+        self.chip_scroll.setFrameShape(QFrame.NoFrame)
+        self.chip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.chip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chip_body = QWidget(self.chip_scroll)
+        self.chip_layout = QHBoxLayout(self.chip_body)
+        self.chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.chip_layout.setSpacing(4)
+        self.chip_scroll.setWidget(self.chip_body)
+        self.chip_scroll.setFixedHeight(38)
+        self.chip_scroll.setVisible(False)
+        layout.addWidget(self.chip_scroll)
+
+        entry_row = QHBoxLayout()
+        entry_row.setContentsMargins(0, 0, 0, 0)
+        entry_row.setSpacing(4)
+        self.input = QLineEdit(self)
+        self.input.setAccessibleName("Value to add")
+        self.add_button = QPushButton("Add", self)
+        self.add_button.setAccessibleName("Add entered value")
+        self.add_button.setToolTip("Add the lookup selection or custom value. Enter does the same thing.")
+        entry_row.addWidget(self.input, 1)
+        entry_row.addWidget(self.add_button)
+        layout.addLayout(entry_row)
+
         self._completion_model = QStringListModel(self)
         self._token_completer = QCompleter(self._completion_model, self)
         self._token_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._token_completer.setFilterMode(Qt.MatchContains)
         self._token_completer.setCompletionMode(QCompleter.PopupCompletion)
         self._token_completer.setMaxVisibleItems(14)
-        self.setCompleter(self._token_completer)
+        self.input.setCompleter(self._token_completer)
         self._token_completer.activated[str].connect(self._insert_completion)
-        self.textEdited.connect(self._complete_token)
-        self.textChanged.connect(self._reset_completion_lead_if_empty)
+        self.input.textEdited.connect(self._complete_token)
+        self.input.returnPressed.connect(self._add_current_input)
+        self.add_button.clicked.connect(self._add_current_input)
 
     def set_completion_values(self, values: list[str]) -> None:
-        self._completion_values = sorted({str(value or "").strip().upper() for value in values if str(value or "").strip()})
+        self._completion_values = sorted({self._normalize(value) for value in values if self._normalize(value)})
         self._completion_model.setStringList(self._completion_values)
 
-    def _current_token(self) -> str:
-        return self.text().rsplit(",", 1)[-1].strip()
-
-    def _reset_completion_lead_if_empty(self, value: str) -> None:
-        if not value.strip():
-            self._completion_lead = ""
-
-    def _complete_token(self, _text: str) -> None:
-        token = self._current_token()
+    def _normalize(self, value: object) -> str:
+        token = str(value or "").strip().upper()
         if not token:
-            self._completion_lead = ""
+            return ""
+        if self._token_prefix:
+            token = f"{self._token_prefix}{token.lstrip(self._token_prefix)}"
+        return token
+
+    def setPlaceholderText(self, text: str) -> None:
+        self.input.setPlaceholderText(text)
+
+    def placeholderText(self) -> str:
+        return self.input.placeholderText()
+
+    def completer(self) -> QCompleter:
+        return self._token_completer
+
+    def setFocus(self, reason=Qt.OtherFocusReason) -> None:  # type: ignore[override]
+        self.input.setFocus(reason)
+
+    def text(self) -> str:
+        return ", ".join(self._values)
+
+    def setText(self, text: object) -> None:
+        values: list[str] = []
+        seen: set[str] = set()
+        for part in str(text or "").split(","):
+            value = self._normalize(part)
+            if value and value not in seen:
+                values.append(value)
+                seen.add(value)
+        self._values = values
+        self.input.clear()
+        self._rebuild_chips()
+
+    def clear(self) -> None:
+        self._values = []
+        self.input.clear()
+        self._rebuild_chips()
+
+    def _complete_token(self, text: str) -> None:
+        token = self._normalize(text)
+        if not token:
             self._token_completer.popup().hide()
             return
-        self._completion_lead = self.text().rsplit(",", 1)[0].strip() if "," in self.text() else ""
         self._token_completer.setCompletionPrefix(token)
         if self._token_completer.completionCount():
             self._token_completer.complete()
 
     def _insert_completion(self, value: str) -> None:
-        # QLineEdit may stage the selected completion before this handler runs.
-        # Use the lead captured while typing so an accepted second/third lookup
-        # appends to, rather than replaces, the groups already entered.
-        prefix = self._completion_lead
-        values = [part.strip() for part in prefix.split(",") if part.strip()]
-        if value.strip().upper() not in {part.upper() for part in values}:
-            values.append(value.strip())
-        self.setText(", ".join(values))
-        self.setCursorPosition(len(self.text()))
-        self._completion_lead = ", ".join(values)
+        self._add_values(value)
+
+    def _add_current_input(self) -> None:
+        self._add_values(self.input.text())
+
+    def _add_values(self, text: object) -> None:
+        changed = False
+        existing = set(self._values)
+        for part in str(text or "").split(","):
+            value = self._normalize(part)
+            if value and value not in existing:
+                self._values.append(value)
+                existing.add(value)
+                changed = True
+        self.input.clear()
+        if changed:
+            self._rebuild_chips()
+        self.input.setFocus()
+
+    def _remove_value(self, value: str) -> None:
+        self._values = [item for item in self._values if item != value]
+        self._rebuild_chips()
+
+    def _rebuild_chips(self) -> None:
+        self.setMinimumHeight(0)
+        while self.chip_layout.count():
+            item = self.chip_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._chip_buttons = []
+        self.chip_body.setMinimumWidth(1)
+        for value in self._values:
+            chip = QPushButton(f"{value}  ×", self.chip_body)
+            chip.setObjectName("fioSpotterTokenChip")
+            chip.setAccessibleName(f"Remove {value}")
+            chip.setToolTip(f"Remove {value}")
+            chip.clicked.connect(lambda _checked=False, selected=value: self._remove_value(selected))
+            self.chip_layout.addWidget(chip)
+            self._chip_buttons.append(chip)
+        self.chip_layout.addStretch(1)
+        self.chip_layout.activate()
+        chip_height = max((chip.sizeHint().height() for chip in self._chip_buttons), default=0)
+        scrollbar_height = self.chip_scroll.horizontalScrollBar().sizeHint().height()
+        self.chip_scroll.setFixedHeight(
+            max(self.input.sizeHint().height() + 6, chip_height + scrollbar_height + 4)
+        )
+        self.chip_body.setMinimumWidth(max(1, self.chip_layout.sizeHint().width()))
+        self.chip_body.adjustSize()
+        self.chip_scroll.setVisible(bool(self._values))
+        self.layout().activate()
+        self.setMinimumHeight(self.sizeHint().height())
+        self.updateGeometry()
+        self.valuesChanged.emit()
 
 
 class FioSpotterTab(QWidget):
@@ -221,6 +328,7 @@ class FioSpotterTab(QWidget):
         self.expect_editor_split.setSizes([320, 620] if compact else [520, 620])
         self.expect_editor_split.widget(0).setMaximumHeight(210 if compact else 16777215)
         self.expect_history_split.setMaximumHeight(300 if compact else 190)
+        self._update_expect_editor_minimum_height()
 
     def _load_expect_access_completions(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -873,9 +981,9 @@ class FioSpotterTab(QWidget):
         self.expect_policy.setToolTip("Optional reusable policy. Save one below, then select it here to apply it to this rule.")
         access_help = QLabel(
             "Allowed callers controls who may ask; * allows anyone. Query groups are JS8 destinations whose "
-            "group-addressed E? requests may be answered. Trusted caller groups instead allow trusted operators "
-            "who belong to those Operator History groups. Add multiple values with commas; lookup appends each selection. "
-            "Blocked callers always win."
+            "group-addressed E? requests may be answered. Trusted operators from groups grants caller access "
+            "only to trusted Operator History records in those groups. Find or enter a value, then press Enter or Add; "
+            "selected values appear above and duplicates are ignored. Blocked callers always win."
         )
         access_help.setWordWrap(True)
         access_help.setObjectName("fioSpotterExpectAccessHelp")
@@ -884,11 +992,11 @@ class FioSpotterTab(QWidget):
         self.expect_access_catalog_state.setWordWrap(True)
         self.expect_access_catalog_state.setObjectName("fioSpotterExpectAccessCatalogState")
         right_layout.addWidget(self.expect_access_catalog_state)
-        self.expect_calls = _CsvCompleterLineEdit(); self.expect_calls.setPlaceholderText("Callsign or *")
-        self.expect_groups = _CsvCompleterLineEdit(); self.expect_groups.setPlaceholderText("Query group; add more with commas")
-        self.expect_blocked = _CsvCompleterLineEdit(); self.expect_blocked.setPlaceholderText("Blocked callers, comma separated")
+        self.expect_calls = _TokenListEditor(); self.expect_calls.setPlaceholderText("Callsign or *")
+        self.expect_groups = _TokenListEditor(token_prefix="@"); self.expect_groups.setPlaceholderText("Find or enter a query group")
+        self.expect_blocked = _TokenListEditor(); self.expect_blocked.setPlaceholderText("Find or enter a blocked callsign")
         self.expect_trusted = QCheckBox("Allow all trusted operators")
-        self.expect_trusted_groups = _CsvCompleterLineEdit(); self.expect_trusted_groups.setPlaceholderText("Trusted caller group; add more with commas")
+        self.expect_trusted_groups = _TokenListEditor(); self.expect_trusted_groups.setPlaceholderText("Find an operator group")
         self.expect_radio = QComboBox()
         self.expect_radio.setAccessibleName("Radios that accept this Expect query")
         self.expect_radio.setToolTip(
@@ -903,7 +1011,14 @@ class FioSpotterTab(QWidget):
         self.expect_enabled = QCheckBox("Rule enabled")
         self.expect_auto = QCheckBox("Auto reply")
         self.expect_unattended = QCheckBox("Unattended auto reply")
-        for label, widget in (("E? Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Allowed callers", self.expect_calls), ("Query groups", self.expect_groups), ("Trusted caller groups", self.expect_trusted_groups), ("Blocked callers", self.expect_blocked), ("Radios", self.expect_radio), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
+        for label, widget in (("E? Token", self.expect_key), ("Reply", self.expect_reply), ("Allow policy", self.expect_policy), ("Allowed callers", self.expect_calls)):
+            form.addRow(label, widget)
+        form.addRow(self.expect_allow_any)
+        form.addRow("Query groups", self.expect_groups)
+        form.addRow(self.expect_trusted)
+        form.addRow("Trusted operators from groups", self.expect_trusted_groups)
+        form.addRow("Blocked callers", self.expect_blocked)
+        for label, widget in (("Radios", self.expect_radio), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
             form.addRow(label, widget)
         radio_help = QLabel(
             "All JS8 radios is the normal choice. A reply uses the receiving radio's configured JS8Call service; "
@@ -912,7 +1027,7 @@ class FioSpotterTab(QWidget):
         radio_help.setWordWrap(True)
         radio_help.setObjectName("fioSpotterExpectRadioHelp")
         form.addRow("", radio_help)
-        form.addRow(self.expect_allow_any); form.addRow(self.expect_trusted); form.addRow(self.expect_enabled); form.addRow(self.expect_auto); form.addRow(self.expect_unattended)
+        form.addRow(self.expect_enabled); form.addRow(self.expect_auto); form.addRow(self.expect_unattended)
         right_layout.addLayout(form)
         actions = QGridLayout()
         save = QPushButton("Save rule"); save.clicked.connect(self._save_entry)
@@ -928,11 +1043,11 @@ class FioSpotterTab(QWidget):
         self.policy_manage = QComboBox(); self.policy_manage.addItem("New policy", 0)
         self.policy_manage.currentIndexChanged.connect(self._load_policy_editor)
         self.policy_name = QLineEdit(); self.policy_name.setPlaceholderText("Policy name")
-        self.policy_calls = _CsvCompleterLineEdit(); self.policy_calls.setPlaceholderText("Callsign or *")
-        self.policy_groups = _CsvCompleterLineEdit(); self.policy_groups.setPlaceholderText("Query group; add more with commas")
+        self.policy_calls = _TokenListEditor(); self.policy_calls.setPlaceholderText("Callsign or *")
+        self.policy_groups = _TokenListEditor(token_prefix="@"); self.policy_groups.setPlaceholderText("Find or enter a query group")
         self.policy_trusted = QCheckBox("Allow all trusted operators")
-        self.policy_trusted_groups = _CsvCompleterLineEdit(); self.policy_trusted_groups.setPlaceholderText("Trusted caller group; add more with commas")
-        self.policy_blocked = _CsvCompleterLineEdit(); self.policy_blocked.setPlaceholderText("Blocked callers")
+        self.policy_trusted_groups = _TokenListEditor(); self.policy_trusted_groups.setPlaceholderText("Find an operator group")
+        self.policy_blocked = _TokenListEditor(); self.policy_blocked.setPlaceholderText("Find or enter a blocked callsign")
         self.policy_scope = QComboBox()
         self.policy_scope.addItem("All JS8 radios", "all")
         self.policy_scope.addItem("Only listed radios", "radio")
@@ -954,11 +1069,23 @@ class FioSpotterTab(QWidget):
         policy_form.addRow("Manage", self.policy_manage)
         policy_form.addRow("Name", self.policy_name); policy_form.addRow("Allowed callers", self.policy_calls)
         policy_form.addRow("Query groups", self.policy_groups)
-        policy_form.addRow("Trusted caller groups", self.policy_trusted_groups)
-        policy_form.addRow(self.policy_trusted); policy_form.addRow("Blocked callers", self.policy_blocked)
+        policy_form.addRow(self.policy_trusted)
+        policy_form.addRow("Trusted operators from groups", self.policy_trusted_groups)
+        policy_form.addRow("Blocked callers", self.policy_blocked)
         policy_form.addRow("Radio scope", self.policy_scope); policy_form.addRow("Radio IDs", self.policy_radios)
         policy_form.addRow(self.policy_enabled); policy_form.addRow(policy_actions)
         right_layout.addWidget(policy_box)
+        for editor in (
+            self.expect_calls,
+            self.expect_groups,
+            self.expect_trusted_groups,
+            self.expect_blocked,
+            self.policy_calls,
+            self.policy_groups,
+            self.policy_trusted_groups,
+            self.policy_blocked,
+        ):
+            editor.valuesChanged.connect(self._update_expect_editor_minimum_height)
         split.addWidget(left); split.addWidget(right); split.setSizes([560, 460])
         layout.addWidget(split, 1)
         histories = QSplitter(Qt.Horizontal)
@@ -970,6 +1097,27 @@ class FioSpotterTab(QWidget):
         layout.addWidget(histories)
         self._load_expect_access_completions()
         self._apply_expect_responsive_layout()
+
+    def _update_expect_editor_minimum_height(self) -> None:
+        if not hasattr(self, "expect_editor_split") or self.expect_editor_split.count() < 2:
+            return
+        editor = self.expect_editor_split.widget(1)
+        editor.setMinimumHeight(0)
+        if editor.layout() is not None:
+            editor.layout().activate()
+        editor.setMinimumHeight(editor.minimumSizeHint().height())
+        editor.updateGeometry()
+        children = [self.expect_editor_split.widget(index) for index in range(self.expect_editor_split.count())]
+        minimums = [
+            max(child.minimumHeight(), child.minimumSizeHint().height())
+            for child in children
+        ]
+        if self.expect_editor_split.orientation() == Qt.Vertical:
+            minimum_height = sum(minimums) + self.expect_editor_split.handleWidth() * max(0, len(children) - 1)
+        else:
+            minimum_height = max(minimums, default=0)
+        self.expect_editor_split.setMinimumHeight(minimum_height)
+        self.expect_editor_split.updateGeometry()
 
     def _save_runtime_state(self) -> None:
         if not hasattr(self, "expect_runtime_enabled"):
@@ -1088,7 +1236,7 @@ class FioSpotterTab(QWidget):
                 parts.append("Trusted")
             trusted_groups = len(row.get("trusted_operator_groups") or [])
             if trusted_groups:
-                parts.append(f"{trusted_groups} trusted group{'s' if trusted_groups != 1 else ''}")
+                parts.append(f"Trusted via {trusted_groups} group{'s' if trusted_groups != 1 else ''}")
         addressed = len(row.get("allowed_groups") or [])
         if addressed:
             parts.append(f"{addressed} query group{'s' if addressed != 1 else ''}")

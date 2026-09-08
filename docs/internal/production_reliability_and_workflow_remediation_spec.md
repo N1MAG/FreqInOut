@@ -584,9 +584,10 @@ managed BBS access while keeping JS8 destination groups distinct:
   current and former callsigns associated with that operator identity.
 - **Allow all trusted operators** authorizes any Operator History identity whose
   roster record has the `trusted` flag.
-- **Trusted caller groups** authorize only trusted operators associated with at
-  least one selected operator group. These groups describe who the caller is;
-  they do not authorize an automatic reply to a JS8 group destination.
+- **Trusted operators from groups** authorize only trusted Operator History
+  identities associated with at least one selected operator group. These
+  memberships describe who the caller is; they do not authorize an automatic
+  reply to a JS8 group destination.
 - **Query groups** separately list JS8 group destinations to which a group
   reply is allowed. Dynamic FLAMP group replies continue to require this
   explicit destination opt-in even when `*` or trusted-operator access permits
@@ -595,10 +596,14 @@ managed BBS access while keeping JS8 destination groups distinct:
   index only when the Expect page is opened. This lookup must not run during
   application startup, UI paint/resize, or the on-air request path.
 
-The editor completes the current comma-delimited token using current and former
-callsigns or roster groups. At narrow widths, the rule list/editor and audit
-panes stack vertically inside the page scroll area; no page-level horizontal
-scrolling or clipped controls are acceptable in Normal or Large Text modes.
+Allowed-caller, query-group, trusted-operator-group, and blocked-caller editors
+show accepted values as removable chips above a separate lookup/custom-value
+field. Enter or **Add** accepts the highlighted lookup result or an explicit
+custom value and leaves the editor ready for another; canonical uppercase and
+query-group `@` normalization prevent duplicates. At narrow widths, the rule
+list/editor and audit panes stack vertically inside the page scroll area; no
+page-level horizontal scrolling or clipped controls are acceptable in Normal
+or Large Text modes.
 Every Spotter combo box uses an expanding closed control and a content-sized,
 bounded popup so the full choice is readable without forcing a wide minimum
 page size. This applies to Watch type/match/priority, Expect rule and policy
@@ -606,10 +611,10 @@ selection, radio selection, policy scope, and Forms purpose selection.
 The reusable allow policy is explicitly optional and its empty choice explains
 that rule-level access fields remain active. Saving a reusable policy keeps it
 selected for the rule being edited and confirms that **Save rule** attaches it.
-Comma-token completion uses an editor-owned string model and an explicitly
-installed completer; accepting a lookup appends the current token without
-replacing previously entered groups, and an empty completion set never opens a
-popup. All user-facing hints follow the product-wide UI Hint Neutrality Contract:
+Token completion uses an editor-owned string model and an explicitly installed
+completer; accepting a lookup appends a chip without replacing previously
+entered values, custom groups remain supported, and an empty completion set
+never opens a popup. All user-facing hints follow the product-wide UI Hint Neutrality Contract:
 they use semantic labels and never embed a real or plausible callsign.
 
 The same rule service supplies ingestion alerts, Inbox focus, Ops Center

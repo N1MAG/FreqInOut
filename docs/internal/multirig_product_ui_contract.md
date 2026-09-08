@@ -285,6 +285,9 @@ arbitrary child such as JS8Call for the Net Control group. Use application-owned
 icons plus short labels, and keep the active master group visible. Condition
 summaries, radio state, and clocks that contribute to current operating context
 belong in the control-bar shell rather than being duplicated in navigation.
+Every main-navigation icon uses the shared navigation canvas, stroke weight, and
+theme-safe accent color; adding a first-class service must not introduce an icon
+that appears heavier, clipped, or differently colored from its peers.
 
 Expanding or collapsing navigation must immediately recalculate the command-bar
 density because it changes the available content width without necessarily

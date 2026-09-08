@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -221,6 +222,25 @@ def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
             tab.policy_radios,
         )
         assert all(widget.height() >= widget.sizeHint().height() for widget in controls)
+
+        tab.expect_calls.setText("K1ABC, K2DEF, K3GHI")
+        tab.expect_groups.setText("REGION, @LOCAL, CUSTOM")
+        tab.expect_trusted_groups.setText("REGION, LOCAL, SUPPORT")
+        tab.expect_blocked.setText("K4JKL, K5MNO")
+        app.processEvents()
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert tab.expect_editor_split.height() >= tab.expect_editor_split.minimumHeight()
+        for editor in (
+            tab.expect_calls,
+            tab.expect_groups,
+            tab.expect_trusted_groups,
+            tab.expect_blocked,
+        ):
+            assert editor.chip_scroll.isVisible()
+            assert editor.chip_scroll.height() >= max(
+                chip.sizeHint().height() for chip in editor._chip_buttons
+            )
+            assert editor.height() >= editor.sizeHint().height()
     finally:
         tab.close()
         tab.deleteLater()
@@ -433,6 +453,17 @@ def test_compact_navigation_exposes_spotter_icon_route():
     from freqinout.gui.main_window import MainWindow
 
     assert ("Spotter", "FIO Spotter", "FIO Spotter", "spotter.svg") in MainWindow._compact_navigation_specs()
+
+
+def test_spotter_navigation_icon_uses_shared_navigation_color_and_canvas():
+    icon = (
+        Path(__file__).resolve().parents[1]
+        / "assets" / "icons" / "navigation" / "spotter.svg"
+    ).read_text(encoding="utf-8")
+
+    assert 'viewBox="0 0 24 24"' in icon
+    assert 'stroke="#3F8FC7"' in icon
+    assert "currentColor" not in icon
 
 
 def test_watches_editor_uses_shared_bounded_store_for_save_toggle_delete_and_test(tmp_path, monkeypatch):
