@@ -73,8 +73,16 @@ class _DeviceProfileVaultSettings:
     def get(self, key: str, default=None):
         if key == "varac_path":
             return self._profile_value("varac_path", "varac_install_path") or self.fallback_settings.get(key, default)
+        if key == "varac_bbs_vault_flamp_relay_dir":
+            return self._profile_value(key) or self.fallback_settings.get(key, default)
         if key == "message_paths":
             merged = dict(self.fallback_settings.get("message_paths", {}) or {})
+            flmsg = str(self._profile_value("flmsg_message_path") or "").strip()
+            if flmsg:
+                merged["flmsg"] = flmsg
+            flamp = str(self._profile_value("flamp_message_path") or "").strip()
+            if flamp:
+                merged["flamp"] = flamp
             incoming = str(self._profile_value("varac_incoming_path") or "").strip()
             if incoming:
                 merged["varac"] = incoming
@@ -125,6 +133,7 @@ class BackgroundIngestController(QObject):
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._dynamic_expect_timer: Optional[QTimer] = None
+        self._dynamic_flamp_projection_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
         self._varac_vault_timer: Optional[QTimer] = None
         self._varac_vault_activity_timer: Optional[QTimer] = None
@@ -159,6 +168,7 @@ class BackgroundIngestController(QObject):
         self._varac_vault_full_interval_ms: int = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
         self._varac_vault_refresh_pending: bool = False
         self._condition_sop_seen_observation_ids: set[str] = set()
+        self._dynamic_flamp_projection_ready = threading.Event()
         self._controller_thread_call.connect(self._run_controller_thread_call)
 
     def _run_controller_thread_call(self, callback: object) -> None:
@@ -177,6 +187,7 @@ class BackgroundIngestController(QObject):
             return
         if self._cancel_token.is_cancelled:
             self._cancel_token = CancellationToken()
+        self._dynamic_flamp_projection_ready.clear()
         self._running = True
         self._ensure_executor()
         # JS8 links/background ingest: low cadence
@@ -198,6 +209,13 @@ class BackgroundIngestController(QObject):
         self._dynamic_expect_timer.setInterval(3 * 1000)
         self._dynamic_expect_timer.timeout.connect(self._ingest_dynamic_expect)
         self._dynamic_expect_timer.start()
+
+        # FLAMP relay/RX reconciliation is a bounded filesystem projection,
+        # intentionally separate from the three-second directed-query tail.
+        self._dynamic_flamp_projection_timer = QTimer(self)
+        self._dynamic_flamp_projection_timer.setInterval(30 * 1000)
+        self._dynamic_flamp_projection_timer.timeout.connect(self._ingest_dynamic_flamp_projection)
+        self._dynamic_flamp_projection_timer.start()
 
         # VarAC ingest: moderate cadence
         self._varac_timer = QTimer(self)
@@ -265,6 +283,7 @@ class BackgroundIngestController(QObject):
             "_js8_links_timer",
             "_messages_timer",
             "_dynamic_expect_timer",
+            "_dynamic_flamp_projection_timer",
             "_varac_timer",
             "_varac_vault_timer",
             "_varac_vault_activity_timer",
@@ -284,6 +303,7 @@ class BackgroundIngestController(QObject):
                 setattr(self, attr, None)
         self._shutdown_executor()
         self._shutdown_realtime_executor()
+        self._dynamic_flamp_projection_ready.clear()
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
         with self._executor_lock:
@@ -489,6 +509,9 @@ class BackgroundIngestController(QObject):
         if "js8" in requested:
             requested.add("js8_links")
             requested.add("messages")
+        if "dynamic_flamp" in requested or "flamp_projection" in requested:
+            self._dynamic_flamp_projection_ready.clear()
+            self._ingest_dynamic_flamp_projection()
         if "js8_links" in requested:
             self._ingest_js8_links(force=force)
         if "message_cache" in requested:
@@ -902,10 +925,67 @@ class BackgroundIngestController(QObject):
 
         self._submit_realtime_job("dynamic_expect", job)
 
+    def _ingest_dynamic_flamp_projection(self) -> None:
+        """Refresh saved FLAMP relay/RX state without touching the GUI thread."""
+
+        self._submit_job("dynamic_flamp_projection", self._run_dynamic_flamp_projection_job)
+
+    def _run_dynamic_flamp_projection_job(
+        self, *, profiles: Optional[Sequence[Mapping[str, object]]] = None
+    ) -> None:
+        selected_profiles = list(profiles) if profiles is not None else self._active_js8_spotter_profiles()
+        store = MultiRadioStore()
+        try:
+            for profile_row in selected_profiles:
+                self._cancel_checkpoint()
+                profile = dict(profile_row)
+                radio_id = int(profile.get("id", 0) or 0)
+                if radio_id <= 0:
+                    continue
+                profile_fallback = self._new_worker_settings()
+                profile_settings = _DeviceProfileVaultSettings(profile, profile_fallback, store)
+                try:
+                    if not self._truthy(
+                        profile_settings.get("js8_expect_dynamic_flamp_enabled", False), False
+                    ):
+                        continue
+                    js8_instance_id = str(
+                        profile.get("js8_instance_id", "")
+                        or profile.get("name", "")
+                        or radio_id
+                    )
+                    MessageIngestor(profile_settings).refresh_dynamic_flamp_state(  # type: ignore[arg-type]
+                        source_radio_id=radio_id,
+                        js8_instance_id=js8_instance_id,
+                    )
+                except Exception as exc:
+                    log.debug(
+                        "BackgroundIngest: FLAMP transfer projection failed for %s: %s",
+                        str(profile.get("name", "") or radio_id),
+                        exc,
+                    )
+                finally:
+                    profile_fallback.close()
+        finally:
+            self._dynamic_flamp_projection_ready.set()
+
+    def _ensure_initial_dynamic_flamp_projection(
+        self, profiles: Sequence[Mapping[str, object]]
+    ) -> None:
+        """Run one projection before this process consumes its first Q request."""
+
+        if self._dynamic_flamp_projection_ready.is_set():
+            return
+        self._run_dynamic_flamp_projection_job(profiles=profiles)
+
     def _run_dynamic_expect_job(self) -> None:
         profiles = self._active_js8_spotter_profiles()
         if not profiles:
             return
+        # The initial projection is the startup phase of this worker, not part
+        # of the per-request tail. It prevents yesterday's saved relay snapshot
+        # from answering before completed FLAMP/rx output is reconciled.
+        self._ensure_initial_dynamic_flamp_projection(profiles)
         inventory = self._runtime_ingest_inventory()
         directed_sources_by_radio = {
             str(source.radio_id or ""): source
@@ -1390,18 +1470,6 @@ class BackgroundIngestController(QObject):
                     or profile.get("name", "")
                     or radio_id
                 )
-                if bool(profile_settings.get("js8_expect_dynamic_flamp_enabled", False)):
-                    try:
-                        ingestor.refresh_dynamic_flamp_state(
-                            source_radio_id=radio_id,
-                            js8_instance_id=js8_instance_id,
-                        )
-                    except Exception as exc:
-                        log.debug(
-                            "BackgroundIngest: FLAMP transfer projection failed for %s: %s",
-                            str(profile.get("name", "") or radio_id),
-                            exc,
-                        )
                 inserted = ingestor.ingest_spotter_from_directed(
                     directed_path=Path(directed).expanduser(),
                     source_radio_id=radio_id,

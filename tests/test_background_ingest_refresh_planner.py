@@ -124,6 +124,64 @@ def test_dynamic_expect_tail_runs_when_source_changes_even_if_runtime_is_disable
     assert controller.submitted == ["dynamic_expect", "dynamic_expect"]
 
 
+def test_initial_dynamic_flamp_projection_runs_once_before_tail_consumption(monkeypatch):
+    controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
+    calls: list[tuple[dict, ...]] = []
+    profiles = ({"id": 7, "name": "FIO-A"},)
+
+    def project(*, profiles):
+        calls.append(tuple(dict(row) for row in profiles))
+        controller._dynamic_flamp_projection_ready.set()
+
+    monkeypatch.setattr(controller, "_run_dynamic_flamp_projection_job", project)
+
+    controller._ensure_initial_dynamic_flamp_projection(profiles)
+    controller._ensure_initial_dynamic_flamp_projection(profiles)
+
+    assert calls == [profiles]
+
+
+def test_profile_settings_expose_profile_specific_flamp_receive_root():
+    fallback = _Settings(
+        {
+            "message_paths": {"flamp": "/fallback/rx", "mesh": "/mesh"},
+            "varac_bbs_vault_flamp_relay_dir": "/fallback/relay",
+        }
+    )
+    profile = {
+        "flamp_message_path": "/radio-a/FLAMP/rx",
+        "flmsg_message_path": "/radio-a/FLMSG",
+    }
+    adapter = background_ingest._DeviceProfileVaultSettings(  # noqa: SLF001
+        profile,
+        fallback,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert adapter.get("message_paths") == {
+        "flamp": "/radio-a/FLAMP/rx",
+        "flmsg": "/radio-a/FLMSG",
+        "mesh": "/mesh",
+    }
+    assert adapter.get("varac_bbs_vault_flamp_relay_dir") == "/fallback/relay"
+
+
+def test_dynamic_flamp_manual_refresh_resets_readiness_and_queues_projection(monkeypatch):
+    controller = BackgroundIngestController(_Settings())  # type: ignore[arg-type]
+    controller._dynamic_flamp_projection_ready.set()
+    calls = {"count": 0, "ready_when_called": True}
+
+    def refresh():
+        calls["count"] += 1
+        calls["ready_when_called"] = controller._dynamic_flamp_projection_ready.is_set()
+
+    monkeypatch.setattr(controller, "_ingest_dynamic_flamp_projection", refresh)
+
+    controller.request_refresh("dynamic_flamp")
+
+    assert calls == {"count": 1, "ready_when_called": False}
+
+
 def test_background_varac_ingest_runs_periodic_quiet_pass(tmp_path):
     source = _source(tmp_path, family="varac", source_type="sqlite")
     controller = _PlannerOnlyController(IngestSourceInventory(ingest_sources=(source,)))

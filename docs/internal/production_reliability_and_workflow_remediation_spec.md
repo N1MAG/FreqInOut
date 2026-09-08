@@ -710,6 +710,85 @@ enabled. Every accepted, blocked, held, failed, deduplicated, and sent decision
 is visible in Expect history with source and reason. A failed send uses bounded
 backoff and never immediately loops.
 
+#### FLAMP receive-state freshness and offline catch-up
+
+The relay directory is a **saved snapshot**, not FLAMP's live receive queue.
+Review of FLAMP 2.2.14 shows that `FLAMP/relay` is rewritten only when the
+operator chooses **Save Relay Files** or when FLAMP exits with **Save Relay Data
+On Program Exit** enabled. Receiving fill blocks while FIO is stopped can
+therefore make an unchanged relay file stale even though a later FIO directory
+scan succeeds. FLAMP's public XML-RPC service does not expose receive-queue
+state or a save-relay operation, and FIO must not consume FLDigi's RX stream in
+competition with FLAMP. A recent directory-scan timestamp alone is consequently
+not proof that an unchanged partial relay snapshot is current.
+
+FIO reconciles three bounded evidence classes in this order:
+
+1. **Validated completed receive.** The configured per-radio `FLAMP/rx` root is
+   scanned only at its root and one FLAMP date-directory level. A regular file
+   whose exact basename matches the AMP `<FILE>` header and whose filesystem
+   time is not older than that transfer's saved relay observation is accepted as
+   FLAMP completion evidence. This is authoritative because FLAMP writes the RX
+   artifact only after its receive object reports every checksum-validated block
+   complete. It upgrades an unchanged partial relay snapshot to `complete` and
+   makes `Q <qid> YES` available after FIO starts.
+2. **Validated saved relay.** The existing AMP parser remains authoritative for
+   total and checksum-accepted block numbers in the saved relay snapshot. It may
+   establish `partial` or `complete`; filename prefixes alone never establish
+   either state.
+3. **No conclusive evidence.** Missing headers, conflicting identifiers or
+   totals, inaccessible roots, an in-progress/failed reconciliation, or an
+   uncorrelated completion candidate yield `unavailable`/held behavior. FIO does
+   not guess from a decoded filename, highest observed block, helper file, or
+   unrelated FLAMP log activity.
+
+The projection persists the AMP transfer filename, expected encoded size,
+relay-file size/mtime/hash, completion-evidence path and kind, and the timestamp
+at which that Q record was validated by a successful scan generation. The
+schema change is additive and idempotent. Existing rows with no new metadata
+are reparsed once; no message, rule, policy, operator, or source file is changed.
+The source-scan row advances only in the same transaction as all per-Q
+reconciliation results. A Q row is eligible for a reply only when it was
+validated by the source's latest successful generation. This prevents a fresh
+source status from masking an unevaluated stale transfer row.
+
+Reconciliation remains off the GUI path and outside per-request evaluation.
+Before the first directed-query tail is consumed in a process, that background
+worker completes one startup projection; a dedicated 30-second background job
+then maintains it without coupling the work to general message ingestion. Each
+source run builds a bounded stat manifest once, reparses/hashes only new or
+changed relay files, and checks exact completion basenames only for known
+transfers. Unchanged complete rows require no content read. Unchanged partial
+rows retain their parsed relay facts but are reevaluated against the lightweight
+RX manifest, so a completed output appearing while FIO was stopped is
+recognized before a startup query can use yesterday's row. After that startup
+gate, the existing three-second directed-query tail is a database-only consumer
+and performs no FLAMP filesystem work.
+
+This catch-up contract deliberately does not claim access to unsaved,
+still-partial blocks held only in FLAMP memory. If FLAMP has neither written a
+new relay snapshot nor completed and saved the RX artifact, FIO cannot prove a
+new missing-block list through FLAMP's supported interfaces. Such an ambiguous
+record must retain its last-observed timestamp in audit/UI, and a future live
+partial-state adapter requires a documented FLAMP API or a captured,
+checksum-verifiable producer artifact before it may affect automatic replies.
+
+Acceptance fixtures cover:
+
+- an unchanged partial relay snapshot followed by a matching FLAMP RX output,
+  which becomes `YES` after restart without touching the relay file;
+- mismatched basename, older completion output, directory, symlink, and
+  out-of-scope nested candidates, none of which can upgrade a transfer;
+- changed relay content with preserved timestamp but changed size, which is
+  reparsed, and an unchanged complete row, which is not reread;
+- malformed/conflicting AMP headers, deleted relay/RX artifacts, failed scans,
+  and source-radio isolation;
+- atomic scan-generation eligibility so no fresh scan record can coexist with
+  an unvalidated reply-eligible Q row; and
+- a production-shaped 138-file relay/RX fixture and a larger bounded fixture,
+  proving startup/background reconciliation stays off the GUI thread and the
+  `E? Q` request path remains database-only.
+
 ### SuperSpotter familiarity contract
 
 The reviewed JS8SuperSpotter 2.6 concepts retained in the FIO design are its
@@ -1504,6 +1583,30 @@ a pending request. Preflight failure summaries report the actual blocking issue
 ahead of non-blocking capability warnings, and dynamic receive/hold/dispatch
 decisions are recorded in the normal log as well as the durable Expect audit.
 No schema, rule, policy, radio, or FLAMP data migration is involved.
+
+FLAMP offline-catch-up follow-up (2026-09-08): read-only production database
+evidence showed Q `906F` still projected from a partial relay snapshot with
+blocks 26 and 27 missing even though a newer, exact-name completed artifact was
+already indexed under FLAMP's dated RX output. The implementation now follows
+the receive-state freshness contract above: it stores additive evidence and
+scan-generation metadata, validates exact completed outputs, reparses legacy
+rows once, and reuses unchanged relay parses. A startup projection runs before
+the process consumes its first dedicated Expect tail; a separate 30-second
+background projection then keeps the state current without rebuilding Messages
+or scanning from the three-second request path. Enabling the service queues an
+immediate projection rather than waiting for that cadence. Temporarily
+inaccessible source roots record a failed generation and retain the last good
+row, so automatic reply holds instead of transmitting a stale answer. Valid
+source scans still
+retire genuinely deleted relay rows.
+
+The production-shaped 138-transfer fixture rereads zero relay payloads on its
+second pass. The affected-area gate passes 142 tests with one environment skip;
+the authoritative fresh-process repository gate passes all 176 test-bearing
+files plus two environment-skip-only files with no failures across 2,607
+collected tests. Python compilation and `git diff --check` pass. The schema
+migration is additive/idempotent and preserves existing transfer rows; no
+message, rule, policy, operator, radio, or FLAMP source file is modified.
 
 ### Slice 4 — Radio launch bundles
 

@@ -57,6 +57,8 @@ DEFAULT_FLAMP_QUEUE_HELPER_NAME = "BBS_QUEUE_LIST.txt"
 DEFAULT_FLAMP_BLOCK_PREFIX = "BBS_BLOCK_LIST"
 DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
+MAX_FLAMP_RECEIVE_FILES_PER_SCAN = 5000
+MAX_FLAMP_RELAY_FILES_PER_SCAN = 5000
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
 # Kept as a compatibility constant for callers that imported the old setting.
 # Visitor-facing helper text must not promise a fixed delay; asynchronous state
@@ -2072,6 +2074,10 @@ def publish_location_view(
 
 class FlampRelayStore:
     PROG_RE = re.compile(r"<PROG.*?\{([A-F0-9]+)\}", re.IGNORECASE)
+    FILE_RE = re.compile(
+        r"<FILE\s+[^>]*>\{([A-F0-9]+)\}([^:\r\n]*):([^\r\n]+)$",
+        re.IGNORECASE,
+    )
     SIZE_RE = re.compile(r"<SIZE\s+[^>]*>\{([A-F0-9]+)\}(\d+)\s+(\d+)\s+(\d+)", re.IGNORECASE)
     BLOCK_RE = re.compile(r"\{([A-F0-9]+):(\d+)\}", re.IGNORECASE)
     VALID_Q_RE = re.compile(r"^[A-F0-9]{4}$", re.IGNORECASE)
@@ -2081,12 +2087,29 @@ class FlampRelayStore:
 
     def relay_files(self) -> List[Path]:
         relay_dir = self.relay_dir
-        if relay_dir is None or not relay_dir.exists():
+        if relay_dir is None or not relay_dir.exists() or not relay_dir.is_dir() or relay_dir.is_symlink():
             return []
         files: List[Path] = []
-        for pattern in ("*.b2s", "*.k2s", "*.relay", "*.txt", "*.dat"):
-            files.extend(relay_dir.glob(pattern))
-        return [path for path in files if path.is_file()]
+        allowed_suffixes = {".b2s", ".k2s", ".relay", ".txt", ".dat"}
+        try:
+            entries = os.scandir(relay_dir)
+        except OSError:
+            return []
+        with entries:
+            for entry in entries:
+                if len(files) >= MAX_FLAMP_RELAY_FILES_PER_SCAN:
+                    break
+                try:
+                    if (
+                        entry.is_symlink()
+                        or not entry.is_file(follow_symlinks=False)
+                        or Path(entry.name).suffix.lower() not in allowed_suffixes
+                    ):
+                        continue
+                except OSError:
+                    continue
+                files.append(Path(entry.path))
+        return files
 
     def queue_index(self, *, max_age_days: Optional[int] = None) -> Dict[str, Path]:
         index: Dict[str, Path] = {}
@@ -2127,6 +2150,10 @@ class FlampRelayStore:
 
     def parse_file(self, file_path: Path) -> Optional[Dict[str, object]]:
         file_id = None
+        transfer_file_id = ""
+        size_file_id = ""
+        transfer_filename = ""
+        transfer_timestamp = ""
         total_blocks = None
         file_size = None
         block_len = None
@@ -2144,8 +2171,15 @@ class FlampRelayStore:
                     match_prog = self.PROG_RE.search(line)
                     if match_prog and not file_id:
                         file_id = match_prog.group(1).upper()
+                    match_file = self.FILE_RE.search(line)
+                    if match_file:
+                        transfer_file_id = match_file.group(1).upper()
+                        file_id = file_id or match_file.group(1).upper()
+                        transfer_timestamp = match_file.group(2).strip()
+                        transfer_filename = PureWindowsPath(match_file.group(3).strip()).name
                     match_size = self.SIZE_RE.search(line)
                     if match_size:
+                        size_file_id = match_size.group(1).upper()
                         file_id = file_id or match_size.group(1).upper()
                         file_size = int(match_size.group(2))
                         total_blocks = int(match_size.group(3))
@@ -2167,6 +2201,10 @@ class FlampRelayStore:
             "path": str(file_path),
             "name": file_path.name,
             "file_id": (file_id or file_path.name[:4]).upper(),
+            "transfer_filename": transfer_filename,
+            "transfer_timestamp": transfer_timestamp,
+            "transfer_file_id": transfer_file_id,
+            "size_file_id": size_file_id,
             "total_blocks": total_blocks,
             "file_size": file_size,
             "block_len": block_len,
@@ -2216,7 +2254,9 @@ class FlampRelayStore:
             total = int(total_raw) if total_raw is not None else 0
         except Exception:
             total = 0
-        if file_id != q_id or total <= 0:
+        transfer_file_id = str(relay_info.get("transfer_file_id") or q_id).strip().upper()
+        size_file_id = str(relay_info.get("size_file_id") or q_id).strip().upper()
+        if file_id != q_id or transfer_file_id != q_id or size_file_id != q_id or total <= 0:
             return {
                 "q_id": q_id,
                 "path": str(relay_info.get("path") or ""),
@@ -2247,7 +2287,61 @@ class FlampRelayStore:
             "missing_blocks": missing,
             "state": state,
             "parser_confidence": confidence,
+            "transfer_filename": str(relay_info.get("transfer_filename") or ""),
+            "transfer_timestamp": str(relay_info.get("transfer_timestamp") or ""),
+            "expected_file_size": relay_info.get("file_size"),
         }
+
+    @staticmethod
+    def completed_receive_index(
+        receive_dir: object, *, max_files: int = MAX_FLAMP_RECEIVE_FILES_PER_SCAN
+    ) -> Dict[str, Tuple[Path, int]]:
+        """Index regular FLAMP outputs at the root and one date-folder level.
+
+        FLAMP auto-save uses one date directory below ``FLAMP/rx``.  Keeping the
+        walk to that documented shape prevents an accidentally broad recursive
+        scan when a user configures the wrong directory.
+        """
+
+        root = _resolve_path(receive_dir)
+        if root is None or not root.exists() or not root.is_dir() or root.is_symlink():
+            return {}
+        bounded = max(1, min(MAX_FLAMP_RECEIVE_FILES_PER_SCAN, int(max_files or 1)))
+        indexed: Dict[str, Tuple[Path, int]] = {}
+        examined = 0
+        child_directories: List[Path] = []
+
+        def scan_directory(directory: Path, *, collect_children: bool = False) -> None:
+            nonlocal examined
+            try:
+                entries = os.scandir(directory)
+            except OSError:
+                return
+            with entries:
+                for entry in entries:
+                    if examined >= bounded:
+                        return
+                    examined += 1
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            stat = entry.stat(follow_symlinks=False)
+                            candidate = Path(entry.path)
+                            previous = indexed.get(entry.name)
+                            if previous is None or int(stat.st_mtime_ns) > previous[1]:
+                                indexed[entry.name] = (candidate, int(stat.st_mtime_ns))
+                        elif collect_children and entry.is_dir(follow_symlinks=False):
+                            child_directories.append(Path(entry.path))
+                    except OSError:
+                        continue
+
+        scan_directory(root, collect_children=True)
+        for child in child_directories:
+            if examined >= bounded:
+                break
+            scan_directory(child)
+        return indexed
 
 
 def index_flamp_transfer_state(
@@ -2256,6 +2350,7 @@ def index_flamp_transfer_state(
     db_path: Path,
     source_radio_id: object = "",
     source_js8_instance_id: object = "",
+    receive_dir: object = "",
     observed_ts: Optional[float] = None,
 ) -> int:
     """Persist validated, source-scoped FLAMP transfer state.
@@ -2272,37 +2367,53 @@ def index_flamp_transfer_state(
     conn = connect_sqlite_runtime_write(path)
     try:
         relay_root = store.relay_dir
-        if relay_root is None or not relay_root.exists() or not relay_root.is_dir():
-            conn.execute(
-                """
-                UPDATE flamp_transfer_state
-                SET state='unavailable', parser_confidence=0,
-                    available_blocks_json='[]', missing_blocks_json='[]',
-                    total_blocks=NULL, updated_ts=?
-                WHERE source_radio_id=? AND source_js8_instance_id=?
-                """,
-                (now, radio_id, js8_id),
-            )
+        if (
+            relay_root is None
+            or not relay_root.exists()
+            or not relay_root.is_dir()
+            or relay_root.is_symlink()
+        ):
             conn.execute(
                 """
                 INSERT INTO flamp_transfer_state_scans
-                    (source_radio_id, source_js8_instance_id, relay_dir,
+                    (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
                      scan_success, file_count, error_text, scanned_ts)
-                VALUES (?, ?, ?, 0, 0, ?, ?)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
                 ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
                     relay_dir=excluded.relay_dir,
+                    receive_dir=excluded.receive_dir,
                     scan_success=excluded.scan_success,
                     file_count=excluded.file_count,
                     error_text=excluded.error_text,
                     scanned_ts=excluded.scanned_ts
                 """,
-                (radio_id, js8_id, str(relay_dir or ""), "FLAMP relay folder is unavailable.", now),
+                (
+                    radio_id,
+                    js8_id,
+                    str(relay_dir or ""),
+                    str(receive_dir or ""),
+                    "FLAMP relay folder is unavailable.",
+                    now,
+                ),
             )
             conn.commit()
             return 0
+        receive_root = _resolve_path(receive_dir)
+        if str(receive_dir or "").strip() and (
+            receive_root is None
+            or not receive_root.exists()
+            or not receive_root.is_dir()
+            or receive_root.is_symlink()
+        ):
+            raise FileNotFoundError("FLAMP completed receive folder is unavailable.")
+        receive_index = store.completed_receive_index(receive_dir)
         existing_rows = conn.execute(
             """
-            SELECT q_id, source_path, source_mtime_ns, source_sha256
+            SELECT q_id, source_path, source_mtime_ns, source_size_bytes,
+                   source_sha256, transfer_filename, expected_file_size,
+                   completion_path, evidence_kind, parser_version,
+                   total_blocks, available_blocks_json, missing_blocks_json,
+                   state, parser_confidence, observed_ts
             FROM flamp_transfer_state
             WHERE source_radio_id=? AND source_js8_instance_id=?
             """,
@@ -2312,7 +2423,19 @@ def index_flamp_transfer_state(
             str(row[0] or "").upper(): {
                 "source_path": str(row[1] or ""),
                 "source_mtime_ns": int(row[2] or 0),
-                "source_sha256": str(row[3] or ""),
+                "source_size_bytes": int(row[3] or 0),
+                "source_sha256": str(row[4] or ""),
+                "transfer_filename": str(row[5] or ""),
+                "expected_file_size": int(row[6]) if row[6] is not None else None,
+                "completion_path": str(row[7] or ""),
+                "evidence_kind": str(row[8] or "relay_snapshot"),
+                "parser_version": int(row[9] or 0),
+                "total_blocks": int(row[10]) if row[10] is not None else None,
+                "available_blocks_json": str(row[11] or "[]"),
+                "missing_blocks_json": str(row[12] or "[]"),
+                "state": str(row[13] or "unavailable"),
+                "parser_confidence": float(row[14] or 0.0),
+                "observed_ts": float(row[15] or 0.0),
             }
             for row in existing_rows
         }
@@ -2323,49 +2446,133 @@ def index_flamp_transfer_state(
             try:
                 stat = relay_path.stat()
                 source_mtime_ns = int(stat.st_mtime_ns)
+                source_size_bytes = int(stat.st_size)
             except OSError:
                 source_mtime_ns = 0
+                source_size_bytes = 0
             prior = existing.get(q_id)
-            if (
+            unchanged = bool(
                 prior
                 and source_mtime_ns > 0
                 and int(prior.get("source_mtime_ns") or 0) == source_mtime_ns
+                and int(prior.get("source_size_bytes") or 0) == source_size_bytes
                 and str(prior.get("source_path") or "") == str(relay_path)
                 and str(prior.get("source_sha256") or "")
+                and int(prior.get("parser_version") or 0) >= 1
+            )
+            transfer_filename = str((prior or {}).get("transfer_filename") or "")
+            completion = receive_index.get(transfer_filename) if transfer_filename else None
+            completion_is_current = bool(
+                completion and source_mtime_ns > 0 and int(completion[1]) >= source_mtime_ns
+            )
+            must_parse = not unchanged or bool(
+                prior
+                and str(prior.get("evidence_kind") or "") == "completed_receive"
+                and not completion_is_current
+            )
+            if must_parse:
+                facts = store.authoritative_file(relay_path, q_id) or {
+                    "q_id": q_id,
+                    "path": str(relay_path),
+                    "transfer_filename": "",
+                    "expected_file_size": None,
+                    "total_blocks": None,
+                    "available_blocks": [],
+                    "missing_blocks": [],
+                    "state": "unavailable",
+                    "parser_confidence": 0.0,
+                }
+                transfer_filename = str(facts.get("transfer_filename") or "")
+                completion = receive_index.get(transfer_filename) if transfer_filename else None
+                completion_is_current = bool(
+                    completion and source_mtime_ns > 0 and int(completion[1]) >= source_mtime_ns
+                )
+                try:
+                    source_sha256 = hashlib.sha256(relay_path.read_bytes()).hexdigest()
+                except OSError:
+                    source_sha256 = ""
+                fact_observed_ts = now
+            else:
+                try:
+                    available = [int(item) for item in json.loads(str(prior.get("available_blocks_json") or "[]"))]
+                except Exception:
+                    available = []
+                try:
+                    missing = [int(item) for item in json.loads(str(prior.get("missing_blocks_json") or "[]"))]
+                except Exception:
+                    missing = []
+                facts = {
+                    "q_id": q_id,
+                    "path": str(relay_path),
+                    "transfer_filename": transfer_filename,
+                    "expected_file_size": prior.get("expected_file_size"),
+                    "total_blocks": prior.get("total_blocks"),
+                    "available_blocks": available,
+                    "missing_blocks": missing,
+                    "state": prior.get("state") or "unavailable",
+                    "parser_confidence": prior.get("parser_confidence") or 0.0,
+                }
+                source_sha256 = str(prior.get("source_sha256") or "")
+                fact_observed_ts = float(prior.get("observed_ts") or 0.0)
+
+            completion_path = ""
+            evidence_kind = "relay_snapshot"
+            total_blocks = facts.get("total_blocks")
+            if (
+                completion_is_current
+                and total_blocks is not None
+                and int(total_blocks or 0) > 0
+                and float(facts.get("parser_confidence") or 0.0) >= 1.0
             ):
-                count += 1
-                continue
-            facts = store.authoritative_file(relay_path, q_id) or {
-                "q_id": q_id,
-                "path": str(relay_path),
-                "total_blocks": None,
-                "available_blocks": [],
-                "missing_blocks": [],
-                "state": "unavailable",
-                "parser_confidence": 0.0,
-            }
-            try:
-                source_sha256 = hashlib.sha256(relay_path.read_bytes()).hexdigest()
-            except OSError:
-                source_sha256 = ""
+                completion_path = str(completion[0])
+                evidence_kind = "completed_receive"
+                facts = dict(facts)
+                facts["available_blocks"] = list(range(1, int(total_blocks) + 1))
+                facts["missing_blocks"] = []
+                facts["state"] = "complete"
+                facts["parser_confidence"] = 1.0
+                if str((prior or {}).get("evidence_kind") or "") != "completed_receive":
+                    log.info(
+                        "FLAMP transfer projection: q=%s source=%s/%s completed receive reconciled path=%s",
+                        q_id,
+                        radio_id,
+                        js8_id,
+                        completion_path,
+                    )
+            elif str((prior or {}).get("evidence_kind") or "") == "completed_receive":
+                log.warning(
+                    "FLAMP transfer projection: q=%s source=%s/%s completed receive evidence removed; relay snapshot restored",
+                    q_id,
+                    radio_id,
+                    js8_id,
+                )
             conn.execute(
                 """
                 INSERT INTO flamp_transfer_state
                     (q_id, source_radio_id, source_js8_instance_id, source_path,
-                     source_mtime_ns, source_sha256, total_blocks,
+                     source_mtime_ns, source_size_bytes, source_sha256,
+                     transfer_filename, expected_file_size, completion_path,
+                     evidence_kind, parser_version, total_blocks,
                      available_blocks_json, missing_blocks_json, state,
-                     parser_confidence, observed_ts, updated_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     parser_confidence, observed_ts, validated_scan_ts, updated_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(q_id, source_radio_id, source_js8_instance_id) DO UPDATE SET
                     source_path=excluded.source_path,
                     source_mtime_ns=excluded.source_mtime_ns,
+                    source_size_bytes=excluded.source_size_bytes,
                     source_sha256=excluded.source_sha256,
+                    transfer_filename=excluded.transfer_filename,
+                    expected_file_size=excluded.expected_file_size,
+                    completion_path=excluded.completion_path,
+                    evidence_kind=excluded.evidence_kind,
+                    parser_version=excluded.parser_version,
                     total_blocks=excluded.total_blocks,
                     available_blocks_json=excluded.available_blocks_json,
                     missing_blocks_json=excluded.missing_blocks_json,
                     state=excluded.state,
                     parser_confidence=excluded.parser_confidence,
                     observed_ts=excluded.observed_ts,
+                    validated_scan_ts=excluded.validated_scan_ts,
                     updated_ts=excluded.updated_ts
                 """,
                 (
@@ -2374,12 +2581,19 @@ def index_flamp_transfer_state(
                     js8_id,
                     str(facts.get("path") or relay_path),
                     source_mtime_ns,
+                    source_size_bytes,
                     source_sha256,
+                    transfer_filename,
+                    facts.get("expected_file_size"),
+                    completion_path,
+                    evidence_kind,
+                    1,
                     facts.get("total_blocks"),
                     json.dumps(list(facts.get("available_blocks") or []), separators=(",", ":")),
                     json.dumps(list(facts.get("missing_blocks") or []), separators=(",", ":")),
                     str(facts.get("state") or "unavailable"),
                     float(facts.get("parser_confidence") or 0.0),
+                    fact_observed_ts,
                     now,
                     now,
                 ),
@@ -2398,28 +2612,60 @@ def index_flamp_transfer_state(
                 UPDATE flamp_transfer_state
                 SET state='unavailable', parser_confidence=0, available_blocks_json='[]',
                     missing_blocks_json='[]', total_blocks=NULL, source_mtime_ns=0,
-                    source_sha256='', updated_ts=?
+                    source_size_bytes=0, source_sha256='', completion_path='',
+                    evidence_kind='relay_snapshot', validated_scan_ts=?, updated_ts=?
                 WHERE id=?
                 """,
-                (now, int(row[0])),
+                (now, now, int(row[0])),
             )
         conn.execute(
             """
             INSERT INTO flamp_transfer_state_scans
-                (source_radio_id, source_js8_instance_id, relay_dir,
+                (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
                  scan_success, file_count, error_text, scanned_ts)
-            VALUES (?, ?, ?, 1, ?, '', ?)
+            VALUES (?, ?, ?, ?, 1, ?, '', ?)
             ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
                 relay_dir=excluded.relay_dir,
+                receive_dir=excluded.receive_dir,
                 scan_success=excluded.scan_success,
                 file_count=excluded.file_count,
                 error_text=excluded.error_text,
                 scanned_ts=excluded.scanned_ts
             """,
-            (radio_id, js8_id, str(relay_root), count, now),
+            (radio_id, js8_id, str(relay_root), str(receive_dir or ""), count, now),
         )
         conn.commit()
         return count
+    except Exception as exc:
+        conn.rollback()
+        try:
+            conn.execute(
+                """
+                INSERT INTO flamp_transfer_state_scans
+                    (source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
+                     scan_success, file_count, error_text, scanned_ts)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+                ON CONFLICT(source_radio_id, source_js8_instance_id) DO UPDATE SET
+                    relay_dir=excluded.relay_dir,
+                    receive_dir=excluded.receive_dir,
+                    scan_success=excluded.scan_success,
+                    file_count=excluded.file_count,
+                    error_text=excluded.error_text,
+                    scanned_ts=excluded.scanned_ts
+                """,
+                (
+                    radio_id,
+                    js8_id,
+                    str(relay_dir or ""),
+                    str(receive_dir or ""),
+                    str(exc)[:500],
+                    now,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -2441,7 +2687,7 @@ def flamp_transfer_index_status(
             return None
         row = conn.execute(
             """
-            SELECT relay_dir, scan_success, file_count, error_text, scanned_ts
+            SELECT relay_dir, receive_dir, scan_success, file_count, error_text, scanned_ts
             FROM flamp_transfer_state_scans
             WHERE source_radio_id=? AND source_js8_instance_id=?
             LIMIT 1
@@ -2457,10 +2703,11 @@ def flamp_transfer_index_status(
         return None
     return {
         "relay_dir": str(row[0] or ""),
-        "scan_success": bool(row[1]),
-        "file_count": int(row[2] or 0),
-        "error_text": str(row[3] or ""),
-        "scanned_ts": float(row[4] or 0.0),
+        "receive_dir": str(row[1] or ""),
+        "scan_success": bool(row[2]),
+        "file_count": int(row[3] or 0),
+        "error_text": str(row[4] or ""),
+        "scanned_ts": float(row[5] or 0.0),
     }
 
 
@@ -2478,7 +2725,7 @@ def list_flamp_transfer_index_statuses(
             return []
         rows = conn.execute(
             """
-            SELECT source_radio_id, source_js8_instance_id, relay_dir,
+            SELECT source_radio_id, source_js8_instance_id, relay_dir, receive_dir,
                    scan_success, file_count, error_text, scanned_ts
             FROM flamp_transfer_state_scans
             ORDER BY scanned_ts DESC, source_radio_id, source_js8_instance_id
@@ -2493,10 +2740,11 @@ def list_flamp_transfer_index_statuses(
             "source_radio_id": str(row[0] or ""),
             "source_js8_instance_id": str(row[1] or ""),
             "relay_dir": str(row[2] or ""),
-            "scan_success": bool(row[3]),
-            "file_count": int(row[4] or 0),
-            "error_text": str(row[5] or ""),
-            "scanned_ts": float(row[6] or 0.0),
+            "receive_dir": str(row[3] or ""),
+            "scan_success": bool(row[4]),
+            "file_count": int(row[5] or 0),
+            "error_text": str(row[6] or ""),
+            "scanned_ts": float(row[7] or 0.0),
         }
         for row in rows
     ]
@@ -2518,9 +2766,11 @@ def lookup_flamp_transfer_state(
             return None
         row = conn.execute(
             """
-            SELECT q_id, source_path, source_mtime_ns, source_sha256, total_blocks,
+            SELECT q_id, source_path, source_mtime_ns, source_size_bytes,
+                   source_sha256, transfer_filename, expected_file_size,
+                   completion_path, evidence_kind, total_blocks,
                    available_blocks_json, missing_blocks_json, state, parser_confidence,
-                   observed_ts, updated_ts
+                   observed_ts, validated_scan_ts, updated_ts
             FROM flamp_transfer_state
             WHERE q_id=? AND source_radio_id=? AND source_js8_instance_id=?
             LIMIT 1
@@ -2532,25 +2782,31 @@ def lookup_flamp_transfer_state(
     if row is None:
         return None
     try:
-        available = [int(item) for item in json.loads(str(row[5] or "[]"))]
+        available = [int(item) for item in json.loads(str(row[10] or "[]"))]
     except Exception:
         available = []
     try:
-        missing = [int(item) for item in json.loads(str(row[6] or "[]"))]
+        missing = [int(item) for item in json.loads(str(row[11] or "[]"))]
     except Exception:
         missing = []
     return {
         "q_id": str(row[0] or "").upper(),
         "source_path": str(row[1] or ""),
         "source_mtime_ns": int(row[2] or 0),
-        "source_sha256": str(row[3] or ""),
-        "total_blocks": int(row[4]) if row[4] is not None else None,
+        "source_size_bytes": int(row[3] or 0),
+        "source_sha256": str(row[4] or ""),
+        "transfer_filename": str(row[5] or ""),
+        "expected_file_size": int(row[6]) if row[6] is not None else None,
+        "completion_path": str(row[7] or ""),
+        "evidence_kind": str(row[8] or "relay_snapshot"),
+        "total_blocks": int(row[9]) if row[9] is not None else None,
         "available_blocks": available,
         "missing_blocks": missing,
-        "state": str(row[7] or "unavailable"),
-        "parser_confidence": float(row[8] or 0.0),
-        "observed_ts": float(row[9] or 0.0),
-        "updated_ts": float(row[10] or 0.0),
+        "state": str(row[12] or "unavailable"),
+        "parser_confidence": float(row[13] or 0.0),
+        "observed_ts": float(row[14] or 0.0),
+        "validated_scan_ts": float(row[15] or 0.0),
+        "updated_ts": float(row[16] or 0.0),
     }
 
 

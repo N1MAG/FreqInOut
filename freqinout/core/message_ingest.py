@@ -1168,6 +1168,25 @@ class MessageIngestor:
             return ""
         return str(raw or "").strip()
 
+    def _flamp_receive_dir_for_source(self) -> str:
+        """Return this radio profile's configured FLAMP completed-RX root."""
+
+        try:
+            paths = self.settings.get("message_paths", {}) or {}
+        except Exception:
+            paths = {}
+        if not isinstance(paths, Mapping):
+            return ""
+        raw = str(paths.get("flamp", "") or "").strip()
+        if not raw:
+            return ""
+        path = Path(raw).expanduser()
+        if path.is_file():
+            path = path.parent
+        if path.name.lower() == "flamp" and (path / "rx").is_dir():
+            path = path / "rx"
+        return str(path)
+
     def refresh_dynamic_flamp_state(
         self, *, source_radio_id: object, js8_instance_id: object
     ) -> int:
@@ -1181,6 +1200,7 @@ class MessageIngestor:
             db_path=db_path,
             source_radio_id=source_radio_id,
             source_js8_instance_id=js8_instance_id,
+            receive_dir=self._flamp_receive_dir_for_source(),
         )
 
     def _dynamic_flamp_hold(
@@ -1375,6 +1395,20 @@ class MessageIngestor:
             source_radio_id=source_radio_id,
             source_js8_instance_id=js8_instance_id,
         ) if db_path else None
+        if state is not None and float(state.get("validated_scan_ts") or 0.0) < float(
+            index_status.get("scanned_ts") or 0.0
+        ):
+            self._dynamic_flamp_hold(
+                q_id=q_id,
+                reason="FLAMP transfer was not validated by the latest successful source scan.",
+                event_id=event_id,
+                source_radio_id=source_radio_id,
+                js8_instance_id=js8_instance_id,
+                from_call=from_call,
+                target=target,
+                db_path=db_path,
+            )
+            return
         if state is None:
             payload = f"Q {q_id} NO"
         else:

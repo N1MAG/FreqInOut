@@ -1827,3 +1827,46 @@ gate passes 97 tests with one environment skip. The authoritative fresh-process
 repository gate passes all 176 test-bearing files plus 2 environment-skip-only
 files with no failures across 2,591 collected tests. Python compilation and
 `git diff --check` pass.
+
+## 2026-09-08 — Slice 3 follow-up: FLAMP offline receive-state catch-up
+
+Read-only review of the supplied production databases resolved the stale
+`Q 906F 26,27` answer. The source-scoped projection still represented an older
+partial file in `FLAMP/relay`, while Messages had already indexed a newer,
+exact-name completed artifact under FLAMP's dated `rx` output. Review of FLAMP
+2.2.14 source and its operator documentation confirmed the two artifacts have
+different lifecycle semantics: relay files are saved snapshots, while the RX
+artifact is written after FLAMP reports checksum-validated completion. Its
+public XML-RPC interface does not expose the live receive queue or a save-relay
+operation, so FIO cannot safely infer unsaved partial fills or compete for
+FLDigi's receive stream.
+
+The dynamic FLAMP projection now performs bounded offline catch-up. It scans
+only the configured RX root and one date-directory level, accepts a regular
+exact-basename completion whose filesystem time is at least the relay snapshot
+time, and upgrades that transfer to complete. Relay parse results persist the
+AMP filename, expected size, file size/mtime/hash, evidence kind/path, parser
+version, and successful validation generation. Existing rows migrate
+additively and reparse once; subsequent unchanged passes stat the bounded
+manifest but do not reread relay payloads. Removing completion evidence reverts
+to the validated relay facts, while a temporarily inaccessible relay or RX root
+records a failed scan, retains the last good row, and forces Expect to hold.
+
+The first background Expect worker run completes one projection before
+consuming its dedicated checkpoint, preventing a startup query from using the
+previous process's row. A separate 30-second worker refresh owns later
+reconciliation, and enabling the service requests that projection immediately.
+The three-second directed tail stays database-only after the startup gate, and
+general message ingestion no longer duplicates the scan.
+Profile-specific FLAMP receive roots and the shared fallback relay root are
+resolved explicitly.
+
+No subagent was used for this follow-up; the high-reasoning primary model owned
+the protocol/source review, state and concurrency design, additive migration,
+implementation, regression review, and integration gate. Verification passes
+142 focused FLAMP/Expect/background/BBS/UI tests with one environment skip. The
+authoritative fresh-process repository gate passes all 176 test-bearing files
+plus two environment-skip-only files with no failures across 2,607 collected
+tests. Python compilation, a real FLAMP `b2s` parser check, and
+`git diff --check` pass. No production database or FLAMP source artifact was
+modified.

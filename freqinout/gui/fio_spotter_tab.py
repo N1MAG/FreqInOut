@@ -1183,12 +1183,20 @@ class FioSpotterTab(QWidget):
         )
 
     def _save_dynamic_flamp_state(self) -> None:
+        enabled = self.dynamic_flamp_enabled.isChecked()
         try:
-            self.settings.set("js8_expect_dynamic_flamp_enabled", self.dynamic_flamp_enabled.isChecked())
+            self.settings.set("js8_expect_dynamic_flamp_enabled", enabled)
             if hasattr(self.settings, "save"):
                 self.settings.save()
         except Exception:
             pass
+        if enabled:
+            try:
+                controller = getattr(self.window(), "background_ingest", None)
+                if controller is not None and hasattr(controller, "request_refresh"):
+                    controller.request_refresh("dynamic_flamp")
+            except Exception:
+                pass
         self._refresh_runtime_state()
 
     def refresh_expect(self) -> None:

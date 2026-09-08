@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea, QWidget
 
 from freqinout.core import fio_spotter_store
 from freqinout.core.traffic_actionability import build_operator_traffic_context
@@ -286,6 +286,32 @@ def test_expect_editor_recovers_when_selected_policy_disappears(monkeypatch):
     finally:
         tab.close()
         tab.deleteLater()
+
+
+def test_enabling_dynamic_flamp_queues_an_immediate_background_projection(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(spotter_ui, "list_expect_allow_policies", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_operator_access_catalog", lambda *, limit: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_runtime_audit", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_dispatch_audit", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_flamp_transfer_index_statuses", lambda **_kwargs: [])
+    requested: list[tuple[str, ...]] = []
+    host = QWidget()
+    host.background_ingest = SimpleNamespace(  # type: ignore[attr-defined]
+        request_refresh=lambda *kinds: requested.append(tuple(kinds))
+    )
+    tab = FioSpotterTab(parent=host, settings=_Settings())
+    try:
+        tab.tabs.setCurrentIndex(2)
+        app.processEvents()
+        tab.dynamic_flamp_enabled.setChecked(True)
+        app.processEvents()
+
+        assert requested == [("dynamic_flamp",)]
+    finally:
+        host.close()
+        host.deleteLater()
 
 
 def test_expect_editor_typing_and_policy_selection_do_not_requery_after_lazy_load(monkeypatch):
