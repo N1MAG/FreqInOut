@@ -532,7 +532,11 @@ silos. Tabs proceed left to right:
 1. **Activity** — bounded recent/matched traffic with age, source, group,
    callsign, form, topic, status, and radio chips; a selected record exposes the
    decoded content, evidence, and actions to open Inbox, Map, operator history,
-   or compose a reply.
+   or compose a reply. A first-class Message Intelligence strip reuses the same
+   operator/group-duty classifier as Ops Center and Messages. Reply, Relay,
+   Review, and Social counts, What/Why guidance, the table Action column, and
+   the active action filter must therefore agree. Source and action chips filter
+   the already-loaded bounded page in memory; they do not issue another query.
 2. **Watches** — station-owned callsign, group, topic/keyword, status, and
    location rules with enablement, priority, source/radio scope, optional
    expiry, last match, count, and health. Add, edit, disable, delete, and test
@@ -591,6 +595,11 @@ The editor completes the current comma-delimited token using current and former
 callsigns or roster groups. At narrow widths, the rule list/editor and audit
 panes stack vertically inside the page scroll area; no page-level horizontal
 scrolling or clipped controls are acceptable in Normal or Large Text modes.
+The reusable allow policy is explicitly optional and its empty choice explains
+that rule-level access fields remain active. Saving a reusable policy keeps it
+selected for the rule being edited and confirms that **Save rule** attaches it.
+Comma-token completion uses an editor-owned string model and an explicitly
+installed completer; an empty completion set never opens a popup.
 
 The same rule service supplies ingestion alerts, Inbox focus, Ops Center
 attention, and Map pins so different screens cannot disagree. Messages remains
@@ -631,6 +640,13 @@ the relay directory. `NO` is allowed only after a recent successful scan proves
 the source has no matching transfer. A missing, failed, or stale scan holds the
 request with a visible reason. Missing source files transition the record to
 unavailable without an error loop.
+
+The request hot path selects only the normalized `Q` rule through the
+Expect-key index and only allow-policy IDs referenced by those candidate rules.
+It must not deserialize unrelated rules/policies, reread the same catalogs for
+group-reply authorization, or run schema/index setup during evaluation, claim,
+completion, or dispatch audit. Startup database initialization is the only
+migration owner.
 
 Dynamic Q service safety is cumulative:
 
@@ -697,6 +713,12 @@ socket-send behavior remain out of scope.
 - Dynamic Q lookup is indexed and bounded, request evaluation and transport run
   off the GUI thread, and the Station Control Bar remains responsive during
   import, history refresh, or Expect dispatch.
+- With 500 unrelated enabled Expect rules retained, 1,000 audit-disabled
+  `Q 970F` policy evaluations complete in no more than 5 seconds on the
+  reference development system. The regression also proves one key-filtered
+  rule read and one referenced-policy read per evaluation, with no second
+  catalog pass. FIO Spotter owns no idle refresh timer; explicit Refresh and
+  ingest-owned background projection are the only refresh mechanisms.
 - A restart/replay or concurrent duplicate dynamic request produces one durable
   claim and at most one transmitted reply.
 - The exact `E? Q 970F` fixture covers absent, complete, authoritative partial,
@@ -1389,6 +1411,38 @@ is still persisted through unrelated Settings saves; FIO Spotter Forms is the
 sole administration surface. Ordinary Settings save now refreshes only the
 runtime projections affected by the save instead of forcing the entire
 multi-radio table projection. No schema or migration changed.
+
+Production Expect/performance follow-up (2026-09-07): the latest supplied log
+contains one MeshCore link/service-discovery failure followed by normal
+scheduler and shell callbacks, then ends abruptly without a traceback, Qt
+fatal, shutdown, Spotter action, or exit marker. It does not establish Mesh or
+the Expect editor as the process-exit cause. FIO Spotter now logs rule/policy
+administration actions and failures so a future short log can be correlated.
+The comma-token completer has an explicit editor/model ownership path, the
+optional allow-policy workflow remains visible at all supported sizes, and an
+administration read failure is no longer presented as a misleading empty
+policy list. Spotter list reads remain query-only; startup remains the only
+migration owner.
+
+Activity now reuses the shared operator/group-duty Message Intelligence
+classifier and projection evidence. Its Reply/Relay/Review/Social strip,
+What/Why guidance, row Action, and action filter agree; all source/action
+filtering occurs against the cached 200-row page. Dynamic Q evaluation selects
+only the indexed `Q` candidates and their referenced policies, carries the
+group authorization result forward, and removes the second catalog pass.
+Evaluation/audit/claim/completion/dispatch and source-state lookup no longer
+repeat schema or journal-mode setup. The on-air path no longer stats a relay
+file; a successful background index records deleted files as database-known
+unavailable sources while malformed-present sources remain held.
+
+On the reference Mac, 1,000 Q evaluations with 500 unrelated rules averaged
+0.528 ms each. Two hundred evaluation + audit + durable claim + completion
+cycles averaged 2.184 ms each. The relevant integrated gate passes 642 tests;
+the authoritative fresh-process repository gate passes 2,546 tests with 37
+environment skips across all 177 test files. Dark/Large Text 900x560 and
+Light/Normal 1400x900 visual gates are stable with no page-level horizontal
+overflow. The Linux T1000-E hardware retry gate remains open; no Mesh device
+configuration or pairing state changed in this follow-up.
 
 ### Slice 4 — Radio launch bundles
 

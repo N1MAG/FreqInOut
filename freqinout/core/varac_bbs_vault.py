@@ -19,8 +19,12 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
-from freqinout.core.db_initializer import _ensure_flamp_dynamic_tables
-from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
+from freqinout.core.sqlite_utils import (
+    connect_sqlite,
+    connect_sqlite_readonly,
+    connect_sqlite_runtime_write,
+    table_exists,
+)
 from freqinout.core.varac_bbs_library_store import (
     bbs_location_catalog_source_dir,
     bbs_library_db_path_from_settings,  # compatibility export; runtime paths are explicit below
@@ -2262,9 +2266,8 @@ def index_flamp_transfer_state(
     js8_id = str(source_js8_instance_id or "").strip()
     now = float(observed_ts if observed_ts is not None else time.time())
     store = FlampRelayStore(relay_dir)
-    conn = connect_sqlite(path)
+    conn = connect_sqlite_runtime_write(path)
     try:
-        _ensure_flamp_dynamic_tables(conn)
         relay_root = store.relay_dir
         if relay_root is None or not relay_root.exists() or not relay_root.is_dir():
             conn.execute(
@@ -2391,7 +2394,8 @@ def index_flamp_transfer_state(
                 """
                 UPDATE flamp_transfer_state
                 SET state='unavailable', parser_confidence=0, available_blocks_json='[]',
-                    missing_blocks_json='[]', total_blocks=NULL, updated_ts=?
+                    missing_blocks_json='[]', total_blocks=NULL, source_mtime_ns=0,
+                    source_sha256='', updated_ts=?
                 WHERE id=?
                 """,
                 (now, int(row[0])),
@@ -2505,9 +2509,10 @@ def lookup_flamp_transfer_state(
     canonical = str(q_id or "").strip().upper()
     if not FlampRelayStore.VALID_Q_RE.fullmatch(canonical):
         return None
-    conn = connect_sqlite(Path(db_path))
+    conn = connect_sqlite_readonly(Path(db_path))
     try:
-        _ensure_flamp_dynamic_tables(conn)
+        if not table_exists(conn, "flamp_transfer_state"):
+            return None
         row = conn.execute(
             """
             SELECT q_id, source_path, source_mtime_ns, source_sha256, total_blocks,

@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
@@ -14,7 +14,12 @@ from freqinout.core.operator_identity import (
     canonical_callsign,
     resolve_operator_identity,
 )
-from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
+from freqinout.core.sqlite_utils import (
+    connect_sqlite,
+    connect_sqlite_readonly,
+    connect_sqlite_runtime_write,
+    table_exists,
+)
 
 
 def default_expect_db_path() -> Path:
@@ -63,6 +68,7 @@ class ExpectEvaluationResult:
     q_id: str = ""
     max_replies: int = 1
     cooldown_seconds: int = 0
+    group_reply_allowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,9 +108,8 @@ def claim_expect_request(
     cooldown = max(0, int(cooldown_seconds or 0))
     if not key or not canonical_q or not caller:
         return ExpectRequestClaimResult(False, "invalid", "Request claim identity is incomplete.", key)
-    conn = connect_sqlite(path, timeout=5.0, busy_timeout_ms=5000)
+    conn = connect_sqlite_runtime_write(path, timeout=5.0, busy_timeout_ms=5000)
     try:
-        _ensure_js8_expect_tables(conn)
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT status, attempts, next_retry_ts FROM js8_expect_request_claims WHERE event_key=?",
@@ -177,9 +182,8 @@ def complete_expect_request_claim(
     normalized = str(status or "failed").strip().lower()
     if normalized not in {"sent", "failed", "held", "duplicate"}:
         normalized = "failed"
-    conn = connect_sqlite(path, timeout=5.0, busy_timeout_ms=5000)
+    conn = connect_sqlite_runtime_write(path, timeout=5.0, busy_timeout_ms=5000)
     try:
-        _ensure_js8_expect_tables(conn)
         conn.execute(
             """
             UPDATE js8_expect_request_claims
@@ -552,6 +556,7 @@ def list_expect_allow_policies(
     *,
     db_path: Optional[Path] = None,
     enabled_only: bool = False,
+    policy_ids: Optional[Iterable[int]] = None,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     if not path.exists():
@@ -560,7 +565,25 @@ def list_expect_allow_policies(
     try:
         if not table_exists(conn, "js8_expect_allow_policies"):
             return []
-        where = "WHERE COALESCE(enabled, 1) != 0" if enabled_only else ""
+        clauses: list[str] = []
+        params: list[object] = []
+        if enabled_only:
+            clauses.append("COALESCE(enabled, 1) != 0")
+        ids: list[int] = []
+        for value in policy_ids or ():
+            try:
+                policy_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if policy_id > 0:
+                ids.append(policy_id)
+        ids = sorted(set(ids))
+        if policy_ids is not None:
+            if not ids:
+                return []
+            clauses.append(f"id IN ({','.join('?' for _ in ids)})")
+            params.extend(ids)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
             f"""
             SELECT id, name, allowed_callsigns_json, allowed_groups_json,
@@ -569,7 +592,8 @@ def list_expect_allow_policies(
             FROM js8_expect_allow_policies
             {where}
             ORDER BY name ASC, id ASC
-            """
+            """,
+            tuple(params),
         ).fetchall()
     finally:
         conn.close()
@@ -618,6 +642,7 @@ def list_expect_entries(
     *,
     db_path: Optional[Path] = None,
     enabled_only: bool = False,
+    expect_key: str = "",
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     if not path.exists():
@@ -626,7 +651,15 @@ def list_expect_entries(
     try:
         if not table_exists(conn, "js8_expect_entries"):
             return []
-        where = "WHERE COALESCE(e.enabled, 0) != 0" if enabled_only else ""
+        clauses: list[str] = []
+        params: list[object] = []
+        if enabled_only:
+            clauses.append("COALESCE(e.enabled, 0) != 0")
+        canonical_key = str(expect_key or "").strip().upper()
+        if canonical_key:
+            clauses.append("e.expect_key=?")
+            params.append(canonical_key)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
             f"""
             SELECT e.id, e.source_radio_id, e.source_scope, e.js8_instance_id, e.allow_policy_id,
@@ -641,7 +674,8 @@ def list_expect_entries(
             LEFT JOIN js8_expect_allow_policies p ON p.id=e.allow_policy_id
             {where}
             ORDER BY COALESCE(e.enabled, 0) DESC, e.expect_key ASC, e.id ASC
-            """
+            """,
+            tuple(params),
         ).fetchall()
     finally:
         conn.close()
@@ -1024,8 +1058,22 @@ def evaluate_expect_request(
     elif not call:
         result = ExpectEvaluationResult(decision="invalid", reason="Missing requesting callsign.", expect_key=key)
     else:
-        entries = [row for row in list_expect_entries(db_path=path, enabled_only=False) if str(row.get("expect_key", "") or "").upper() == key]
-        policies = {int(row.get("id", 0) or 0): row for row in list_expect_allow_policies(db_path=path, enabled_only=False)}
+        # Use the indexed on-air token instead of deserializing the retained
+        # rule and policy catalogs for every request.
+        entries = list_expect_entries(db_path=path, enabled_only=False, expect_key=key)
+        policy_ids = {
+            int(row.get("allow_policy_id", 0) or 0)
+            for row in entries
+            if int(row.get("allow_policy_id", 0) or 0) > 0
+        }
+        policies = {
+            int(row.get("id", 0) or 0): row
+            for row in list_expect_allow_policies(
+                db_path=path,
+                enabled_only=False,
+                policy_ids=policy_ids,
+            )
+        }
         caller_profile: dict[str, Any] | None = None
 
         def operator_profile() -> dict[str, Any]:
@@ -1145,6 +1193,7 @@ def evaluate_expect_request(
                 unattended_auto_reply_enabled=bool(entry.get("unattended_auto_reply_enabled", False)),
                 max_replies=max(1, int(entry.get("max_replies", 1) or 1)),
                 cooldown_seconds=max(0, int(entry.get("cooldown_seconds", 0) or 0)),
+                group_reply_allowed=group_allowed,
             )
             break
         if result.decision == "no-match" and source_mismatch_seen:
@@ -1152,9 +1201,8 @@ def evaluate_expect_request(
         elif result.decision == "no-match" and disabled_seen:
             result = ExpectEvaluationResult(decision="disabled", reason=f"Expect entry for {key} exists but is disabled.", expect_key=key)
     if write_audit:
-        conn = connect_sqlite(path)
+        conn = connect_sqlite_runtime_write(path)
         try:
-            _ensure_js8_expect_tables(conn)
             _record_expect_runtime_audit(
                 conn,
                 event_id=event_id,
@@ -1209,16 +1257,6 @@ def evaluate_dynamic_flamp_request(
     # A group reply is opt-in even if a Q policy uses allow_any for direct
     # callers.  Explicit group membership may come from the entry or policy.
     group = _norm_group(target_group)
-    if result.decision == "reply-ready" and group:
-        rows = list_expect_entries(db_path=Path(db_path) if db_path is not None else None, enabled_only=False)
-        entry = next((row for row in rows if int(row.get("id", 0) or 0) == int(result.expect_entry_id or 0)), None)
-        allowed_groups = list(entry.get("allowed_groups", []) if entry else [])
-        policy_id = int(entry.get("allow_policy_id", 0) or 0) if entry else 0
-        if policy_id:
-            policies = list_expect_allow_policies(db_path=Path(db_path) if db_path is not None else None, enabled_only=False)
-            policy = next((row for row in policies if int(row.get("id", 0) or 0) == policy_id), None)
-            if policy:
-                allowed_groups.extend(policy.get("allowed_groups", []) or [])
-        if not any(_matches_group(value, group) for value in allowed_groups):
-            result = replace(result, decision="blocked", reason="Dynamic Q group replies require explicit group policy.")
+    if result.decision == "reply-ready" and group and not result.group_reply_allowed:
+        result = replace(result, decision="blocked", reason="Dynamic Q group replies require explicit group policy.")
     return result

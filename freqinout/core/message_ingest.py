@@ -1283,8 +1283,7 @@ class MessageIngestor:
             payload = f"Q {q_id} NO"
         else:
             state_name = str(state.get("state") or "unavailable").lower()
-            source_file = Path(str(state.get("source_path") or ""))
-            if state_name == "unavailable" and source_file.exists():
+            if state_name == "unavailable" and int(state.get("source_mtime_ns") or 0) > 0:
                 self._dynamic_flamp_hold(
                     q_id=q_id,
                     reason="FLAMP transfer exists but its total/block set is not authoritative.",

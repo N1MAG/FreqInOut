@@ -123,6 +123,29 @@ def test_activity_query_is_source_filtered_newest_first_and_bounded(tmp_path: Pa
     assert all(row["source_family"] == "spotter" for row in rows)
 
 
+def test_activity_query_reuses_projected_assessment_and_provenance(tmp_path: Path) -> None:
+    db = tmp_path / "nets.db"
+    upsert_projected_message(
+        db,
+        source=MessageSourceRecord(source_id="spotter", source_family="spotter"),
+        message=MessageProjectionRecord(
+            message_id="spotter:assessment", canonical_key="spotter:assessment",
+            content_hash="assessment", primary_source_id="spotter", source_family="spotter",
+            summary="Wildfire report", body_preview="Smoke reported near the highway.",
+            topics=("Fire", "Travel/Roads"), actionable=True, operator_attention=True,
+            severity="warning", recommended_action="review_now", confidence=0.9,
+            intelligence={"provenance": {"trust": "trusted", "freshness": "recent"}},
+            event_ts=1.0, received_ts=1.0,
+        ),
+    )
+
+    row = list_spotter_activity(db_path=db)[0]
+
+    assert row["topics"] == ["Fire", "Travel/Roads"]
+    assert row["recommended_action"] == "review_now"
+    assert row["intelligence"]["provenance"] == {"trust": "trusted", "freshness": "recent"}
+
+
 def test_activity_read_remains_nonblocking_while_ingest_writer_is_active(tmp_path: Path) -> None:
     db = tmp_path / "nets.db"
     source = MessageSourceRecord(source_id="spotter", source_family="spotter")

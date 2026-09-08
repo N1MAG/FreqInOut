@@ -263,6 +263,36 @@ def test_projected_message_query_accepts_multiple_source_families(tmp_path) -> N
     assert [row["message_id"] for row in rows] == [commstat_msg.message_id, sitrep_msg.message_id]
 
 
+def test_spotter_activity_preserves_shared_message_intelligence_fields(tmp_path) -> None:
+    db_path = tmp_path / "fio.db"
+    source = MessageSourceRecord(source_id="radio1-spotter", source_family="spotter", source_label="Radio 1 Spotter")
+    message = MessageProjectionRecord(
+        **{
+            **_message("msg-activity", event_ts=500.0).__dict__,
+            "primary_source_id": "radio1-spotter",
+            "source_family": "spotter",
+            "source_label": "Radio 1 Spotter",
+            "status": "YELLOW",
+            "severity": "warning",
+            "actionable": True,
+            "operator_attention": True,
+            "recommended_action": "Open Inbox",
+            "summary": "Shared intelligence summary",
+            "body_preview": "Why / action from shared intelligence",
+        }
+    )
+
+    upsert_projected_message(db_path, source=source, message=message)
+
+    rows = list_spotter_activity(db_path=db_path, source_families=("spotter",), limit=10)
+
+    assert len(rows) == 1
+    assert rows[0]["severity"] == "warning"
+    assert rows[0]["actionable"] == 1
+    assert rows[0]["operator_attention"] == 1
+    assert rows[0]["recommended_action"] == "Open Inbox"
+
+
 def test_projected_attention_and_geo_queries_are_bounded(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     source = _source()

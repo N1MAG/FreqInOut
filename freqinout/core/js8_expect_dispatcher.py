@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.js8_expect_store import (
     ExpectEvaluationResult,
     ExpectRequestClaimResult,
@@ -16,7 +15,7 @@ from freqinout.core.js8_expect_store import (
 from freqinout.core.js8_msg_auth import sign_js8_text
 from freqinout.core.js8_msg_auth_store import MSG_AUTH_SCOPE_SIGNING, load_msg_auth_keys
 from freqinout.core.js8_send_service import JS8SendResult, send_js8_message_guarded
-from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
+from freqinout.core.sqlite_utils import connect_sqlite_readonly, connect_sqlite_runtime_write, table_exists
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 
 
@@ -44,9 +43,8 @@ def _record_dispatch_audit(
 ) -> None:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = connect_sqlite(path)
+    conn = connect_sqlite_runtime_write(path)
     try:
-        _ensure_js8_expect_tables(conn)
         conn.execute(
             """
             INSERT INTO js8_expect_dispatch_audit

@@ -7,9 +7,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QScrollArea
 
 from freqinout.core import fio_spotter_store
+from freqinout.core.traffic_actionability import build_operator_traffic_context
 from freqinout.gui import fio_spotter_tab as spotter_ui
 from freqinout.gui.fio_spotter_tab import FioSpotterTab
 
@@ -33,6 +35,19 @@ def _app():
     if app is not None and not isinstance(app, QApplication):
         pytest.skip("A non-GUI QCoreApplication is already active.")
     return app or QApplication([])
+
+
+def _set_app_text_scale(app: QApplication, scale: float) -> QFont:
+    old_font = QFont(app.font())
+    new_font = QFont(old_font)
+    point_size = float(old_font.pointSizeF())
+    if point_size > 0:
+        new_font.setPointSizeF(point_size * float(scale))
+    else:
+        pixel_size = int(old_font.pixelSize() or 0)
+        new_font.setPixelSize(max(12, int(round((pixel_size or 12) * float(scale)))))
+    app.setFont(new_font)
+    return old_font
 
 
 def test_spotter_tab_has_lazy_browser_tabs_in_service_order():
@@ -74,6 +89,71 @@ def test_screen_reactivation_does_not_repeat_activity_query(monkeypatch):
         tab.deleteLater()
 
 
+def test_activity_filter_chips_use_the_current_bounded_page_without_a_query(monkeypatch):
+    app = _app()
+    calls: list[int] = []
+
+    def activity(**_kwargs):
+        calls.append(1)
+        return [
+            {"message_id": "spotter:1", "source_family": "spotter", "summary": "Form"},
+            {"message_id": "js8:1", "source_family": "js8", "summary": "JS8"},
+        ]
+
+    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        assert calls == [1]
+        next(button for button in tab.activity_chips if button.text() == "JS8").click()
+        app.processEvents()
+        assert calls == [1]
+        assert [row["message_id"] for row in tab._activity_rows] == ["js8:1"]
+    finally:
+        tab.deleteLater()
+
+
+def test_activity_intelligence_filters_the_cached_page_without_a_query(monkeypatch):
+    app = _app()
+    calls: list[int] = []
+
+    def activity(**_kwargs):
+        calls.append(1)
+        return [
+            {
+                "message_id": "spotter:event", "source_family": "spotter",
+                "from_call": "K1ABC", "to_call": "@MR08", "group_name": "MR08",
+                "summary": "Wildfire affecting Route 9", "topics": ["Fire", "Travel/Roads"],
+                "severity": "warning", "actionable": True, "received_ts": 20.0,
+            },
+            {
+                "message_id": "js8:other", "source_family": "js8",
+                "from_call": "K2ABC", "to_call": "@OTHER", "group_name": "OTHER",
+                "summary": "Routine traffic", "topics": [], "received_ts": 10.0,
+            },
+        ]
+
+    context = build_operator_traffic_context(
+        callsign="N1MAG",
+        configured_operating_groups=("MR08",),
+        operator_rows=({"callsign": "N1MAG", "group1": "MR08", "group_role": "HUB"},),
+    )
+    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
+    monkeypatch.setattr(spotter_ui, "load_operator_traffic_context", lambda *_args, **_kwargs: context)
+
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        assert calls == [1]
+        assert tab.activity_intelligence.buttons["relay"].text() == "Relay 1"
+        tab.activity_intelligence.buttons["relay"].click()
+        app.processEvents()
+        assert calls == [1]
+        assert [row["message_id"] for row in tab._activity_rows] == ["spotter:event"]
+        assert tab.activity_table.item(0, 5).text() == "Relay"
+        assert "Distribute Fire report" in tab.activity_intelligence.insight_label.text()
+    finally:
+        tab.deleteLater()
+
+
 def test_compact_expect_page_scrolls_without_expanding_shell_height():
     app = _app()
     tab = FioSpotterTab(settings=_Settings())
@@ -88,6 +168,167 @@ def test_compact_expect_page_scrolls_without_expanding_shell_height():
         assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert scroll.horizontalScrollBar().maximum() == 0
         assert scroll.verticalScrollBar().maximum() > 0
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+@pytest.mark.parametrize("scale", [1.0, 1.25])
+def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
+    app = _app()
+    old_font = _set_app_text_scale(app, scale)
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.resize(900, 560)
+        tab.tabs.setCurrentIndex(2)
+        tab.show()
+        app.processEvents()
+
+        assert tab.height() == 560
+        assert tab.expect_editor_split.orientation() == Qt.Vertical
+        scroll = tab.tabs.currentWidget().findChild(QScrollArea)
+        assert scroll is not None
+        assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert scroll.verticalScrollBar().maximum() > 0
+
+        controls = (
+            tab.expect_key,
+            tab.expect_reply,
+            tab.expect_policy,
+            tab.expect_calls,
+            tab.expect_groups,
+            tab.expect_blocked,
+            tab.expect_trusted_groups,
+            tab.expect_source_scope,
+            tab.expect_source_radio,
+            tab.expect_js8_instance,
+            tab.expect_schedule,
+            tab.expect_max,
+            tab.expect_cooldown,
+            tab.policy_manage,
+            tab.policy_name,
+            tab.policy_calls,
+            tab.policy_groups,
+            tab.policy_trusted_groups,
+            tab.policy_blocked,
+            tab.policy_scope,
+            tab.policy_radios,
+        )
+        assert all(widget.height() >= widget.sizeHint().height() for widget in controls)
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.setFont(old_font)
+        app.processEvents()
+
+
+def test_expect_editor_recovers_when_selected_policy_disappears(monkeypatch):
+    app = _app()
+    empty_rows = []
+    policy_rows = [{"id": 7, "name": "Regional trusted", "enabled": True}]
+
+    calls = {"count": 0}
+
+    def _list_policies(**_kwargs):
+        calls["count"] += 1
+        return policy_rows if calls["count"] == 1 else empty_rows
+
+    monkeypatch.setattr(spotter_ui, "list_expect_allow_policies", _list_policies)
+    monkeypatch.setattr(spotter_ui, "list_expect_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_operator_access_catalog", lambda *, limit: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_runtime_audit", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_expect_dispatch_audit", lambda **_kwargs: [])
+    monkeypatch.setattr(spotter_ui, "list_flamp_transfer_index_statuses", lambda **_kwargs: [])
+
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.tabs.setCurrentIndex(2)
+        app.processEvents()
+        tab.policy_manage.setCurrentIndex(tab.policy_manage.findData(7))
+        app.processEvents()
+        assert tab.policy_name.text() == "Regional trusted"
+
+        tab.refresh_expect()
+        app.processEvents()
+
+        assert tab.policy_manage.currentData() == 0
+        assert tab.policy_manage.currentText() == "New policy"
+        assert tab.policy_name.text() == ""
+        assert tab.policy_trusted_groups.text() == ""
+        assert tab.expect_policy.currentData() == 0
+        assert tab.expect_policy.findData(0) == 0
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_expect_editor_typing_and_policy_selection_do_not_requery_after_lazy_load(monkeypatch):
+    app = _app()
+    counts = {
+        "catalog": 0,
+        "policies": 0,
+        "entries": 0,
+        "runtime": 0,
+        "dispatch": 0,
+        "flamp": 0,
+    }
+
+    def _catalog(*, limit: int):
+        counts["catalog"] += 1
+        return [
+            {
+                "callsign": "K1OLD",
+                "current_callsign": "K1NEW",
+                "historical": True,
+                "trusted": True,
+                "groups": ["MAGNET", "MR08"],
+            }
+        ]
+
+    def _policies(**_kwargs):
+        counts["policies"] += 1
+        return [{"id": 7, "name": "Regional trusted", "enabled": True}]
+
+    def _entries(**_kwargs):
+        counts["entries"] += 1
+        return []
+
+    def _runtime(**_kwargs):
+        counts["runtime"] += 1
+        return []
+
+    def _dispatch(**_kwargs):
+        counts["dispatch"] += 1
+        return []
+
+    def _flamp(**_kwargs):
+        counts["flamp"] += 1
+        return []
+
+    monkeypatch.setattr(spotter_ui, "list_expect_operator_access_catalog", _catalog)
+    monkeypatch.setattr(spotter_ui, "list_expect_allow_policies", _policies)
+    monkeypatch.setattr(spotter_ui, "list_expect_entries", _entries)
+    monkeypatch.setattr(spotter_ui, "list_expect_runtime_audit", _runtime)
+    monkeypatch.setattr(spotter_ui, "list_expect_dispatch_audit", _dispatch)
+    monkeypatch.setattr(spotter_ui, "list_flamp_transfer_index_statuses", _flamp)
+
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.tabs.setCurrentIndex(2)
+        app.processEvents()
+        initial = dict(counts)
+
+        tab.expect_key.setText("Q")
+        tab.expect_reply.setText("READY")
+        tab.expect_groups.setText("@MAGNET")
+        tab.expect_trusted_groups.setText("MR08")
+        tab.policy_manage.setCurrentIndex(tab.policy_manage.findData(7))
+        tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(7))
+        tab.expect_source_scope.setCurrentText("all")
+        app.processEvents()
+
+        assert counts == initial
     finally:
         tab.close()
         tab.deleteLater()
@@ -274,5 +515,30 @@ def test_activity_actions_pass_selected_shared_projection(monkeypatch):
             ("map", "spotter:1"),
             ("operator", "spotter:1"),
         ]
+    finally:
+        tab.deleteLater()
+
+
+def test_activity_leads_with_shared_assessment_then_source_evidence(monkeypatch):
+    app = _app()
+    row = {
+        "message_id": "spotter:assessment", "source_family": "spotter", "from_call": "K1ABC",
+        "to_call": "@MR08", "summary": "Wildfire reported", "body_text": "Smoke near Route 9.",
+        "topics": ["Fire", "Travel/Roads"], "severity": "warning",
+        "operator_attention": True, "recommended_action": "review_now",
+        "intelligence": {"provenance": {"trust": "trusted", "freshness": "recent"}},
+    }
+    monkeypatch.setattr(spotter_ui, "list_spotter_activity", lambda **_kwargs: [row])
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.activity_table.selectRow(0)
+        app.processEvents()
+        assert tab.activity_table.item(0, 5).text() == "Review now"
+        assert tab.activity_table.item(0, 6).text() == "Fire, Travel/Roads"
+        detail = tab.activity_detail.toPlainText()
+        assert "Assessment" in detail
+        assert "Recommended action: Review now" in detail
+        assert "Trust: trusted" in detail
+        assert "Source evidence" in detail
     finally:
         tab.deleteLater()

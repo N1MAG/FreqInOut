@@ -1,11 +1,23 @@
 from pathlib import Path
+import sqlite3
 
+import pytest
+
+from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.js8_expect_dispatcher import dispatch_expect_auto_reply, list_expect_dispatch_audit
 from freqinout.core.js8_expect_store import ExpectEvaluationResult
 from freqinout.core.js8_msg_auth import MsgAuthKey, verify_js8_text
 from freqinout.core.js8_msg_auth_store import MSG_AUTH_SCOPE_SIGNING, save_msg_auth_key
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 from tests.test_js8_send_service import _safe_server, _response
+
+
+@pytest.fixture(autouse=True)
+def _startup_expect_schema(tmp_path: Path) -> None:
+    """Model the application startup migration before runtime dispatch."""
+    db_path = tmp_path / "freqinout_nets.db"
+    with sqlite3.connect(db_path) as conn:
+        _ensure_js8_expect_tables(conn)
 
 
 def _ready_eval(**overrides) -> ExpectEvaluationResult:

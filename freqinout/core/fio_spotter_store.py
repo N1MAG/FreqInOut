@@ -309,7 +309,9 @@ def list_spotter_activity(
                        severity, read_state, from_call, to_call, group_name,
                        state_code, grid, event_ts, received_ts, subject, summary,
                        body_preview AS preview, body_preview AS body_text,
-                       actionable, operator_attention, recommended_action
+                       topics_json, actionable, operator_attention, confidence,
+                       recommended_action, intelligence_version, intelligence_utc,
+                       intelligence_json
                   FROM message_projection
                  WHERE {' AND '.join(clauses)}
                  ORDER BY event_ts DESC, received_ts DESC, message_id DESC
@@ -319,4 +321,14 @@ def list_spotter_activity(
             ).fetchall()
         finally:
             conn.close()
-    return [{key: row[key] for key in row.keys()} for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        item["topics"] = _load_list(item.get("topics_json"))
+        try:
+            intelligence = json.loads(str(item.get("intelligence_json") or "{}"))
+        except (TypeError, ValueError):
+            intelligence = {}
+        item["intelligence"] = intelligence if isinstance(intelligence, dict) else {}
+        result.append(item)
+    return result

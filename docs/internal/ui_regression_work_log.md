@@ -1610,3 +1610,74 @@ fresh-process repository gate passes 2,534 tests with 37
 environment-dependent skips across 177 test files; the two skip-only files
 return pytest's no-tests-collected status and contain no failure. Python
 compilation and `git diff --check` pass.
+
+## 2026-09-07 — Slice 3 follow-up: Expect stability, intelligence, and FLAMP Q hot path
+
+The latest supplied production log is a short 39-line fragment covering
+19:15:38–19:16:06. It records one MeshCore BLE `link_connect` failure
+(`failed to discover services, device disconnected`), continued scheduler
+activity, Station Control Bar callbacks of 340 ms and 1,648 ms, and then ends
+on a normal scheduler line. It contains no traceback, Qt fatal, shutdown,
+Spotter interaction, or process-exit marker. Mesh is a real source of retry and
+status churn, but this artifact does not establish it—or the Expect editor—as
+the exit cause. The earlier watchdog dump still resolves the only captured
+main-thread hang to the now-removed duplicate Settings Spotter mapper.
+
+The Expect administration workflow now uses an explicitly editor-owned
+`QCompleter` and `QStringListModel`, caps its visible results, and suppresses an
+empty popup. The reusable policy is visibly optional; saving one selects it for
+the current rule and tells the operator to use **Save rule** to attach it. If a
+selected policy disappears, stale editor fields are cleared. Query failures are
+logged and presented as storage/startup-repair failures rather than as a false
+empty policy catalog. Opening the dynamic Q editor and saving or failing to
+save a rule/policy now produces a compact diagnostic log event. The primary
+integration review removed a delegated page-triggered schema upgrade because
+it violated the query-only reader contract; startup remains the only migration
+owner.
+
+FIO Spotter Activity now consumes the shared message projection's topics,
+confidence, recommended action, and intelligence provenance. A first-class
+Message Intelligence strip reuses the same operator/group-duty classifier as
+Ops Center and Messages, so Reply/Relay/Review/Social counts, What/Why,
+selected-row Action, and bucket filters agree. Source and intelligence chips
+filter the already-loaded 200-row page in memory and never issue a second
+query. Raw source evidence remains available beneath the assessment.
+
+The dynamic FLAMP Q request path was changed from catalog-wide processing to
+one indexed Expect-key read plus one referenced-policy read. Group-reply
+authorization is carried in the evaluation result rather than recovered by a
+second full rule/policy scan. Latency-sensitive evaluation audit, durable
+claim, completion, and dispatch-audit writes use an initialized-runtime SQLite
+connection that does not repeat schema or journal-mode setup. FLAMP state
+lookup is query-only, and the on-air path no longer stats a relay file. The
+background index clears persisted source mtime/hash when a file disappears, so
+database state safely distinguishes removed content (`NO` after a recent
+successful scan) from a present but non-authoritative transfer (hold).
+
+Reference performance with 500 unrelated rules: 1,000 audit-disabled
+`Q 970F` evaluations completed in 527.6 ms (0.528 ms average). Two hundred
+evaluation + audit + durable claim + completion cycles completed in 436.9 ms
+(2.184 ms average). A regression proves the Expect-key index is selected, only
+the `Q` candidates and referenced policy are read, no second catalog pass
+occurs, runtime claim/completion do not invoke schema setup, and the live Q path
+does not touch relay files.
+
+Delegation and review: Luna/high performed the read-only production log,
+Mesh-lifecycle, and incident analysis; Terra/high implemented the bounded
+Expect editor/completer and initial Activity projection package; Mini/high
+implemented focused optional-policy, responsive-layout, stale-policy, cached-
+filter, and projection tests. The high-reasoning primary model owned the
+architecture/concurrency boundary, rejected the UI migration, implemented and
+benchmarked the Q/runtime SQLite path, integrated shared Message Intelligence,
+reviewed every delegated diff, and ran the final gates.
+
+Verification: 76 focused Spotter/Expect/projection tests passed, followed by
+642 integrated FIO Spotter, Message Intelligence, directed-ingest, shell, and
+Mesh tests. The authoritative fresh-process repository gate passed 2,546 tests
+with 37 environment-dependent skips across all 177 test files. Python
+compilation and `git diff --check` pass. Offscreen visual review covered
+900x560 Dark/Large Text and 1400x900 Light/Normal; the transient first-frame
+capture was rerendered after the event queue drained and the stable views show
+no clipping or page-level horizontal overflow. No Mesh device setting,
+pairing, channel, or firmware state was changed. The physical Linux T1000-E
+retry gate remains open.

@@ -7,7 +7,9 @@ import sqlite3
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.db_initializer import _ensure_js8_expect_tables
@@ -256,6 +258,108 @@ def test_expect_access_ui_is_lazy_autocompleting_and_compact(monkeypatch, tmp_pa
         assert row["allowed_groups"] == ["@MAGNET"]
         assert "Any caller" in tab._expect_access_summary(row)
         assert "addressed group" in tab._expect_access_summary(row)
+    finally:
+        tab.close()
+        tab.deleteLater()
+
+
+def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_trusted_groups(monkeypatch, tmp_path: Path) -> None:
+    app = _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        spotter_ui,
+        "list_expect_operator_access_catalog",
+        lambda *, limit: [
+            {
+                "callsign": "K1OLD",
+                "current_callsign": "K1NEW",
+                "historical": True,
+                "trusted": True,
+                "groups": ["MAGNET", "MR08"],
+            }
+        ],
+    )
+
+    old_font = QFont(app.font())
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.resize(900, 560)
+        tab.tabs.setCurrentIndex(2)
+        tab.show()
+        app.processEvents()
+
+        assert tab.expect_policy.itemData(0) == 0
+        assert tab.expect_policy.currentData() == 0
+        assert tab.policy_manage.currentData() == 0
+        assert tab.expect_groups._completion_values == ["@MAGNET", "@MR08"]
+        assert tab.expect_trusted_groups._completion_values == ["MAGNET", "MR08"]
+
+        tab.policy_name.setText("Regional trusted")
+        tab.policy_calls.setText("K1ABC")
+        tab.policy_groups.setText("@MAGNET")
+        tab.policy_trusted.setChecked(True)
+        tab.policy_trusted_groups.setText("MR08")
+        tab.policy_enabled.setChecked(True)
+        tab._save_policy()
+
+        policies = spotter_ui.list_expect_allow_policies()
+        assert len(policies) == 1
+        policy_id = int(policies[0]["id"])
+        assert tab.expect_policy.findData(policy_id) >= 0
+
+        tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(policy_id))
+        tab.expect_key.setText("Q")
+        tab.expect_reply.setText("READY")
+        tab.expect_groups.setText("@MAGNET")
+        tab.expect_trusted.setChecked(True)
+        tab.expect_trusted_groups.setText("MR08")
+        tab.expect_enabled.setChecked(True)
+        tab.expect_auto.setChecked(True)
+        tab.expect_unattended.setChecked(True)
+        tab._save_entry()
+
+        rows = spotter_ui.list_expect_entries()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["allow_policy_id"] == policy_id
+        assert row["allow_policy_name"] == "Regional trusted"
+        assert row["allow_trusted_operators"] == 1
+        assert row["trusted_operator_groups"] == ["MR08"]
+        assert row["allowed_groups"] == ["@MAGNET"]
+        assert "Regional trusted" in tab._expect_access_summary(row)
+    finally:
+        tab.close()
+        tab.deleteLater()
+        app.setFont(old_font)
+        app.processEvents()
+
+
+def test_trusted_roster_group_completion_is_attached_to_its_live_editor(monkeypatch, tmp_path: Path) -> None:
+    """Roster-group typing must use an editor-owned popup, not a detached Qt popup."""
+    app = _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        spotter_ui,
+        "list_expect_operator_access_catalog",
+        lambda *, limit: [
+            {"callsign": "K1ABC", "current_callsign": "K1ABC", "historical": False,
+             "trusted": True, "groups": ["MAGNET", "MR08"]},
+        ],
+    )
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        tab.tabs.setCurrentIndex(2)
+        tab.show()
+        app.processEvents()
+        editor = tab.expect_trusted_groups
+        assert editor.completer() is editor._token_completer
+        assert editor._token_completer.widget() is editor
+        editor.setFocus()
+        QTest.keyClicks(editor, "MR")
+        app.processEvents()
+        assert editor._token_completer.completionCount() == 1
+        editor._insert_completion("MR08")
+        assert editor.text() == "MR08"
     finally:
         tab.close()
         tab.deleteLater()

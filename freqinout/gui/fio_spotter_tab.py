@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QStringListModel
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
@@ -27,6 +27,7 @@ from freqinout.core.js8_expect_runtime import (
     load_expect_automation_runtime_state, set_expect_automation_runtime_state,
 )
 from freqinout.core.js8_expect_store import (
+    default_expect_db_path,
     delete_expect_allow_policy, delete_expect_entry, list_expect_allow_policies, list_expect_entries,
     list_expect_operator_access_catalog, list_expect_runtime_audit,
     save_expect_allow_policy, save_expect_entry,
@@ -41,8 +42,19 @@ from freqinout.core.js8_spotter_forms import (
 )
 from freqinout.core.js8spotter_importer import import_js8spotter_database, preview_js8spotter_import
 from freqinout.core.perf_metrics import emit_span
+from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.traffic_actionability import (
+    TrafficActionSummary,
+    build_operator_traffic_context,
+    build_traffic_action_summary,
+    configured_group_names,
+    load_operator_traffic_context,
+    message_matches_traffic_bucket,
+    traffic_action_item,
+)
 from freqinout.core.varac_bbs_vault import list_flamp_transfer_index_statuses
+from freqinout.gui.traffic_action_summary_widget import TrafficActionSummaryWidget
 
 
 _MAX_ROWS = 200
@@ -73,16 +85,23 @@ class _CsvCompleterLineEdit(QLineEdit):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._completion_values: list[str] = []
-        self._token_completer = QCompleter([], self)
+        # Install the completer on its editor so Qt has an explicit popup
+        # anchor and ownership path. Keep an explicit string model as well:
+        # QCompleter.model() is not guaranteed to expose QStringListModel's
+        # mutation API across Qt bindings.
+        self._completion_model = QStringListModel(self)
+        self._token_completer = QCompleter(self._completion_model, self)
         self._token_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._token_completer.setFilterMode(Qt.MatchContains)
         self._token_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._token_completer.setMaxVisibleItems(14)
+        self.setCompleter(self._token_completer)
         self._token_completer.activated[str].connect(self._insert_completion)
         self.textEdited.connect(self._complete_token)
 
     def set_completion_values(self, values: list[str]) -> None:
         self._completion_values = sorted({str(value or "").strip().upper() for value in values if str(value or "").strip()})
-        self._token_completer.model().setStringList(self._completion_values)
+        self._completion_model.setStringList(self._completion_values)
 
     def _current_token(self) -> str:
         return self.text().rsplit(",", 1)[-1].strip()
@@ -90,9 +109,11 @@ class _CsvCompleterLineEdit(QLineEdit):
     def _complete_token(self, _text: str) -> None:
         token = self._current_token()
         if not token:
+            self._token_completer.popup().hide()
             return
         self._token_completer.setCompletionPrefix(token)
-        self._token_completer.complete()
+        if self._token_completer.completionCount():
+            self._token_completer.complete()
 
     def _insert_completion(self, value: str) -> None:
         prefix = self.text().rsplit(",", 1)[0].strip() if "," in self.text() else ""
@@ -128,6 +149,9 @@ class FioSpotterTab(QWidget):
         self._policy_rows: list[dict[str, Any]] = []
         self._entry_rows: list[dict[str, Any]] = []
         self._activity_rows: list[dict[str, Any]] = []
+        self._activity_catalog_rows: list[dict[str, Any]] = []
+        self._activity_action_filter = ""
+        self._activity_context = None
         self._watch_rows: list[dict[str, Any]] = []
         self._expect_access_catalog_loaded_at = 0.0
         self._compact = False
@@ -315,8 +339,15 @@ class FioSpotterTab(QWidget):
         self.activity_chips = self.activity_chip_row.findChildren(QPushButton)
         self.activity_chips[0].setChecked(True)
         layout.addWidget(self.activity_chip_row)
+        self.activity_intelligence = TrafficActionSummaryWidget(self.settings)
+        self.activity_intelligence.title_label.setText("Message intelligence")
+        self.activity_intelligence.setToolTip(
+            "Action counts are derived from the newest bounded Spotter page and your operator/group duties."
+        )
+        self.activity_intelligence.bucketActivated.connect(self._set_activity_action_filter)
+        layout.addWidget(self.activity_intelligence)
         split = QSplitter(Qt.Horizontal)
-        self.activity_table = self._table(["Age", "Source", "From", "Group", "Form", "Status", "Topic"], name="fioSpotterActivityTable")
+        self.activity_table = self._table(["Age", "Source", "From", "Group", "Form", "Action", "Topic"], name="fioSpotterActivityTable")
         hdr = self.activity_table.horizontalHeader()
         for col in range(6):
             hdr.setSectionResizeMode(col, QHeaderView.Interactive)
@@ -353,26 +384,69 @@ class FioSpotterTab(QWidget):
         layout.addWidget(split, 1)
 
     def refresh_activity(self) -> None:
+        """Explicitly refresh the bounded projection page from the station store."""
         table = getattr(self, "activity_table", None)
         if table is None:
             return
         started = time.perf_counter()
-        self._activity_rows = []
+        self._activity_catalog_rows = []
         try:
             # The service defaults match projection source families emitted by
             # FIO: ``spotter`` (decoded forms), ``js8`` and legacy ``js8call``.
-            selected = {button.text() for button in getattr(self, "activity_chips", ()) if button.isChecked()}
-            families = ("spotter", "js8", "js8call")
-            if "JS8" in selected and "Forms" not in selected:
-                families = ("js8", "js8call")
-            elif "Forms" in selected and "JS8" not in selected:
-                families = ("spotter",)
-            self._activity_rows = list_spotter_activity(
-                source_families=families, limit=_MAX_ROWS
+            # Filter chips intentionally operate on this cached bounded page;
+            # toggling them must not issue a database query.
+            self._activity_catalog_rows = list_spotter_activity(
+                source_families=("spotter", "js8", "js8call"), limit=_MAX_ROWS
             )
-        except Exception:
-            self._activity_rows = []
+        except Exception as exc:
+            log.warning("FIO Spotter: Activity refresh failed: %s", exc, exc_info=True)
+            self._activity_catalog_rows = []
+        hf_groups, local_groups = configured_group_names(self.settings)
+        callsign = self.settings.get("operator_callsign", "") or self.settings.get("callsign", "")
+        try:
+            self._activity_context = load_operator_traffic_context(
+                default_expect_db_path(),
+                callsign=callsign,
+                configured_operating_groups=hf_groups,
+                configured_local_groups=local_groups,
+            )
+        except Exception as exc:
+            log.warning("FIO Spotter: operator traffic context read failed: %s", exc, exc_info=True)
+            self._activity_context = build_operator_traffic_context(
+                callsign=callsign,
+                configured_operating_groups=hf_groups,
+                configured_local_groups=local_groups,
+            )
         query_elapsed = (time.perf_counter() - started) * 1000.0
+        self._apply_activity_filters(query_elapsed=query_elapsed)
+
+    def _apply_activity_filters(self, *, query_elapsed: float = 0.0) -> None:
+        """Apply Activity chips to the current bounded page without I/O."""
+        table = getattr(self, "activity_table", None)
+        if table is None:
+            return
+        selected = {button.text() for button in getattr(self, "activity_chips", ()) if button.isChecked()}
+        families = {"spotter", "js8", "js8call"}
+        if "JS8" in selected and "Forms" not in selected:
+            families = {"js8", "js8call"}
+        elif "Forms" in selected and "JS8" not in selected:
+            families = {"spotter"}
+        source_rows = [
+            row for row in self._activity_catalog_rows
+            if _text(row.get("source_family")).lower() in families
+        ]
+        context = self._activity_context
+        summary = build_traffic_action_summary(source_rows, context) if context is not None else None
+        if hasattr(self, "activity_intelligence"):
+            self.activity_intelligence.set_active_bucket(self._activity_action_filter)
+            self.activity_intelligence.set_summary(summary or TrafficActionSummary())
+        if self._activity_action_filter and context is not None:
+            self._activity_rows = [
+                row for row in source_rows
+                if message_matches_traffic_bucket(row, context, self._activity_action_filter)
+            ]
+        else:
+            self._activity_rows = source_rows
         render_started = time.perf_counter()
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
@@ -386,14 +460,14 @@ class FioSpotterTab(QWidget):
                 self._put(table, i, 2, row.get("from_call"))
                 self._put(table, i, 3, row.get("group_name") or row.get("to_call"))
                 self._put(table, i, 4, row.get("form_id") or row.get("message_type"))
-                self._put(table, i, 5, row.get("status"))
-                self._put(table, i, 6, row.get("subject") or row.get("preview") or row.get("body_text"))
+                self._put(table, i, 5, self._activity_action_text(row))
+                self._put(table, i, 6, ", ".join(row.get("topics") or ()) or row.get("subject") or row.get("summary") or row.get("preview") or row.get("body_text"))
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
         emit_span(
             "fio_spotter.activity_refresh",
-            (time.perf_counter() - started) * 1000.0,
+            query_elapsed + (time.perf_counter() - render_started) * 1000.0,
             meta={
                 "query_ms": round(query_elapsed, 1),
                 "render_ms": round((time.perf_counter() - render_started) * 1000.0, 1),
@@ -402,7 +476,26 @@ class FioSpotterTab(QWidget):
             min_ms=10.0,
         )
         if not self._activity_rows:
-            self.activity_detail.setPlainText("No bounded FIO traffic is available yet. Ingest continues outside this view.")
+            self.activity_detail.setPlainText("No matching traffic in the current bounded page. Refresh to read newer station traffic.")
+
+    def _set_activity_action_filter(self, bucket: object) -> None:
+        """Filter the cached Activity page by shared message intelligence."""
+        self._activity_action_filter = _text(bucket).lower()
+        self._apply_activity_filters()
+
+    def _activity_action_text(self, row: dict[str, Any]) -> str:
+        """Render the same operator-aware action used by the summary chips."""
+        item = traffic_action_item(row, self._activity_context) if self._activity_context is not None else None
+        if item is not None:
+            return item.primary_bucket.title()
+        action = _text(row.get("recommended_action")).replace("_", " ")
+        if action:
+            return action[:1].upper() + action[1:]
+        if row.get("operator_attention") or row.get("actionable"):
+            return "Review"
+        status = _text(row.get("status"))
+        severity = _text(row.get("severity"))
+        return "No action" if not severity or severity.lower() == "info" else f"Monitor · {severity}"
 
     def _on_activity_filter(self) -> None:
         sender = self.sender()
@@ -414,15 +507,39 @@ class FioSpotterTab(QWidget):
             self.activity_chips[0].setChecked(False)
         if not any(button.isChecked() for button in self.activity_chips):
             self.activity_chips[0].setChecked(True)
-        self.refresh_activity()
+        self._apply_activity_filters()
 
     def _show_activity_detail(self) -> None:
         selected = self.activity_table.selectedItems()
         if not selected:
             return
         row = selected[0].data(Qt.UserRole) or {}
+        intelligence = row.get("intelligence") if isinstance(row.get("intelligence"), dict) else {}
+        provenance = intelligence.get("provenance") if isinstance(intelligence.get("provenance"), dict) else {}
+        map_context = intelligence.get("map") if isinstance(intelligence.get("map"), dict) else {}
+        topics = ", ".join(str(topic) for topic in row.get("topics") or ()) or "None classified"
+        action_item = traffic_action_item(row, self._activity_context) if self._activity_context is not None else None
+        why: list[str] = []
+        severity = _text(row.get("severity"))
+        if severity:
+            why.append(f"Severity: {severity}")
+        trust = _text(provenance.get("trust"))
+        freshness = _text(provenance.get("freshness"))
+        if trust:
+            why.append(f"Trust: {trust}")
+        if freshness:
+            why.append(f"Freshness: {freshness}")
+        location = " / ".join(part for part in (_text(map_context.get("state")) or _text(row.get("state_code")), _text(map_context.get("grid")) or _text(row.get("grid"))) if part)
+        if location:
+            why.append(f"Location: {location}")
         self.activity_detail.setPlainText(
-            "Decoded / evidence\n\n"
+            "Assessment\n\n"
+            f"{_text(row.get('summary') or row.get('subject')) or 'No shared summary is available.'}\n"
+            f"Recommended action: {self._activity_action_text(row)}\n"
+            f"Topics: {topics}\n"
+            f"What: {action_item.what if action_item is not None else 'Monitor this traffic in context.'}\n"
+            f"Why: {action_item.why if action_item is not None else ('; '.join(why) or 'No elevated condition in the shared projection.')}\n\n"
+            "Source evidence\n\n"
             f"From: {_text(row.get('from_call')) or 'Unknown'}\n"
             f"Target: {_text(row.get('to_call') or row.get('group_name')) or 'Unknown'}\n"
             f"Source: {_text(row.get('source_family')) or 'Unknown'}\n\n"
@@ -655,7 +772,8 @@ class FioSpotterTab(QWidget):
         form = QFormLayout()
         self.expect_key = QLineEdit(); self.expect_key.setPlaceholderText("Token, e.g. INFO")
         self.expect_reply = QLineEdit(); self.expect_reply.setPlaceholderText("Reply text")
-        self.expect_policy = QComboBox(); self.expect_policy.addItem("No allow policy", 0)
+        self.expect_policy = QComboBox(); self.expect_policy.addItem("No allow policy (use rule fields below)", 0)
+        self.expect_policy.setToolTip("Optional reusable policy. Save one below, then select it here to apply it to this rule.")
         access_help = QLabel(
             "Enter callsigns separated by commas; * allows any caller. Addressed groups authorize group replies. "
             "Trusted roster access uses Operator History and includes linked former callsigns. Blocked callers always win."
@@ -696,7 +814,7 @@ class FioSpotterTab(QWidget):
             actions.addWidget(button, index // 2, index % 2)
         actions.setColumnStretch(2, 1)
         right_layout.addLayout(actions)
-        policy_box = QGroupBox("Allow policy")
+        policy_box = QGroupBox("Reusable allow policy (optional)")
         policy_form = QFormLayout(policy_box)
         self.policy_manage = QComboBox(); self.policy_manage.addItem("New policy", 0)
         self.policy_manage.currentIndexChanged.connect(self._load_policy_editor)
@@ -801,11 +919,15 @@ class FioSpotterTab(QWidget):
         try:
             self._policy_rows = list_expect_allow_policies()
             self._entry_rows = list_expect_entries()[:_MAX_ROWS]
-        except Exception:
+        except Exception as exc:
+            log.warning("FIO Spotter: Expect administration read failed: %s", exc, exc_info=True)
             self._policy_rows, self._entry_rows = [], []
+            self.expect_runtime_state.setText(
+                "○ Expect storage could not be read. Restart FIO to run startup database repair; details are in the log."
+            )
         selected = self.expect_policy.currentData()
         selected_manage = self.policy_manage.currentData()
-        self.expect_policy.blockSignals(True); self.expect_policy.clear(); self.expect_policy.addItem("No allow policy", 0)
+        self.expect_policy.blockSignals(True); self.expect_policy.clear(); self.expect_policy.addItem("No allow policy (use rule fields below)", 0)
         self.policy_manage.blockSignals(True); self.policy_manage.clear(); self.policy_manage.addItem("New policy", 0)
         for row in self._policy_rows:
             self.expect_policy.addItem(f"{'●' if row.get('enabled') else '○'} {row.get('name')}", int(row.get('id') or 0))
@@ -813,6 +935,11 @@ class FioSpotterTab(QWidget):
         self.expect_policy.setCurrentIndex(max(0, self.expect_policy.findData(selected)))
         self.policy_manage.setCurrentIndex(max(0, self.policy_manage.findData(selected_manage)))
         self.expect_policy.blockSignals(False); self.policy_manage.blockSignals(False)
+        if selected_manage and self.policy_manage.currentData() == 0:
+            # A policy may have been deleted by another administration surface
+            # while this editor was open.  Do not leave its stale access data
+            # staged against the now-empty selector.
+            self._clear_policy_editor(reset_selection=False)
         table = self.expect_entries_table
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
@@ -904,6 +1031,7 @@ class FioSpotterTab(QWidget):
         self.expect_runtime_state.setText(
             "Configure explicit callers or groups (or an allow policy), then Save rule. The Q ID and response are generated from the request and indexed FLAMP state."
         )
+        log.info("FIO Spotter: opened new dynamic FLAMP Q rule editor")
 
     def _save_entry(self) -> None:
         selected = self.expect_entries_table.selectedItems(); existing = selected[0].data(Qt.UserRole) if selected else {}
@@ -914,10 +1042,19 @@ class FioSpotterTab(QWidget):
             if allow_any and "*" not in allowed_calls:
                 allowed_calls.insert(0, "*")
             payload = {"expect_key": self.expect_key.text(), "response_text": self.expect_reply.text(), "allow_policy_id": self.expect_policy.currentData() or None, "allowed_callsigns": allowed_calls, "allowed_groups": _csv(self.expect_groups.text()), "allow_any": allow_any, "allow_trusted_operators": self.expect_trusted.isChecked(), "trusted_operator_groups": _csv(self.expect_trusted_groups.text()), "blocked_callsigns": _csv(self.expect_blocked.text()), "max_replies": self.expect_max.value(), "cooldown_seconds": self.expect_cooldown.value(), "auto_tx_schedule": self.expect_schedule.text(), "enabled": self.expect_enabled.isChecked(), "auto_reply_enabled": self.expect_auto.isChecked(), "unattended_auto_reply_enabled": self.expect_unattended.isChecked(), "source_radio_id": self.expect_source_radio.text(), "source_scope": self.expect_source_scope.currentText() or ("all" if is_dynamic_q else "radio"), "js8_instance_id": self.expect_js8_instance.text(), "import_source": "fio-spotter"}
-            save_expect_entry(payload)
+            saved = save_expect_entry(payload)
         except Exception as exc:
+            log.warning("FIO Spotter: Expect rule save failed: %s", exc, exc_info=True)
             self.expect_runtime_state.setText(f"○ Rule not saved: {exc}")
             return
+        log.info(
+            "FIO Spotter: %s Expect rule id=%s key=%s policy_id=%s scope=%s",
+            "created" if saved.created else "saved",
+            saved.id,
+            saved.expect_key,
+            payload.get("allow_policy_id") or 0,
+            payload.get("source_scope"),
+        )
         self.refresh_expect()
 
     def _delete_entry(self) -> None:
@@ -929,7 +1066,7 @@ class FioSpotterTab(QWidget):
 
     def _save_policy(self) -> None:
         try:
-            save_expect_allow_policy({
+            saved = save_expect_allow_policy({
                 "id": self.policy_manage.currentData() or 0,
                 "name": self.policy_name.text(),
                 "allowed_callsigns": _csv(self.policy_calls.text()),
@@ -943,10 +1080,26 @@ class FioSpotterTab(QWidget):
                 "import_source": "fio-spotter",
             })
         except Exception as exc:
+            log.warning("FIO Spotter: allow policy save failed: %s", exc, exc_info=True)
             self.expect_runtime_state.setText(f"○ Policy not saved: {exc}")
             return
-        self._clear_policy_editor()
+        log.info(
+            "FIO Spotter: %s Expect allow policy id=%s name=%s",
+            "created" if saved.created else "saved",
+            saved.id,
+            saved.name,
+        )
         self.refresh_expect()
+        policy_index = self.expect_policy.findData(saved.id)
+        if policy_index >= 0:
+            self.expect_policy.setCurrentIndex(policy_index)
+        manage_index = self.policy_manage.findData(saved.id)
+        if manage_index >= 0:
+            self.policy_manage.setCurrentIndex(manage_index)
+        self.expect_runtime_state.setText(
+            f"● {'Created' if saved.created else 'Saved'} allow policy “{saved.name}”. "
+            "It is selected for this rule; choose Save rule to attach it."
+        )
 
     def _load_policy_editor(self) -> None:
         policy_id = int(self.policy_manage.currentData() or 0)
