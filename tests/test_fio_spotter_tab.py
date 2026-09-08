@@ -52,6 +52,28 @@ def test_spotter_tab_has_lazy_browser_tabs_in_service_order():
         tab.deleteLater()
 
 
+def test_screen_reactivation_does_not_repeat_activity_query(monkeypatch):
+    app = _app()
+    calls: list[int] = []
+
+    def activity(**_kwargs):
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(spotter_ui, "list_spotter_activity", activity)
+    tab = FioSpotterTab(settings=_Settings())
+    try:
+        assert len(calls) == 1
+        tab.set_tab_active(True)
+        tab.set_tab_active(True)
+        app.processEvents()
+        assert len(calls) == 1
+        tab.refresh_activity()
+        assert len(calls) == 2
+    finally:
+        tab.deleteLater()
+
+
 def test_compact_expect_page_scrolls_without_expanding_shell_height():
     app = _app()
     tab = FioSpotterTab(settings=_Settings())

@@ -69,7 +69,9 @@ def _seed_operator_identity_history(db_path: Path, *, old_call: str, current_cal
             (old_call, group, utc_day, utc_day),
         )
         ensure_operator_checkins_schema(conn)
-        change_operator_callsign(conn, old_call, current_call, effective_at=utc_ts - 3600.0)
+        # Keep the change after the day-granularity first-seen assignment even
+        # when this test runs during the first UTC hour.
+        change_operator_callsign(conn, old_call, current_call, effective_at=utc_ts)
         conn.commit()
     finally:
         conn.close()

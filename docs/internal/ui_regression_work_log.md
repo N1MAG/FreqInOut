@@ -1534,3 +1534,41 @@ with one environment skip.
 Offscreen visual review at 900x560 with Large Text and 1400x900 with Normal Text
 shows responsive vertical/horizontal split transitions and zero page-level
 horizontal overflow. Python compilation and `git diff --check` pass.
+
+## 2026-09-07 — FIO Spotter production activation performance correction
+
+The follow-up Linux log and operator CPU observation exposed a visible-table
+regression that the offscreen layout gate did not exercise. FIO Spotter itself
+constructed in 534 ms, but the redundant activation refresh held
+`main_window.set_screen` for 55–62 seconds on three consecutive attempts and
+triggered watchdog stalls. Activity used live `ResizeToContents` headers while
+replacing up to 1,400 cells; once visible, those inserts could repeatedly
+recalculate table geometry. The screen lifecycle also queried Activity once in
+the constructor and again immediately through `set_tab_active(True)`.
+
+Spotter now loads each browser tab once on first visit and updates it thereafter
+only through its explicit Refresh or save actions. Activity, Watches, Expect
+history, and Forms replace their bounded rows with painting and selection
+signals suspended, and populated tables use stable interactive widths instead
+of live content measurement. Activity emits separate query and render timings
+under `fio_spotter.activity_refresh`.
+
+The database review found another contention source: read helpers were invoking
+full idempotent schema/index setup, and each new connection attempted to set WAL
+journal mode. Under concurrent Message ingest and MeshCore writes, opening a
+read-only tab could therefore contend for write locks. FIO Spotter Activity,
+Watches, Expect rules/policies/audits, dispatch audit, FLAMP index status, and
+Operator History completion now use short-timeout query-only connections.
+Schema creation remains centralized in startup and explicit write paths.
+
+Focused verification passes 57 tests with three environment skips. A visible
+200-row/500-character synthetic Activity table refresh completes in 5.7–6.1 ms
+on the development Mac, repeat screen activation performs no query, all five
+browser tabs switch in 0–16 ms against the local multi-rig profile, and an
+isolated two-second Qt event-loop soak consumes 0.2 ms of process CPU. A WAL
+contention regression confirms Activity remains below 0.5 seconds while an
+ingest writer holds an immediate transaction. Full integration verification is
+327 passed with four environment skips. Python compilation and `git diff --check`
+pass. The gate also corrected a test-only UTC-midnight fixture whose
+one-hour backdating could precede its day-granularity roster assignment; no
+production identity behavior changed.

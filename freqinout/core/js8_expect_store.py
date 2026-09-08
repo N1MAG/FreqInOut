@@ -12,10 +12,9 @@ from freqinout.core.db_initializer import _ensure_js8_expect_tables
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.operator_identity import (
     canonical_callsign,
-    ensure_operator_identity_schema,
     resolve_operator_identity,
 )
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
 
 
 def default_expect_db_path() -> Path:
@@ -346,13 +345,13 @@ def list_expect_operator_access_catalog(
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     if not path.exists():
         return []
-    conn = connect_sqlite(path)
+    conn = connect_sqlite_readonly(path)
     try:
-        if conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_checkins'"
-        ).fetchone() is None:
+        required_tables = (
+            "operator_checkins", "operator_identities", "operator_callsign_history",
+        )
+        if not all(table_exists(conn, name) for name in required_tables):
             return []
-        ensure_operator_identity_schema(conn, backfill_operator_rows=False)
         row_limit = max(1, min(int(limit or 2000), 5000))
         alias_rows = conn.execute(
             """
@@ -555,9 +554,12 @@ def list_expect_allow_policies(
     enabled_only: bool = False,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_js8_expect_tables(conn)
+        if not table_exists(conn, "js8_expect_allow_policies"):
+            return []
         where = "WHERE COALESCE(enabled, 1) != 0" if enabled_only else ""
         rows = conn.execute(
             f"""
@@ -618,9 +620,12 @@ def list_expect_entries(
     enabled_only: bool = False,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_js8_expect_tables(conn)
+        if not table_exists(conn, "js8_expect_entries"):
+            return []
         where = "WHERE COALESCE(e.enabled, 0) != 0" if enabled_only else ""
         rows = conn.execute(
             f"""
@@ -902,9 +907,12 @@ def list_expect_management_audit(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_js8_expect_tables(conn)
+        if not table_exists(conn, "js8_expect_management_audit"):
+            return []
         rows = conn.execute(
             """
             SELECT id, expect_entry_id, action, expect_key, source_radio_id, source_scope,
@@ -950,9 +958,12 @@ def list_expect_runtime_audit(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_js8_expect_tables(conn)
+        if not table_exists(conn, "js8_expect_audit"):
+            return []
         rows = conn.execute(
             """
             SELECT id, event_id, expect_entry_id, expect_key, source_radio_id, source_js8_instance_id,

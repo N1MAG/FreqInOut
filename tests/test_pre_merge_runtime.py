@@ -13,7 +13,7 @@ import freqinout
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.system_timezone import normalize_supported_timezone_name
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
 
@@ -107,6 +107,23 @@ def test_connect_sqlite_enables_wal_and_runtime_pragmas(tmp_path):
     assert journal_mode == "wal"
     assert synchronous == 1
     assert temp_store == 2
+
+
+def test_connect_sqlite_readonly_does_not_mutate_or_create_database(tmp_path):
+    db_path = tmp_path / "sample.db"
+    with connect_sqlite(db_path) as writer:
+        writer.execute("CREATE TABLE sample(value TEXT)")
+        writer.execute("INSERT INTO sample(value) VALUES ('ready')")
+        writer.commit()
+
+    with connect_sqlite_readonly(db_path) as reader:
+        assert reader.execute("SELECT value FROM sample").fetchone()[0] == "ready"
+        assert int(reader.execute("PRAGMA query_only").fetchone()[0]) == 1
+        with pytest.raises(Exception):
+            reader.execute("INSERT INTO sample(value) VALUES ('blocked')")
+
+    with pytest.raises(Exception):
+        connect_sqlite_readonly(tmp_path / "missing.db")
 
 
 def test_flrig_client_from_settings_uses_saved_port(monkeypatch, tmp_path):

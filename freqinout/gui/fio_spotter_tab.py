@@ -40,6 +40,7 @@ from freqinout.core.js8_spotter_forms import (
     normalize_mapping_row,
 )
 from freqinout.core.js8spotter_importer import import_js8spotter_database, preview_js8spotter_import
+from freqinout.core.perf_metrics import emit_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.varac_bbs_vault import list_flamp_transfer_index_statuses
 
@@ -156,7 +157,7 @@ class FioSpotterTab(QWidget):
 
     def set_tab_active(self, active: bool) -> None:
         """Lifecycle hook used by MainWindow's lazy screen controller."""
-        if active:
+        if active and self.tabs.currentIndex() not in self._built:
             self._activate_tab(self.tabs.currentIndex())
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -211,13 +212,15 @@ class FioSpotterTab(QWidget):
         self._expect_access_catalog_loaded_at = now
 
     def _activate_tab(self, index: int) -> None:
-        if index not in self._built:
-            builders: tuple[Callable[[QWidget], None], ...] = (
-                self._build_activity, self._build_watches, self._build_expect,
-                self._build_forms, self._build_imports,
-            )
-            builders[index](self.tabs.widget(index))
-            self._built.add(index)
+        if index in self._built:
+            return
+        started = time.perf_counter()
+        builders: tuple[Callable[[QWidget], None], ...] = (
+            self._build_activity, self._build_watches, self._build_expect,
+            self._build_forms, self._build_imports,
+        )
+        builders[index](self.tabs.widget(index))
+        self._built.add(index)
         # Forms/import preview can touch an external directory/database, so
         # those scans are operator-triggered rather than tab-activation work.
         if index == 0:
@@ -230,6 +233,12 @@ class FioSpotterTab(QWidget):
             self._refresh_forms_state()
         else:
             self.refresh_imports()
+        emit_span(
+            "fio_spotter.tab_first_load",
+            (time.perf_counter() - started) * 1000.0,
+            meta={"index": index, "tab": _TAB_NAMES[index]},
+            min_ms=10.0,
+        )
 
     @staticmethod
     def _table(headers: list[str], *, name: str) -> QTableWidget:
@@ -310,8 +319,10 @@ class FioSpotterTab(QWidget):
         self.activity_table = self._table(["Age", "Source", "From", "Group", "Form", "Status", "Topic"], name="fioSpotterActivityTable")
         hdr = self.activity_table.horizontalHeader()
         for col in range(6):
-            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(col, QHeaderView.Interactive)
         hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        for col, width in enumerate((145, 85, 90, 90, 90, 85)):
+            self.activity_table.setColumnWidth(col, width)
         detail_panel = QWidget()
         detail_layout = QVBoxLayout(detail_panel)
         detail_layout.setContentsMargins(0, 0, 0, 0)
@@ -345,6 +356,7 @@ class FioSpotterTab(QWidget):
         table = getattr(self, "activity_table", None)
         if table is None:
             return
+        started = time.perf_counter()
         self._activity_rows = []
         try:
             # The service defaults match projection source families emitted by
@@ -360,16 +372,35 @@ class FioSpotterTab(QWidget):
             )
         except Exception:
             self._activity_rows = []
-        table.setRowCount(len(self._activity_rows))
-        for i, row in enumerate(self._activity_rows):
-            age = _when(row.get("received_ts") or row.get("event_ts"))
-            self._put(table, i, 0, age, data=row)
-            self._put(table, i, 1, row.get("source_family"))
-            self._put(table, i, 2, row.get("from_call"))
-            self._put(table, i, 3, row.get("group_name") or row.get("to_call"))
-            self._put(table, i, 4, row.get("form_id") or row.get("message_type"))
-            self._put(table, i, 5, row.get("status"))
-            self._put(table, i, 6, row.get("subject") or row.get("preview") or row.get("body_text"))
+        query_elapsed = (time.perf_counter() - started) * 1000.0
+        render_started = time.perf_counter()
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.clearContents()
+            table.setRowCount(len(self._activity_rows))
+            for i, row in enumerate(self._activity_rows):
+                age = _when(row.get("received_ts") or row.get("event_ts"))
+                self._put(table, i, 0, age, data=row)
+                self._put(table, i, 1, row.get("source_family"))
+                self._put(table, i, 2, row.get("from_call"))
+                self._put(table, i, 3, row.get("group_name") or row.get("to_call"))
+                self._put(table, i, 4, row.get("form_id") or row.get("message_type"))
+                self._put(table, i, 5, row.get("status"))
+                self._put(table, i, 6, row.get("subject") or row.get("preview") or row.get("body_text"))
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+        emit_span(
+            "fio_spotter.activity_refresh",
+            (time.perf_counter() - started) * 1000.0,
+            meta={
+                "query_ms": round(query_elapsed, 1),
+                "render_ms": round((time.perf_counter() - render_started) * 1000.0, 1),
+                "rows": len(self._activity_rows),
+            },
+            min_ms=10.0,
+        )
         if not self._activity_rows:
             self.activity_detail.setPlainText("No bounded FIO traffic is available yet. Ingest continues outside this view.")
 
@@ -439,8 +470,10 @@ class FioSpotterTab(QWidget):
         self.watches_table.itemSelectionChanged.connect(self._load_selected_watch)
         watch_hdr = self.watches_table.horizontalHeader()
         for col in (0, 2, 4, 5, 6, 7):
-            watch_hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            watch_hdr.setSectionResizeMode(col, QHeaderView.Interactive)
         watch_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        for col, width in ((0, 50), (2, 150), (4, 80), (5, 130), (6, 130), (7, 90)):
+            self.watches_table.setColumnWidth(col, width)
         split.addWidget(self.watches_table)
         editor = QGroupBox("Watch editor")
         editor.setAccessibleName("Spotter watch editor")
@@ -482,17 +515,24 @@ class FioSpotterTab(QWidget):
         except Exception as exc:
             self._watch_rows = []
             self.watch_status.setText(f"Watch service unavailable: {exc}")
-        self.watches_table.setRowCount(len(self._watch_rows))
-        for i, row in enumerate(self._watch_rows):
-            source_text = ", ".join(row.get("source_families") or ()) or "All sources"
-            values = (
-                "●" if row.get("enabled") else "○", row.get("name"),
-                f"{row.get('watch_kind')}: {row.get('pattern')}", source_text,
-                row.get("priority"), _when(row.get("expires_ts")),
-                _when(row.get("last_match_ts")), row.get("health"),
-            )
-            for col, value in enumerate(values):
-                self._put(self.watches_table, i, col, value, data=row if col == 0 else None)
+        self.watches_table.setUpdatesEnabled(False)
+        self.watches_table.blockSignals(True)
+        try:
+            self.watches_table.clearContents()
+            self.watches_table.setRowCount(len(self._watch_rows))
+            for i, row in enumerate(self._watch_rows):
+                source_text = ", ".join(row.get("source_families") or ()) or "All sources"
+                values = (
+                    "●" if row.get("enabled") else "○", row.get("name"),
+                    f"{row.get('watch_kind')}: {row.get('pattern')}", source_text,
+                    row.get("priority"), _when(row.get("expires_ts")),
+                    _when(row.get("last_match_ts")), row.get("health"),
+                )
+                for col, value in enumerate(values):
+                    self._put(self.watches_table, i, col, value, data=row if col == 0 else None)
+        finally:
+            self.watches_table.blockSignals(False)
+            self.watches_table.setUpdatesEnabled(True)
         if not self._watch_rows:
             self.watch_status.setText("No watches yet. Add a bounded station watch.")
 
@@ -773,11 +813,18 @@ class FioSpotterTab(QWidget):
         self.expect_policy.setCurrentIndex(max(0, self.expect_policy.findData(selected)))
         self.policy_manage.setCurrentIndex(max(0, self.policy_manage.findData(selected_manage)))
         self.expect_policy.blockSignals(False); self.policy_manage.blockSignals(False)
-        table = self.expect_entries_table; table.setRowCount(len(self._entry_rows))
-        for i, row in enumerate(self._entry_rows):
-            values = ("●" if row.get("enabled") else "○", row.get("expect_key"), self._expect_access_summary(row), "●" if row.get("auto_reply_enabled") else "○", row.get("max_replies"), row.get("cooldown_seconds"), row.get("source_radio_id") or row.get("source_scope"))
-            for col, value in enumerate(values): self._put(table, i, col, value, data=row if col == 0 else None)
-        self._refresh_runtime_state()
+        table = self.expect_entries_table
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.clearContents()
+            table.setRowCount(len(self._entry_rows))
+            for i, row in enumerate(self._entry_rows):
+                values = ("●" if row.get("enabled") else "○", row.get("expect_key"), self._expect_access_summary(row), "●" if row.get("auto_reply_enabled") else "○", row.get("max_replies"), row.get("cooldown_seconds"), row.get("source_radio_id") or row.get("source_scope"))
+                for col, value in enumerate(values): self._put(table, i, col, value, data=row if col == 0 else None)
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
         self._refresh_expect_history()
 
     @staticmethod
@@ -809,12 +856,21 @@ class FioSpotterTab(QWidget):
             dispatch_rows = list_expect_dispatch_audit(limit=_MAX_ROWS)
         except Exception:
             runtime_rows, dispatch_rows = [], []
-        self.expect_requests_table.setRowCount(min(_MAX_ROWS, len(runtime_rows)))
-        for i, row in enumerate(runtime_rows[:_MAX_ROWS]):
-            for col, value in enumerate((_when(row.get("created_ts")), row.get("decision"), row.get("expect_key"), row.get("requesting_callsign"), row.get("reason"))): self._put(self.expect_requests_table, i, col, value)
-        self.expect_replies_table.setRowCount(min(_MAX_ROWS, len(dispatch_rows)))
-        for i, row in enumerate(dispatch_rows[:_MAX_ROWS]):
-            for col, value in enumerate((_when(row.get("created_ts")), row.get("decision"), row.get("reply_radio_id"), row.get("transmitted_text"))): self._put(self.expect_replies_table, i, col, value)
+        for table in (self.expect_requests_table, self.expect_replies_table):
+            table.setUpdatesEnabled(False)
+            table.blockSignals(True)
+            table.clearContents()
+        try:
+            self.expect_requests_table.setRowCount(min(_MAX_ROWS, len(runtime_rows)))
+            for i, row in enumerate(runtime_rows[:_MAX_ROWS]):
+                for col, value in enumerate((_when(row.get("created_ts")), row.get("decision"), row.get("expect_key"), row.get("requesting_callsign"), row.get("reason"))): self._put(self.expect_requests_table, i, col, value)
+            self.expect_replies_table.setRowCount(min(_MAX_ROWS, len(dispatch_rows)))
+            for i, row in enumerate(dispatch_rows[:_MAX_ROWS]):
+                for col, value in enumerate((_when(row.get("created_ts")), row.get("decision"), row.get("reply_radio_id"), row.get("transmitted_text"))): self._put(self.expect_replies_table, i, col, value)
+        finally:
+            for table in (self.expect_requests_table, self.expect_replies_table):
+                table.blockSignals(False)
+                table.setUpdatesEnabled(True)
 
     def _load_selected_entry(self) -> None:
         selected = self.expect_entries_table.selectedItems()
@@ -945,11 +1001,15 @@ class FioSpotterTab(QWidget):
             name="fioSpotterFormsTable",
         )
         forms_header = self.forms_table.horizontalHeader()
-        forms_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        forms_header.setSectionResizeMode(0, QHeaderView.Interactive)
         forms_header.setSectionResizeMode(1, QHeaderView.Stretch)
-        forms_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        forms_header.setSectionResizeMode(2, QHeaderView.Interactive)
         for column in range(3, 8):
-            forms_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            forms_header.setSectionResizeMode(column, QHeaderView.Interactive)
+        self.forms_table.setColumnWidth(0, 90)
+        self.forms_table.setColumnWidth(2, 120)
+        for column in range(3, 8):
+            self.forms_table.setColumnWidth(column, 65)
         self.forms_table.itemSelectionChanged.connect(self._preview_selected_form)
         layout.addWidget(self.forms_table, 1)
         action_row = QHBoxLayout()
@@ -1009,23 +1069,30 @@ class FioSpotterTab(QWidget):
             f"Forms folder: {path or 'Not configured'} — {len(mappings)} catalog entries "
             f"(bounded to {_MAX_ROWS}). Select which FIO services receive each form, then Save mappings."
         )
-        self.forms_table.setRowCount(len(mappings))
-        for row_index, mapping in enumerate(mappings):
-            row = dict(mapping)
-            row["path"] = paths.get(_text(row.get("form_code")), "")
-            self._put(self.forms_table, row_index, 0, row.get("form_code"), data=row)
-            self._put(self.forms_table, row_index, 1, row.get("title"))
-            purpose = QComboBox()
-            purpose.setAccessibleName(f"Purpose for {_text(row.get('form_code'))}")
-            purpose.addItems(list(PURPOSE_OPTIONS))
-            purpose.setCurrentText(_text(row.get("purpose")))
-            self.forms_table.setCellWidget(row_index, 2, purpose)
-            for column, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
-                item = QTableWidgetItem("")
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked if bool(row.get(key)) else Qt.Unchecked)
-                item.setToolTip(f"Use {_text(row.get('form_code'))} for {key}")
-                self.forms_table.setItem(row_index, column, item)
+        self.forms_table.setUpdatesEnabled(False)
+        self.forms_table.blockSignals(True)
+        try:
+            self.forms_table.clearContents()
+            self.forms_table.setRowCount(len(mappings))
+            for row_index, mapping in enumerate(mappings):
+                row = dict(mapping)
+                row["path"] = paths.get(_text(row.get("form_code")), "")
+                self._put(self.forms_table, row_index, 0, row.get("form_code"), data=row)
+                self._put(self.forms_table, row_index, 1, row.get("title"))
+                purpose = QComboBox()
+                purpose.setAccessibleName(f"Purpose for {_text(row.get('form_code'))}")
+                purpose.addItems(list(PURPOSE_OPTIONS))
+                purpose.setCurrentText(_text(row.get("purpose")))
+                self.forms_table.setCellWidget(row_index, 2, purpose)
+                for column, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
+                    item = QTableWidgetItem("")
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked if bool(row.get(key)) else Qt.Unchecked)
+                    item.setToolTip(f"Use {_text(row.get('form_code'))} for {key}")
+                    self.forms_table.setItem(row_index, column, item)
+        finally:
+            self.forms_table.blockSignals(False)
+            self.forms_table.setUpdatesEnabled(True)
         if not mappings:
             self.forms_preview.setPlainText("No MCF forms are configured. Choose the folder used by FIO Spotter, then refresh the catalog.")
 

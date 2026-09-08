@@ -16,7 +16,7 @@ from freqinout.core.js8_expect_store import (
 from freqinout.core.js8_msg_auth import sign_js8_text
 from freqinout.core.js8_msg_auth_store import MSG_AUTH_SCOPE_SIGNING, load_msg_auth_keys
 from freqinout.core.js8_send_service import JS8SendResult, send_js8_message_guarded
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
 
 
@@ -82,9 +82,12 @@ def list_expect_dispatch_audit(
     limit: int = 50,
 ) -> list[dict[str, object]]:
     path = Path(db_path) if db_path is not None else default_expect_db_path()
-    conn = connect_sqlite(path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_js8_expect_tables(conn)
+        if not table_exists(conn, "js8_expect_dispatch_audit"):
+            return []
         rows = conn.execute(
             """
             SELECT id, event_id, expect_entry_id, expect_key, source_radio_id, source_js8_instance_id,

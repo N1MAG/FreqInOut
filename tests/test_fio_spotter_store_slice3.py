@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
@@ -120,3 +121,34 @@ def test_activity_query_is_source_filtered_newest_first_and_bounded(tmp_path: Pa
     assert len(rows) == MAX_ACTIVITY_ROWS
     assert rows[0]["message_id"] == f"spotter:{MAX_ACTIVITY_ROWS + 24}"
     assert all(row["source_family"] == "spotter" for row in rows)
+
+
+def test_activity_read_remains_nonblocking_while_ingest_writer_is_active(tmp_path: Path) -> None:
+    db = tmp_path / "nets.db"
+    source = MessageSourceRecord(source_id="spotter", source_family="spotter")
+    upsert_projected_message(
+        db,
+        source=source,
+        message=MessageProjectionRecord(
+            message_id="spotter:one",
+            canonical_key="spotter:one",
+            content_hash="hash:one",
+            primary_source_id="spotter",
+            source_family="spotter",
+            event_ts=1.0,
+            received_ts=1.0,
+        ),
+    )
+    writer = sqlite3.connect(db)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE message_projection SET summary='pending' WHERE message_id='spotter:one'")
+        started = time.perf_counter()
+        rows = list_spotter_activity(db_path=db)
+        elapsed = time.perf_counter() - started
+    finally:
+        writer.rollback()
+        writer.close()
+    assert [row["message_id"] for row in rows] == ["spotter:one"]
+    assert elapsed < 0.5

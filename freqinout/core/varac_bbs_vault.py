@@ -20,7 +20,7 @@ from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
 from freqinout.core.db_initializer import _ensure_flamp_dynamic_tables
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
 from freqinout.core.varac_bbs_library_store import (
     bbs_location_catalog_source_dir,
     bbs_library_db_path_from_settings,  # compatibility export; runtime paths are explicit below
@@ -2425,9 +2425,13 @@ def flamp_transfer_index_status(
 ) -> Optional[Dict[str, object]]:
     """Return the last source-scoped background projection result."""
 
-    conn = connect_sqlite(Path(db_path))
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_flamp_dynamic_tables(conn)
+        if not table_exists(conn, "flamp_transfer_state_scans"):
+            return None
         row = conn.execute(
             """
             SELECT relay_dir, scan_success, file_count, error_text, scanned_ts
@@ -2458,9 +2462,13 @@ def list_flamp_transfer_index_statuses(
 ) -> List[Dict[str, object]]:
     """Bounded status rows for FIO Spotter administration."""
 
-    conn = connect_sqlite(Path(db_path))
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path)
     try:
-        _ensure_flamp_dynamic_tables(conn)
+        if not table_exists(conn, "flamp_transfer_state_scans"):
+            return []
         rows = conn.execute(
             """
             SELECT source_radio_id, source_js8_instance_id, relay_dir,

@@ -686,6 +686,14 @@ socket-send behavior remain out of scope.
 - Opening FIO Spotter does not construct or load its history until first use.
   Each browser tab uses bounded indexed queries and shows an explicit result
   scope; changing chips does not rebuild unrelated tabs.
+- FIO Spotter list readers use query-only connections and never run schema,
+  index, or journal-mode mutations. Startup owns migrations. Screen
+  reactivation does not repeat an already-loaded tab query; explicit Refresh
+  remains the operator-controlled update path.
+- Bounded table replacement is painted as one batch. Live
+  `ResizeToContents` sizing is prohibited on populated Spotter tables because
+  it can recalculate geometry after every inserted cell. Activity timing
+  records query and render components separately in the performance log.
 - Dynamic Q lookup is indexed and bounded, request evaluation and transport run
   off the GUI thread, and the Station Control Bar remains responsive during
   import, history refresh, or Expect dispatch.

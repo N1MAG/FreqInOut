@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from freqinout.core.js8_expect_store import default_expect_db_path
-from freqinout.core.message_projection_store import list_projected_messages
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.perf_metrics import PerfSpan
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly, table_exists
 
 
 WATCH_KINDS = ("callsign", "group", "topic", "keyword", "status", "location")
@@ -170,9 +170,12 @@ def list_spotter_watches(
     *, db_path: str | Path | None = None, enabled_only: bool = False, limit: int = 200
 ) -> list[dict[str, Any]]:
     path = _db_path(db_path)
-    conn = connect_sqlite(path, row_factory=sqlite3.Row)
+    if not path.exists():
+        return []
+    conn = connect_sqlite_readonly(path, row_factory=sqlite3.Row)
     try:
-        ensure_fio_spotter_schema(conn)
+        if not table_exists(conn, "fio_spotter_watches"):
+            return []
         where = "WHERE enabled != 0" if enabled_only else ""
         rows = conn.execute(
             f"""
@@ -263,12 +266,57 @@ def list_spotter_activity(
     received_after_ts: float = 0.0,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    rows = list_projected_messages(
-        _db_path(db_path),
-        source_families=source_families,
-        group_name=group_name,
-        search_text=search_text,
-        received_after_ts=received_after_ts,
-        limit=max(1, min(MAX_ACTIVITY_ROWS, int(limit or 200))),
-    )
+    path = _db_path(db_path)
+    if not path.exists():
+        return []
+    requested_sources = sorted({
+        str(value or "").strip().lower()
+        for value in source_families
+        if str(value or "").strip()
+    })
+    clauses = ["deleted=0", "archived=0"]
+    params: list[object] = []
+    if len(requested_sources) == 1:
+        clauses.append("source_family=?")
+        params.append(requested_sources[0])
+    elif requested_sources:
+        clauses.append(f"source_family IN ({','.join('?' for _ in requested_sources)})")
+        params.extend(requested_sources)
+    if group_name:
+        clauses.append("group_name=?")
+        params.append(str(group_name).lstrip("@"))
+    if search_text:
+        clauses.append("search_text LIKE ?")
+        params.append(f"%{str(search_text).lower()}%")
+    if received_after_ts:
+        clauses.append("COALESCE(NULLIF(received_ts, 0), event_ts, 0) >= ?")
+        params.append(float(received_after_ts))
+    bounded_limit = max(1, min(MAX_ACTIVITY_ROWS, int(limit or 200)))
+    params.append(bounded_limit)
+    with PerfSpan(
+        "fio_spotter.activity_query",
+        meta={"limit": bounded_limit, "sources": requested_sources},
+        min_ms=10.0,
+    ):
+        conn = connect_sqlite_readonly(path, row_factory=sqlite3.Row)
+        try:
+            if not table_exists(conn, "message_projection"):
+                return []
+            rows = conn.execute(
+                f"""
+                SELECT message_id, source_family, source_label, radio_id,
+                       app_instance_id, message_type, display_type, status,
+                       severity, read_state, from_call, to_call, group_name,
+                       state_code, grid, event_ts, received_ts, subject, summary,
+                       body_preview AS preview, body_preview AS body_text,
+                       actionable, operator_attention, recommended_action
+                  FROM message_projection
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY event_ts DESC, received_ts DESC, message_id DESC
+                 LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        finally:
+            conn.close()
     return [{key: row[key] for key in row.keys()} for row in rows]
