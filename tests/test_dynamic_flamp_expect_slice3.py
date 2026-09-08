@@ -1030,6 +1030,94 @@ def test_dynamic_q_replies_are_database_only_and_use_receiving_js8_source(
         settings.close()
 
 
+def test_dynamic_flamp_reply_clears_selected_target_before_send(monkeypatch, tmp_path: Path) -> None:
+    config_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(config_root))
+    settings = SettingsManager()
+    settings.set("js8_expect_dynamic_flamp_enabled", True)
+    settings.set("js8_expect_unattended_auto_reply_enabled", True)
+    settings.save()
+    db_path = config_root / "config" / "freqinout_nets.db"
+    save_expect_entry(
+        {
+            "expect_key": "Q",
+            "source_scope": "all",
+            "allowed_callsigns": ["K1ABC"],
+            "enabled": True,
+            "auto_reply_enabled": True,
+            "unattended_auto_reply_enabled": True,
+        },
+        db_path=db_path,
+    )
+    relay = tmp_path / "relay"
+    relay.mkdir()
+    settings.set("varac_bbs_vault_flamp_relay_dir", str(relay))
+    settings.save()
+    _initialize_flamp_projection(db_path)
+    _relay_file(relay / "970F_payload.b2s", "970F", 4, [1, 2, 3, 4])
+    index_flamp_transfer_state(
+        relay,
+        db_path=db_path,
+        source_radio_id="7",
+        source_js8_instance_id="fio-a",
+    )
+    selected = {"value": "@OLD"}
+
+    def _selected_response(req):
+        return {"type": "RX.CALL_SELECTED", "value": selected["value"], "params": dict(req.get("params") or {})}
+
+    def _set_selected(req):
+        selected["value"] = str(req.get("value") or "")
+        return {"type": "RX.CALL_SELECTED", "value": selected["value"], "params": dict(req.get("params") or {})}
+
+    server = _safe_server(
+        **{
+            "RX.GET_CALL_SELECTED": _selected_response,
+            "RX.SET_SELECTED_CALL": _set_selected,
+            "TX.SET_SELECTED_CALL": _set_selected,
+            "STATION.SET_SELECTED_CALL": _set_selected,
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    ingestor = MessageIngestor(
+        settings,
+        expect_dispatch_client_factory=lambda radio, instance: (
+            client if (radio, instance) == ("7", "fio-a") else None
+        ),
+        expect_auto_reply_enabled=True,
+    )
+    try:
+        ingestor._handle_dynamic_flamp_query(
+            {
+                "q_id": "970F",
+                "confidence": 1.0,
+                "from_call": "K1ABC",
+                "to_call": "N0CALL",
+                "relayed": False,
+                "event_id": "event-970F",
+            },
+            source_radio_id="7",
+            js8_instance_id="fio-a",
+            source_key="js8:fio-a",
+            source_path=None,
+        )
+
+        deadline = time.time() + 1.0
+        while "TX.SEND_MESSAGE" not in [row["type"] for row in server.received] and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert selected["value"] == ""
+        request_types = [row["type"] for row in server.received]
+        assert "RX.SET_SELECTED_CALL" in request_types
+        assert request_types.index("RX.SET_SELECTED_CALL") < request_types.index("TX.SEND_MESSAGE")
+        assert server.received[-1]["type"] == "TX.SEND_MESSAGE"
+        assert server.received[-1]["value"] == "K1ABC Q 970F YES"
+    finally:
+        client.stop()
+        server.stop()
+        settings.close()
+
+
 def test_replayed_old_directed_q_is_held_without_transmit(monkeypatch, tmp_path: Path) -> None:
     config_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(config_root))

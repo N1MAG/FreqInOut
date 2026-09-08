@@ -626,6 +626,20 @@ attention, and Map pins so different screens cannot disagree. Messages remains
 the complete traffic triage surface; FIO Spotter is the administration and
 focused operational browser for Spotter-specific behavior.
 
+All unattended FIO Spotter Expect transmissions use one selected-target safety
+contract. Immediately before preflight, FIO makes a best-effort compatibility
+clear of any stale callsign selected in the receiving JS8Call instance inside
+the existing endpoint-serialized send transaction. It then re-reads target
+state and applies the normal TX-enabled, queue-empty, TX-text-empty, RF Guard,
+access-policy, durable-claim, cooldown, and audit requirements before sending
+the explicitly addressed reply. Official
+JS8Call releases expose selected-target reading but not writing; if the target
+remains selected, FIO holds the reply and tells the operator to deselect it in
+JS8Call. FIO must not merely ignore a selected target, and this compatibility
+attempt must not change manual or operator-confirmed send behavior. The contract
+covers both fixed Expect responses, including form responses, and the dynamic
+FLAMP Q service.
+
 ### Dynamic FLAMP Expect query service
 
 FIO Spotter may explicitly enable a built-in dynamic Expect service for the exact,
@@ -839,6 +853,12 @@ socket-send behavior remain out of scope.
   ingest-owned background projection are the only refresh mechanisms.
 - A restart/replay or concurrent duplicate dynamic request produces one durable
   claim and at most one transmitted reply.
+- A stale JS8Call selected callsign is subject to a compatibility clear inside
+  the serialized unattended Expect send transaction before preflight and before
+  `TX.SEND_MESSAGE`. A supporting/custom endpoint proceeds only after the target
+  reads back empty; an official endpoint that leaves it selected holds with an
+  actionable reason and transmits nothing. Queue, TX-text, and other blocking
+  guards remain cumulative, while manual sends retain their existing policy.
 - The exact `E? Q 970F` fixture covers absent, complete, authoritative partial,
   unknown-total, malformed, wrong-source, paused, RF-guard-held, send-failed,
   duplicate, cooldown, and restart cases.
@@ -1619,6 +1639,29 @@ files plus two environment-skip-only files with no failures across 2,608
 collected tests. Python compilation and `git diff --check` pass. The schema
 migration is additive/idempotent and preserves existing transfer rows; no
 message, rule, policy, operator, radio, or FLAMP source file is modified.
+
+Selected-target autoreply follow-up (2026-09-08): production evidence showed
+that fixed and dynamic Expect evaluation, routing, and source-state lookup could
+all succeed while dispatch was blocked by an unrelated callsign selected in the
+receiving JS8Call UI. Every live unattended FIO Spotter autoreply already
+converges on one dispatcher. That dispatcher now requests selected-target
+clearing from the shared send service, which makes a compatibility attempt
+inside the endpoint transaction lock before normal preflight and the explicitly
+addressed send. Official JS8Call source review confirmed that released versions
+provide only selected-target reading, not writing; therefore stock builds read
+back the unchanged target and hold with an actionable deselect reason. The
+implementation does not use the less-safe selected-target bypass and
+does not change Compose, NCS acknowledgements, pending-message requests, or
+other manual/operator-confirmed transmissions. No other live unattended FIO
+JS8Call autoreply funnel was found; dormant legacy auto-query code remains out
+of scope. Fixed form-Expect and dynamic FLAMP Q end-to-end regressions model an
+endpoint that supports the compatibility setter; a separate stock-compatible
+regression proves an unchanged target blocks with no `TX.SEND_MESSAGE`. The
+affected-area gate passes 219 tests with one environment skip, and the
+authoritative fresh-process repository gate passes all 176 test-bearing files
+plus two environment-skip-only files with no failures across 2,610 collected
+tests. Python compilation and
+`git diff --check` pass. No schema, configuration, or persisted data changes.
 
 ### Slice 4 — Radio launch bundles
 

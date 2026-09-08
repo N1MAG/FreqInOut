@@ -1874,3 +1874,38 @@ plus two environment-skip-only files with no failures across 2,608 collected
 tests. Python compilation, a real FLAMP `b2s` parser check, and
 `git diff --check` pass. No production database or FLAMP source artifact was
 modified.
+
+## 2026-09-08 — Slice 3 follow-up: JS8 selected-target compatibility
+
+The supplied production logs proved that FIO received and evaluated both fixed
+and dynamic Expect traffic but blocked dispatch when JS8Call retained an
+unrelated selected callsign. The live-transmit audit found one unattended FIO
+Spotter funnel: fixed/form Expect and dynamic FLAMP Q both call
+`dispatch_expect_auto_reply`. Manual Compose, NCS acknowledgement, pending
+message query, group/single Spotter, and End Net transmissions are not automatic
+replies and retain their existing operator-confirmation and target safeguards.
+Dormant legacy auto-query branches remain unchanged.
+
+Unattended Expect dispatch now asks the shared guarded-send service to make a
+best-effort compatibility clear of the selected callsign. The attempt,
+target-state verification, remaining preflight, and send stay inside the
+existing per-endpoint transaction lock. Official JS8Call source review found no
+released selected-target setter; stock builds therefore retain the selection,
+and FIO holds with an actionable manual-deselect reason. FIO still
+blocks on disabled TX, queued frames, non-empty TX text, RF Guard, access,
+claim, cooldown, and audit failures; it does not bypass selected-target
+verification. End-to-end tests cover both a fixed FIOSpotter form response and
+a dynamic `E? Q` response against a setter-capable compatibility endpoint. A
+stock-compatible regression proves that an unchanged selected target blocks and
+produces no `TX.SEND_MESSAGE`.
+
+Delegation and review: Terra/high performed the read-only automatic-transmit
+inventory and scope audit; Luna/high made the single bounded dispatcher change;
+Mini/high added the fixed and dynamic end-to-end regressions. The high-reasoning
+primary model defined the concurrency/safety contract, reviewed every delegated
+diff, updated both governing specifications and this work log, and ran final
+integration. The affected-area gate passes 219 tests with one environment skip.
+The authoritative fresh-process repository gate passes all 176 test-bearing
+files plus two environment-skip-only files with no failures across 2,610
+collected tests. Python compilation and `git diff --check` pass. No database,
+configuration, migration, radio, or source artifact was modified.

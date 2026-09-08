@@ -339,9 +339,25 @@ def dispatch_expect_auto_reply(
             )
             return result
 
-    send_result = send_js8_message_guarded(client, response_text, timeout_s=timeout_s)
+    send_result = send_js8_message_guarded(
+        client,
+        response_text,
+        timeout_s=timeout_s,
+        clear_selected_target=True,
+    )
     decision = "sent" if send_result.sent else "blocked"
     reason = send_result.detail
+    if not send_result.sent:
+        selected_target_issue = next(
+            (issue for issue in send_result.preflight.issues if issue.code == "selected_target_present" and issue.blocking),
+            None,
+        )
+        if selected_target_issue is not None:
+            selected_target = str(send_result.preflight.selected_call or "").strip()
+            reason = (
+                f"JS8Call still has selected target '{selected_target}'. "
+                "Deselect it in JS8Call before FIO can send this automatic reply."
+            )
     if sign_detail:
         reason = f"{reason} ({sign_detail})"
     result = ExpectDispatchResult(

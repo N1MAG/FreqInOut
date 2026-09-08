@@ -122,6 +122,40 @@ def test_expect_dispatch_uses_guarded_send_and_audits_blocks(tmp_path: Path) -> 
         server.stop()
 
 
+def test_expect_dispatch_holds_when_js8call_cannot_clear_selected_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "freqinout_nets.db"
+    selected = {"value": "K7OLD"}
+
+    def selected_response(req):
+        return _response("RX.CALL_SELECTED", req, value=selected["value"])
+
+    server = _safe_server(
+        **{"RX.GET_CALL_SELECTED": selected_response}
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        result = dispatch_expect_auto_reply(
+            evaluation=_ready_eval(response_text="K1NEW F!304 OK"),
+            client=client,
+            runtime_unattended_enabled=True,
+            event_id="evt-selected-target",
+            requesting_callsign="K1NEW",
+            db_path=db_path,
+            timeout_s=0.4,
+        )
+
+        assert result.sent is False
+        assert result.decision == "blocked"
+        assert "Deselect it in JS8Call" in result.reason
+        assert "TX.SEND_MESSAGE" not in [row["type"] for row in server.received]
+        audit = list_expect_dispatch_audit(db_path=db_path)
+        assert audit[0]["decision"] == "blocked"
+        assert "Deselect it in JS8Call" in audit[0]["reason"]
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_expect_dispatch_signs_saved_payload_for_actual_target(tmp_path: Path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     shared_key = "MAGNET-MR08-DIRECT-SHARED"

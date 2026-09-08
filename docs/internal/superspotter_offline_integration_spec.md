@@ -88,6 +88,17 @@ uses the same enabled/paused runtime, allow policies, source resolution, RF
 Guard, and dispatch audit. It replies through the JS8 instance that received the
 request and never falls back to another radio.
 
+Fixed and dynamic unattended Expect replies also share one selected-target
+safety rule: within the endpoint-serialized send transaction, FIO makes a
+best-effort compatibility clear of a stale callsign selected in JS8Call and
+verifies that the selected target is then empty during normal preflight before
+sending the explicitly addressed response. Official JS8Call releases expose no
+selected-target setter; if the target reads back unchanged, FIO holds with an
+actionable manual-deselect reason and sends nothing. This is not a bypass; TX
+state, queued traffic, existing TX text, RF Guard, authorization, claim,
+cooldown, and audit protections remain in force. Manual and operator-confirmed
+transmissions retain their existing selected-target behavior.
+
 FIO persists authoritative FLAMP transfer state because current compatibility
 parsers do not reliably retain digit-leading IDs such as `970F` and can mistake
 the highest observed block for a known transfer total. `Q <id> YES` requires a

@@ -12,7 +12,7 @@ from freqinout.core.observation_store import list_observations
 from freqinout.core.operator_identity import change_operator_callsign
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_api_client import JS8ApiClient
-from tests.test_js8_send_service import _safe_server
+from tests.test_js8_send_service import _response, _safe_server
 
 
 def _write_js8_inbox(
@@ -585,7 +585,23 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
         },
         db_path=db_path,
     )
-    server = _safe_server()
+    selected = {"value": "@MAGNET"}
+
+    def _selected_response(req):
+        return _response("RX.CALL_SELECTED", req, value=selected["value"])
+
+    def _set_selected(req):
+        selected["value"] = str(req.get("value") or "")
+        return _response("RX.CALL_SELECTED", req, value=selected["value"])
+
+    server = _safe_server(
+        **{
+            "RX.GET_CALL_SELECTED": _selected_response,
+            "RX.SET_SELECTED_CALL": _set_selected,
+            "TX.SET_SELECTED_CALL": _set_selected,
+            "STATION.SET_SELECTED_CALL": _set_selected,
+        }
+    )
     client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
     requested_sources: list[tuple[str, str]] = []
 
@@ -617,6 +633,10 @@ def test_spotter_js8_event_expect_dispatch_sends_only_when_runtime_enabled(monke
 
         assert imported == 1
         assert requested_sources == [("8", "fio-b")]
+        assert selected["value"] == ""
+        request_types = [row["type"] for row in server.received]
+        assert "RX.SET_SELECTED_CALL" in request_types
+        assert request_types.index("RX.SET_SELECTED_CALL") < request_types.index("TX.SEND_MESSAGE")
         assert server.received[-1]["type"] == "TX.SEND_MESSAGE"
         assert server.received[-1]["value"] == "@MAGNET F!304 OK"
         dispatch = list_expect_dispatch_audit(db_path=db_path)
