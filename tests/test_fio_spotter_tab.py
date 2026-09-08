@@ -30,6 +30,14 @@ class _Settings:
         pass
 
 
+class _RadioStore:
+    def list_device_profiles(self):
+        return [
+            {"id": 7, "name": "FTDX-10", "enabled": 1, "use_js8call": 1, "js8_instance_id": 11},
+            {"id": 8, "name": "IC-7300", "enabled": 1, "use_js8call": 0, "js8_instance_id": None},
+        ]
+
+
 def _app():
     app = QApplication.instance()
     if app is not None and not isinstance(app, QApplication):
@@ -52,7 +60,7 @@ def _set_app_text_scale(app: QApplication, scale: float) -> QFont:
 
 def test_spotter_tab_has_lazy_browser_tabs_in_service_order():
     app = _app()
-    tab = FioSpotterTab(settings=_Settings())
+    tab = FioSpotterTab(settings=_Settings(), radio_store=_RadioStore())
     try:
         assert [tab.tabs.tabText(i) for i in range(tab.tabs.count())] == [
             "Activity", "Watches", "Expect", "Forms", "Imports",
@@ -200,10 +208,7 @@ def test_expect_editor_keeps_narrow_layout_and_text_controls_readable(scale):
             tab.expect_groups,
             tab.expect_blocked,
             tab.expect_trusted_groups,
-            tab.expect_source_scope,
-            tab.expect_source_radio,
-            tab.expect_js8_instance,
-            tab.expect_schedule,
+            tab.expect_radio,
             tab.expect_max,
             tab.expect_cooldown,
             tab.policy_manage,
@@ -325,7 +330,7 @@ def test_expect_editor_typing_and_policy_selection_do_not_requery_after_lazy_loa
         tab.expect_trusted_groups.setText("MR08")
         tab.policy_manage.setCurrentIndex(tab.policy_manage.findData(7))
         tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(7))
-        tab.expect_source_scope.setCurrentText("all")
+        tab.expect_radio.setCurrentIndex(0)
         app.processEvents()
 
         assert counts == initial
@@ -349,18 +354,18 @@ def test_spotter_navigation_helper_uses_internal_route_without_window_setup():
     assert host.opened == [7]
 
 
-def test_expect_editor_persists_policy_source_and_schedule(monkeypatch, tmp_path):
+def test_expect_editor_uses_named_fio_radio_and_hides_routing_details(monkeypatch, tmp_path):
     app = _app()
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     settings = _Settings()
-    tab = FioSpotterTab(settings=settings)
+    tab = FioSpotterTab(settings=settings, radio_store=_RadioStore())
     try:
         tab.tabs.setCurrentIndex(2)
         app.processEvents()
         tab.policy_name.setText("Regional hubs")
         tab.policy_calls.setText("K1ABC")
         tab.policy_groups.setText("@MAGNET")
-        tab.policy_scope.setCurrentText("radio")
+        tab.policy_scope.setCurrentIndex(tab.policy_scope.findData("radio"))
         tab.policy_radios.setText("7")
         tab._save_policy()
         policies = spotter_ui.list_expect_allow_policies()
@@ -370,16 +375,56 @@ def test_expect_editor_persists_policy_source_and_schedule(monkeypatch, tmp_path
         tab.expect_key.setText("INFO")
         tab.expect_reply.setText("STATUS GREEN")
         tab.expect_policy.setCurrentIndex(tab.expect_policy.findData(policies[0]["id"]))
-        tab.expect_source_scope.setCurrentText("radio")
-        tab.expect_source_radio.setText("7")
-        tab.expect_js8_instance.setText("fio-a")
-        tab.expect_schedule.setText("18:00-23:00Z")
+        tab.expect_radio.setCurrentIndex(tab.expect_radio.findData("7"))
         tab.expect_enabled.setChecked(True)
         tab._save_entry()
         entries = spotter_ui.list_expect_entries()
         assert entries[0]["source_radio_id"] == "7"
-        assert entries[0]["js8_instance_id"] == "fio-a"
-        assert entries[0]["auto_tx_schedule"] == "18:00-23:00Z"
+        assert entries[0]["source_scope"] == "radio"
+        assert entries[0]["js8_instance_id"] == ""
+        assert entries[0]["auto_tx_schedule"] == ""
+        assert tab.expect_radio.currentText() == "FTDX-10"
+        assert tab.expect_radio.findData("8") == -1
+        widest_radio = max(
+            tab.expect_radio.fontMetrics().horizontalAdvance(tab.expect_radio.itemText(index))
+            for index in range(tab.expect_radio.count())
+        )
+        assert tab.expect_radio.view().minimumWidth() >= widest_radio
+        labels = [label.text() for label in tab.findChildren(spotter_ui.QLabel)]
+        assert "E? Token" in labels
+        assert "JS8 instance" not in labels
+        assert "Schedule" not in labels
+    finally:
+        tab.deleteLater()
+
+
+def test_expect_editor_defaults_to_all_radios_and_preserves_legacy_routing(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    spotter_ui.save_expect_entry({
+        "expect_key": "INFO",
+        "response_text": "STATUS GREEN",
+        "source_scope": "radio",
+        "source_radio_id": "7",
+        "js8_instance_id": "fio-a",
+        "auto_tx_schedule": "18:00-23:00Z",
+        "enabled": True,
+    })
+    tab = FioSpotterTab(settings=_Settings(), radio_store=_RadioStore())
+    try:
+        tab.tabs.setCurrentIndex(2)
+        app.processEvents()
+        tab._clear_entry()
+        assert tab.expect_radio.currentData() == ""
+        assert tab.expect_radio.currentText().startswith("All JS8 radios")
+
+        tab.expect_entries_table.selectRow(0)
+        app.processEvents()
+        assert tab.expect_radio.currentData() == "7"
+        tab._save_entry()
+        entry = spotter_ui.list_expect_entries()[0]
+        assert entry["js8_instance_id"] == "fio-a"
+        assert entry["auto_tx_schedule"] == "18:00-23:00Z"
     finally:
         tab.deleteLater()
 
@@ -459,6 +504,13 @@ def test_forms_folder_and_import_preview_use_canonical_settings_keys(tmp_path, m
         assert "preserved" in tab.forms_state.text().lower()
         tab.refresh_forms()
         assert tab.forms_table.rowCount() == 1
+        purpose_combo = tab.forms_table.cellWidget(0, 2)
+        widest_purpose = max(
+            purpose_combo.fontMetrics().horizontalAdvance(purpose_combo.itemText(index))
+            for index in range(purpose_combo.count())
+        )
+        assert purpose_combo.view().minimumWidth() >= widest_purpose
+        assert tab.forms_table.columnWidth(2) >= widest_purpose + 40
         tab.forms_table.selectRow(0)
         tab._auto_classify_forms()
         tab._save_form_mappings()

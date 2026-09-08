@@ -1681,3 +1681,33 @@ capture was rerendered after the event queue drained and the stable views show
 no clipping or page-level horizontal overflow. No Mesh device setting,
 pairing, channel, or firmware state was changed. The physical Linux T1000-E
 retry gate remains open.
+
+## 2026-09-07 — Slice 3 follow-up: Expect radio workflow and dropdown legibility
+
+The Expect editor now labels the command field **E? Token**. New rules default
+to `All JS8 radios — reply on receiving radio`; a radio restriction is selected
+by the configured FIO radio name and is limited to profiles with JS8Call
+capability. The rules table uses the same human-readable radio name. The former
+operator-facing Source Scope, numeric Radio ID, JS8 Instance, and Schedule rows
+are removed. FIO derives routing from the receiving radio. When an existing
+rule is saved without changing its radio selection, legacy instance/schedule
+metadata is preserved; changing the radio deliberately adopts current FIO
+routing with no stale per-rule override. No migration or device state change is
+involved.
+
+All QComboBox instances owned by FIO Spotter were audited. Watch type, match,
+and priority; Expect policy, radio, policy management, and policy scope; and
+per-form purpose selectors now expand within their layout while their popup is
+sized to the longest bounded item and every item has a tooltip. This avoids
+clipped choices without introducing a page-level minimum width at compact or
+Large Text sizes.
+
+Focused verification passes 73 FIO Spotter/Expect runtime, dispatch, store,
+dynamic FLAMP Q, and access tests. Compact 900x700 rendering at 125% text scale
+was inspected at the top and editor scroll positions: the page has no
+horizontal overflow, the radio choice is fully readable, and removed routing
+controls do not leave dead space. The authoritative fresh-process repository
+gate passes all 175 test-bearing files plus 2 environment-skip-only files with
+no failure across the 2,582 collected tests. The known long-lived monolithic Qt
+process still reaches the pre-existing LogViewer/thread lifetime segmentation
+fault after 66%; the same files pass in isolation.

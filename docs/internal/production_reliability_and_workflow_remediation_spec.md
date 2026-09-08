@@ -542,11 +542,15 @@ silos. Tabs proceed left to right:
    expiry, last match, count, and health. Add, edit, disable, delete, and test
    are first-class actions.
 3. **Expect** — one master rule list plus a readable detail/editor area for
-   request token, reply, allowed callers/groups, blocked callers, source/radio,
-   maximum replies, cooldown, expiry/schedule, enabled state, and separate
-   unattended auto-reply permission. Persistent chips show whether replies and
-   automatic transmission are active or paused. A Requests/Replies history
-   view shows request, decision, reason, source, age, and transmitted response.
+   **E? Token**, reply, allowed callers/groups, blocked callers, radio scope,
+   maximum replies, cooldown, enabled state, and separate unattended auto-reply
+   permission. `All JS8 radios` is the default and recommended scope; an
+   exceptional rule may be restricted by selecting a known FIO radio name.
+   JS8 instance IDs and per-rule schedules are routing details derived from the
+   receiving radio and are not operator-facing editor fields. Persistent chips
+   show whether replies and automatic transmission are active or paused. A
+   Requests/Replies history view shows request, decision, reason, source, age,
+   and transmitted response.
 4. **Forms** — FIO's known MCF/form catalog, categories, mappings, validation,
    import folder, and compose/preview actions. Human names lead; protocol codes
    remain supporting detail.
@@ -595,6 +599,10 @@ The editor completes the current comma-delimited token using current and former
 callsigns or roster groups. At narrow widths, the rule list/editor and audit
 panes stack vertically inside the page scroll area; no page-level horizontal
 scrolling or clipped controls are acceptable in Normal or Large Text modes.
+Every Spotter combo box uses an expanding closed control and a content-sized,
+bounded popup so the full choice is readable without forcing a wide minimum
+page size. This applies to Watch type/match/priority, Expect rule and policy
+selection, radio selection, policy scope, and Forms purpose selection.
 The reusable allow policy is explicitly optional and its empty choice explains
 that rule-level access fields remain active. Saving a reusable policy keeps it
 selected for the rule being edited and confirms that **Save rule** attaches it.
@@ -1443,6 +1451,19 @@ environment skips across all 177 test files. Dark/Large Text 900x560 and
 Light/Normal 1400x900 visual gates are stable with no page-level horizontal
 overflow. The Linux T1000-E hardware retry gate remains open; no Mesh device
 configuration or pairing state changed in this follow-up.
+
+Expect radio-workflow follow-up (2026-09-07): the rule editor now names the
+protocol field **E? Token** and defaults new rules, including dynamic FLAMP Q,
+to `All JS8 radios — reply on receiving radio`. The optional restriction lists
+only configured FIO radios with JS8Call capability and displays the human radio
+name in both the selector and rule list. Internal radio IDs are never requested
+from the operator. JS8 instance and schedule controls are removed from the
+normal editor; new or deliberately retargeted rules use the selected radio's
+current routing, while an unchanged legacy rule retains its stored routing
+metadata. An unavailable legacy radio remains visible as such rather than
+silently changing scope. All Spotter dropdowns now have flexible closed widths,
+bounded content-sized popup widths, and item tooltips. This is a UI/persistence
+adapter change only and requires no schema migration.
 
 ### Slice 4 — Radio launch bundles
 
