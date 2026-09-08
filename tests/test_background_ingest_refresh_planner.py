@@ -30,6 +30,10 @@ class _PlannerOnlyController(BackgroundIngestController):
         self.submitted.append(str(job_name))
         job_func()
 
+    def _submit_realtime_job(self, job_name, job_func):  # type: ignore[override]
+        self.submitted.append(str(job_name))
+        job_func()
+
 
 def _source(tmp_path, *, family: str = "js8call", source_type: str = "file") -> IngestSourceDescriptor:
     path = tmp_path / f"{family}-{source_type}.txt"
@@ -92,6 +96,32 @@ def test_background_message_ingest_force_bypasses_unchanged_skip(tmp_path):
 
     assert calls["messages"] == 2
     assert controller.submitted == ["messages", "messages"]
+
+
+def test_dynamic_expect_tail_runs_when_source_changes_even_if_runtime_is_disabled(tmp_path):
+    path = tmp_path / "DIRECTED.TXT"
+    path.write_text("one\n", encoding="utf-8")
+    source = IngestSourceDescriptor(
+        source_id="js8-directed-radio-1",
+        family="js8call",
+        source_type="file",
+        label="FIO-A DIRECTED",
+        radio_id="1",
+        path=str(path),
+        metadata={"role": "directed"},
+    )
+    controller = _PlannerOnlyController(IngestSourceInventory(ingest_sources=(source,)))
+    controller._running = True
+    calls = {"expect": 0}
+    controller._run_dynamic_expect_job = lambda: calls.__setitem__("expect", calls["expect"] + 1)  # type: ignore[method-assign]
+
+    controller._ingest_dynamic_expect()
+    controller._ingest_dynamic_expect()
+    path.write_text("one\ntwo\n", encoding="utf-8")
+    controller._ingest_dynamic_expect()
+
+    assert calls["expect"] == 2
+    assert controller.submitted == ["dynamic_expect", "dynamic_expect"]
 
 
 def test_background_varac_ingest_runs_periodic_quiet_pass(tmp_path):

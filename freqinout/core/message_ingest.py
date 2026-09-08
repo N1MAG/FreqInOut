@@ -330,13 +330,14 @@ class MessageIngestor:
                     last_pos = fh.tell()
                     dynamic = self._parse_dynamic_directed_line(line)
                     if dynamic:
-                        self._handle_dynamic_flamp_query(
-                            dynamic,
-                            source_radio_id=source_radio_id,
-                            js8_instance_id=js8_instance_id,
-                            source_key=source_key,
-                            source_path=directed_path,
-                        )
+                        if evaluate_expect:
+                            self._handle_dynamic_flamp_query(
+                                dynamic,
+                                source_radio_id=source_radio_id,
+                                js8_instance_id=js8_instance_id,
+                                source_key=source_key,
+                                source_path=directed_path,
+                            )
                         continue
                     parsed = self._parse_directed_spotter_line(line)
                     if parsed:
@@ -460,6 +461,74 @@ class MessageIngestor:
             log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
         return imported
 
+    def ingest_dynamic_flamp_from_directed(
+        self,
+        *,
+        directed_path: Path,
+        source_radio_id: object,
+        js8_instance_id: object,
+        source_key: object = "",
+        offset_key: str,
+        fallback_offset_key: str = "",
+    ) -> int:
+        """Tail only dynamic FLAMP requests from a directed-message file.
+
+        This path deliberately avoids general message projection and schema
+        work so unattended queries can be noticed at a short cadence without
+        making the rest of message ingestion expensive.
+        """
+        path = Path(directed_path).expanduser()
+        if not path.exists():
+            return 0
+        raw_offset = self.settings.get(offset_key, None)
+        if raw_offset is None and fallback_offset_key:
+            raw_offset = self.settings.get(fallback_offset_key, 0)
+        try:
+            offset = int(raw_offset or 0)
+        except Exception:
+            offset = 0
+        try:
+            size_now = path.stat().st_size
+            if offset < 0 or offset > size_now:
+                offset = 0
+            recognized = 0
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                if offset:
+                    fh.seek(offset)
+                last_pos = fh.tell()
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    # Do not checkpoint an in-progress append. JS8Call records
+                    # are newline-delimited; the next poll can read it whole.
+                    if not line.endswith(("\n", "\r")) and fh.tell() >= size_now:
+                        break
+                    last_pos = fh.tell()
+                    parsed = self._parse_dynamic_directed_line(line)
+                    if parsed is None:
+                        continue
+                    recognized += 1
+                    self._handle_dynamic_flamp_query(
+                        parsed,
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        source_key=source_key,
+                        source_path=path,
+                    )
+            self.settings.set(offset_key, last_pos)
+            if hasattr(self.settings, "save"):
+                self.settings.save()
+            return recognized
+        except Exception as exc:
+            log.warning(
+                "MessageIngest: dynamic FLAMP directed tail failed source=%s path=%s: %s",
+                str(source_key or js8_instance_id or source_radio_id or "unknown"),
+                path,
+                exc,
+            )
+            return 0
+
     def ingest_spotter_from_js8_events(
         self,
         messages: Iterable[Dict[str, Any]],
@@ -476,13 +545,14 @@ class MessageIngestor:
         for event in list(messages or []):
             dynamic = self._parse_dynamic_js8_event(event)
             if dynamic:
-                self._handle_dynamic_flamp_query(
-                    dynamic,
-                    source_radio_id=source_radio_id,
-                    js8_instance_id=js8_instance_id,
-                    source_key=source_key,
-                    source_path=None,
-                )
+                if evaluate_expect:
+                    self._handle_dynamic_flamp_query(
+                        dynamic,
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        source_key=source_key,
+                        source_path=None,
+                    )
                 continue
             parsed = self._parse_js8_spotter_event(event)
             if parsed:
@@ -766,7 +836,7 @@ class MessageIngestor:
                 )
                 log.debug("MessageIngest: Expect auto-reply client factory returned no client for radio=%s js8=%s.", reply_radio_id, reply_js8_instance_id)
                 return
-            dispatch_expect_auto_reply(
+            dispatch_result = dispatch_expect_auto_reply(
                 evaluation=evaluation,
                 client=client,
                 runtime_unattended_enabled=True,
@@ -780,6 +850,15 @@ class MessageIngestor:
                 claim_q_id=claim_q_id,
                 claim_already_acquired=claim is not None,
             )
+            log.info(
+                "FIO Spotter Expect: dispatch decision=%s key=%s from=%s radio=%s js8=%s reason=%s",
+                dispatch_result.decision,
+                str(evaluation.expect_key or ""),
+                str(requesting_callsign or ""),
+                reply_radio_id,
+                reply_js8_instance_id,
+                dispatch_result.reason,
+            )
         except Exception as exc:
             if claim is not None:
                 complete_expect_request_claim(
@@ -789,7 +868,7 @@ class MessageIngestor:
                     db_path=db_path,
                     retry_after_seconds=30,
                 )
-            log.debug("MessageIngest: Expect auto-reply dispatch failed for %s: %s", event_id, exc)
+            log.warning("MessageIngest: Expect auto-reply dispatch failed for %s: %s", event_id, exc)
 
     def _db_path(self) -> Path | None:
         try:
@@ -1026,7 +1105,7 @@ class MessageIngestor:
         if query is None:
             target_token = target
             prefixed = re.fullmatch(
-                rf"\s*{re.escape(target_token)}\s*[>:]?\s+(E\?\s+Q\s+[0-9A-F]{{4}})\s*",
+                rf"\s*{re.escape(target_token)}\s*[>:]?\s+(E\?\s+Q\s*[0-9A-F]{{4}})\s*",
                 text,
                 flags=re.IGNORECASE,
             )
@@ -1134,6 +1213,15 @@ class MessageIngestor:
             target_group=target,
             db_path=db_path,
         )
+        log.info(
+            "FIO Spotter Expect: held dynamic FLAMP request q=%s from=%s target=%s radio=%s js8=%s reason=%s",
+            q_id,
+            from_call,
+            target,
+            str(source_radio_id or ""),
+            str(js8_instance_id or ""),
+            reason,
+        )
 
     def _handle_dynamic_flamp_query(
         self,
@@ -1151,6 +1239,14 @@ class MessageIngestor:
         db_path = self._db_path()
         if not q_id or not event_id or not from_call or not target:
             return
+        log.info(
+            "FIO Spotter Expect: received dynamic FLAMP request q=%s from=%s target=%s radio=%s js8=%s",
+            q_id,
+            from_call,
+            target,
+            str(source_radio_id or ""),
+            str(js8_instance_id or ""),
+        )
         event_id = f"{event_id}|radio={str(source_radio_id or '').strip()}|js8={str(js8_instance_id or '').strip()}|from={from_call}|to={target}|q={q_id}"
         received_ts = float(parsed.get("utc_ts") or time.time())
         request_age = time.time() - received_ts

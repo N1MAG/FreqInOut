@@ -96,7 +96,10 @@ LIST_Q_RE = re.compile(r"^LIST\s+Q\s*$", re.IGNORECASE)
 LIST_BLOCKS_RE = re.compile(r"^(?:LIST\s+(?:BLKS|BLOCKS)\s+|LIST\s+)([A-F0-9]{4})\s*$", re.IGNORECASE)
 BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([0-9][0-9,\s]*?)\s*([A-F0-9]{4})\s*$", re.IGNORECASE)
 INVALID_BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
-DYNAMIC_FLAMP_QUERY_RE = re.compile(r"^\s*E\?\s+Q\s+([0-9A-F]{4})\s*$", re.IGNORECASE)
+# JS8Spotter operators commonly omit the space between the Q token and the
+# four-character FLAMP identifier.  Keep the command otherwise exact so a
+# conversational mention cannot trigger unattended transmission.
+DYNAMIC_FLAMP_QUERY_RE = re.compile(r"^\s*E\?\s+Q\s*([0-9A-F]{4})\s*$", re.IGNORECASE)
 ALIAS_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:/+\-]{0,31}$")
 
 

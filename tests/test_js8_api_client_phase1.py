@@ -417,6 +417,33 @@ def test_native_client_send_one_way_command() -> None:
         server.stop()
 
 
+def test_native_client_correlates_standard_response_without_request_id() -> None:
+    server = _FakeJs8Server(
+        {
+            "TX.GET_TEXT": {
+                "type": "TX.TEXT",
+                "value": "",
+                "params": {},
+            }
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        response = client.request(
+            "TX.GET_TEXT",
+            expect_types=("TX.TEXT",),
+            timeout_s=0.4,
+        )
+
+        assert response.type == "TX.TEXT"
+        assert response.id is None
+        assert client.status_snapshot().pending_request_count == 0
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_probe_capabilities_classifies_full_api() -> None:
     def version_response(request: Mapping[str, Any]) -> Dict[str, Any]:
         return _response("STATION.VERSION", request, {"VERSION": "3.0.2"})

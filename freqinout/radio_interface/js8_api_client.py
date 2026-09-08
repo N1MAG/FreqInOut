@@ -222,6 +222,7 @@ class JS8ApiClient:
         self._state_lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._pending: Dict[str, "queue.Queue[JS8ApiMessage]"] = {}
+        self._pending_expected: Dict[str, frozenset[str]] = {}
         self._listeners: List[Callable[[JS8ApiMessage], None]] = []
         self._events: "queue.Queue[JS8ApiMessage]" = queue.Queue()
         self._next_id = int(time.time() * 1000) % 1_000_000_000
@@ -331,9 +332,15 @@ class JS8ApiClient:
         msg_id = self._allocate_id()
         request_params = dict(params or {})
         request_params["_ID"] = msg_id
+        expected = frozenset(
+            str(item or "").strip().upper()
+            for item in (expect_types or ())
+            if str(item or "").strip()
+        )
         waiter: "queue.Queue[JS8ApiMessage]" = queue.Queue(maxsize=1)
         with self._state_lock:
             self._pending[str(msg_id)] = waiter
+            self._pending_expected[str(msg_id)] = expected
         try:
             self._send({"type": command_text, "value": _safe_text(value), "params": request_params})
             timeout = float(timeout_s if timeout_s is not None else self.timeout_s)
@@ -343,6 +350,7 @@ class JS8ApiClient:
         finally:
             with self._state_lock:
                 self._pending.pop(str(msg_id), None)
+                self._pending_expected.pop(str(msg_id), None)
         if response.type == "API.ERROR":
             self._record_error(response.value or "JS8Call API returned API.ERROR")
             if _safe_text(response.params.get("ERROR_CLASS"), limit=64) == "connection":
@@ -525,6 +533,28 @@ class JS8ApiClient:
                 except queue.Full:
                     pass
                 return
+        elif message.type:
+            # Released JS8Call builds commonly omit the caller-provided _ID
+            # from responses. Correlate the oldest pending request expecting
+            # this response type. The client send lock preserves request order,
+            # while the type gate prevents unrelated RX traffic from satisfying
+            # a request.
+            response_type = message.type.strip().upper()
+            with self._state_lock:
+                fallback_waiter = next(
+                    (
+                        self._pending[key]
+                        for key in self._pending
+                        if response_type in self._pending_expected.get(key, frozenset())
+                    ),
+                    None,
+                )
+            if fallback_waiter is not None:
+                try:
+                    fallback_waiter.put_nowait(message)
+                except queue.Full:
+                    pass
+                return
         self._events.put(message)
         with self._state_lock:
             listeners = list(self._listeners)
@@ -542,6 +572,7 @@ class JS8ApiClient:
         with self._state_lock:
             pending = list(self._pending.values())
             self._pending.clear()
+            self._pending_expected.clear()
         for waiter in pending:
             try:
                 waiter.put_nowait(

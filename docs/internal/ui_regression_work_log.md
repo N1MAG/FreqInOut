@@ -1784,3 +1784,46 @@ files plus 2 environment-skip-only files with no failures across 2,585 collected
 tests. Dark theme at 1400x900 and 125% text was visually inspected after two
 successive popup selections; both chips, the cleared input, and the surrounding
 form remain visible without compression.
+
+## 2026-09-08 — Slice 3 follow-up: production dynamic FLAMP Q dispatch
+
+Production `DIRECTED.TXT`, `ALL.TXT`, application log, and read-only Expect
+database evidence were correlated. Two requests were received: compact
+`E? Q906F` and spaced `E? Q 906F`. The compact spelling exposed a parser
+compatibility gap. The spaced request was ingested 16 seconds after reception,
+matched the enabled MAGNET policy through trusted Operator History, and resolved
+Q 906F as an authoritative 28-block partial transfer missing blocks 26 and 27.
+The durable dispatch audit proved that FIO then blocked transmission during
+JS8Call preflight after timing out waiting for `STATION.CONFIG`; the displayed
+reason named the first capability warning rather than necessarily identifying
+the later blocking condition. Code review found that the client required FIO's
+private request `_ID`, although released JS8Call builds commonly return standard
+response types without echoing that field.
+
+The exact query parser now accepts both spaced and established compact syntax
+while continuing to reject extra text. Native JS8 API requests correlate by
+`_ID` when available and otherwise by the oldest pending request's explicitly
+declared response type, matching released JS8Call behavior without allowing
+unrelated RX events to satisfy a request. Preflight summaries prioritize the
+actual blocking issue. Dynamic-Q receive, hold, and final dispatch decisions now
+produce concise operational log records in addition to durable database audit.
+
+Dynamic-Q observation now tails changed `DIRECTED.TXT` sources on a dedicated
+three-second lightweight cadence. It uses a separate incremental checkpoint,
+inherits the established Spotter checkpoint on upgrade, avoids all general
+message projection and FLAMP filesystem scanning, and leaves the 90-second
+message pass responsible for normal projection without reevaluating the same Q
+record. Disabled or paused service consumes and audits the query as held so it
+cannot transmit later after a state change. The dedicated checkpoint is seeded
+before the initial broad message pass so a request received during startup
+cannot be skipped.
+
+Focused verification covers both production line shapes, incomplete append
+recovery, incremental offset behavior, change-only scheduling, ID-less JS8Call
+response correlation, guarded send through ID-less responses, and blocking-
+reason presentation. No production database was modified and no schema,
+operator, radio, rule, policy, or FLAMP state changed. The focused affected-area
+gate passes 97 tests with one environment skip. The authoritative fresh-process
+repository gate passes all 176 test-bearing files plus 2 environment-skip-only
+files with no failures across 2,591 collected tests. Python compilation and
+`git diff --check` pass.

@@ -630,8 +630,10 @@ focused operational browser for Spotter-specific behavior.
 
 FIO Spotter may explicitly enable a built-in dynamic Expect service for the exact,
 case-insensitive request `E? Q <qid>`, where `<qid>` is exactly four hexadecimal
-characters. The query value is supplied by the received message; operators do
-not create one rule per Q ID. For `E? Q 970F`, the only valid response payloads
+characters. For compatibility with established JS8Spotter operating practice,
+the compact spelling `E? Q<qid>` is also valid; no other surrounding or trailing
+text is accepted. The query value is supplied by the received message; operators
+do not create one rule per Q ID. For `E? Q 970F`, the only valid response payloads
 are:
 
 - `Q 970F YES` when an authoritative current FLAMP transfer has a known total
@@ -667,6 +669,17 @@ It must not deserialize unrelated rules/policies, reread the same catalogs for
 group-reply authorization, or run schema/index setup during evaluation, claim,
 completion, or dispatch audit. Startup database initialization is the only
 migration owner.
+
+Dynamic-Q observation uses a dedicated three-second incremental tail of each
+active radio's `DIRECTED.TXT`. It keeps a source-specific byte checkpoint,
+performs no general message projection, directory scan, hash pass, or schema
+work, and runs only when the source fingerprint changes. Disabled or paused
+service still consumes and visibly holds a query so it cannot be transmitted
+later merely because the operator enables or resumes automation. The broader
+message/Spotter pass remains on its normal cadence and does not evaluate the
+same dynamic record a second time. On first use, the dedicated checkpoint
+inherits the existing Spotter checkpoint so an upgrade does not replay
+historical RF requests.
 
 Dynamic Q service safety is cumulative:
 
@@ -1476,6 +1489,21 @@ metadata. An unavailable legacy radio remains visible as such rather than
 silently changing scope. All Spotter dropdowns now have flexible closed widths,
 bounded content-sized popup widths, and item tooltips. This is a UI/persistence
 adapter change only and requires no schema migration.
+
+Production dynamic-Q follow-up (2026-09-08): JS8Call recorded both
+`E? Q906F` and `E? Q 906F`. The compact form was rejected by the original exact
+parser; the spaced form was accepted, matched the enabled trusted-operator
+policy, resolved authoritative partial state, and reached send preflight. The
+send was blocked after the native client timed out waiting for
+`STATION.CONFIG`. Code review found that response correlation required FIO's
+private request `_ID`, although released JS8Call builds commonly return standard
+response types without echoing that field. Native API request correlation now
+prefers `_ID` when returned and otherwise assigns the oldest pending request
+whose declared response type matches. Unrelated receive traffic cannot satisfy
+a pending request. Preflight failure summaries report the actual blocking issue
+ahead of non-blocking capability warnings, and dynamic receive/hold/dispatch
+decisions are recorded in the normal log as well as the durable Expect audit.
+No schema, rule, policy, radio, or FLAMP data migration is involved.
 
 ### Slice 4 — Radio launch bundles
 

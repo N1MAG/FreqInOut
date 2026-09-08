@@ -7,6 +7,8 @@ import time
 from typing import Any, Dict, List, Mapping, Optional
 
 from freqinout.core.js8_send_service import (
+    JS8SendIssue,
+    JS8SendPreflight,
     js8_endpoint_from_radio_profile,
     preflight_js8_send,
     send_js8_message_guarded,
@@ -134,6 +136,19 @@ def test_preflight_requires_confirmation_when_target_state_cannot_be_verified() 
         server.stop()
 
 
+def test_preflight_failure_summary_reports_blocking_issue_before_warning() -> None:
+    preflight = JS8SendPreflight(
+        endpoint=JS8ApiEndpoint("127.0.0.1", 2442),
+        ok=False,
+        issues=(
+            JS8SendIssue("tx_config_unknown", "TX configuration unavailable.", False),
+            JS8SendIssue("selected_target_present", "A selected target blocks sending."),
+        ),
+    )
+
+    assert preflight.summary == "A selected target blocks sending."
+
+
 def test_guarded_send_clears_tx_text_then_sends_message() -> None:
     server = _safe_server()
     client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
@@ -147,6 +162,31 @@ def test_guarded_send_clears_tx_text_then_sends_message() -> None:
         assert result.sent is True
         assert [row["type"] for row in server.received[-2:]] == ["TX.SET_TEXT", "TX.SEND_MESSAGE"]
         assert server.received[-1]["value"] == "@MAGNET F!103 ABC"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_guarded_send_accepts_standard_js8_responses_without_request_ids() -> None:
+    server = _FakeJs8Server(
+        {
+            "STATION.GET_CONFIG": {"type": "STATION.CONFIG", "value": "", "params": {"TX_ENABLED": True}},
+            "TX.GET_QUEUE_DEPTH": {"type": "TX.QUEUE_DEPTH", "value": "", "params": {"DEPTH": 0}},
+            "TX.GET_TEXT": {"type": "TX.TEXT", "value": "", "params": {}},
+            "RX.GET_CALL_SELECTED": {"type": "RX.CALL_SELECTED", "value": "", "params": {}},
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        result = send_js8_message_guarded(client, "N0CALL Q 906F NO", timeout_s=0.4)
+
+        deadline = time.time() + 1.0
+        while "TX.SEND_MESSAGE" not in [row["type"] for row in server.received] and time.time() < deadline:
+            time.sleep(0.02)
+
+        assert result.sent is True
+        assert result.preflight.ok is True
+        assert "TX.SEND_MESSAGE" in [row["type"] for row in server.received]
     finally:
         client.stop()
         server.stop()

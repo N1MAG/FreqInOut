@@ -41,10 +41,79 @@ def _initialize_flamp_projection(db_path: Path) -> None:
 
 def test_dynamic_query_parser_is_exact_and_case_insensitive() -> None:
     assert parse_dynamic_flamp_query("E? Q 970F").q_id == "970F"
+    assert parse_dynamic_flamp_query("E? Q970F").q_id == "970F"
     assert parse_dynamic_flamp_query("e? q 970f").q_id == "970F"
     assert parse_dynamic_flamp_query("E? Q 970F trailing") is None
     assert parse_dynamic_flamp_query("E? Q 970") is None
     assert parse_dynamic_flamp_query("E? 970F") is None
+
+
+def test_dynamic_directed_parser_accepts_production_js8_spacing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    settings = SettingsManager()
+    ingestor = MessageIngestor(settings)
+    compact = ingestor._parse_dynamic_directed_line(
+        "2026-09-08 13:20:42\t7.115000\t1925\t+12\tW5TTA: N1MAG  E? Q906F ♢ \n"
+    )
+    spaced = ingestor._parse_dynamic_directed_line(
+        "2026-09-08 13:22:28\t7.115000\t1925\t+15\tW5TTA: N1MAG  E? Q 906F ♢ \n"
+    )
+    assert compact and compact["q_id"] == "906F" and compact["to_call"] == "N1MAG"
+    assert spaced and spaced["q_id"] == "906F" and spaced["from_call"] == "W5TTA"
+    settings.close()
+
+
+def test_dynamic_directed_tail_is_incremental_and_preserves_partial_append(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+    directed = tmp_path / "DIRECTED.TXT"
+    old = "2026-09-08 13:19:00\t7.115000\t1925\t+10\tW5TTA: N1MAG TEST ♢ \n"
+    directed.write_text(old, encoding="utf-8")
+    settings = SettingsManager()
+    settings.set("spotter_directed_offset_source-a", len(old.encode("utf-8")))
+    settings.save()
+    ingestor = MessageIngestor(settings)
+    handled: list[dict] = []
+    monkeypatch.setattr(
+        ingestor,
+        "_handle_dynamic_flamp_query",
+        lambda parsed, **_kwargs: handled.append(dict(parsed)),
+    )
+
+    partial = "2026-09-08 13:20:42\t7.115000\t1925\t+12\tW5TTA: N1MAG  E? Q906F ♢ "
+    with directed.open("a", encoding="utf-8") as fh:
+        fh.write(partial)
+    assert ingestor.ingest_dynamic_flamp_from_directed(
+        directed_path=directed,
+        source_radio_id=1,
+        js8_instance_id="fio-a",
+        source_key="source-a",
+        offset_key="expect_directed_offset_source-a",
+        fallback_offset_key="spotter_directed_offset_source-a",
+    ) == 0
+    assert handled == []
+
+    with directed.open("a", encoding="utf-8") as fh:
+        fh.write("\n")
+    assert ingestor.ingest_dynamic_flamp_from_directed(
+        directed_path=directed,
+        source_radio_id=1,
+        js8_instance_id="fio-a",
+        source_key="source-a",
+        offset_key="expect_directed_offset_source-a",
+        fallback_offset_key="spotter_directed_offset_source-a",
+    ) == 1
+    assert [row["q_id"] for row in handled] == ["906F"]
+    assert ingestor.ingest_dynamic_flamp_from_directed(
+        directed_path=directed,
+        source_radio_id=1,
+        js8_instance_id="fio-a",
+        source_key="source-a",
+        offset_key="expect_directed_offset_source-a",
+        fallback_offset_key="spotter_directed_offset_source-a",
+    ) == 0
+    settings.close()
 
 
 def test_flamp_state_is_authoritative_source_scoped_and_digit_leading(tmp_path: Path) -> None:

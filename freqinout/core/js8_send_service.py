@@ -39,7 +39,10 @@ class JS8SendPreflight:
             return "JS8Call send preflight passed."
         if self.ok:
             return "JS8Call send preflight passed with operator confirmation required."
-        first = self.issues[0].detail if self.issues else "JS8Call send preflight failed."
+        first = next(
+            (issue.detail for issue in self.issues if issue.blocking),
+            self.issues[0].detail if self.issues else "JS8Call send preflight failed.",
+        )
         return first
 
 

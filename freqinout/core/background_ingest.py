@@ -124,6 +124,7 @@ class BackgroundIngestController(QObject):
         self.expect_guard_preflight = expect_guard_preflight
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
+        self._dynamic_expect_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
         self._varac_vault_timer: Optional[QTimer] = None
         self._varac_vault_activity_timer: Optional[QTimer] = None
@@ -190,6 +191,14 @@ class BackgroundIngestController(QObject):
         self._messages_timer.timeout.connect(self._ingest_messages)
         self._messages_timer.start()
 
+        # Dynamic Expect is a lightweight tail of DIRECTED.TXT, separate from
+        # the broader 90-second message/projection pass.  This keeps on-air
+        # FLAMP queries responsive without repeatedly rebuilding message views.
+        self._dynamic_expect_timer = QTimer(self)
+        self._dynamic_expect_timer.setInterval(3 * 1000)
+        self._dynamic_expect_timer.timeout.connect(self._ingest_dynamic_expect)
+        self._dynamic_expect_timer.start()
+
         # VarAC ingest: moderate cadence
         self._varac_timer = QTimer(self)
         self._varac_timer.setInterval(2 * 60 * 1000)  # 2 minutes
@@ -236,6 +245,9 @@ class BackgroundIngestController(QObject):
 
         # Initial staggered ingest
         if initial_stagger:
+            # Seed the dedicated Expect checkpoint before the broader message
+            # pass can advance its compatibility checkpoint.
+            QTimer.singleShot(1500, self._ingest_dynamic_expect)
             QTimer.singleShot(2000, self._ingest_js8_links)
             QTimer.singleShot(4000, self._ingest_messages)
             QTimer.singleShot(6000, self._ingest_varac)
@@ -252,6 +264,7 @@ class BackgroundIngestController(QObject):
         for attr in (
             "_js8_links_timer",
             "_messages_timer",
+            "_dynamic_expect_timer",
             "_varac_timer",
             "_varac_vault_timer",
             "_varac_vault_activity_timer",
@@ -861,6 +874,101 @@ class BackgroundIngestController(QObject):
             realtime_source_present=realtime_present,
         )
 
+    def _ingest_dynamic_expect(self, *, force: bool = False) -> None:
+        sources = tuple(
+            source
+            for source in self._runtime_ingest_inventory().sources_for_family("js8call")
+            if source.source_type == "file"
+            and str(source.metadata.get("role", "") or "") == "directed"
+        )
+        fingerprint = ingest_sources_fingerprint(
+            sources,
+            families=("js8call",),
+            source_types=("file",),
+        )
+        decision = plan_ingest_refresh(
+            fingerprint,
+            previous_fingerprint=self._job_refresh_fingerprints.get("dynamic_expect"),
+            last_run_ts=float(self._job_refresh_last_run_ts.get("dynamic_expect", 0.0) or 0.0),
+            force=force,
+        )
+        if not decision.should_run:
+            return
+
+        def job() -> None:
+            self._run_dynamic_expect_job()
+            self._job_refresh_fingerprints["dynamic_expect"] = decision.fingerprint
+            self._job_refresh_last_run_ts["dynamic_expect"] = time.time()
+
+        self._submit_realtime_job("dynamic_expect", job)
+
+    def _run_dynamic_expect_job(self) -> None:
+        profiles = self._active_js8_spotter_profiles()
+        if not profiles:
+            return
+        inventory = self._runtime_ingest_inventory()
+        directed_sources_by_radio = {
+            str(source.radio_id or ""): source
+            for source in inventory.sources_for_family("js8call")
+            if source.source_type == "file"
+            and str(source.metadata.get("role", "") or "") == "directed"
+        }
+        worker_settings = self._new_worker_settings()
+        coordinator = ExpectAutomationCoordinator(
+            worker_settings,
+            profiles=profiles,
+            guard_preflight=self.expect_guard_preflight,
+        )
+        store = MultiRadioStore()
+        try:
+            for profile in profiles:
+                self._cancel_checkpoint()
+                radio_id = int(profile.get("id", 0) or 0)
+                source = directed_sources_by_radio.get(str(radio_id))
+                directed = str(
+                    (source.path if source is not None else "")
+                    or profile.get("js8_directed_path", "")
+                    or ""
+                ).strip()
+                if radio_id <= 0 or not directed:
+                    continue
+                source_id = str(getattr(source, "source_id", "") or "").strip()
+                standard_offset = (
+                    f"spotter_directed_offset_{source_id}"
+                    if source_id
+                    else f"spotter_directed_offset_radio_{radio_id}"
+                )
+                expect_offset = (
+                    f"expect_directed_offset_{source_id}"
+                    if source_id
+                    else f"expect_directed_offset_radio_{radio_id}"
+                )
+                profile_fallback = self._new_worker_settings()
+                profile_settings = _DeviceProfileVaultSettings(profile, profile_fallback, store)
+                try:
+                    js8_instance_id = str(
+                        profile.get("js8_instance_id", "")
+                        or profile.get("name", "")
+                        or radio_id
+                    )
+                    MessageIngestor(
+                        profile_settings,  # type: ignore[arg-type]
+                        expect_dispatch_client_factory=coordinator.client_factory_for_ingest(),
+                        expect_auto_reply_enabled=coordinator.runtime_unattended_enabled(),
+                    ).ingest_dynamic_flamp_from_directed(
+                        directed_path=Path(directed).expanduser(),
+                        source_radio_id=radio_id,
+                        js8_instance_id=js8_instance_id,
+                        source_key=source_id,
+                        offset_key=expect_offset,
+                        fallback_offset_key=standard_offset,
+                    )
+                finally:
+                    profile_fallback.close()
+        finally:
+            coordinator.close()
+            worker_settings.close()
+
     def _run_messages_job(self, *, include_observation_backfill: bool = True) -> None:
         worker_settings = self._new_worker_settings()
         try:
@@ -1209,8 +1317,6 @@ class BackgroundIngestController(QObject):
         for profile in profiles:
             if not self._truthy(profile.get("use_js8call", False), False) and not self._truthy(profile.get("use_js8spotter", False), False):
                 continue
-            if not str(profile.get("js8_directed_path", "") or "").strip():
-                continue
             out.append(profile)
         return out
 
@@ -1293,7 +1399,7 @@ class BackgroundIngestController(QObject):
                     except Exception as exc:
                         log.debug(
                             "BackgroundIngest: FLAMP transfer projection failed for %s: %s",
-                            profile_name,
+                            str(profile.get("name", "") or radio_id),
                             exc,
                         )
                 inserted = ingestor.ingest_spotter_from_directed(
@@ -1302,7 +1408,7 @@ class BackgroundIngestController(QObject):
                     js8_instance_id=js8_instance_id,
                     source_key=directed_source_id,
                     offset_key=f"spotter_directed_offset_{directed_source_id}" if directed_source_id else f"spotter_directed_offset_radio_{radio_id}",
-                    evaluate_expect=True,
+                    evaluate_expect=False,
                 )
                 if health_key and directed_source is not None:
                     self._health.record_success(
