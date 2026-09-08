@@ -59,6 +59,7 @@ DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
 MAX_FLAMP_RECEIVE_FILES_PER_SCAN = 5000
 MAX_FLAMP_RELAY_FILES_PER_SCAN = 5000
+FLAMP_TRANSFER_PARSER_VERSION = 2
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
 # Kept as a compatibility constant for callers that imported the old setting.
 # Visitor-facing helper text must not promise a fixed delay; asynchronous state
@@ -2447,9 +2448,11 @@ def index_flamp_transfer_state(
                 stat = relay_path.stat()
                 source_mtime_ns = int(stat.st_mtime_ns)
                 source_size_bytes = int(stat.st_size)
+                source_mtime_ts = float(stat.st_mtime)
             except OSError:
                 source_mtime_ns = 0
                 source_size_bytes = 0
+                source_mtime_ts = 0.0
             prior = existing.get(q_id)
             unchanged = bool(
                 prior
@@ -2458,7 +2461,7 @@ def index_flamp_transfer_state(
                 and int(prior.get("source_size_bytes") or 0) == source_size_bytes
                 and str(prior.get("source_path") or "") == str(relay_path)
                 and str(prior.get("source_sha256") or "")
-                and int(prior.get("parser_version") or 0) >= 1
+                and int(prior.get("parser_version") or 0) >= FLAMP_TRANSFER_PARSER_VERSION
             )
             transfer_filename = str((prior or {}).get("transfer_filename") or "")
             completion = receive_index.get(transfer_filename) if transfer_filename else None
@@ -2491,7 +2494,7 @@ def index_flamp_transfer_state(
                     source_sha256 = hashlib.sha256(relay_path.read_bytes()).hexdigest()
                 except OSError:
                     source_sha256 = ""
-                fact_observed_ts = now
+                fact_observed_ts = source_mtime_ts
             else:
                 try:
                     available = [int(item) for item in json.loads(str(prior.get("available_blocks_json") or "[]"))]
@@ -2587,7 +2590,7 @@ def index_flamp_transfer_state(
                     facts.get("expected_file_size"),
                     completion_path,
                     evidence_kind,
-                    1,
+                    FLAMP_TRANSFER_PARSER_VERSION,
                     facts.get("total_blocks"),
                     json.dumps(list(facts.get("available_blocks") or []), separators=(",", ":")),
                     json.dumps(list(facts.get("missing_blocks") or []), separators=(",", ":")),

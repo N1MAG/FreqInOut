@@ -881,6 +881,72 @@ def test_dynamic_q_holds_a_row_not_validated_by_the_latest_scan(
     assert held == ["FLAMP transfer was not validated by the latest successful source scan."]
 
 
+def test_dynamic_q_holds_an_old_partial_relay_snapshot(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(config_root))
+    settings = SettingsManager()
+    settings.set("js8_expect_dynamic_flamp_enabled", True)
+    settings.set("js8_expect_unattended_auto_reply_enabled", True)
+    settings.set("js8_expect_unattended_auto_reply_paused", False)
+    relay = tmp_path / "relay"
+    relay.mkdir()
+    relay_path = relay / "A10F_payload.b2s"
+    _relay_file(relay_path, "A10F", 4, [1, 2])
+    stale_ts = time.time() - 3600
+    os.utime(relay_path, (stale_ts, stale_ts))
+    settings.set("varac_bbs_vault_flamp_relay_dir", str(relay))
+    settings.save()
+    db_path = config_root / "config" / "freqinout_nets.db"
+    _initialize_flamp_projection(db_path)
+    index_flamp_transfer_state(
+        relay,
+        db_path=db_path,
+        source_radio_id="7",
+        source_js8_instance_id="fio-a",
+    )
+    save_expect_entry(
+        {
+            "expect_key": "Q",
+            "source_scope": "all",
+            "allowed_callsigns": ["K1ABC"],
+            "enabled": True,
+            "auto_reply_enabled": True,
+            "unattended_auto_reply_enabled": True,
+        },
+        db_path=db_path,
+    )
+    held: list[str] = []
+    ingestor = MessageIngestor(settings, expect_auto_reply_enabled=True)
+    monkeypatch.setattr(
+        ingestor,
+        "_dynamic_flamp_hold",
+        lambda **kwargs: held.append(str(kwargs.get("reason") or "")),
+    )
+    try:
+        ingestor._handle_dynamic_flamp_query(
+            {
+                "q_id": "A10F",
+                "confidence": 1.0,
+                "from_call": "K1ABC",
+                "to_call": "N0CALL",
+                "event_id": "stale-partial-test",
+                "utc_ts": time.time(),
+            },
+            source_radio_id="7",
+            js8_instance_id="fio-a",
+            source_key="source-a",
+            source_path=None,
+        )
+    finally:
+        settings.close()
+
+    assert held == [
+        "Saved FLAMP relay snapshot is too old to prove the current missing-block list."
+    ]
+
+
 def test_dynamic_q_replies_are_database_only_and_use_receiving_js8_source(
     monkeypatch, tmp_path: Path
 ) -> None:

@@ -735,7 +735,11 @@ FIO reconciles three bounded evidence classes in this order:
 2. **Validated saved relay.** The existing AMP parser remains authoritative for
    total and checksum-accepted block numbers in the saved relay snapshot. It may
    establish `partial` or `complete`; filename prefixes alone never establish
-   either state.
+   either state. A missing-block reply is eligible only while the partial relay
+   file's own modification time is within the ten-minute confidence window.
+   Older partial snapshots remain visible but are held because a later unsaved
+   FLAMP receive cannot be ruled out. A checksum-complete snapshot remains
+   conclusive regardless of age.
 3. **No conclusive evidence.** Missing headers, conflicting identifiers or
    totals, inaccessible roots, an in-progress/failed reconciliation, or an
    uncorrelated completion candidate yield `unavailable`/held behavior. FIO does
@@ -781,6 +785,8 @@ Acceptance fixtures cover:
   out-of-scope nested candidates, none of which can upgrade a transfer;
 - changed relay content with preserved timestamp but changed size, which is
   reparsed, and an unchanged complete row, which is not reread;
+- a recent partial relay snapshot, which may return missing blocks, and an old
+  partial snapshot, which is held rather than returning a potentially stale list;
 - malformed/conflicting AMP headers, deleted relay/RX artifacts, failed scans,
   and source-radio isolation;
 - atomic scan-generation eligibility so no fresh scan record can coexist with
@@ -1600,10 +1606,16 @@ row, so automatic reply holds instead of transmitting a stale answer. Valid
 source scans still
 retire genuinely deleted relay rows.
 
+Missing-block replies additionally require a relay snapshot no more than ten
+minutes old, measured from the source file rather than the scan time. This
+prevents a current background-scan timestamp from laundering an old partial
+snapshot into a confident answer. Completed RX evidence and checksum-complete
+relay snapshots remain conclusive.
+
 The production-shaped 138-transfer fixture rereads zero relay payloads on its
-second pass. The affected-area gate passes 142 tests with one environment skip;
+second pass. The affected-area gate passes 143 tests with one environment skip;
 the authoritative fresh-process repository gate passes all 176 test-bearing
-files plus two environment-skip-only files with no failures across 2,607
+files plus two environment-skip-only files with no failures across 2,608
 collected tests. Python compilation and `git diff --check` pass. The schema
 migration is additive/idempotent and preserves existing transfer rows; no
 message, rule, policy, operator, radio, or FLAMP source file is modified.

@@ -1851,6 +1851,10 @@ additively and reparse once; subsequent unchanged passes stat the bounded
 manifest but do not reread relay payloads. Removing completion evidence reverts
 to the validated relay facts, while a temporarily inaccessible relay or RX root
 records a failed scan, retains the last good row, and forces Expect to hold.
+Partial missing-block replies use the relay file's own modification time and
+require a snapshot no more than ten minutes old. An old partial file is retained
+for operator context but held for automatic reply; a fresh scan timestamp can no
+longer make stale missing-block evidence appear current.
 
 The first background Expect worker run completes one projection before
 consuming its dedicated checkpoint, preventing a startup query from using the
@@ -1864,9 +1868,9 @@ resolved explicitly.
 No subagent was used for this follow-up; the high-reasoning primary model owned
 the protocol/source review, state and concurrency design, additive migration,
 implementation, regression review, and integration gate. Verification passes
-142 focused FLAMP/Expect/background/BBS/UI tests with one environment skip. The
+143 focused FLAMP/Expect/background/BBS/UI tests with one environment skip. The
 authoritative fresh-process repository gate passes all 176 test-bearing files
-plus two environment-skip-only files with no failures across 2,607 collected
+plus two environment-skip-only files with no failures across 2,608 collected
 tests. Python compilation, a real FLAMP `b2s` parser check, and
 `git diff --check` pass. No production database or FLAMP source artifact was
 modified.

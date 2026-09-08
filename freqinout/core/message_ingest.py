@@ -48,6 +48,7 @@ from freqinout.core.varac_bbs_vault import (
 
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 FLAMP_TRANSFER_INDEX_MAX_AGE_SECONDS = 10 * 60
+FLAMP_PARTIAL_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 DYNAMIC_EXPECT_REQUEST_MAX_AGE_SECONDS = 30 * 60
 SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
 SPOTTER_STATUS_FORMS = {"104", "301", "304"}
@@ -1428,6 +1429,19 @@ class MessageIngestor:
             if state_name == "complete" and state.get("total_blocks") and not state.get("missing_blocks"):
                 payload = f"Q {q_id} YES"
             elif state_name == "partial" and state.get("total_blocks") and float(state.get("parser_confidence") or 0.0) >= 1.0:
+                snapshot_age = time.time() - float(state.get("observed_ts") or 0.0)
+                if snapshot_age > FLAMP_PARTIAL_SNAPSHOT_MAX_AGE_SECONDS or snapshot_age < -120:
+                    self._dynamic_flamp_hold(
+                        q_id=q_id,
+                        reason="Saved FLAMP relay snapshot is too old to prove the current missing-block list.",
+                        event_id=event_id,
+                        source_radio_id=source_radio_id,
+                        js8_instance_id=js8_instance_id,
+                        from_call=from_call,
+                        target=target,
+                        db_path=db_path,
+                    )
+                    return
                 missing = sorted({int(item) for item in (state.get("missing_blocks") or [])})
                 body = ",".join(str(item) for item in missing)
                 if not missing or len(f"Q {q_id} {body}") > 180:
