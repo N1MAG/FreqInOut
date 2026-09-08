@@ -1032,6 +1032,16 @@ baseline and acceptance evidence is recorded in
   and covered by focused tests.
 - No schema or data migration was introduced in Slice 0.
 
+Production follow-up (2026-09-08): deferred-screen factories must treat optional
+settings hooks as optional at the call site. HF Callsigns exposed a mismatch
+where lazy construction evaluated a missing `on_settings_saved` attribute before
+the shared safe signal connector could inspect it, leaving the stable placeholder
+visible on every selection. Operator History now implements the presentation-only
+settings hook, the factory uses optional lookup defensively, and any future
+deferred factory failure retains its placeholder while logging the screen label,
+exception message, and traceback. Regression coverage exercises both the real HF
+settings callback contract and a deferred tab without that optional callback.
+
 On a SQLite-consistent clone of the production-sized databases, measured on the
 macOS development host with external radio/Mesh/launch/ingest side effects
 suppressed, first usable shell was 4.219 seconds, main-window construction was

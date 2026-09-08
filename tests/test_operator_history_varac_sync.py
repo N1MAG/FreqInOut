@@ -104,6 +104,21 @@ def test_operator_history_keeps_role_tier_near_callsign_and_scrolls_horizontally
         tab.deleteLater()
 
 
+def test_operator_history_settings_saved_refreshes_theme_without_loading_data(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path))
+    QApplication.instance() or QApplication([])
+    tab = OperatorHistoryTab()
+    calls: list[str] = []
+    monkeypatch.setattr(tab.settings, "reload", lambda: calls.append("reload"))
+    monkeypatch.setattr(tab, "apply_theme", lambda: calls.append("theme"))
+    monkeypatch.setattr(tab, "_load_data", lambda **_kwargs: calls.append("load"))
+
+    tab.on_settings_saved()
+
+    assert calls == ["reload", "theme"]
+    tab.deleteLater()
+
+
 def test_operator_history_age_summary_uses_days_without_hours() -> None:
     now = 1_700_000_000.0
     assert OperatorHistoryTab._age_text_from_epoch(now - (2 * 86400 + 6 * 3600), now=now) == "2d"

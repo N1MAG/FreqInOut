@@ -5483,7 +5483,7 @@ class MainWindow(QMainWindow):
             self._connect_lazy_screen_signal(
                 "settings_saved.operator_history",
                 getattr(self.settings_tab, "settings_saved", None),
-                tab.on_settings_saved,
+                getattr(tab, "on_settings_saved", None),
             )
             self._connect_lazy_screen_signal(
                 "operator_history.updated",
@@ -5591,7 +5591,11 @@ class MainWindow(QMainWindow):
             if existing is not None and existing is not self._lazy_placeholders.get(label):
                 return
             factory = self._lazy_factories[label]
-            new_widget = factory()
+            try:
+                new_widget = factory()
+            except Exception:
+                log.exception("MainWindow: failed to create deferred screen %r", label)
+                return
             try:
                 if hasattr(new_widget, "apply_theme"):
                     new_widget.apply_theme()

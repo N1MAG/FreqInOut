@@ -1909,3 +1909,30 @@ The authoritative fresh-process repository gate passes all 176 test-bearing
 files plus two environment-skip-only files with no failures across 2,610
 collected tests. Python compilation and `git diff --check` pass. No database,
 configuration, migration, radio, or source artifact was modified.
+
+## 2026-09-08 — HF Callsigns deferred-screen load repair
+
+The Linux production log showed deterministic `AttributeError` failures in
+`main_window.create_operator_history_tab` each time **HF Callsigns** was selected;
+Local Operators and Local Reports loaded normally. Code review found that the
+Slice 0 lazy factory evaluated `tab.on_settings_saved` even though
+`OperatorHistoryTab` did not implement that hook. The exception occurred after
+the widget was constructed but before it replaced the placeholder, which made the
+screen appear not to load.
+
+Operator History now implements a lightweight settings callback that reloads
+settings and reapplies presentation without rebuilding its data table. The lazy
+factory also looks up that callback defensively. Deferred factory failures now
+keep the stable placeholder available for retry and emit the screen label plus a
+full exception traceback, replacing the prior class-name-only production clue.
+No database, runtime configuration, message, radio, or Mesh state was modified.
+
+Delegation and review: Terra/high correlated the production log, launcher, and
+failure timing; Luna/high independently audited the HF factory and identified the
+missing callback boundary; Luna/high reviewed the focused regression coverage.
+The high-reasoning primary model reconciled the recommendations, implemented the
+settings contract and defensive failure boundary, and performed integration
+review. The focused deferred-screen, HF/Local operator, and navigation set passes
+194 tests. The authoritative fresh-process repository gate passes all 176
+test-bearing files plus two environment-skip-only files with no failures across
+2,614 collected tests. Python compilation and `git diff --check` pass.

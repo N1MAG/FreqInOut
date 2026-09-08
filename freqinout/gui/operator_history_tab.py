@@ -1713,6 +1713,14 @@ class OperatorHistoryTab(QWidget):
                 mark=mark,
             )
 
+    def on_settings_saved(self) -> None:
+        """Refresh settings-backed presentation without rebuilding the data table."""
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self.apply_theme()
+
     def on_tab_activated(self) -> None:
         with perf_span("operators.on_tab_activated", settings=self.settings, min_ms=5.0):
             if time.time() - float(self._last_load_ts) < self._load_min_interval_sec:
