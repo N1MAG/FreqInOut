@@ -1760,3 +1760,27 @@ navigation tests. The authoritative fresh-process repository gate passes all
 chip height, custom query groups, removal, and case/prefix duplicate suppression.
 The populated editor was also visually inspected in Dark theme at 1400x900 and
 125% text: the page scrolls instead of compressing chip, input, or Add controls.
+
+## 2026-09-08 — Slice 3 follow-up: repeat lookup reliability
+
+Qt may write a clicked completer value into its line edit after application
+activation handlers return. That platform-dependent ordering left the accepted
+value in the lookup field, so the next search appended to stale text and yielded
+no useful results. The token editor now performs a next-event cleanup after a
+completion is accepted, resets the completer prefix, preserves every accepted
+chip, and keeps focus ready for the next value. Chip widgets are reconciled
+incrementally so a deferred deletion from the first selection cannot collapse
+the replacement chip canvas during the second. A UI regression clicks two
+successive live popup results and verifies both chips remain visible with
+non-zero geometry while the entry is empty after each selection.
+
+The persistent **All JS8 radios is the normal choice...** paragraph was removed
+from the rule editor. The selector already communicates the default and detailed
+routing guidance remains appropriate for Spotter Help.
+
+Verification passes 120 focused Spotter, Expect, dynamic FLAMP Q, shell, and
+navigation tests. The fresh-process repository gate passes all 176 test-bearing
+files plus 2 environment-skip-only files with no failures across 2,585 collected
+tests. Dark theme at 1400x900 and 125% text was visually inspected after two
+successive popup selections; both chips, the cleared input, and the surrounding
+form remain visible without compression.

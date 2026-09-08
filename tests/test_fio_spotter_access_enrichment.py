@@ -365,8 +365,8 @@ def test_expect_rule_editor_keeps_optional_policy_default_and_round_trips_truste
         app.processEvents()
 
 
-def test_trusted_operator_group_completion_is_attached_to_its_live_editor(monkeypatch, tmp_path: Path) -> None:
-    """Roster-group typing must use an editor-owned popup, not a detached Qt popup."""
+def test_repeated_group_lookup_clears_entry_and_keeps_all_accepted_chips(monkeypatch, tmp_path: Path) -> None:
+    """A clicked completion must leave a clean field for the next lookup."""
     app = _app()
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
     monkeypatch.setattr(
@@ -386,13 +386,23 @@ def test_trusted_operator_group_completion_is_attached_to_its_live_editor(monkey
         assert editor.completer() is editor._token_completer
         assert editor._token_completer.widget() is editor.input
         editor.setFocus()
-        QTest.keyClicks(editor.input, "MR")
-        app.processEvents()
-        assert editor._token_completer.completionCount() == 1
-        editor._insert_completion("MR08")
-        assert editor.text() == "MR08"
-        assert editor.input.text() == ""
-        assert [button.text() for button in editor._chip_buttons] == ["MR08  ×"]
+        for typed, expected in (("MAG", "MAGNET"), ("MR", "MR08")):
+            QTest.keyClicks(editor.input, typed)
+            app.processEvents()
+            assert editor._token_completer.completionCount() == 1
+            popup = editor._token_completer.popup()
+            index = editor._token_completer.completionModel().index(0, 0)
+            assert index.data() == expected
+            popup.setCurrentIndex(index)
+            QTest.mouseClick(popup.viewport(), Qt.LeftButton, pos=popup.visualRect(index).center())
+            app.processEvents()
+            assert editor.input.text() == ""
+
+        assert editor.text() == "MAGNET, MR08"
+        assert [button.text() for button in editor._chip_buttons] == ["MAGNET  ×", "MR08  ×"]
+        assert editor.chip_scroll.isVisible()
+        assert editor.chip_body.width() > 1
+        assert all(button.width() > 0 and button.height() > 0 for button in editor._chip_buttons)
     finally:
         tab.close()
         tab.deleteLater()

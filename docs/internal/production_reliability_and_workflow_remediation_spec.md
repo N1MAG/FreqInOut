@@ -613,8 +613,12 @@ that rule-level access fields remain active. Saving a reusable policy keeps it
 selected for the rule being edited and confirms that **Save rule** attaches it.
 Token completion uses an editor-owned string model and an explicitly installed
 completer; accepting a lookup appends a chip without replacing previously
-entered values, custom groups remain supported, and an empty completion set
-never opens a popup. All user-facing hints follow the product-wide UI Hint Neutrality Contract:
+entered values, clears the lookup field after Qt finishes applying the selected
+completion, and leaves the next lookup immediately usable. Custom groups remain
+supported, and an empty completion set never opens a popup. The radio selector's
+choice is self-explanatory; detailed receiving-radio routing guidance belongs in
+Help rather than a persistent paragraph in the compact editor. All user-facing
+hints follow the product-wide UI Hint Neutrality Contract:
 they use semantic labels and never embed a real or plausible callsign.
 
 The same rule service supplies ingestion alerts, Inbox focus, Ops Center

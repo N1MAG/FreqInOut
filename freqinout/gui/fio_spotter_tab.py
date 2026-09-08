@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, Signal, QStringListModel
+from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QCompleter, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
@@ -105,6 +105,7 @@ class _TokenListEditor(QWidget):
         self.chip_layout = QHBoxLayout(self.chip_body)
         self.chip_layout.setContentsMargins(0, 0, 0, 0)
         self.chip_layout.setSpacing(4)
+        self.chip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.chip_scroll.setWidget(self.chip_body)
         self.chip_scroll.setFixedHeight(38)
         self.chip_scroll.setVisible(False)
@@ -189,6 +190,10 @@ class _TokenListEditor(QWidget):
 
     def _insert_completion(self, value: str) -> None:
         self._add_values(value)
+        # QLineEdit applies a clicked QCompleter value after activated handlers
+        # return on some Qt/platform combinations. Clear again on the next event
+        # turn so the accepted lookup cannot remain in front of the next search.
+        QTimer.singleShot(0, self, self._reset_entry_input)
 
     def _add_current_input(self) -> None:
         self._add_values(self.input.text())
@@ -202,10 +207,15 @@ class _TokenListEditor(QWidget):
                 self._values.append(value)
                 existing.add(value)
                 changed = True
-        self.input.clear()
+        self._reset_entry_input()
         if changed:
             self._rebuild_chips()
         self.input.setFocus()
+
+    def _reset_entry_input(self) -> None:
+        self.input.clear()
+        self._token_completer.setCompletionPrefix("")
+        self._token_completer.popup().hide()
 
     def _remove_value(self, value: str) -> None:
         self._values = [item for item in self._values if item != value]
@@ -213,30 +223,42 @@ class _TokenListEditor(QWidget):
 
     def _rebuild_chips(self) -> None:
         self.setMinimumHeight(0)
-        while self.chip_layout.count():
-            item = self.chip_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._chip_buttons = []
-        self.chip_body.setMinimumWidth(1)
+        existing = {
+            str(chip.property("tokenValue") or ""): chip
+            for chip in self._chip_buttons
+        }
+        wanted = set(self._values)
+        for value, chip in existing.items():
+            if value not in wanted:
+                self.chip_layout.removeWidget(chip)
+                chip.hide()
+                chip.deleteLater()
+
+        next_buttons: list[QPushButton] = []
         for value in self._values:
-            chip = QPushButton(f"{value}  ×", self.chip_body)
-            chip.setObjectName("fioSpotterTokenChip")
-            chip.setAccessibleName(f"Remove {value}")
-            chip.setToolTip(f"Remove {value}")
-            chip.clicked.connect(lambda _checked=False, selected=value: self._remove_value(selected))
+            chip = existing.get(value)
+            if chip is None:
+                chip = QPushButton(f"{value}  ×", self.chip_body)
+                chip.setObjectName("fioSpotterTokenChip")
+                chip.setProperty("tokenValue", value)
+                chip.setAccessibleName(f"Remove {value}")
+                chip.setToolTip(f"Remove {value}")
+                chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                chip.clicked.connect(lambda _checked=False, selected=value: self._remove_value(selected))
+            else:
+                self.chip_layout.removeWidget(chip)
             self.chip_layout.addWidget(chip)
-            self._chip_buttons.append(chip)
-        self.chip_layout.addStretch(1)
+            chip.show()
+            next_buttons.append(chip)
+        self._chip_buttons = next_buttons
         self.chip_layout.activate()
         chip_height = max((chip.sizeHint().height() for chip in self._chip_buttons), default=0)
         scrollbar_height = self.chip_scroll.horizontalScrollBar().sizeHint().height()
         self.chip_scroll.setFixedHeight(
             max(self.input.sizeHint().height() + 6, chip_height + scrollbar_height + 4)
         )
-        self.chip_body.setMinimumWidth(max(1, self.chip_layout.sizeHint().width()))
-        self.chip_body.adjustSize()
+        body_hint = self.chip_layout.sizeHint()
+        self.chip_body.setFixedSize(max(1, body_hint.width()), max(1, body_hint.height()))
         self.chip_scroll.setVisible(bool(self._values))
         self.layout().activate()
         self.setMinimumHeight(self.sizeHint().height())
@@ -1020,13 +1042,6 @@ class FioSpotterTab(QWidget):
         form.addRow("Blocked callers", self.expect_blocked)
         for label, widget in (("Radios", self.expect_radio), ("Max replies", self.expect_max), ("Cooldown", self.expect_cooldown)):
             form.addRow(label, widget)
-        radio_help = QLabel(
-            "All JS8 radios is the normal choice. A reply uses the receiving radio's configured JS8Call service; "
-            "FIO manages instance routing and scheduling."
-        )
-        radio_help.setWordWrap(True)
-        radio_help.setObjectName("fioSpotterExpectRadioHelp")
-        form.addRow("", radio_help)
         form.addRow(self.expect_enabled); form.addRow(self.expect_auto); form.addRow(self.expect_unattended)
         right_layout.addLayout(form)
         actions = QGridLayout()
