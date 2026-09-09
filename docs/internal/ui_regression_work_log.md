@@ -2080,3 +2080,53 @@ blank-profile construction is approximately 38–40 ms for SOP Builder and
 47–55 ms for Plan Builder after first-use font initialization. Python
 compilation and `git diff --check` pass. This slice makes no schema or production
 data changes and does not begin Slice 6.
+
+## 2026-09-09 — Slice 6 roster diagnostics and final integration
+
+The HF Callsigns roster import previously grouped blank separators, roster
+labels, and actual invalid operator rows under one `skipped` count. That made the
+supplied MAGNET result look as though 22 operator records were lost even though
+the parser had accepted every valid operator. The confirmation surface also
+showed only a small operator sample and committed through a metadata helper that
+could suppress a write exception and commit from `finally`.
+
+Slice 6 introduces a Qt-independent classified result and row-diagnostic model.
+The parser reports imported, updated, blank ignored, section/legend ignored, and
+invalid skipped separately; diagnostics preserve CSV line, callsign text, field,
+and reason. It recognizes the supplied trailing roster labels, rejects duplicate
+callsigns in one input deterministically, normalizes mixed group delimiters, and
+uses a bounded comma/tab/semicolon dialect probe.
+
+HF Callsigns performs a read-only lookup of current roster/identity callsigns
+before review, then presents a compact scrollable preview with result and source
+line columns. The displayed diagnostics are capped at 80 rows, while Copy and
+Export include the complete report before any write. Cancel remains
+non-mutating. Closed/former callsigns are not silently merged during roster
+import; the explicit Operator History Change Callsign workflow owns that
+association and protects against later callsign reuse.
+
+Confirmed rows use the shared metadata/identity tables in one caller-owned
+transaction. Strict write errors propagate, the complete write count is checked,
+and failure closes/rolls back without a success message or VarAC sync. Successful
+new and updated rows refresh the shared HF Callsigns data and trusted VarAC tag
+projection. No database schema or production data migration is involved.
+
+The supplied roster result is 166 imported, 18 blank ignored, 4 section/legend
+ignored, 0 invalid skipped, MR01–MR10, and 188 diagnostics. Five hundred parses
+measured 1.374 ms median, 1.584 ms p95, and 1.991 ms maximum on the macOS
+development host. Focused operator/platform coverage passes 97 tests with 25
+environment skips. The repository gate passes 2,704 tests with 37 environment
+skips in fresh processes. A combined Qt-heavy batch completed 889 assertions but
+hit the already documented macOS post-summary exit 139; its two isolated halves
+then exited cleanly with 465 and 424 passes.
+
+The isolated 120-second real-window soak passed with 869.5 ms first usable shell,
+1.5 ms maximum event-loop lag, 36.4 ms shutdown, 45 interactions, 11 resize
+cycles, and 23 navigation changes. Physical Linux production validation remains
+for the pre-main release gate.
+
+Delegation: Terra/high implemented the roster model and responsive preview;
+Luna/high handled help and recovery guidance; Luna/medium built the focused
+fixture, transaction, and Qt tests. The high-reasoning primary model owned
+transaction/identity policy and final integration, reviewed all delegated diffs,
+ran the gate, and did not start another slice.

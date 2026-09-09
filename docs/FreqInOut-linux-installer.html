@@ -122,6 +122,15 @@ bash install_FreqInOut_linux.sh</code></pre>
     <li>or configure proxy environment variables and retry</li>
   </ul>
 
+  <h3>Safe recovery staging</h3>
+  <p>Installer backups and in-app migration backups are recovery points, not working directories. Keep the failed install and its logs until the recovered copy is verified. Before restoring anything, close FreqInOut and companion radio applications, copy the current config to a new holding folder, and inspect the archive or in-app <code>manifest.json</code>. Stage recovered files under a separate config root and launch with <code>FREQINOUT_CONFIG_DIR</code> pointed at that staging root for validation. Do not extract an archive or copy backup contents directly over the live <code>~/.freqinout</code> tree. The <code>--repair</code> mode repairs the application environment and launcher; it is not a request to overwrite production configuration.</p>
+  <p>Preview an installer archive without changing the live install:</p>
+  <pre><code>RECOVERY_ROOT="$HOME/freqinout-recovery-YYYYMMDD-HHMMSS"
+mkdir -p "$RECOVERY_ROOT"
+tar -tzf "$HOME/.local/state/freqinout/backups/freqinout-backup-YYYYMMDD-HHMMSS.tar.gz" \
+  &gt; "$RECOVERY_ROOT/installer-archive-list.txt"</code></pre>
+  <p>For an in-app backup, use the manifest's <code>backup_path</code> entries to select what to copy into the staging root; preserve the manifest and any missing-path entries for support. Keep the current tree, failed-state logs, staged recovery, and original backup until Settings, databases, schedules, and roster import results have been checked.</p>
+
   <h2>8) Safety and reliability features</h2>
   <ul>
     <li>single-instance lock (prevents concurrent runs)</li>

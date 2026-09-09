@@ -476,7 +476,12 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
         log.error("checkin_db: upsert failed: %s", e)
 
 
-def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connection | None = None):
+def upsert_operator_metadata(
+    entries: List[Dict[str, Any]],
+    conn: sqlite3.Connection | None = None,
+    *,
+    raise_on_error: bool = False,
+) -> int:
     """
     Insert or update operator identity metadata without incrementing check-in counts.
 
@@ -485,7 +490,7 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
     do not want to imply a received check-in event.
     """
     if not entries:
-        return
+        return 0
 
     owns_conn = conn is None
     if owns_conn:
@@ -494,8 +499,11 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
             conn = sqlite3.connect(db_path)
         except Exception as e:
             log.error("checkins_db: metadata upsert open failed: %s", e)
-            return
+            if raise_on_error:
+                raise
+            return 0
 
+    written = 0
     try:
         assert conn is not None
         _ensure_table(conn)
@@ -682,15 +690,26 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                     operator_id,
                 ),
             )
+            written += 1
+        if owns_conn:
+            conn.commit()
     except Exception as e:
         log.error("checkin_db: metadata upsert failed: %s", e)
+        if owns_conn and conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        if raise_on_error:
+            raise
+        return 0
     finally:
-        try:
-            if owns_conn and conn is not None:
-                conn.commit()
+        if owns_conn and conn is not None:
+            try:
                 conn.close()
-        except Exception:
-            pass
+            except Exception:
+                pass
+    return written
 
 
 def get_all_operators() -> List[Dict[str, Any]]:

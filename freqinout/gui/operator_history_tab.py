@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidgetAction,
     QHeaderView,
     QAbstractItemView,
+    QApplication,
+    QScrollArea,
     QStyle,
     QCompleter,
     QDateTimeEdit,
@@ -48,7 +50,13 @@ from freqinout.core.operator_identity import (
 from freqinout.core.ingest_runtime_status import active_runtime_ingest_inventory
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
-from freqinout.core.operator_roster_import import RosterImportResult, infer_parent_group_from_path, parse_operator_roster_csv
+from freqinout.core.operator_roster_import import (
+    RosterImportResult,
+    classify_roster_import_result,
+    format_roster_diagnostic_classification,
+    infer_parent_group_from_path,
+    parse_operator_roster_csv,
+)
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_callsign_tags import sync_varac_callsign_tags_from_db
@@ -2081,12 +2089,23 @@ class OperatorHistoryTab(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Review Operator Import")
         layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 8, 12, 12)
+        layout.setSpacing(8)
+        review_scroll = QScrollArea(dlg)
+        review_scroll.setWidgetResizable(True)
+        review_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        review_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        review_body = QWidget(review_scroll)
+        review_layout = QVBoxLayout(review_body)
+        review_layout.setContentsMargins(18, 16, 18, 8)
+        review_layout.setSpacing(10)
+        review_scroll.setWidget(review_body)
+        layout.addWidget(review_scroll)
+        dlg.resize(860, 520)
 
         title = QLabel("Review detected operators before importing.")
         title.setStyleSheet("font-weight: 700;")
-        layout.addWidget(title)
+        review_layout.addWidget(title)
 
         regions = ", ".join(result.child_groups[:10])
         if len(result.child_groups) > 10:
@@ -2107,32 +2126,43 @@ class OperatorHistoryTab(QWidget):
         summary_lines = [
             f"Parent group: {result.parent_group or 'Unassigned'}",
             f"Operators to import: {result.imported}",
-            f"Skipped rows: {result.skipped}",
+            f"Existing operators to update: {result.updated}",
+            f"Blank rows ignored: {result.blank_ignored}",
+            f"Section/legend rows ignored: {result.legend_ignored}",
+            f"Invalid rows skipped: {result.invalid_skipped}",
             f"Detected regions: {regions or 'None'}",
             f"Detected fields: {fields or 'None'}",
             f"Not imported: {unmapped or 'None'}",
         ]
         summary = QLabel("\n".join(summary_lines))
         summary.setWordWrap(True)
-        layout.addWidget(summary)
+        review_layout.addWidget(summary)
 
         sample_label = QLabel("Sample operators")
         sample_label.setStyleSheet("font-weight: 700;")
-        layout.addWidget(sample_label)
+        review_layout.addWidget(sample_label)
 
         sample_rows = result.entries[:8]
-        table = QTableWidget(len(sample_rows), 7, dlg)
-        table.setHorizontalHeaderLabels(["Callsign", "Role", "Tier", "Name", "State", "Grid", "Groups"])
+        accepted_by_callsign = {
+            item.callsign_text.strip().upper(): item
+            for item in result.diagnostics
+            if item.classification in {"imported", "updated"}
+        }
+        table = QTableWidget(len(sample_rows), 9, dlg)
+        table.setHorizontalHeaderLabels(["Result", "CSV line", "Callsign", "Role", "Tier", "Name", "State", "Grid", "Groups"])
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
-        table.setMinimumHeight(210)
-        table.setMinimumWidth(760)
+        table.setMinimumHeight(120)
+        table.setMaximumHeight(180)
         for row_idx, entry in enumerate(sample_rows):
             groups = entry.get("groups_json") or []
             if not isinstance(groups, list):
                 groups = []
+            diagnostic = accepted_by_callsign.get(str(entry.get("callsign") or "").strip().upper())
             values = [
+                format_roster_diagnostic_classification(diagnostic.classification) if diagnostic else "Imported",
+                diagnostic.line if diagnostic else "",
                 entry.get("callsign", ""),
                 entry.get("group_role", ""),
                 entry.get("tier", ""),
@@ -2145,26 +2175,59 @@ class OperatorHistoryTab(QWidget):
                 table.setItem(row_idx, col_idx, QTableWidgetItem(str(value or "")))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         table.horizontalHeader().setStretchLastSection(True)
-        table.setColumnWidth(0, 110)
-        table.setColumnWidth(1, 95)
-        table.setColumnWidth(2, 70)
-        table.setColumnWidth(3, 150)
-        table.setColumnWidth(4, 80)
-        table.setColumnWidth(5, 90)
-        layout.addWidget(table)
+        table.setColumnWidth(0, 85)
+        table.setColumnWidth(1, 70)
+        table.setColumnWidth(2, 100)
+        table.setColumnWidth(3, 75)
+        table.setColumnWidth(4, 55)
+        table.setColumnWidth(5, 130)
+        table.setColumnWidth(6, 55)
+        table.setColumnWidth(7, 70)
+        review_layout.addWidget(table)
 
-        if result.imported == 0:
+        diagnostics = list(result.diagnostics[:80])
+        diagnostics_label = QLabel(
+            f"Row diagnostics — first {len(diagnostics)} of {len(result.diagnostics)}"
+            if len(diagnostics) < len(result.diagnostics) else "Row diagnostics"
+        )
+        diagnostics_label.setStyleSheet("font-weight: 700;")
+        diagnostics_label.setVisible(bool(diagnostics))
+        review_layout.addWidget(diagnostics_label)
+        diagnostics_table = QTableWidget(len(diagnostics), 5, dlg)
+        diagnostics_table.setObjectName("rosterImportDiagnostics")
+        diagnostics_table.setHorizontalHeaderLabels(["Line", "Result", "Callsign text", "Field", "Reason"])
+        diagnostics_table.verticalHeader().setVisible(False)
+        diagnostics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        diagnostics_table.setSelectionMode(QAbstractItemView.NoSelection)
+        diagnostics_table.setMinimumHeight(100)
+        diagnostics_table.setMaximumHeight(160)
+        diagnostics_table.setVisible(bool(diagnostics))
+        for row_idx, item in enumerate(diagnostics):
+            for col_idx, value in enumerate((item.line, item.classification, item.callsign_text, item.field, item.reason)):
+                display_value = format_roster_diagnostic_classification(value) if col_idx == 1 else value
+                diagnostics_table.setItem(row_idx, col_idx, QTableWidgetItem(str(display_value or "")))
+        diagnostics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        diagnostics_table.horizontalHeader().setStretchLastSection(True)
+        review_layout.addWidget(diagnostics_table)
+
+        if (result.imported + result.updated) == 0:
             note = QLabel("No valid operators were detected. Nothing will be imported.")
         else:
             note = QLabel("Importing updates existing callsigns and adds new ones to HF Operators.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
-        layout.addWidget(note)
+        review_layout.addWidget(note)
 
         btn_row = QHBoxLayout()
+        copy_diagnostics_btn = QPushButton("Copy Diagnostics")
+        export_diagnostics_btn = QPushButton("Export Diagnostics")
         import_btn = QPushButton("Import Operators")
-        import_btn.setEnabled(result.imported > 0)
+        import_btn.setEnabled((result.imported + result.updated) > 0)
         cancel_btn = QPushButton("Cancel")
+        copy_diagnostics_btn.clicked.connect(lambda: QApplication.clipboard().setText(result.diagnostics_text()))
+        export_diagnostics_btn.clicked.connect(lambda: self._export_roster_import_diagnostics(result))
+        btn_row.addWidget(copy_diagnostics_btn)
+        btn_row.addWidget(export_diagnostics_btn)
         btn_row.addStretch()
         btn_row.addWidget(import_btn)
         btn_row.addWidget(cancel_btn)
@@ -2173,6 +2236,30 @@ class OperatorHistoryTab(QWidget):
         cancel_btn.clicked.connect(dlg.reject)
 
         return dlg.exec() == QDialog.Accepted
+
+    def _export_roster_import_diagnostics(self, result: RosterImportResult) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Roster Import Diagnostics",
+            "roster_import_diagnostics.csv",
+            "CSV Files (*.csv)",
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["line", "result", "callsign_text", "field", "reason"])
+                for item in result.diagnostics:
+                    writer.writerow([
+                        item.line,
+                        format_roster_diagnostic_classification(item.classification),
+                        item.callsign_text,
+                        item.field,
+                        item.reason,
+                    ])
+        except Exception as exc:
+            QMessageBox.warning(self, "Roster Import", f"Could not export diagnostics:\n{exc}")
 
     def _show_manage_menu(self):
         menu = QMenu(self)
@@ -2318,16 +2405,60 @@ class OperatorHistoryTab(QWidget):
         try:
             with open(fn, newline="", encoding="utf-8-sig") as f:
                 result = parse_operator_roster_csv(f, parent_group=parent_group, source_path=fn)
-            if not self._confirm_roster_import_preview(result):
-                return
             db_path = self._db_path()
             if not db_path:
                 QMessageBox.warning(self, "CSV Import", "Database path not found.")
                 return
+            existing_callsigns: List[str] = []
+            try:
+                preview_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+                preview_conn = sqlite3.connect(preview_uri, uri=True)
+                try:
+                    try:
+                        existing_callsigns = [
+                            str(row[0] or "")
+                            for row in preview_conn.execute("SELECT callsign FROM operator_checkins")
+                        ]
+                    except sqlite3.OperationalError:
+                        # A profile may have current identities before roster metadata.
+                        existing_callsigns = []
+                    # Include current identities that do not yet have roster metadata.
+                    # Deliberately do not classify closed/former callsigns as updates:
+                    # callsign reuse is possible, and association changes belong to the
+                    # explicit Change Callsign workflow in Operator History.
+                    try:
+                        existing_callsigns.extend(
+                            str(row[0] or "")
+                            for row in preview_conn.execute("SELECT current_callsign FROM operator_identities")
+                        )
+                    except sqlite3.OperationalError:
+                        # Profiles predating stable identities still classify roster rows correctly.
+                        pass
+                finally:
+                    preview_conn.close()
+            except sqlite3.Error:
+                # A new profile has no operator table yet; every accepted row is new.
+                existing_callsigns = []
+            result = classify_roster_import_result(result, existing_callsigns=existing_callsigns)
+            if not self._confirm_roster_import_preview(result):
+                return
             conn = sqlite3.connect(db_path)
             try:
                 self._ensure_schema(conn)
-                upsert_operator_metadata(result.entries, conn=conn)
+                try:
+                    written = upsert_operator_metadata(result.entries, conn=conn, raise_on_error=True)
+                except TypeError as exc:
+                    # Preserve older integration hooks that implement the legacy
+                    # two-argument callable, while production uses strict errors.
+                    if "raise_on_error" not in str(exc):
+                        raise
+                    written = upsert_operator_metadata(result.entries, conn=conn)
+                # Older integrations may return None; the current core returns a
+                # count so a swallowed or partial write cannot report success.
+                if written is not None and written != len(result.entries):
+                    raise RuntimeError(
+                        f"Only {written} of {len(result.entries)} roster operators were written."
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -2338,12 +2469,16 @@ class OperatorHistoryTab(QWidget):
 
         self._load_data(show_toast=True)
         self._schedule_history_update()
-        if result.imported:
+        if result.imported + result.updated:
             self._sync_varac_callsign_tags()
         child_preview = ", ".join(result.child_groups[:8])
         if len(result.child_groups) > 8:
             child_preview += f", +{len(result.child_groups) - 8} more"
-        msg = f"Imported {result.imported} operator(s). Skipped {result.skipped}."
+        msg = (
+            f"Imported {result.imported} operator(s); updated {result.updated}.\n"
+            f"Blank ignored {result.blank_ignored}; section/legend ignored {result.legend_ignored}; "
+            f"invalid skipped {result.invalid_skipped}."
+        )
         if result.parent_group:
             msg += f"\nMapped parent group: {result.parent_group}."
         if child_preview:

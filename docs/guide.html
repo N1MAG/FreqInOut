@@ -246,6 +246,7 @@
       <tr><td><a href="#hf-nets-policy-manager">Net/SOP Policies Dialog</a></td><td>This records whether a net or an SOP wins when their time windows overlap.</td></tr>
       <tr><td><a href="#hf-nets-sop-workflow">Net/SOP Conflict Review</a></td><td>Use this when a net and an active SOP both want control at the same time.</td></tr>
       <tr><td><a href="#hf-callsigns-actions">HF Callsigns Actions</a></td><td>These are the roster-maintenance tools for searching, editing, importing, exporting, trusting, tagging, and setting SitRep status.</td></tr>
+      <tr><td><a href="#hf-callsigns-import">HF Callsigns CSV Import Review</a></td><td>Use the preview classifications and diagnostics before committing a roster import.</td></tr>
       <tr><td><a href="#sop-builder-actions">SOP Builder Top-Level Actions</a></td><td>These manage the SOP as a whole: create, save, delete, version, import/export, and PDF output.</td></tr>
       <tr><td><a href="#sop-builder-versions">SOP Versions</a></td><td>Versions are named drafts, useful when you want to keep several possible plans without making all of them active.</td></tr>
       <tr><td><a href="#sop-builder-fields">SOP Profile Fields</a></td><td>These name the SOP, choose HF or local scope, and decide whether the saved profile should become active.</td></tr>
@@ -1003,6 +1004,19 @@
     <li><strong>CSV imports</strong>: Excel <code>CSV UTF-8</code> exports with BOM are accepted.</li>
   </ul>
 
+  <h3 id="hf-callsigns-import">CSV Import Review and Diagnostics</h3>
+  <p>Importing a roster is a preview-first workflow. Review the detected parent/child groups, mapped fields, sample operators, and row totals before choosing <code>Import Operators</code>. The preview does not write to the operator database; cancel it to leave the current roster unchanged.</p>
+  <p>The result uses these classifications exactly:</p>
+  <ul class="section-list">
+    <li><strong>Imported</strong>: new operator rows accepted by validation.</li>
+    <li><strong>Updated</strong>: existing operator rows matched and refreshed by the import.</li>
+    <li><strong>Blank ignored</strong>: blank or separator rows with no operator record.</li>
+    <li><strong>Section/legend ignored</strong>: recognizable headings, notes, or legend rows such as <code>New additions</code> or <code>* = Signal only</code>.</li>
+    <li><strong>Invalid skipped</strong>: an intended operator row that fails validation. A blank or recognizable section/legend row is ignored, not a skipped valid operator.</li>
+  </ul>
+  <p>Warnings identify the CSV line, callsign text, field, and reason. Use the preview's copy/export diagnostics action before committing when you need a support record or want to correct the source file. Export the roster after a successful import if you need a separate operator-data checkpoint.</p>
+  <p><strong>Supplied MAGNET roster:</strong> the expected parser result is <code>166 imported</code>, <code>18 blank ignored</code>, <code>4 section/legend ignored</code>, and <code>0 invalid skipped</code>; child groups <code>MR01</code> through <code>MR10</code> are detected. On a roster that already contains some of those callsigns, matching rows may be reported as <strong>Updated</strong> rather than new imports.</p>
+
   <h2 id="local-callsigns">Operators: Local Callsigns</h2>
   <p><strong>Purpose</strong>: maintain local VHF/UHF/GMRS/MURS/FRS operator roster and local context.</p>
   <p><strong>Why you use it</strong>: Local Callsigns does for local comms what HF Callsigns does for HF. It gives the local NCS and local reporting workflows a real roster instead of a scratch pad.</p>
@@ -1527,7 +1541,7 @@
   <ul class="section-list">
     <li>UTC is the storage truth for schedules and SOP timing.</li>
     <li>Display toggles do not rewrite stored schedule times.</li>
-    <li>CSV/JSON import tools validate required fields and may skip invalid rows with summary feedback.</li>
+    <li>Roster CSV import validates required fields and reports <code>imported</code>, <code>updated</code>, <code>blank ignored</code>, <code>section/legend ignored</code>, and <code>invalid skipped</code> rows with line-level feedback.</li>
   </ul>
 
   <h2 id="troubleshooting">Troubleshooting</h2>

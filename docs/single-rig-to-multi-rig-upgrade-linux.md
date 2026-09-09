@@ -122,6 +122,18 @@ The production upgrade must be treated as a full migration. Existing FIO data is
 | GPG/encryption key references | FIO settings such as the GPG executable path, trusted fingerprints, and selected signing fingerprint remain in `freqinout.db` and are backed up with the config root. |
 | Saved signing passphrases | Saved GPG signing passphrases are stored in the Linux OS credential store through `keyring`, not inside FIO settings. On the same Linux user account, the upgraded FIO should continue to read them by fingerprint. They are not copied into FIO backups and should not be exported into plain files. |
 
+### Roster import validation
+
+Treat an operator CSV as staged input. In HF Callsigns, review the import preview before committing it and use the preview's copy/export diagnostics action if you need a support record. The preview is non-destructive: canceling it does not write the operator database. The result must distinguish:
+
+- operator rows **imported**;
+- existing operator rows **updated**;
+- blank/separator rows **ignored**;
+- section/legend rows **ignored**; and
+- intended operator rows that fail validation **skipped** as invalid.
+
+Warnings identify the CSV line, callsign text, field, and reason. Do not describe blank or recognizable section/legend rows as skipped valid operators. For the supplied MAGNET roster, the expected result on an empty target roster is `166 imported`, `18 blank ignored`, `4 section/legend ignored`, and `0 invalid skipped`, with child groups `MR01` through `MR10`. If the target already contains matching callsigns, those rows may be reported as `updated`.
+
 ## 7. Launch the Upgraded App Against Production Config
 
 For the in-place production upgrade, do not use the isolated fresh-install config root. Launch normally:
@@ -205,6 +217,8 @@ Expected:
 |---|---|
 | `[ ]` | Installer backup archive exists under `$HOME/.local/state/freqinout/backups`. |
 | `[ ]` | In-app pre-migration backup exists under `$HOME/.freqinout/backups`. |
+| `[ ]` | Any roster import preview was reviewed and diagnostics were copied/exported before commit. |
+| `[ ]` | Roster result uses `imported`, `updated`, `blank ignored`, `section/legend ignored`, and `invalid skipped`; supplied-fixture counts are `166`, `18`, `4`, and `0`. |
 | `[ ]` | The first migrated radio has the expected name and control backend. |
 | `[ ]` | FLRig/FLDigi paths, hosts, ports, logs, and check-in paths migrated. |
 | `[ ]` | JS8Call host, port, profile path, directed path, and forms path migrated. |
@@ -245,6 +259,23 @@ If migration fails after the in-app backup succeeds, keep the backup path shown 
 ```bash
 cp "$HOME/freqinout-install.log" "$HOME/freqinout-install-upgrade-failure.log"
 cp "$HOME/.freqinout/freqinout.log" "$HOME/freqinout-runtime-upgrade-failure.log" 2>/dev/null || true
+```
+
+Recovery is non-destructive. Keep the failed state and both logs for support; do not delete or overwrite the installer archive or the in-app backup. Before any restore attempt, close FIO and companion apps, copy the current production config to a new timestamped holding folder, and inspect the backup manifest:
+
+```bash
+RECOVERY_ROOT="$HOME/freqinout-recovery-YYYYMMDD-HHMMSS"
+mkdir -p "$RECOVERY_ROOT"
+cp -a "$HOME/.freqinout" "$RECOVERY_ROOT/current-config"
+cat "$HOME/.freqinout/backups/pre-multirig-YYYYMMDD-HHMMSS/manifest.json"
+```
+
+Use the manifest's `backup_path` entries to copy the selected backed-up files/directories into a separate recovery config root; validate that copy first by launching with `FREQINOUT_CONFIG_DIR` pointed at it. Never extract an installer archive or copy a backup directly over the live `$HOME/.freqinout` tree. Keep the original production tree, the failed-state copy, and the backup until the recovered profile, databases, schedules, and roster counts have been checked.
+
+For an installer archive, preview its contents before staging it elsewhere:
+
+```bash
+tar -tzf "$HOME/.local/state/freqinout/backups/freqinout-backup-YYYYMMDD-HHMMSS.tar.gz" > "$RECOVERY_ROOT/installer-archive-list.txt"
 ```
 
 Do not run repeated migrations against the same production config until the failure is understood.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import datetime
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
 
@@ -29,6 +29,26 @@ HEADER_ALIASES: Dict[str, tuple[str, ...]] = {
 IGNORED_HEADERS = {"tg handle", "tghandle", "alt contact", "altcontact"}
 GROUP_ROLE_ALIASES = {"ALT-HUB": "HUB-ALT"}
 CALLSIGN_RE = re.compile(r"^[A-Z0-9]{1,3}[0-9][A-Z0-9]{1,4}(?:/[A-Z0-9]{1,4})?$")
+DIAGNOSTIC_LABELS = {
+    "imported": "Imported",
+    "updated": "Updated",
+    "blank_ignored": "Blank ignored",
+    "legend_ignored": "Section/legend ignored",
+    "invalid_skipped": "Invalid skipped",
+}
+
+
+@dataclass(frozen=True)
+class RosterImportDiagnostic:
+    line: int
+    classification: str
+    callsign_text: str = ""
+    field: str = ""
+    reason: str = ""
+
+
+def format_roster_diagnostic_classification(classification: str) -> str:
+    return DIAGNOSTIC_LABELS.get(classification, classification.replace("_", " ").capitalize())
 
 
 @dataclass(frozen=True)
@@ -40,6 +60,30 @@ class RosterImportResult:
     skipped: int
     detected_headers: Dict[str, str]
     source_headers: List[str]
+    updated: int = 0
+    blank_ignored: int = 0
+    legend_ignored: int = 0
+    invalid_skipped: int = 0
+    diagnostics: List[RosterImportDiagnostic] = field(default_factory=list)
+
+    def diagnostics_text(self) -> str:
+        lines = [
+            f"Imported: {self.imported}",
+            f"Updated: {self.updated}",
+            f"Blank ignored: {self.blank_ignored}",
+            f"Section/legend ignored: {self.legend_ignored}",
+            f"Invalid skipped: {self.invalid_skipped}",
+        ]
+        for item in self.diagnostics:
+            lines.append(
+                " | ".join(
+                    part for part in (
+                        f"Line {item.line}", format_roster_diagnostic_classification(item.classification),
+                        item.callsign_text, item.field, item.reason
+                    ) if part
+                )
+            )
+        return "\n".join(lines)
 
 
 def _header_key(value: object) -> str:
@@ -105,6 +149,65 @@ def _trusted_value(value: object) -> int:
     return 1
 
 
+def _row_values(row: Mapping[str, object]) -> List[str]:
+    return [str(value or "").strip() for value in row.values()]
+
+
+def _is_legend_row(callsign_text: str, row: Mapping[str, object]) -> bool:
+    """Return true only for recognizable roster labels, not malformed records."""
+    values = [value for value in _row_values(row) if value]
+    # The supplied MAGNET roster stores its trailing labels in TimeZone, leaving
+    # Callsign blank.  A sole populated cell is therefore the marker to inspect.
+    marker_text = callsign_text or (values[0] if len(values) == 1 else "")
+    marker = re.sub(r"\s+", " ", str(marker_text or "").strip().lower())
+    if marker in {"new additions", "c.s. change", "cs change", "limbo"}:
+        return True
+    if marker.startswith("*") and "signal" in marker:
+        return True
+    return False
+
+
+def classify_roster_import_result(
+    result: RosterImportResult,
+    *,
+    existing_callsigns: Iterable[object] = (),
+) -> RosterImportResult:
+    """Classify accepted rows as new imports or updates without writing data."""
+    existing = {_normalize_callsign(value) for value in existing_callsigns}
+    existing.discard("")
+    updated_callsigns = {
+        _normalize_callsign(entry.get("callsign"))
+        for entry in result.entries
+        if _normalize_callsign(entry.get("callsign")) in existing
+    }
+    diagnostics = [
+        replace(
+            item,
+            classification=("updated" if _normalize_callsign(item.callsign_text) in updated_callsigns else "imported"),
+            reason=("Existing operator will be updated" if _normalize_callsign(item.callsign_text) in updated_callsigns else "New operator ready to import"),
+        )
+        if item.classification in {"imported", "updated"}
+        else item
+        for item in result.diagnostics
+    ]
+    updated = len(updated_callsigns)
+    return replace(result, imported=max(0, len(result.entries) - updated), updated=updated, diagnostics=diagnostics)
+
+
+def _roster_csv_reader(source: TextIO) -> csv.DictReader:
+    """Use a bounded dialect probe when the supplied stream can be rewound."""
+    try:
+        if not source.seekable():
+            return csv.DictReader(source)
+        position = source.tell()
+        sample = source.read(8192)
+        source.seek(position)
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+        return csv.DictReader(source, dialect=dialect)
+    except (AttributeError, csv.Error, OSError):
+        return csv.DictReader(source)
+
+
 def parse_operator_roster_csv(
     source: TextIO,
     *,
@@ -113,23 +216,57 @@ def parse_operator_roster_csv(
     default_trusted: bool = True,
     imported_at_utc: Optional[str] = None,
 ) -> RosterImportResult:
-    reader = csv.DictReader(source)
+    reader = _roster_csv_reader(source)
     detected = detect_roster_headers(reader.fieldnames)
     if "callsign" not in detected:
-        raise ValueError("Roster CSV must include a callsign column.")
+        headers = ", ".join(str(header or "") for header in (reader.fieldnames or []) if header)
+        raise ValueError(f"Roster CSV must include a callsign column (found: {headers or 'no headers'}).")
 
     parent = normalize_group_name(parent_group) or infer_parent_group_from_path(source_path)
     imported_at = imported_at_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
     entries: List[Dict[str, object]] = []
     child_seen: set[str] = set()
     child_groups: List[str] = []
-    skipped = 0
+    diagnostics: List[RosterImportDiagnostic] = []
+    blank_ignored = 0
+    legend_ignored = 0
+    invalid_skipped = 0
+    seen_callsigns: set[str] = set()
 
     for row in reader:
-        cs = _normalize_callsign(_get(row, detected, "callsign"))
-        if not cs:
-            skipped += 1
+        line = max(2, int(reader.line_num or 0))
+        callsign_text = _get(row, detected, "callsign")
+        populated_cells = [
+            (str(field or "").strip(), str(value or "").strip())
+            for field, value in row.items()
+            if str(value or "").strip()
+        ]
+        marker_field, marker_text = (
+            (populated_cells[0] if len(populated_cells) == 1 else ("callsign", callsign_text))
+        )
+        if not any(_row_values(row)):
+            blank_ignored += 1
+            diagnostics.append(RosterImportDiagnostic(line, "blank_ignored", reason="Blank or separator row"))
             continue
+        if _is_legend_row(callsign_text, row):
+            legend_ignored += 1
+            diagnostics.append(
+                RosterImportDiagnostic(line, "legend_ignored", marker_text, marker_field, "Section or legend row")
+            )
+            continue
+        cs = _normalize_callsign(callsign_text)
+        if not cs:
+            invalid_skipped += 1
+            diagnostics.append(RosterImportDiagnostic(line, "invalid_skipped", callsign_text, "callsign", "Invalid callsign"))
+            continue
+        if cs in seen_callsigns:
+            invalid_skipped += 1
+            diagnostics.append(RosterImportDiagnostic(line, "invalid_skipped", callsign_text, "callsign", "Duplicate callsign in CSV"))
+            continue
+        seen_callsigns.add(cs)
+        diagnostics.append(
+            RosterImportDiagnostic(line, "imported", callsign_text, "callsign", "New operator ready to import")
+        )
 
         region = normalize_group_name(_get(row, detected, "region"))
         groups: List[str] = []
@@ -174,9 +311,13 @@ def parse_operator_roster_csv(
         parent_group=parent,
         child_groups=child_groups,
         imported=len(entries),
-        skipped=skipped,
+        skipped=invalid_skipped,
         detected_headers=dict(detected),
         source_headers=[str(field or "").strip() for field in (reader.fieldnames or []) if str(field or "").strip()],
+        blank_ignored=blank_ignored,
+        legend_ignored=legend_ignored,
+        invalid_skipped=invalid_skipped,
+        diagnostics=diagnostics,
     )
 
 

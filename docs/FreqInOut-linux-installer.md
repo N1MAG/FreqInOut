@@ -176,6 +176,21 @@ If internet checks fail:
 - use `--offline`
 - or configure proxy environment variables and retry
 
+### Safe recovery staging
+
+Installer backups and in-app migration backups are recovery points, not working directories. Keep the failed install and its logs until the recovered copy is verified. Before restoring anything, close FreqInOut and companion radio applications, copy the current config to a new holding folder, and inspect the archive or in-app `manifest.json`. Stage recovered files under a separate config root and launch with `FREQINOUT_CONFIG_DIR` pointed at that staging root for validation. Do not extract an archive or copy backup contents directly over the live `~/.freqinout` tree. The `--repair` mode repairs the application environment and launcher; it is not a request to overwrite production configuration.
+
+Preview an installer archive without changing the live install:
+
+```bash
+RECOVERY_ROOT="$HOME/freqinout-recovery-YYYYMMDD-HHMMSS"
+mkdir -p "$RECOVERY_ROOT"
+tar -tzf "$HOME/.local/state/freqinout/backups/freqinout-backup-YYYYMMDD-HHMMSS.tar.gz" \
+  > "$RECOVERY_ROOT/installer-archive-list.txt"
+```
+
+For an in-app backup, use the manifest's `backup_path` entries to select what to copy into the staging root; preserve the manifest and any missing-path entries for support. Keep the current tree, failed-state logs, staged recovery, and original backup until Settings, databases, schedules, and roster import results have been checked.
+
 ---
 
 ## 8) Safety and reliability features

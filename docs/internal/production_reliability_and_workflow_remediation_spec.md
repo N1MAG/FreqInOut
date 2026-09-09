@@ -1,8 +1,7 @@
 # Production Reliability And Workflow Remediation Spec
 
-Status: Slices 0, 2, and 3 implemented with automated gates passed; Slice 1
-software gate passed 2026-09-06 with the T1000-E reconnect hardware exception
-documented; Slices 4–6 not started
+Status: Slices 0–6 implemented with automated gates passed; Slice 1 software
+gate passed 2026-09-06 with the T1000-E reconnect hardware exception documented
 
 Date: 2026-09-06
 
@@ -1792,6 +1791,56 @@ Exit gate: supplied file reports 166 imported, 18 blank ignored, 4 label rows
 ignored, 0 invalid; full performance/platform regression passes.
 
 Risk: **low** for roster reporting, **medium** for final integration.
+
+Implementation result (2026-09-09): **automated exit gate passed**. Roster
+parsing now returns explicit `imported`, `updated`, `blank_ignored`,
+`legend_ignored`, and `invalid_skipped` totals plus one diagnostic for every
+non-header source row. Diagnostics retain CSV line, callsign text, field, and
+reason; duplicate callsigns within one CSV are invalid rows rather than silent
+last-write-wins updates. A bounded dialect probe supports comma-, tab-, and
+semicolon-delimited roster exports without reading the full input twice.
+
+HF Callsigns now performs a read-only current-identity lookup before displaying
+the import review. The preview is non-mutating, distinguishes new and updated
+operators, shows source line/result in its sample, and bounds the on-screen
+diagnostic table to 80 rows while Copy/Export retains the complete report. It
+uses a compact scrollable surface without a fixed wide minimum. Closed/former
+callsigns are deliberately not treated as implicit roster updates because a
+callsign can be reused; reassociation remains the explicit Change Callsign
+workflow in Operator History.
+
+Accepted rows are written only after confirmation. The metadata writer exposes
+a strict error mode and a write count, no longer commits from `finally`, and the
+roster caller verifies the complete count before its single commit. A failed
+multi-row import therefore rolls back rather than reporting partial success.
+Successful new and updated rows continue through the shared operator identity,
+group membership, HF Callsigns, Map/search, and VarAC trusted-callsign sync
+paths; no parallel roster store or schema migration was introduced.
+
+The supplied MAGNET roster reports exactly **166 imported, 18 blank ignored, 4
+section/legend ignored, and 0 invalid skipped**, with MR01 through MR10 and 188
+row diagnostics. On the macOS development host, 500 parses measured 1.374 ms
+median, 1.584 ms p95, and 1.991 ms maximum. Focused Slice 6 and affected
+operator/platform coverage passes 97 tests with 25 environment skips. The full
+repository passes 2,704 tests with 37 environment skips in fresh-process
+batches; one larger combined Qt batch completed all 889 assertions before the
+previously documented macOS post-summary exit 139, and its two fresh-process
+halves then exited cleanly with 465 and 424 passes.
+
+A 120-second isolated real-window soak completed 117 event-loop samples, 45
+interactions, 11 resize cycles, and 23 navigation changes. First usable shell
+was 869.5 ms, maximum event-loop lag was 1.5 ms, and shutdown was 36.4 ms with
+all Qt worker threads stopped cleanly. Physical Linux production validation
+remains a pre-main release check and is not represented as having run on this
+macOS host.
+
+Delegation and review: Terra/high implemented the widget-independent result
+model and bounded preview/export seam. Luna/high updated help and safe
+migration/recovery guidance. Luna/medium implemented the exact-fixture,
+edge-case, transaction, and compact Qt acceptance package. The high-reasoning
+primary model owned transaction and identity policy, reviewed every delegated
+diff, closed the implicit former-callsign association risk, ran performance and
+platform integration, and completed this gate. No subsequent slice began.
 
 ## Test And Release Strategy
 
