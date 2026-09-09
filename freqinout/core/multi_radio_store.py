@@ -936,6 +936,88 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_varac_cluster_members_instance ON varac_cluster_members(cluster_id, instance_number)",
         ),
     },
+    "radio_launch_bundles": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS radio_launch_bundles (
+            radio_profile_id INTEGER PRIMARY KEY,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            launch_enabled INTEGER NOT NULL DEFAULT 0,
+            migrated_from_legacy INTEGER NOT NULL DEFAULT 0,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "launch_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "migrated_from_legacy": "INTEGER NOT NULL DEFAULT 0",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (),
+    },
+    "radio_launch_bundle_items": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS radio_launch_bundle_items (
+            radio_profile_id INTEGER NOT NULL,
+            instance_key TEXT NOT NULL,
+            app_name TEXT NOT NULL,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            launch_at_startup INTEGER NOT NULL DEFAULT 0,
+            monitor_health INTEGER NOT NULL DEFAULT 1,
+            command_override TEXT,
+            path_override TEXT,
+            dependencies_json TEXT NOT NULL DEFAULT '[]',
+            readiness_json TEXT NOT NULL DEFAULT '{}',
+            updated_utc TEXT NOT NULL,
+            PRIMARY KEY(radio_profile_id, instance_key),
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "app_name": "TEXT NOT NULL DEFAULT ''",
+            "display_order": "INTEGER NOT NULL DEFAULT 0",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "launch_at_startup": "INTEGER NOT NULL DEFAULT 0",
+            "monitor_health": "INTEGER NOT NULL DEFAULT 1",
+            "command_override": "TEXT",
+            "path_override": "TEXT",
+            "dependencies_json": "TEXT NOT NULL DEFAULT '[]'",
+            "readiness_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE INDEX IF NOT EXISTS idx_radio_launch_items_order ON radio_launch_bundle_items(radio_profile_id, display_order)",
+        ),
+    },
+    "launch_bundle_migration_audit": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS launch_bundle_migration_audit (
+            migration_key TEXT PRIMARY KEY,
+            occurred_utc TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            target_radio_profile_id INTEGER,
+            target_reason TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL,
+            backup_path TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """,
+        "columns": {
+            "occurred_utc": "TEXT NOT NULL DEFAULT ''",
+            "source_key": "TEXT NOT NULL DEFAULT ''",
+            "target_radio_profile_id": "INTEGER",
+            "target_reason": "TEXT NOT NULL DEFAULT ''",
+            "source_sha256": "TEXT NOT NULL DEFAULT ''",
+            "item_count": "INTEGER NOT NULL DEFAULT 0",
+            "state": "TEXT NOT NULL DEFAULT ''",
+            "backup_path": "TEXT",
+            "result_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+        "indexes": (),
+    },
 }
 
 

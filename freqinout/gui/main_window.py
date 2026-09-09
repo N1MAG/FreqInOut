@@ -7547,7 +7547,10 @@ class MainWindow(QMainWindow):
             return []
         try:
             items = visible_status_programs(dict(self.settings.all()), device_profiles=[profile_map])
-            return self._station_command_health_monitored_items(items)
+            return self._station_command_health_monitored_items(
+                items,
+                radio_profile_id=int(profile_map.get("id", 0) or 0),
+            )
         except Exception:
             return []
 
@@ -7556,11 +7559,24 @@ class MainWindow(QMainWindow):
         app_name = str(name or "").strip()
         return "JS8Call_API" if app_name == "JS8Call" else app_name
 
-    def _station_command_health_monitored_items(self, items: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        try:
-            raw_items = self.settings.get("launch_control_items", [])
-        except Exception:
-            raw_items = []
+    def _station_command_health_monitored_items(
+        self,
+        items: list[tuple[str, str]],
+        *,
+        radio_profile_id: int = 0,
+    ) -> list[tuple[str, str]]:
+        raw_items = []
+        if radio_profile_id > 0:
+            try:
+                bundle = self.launch_orchestrator.get_radio_launch_bundle(radio_profile_id)
+                raw_items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
+            except Exception:
+                raw_items = []
+        if not raw_items:
+            try:
+                raw_items = self.settings.get("launch_control_items", [])
+            except Exception:
+                raw_items = []
         if not isinstance(raw_items, list):
             return items
         monitored_by_key: dict[str, bool] = {}
@@ -7571,7 +7587,9 @@ class MainWindow(QMainWindow):
             name = str(item.get("name", "") or "").strip()
             if name not in builtin_names:
                 continue
-            monitored_by_key[self._station_command_launch_health_key(name)] = bool(item.get("enabled", True))
+            monitored_by_key[self._station_command_launch_health_key(name)] = bool(
+                item.get("monitor_health", item.get("enabled", True))
+            )
         if not monitored_by_key:
             return items
         return [(key, label) for key, label in items if monitored_by_key.get(key, True)]

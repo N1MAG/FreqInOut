@@ -15,6 +15,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.dependency_status_service import get_dependency_status_service
+from freqinout.core.launch_bundle_store import LaunchBundleStore
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.station_launch_planner import LaunchPlan, StationLaunchPlanner
 
 
 LAUNCH_APP_ORDER: List[str] = [
@@ -95,10 +99,21 @@ class LaunchOrchestrator(QObject):
     sequence_progress = Signal(object)
     sequence_finished = Signal(object)
 
-    def __init__(self, settings: SettingsManager, parent: QObject | None = None):
+    def __init__(
+        self,
+        settings: SettingsManager,
+        parent: QObject | None = None,
+        *,
+        bundle_store: LaunchBundleStore | None = None,
+        multi_radio_store: MultiRadioStore | None = None,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.status = SoftwareStatusService(settings)
+        self.dependency_status = get_dependency_status_service(settings)
+        self.bundle_store = bundle_store or LaunchBundleStore(settings.db_path)
+        self.multi_radio_store = multi_radio_store or MultiRadioStore(settings.db_path)
+        self.planner = StationLaunchPlanner()
         self._runtime_launch_enabled_override: Optional[bool] = None
         self._runtime_launch_block_reason: str = ""
         self._active = False
@@ -108,13 +123,13 @@ class LaunchOrchestrator(QObject):
         self._index = 0
         self._results: List[Dict[str, Any]] = []
         self._current_name: Optional[str] = None
+        self._current_item: Any = None
         self._current_cmd: Optional[List[str]] = None
         self._current_started_monotonic = 0.0
         self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
-        self._migrate_if_needed()
 
     @staticmethod
     def is_truthy(val: Any) -> bool:
@@ -224,49 +239,78 @@ class LaunchOrchestrator(QObject):
         return out
 
     def get_launch_items(self) -> List[Dict[str, Any]]:
-        self._migrate_if_needed()
         raw = self.settings.get("launch_control_items", [])
         if not isinstance(raw, list):
             raw = []
         normalized = self.build_default_items(raw, custom_tools=self.get_custom_tools())
         return normalized
 
-    def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
-        normalized = self.build_default_items(items, custom_tools=self.get_custom_tools())
-        batch: Dict[str, Any] = {
-            "launch_control_items": normalized,
-            "launch_control_enabled": bool(launch_all_with_startup),
-            "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(
-                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
-                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-            ),
+    def get_radio_launch_bundle(self, radio_profile_id: int) -> Dict[str, Any]:
+        return self.bundle_store.get_bundle(
+            int(radio_profile_id),
+            legacy_items=self.settings.get("launch_control_items", []),
+        )
+
+    def set_radio_launch_bundle(
+        self,
+        radio_profile_id: int,
+        items: List[Dict[str, Any]],
+        launch_enabled: bool,
+    ) -> Dict[str, Any]:
+        return self.bundle_store.save_bundle(int(radio_profile_id), bool(launch_enabled), items)
+
+    def preview_startup_plan(
+        self,
+        *,
+        scope_radio_id: Optional[int] = None,
+        trigger: str = "startup",
+        bundle_override: Optional[Mapping[str, Any]] = None,
+    ) -> LaunchPlan:
+        profiles = self.multi_radio_store.list_runtime_active_device_profiles()
+        bundles = {
+            int(profile["id"]): self.get_radio_launch_bundle(int(profile["id"]))
+            for profile in profiles
+            if int(profile.get("id", 0) or 0) > 0
         }
-        for item in normalized:
-            name = str(item.get("name", "")).strip()
-            startup = bool(item.get("startup", False))
-            legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
-            if legacy_key:
-                batch[str(legacy_key)] = startup
-        if hasattr(self.settings, "set_many"):
-            self.settings.set_many(batch, save=True)  # type: ignore[attr-defined]
-        else:
-            for key, val in batch.items():
-                self.settings.set(key, val)
+        if scope_radio_id is not None and bundle_override is not None:
+            bundles[int(scope_radio_id)] = dict(bundle_override)
+        return self.planner.plan_startup(
+            profiles,
+            bundles,
+            scope_radio_id=scope_radio_id,
+            trigger=trigger,
+        )
+
+    def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
+        """Compatibility entry point; writes the runtime-primary radio bundle, never legacy KV."""
+        profile = self.multi_radio_store.get_runtime_primary_device_profile()
+        if not profile:
+            raise RuntimeError("Launch Control needs a selected radio before it can be saved.")
+        self.set_radio_launch_bundle(
+            int(profile["id"]),
+            self.build_default_items(items, custom_tools=self.get_custom_tools()),
+            bool(launch_all_with_startup),
+        )
 
     def start_startup_sequence(self) -> bool:
         if self._active:
             return False
         if not self.launch_allowed():
             return False
-        launch_all = self.is_truthy(self.settings.get("launch_control_enabled", True))
-        if not launch_all:
-            return False
-        items = self.get_launch_items()
-        queue = self._build_queue(items, startup_only=True)
+        plan = self.preview_startup_plan(trigger="startup")
+        queue = plan.queue()
         if not queue:
             return False
         return self._start_sequence("startup", queue)
+
+    def start_radio_startup_sequence(self, radio_profile_id: int) -> bool:
+        if self._active or not self.launch_allowed():
+            return False
+        plan = self.preview_startup_plan(scope_radio_id=int(radio_profile_id), trigger="manual")
+        queue = plan.queue()
+        if not queue:
+            return False
+        return self._start_sequence("manual", queue)
 
     def start_manual_sequence(self, items: Optional[List[Dict[str, Any]]] = None) -> bool:
         if self._active:
@@ -285,6 +329,8 @@ class LaunchOrchestrator(QObject):
         if not self._active:
             return
         self._cancel_requested = True
+        self._poll_timer.stop()
+        self._finish_sequence(cancelled=True)
 
     def is_active(self) -> bool:
         return self._active
@@ -308,35 +354,6 @@ class LaunchOrchestrator(QObject):
             if str(raw or "").strip():
                 return True
         return False
-
-    def _migrate_if_needed(self) -> None:
-        migrated = self.is_truthy(self.settings.get("launch_control_migrated_v1", False))
-        raw_items = self.settings.get("launch_control_items", None)
-        if migrated and isinstance(raw_items, list):
-            return
-        defaults = self.build_default_items(
-            raw_items if isinstance(raw_items, list) else None,
-            custom_tools=self.get_custom_tools(),
-        )
-        batch = {
-            "launch_control_items": defaults,
-            "launch_control_enabled": bool(self.settings.get("launch_control_enabled", True)),
-            "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(
-                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
-                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-            ),
-        }
-        for item in defaults:
-            name = str(item.get("name", "")).strip()
-            legacy_key = LAUNCH_APP_META.get(name, {}).get("legacy_autostart_key")
-            if legacy_key:
-                batch[str(legacy_key)] = bool(item.get("startup", False))
-        if hasattr(self.settings, "set_many"):
-            self.settings.set_many(batch, save=True)  # type: ignore[attr-defined]
-        else:
-            for key, val in batch.items():
-                self.settings.set(key, val)
 
     def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[Any]:
         queue: List[Any] = []
@@ -367,6 +384,19 @@ class LaunchOrchestrator(QObject):
             return str(item.get("name", "") or "").strip()
         return str(item or "").strip()
 
+    @staticmethod
+    def _result_for(item: Any, *, status: str, detail: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "name": LaunchOrchestrator._queue_item_name(item),
+            "status": status,
+            "detail": detail,
+        }
+        if isinstance(item, Mapping):
+            for key in ("instance_key", "instance_identity", "radio_ids", "radio_names"):
+                if key in item:
+                    result[key] = item[key]
+        return result
+
     def _schedule_advance_queue(self, delay_ms: int = 0) -> None:
         QTimer.singleShot(max(0, int(delay_ms)), self._advance_queue)
 
@@ -382,15 +412,51 @@ class LaunchOrchestrator(QObject):
             return 120.0
         return float(val)
 
-    def _program_ready_for_sequence(self, name: str) -> bool:
-        if not self._program_running(name):
+    def _program_ready_for_sequence(self, item: Any) -> bool:
+        name = self._queue_item_name(item)
+        info = self._cached_status_for_item(item)
+        if not self._program_running(item):
             return False
         if name == "JS8Call":
-            try:
-                return bool(self.status.js8_api_reachable(allow_fallback=False))
-            except Exception:
-                return False
+            policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+            if isinstance(policy, Mapping) and not bool(policy.get("require_api", True)):
+                return True
+            return bool(info.get("reachable", False))
+        if name in {"FLRig", "FLDigi"} and isinstance(item, Mapping):
+            policy = item.get("readiness_policy", {})
+            if isinstance(policy, Mapping) and bool(policy.get("require_service", False)):
+                return bool(info.get("reachable", False))
         return True
+
+    def _cached_status_for_item(self, item: Any) -> Mapping[str, Any]:
+        name = self._queue_item_name(item)
+        policy = item.get("readiness_policy", {}) if isinstance(item, Mapping) else {}
+        kwargs: Dict[str, Any] = {"force": False}
+        if name == "JS8Call" and isinstance(policy, Mapping):
+            kwargs["host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["port_override"] = None
+        elif name == "FLRig" and isinstance(policy, Mapping):
+            kwargs["flrig_host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["flrig_port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["flrig_port_override"] = None
+        elif name == "FLDigi" and isinstance(policy, Mapping):
+            kwargs["fldigi_host_override"] = str(policy.get("host", "") or "") or None
+            try:
+                kwargs["fldigi_port_override"] = int(policy.get("port")) if policy.get("port") is not None else None
+            except Exception:
+                kwargs["fldigi_port_override"] = None
+        try:
+            snapshot = self.dependency_status.status_snapshot(**kwargs)
+        except Exception:
+            return {}
+        key = "JS8Call_API" if name == "JS8Call" else name
+        info = snapshot.get(key, {}) if isinstance(snapshot, Mapping) else {}
+        return info if isinstance(info, Mapping) else {}
 
     def _pending_queue_contains(self, names: set[str]) -> bool:
         if not names:
@@ -422,6 +488,7 @@ class LaunchOrchestrator(QObject):
         self._index = 0
         self._results = []
         self._current_name = None
+        self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
         try:
@@ -431,7 +498,12 @@ class LaunchOrchestrator(QObject):
             )
         except Exception:
             self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
-        self.sequence_started.emit({"trigger": trigger, "queue": [self._queue_item_name(item) for item in queue]})
+        self.sequence_started.emit(
+            {
+                "trigger": trigger,
+                "queue": [dict(item) if isinstance(item, Mapping) else {"name": self._queue_item_name(item)} for item in queue],
+            }
+        )
         self._schedule_advance_queue(0)
         return True
 
@@ -450,28 +522,53 @@ class LaunchOrchestrator(QObject):
         if not name:
             self._schedule_advance_queue(0)
             return
-        if self._program_running(name):
-            if self._program_ready_for_sequence(name):
-                result = {"name": name, "status": "already_running", "detail": "already running"}
+        blocked_dependency = self._blocked_dependency_for(queue_item)
+        if blocked_dependency:
+            result = self._result_for(
+                queue_item,
+                status="blocked_dependency",
+                detail=f"dependency {blocked_dependency} was not ready",
+            )
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            self._schedule_advance_queue(0)
+            return
+        if self._program_running(queue_item):
+            same_name_identities = {
+                str(value.get("instance_identity", "") or "")
+                for value in self._queue
+                if isinstance(value, Mapping) and self._queue_item_name(value) == name
+            }
+            has_distinct_instances = len(same_name_identities - {""}) > 1
+            endpoint_scoped = name in {"JS8Call", "FLRig", "FLDigi"}
+            ready = self._program_ready_for_sequence(queue_item)
+            if ready and (not has_distinct_instances or endpoint_scoped):
+                result = self._result_for(queue_item, status="already_running", detail="already running")
                 self._results.append(result)
                 self.sequence_progress.emit(result)
                 self._schedule_advance_queue(0)
                 return
-            self._current_name = name
-            self._current_cmd = None
-            self._current_started_monotonic = time.monotonic()
-            self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
-            self._poll_timer.start()
-            return
+            # A different JS8 instance may already be running while this
+            # planned endpoint is absent. Launch this instance instead of
+            # waiting on the unrelated process name.
+            should_launch_distinct = has_distinct_instances and (not ready or not endpoint_scoped)
+            if not should_launch_distinct:
+                self._current_name = name
+                self._current_item = queue_item
+                self._current_cmd = None
+                self._current_started_monotonic = time.monotonic()
+                self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
+                self._poll_timer.start()
+                return
         cmd, cmd_desc = self._resolve_launch_command(queue_item)
         if not cmd:
-            result = {"name": name, "status": "failed", "detail": "no launch command"}
+            result = self._result_for(queue_item, status="failed", detail="no launch command")
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
             return
         if self._is_self_launch_command(cmd):
-            result = {"name": name, "status": "blocked_self", "detail": "blocked self-launch target"}
+            result = self._result_for(queue_item, status="blocked_self", detail="blocked self-launch target")
             self._results.append(result)
             self.sequence_progress.emit(result)
             log.warning("LaunchOrchestrator: blocked self-launch target for %s via %r", name, cmd)
@@ -483,21 +580,57 @@ class LaunchOrchestrator(QObject):
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
             cwd = self._infer_launch_cwd(name, cmd, cmd_desc)
             subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
+            try:
+                self.dependency_status.refresh_now(reason=f"launch:{name}", force=True)
+            except Exception:
+                pass
             if cwd:
                 log.info("LaunchOrchestrator: launched %s via %s (cwd=%s)", name, cmd_desc, cwd)
             else:
                 log.info("LaunchOrchestrator: launched %s via %s", name, cmd_desc)
             self._current_name = name
+            self._current_item = queue_item
             self._current_cmd = cmd
             self._current_started_monotonic = time.monotonic()
             self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
         except Exception as e:
             log.error("LaunchOrchestrator: failed launching %s via %s: %s", name, cmd_desc, e)
-            result = {"name": name, "status": "failed", "detail": str(e)}
+            result = self._result_for(queue_item, status="failed", detail=str(e))
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._schedule_advance_queue(0)
+
+    def _blocked_dependency_for(self, item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return ""
+        dependencies = item.get("dependencies", [])
+        if not isinstance(dependencies, list) or not dependencies:
+            return ""
+        radio_ids = {int(value) for value in item.get("radio_ids", []) if str(value).strip()}
+        success_states = {"launched", "already_running"}
+        queue_names = {self._queue_item_name(value) for value in self._queue}
+        for dependency in (str(value).strip() for value in dependencies):
+            if not dependency or dependency not in queue_names:
+                continue
+            matching: List[Mapping[str, Any]] = []
+            for result in self._results:
+                if str(result.get("name", "") or "") != dependency:
+                    continue
+                result_radios = {int(value) for value in result.get("radio_ids", []) if str(value).strip()}
+                if radio_ids and result_radios and radio_ids.isdisjoint(result_radios):
+                    continue
+                matching.append(result)
+            successful = [result for result in matching if str(result.get("status", "")) in success_states]
+            if not successful:
+                return dependency
+            if radio_ids:
+                covered_radios: set[int] = set()
+                for result in successful:
+                    covered_radios.update(int(value) for value in result.get("radio_ids", []) if str(value).strip())
+                if not radio_ids.issubset(covered_radios):
+                    return dependency
+        return ""
 
     def _poll_current_readiness(self) -> None:
         if not self._active:
@@ -520,33 +653,48 @@ class LaunchOrchestrator(QObject):
         )
         if self._poll_timer.interval() != desired_interval:
             self._poll_timer.setInterval(desired_interval)
-        if self._program_ready_for_sequence(name):
+        if self._program_ready_for_sequence(self._current_item or name):
             self._poll_timer.stop()
             delay_sec = self._post_ready_settle_delay_seconds(name)
             detail = f"ready in {elapsed:.1f}s"
             if delay_sec > 0:
                 detail += f"; waiting {delay_sec:.1f}s before next launch"
-            result = {"name": name, "status": "launched", "detail": detail}
+            result = self._result_for(self._current_item or name, status="launched", detail=detail)
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
+            self._current_item = None
             self._current_cmd = None
             self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
         if elapsed >= float(self._wait_timeout_sec):
             self._poll_timer.stop()
-            result = {"name": name, "status": "timeout", "detail": f"not ready after {self._wait_timeout_sec}s"}
+            result = self._result_for(
+                self._current_item or name,
+                status="timeout",
+                detail=f"not ready after {self._wait_timeout_sec}s",
+            )
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
+            self._current_item = None
             self._current_cmd = None
             self._schedule_advance_queue(0)
 
-    def _program_running(self, name: str) -> bool:
-        try:
-            return bool(self.status.program_is_running(name))
-        except Exception:
-            return False
+    def _program_running(self, item: Any) -> bool:
+        name = self._queue_item_name(item)
+        if isinstance(item, Mapping) and item.get("instance_identity"):
+            target = str(
+                item.get("launch_command_override", "")
+                or item.get("launch_path_override", "")
+                or ""
+            ).strip()
+            if target:
+                try:
+                    return bool(self.status.cached_program_instance_running(name, target))
+                except Exception:
+                    return False
+        return bool(self._cached_status_for_item(item).get("running", False))
 
     def _resolve_launch_command(self, item_or_name: Any) -> Tuple[Optional[List[str]], str]:
         name = self._queue_item_name(item_or_name)
@@ -796,11 +944,11 @@ class LaunchOrchestrator(QObject):
         self._poll_timer.stop()
         if cancelled and self._current_name:
             self._results.append(
-                {
-                    "name": self._current_name,
-                    "status": "cancelled",
-                    "detail": "sequence cancelled before readiness check completed",
-                }
+                self._result_for(
+                    self._current_item or self._current_name,
+                    status="cancelled",
+                    detail="sequence cancelled before readiness check completed",
+                )
             )
         summary = self._build_summary(cancelled=cancelled)
         self._active = False
@@ -809,6 +957,7 @@ class LaunchOrchestrator(QObject):
         self._queue = []
         self._index = 0
         self._current_name = None
+        self._current_item = None
         self._current_cmd = None
         self._current_started_monotonic = 0.0
         self.sequence_finished.emit(summary)
@@ -819,6 +968,7 @@ class LaunchOrchestrator(QObject):
         failed = sum(1 for r in self._results if r.get("status") == "failed")
         timeout = sum(1 for r in self._results if r.get("status") == "timeout")
         blocked_self = sum(1 for r in self._results if r.get("status") == "blocked_self")
+        blocked_dependency = sum(1 for r in self._results if r.get("status") == "blocked_dependency")
         cancelled_count = sum(1 for r in self._results if r.get("status") == "cancelled")
         return {
             "trigger": self._trigger,
@@ -828,6 +978,7 @@ class LaunchOrchestrator(QObject):
             "failed": failed,
             "timeout": timeout,
             "blocked_self": blocked_self,
+            "blocked_dependency": blocked_dependency,
             "cancelled_count": cancelled_count,
             "results": list(self._results),
         }

@@ -81,6 +81,7 @@ class SettingsManager:
                 "SettingsManager: initialized fresh multi-rig blank slate; no default radio was created."
             )
             self.reload()
+        self._ensure_launch_bundle_migration()
         self._sync_system_timezone(force=True)
 
     # ---------- internal I/O ---------- #
@@ -110,6 +111,28 @@ class SettingsManager:
         except Exception as e:
             log.error("SettingsManager: migration from config.json failed: %s", e)
             return False
+
+    def _ensure_launch_bundle_migration(self) -> None:
+        """Run the additive launch-ownership migration from the startup migration owner."""
+        if not is_multi_rig_migration_current(self._conn):
+            log.debug("SettingsManager: launch bundle migration waits for multi-rig ownership migration.")
+            return
+        try:
+            from freqinout.core.launch_bundle_store import LaunchBundleStore
+
+            result = LaunchBundleStore(self.db_path).migrate_legacy(self._data)
+            state = str(result.get("state", "") or "")
+            if state == "confirmed" and not bool(result.get("already_applied", False)):
+                log.info(
+                    "SettingsManager: migrated Launch Control to radio %s (%s item(s)); legacy keys retained read-only.",
+                    result.get("target_radio_profile_id"),
+                    result.get("item_count", 0),
+                )
+            elif state == "deferred":
+                log.debug("SettingsManager: launch bundle migration deferred until a radio exists.")
+        except Exception as exc:
+            # The source keys remain intact and provide a read-only fallback.
+            log.error("SettingsManager: launch bundle migration failed safely: %s", exc)
 
     def _bulk_write(self, data: Dict[str, Any]) -> None:
         payload = [(k, json.dumps(v)) for k, v in data.items()]

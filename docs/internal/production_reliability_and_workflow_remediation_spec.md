@@ -933,6 +933,39 @@ radios or restarting FIO must show the saved checkbox/order state.
 - Two radios with a shared app launch it once; two distinct configured instances
   launch separately.
 
+Implementation result (2026-09-08): **automated Slice 4 exit gate passed**.
+Launch Control now persists an ordered, versioned bundle per radio in additive
+`radio_launch_bundles` and `radio_launch_bundle_items` tables. The startup-owned
+migration checkpoints and backs up the settings database, imports legacy rows,
+legacy autostart flags, and station custom tools once, records the selected
+target and source digest in `launch_bundle_migration_audit`, leaves the source
+KV values unchanged, and disables legacy fallback after confirmation. A failed
+backup or write changes no launch ownership state.
+
+`StationLaunchPlanner` is the single pure contract for the Settings preview,
+automatic station startup, and selected-radio `Start Startup Apps`. It applies
+radio-specific path/command and endpoint values, stable dependency ordering,
+exact instance identity and station-wide deduplication. Shared instances retain
+all serving-radio provenance; different JS8Call, FLRig, FLDigi, VarAC, or custom
+command/path instances remain separate. Executor results name the radio(s) and
+instance, a failed prerequisite blocks every dependent radio it did not cover,
+and dependency cycles are rejected before execution.
+
+Settings radio switching now stashes unsaved bundle drafts independently and
+reloads the selected radio's persisted checkbox/order state. `Monitor Health`
+is independent from `Launch at Startup`, the compact Startup Preview is planner
+backed, and Save commits the radio bundle before the normal UI reload. Launch
+table reads and readiness polling use the shared asynchronous dependency-status
+snapshot; checkbox, save, and paint paths no longer force a process walk.
+
+The focused launch, migration, planner, status, multi-rig, and Settings gate
+passes 366 tests with 4 environment skips. The repository gate passes in four
+fresh-process batches: 2,634 tests passed and 37 environment skips. The single
+long-lived macOS Qt run reached 80% without an assertion failure, then hit the
+known test-process teardown/worker-pool segmentation fault in an unrelated
+ControlFreq construction; fresh-process batching completed every test file.
+Python compilation and `git diff --check` pass. No Slice 5 work began.
+
 ## SOP Builder Remediation
 
 SOP Builder is a first-class builder, not a hidden utility or a spreadsheet.

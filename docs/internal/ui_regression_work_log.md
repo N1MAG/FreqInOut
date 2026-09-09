@@ -1983,3 +1983,55 @@ JS8 ingest, projection, Messages responsiveness, and Map set passes 329 tests.
 The repository-wide gate passes 2,621 tests with 37 environment skips. Python
 compilation and `git diff --check` pass. No production database, JS8 source
 log, configuration, radio, or Map/link evidence was modified.
+
+## 2026-09-08 — Slice 4 radio launch bundles
+
+Launch Control previously displayed the selected radio's configured software
+but stored checkbox/order state in one global `launch_control_items` value.
+Automatic startup read that global list while `Start Startup Apps` constructed
+a separate selected-radio queue. Monitor Health was an alias for the generic
+enabled flag, each refresh forced a process snapshot, and results could not
+identify the radio or distinguish application instances.
+
+Slice 4 adds radio-owned bundle and ordered-item tables plus a one-time migration
+audit. The startup migration owner checkpoints and creates a timestamped backup,
+then imports the legacy list, legacy autostart flags, and reusable station custom
+tools in one transaction. Target selection is deterministic (runtime primary,
+sole active, legacy default, then first profile); no-radio installs defer without
+inventing a profile. Source KV remains unchanged as a read-only fallback only
+until confirmation. Backup failure, write failure, repeat startup, and a
+pre-existing bundle are non-destructive and idempotent.
+
+A Qt-free `StationLaunchPlanner` now produces both the displayed Startup Preview
+and executable queue. It scopes active radios, applies bundle opt-in and ordered
+startup rows, hydrates radio-specific software paths and endpoints, topologically
+orders dependencies, rejects cycles, deduplicates exact shared identities, and
+keeps different endpoint/path/command identities separate. Executor progress and
+results carry radio names/IDs plus instance identity. Dependency failure must
+cover every radio served by a shared dependent before that dependent can run.
+Cancellation immediately stops the pending sequence without terminating external
+applications.
+
+Settings keeps unsaved launch drafts separately while switching radios, persists
+all staged bundles before reload, and no longer writes the legacy global launch
+or autostart keys. Monitor Health and Launch at Startup are independent. The
+table, preview, and executor consume shared immutable dependency snapshots;
+refresh/save/toggle paths do not synchronously enumerate processes. The Station
+Control Bar also filters health with the selected radio's bundle.
+
+Delegation and review: Terra/high performed the runtime, persistence, migration,
+and concurrency audit. Luna/high audited and implemented the bounded Settings UI
+seam and created the focused Qt-free persistence/planner test package. The
+high-reasoning primary model defined and implemented the store/planner/executor
+architecture, reviewed every delegated diff, closed multi-instance/dependency
+coverage gaps, updated the governing specification and work log, and ran final
+integration.
+
+The focused launch/migration/planner/status/multi-rig/Settings gate passes 366
+tests with 4 environment skips. The repository gate passes in four fresh-process
+batches: 2,634 tests passed and 37 environment skips. A single long-lived macOS
+Qt run reached 80% without assertion failure before the test process segfaulted
+inside unrelated ControlFreq construction with numerous test-created worker
+pools still alive; batching completed every test file. Python compilation and
+`git diff --check` pass. The change is additive and does not modify production
+settings, launch applications, or begin Slice 5.

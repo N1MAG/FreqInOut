@@ -353,6 +353,46 @@ class SoftwareStatusService:
                 continue
         return None
 
+    def cached_program_is_running(self, program_name: str) -> bool:
+        """Read the shared process snapshot without ever starting an inventory walk."""
+        cls = type(self)
+        self._proc_snapshot = cls._shared_proc_snapshot
+        self._proc_records = cls._shared_proc_records
+        self._proc_snapshot_ts = cls._shared_proc_snapshot_ts
+        if not self._proc_snapshot and not self._proc_records:
+            return False
+        targets = set(self._target_tokens(program_name))
+        if not targets:
+            normalized = program_name.strip().lower()
+            targets = {normalized, f"{normalized}.exe"}
+        return any(token in targets for token in self._proc_snapshot)
+
+    def cached_program_instance_running(self, program_name: str, configured_target: str) -> bool:
+        """Match a configured executable/script using only the shared cached records."""
+        target_text = str(configured_target or "").strip()
+        if not target_text:
+            return self.cached_program_is_running(program_name)
+        try:
+            parts = shlex.split(target_text, posix=os.name != "nt")
+        except Exception:
+            parts = [target_text]
+        path_parts = [Path(os.path.expanduser(os.path.expandvars(value))) for value in parts[:4] if value and not value.startswith("-")]
+        target_paths = {str(path.resolve(strict=False)).casefold() for path in path_parts if path.is_absolute() or "/" in str(path) or "\\" in str(path)}
+        if not target_paths:
+            return False
+        cls = type(self)
+        for record in cls._shared_proc_records:
+            candidates = [str(record.get("exe_path") or "")]
+            candidates.extend(str(value or "") for value in record.get("cmd_paths", ()))
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                resolved = str(Path(candidate).resolve(strict=False)).casefold()
+                for target in target_paths:
+                    if resolved == target or resolved.startswith(target.rstrip("/\\") + os.sep.casefold()):
+                        return True
+        return False
+
     def js8_api_reachable(
         self,
         *,
