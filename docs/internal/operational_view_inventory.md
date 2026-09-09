@@ -327,7 +327,8 @@ Gate status:
 Near-term rule:
 
 - SOP should consume projected traffic signals, not raw inbox rows.
-- The existing SOP action-row table is a temporary advanced compatibility view.
+- The SOP action-row table is an optional advanced compatibility view; stacked
+  action cards are the primary editor and own the saved draft model.
   Remove it after the card-based `SopActionBuilder` reaches parity, with tests
   proving saved SOP payloads, RF Guard checks, and ControlFreq preview remain
   unchanged.

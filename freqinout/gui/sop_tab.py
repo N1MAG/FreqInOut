@@ -13,6 +13,7 @@ from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
+    QBoxLayout,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -59,6 +60,7 @@ from freqinout.core.observation_queries import ObservationQuery, operational_act
 from freqinout.core.schedule_source_sets import assigned_plan_rf_guard_impacts_for_sop_update
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
+from freqinout.core.sop_action_model import SopActionDraftCollection
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
@@ -4346,7 +4348,20 @@ class SOPTab(_LegacySOPTab):
     WB_FILTER_NEEDS_TIME = "NEEDS_TIME"
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # Unlike the retired v1 layout, v2 owns a real scrollable workspace.
+        # This keeps the card workflow reachable at compact and Large Text sizes.
+        outer = QVBoxLayout(self)
+        self.sop_scroll = QScrollArea(self)
+        self.sop_scroll.setObjectName("sopBuilderScroll")
+        self.sop_scroll.setWidgetResizable(True)
+        self.sop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sop_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sop_scroll_content = QWidget(self.sop_scroll)
+        self.sop_scroll.setWidget(self.sop_scroll_content)
+        root = QVBoxLayout(self.sop_scroll_content)
+        self._action_drafts = SopActionDraftCollection()
+        self._sop_card_page = 0
+        self._syncing_action_drafts = False
 
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("<h3>SOP Builder</h3>"))
@@ -4410,6 +4425,7 @@ class SOPTab(_LegacySOPTab):
         self.traffic_suggestions_review_btn.clicked.connect(self._open_condition_sop_automation_review)
         traffic_layout.addWidget(self.traffic_suggestions_review_btn)
         root.addWidget(self.traffic_suggestions_box)
+        self._sop_traffic_layout = traffic_layout
         self._traffic_suggestion_decisions: List[Any] = []
         self._traffic_focus_context: Dict[str, str] = {}
         QTimer.singleShot(0, self.refresh_traffic_suggestions)
@@ -4452,6 +4468,7 @@ class SOPTab(_LegacySOPTab):
         sop_preview_layout.addWidget(self.sop_preview_label)
         sop_workbench_layout.addWidget(self.sop_preview_box, 1)
         root.addWidget(self.sop_workbench_box)
+        self._sop_workbench_layout = sop_workbench_layout
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -4500,6 +4517,7 @@ class SOPTab(_LegacySOPTab):
         ):
             header.addWidget(btn)
         root.addLayout(header)
+        self._sop_management_row = header
 
         cfg_box = QGroupBox("SOP")
         cfg_layout = QVBoxLayout(cfg_box)
@@ -4596,7 +4614,7 @@ class SOPTab(_LegacySOPTab):
         action_builder_header.addWidget(self.add_row_btn)
         action_builder_layout.addLayout(action_builder_header)
         self.sop_action_builder_hint = QLabel(
-            "Use Add Action Row, then complete the required fields in the temporary table below. Cards summarize what Ops Center will use."
+            "Add an action, then work through its card from group and conditions to timing, contact, and conflict policy."
         )
         self.sop_action_builder_hint.setObjectName("sopActionBuilderHint")
         self.sop_action_builder_hint.setWordWrap(True)
@@ -4606,11 +4624,21 @@ class SOPTab(_LegacySOPTab):
         self.sop_action_cards_label.setWordWrap(True)
         self.sop_action_cards_label.setTextFormat(Qt.RichText)
         self.sop_action_cards_label.setToolTip(
-            "SopActionBuilder: compact review cards rendered from the same fields saved by the Advanced Table."
+            "SOP action cards are the primary editor and the source used by Save."
         )
+        self.sop_action_cards_label.setVisible(False)
         action_builder_layout.addWidget(self.sop_action_cards_label)
-        self.sop_action_builder_box.setMinimumHeight(132)
-        self.sop_action_builder_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.sop_action_cards_container = QWidget(self.sop_action_builder_box)
+        self.sop_action_cards_container.setObjectName("sopActionCards")
+        self.sop_action_cards_layout = QVBoxLayout(self.sop_action_cards_container)
+        self.sop_action_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.sop_action_cards_layout.setSpacing(8)
+        action_builder_layout.addWidget(self.sop_action_cards_container)
+        self.sop_cards_more_btn = QToolButton(self.sop_action_builder_box)
+        self.sop_cards_more_btn.clicked.connect(self._toggle_sop_cards_expanded)
+        self.sop_cards_more_btn.setVisible(False)
+        action_builder_layout.addWidget(self.sop_cards_more_btn, alignment=Qt.AlignLeft)
+        self.sop_action_builder_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         cfg_layout.addWidget(self.sop_action_builder_box)
 
         self.actions_table = QTableWidget(0, 15)
@@ -4658,13 +4686,20 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
         self.actions_table.setMinimumHeight(220)
         self.actions_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.advanced_table_box = QGroupBox("Advanced Table (temporary)")
+        self.advanced_table_toggle_btn = QToolButton()
+        self.advanced_table_toggle_btn.setObjectName("sopAdvancedBulkEditorToggle")
+        self.advanced_table_toggle_btn.setCheckable(True)
+        self.advanced_table_toggle_btn.clicked.connect(
+            lambda checked=False: self._set_advanced_table_expanded(bool(checked))
+        )
+        cfg_layout.addWidget(self.advanced_table_toggle_btn, alignment=Qt.AlignLeft)
+        self.advanced_table_box = QGroupBox("Advanced bulk editor")
         self.advanced_table_box.setObjectName("sopAdvancedTableTemporary")
         advanced_table_layout = QVBoxLayout(self.advanced_table_box)
         advanced_table_layout.setContentsMargins(10, 8, 10, 8)
         advanced_table_layout.setSpacing(8)
         self.advanced_table_hint = QLabel(
-            "Temporary full-field editor. Do not remove until action cards preserve save/load, RF Guard, and Ops Center preview behavior."
+            "Optional spreadsheet-style editing for experienced users. Changes update the same actions shown in the cards."
         )
         self.advanced_table_hint.setObjectName("sopAdvancedTableRemovalFlag")
         self.advanced_table_hint.setWordWrap(True)
@@ -4673,6 +4708,7 @@ class SOPTab(_LegacySOPTab):
         self.advanced_table_box.setMinimumHeight(300)
         self.advanced_table_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         cfg_layout.addWidget(self.advanced_table_box)
+        self._set_advanced_table_expanded(False)
 
         self.conflict_workbench_toggle_btn = QToolButton()
         self.conflict_workbench_toggle_btn.setCheckable(True)
@@ -4822,11 +4858,399 @@ class SOPTab(_LegacySOPTab):
         self._apply_action_table_visual_order()
         self._apply_category_table_view()
         self._refresh_sop_workbench_contracts()
+        outer.addWidget(self.sop_scroll, stretch=1)
+        QTimer.singleShot(0, self._apply_sop_responsive_layout)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_sop_responsive_layout()
+
+    def _apply_sop_responsive_layout(self) -> None:
+        """Stack fixed-width builder bands before they create page scrolling."""
+        compact = self.width() < 1050
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        for layout_name in ("_sop_traffic_layout", "_sop_workbench_layout", "_sop_management_row"):
+            layout = getattr(self, layout_name, None)
+            if isinstance(layout, QBoxLayout):
+                layout.setDirection(direction)
 
     def _wire_dirty_tracking(self) -> None:
         self.name_edit.textChanged.connect(self._mark_dirty)
         self.category_combo.currentIndexChanged.connect(self._mark_dirty)
         self.active_cb.toggled.connect(self._mark_dirty)
+
+    def _set_advanced_table_expanded(self, expanded: bool) -> None:
+        shown = bool(expanded)
+        # The cards own the editing model.  Rebuild the compatibility table
+        # from that model only when the operator asks to use the bulk editor;
+        # when it closes, absorb bulk changes and refresh the card projection.
+        if shown:
+            self._reload_advanced_table_from_drafts()
+        else:
+            self._sync_drafts_from_advanced_table()
+            self._render_sop_action_cards()
+        self.advanced_table_box.setVisible(shown)
+        self.advanced_table_toggle_btn.blockSignals(True)
+        self.advanced_table_toggle_btn.setChecked(shown)
+        self.advanced_table_toggle_btn.blockSignals(False)
+        self.advanced_table_toggle_btn.setText(
+            "Hide Advanced bulk editor" if shown else "Show Advanced bulk editor"
+        )
+        self.advanced_table_toggle_btn.setToolTip(
+            "Optional spreadsheet-style editor. The action cards above are the primary workflow."
+        )
+
+    def _toggle_sop_cards_expanded(self) -> None:
+        rows = self._action_drafts.rows()
+        page_count = max(1, (len(rows) + 11) // 12)
+        self._sop_card_page = (int(getattr(self, "_sop_card_page", 0) or 0) + 1) % page_count
+        self._render_sop_action_cards()
+
+    @staticmethod
+    def _card_value(draft: object, field_name: str) -> str:
+        return str(getattr(draft, field_name, "") or "")
+
+    def _render_sop_action_cards(self) -> None:
+        """Render a bounded, editable projection of the draft collection.
+
+        Cards deliberately contain ordinary Qt editors rather than a rendered HTML
+        summary; their values first update ``_action_drafts`` and then mirror the
+        compatibility table.  The table therefore is not the authority for card
+        edits and can be removed once the old conflict UI is migrated.
+        """
+        layout = getattr(self, "sop_action_cards_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        rows = list(self._action_drafts.rows())
+        page_count = max(1, (len(rows) + 11) // 12)
+        page = min(max(0, int(getattr(self, "_sop_card_page", 0) or 0)), page_count - 1)
+        self._sop_card_page = page
+        start_index = page * 12
+        end_index = min(len(rows), start_index + 12)
+        for index in range(start_index, end_index):
+            draft = rows[index]
+            card = QGroupBox(f"Action {index + 1}", self.sop_action_cards_container)
+            card.setObjectName("sopActionCard")
+            card.setProperty("sop_action_index", index)
+            form = QFormLayout(card)
+            form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            category = self._current_category()
+
+            def add_line(field_name: str, label: str, *, read_only: bool = False) -> QLineEdit:
+                edit = QLineEdit(self._card_value(draft, field_name), card)
+                edit.setObjectName(f"sopCard_{field_name}")
+                edit.setReadOnly(read_only)
+                edit.textChanged.connect(
+                    lambda value, row=index, field=field_name: self._on_sop_card_field_changed(row, field, value)
+                )
+                form.addRow(label + ":", edit)
+                return edit
+
+            def add_editable_combo(field_name: str, label: str, values: List[str]) -> QComboBox:
+                combo = QComboBox(card)
+                combo.setEditable(True)
+                options = [str(value) for value in values if str(value).strip()]
+                current = self._card_value(draft, field_name)
+                if current and current not in options:
+                    options.append(current)
+                combo.addItems(options)
+                combo.setCurrentText(current)
+                combo.setObjectName(f"sopCardCombo_{field_name}")
+                if combo.lineEdit() is not None:
+                    combo.lineEdit().setObjectName(f"sopCard_{field_name}")
+                combo.currentTextChanged.connect(
+                    lambda value, row=index, field=field_name: self._on_sop_card_field_changed(row, field, value)
+                )
+                self._fit_combo_popup(combo)
+                form.addRow(label + ":", combo)
+                return combo
+
+            group_name = self._card_value(draft, "group_name").strip().upper()
+            group_values = self._hf_group_names() if category == self.CAT_HF else self._local_group_names()
+            add_editable_combo("group_name", "Group", group_values)
+            add_line("condition_levels", "Condition levels")
+
+            resource_values = self._resource_options_for_category(category, group_name)
+            resource_combo = add_editable_combo("software", "Resource / tool", resource_values)
+            resource = resource_combo.currentText().strip()
+            if category == self.CAT_LOCAL:
+                mode_values = self._local_modes_for_group_resource(group_name, resource)
+            else:
+                mode_values = self._mode_options_for_group_band(group_name, "") or ["DIGI", "USB", "LSB"]
+            add_editable_combo("mode", "Mode / route", mode_values)
+
+            action_combo = QComboBox(card)
+            action_pairs = (
+                self._action_catalog().get("Local Net", [])
+                if category == self.CAT_LOCAL
+                else self._action_catalog().get(resource, [])
+            )
+            action_key = self._card_value(draft, "action_key")
+            for key, label in action_pairs:
+                action_combo.addItem(label, key)
+            if action_key and action_combo.findData(action_key) < 0:
+                action_combo.addItem(self._card_value(draft, "action_label") or action_key, action_key)
+            action_idx = action_combo.findData(action_key)
+            action_combo.setCurrentIndex(action_idx if action_idx >= 0 else (0 if action_combo.count() else -1))
+            action_combo.setObjectName("sopCard_action")
+            action_combo.currentIndexChanged.connect(
+                lambda _value, row=index, combo=action_combo: (
+                    self._on_sop_card_field_changed(row, "action_key", str(combo.currentData() or "")),
+                    self._on_sop_card_field_changed(row, "action_label", combo.currentText()),
+                )
+            )
+            self._fit_combo_popup(action_combo)
+            form.addRow("Action:", action_combo)
+
+            add_editable_combo("band", "Band", self.BAND_CHOICES if category == self.CAT_HF else [])
+            add_line("frequency", "Frequency / route")
+            add_line("daily_start_utc", "Start (UTC)")
+            add_line("daily_end_utc", "End (calculated)", read_only=True)
+            add_editable_combo("duration_minutes", "Duration (minutes)", ["30", "60"])
+            add_editable_combo("interval_minutes", "Interval (minutes)", ["30", "60", "180", "360", "720", "1440"])
+            add_line("interval_phase_minutes", "Interval phase (minutes)")
+
+            policy_combo = QComboBox(card)
+            for label, value in (
+                ("SOP Priority", self.manager.CONFLICT_POLICY_SOP),
+                ("Net Priority", self.manager.CONFLICT_POLICY_NET),
+                ("Daily Priority", self.manager.CONFLICT_POLICY_DAILY),
+            ):
+                policy_combo.addItem(label, value)
+            policy_combo.setCurrentIndex(max(0, policy_combo.findData(self._card_value(draft, "conflict_policy"))))
+            policy_combo.currentIndexChanged.connect(
+                lambda _value, row=index, combo=policy_combo: self._on_sop_card_field_changed(
+                    row, "conflict_policy", str(combo.currentData() or self.manager.CONFLICT_POLICY_SOP)
+                )
+            )
+            form.addRow("Conflict policy:", policy_combo)
+
+            contact_combo = QComboBox(card)
+            contact_options = self.LOCAL_CONTACT_OPTIONS if category == self.CAT_LOCAL else self.CONTACT_RULE_OPTIONS
+            for value, label in contact_options:
+                contact_combo.addItem(label, value)
+            contact_combo.setCurrentIndex(max(0, contact_combo.findData(self._card_value(draft, "contact_rule"))))
+            contact_combo.currentIndexChanged.connect(
+                lambda _value, row=index, combo=contact_combo: self._on_sop_card_field_changed(
+                    row, "contact_rule", str(combo.currentData() or "none")
+                )
+            )
+            form.addRow("Contact type:", contact_combo)
+            add_line("contact_target", "Contact target")
+            add_line("description", "Description")
+            for field_name, label in (("enabled", "Enabled"), ("schedule_applied", "Apply to schedule")):
+                checkbox = QCheckBox(card)
+                checkbox.setChecked(bool(getattr(draft, field_name, True)))
+                checkbox.toggled.connect(
+                    lambda checked, row=index, field=field_name: self._on_sop_card_field_changed(row, field, checked)
+                )
+                form.addRow(label + ":", checkbox)
+            conflict = QLabel(
+                self._card_value(draft, "daily_conflict_summary")
+                or self._card_value(draft, "net_conflict_summary")
+                or "Pending validation",
+                card,
+            )
+            conflict.setObjectName("sopCardConflict")
+            conflict.setWordWrap(True)
+            form.addRow("Conflict:", conflict)
+            actions = QHBoxLayout()
+            duplicate_btn = QPushButton("Duplicate", card)
+            duplicate_btn.clicked.connect(lambda _=False, row=index: self._duplicate_sop_action_card(row))
+            remove_btn = QPushButton("Remove", card)
+            remove_btn.clicked.connect(lambda _=False, row=index: self._remove_sop_action_card(row))
+            actions.addWidget(duplicate_btn)
+            actions.addWidget(remove_btn)
+            actions.addStretch()
+            form.addRow(actions)
+            layout.addWidget(card)
+        layout.addStretch()
+        more_btn = getattr(self, "sop_cards_more_btn", None)
+        if isinstance(more_btn, QToolButton):
+            more_btn.setVisible(len(rows) > 12)
+            if page + 1 < page_count:
+                next_start = end_index + 1
+                next_end = min(len(rows), end_index + 12)
+                more_btn.setText(f"Show actions {next_start}–{next_end}")
+            else:
+                more_btn.setText("Back to actions 1–12")
+
+    def _on_sop_card_field_changed(self, row: int, field_name: str, value: Any) -> None:
+        if bool(getattr(self, "_syncing_action_drafts", False)):
+            return
+        numeric = {"duration_minutes", "interval_minutes", "interval_phase_minutes"}
+        converted: Any = value
+        if field_name in numeric:
+            try:
+                converted = max(0, int(value or 0))
+            except ValueError:
+                return
+        if self._action_drafts.update(row, field_name, converted):
+            if field_name in {"daily_start_utc", "duration_minutes"}:
+                draft = self._action_drafts.rows()[row]
+                raw_start = str(draft.daily_start_utc or "").strip()
+                if self._is_valid_hhmm(raw_start):
+                    self._action_drafts.update(
+                        row,
+                        "daily_end_utc",
+                        self._add_minutes_hhmm(raw_start, int(draft.duration_minutes or 60)),
+                    )
+            self._card_edit_in_progress = True
+            try:
+                self._mirror_card_field_to_advanced_table(row, field_name, converted)
+                self._mark_dirty()
+            finally:
+                self._card_edit_in_progress = False
+
+    def _mark_dirty(self, *_args) -> None:
+        # The advanced editor is a view/editor adapter: changes enter the draft
+        # collection immediately, while card changes never read their values back
+        # from the table.
+        sender = self.sender()
+        advanced_change = isinstance(sender, QWidget) and (
+            sender is getattr(self, "actions_table", None)
+            or bool(getattr(self, "actions_table", None) and self.actions_table.isAncestorOf(sender))
+        )
+        if advanced_change and not bool(getattr(self, "_card_edit_in_progress", False)) and not bool(getattr(self, "_loading_ui", False)):
+            self._sync_drafts_from_advanced_table()
+        super()._mark_dirty(*_args)
+
+    def _sync_drafts_from_advanced_table(self) -> None:
+        if not hasattr(self, "_action_drafts") or not hasattr(self, "actions_table") or bool(getattr(self, "_syncing_action_drafts", False)):
+            return
+        rows: List[Dict[str, Any]] = []
+        existing_rows = self._action_drafts.payloads()
+        for row in range(self.actions_table.rowCount()):
+            group = self.actions_table.cellWidget(row, self.COL_GROUP)
+            resource = self.actions_table.cellWidget(row, self.COL_RESOURCE)
+            mode = self.actions_table.cellWidget(row, self.COL_MODE)
+            action = self.actions_table.cellWidget(row, self.COL_ACTION)
+            bandfreq = self.actions_table.cellWidget(row, self.COL_BANDFREQ)
+            duration = self.actions_table.cellWidget(row, self.COL_DURATION)
+            interval = self.actions_table.cellWidget(row, self.COL_INTERVAL)
+            contact = self.actions_table.cellWidget(row, self.COL_CONTACT)
+            target = self.actions_table.cellWidget(row, self.COL_CONTACT_TARGET)
+            desc = self.actions_table.cellWidget(row, self.COL_DESC)
+            cond = self.actions_table.cellWidget(row, self.COL_COND)
+            start = self._action_row_start_edit(row)
+            if not isinstance(group, QComboBox):
+                continue
+            band, frequency = self._split_band_freq(bandfreq.currentText()) if isinstance(bandfreq, QComboBox) else ("", "")
+            interval_minutes, phase_minutes = self._parse_interval_spec(interval.currentText()) if isinstance(interval, QComboBox) else (180, 0)
+            preserved = dict(existing_rows[row]) if row < len(existing_rows) else {}
+            preserved.update(
+                {
+                    "id": int(group.property("action_id") or 0),
+                    "group_name": group.currentText().strip().upper(),
+                    "condition_levels": self._condition_levels_from_widget(cond),
+                    "band": band,
+                    "frequency": frequency,
+                    "software": resource.currentText().strip() if isinstance(resource, QComboBox) else "",
+                    "mode": mode.currentText().strip().upper() if isinstance(mode, QComboBox) else "",
+                    "action_key": str(action.currentData() or "").strip() if isinstance(action, QComboBox) else "",
+                    "action_label": action.currentText().strip() if isinstance(action, QComboBox) else "",
+                    "daily_start_utc": self._utc_start_hhmm_from_display(start.text().strip(), show_local=self._show_local) if isinstance(start, QLineEdit) else "00:00",
+                    "duration_minutes": int(duration.currentData() or 60) if isinstance(duration, QComboBox) else 60,
+                    "interval_minutes": interval_minutes,
+                    "interval_phase_minutes": phase_minutes,
+                    "interval_hours": max(1, int((interval_minutes + 59) // 60)),
+                    "conflict_policy": self.manager._normalize_conflict_policy(group.property("conflict_policy")),
+                    "schedule_applied": bool(group.property("schedule_applied")),
+                    "contact_rule": str(contact.currentData() or "none") if isinstance(contact, QComboBox) else "none",
+                    "contact_target": target.currentText().strip().upper() if isinstance(target, QComboBox) else "",
+                    "description": desc.text().strip() if isinstance(desc, QLineEdit) else "",
+                    "sort_order": row,
+                }
+            )
+            rows.append(preserved)
+        if rows:
+            self._action_drafts.replace(rows)
+
+    def _mirror_card_field_to_advanced_table(self, row: int, field_name: str, value: Any) -> None:
+        """Keep the temporary table compatible without using it as the authority."""
+        if row < 0 or row >= self.actions_table.rowCount():
+            return
+        mapping = {
+            "group_name": self.COL_GROUP,
+            "software": self.COL_RESOURCE,
+            "mode": self.COL_MODE,
+            "daily_start_utc": self.COL_START,
+            "contact_target": self.COL_CONTACT_TARGET,
+            "description": self.COL_DESC,
+        }
+        self._syncing_action_drafts = True
+        try:
+            if field_name == "condition_levels":
+                widget = self.actions_table.cellWidget(row, self.COL_COND)
+                if isinstance(widget, _ConditionLevelsMultiCombo):
+                    widget.set_normalized_value(str(value), emit=False)
+                return
+            if field_name in {"band", "frequency"}:
+                widget = self.actions_table.cellWidget(row, self.COL_BANDFREQ)
+                draft = self._action_drafts.rows()[row]
+                if isinstance(widget, QComboBox):
+                    widget.setCurrentText(f"{draft.band} - {draft.frequency}".strip(" -"))
+                return
+            if field_name == "action_key":
+                widget = self.actions_table.cellWidget(row, self.COL_ACTION)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(value)
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                return
+            if field_name == "duration_minutes":
+                widget = self.actions_table.cellWidget(row, self.COL_DURATION)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(int(value or 60))
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                return
+            if field_name == "schedule_applied":
+                widget = self.actions_table.cellWidget(row, self.COL_GROUP)
+                if isinstance(widget, QComboBox):
+                    widget.setProperty("schedule_applied", bool(value))
+                return
+            if field_name == "conflict_policy":
+                widget = self.actions_table.cellWidget(row, self.COL_GROUP)
+                if isinstance(widget, QComboBox):
+                    widget.setProperty("conflict_policy", self.manager._normalize_conflict_policy(value))
+                return
+            col = mapping.get(field_name)
+            if col is None:
+                return
+            widget = self._action_row_start_edit(row) if col == self.COL_START else self.actions_table.cellWidget(row, col)
+            if isinstance(widget, QLineEdit):
+                widget.setText(str(value))
+            elif isinstance(widget, QComboBox):
+                widget.setCurrentText(str(value))
+        finally:
+            self._syncing_action_drafts = False
+
+    def _duplicate_sop_action_card(self, row: int) -> None:
+        if self._action_drafts.duplicate(row) is None:
+            return
+        self._reload_advanced_table_from_drafts()
+        self._mark_dirty()
+
+    def _remove_sop_action_card(self, row: int) -> None:
+        if not self._action_drafts.remove(row):
+            return
+        if not self._action_drafts.rows():
+            self._action_drafts.append({})
+        self._reload_advanced_table_from_drafts()
+        self._mark_dirty()
+
+    def _reload_advanced_table_from_drafts(self) -> None:
+        self._loading_ui = True
+        try:
+            self._populate_actions(self._action_drafts.payloads())
+        finally:
+            self._loading_ui = False
 
     def _normalize_hf_activation_conflict_mode(self, value: Any) -> str:
         raw = str(value or "").strip().upper()
@@ -5935,6 +6359,17 @@ class SOPTab(_LegacySOPTab):
         )
         if isinstance(badge, QToolButton):
             badge.setProperty("conflict_status", status_key)
+        cards = getattr(self, "sop_action_cards_container", None)
+        if cards is not None:
+            for card in cards.findChildren(QGroupBox, "sopActionCard"):
+                card_index = card.property("sop_action_index")
+                if card_index is None or int(card_index) != row_index:
+                    continue
+                card_badge = card.findChild(QLabel, "sopCardConflict")
+                if card_badge is not None:
+                    card_badge.setText(label)
+                    card_badge.setToolTip(str(tooltip or "").strip())
+                break
 
     def _show_inline_conflict_details_for_button(self, btn: QToolButton) -> None:
         for r in range(self.actions_table.rowCount()):
@@ -7285,6 +7720,8 @@ class SOPTab(_LegacySOPTab):
         self._update_start_slots_button_for_row(row)
 
     def _populate_actions(self, existing: List[Dict[str, Any]]) -> None:
+        if hasattr(self, "_action_drafts"):
+            self._action_drafts.replace(existing or [{}])
         self._clear_row_dynamic_refresh_timers()
         self.actions_table.setRowCount(0)
         rows = [r for r in (existing or []) if isinstance(r, dict)]
@@ -7296,6 +7733,8 @@ class SOPTab(_LegacySOPTab):
         self._apply_category_table_view()
         self._autosize_actions_table()
         self._refresh_sop_workbench_contracts()
+        self._sync_drafts_from_advanced_table()
+        self._render_sop_action_cards()
 
     def _add_action_row(self, existing: Dict[str, Any] | None, *, mark_dirty: bool = True) -> None:
         row = self.actions_table.rowCount()
@@ -7485,18 +7924,26 @@ class SOPTab(_LegacySOPTab):
         self._set_inline_conflict_badge(row, "pending")
         self._update_start_slots_button_for_row(row)
         if mark_dirty:
+            if hasattr(self, "_action_drafts"):
+                self._sync_drafts_from_advanced_table()
+                self._render_sop_action_cards()
             self._mark_dirty()
 
     def _remove_row_for_button(self, btn: QPushButton) -> None:
         for r in range(self.actions_table.rowCount()):
             if self.actions_table.cellWidget(r, self.COL_REMOVE) is btn:
+                if hasattr(self, "_action_drafts"):
+                    self._action_drafts.remove(r)
                 self.actions_table.removeRow(r)
                 self._clear_row_dynamic_refresh_timers()
                 if self.actions_table.rowCount() == 0:
                     self._add_action_row(existing=None, mark_dirty=False)
+                    if hasattr(self, "_action_drafts") and not self._action_drafts.rows():
+                        self._action_drafts.append({})
                 self._autosize_actions_table()
                 self._mark_dirty()
                 self._refresh_sop_workbench_contracts()
+                self._render_sop_action_cards()
                 self._last_realtime_conflict_signature = None
                 self._schedule_realtime_hf_conflict_check()
                 return
@@ -7564,6 +8011,8 @@ class SOPTab(_LegacySOPTab):
         return f"{total // 60:02d}:{total % 60:02d}"
 
     def _collect_profile_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], None]:
+        if hasattr(self, "_action_drafts"):
+            return self._collect_profile_payload_from_drafts()
         name = self.name_edit.text().strip()
         if not name:
             raise ValueError("SOP name is required.")
@@ -7704,6 +8153,99 @@ class SOPTab(_LegacySOPTab):
             "sop_start_utc": "00:00",
             "priority": 100,
             "active": active,
+            "window_hours": 24,
+        }
+        return payload, actions, None
+
+    def _collect_profile_payload_from_drafts(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], None]:
+        """Validate/persist the widget-independent draft collection."""
+        name = self.name_edit.text().strip()
+        if not name:
+            raise ValueError("SOP name is required.")
+        category = self._current_category()
+        actions: List[Dict[str, Any]] = []
+        for row, draft in enumerate(self._action_drafts.rows()):
+            action = draft.to_payload(sort_order=row)
+            group_name = str(action.get("group_name") or "").strip().upper()
+            resource = str(action.get("software") or "").strip()
+            action_key = str(action.get("action_key") or "").strip()
+            band = str(action.get("band") or "").strip().upper()
+            frequency = str(action.get("frequency") or "").strip()
+            description = str(action.get("description") or "").strip()
+            target = str(action.get("contact_target") or "").strip().upper()
+            blank = not any((group_name, resource, action_key, description, target, band, frequency))
+            if blank:
+                continue
+            if not group_name:
+                raise ValueError(f"Row {row + 1}: Group is required for this SOP.")
+            if category == self.CAT_HF and not self._hf_group_uses_condition_levels(group_name):
+                raise ValueError(f"Row {row + 1}: Group '{group_name}' must have Use Condition Levels enabled in Settings.")
+            if not resource:
+                raise ValueError(f"Row {row + 1}: Resource is required.")
+            if not action_key:
+                raise ValueError(f"Row {row + 1}: Action is required.")
+            if category == self.CAT_HF and (not band or not frequency):
+                raise ValueError(f"Row {row + 1}: Band - Freq is required for HF SOP.")
+            raw_start_utc = str(action.get("daily_start_utc") or "").strip()
+            if not self._is_valid_hhmm(raw_start_utc):
+                raise ValueError(f"Row {row + 1}: Daily Start must be HH:MM.")
+            start_utc = self.manager._normalize_hhmm(raw_start_utc)
+            try:
+                duration = int(action.get("duration_minutes") or 60)
+            except Exception:
+                duration = 60
+            if duration not in {30, 60}:
+                raise ValueError(f"Row {row + 1}: Duration must be 30 or 60 minutes.")
+            try:
+                interval = max(1, int(action.get("interval_minutes") or 180))
+            except Exception:
+                interval = 180
+            try:
+                phase = max(0, int(action.get("interval_phase_minutes") or 0)) % interval
+            except Exception:
+                phase = 0
+            action.update(
+                {
+                    "group_name": group_name,
+                    "condition_levels": self.manager._normalize_condition_levels(action.get("condition_levels")) if category == self.CAT_HF else "ALL",
+                    "band": band if category == self.CAT_HF else "",
+                    "frequency": frequency if category == self.CAT_HF else "",
+                    "software": "Local Net" if category == self.CAT_LOCAL else resource,
+                    "mode": str(action.get("mode") or "").strip().upper() if category == self.CAT_LOCAL else "",
+                    "action_label": str(action.get("action_label") or action_key).strip(),
+                    "enabled": bool(action.get("enabled", True)),
+                    "daily_start_utc": start_utc,
+                    "daily_end_utc": self._add_minutes_hhmm(start_utc, duration),
+                    "duration_minutes": duration,
+                    "interval_minutes": interval,
+                    "interval_phase_minutes": phase,
+                    "interval_hours": max(1, int((interval + 59) // 60)),
+                    "conflict_policy": self.manager._normalize_conflict_policy(action.get("conflict_policy")),
+                    "daily_conflict_summary": "",
+                    "net_conflict_summary": "",
+                    "schedule_applied": bool(action.get("schedule_applied", True)),
+                    "description": description,
+                    "contact_target": self.ANY_ROLE_TOKEN if target == "ANY (ROLE MATCH)" else target,
+                    "sort_order": row,
+                }
+            )
+            if category == self.CAT_LOCAL and action_key == "local_monitor":
+                action["contact_rule"] = "none"
+                action["contact_target"] = ""
+            actions.append(action)
+        if not actions:
+            raise ValueError("Add at least one action row.")
+        profile_group = next((str(a.get("group_name") or "").strip().upper() for a in actions if a.get("group_name")), "")
+        payload = {
+            "id": int(self._selected_profile_id or 0),
+            "name": name,
+            "category": category,
+            "operating_group": profile_group if category == self.CAT_HF else "",
+            "secondary_group": "",
+            "frequency": "",
+            "sop_start_utc": "00:00",
+            "priority": 100,
+            "active": bool(self.active_cb.isChecked()),
             "window_hours": 24,
         }
         return payload, actions, None

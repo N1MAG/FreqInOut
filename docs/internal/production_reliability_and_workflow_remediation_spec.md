@@ -1752,6 +1752,37 @@ tests; no workflow field is lost.
 Risk: **medium** after model separation; **high** if attempted as direct widget
 rearrangement without it.
 
+Implementation result (2026-09-09): **automated Slice 5 exit gate passed**.
+SOP actions now use a widget-independent ordered draft collection as the Save
+and validation authority. The primary editor is a vertically scrollable set of
+guided action cards with group/resource/action choices, timing, contact,
+conflict policy, enable/apply state, duplicate, and remove controls. Card
+rendering is paged at 12 actions, so a large SOP does not construct an
+unbounded widget tree in one paint. The spreadsheet-style editor remains an
+optional collapsed bulk adapter; opening it projects from the draft model and
+closing it updates the same model without losing card-only fields. Invalid time
+text is rejected before normalization, calculated end time is explicit, and
+real-time conflict results update the visible card as well as the bulk row.
+
+The SOP workspace stacks fixed-width bands at compact widths and disables page
+horizontal scrolling. The Plan Builder reflows plan identity, source controls,
+and inline editing between wide and compact grids; detail and RF Guard surfaces
+use font-metric-aware bounds. Projection and RF Guard tables have explicit
+display caps while summaries retain complete totals. The deterministic Plan
+snapshot now includes all schedule/policy fields plus selected plan, source,
+radio, time, and display inputs, so polling only rebuilds when an actual
+projection input changes.
+
+Acceptance covers SOP empty, populated, invalid, and conflict-heavy states at
+900x560 and 1000x700 and Plan default and contextual view states at 1920x1080,
+1000x700, and 900x560, with Normal/Large Text in Light/Dark themes. The focused
+Slice 5 and affected-area gate passes 321 tests. The complete repository gate
+passes in four fresh-process batches: 2,693 tests passed with 37 environment
+skips. Warm blank-profile construction measured approximately 38–40 ms for SOP
+Builder and 47–55 ms for Plan Builder after first-use font initialization.
+Python compilation and `git diff --check` pass. No database or configuration
+migration is involved, and no Slice 6 work began.
+
 ### Slice 6 — Roster diagnostics and final integration
 
 Deliverables: classified import results, row-level preview/export, exact roster

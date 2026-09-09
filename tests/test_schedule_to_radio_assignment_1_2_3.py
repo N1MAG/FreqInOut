@@ -156,10 +156,10 @@ def test_phase5_freqplanner_workspace_foundation_source_wiring() -> None:
 
     assert 'QLabel("<h3>Plan Builder</h3>")' in planner_source
     assert "plan_workspace = QVBoxLayout()" in planner_source
-    assert "plan_select_row = QHBoxLayout()" in planner_source
-    assert "plan_select_row.addWidget(self.save_plan_btn)" in planner_source
-    assert "source_workspace.addWidget(self.save_sop_plan_btn)" in planner_source
-    assert "source_workspace.addWidget(self.build_sop_layer_btn)" in planner_source
+    assert "plan_select_row = QGridLayout()" in planner_source
+    assert "plan_select_row.addWidget(self.save_plan_btn," in planner_source
+    assert "source_workspace.addWidget(self.save_sop_plan_btn," in planner_source
+    assert "source_workspace.addWidget(self.build_sop_layer_btn," in planner_source
     assert 'self.plan_ingredients_frame.setObjectName("freqPlannerPlanIngredients")' in planner_source
     assert 'self.plan_ingredients_scroll.setObjectName("freqPlannerPlanIngredientsScroll")' in planner_source
     assert "self.plan_ingredients_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in planner_source

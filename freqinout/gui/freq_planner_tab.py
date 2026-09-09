@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
@@ -160,6 +161,8 @@ class FreqPlannerTab(QWidget):
     COL_UTC = 0
     COL_LOCAL = 1
     COL_DAY_OFFSET = 2  # Sunday at column 2
+    MAX_PROJECTION_TABLE_ROWS = 500
+    MAX_RF_GUARD_ROWS = 200
 
     def __init__(self, parent=None, *, plan_context_service: Optional[PlanContextService] = None):
         super().__init__(parent)
@@ -226,9 +229,11 @@ class FreqPlannerTab(QWidget):
 
         plan_workspace = QVBoxLayout()
         plan_workspace.setSpacing(8)
-        plan_select_row = QHBoxLayout()
+        plan_select_row = QGridLayout()
         plan_select_row.setSpacing(8)
-        plan_select_row.addWidget(QLabel("Plan:"))
+        self.plan_select_layout = plan_select_row
+        self.plan_select_label = QLabel("Plan:")
+        plan_select_row.addWidget(self.plan_select_label, 0, 0)
         self.plan_mode_label = QLabel("New")
         self.plan_mode_label.setObjectName("freqPlannerPlanMode")
         self.plan_mode_label.setToolTip("Shows whether Save Plan will create a new plan or update the selected plan.")
@@ -240,8 +245,8 @@ class FreqPlannerTab(QWidget):
         if self.frequency_plan_combo.lineEdit() is not None:
             self.frequency_plan_combo.lineEdit().setPlaceholderText("Name or select a Frequency Plan")
         self.frequency_plan_combo.currentIndexChanged.connect(self._on_frequency_plan_selected)
-        plan_select_row.addWidget(self.frequency_plan_combo, 1)
-        plan_select_row.addWidget(self.plan_mode_label)
+        plan_select_row.addWidget(self.frequency_plan_combo, 0, 1)
+        plan_select_row.addWidget(self.plan_mode_label, 0, 2)
         self.new_plan_btn = QPushButton("New Plan")
         self.save_plan_btn = QPushButton("Save Plan")
         self.save_sop_plan_btn = QPushButton("Save SOP Plan")
@@ -250,24 +255,35 @@ class FreqPlannerTab(QWidget):
         self.assign_plan_btn = QPushButton("Assign in Settings")
         self.new_plan_btn.clicked.connect(self._on_new_plan_clicked)
         self.new_plan_btn.setToolTip("Start a new Frequency Plan from the selected Daily, Net, and SOP layers.")
-        plan_select_row.addWidget(self.new_plan_btn)
+        plan_select_row.addWidget(self.new_plan_btn, 0, 3)
         self.save_plan_btn.clicked.connect(self._on_save_plan_clicked)
         self.save_plan_btn.setToolTip("Save or update the visible HF Daily + HF Nets + SOP projection as a named Frequency Plan.")
-        plan_select_row.addWidget(self.save_plan_btn)
+        plan_select_row.addWidget(self.save_plan_btn, 0, 4)
         self.save_sop_plan_btn.clicked.connect(self._on_save_sop_plan_clicked)
         self.save_sop_plan_btn.setToolTip("Review side-by-side SOP, HF Daily, HF Net, and Net Resource lanes and save them as an SOP Schedule Plan.")
         self.rename_plan_btn.clicked.connect(self._on_rename_plan_clicked)
         self.rename_plan_btn.setEnabled(False)
         self.rename_plan_btn.setToolTip("Rename the selected Frequency Plan without changing its schedule windows.")
-        plan_select_row.addWidget(self.rename_plan_btn)
+        plan_select_row.addWidget(self.rename_plan_btn, 0, 5)
         self.delete_plan_btn.clicked.connect(self._on_delete_plan_clicked)
         self.delete_plan_btn.setToolTip("Delete the selected saved Frequency Plan when it is not assigned to a radio.")
-        plan_select_row.addWidget(self.delete_plan_btn)
+        plan_select_row.addWidget(self.delete_plan_btn, 0, 6)
         self.assign_plan_btn.clicked.connect(self._on_assign_plan_clicked)
         self.assign_plan_btn.setEnabled(False)
         self.assign_plan_btn.setToolTip(
             "Select or save a Frequency Plan, then use Settings > Schedule Assignment to assign it with RF Guard."
         )
+        plan_select_row.addWidget(self.assign_plan_btn, 0, 7)
+        self.plan_select_controls = [
+            self.plan_select_label,
+            self.frequency_plan_combo,
+            self.plan_mode_label,
+            self.new_plan_btn,
+            self.save_plan_btn,
+            self.rename_plan_btn,
+            self.delete_plan_btn,
+            self.assign_plan_btn,
+        ]
         plan_workspace.addLayout(plan_select_row)
 
         self.build_sop_layer_btn = QPushButton("Build SOP Layer")
@@ -282,28 +298,42 @@ class FreqPlannerTab(QWidget):
         self.resolve_rf_guard_btn.setToolTip("Review RF Guard issues first, then open the radio assignment area to resolve them.")
         layout.addLayout(plan_workspace)
 
-        source_workspace = QHBoxLayout()
+        source_workspace = QGridLayout()
         source_workspace.setSpacing(8)
-        source_workspace.addWidget(QLabel("HF Daily:"))
+        self.source_workspace_layout = source_workspace
+        self.source_daily_label = QLabel("HF Daily:")
+        self.source_net_label = QLabel("HF Nets:")
+        self.source_sop_label = QLabel("SOP:")
+        source_workspace.addWidget(self.source_daily_label, 0, 0)
         self.hf_daily_source_combo = QComboBox()
         self.hf_daily_source_combo.setObjectName("freqPlannerHfDailySourceCombo")
         self.hf_daily_source_combo.setToolTip("Select the active HF Daily schedule or a named schedule saved from the HF Daily tab.")
         self.hf_daily_source_combo.currentIndexChanged.connect(self._on_source_set_selected)
-        source_workspace.addWidget(self.hf_daily_source_combo, 1)
-        source_workspace.addWidget(QLabel("HF Nets:"))
+        source_workspace.addWidget(self.hf_daily_source_combo, 0, 1)
         self.hf_net_source_combo = QComboBox()
         self.hf_net_source_combo.setObjectName("freqPlannerHfNetSourceCombo")
         self.hf_net_source_combo.setToolTip("Select the active HF Net schedule or a named schedule saved from the HF Nets tab.")
         self.hf_net_source_combo.currentIndexChanged.connect(self._on_source_set_selected)
-        source_workspace.addWidget(self.hf_net_source_combo, 1)
-        source_workspace.addWidget(QLabel("SOP:"))
+        source_workspace.addWidget(self.source_net_label, 0, 2)
+        source_workspace.addWidget(self.hf_net_source_combo, 0, 3)
         self.sop_plan_source_combo = QComboBox()
         self.sop_plan_source_combo.setObjectName("freqPlannerSopPlanSourceCombo")
         self.sop_plan_source_combo.setToolTip("Select active SOP Builder layers or a saved SOP Schedule Plan to include as the what-to-do layer.")
         self.sop_plan_source_combo.currentIndexChanged.connect(self._on_source_set_selected)
-        source_workspace.addWidget(self.sop_plan_source_combo, 1)
-        source_workspace.addWidget(self.save_sop_plan_btn)
-        source_workspace.addWidget(self.build_sop_layer_btn)
+        source_workspace.addWidget(self.source_sop_label, 0, 4)
+        source_workspace.addWidget(self.sop_plan_source_combo, 0, 5)
+        source_workspace.addWidget(self.save_sop_plan_btn, 0, 6)
+        source_workspace.addWidget(self.build_sop_layer_btn, 0, 7)
+        self.source_controls = [
+            self.source_daily_label,
+            self.hf_daily_source_combo,
+            self.source_net_label,
+            self.hf_net_source_combo,
+            self.source_sop_label,
+            self.sop_plan_source_combo,
+            self.save_sop_plan_btn,
+            self.build_sop_layer_btn,
+        ]
         layout.addLayout(source_workspace)
 
         self.plan_ingredients_frame = QFrame()
@@ -483,6 +513,10 @@ class FreqPlannerTab(QWidget):
         self.inline_editor_card = QFrame()
         self.inline_editor_card.setObjectName("freqPlannerInlineEditorCard")
         self.inline_editor_card.setFrameShape(QFrame.StyledPanel)
+        # Details are progressive disclosure. Hide the editor before the first
+        # asynchronous projection completes so compact startup never flashes a
+        # large empty form over the timeline.
+        self.inline_editor_card.setVisible(False)
         inline_layout = QVBoxLayout(self.inline_editor_card)
         inline_layout.setContentsMargins(10, 6, 10, 6)
         inline_layout.setSpacing(6)
@@ -498,8 +532,9 @@ class FreqPlannerTab(QWidget):
         self.inline_editor_impact_label.setObjectName("freqPlannerInlineEditorImpact")
         self.inline_editor_impact_label.setWordWrap(True)
         inline_layout.addWidget(self.inline_editor_impact_label)
-        inline_identity_row = QHBoxLayout()
+        inline_identity_row = QGridLayout()
         inline_identity_row.setSpacing(8)
+        self.inline_identity_row = inline_identity_row
         self.inline_group_edit = QLineEdit()
         self.inline_group_edit.setPlaceholderText("Group")
         self.inline_band_edit = QLineEdit()
@@ -512,29 +547,40 @@ class FreqPlannerTab(QWidget):
         self.inline_end_edit.setPlaceholderText("End UTC")
         self.inline_mode_edit = QLineEdit()
         self.inline_mode_edit.setPlaceholderText("Mode")
+        inline_identity_widgets = []
         for label_text, widget in (
             ("Group", self.inline_group_edit),
             ("Band", self.inline_band_edit),
             ("Freq", self.inline_frequency_edit),
         ):
-            inline_identity_row.addWidget(QLabel(label_text))
-            inline_identity_row.addWidget(widget, 1)
+            label = QLabel(label_text)
+            inline_identity_widgets.append((label, widget))
+            col = len(inline_identity_widgets) - 1
+            inline_identity_row.addWidget(label, 0, col * 2)
+            inline_identity_row.addWidget(widget, 0, col * 2 + 1)
+        self.inline_identity_widgets = inline_identity_widgets
         inline_layout.addLayout(inline_identity_row)
-        inline_timing_row = QHBoxLayout()
+        inline_timing_row = QGridLayout()
         inline_timing_row.setSpacing(8)
+        self.inline_timing_row = inline_timing_row
+        inline_timing_widgets = []
         for label_text, widget in (
             ("Start", self.inline_start_edit),
             ("End", self.inline_end_edit),
             ("Mode", self.inline_mode_edit),
         ):
-            inline_timing_row.addWidget(QLabel(label_text))
-            inline_timing_row.addWidget(widget, 1)
+            label = QLabel(label_text)
+            inline_timing_widgets.append((label, widget))
+            col = len(inline_timing_widgets) - 1
+            inline_timing_row.addWidget(label, 0, col * 2)
+            inline_timing_row.addWidget(widget, 0, col * 2 + 1)
+        self.inline_timing_widgets = inline_timing_widgets
         self.inline_update_plan_btn = QPushButton("Update Plan Only")
         self.inline_update_hf_daily_btn = QPushButton("Update Source")
         self.inline_update_plan_btn.clicked.connect(self._on_inline_update_plan_clicked)
         self.inline_update_hf_daily_btn.clicked.connect(self._on_inline_update_hf_daily_clicked)
-        inline_timing_row.addWidget(self.inline_update_plan_btn)
-        inline_timing_row.addWidget(self.inline_update_hf_daily_btn)
+        inline_timing_row.addWidget(self.inline_update_plan_btn, 0, 6)
+        inline_timing_row.addWidget(self.inline_update_hf_daily_btn, 0, 7)
         inline_layout.addLayout(inline_timing_row)
         inspector_actions = QHBoxLayout()
         self.edit_hf_daily_btn = QPushButton("Edit HF Daily")
@@ -591,6 +637,122 @@ class FreqPlannerTab(QWidget):
         self._load_band_colors()
         self._refresh_source_set_controls()
         self._render_band_legend()
+        self.frequency_plan_action_hint_label.setWordWrap(True)
+        self._update_responsive_height_bounds()
+        self.rf_guard_review_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._apply_responsive_layout(force=True)
+
+    @staticmethod
+    def _reflow_grid(layout: QGridLayout, placements: List[Tuple[QWidget, int, int, int, int]]) -> None:
+        """Move existing controls within a grid without duplicating widgets."""
+        for widget, _row, _column, _rowspan, _colspan in placements:
+            layout.removeWidget(widget)
+        for widget, row, column, rowspan, colspan in placements:
+            layout.addWidget(widget, row, column, rowspan, colspan)
+
+    def _update_responsive_height_bounds(self) -> None:
+        """Bound secondary surfaces without clipping Large Text."""
+        line = max(18, int(self.fontMetrics().lineSpacing()))
+        self.frequency_plan_action_hint_label.setMaximumHeight(max(48, line * 3 + 8))
+        self.selected_window_card.setMaximumHeight(max(76, line * 3 + 18))
+        self.rf_guard_review_table.setMaximumHeight(max(190, line * 7 + 36))
+
+    def _apply_responsive_layout(self, *, force: bool = False) -> None:
+        """Keep the Plan Builder usable at compact sizes without losing actions."""
+        if not hasattr(self, "plan_select_layout") or not hasattr(self, "source_workspace_layout"):
+            return
+        width = max(0, int(self.width()))
+        height = max(0, int(self.height()))
+        mode = "compact" if width < 1100 or height < 700 else "wide"
+        if not force and mode == getattr(self, "_responsive_layout_mode", ""):
+            return
+        self._responsive_layout_mode = mode
+
+        if mode == "compact":
+            plan_placements = [
+                (self.plan_select_label, 0, 0, 1, 1),
+                (self.frequency_plan_combo, 0, 1, 1, 3),
+                (self.plan_mode_label, 0, 4, 1, 1),
+                (self.new_plan_btn, 1, 0, 1, 2),
+                (self.save_plan_btn, 1, 2, 1, 2),
+                (self.rename_plan_btn, 2, 0, 1, 2),
+                (self.delete_plan_btn, 2, 2, 1, 2),
+                (self.assign_plan_btn, 2, 4, 1, 1),
+            ]
+            source_placements = [
+                (self.source_daily_label, 0, 0, 1, 1),
+                (self.hf_daily_source_combo, 0, 1, 1, 4),
+                (self.source_net_label, 1, 0, 1, 1),
+                (self.hf_net_source_combo, 1, 1, 1, 4),
+                (self.source_sop_label, 2, 0, 1, 1),
+                (self.sop_plan_source_combo, 2, 1, 1, 4),
+                (self.save_sop_plan_btn, 3, 0, 1, 2),
+                (self.build_sop_layer_btn, 3, 2, 1, 3),
+            ]
+            for column in range(5):
+                self.plan_select_layout.setColumnStretch(column, 0)
+                self.source_workspace_layout.setColumnStretch(column, 0)
+            self.plan_select_layout.setColumnStretch(1, 1)
+            self.source_workspace_layout.setColumnStretch(1, 1)
+            self.frequency_plan_combo.setMinimumWidth(0)
+            self.plan_select_layout.setVerticalSpacing(4)
+            self.source_workspace_layout.setVerticalSpacing(4)
+        else:
+            plan_placements = [
+                (self.plan_select_label, 0, 0, 1, 1),
+                (self.frequency_plan_combo, 0, 1, 1, 1),
+                (self.plan_mode_label, 0, 2, 1, 1),
+                (self.new_plan_btn, 0, 3, 1, 1),
+                (self.save_plan_btn, 0, 4, 1, 1),
+                (self.rename_plan_btn, 0, 5, 1, 1),
+                (self.delete_plan_btn, 0, 6, 1, 1),
+                (self.assign_plan_btn, 0, 7, 1, 1),
+            ]
+            source_placements = [
+                (self.source_daily_label, 0, 0, 1, 1),
+                (self.hf_daily_source_combo, 0, 1, 1, 1),
+                (self.source_net_label, 0, 2, 1, 1),
+                (self.hf_net_source_combo, 0, 3, 1, 1),
+                (self.source_sop_label, 0, 4, 1, 1),
+                (self.sop_plan_source_combo, 0, 5, 1, 1),
+                (self.save_sop_plan_btn, 0, 6, 1, 1),
+                (self.build_sop_layer_btn, 0, 7, 1, 1),
+            ]
+            self.frequency_plan_combo.setMinimumWidth(240)
+            self.plan_select_layout.setVerticalSpacing(8)
+            self.source_workspace_layout.setVerticalSpacing(8)
+
+        self._reflow_grid(self.plan_select_layout, plan_placements)
+        self._reflow_grid(self.source_workspace_layout, source_placements)
+
+        # Inline editing is secondary detail; stack its fields only when a user opens it.
+        if mode == "compact":
+            inline_identity = []
+            for row, (label, widget) in enumerate(self.inline_identity_widgets):
+                inline_identity.extend(((label, row, 0, 1, 1), (widget, row, 1, 1, 3)))
+            inline_timing = []
+            for row, (label, widget) in enumerate(self.inline_timing_widgets):
+                inline_timing.extend(((label, row, 0, 1, 1), (widget, row, 1, 1, 3)))
+            inline_timing.extend(
+                ((self.inline_update_plan_btn, 3, 0, 1, 2), (self.inline_update_hf_daily_btn, 3, 2, 1, 2))
+            )
+        else:
+            inline_identity = []
+            for column, (label, widget) in enumerate(self.inline_identity_widgets):
+                inline_identity.extend(((label, 0, column * 2, 1, 1), (widget, 0, column * 2 + 1, 1, 1)))
+            inline_timing = []
+            for column, (label, widget) in enumerate(self.inline_timing_widgets):
+                inline_timing.extend(((label, 0, column * 2, 1, 1), (widget, 0, column * 2 + 1, 1, 1)))
+            inline_timing.extend(
+                ((self.inline_update_plan_btn, 0, 6, 1, 1), (self.inline_update_hf_daily_btn, 0, 7, 1, 1))
+            )
+        self._reflow_grid(self.inline_identity_row, inline_identity)
+        self._reflow_grid(self.inline_timing_row, inline_timing)
+        self._update_responsive_height_bounds()
+        if mode == "compact":
+            self.frequency_plan_action_hint_label.setMaximumHeight(
+                max(self.frequency_plan_action_hint_label.maximumHeight(), self.fontMetrics().lineSpacing() * 3 + 16)
+            )
 
     def _on_planner_view_changed(self) -> None:
         day_visible = self._planner_view_mode() == "operational"
@@ -2051,20 +2213,23 @@ class FreqPlannerTab(QWidget):
     def _set_rf_guard_review_card(self, validation: Mapping[str, Any]) -> None:
         if not hasattr(self, "rf_guard_review_card"):
             return
-        rows = self._rf_guard_issue_rows(validation) if isinstance(validation, Mapping) else []
+        all_rows = self._rf_guard_issue_rows(validation) if isinstance(validation, Mapping) else []
+        rows = all_rows[: self.MAX_RF_GUARD_ROWS]
         if not rows:
             self.rf_guard_review_table.setRowCount(0)
             self.rf_guard_review_card.setVisible(False)
             return
         state = str(validation.get("state") or "").strip().lower()
-        blocked_count = len([row for row in rows if row[0] == "Blocked"])
-        warning_count = len(rows) - blocked_count
+        blocked_count = len([row for row in all_rows if row[0] == "Blocked"])
+        warning_count = len(all_rows) - blocked_count
         bits: List[str] = []
         if blocked_count:
             bits.append(f"{blocked_count} blocked")
         if warning_count:
             bits.append(f"{warning_count} warning{'s' if warning_count != 1 else ''}")
         summary = ", ".join(bits) if bits else "Review needed"
+        if len(all_rows) > len(rows):
+            summary += f"; showing first {len(rows)} of {len(all_rows)}"
         if state == "blocked":
             summary = f"{summary}. Resolve blocked items before assignment or save."
         elif state == "warning":
@@ -5615,6 +5780,8 @@ class FreqPlannerTab(QWidget):
                 str(item["band_or_freq"]),
             ),
         )
+        total_rows = len(rows)
+        rows = rows[: self.MAX_PROJECTION_TABLE_ROWS]
         self.table.setRowCount(len(rows))
         for row, item_data in enumerate(rows):
             pattern = self._compact_pattern_days(item_data["days"])
@@ -5649,11 +5816,13 @@ class FreqPlannerTab(QWidget):
             hf_sched=hf_sched,
             net_sched=net_sched,
             sop_sched=sop_sched,
-            effective_count=len(rows),
+            effective_count=total_rows,
             effective_label="Patterns",
         )
+        bounded_note = f" Showing first {len(rows)} of {total_rows}." if total_rows > len(rows) else ""
         self.frequency_plan_action_hint_label.setText(
-            "Pattern Summary groups matching windows so daily baselines and nets are easy to scan. Select a pattern to edit one representative window."
+            "Pattern Summary groups matching windows so daily baselines and nets are easy to scan. "
+            f"Select a pattern to edit one representative window.{bounded_note}"
         )
         self.table.setSortingEnabled(True)
 
@@ -5688,7 +5857,9 @@ class FreqPlannerTab(QWidget):
         hv.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(6, QHeaderView.Stretch)
-        self.table.setRowCount(max(1, len(projection.effective_segments)))
+        all_segments = projection.effective_segments
+        visible_segments = all_segments[: self.MAX_PROJECTION_TABLE_ROWS]
+        self.table.setRowCount(max(1, len(visible_segments)))
         visible_bands: set[str] = set()
         if not projection.effective_segments:
             item = QTableWidgetItem("No effective schedule windows")
@@ -5706,7 +5877,7 @@ class FreqPlannerTab(QWidget):
             )
             self.frequency_plan_action_hint_label.setText("No effective HF Daily, HF Nets, or SOP windows are available.")
             return
-        for row, segment in enumerate(projection.effective_segments):
+        for row, segment in enumerate(visible_segments):
             source_cell = self._effective_window_cell_for_segment(segment, projection)
             day_label, time_label = self._effective_window_day_and_time(segment)
             band_or_freq = segment.band if self._show_band else segment.frequency
@@ -5743,10 +5914,16 @@ class FreqPlannerTab(QWidget):
             hf_sched=hf_sched,
             net_sched=net_sched,
             sop_sched=sop_sched,
-            effective_count=len(projection.effective_segments),
+            effective_count=len(all_segments),
+        )
+        bounded_note = (
+            f" Showing first {len(visible_segments)} of {len(all_segments)}."
+            if len(all_segments) > len(visible_segments)
+            else ""
         )
         self.frequency_plan_action_hint_label.setText(
-            "Sort by day, time, layer, group, band, or purpose. Select a window to review or edit its source."
+            "Sort by day, time, layer, group, band, or purpose. "
+            f"Select a window to review or edit its source.{bounded_note}"
         )
         self.table.setSortingEnabled(True)
 
@@ -5791,8 +5968,9 @@ class FreqPlannerTab(QWidget):
             radio_refs = [
                 ref for ref in radio_refs if self._radio_id_for_schedule_ref(ref) == int(selected_radio_id)
             ]
-        self.table.setRowCount(max(1, len(radio_refs)))
+        total_radio_refs = len(radio_refs)
         if not radio_refs:
+            self.table.setRowCount(1)
             if selected_radio_id > 0:
                 message = f"No windows are assigned to {self._radio_label_for_id(selected_radio_id)} for the selected plan."
             else:
@@ -5827,6 +6005,8 @@ class FreqPlannerTab(QWidget):
             return day_index, start, self._radio_id_for_schedule_ref(ref), str(ref.get("source") or "")
 
         sorted_refs = sorted(radio_refs, key=sort_key)
+        sorted_refs = sorted_refs[: self.MAX_PROJECTION_TABLE_ROWS]
+        self.table.setRowCount(max(1, len(sorted_refs)))
         overlap_labels = self._radio_window_overlap_labels(sorted_refs)
         for row, ref in enumerate(sorted_refs):
             radio_id = self._radio_id_for_schedule_ref(ref)
@@ -5874,7 +6054,7 @@ class FreqPlannerTab(QWidget):
             hf_sched=hf_sched,
             net_sched=net_sched,
             sop_sched=sop_sched,
-            effective_count=len(radio_refs),
+            effective_count=total_radio_refs,
             effective_label="Radio windows",
             plan_payload=selected_plan,
         )
@@ -5882,6 +6062,8 @@ class FreqPlannerTab(QWidget):
         summary = self._radio_window_summary_text(plan_name, sorted_refs, overlap_labels, week_sunday)
         if selected_radio_id > 0:
             summary = f"{self._radio_label_for_id(selected_radio_id)}: {summary}"
+        if total_radio_refs > len(sorted_refs):
+            summary += f" Showing first {len(sorted_refs)} of {total_radio_refs}."
         self.frequency_plan_action_hint_label.setText(summary)
 
     def _rebuild_shared_week_table(
@@ -6090,39 +6272,28 @@ class FreqPlannerTab(QWidget):
         """
         Deterministic snapshot of schedules and time view to avoid unnecessary rebuilds.
         """
-        parts = [
-            f"VIEW:{self._planner_view_mode()}",
-            f"SOPDAY:{self._selected_operational_day()}",
-            "LOCAL" if self._show_local else "UTC",
-            "BAND" if self._show_band else "FREQ",
-        ]
-        for s in sorted(hf_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("group_name", ""))):
-            parts.append(
-                f"H|{s.get('day_utc','')}|{s.get('group_name','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('band','')}"
+        def stable_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                (dict(row) for row in rows),
+                key=lambda row: json.dumps(row, sort_keys=True, default=str, separators=(",", ":")),
             )
-        for n in sorted(net_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("net_name", ""))):
-            parts.append(
-                f"N|{n.get('day_utc','')}|{n.get('net_name','')}|{n.get('start_utc','')}|{n.get('end_utc','')}|{n.get('recurrence','')}|{n.get('month_weeks','')}"
-            )
-        for s in sorted(sop_sched, key=lambda x: (x.get("group_name", ""), x.get("day_utc", ""), x.get("start_utc", ""))):
-            parts.append(
-                f"S|{s.get('group_name','')}|{s.get('day_utc','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('recurrence','')}|{s.get('month_weeks','')}"
-            )
-        for p in sorted(
-            policy_rows,
-            key=lambda x: (
-                str(x.get("policy") or ""),
-                str(x.get("start_utc") or ""),
-                str(x.get("end_utc") or ""),
-                str(x.get("net_row_signature") or ""),
-                str(x.get("sop_row_signature") or ""),
-            ),
-        ):
-            parts.append(
-                f"P|{p.get('policy','')}|{p.get('start_utc','')}|{p.get('end_utc','')}|"
-                f"{p.get('net_row_signature','')}|{p.get('sop_row_signature','')}"
-            )
-        return ";".join(parts)
+
+        state = {
+            "view": self._planner_view_mode(),
+            "operational_day": self._selected_operational_day(),
+            "time_basis": "local" if self._show_local else "utc",
+            "band_display": "band" if self._show_band else "frequency",
+            "frequency_plan": self.frequency_plan_combo.currentData() if hasattr(self, "frequency_plan_combo") else None,
+            "hf_daily_source": self.hf_daily_source_combo.currentData() if hasattr(self, "hf_daily_source_combo") else None,
+            "hf_net_source": self.hf_net_source_combo.currentData() if hasattr(self, "hf_net_source_combo") else None,
+            "sop_source": self.sop_plan_source_combo.currentData() if hasattr(self, "sop_plan_source_combo") else None,
+            "radio_filter": self.radio_window_radio_combo.currentData() if hasattr(self, "radio_window_radio_combo") else None,
+            "hf": stable_rows(hf_sched),
+            "net": stable_rows(net_sched),
+            "sop": stable_rows(sop_sched),
+            "policy": stable_rows(policy_rows),
+        }
+        return json.dumps(state, sort_keys=True, default=str, separators=(",", ":"))
 
     def _maybe_rebuild_if_changed(self):
         if self._projection_pending:
@@ -6389,6 +6560,10 @@ class FreqPlannerTab(QWidget):
         self._apply_theme()
 
     # ------------- Qt events ------------- #
+
+    def resizeEvent(self, event) -> None:  # pragma: no cover - geometry is covered by UI tests
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
 
     def showEvent(self, event):
         """

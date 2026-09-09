@@ -153,7 +153,7 @@ def test_net_source_schedule_is_source_first_before_table() -> None:
     assert 'self.header_title_label = QLabel("<h3>Net Source Schedule</h3>")' in source
 
 
-def test_sop_builder_contract_shell_and_temporary_advanced_table_are_flagged() -> None:
+def test_sop_builder_contract_shell_and_optional_advanced_table_are_flagged() -> None:
     source = Path("freqinout/gui/sop_tab.py").read_text(encoding="utf-8")
     inventory = Path("docs/internal/operational_view_inventory.md").read_text(encoding="utf-8")
 
@@ -162,9 +162,9 @@ def test_sop_builder_contract_shell_and_temporary_advanced_table_are_flagged() -
     assert 'self.sop_context_summary_label.setObjectName("sopContextSummary")' in source
     assert 'self.sop_preview_label.setObjectName("sopPreview")' in source
     assert 'self.sop_action_cards_label.setObjectName("sopActionBuilderCards")' in source
-    assert 'self.advanced_table_box = QGroupBox("Advanced Table (temporary)")' in source
+    assert 'self.advanced_table_box = QGroupBox("Advanced bulk editor")' in source
     assert 'self.advanced_table_box.setObjectName("sopAdvancedTableTemporary")' in source
-    assert "temporary advanced compatibility view" in inventory
+    assert "optional advanced compatibility view" in inventory
 
 
 def test_phase7_primary_nav_groups_start_collapsed() -> None:
@@ -1625,9 +1625,9 @@ def test_phase7_freqplanner_moves_times_into_plan_workspace_and_hides_context() 
     assert "header.addWidget(self.time_toggle_btn)" not in header_block
     assert "self.plan_context_label.setVisible(False)" in build_block
     assert "view_workspace.addWidget(self.time_toggle_btn)" in plan_block
-    assert "plan_select_row.addWidget(self.save_plan_btn)" in plan_block
-    assert "source_workspace.addWidget(self.save_sop_plan_btn)" in plan_block
-    assert "source_workspace.addWidget(self.build_sop_layer_btn)" in plan_block
+    assert "plan_select_row.addWidget(self.save_plan_btn," in plan_block
+    assert "source_workspace.addWidget(self.save_sop_plan_btn," in plan_block
+    assert "source_workspace.addWidget(self.build_sop_layer_btn," in plan_block
     assert "view_workspace.addWidget(self.review_rf_guard_btn)" in plan_block
     assert "view_workspace.addWidget(self.assign_plan_btn)" in plan_block
 

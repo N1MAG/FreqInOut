@@ -2035,3 +2035,48 @@ inside unrelated ControlFreq construction with numerous test-created worker
 pools still alive; batching completed every test file. Python compilation and
 `git diff --check` pass. The change is additive and does not modify production
 settings, launch applications, or begin Slice 5.
+
+## 2026-09-09 — Slice 5 SOP and Plan responsive builders
+
+The SOP Builder's wide action table was still the effective editing authority,
+making the normal workflow spreadsheet-like and difficult to use at 900x560.
+Its summary cards were read-only, large SOPs could expand without a render
+bound, and validation depended on reading Qt cell widgets. Plan Builder kept
+plan, source, and inline-edit controls in fixed horizontal rows; secondary
+detail surfaces could crowd out the schedule, and its projection snapshot
+omitted fields that can materially change the result.
+
+Slice 5 introduces a Qt-independent `SopActionDraftCollection` that preserves
+the full persisted action payload and supplies Save/validation. The primary SOP
+surface is now editable, vertically scrollable action cards with guided choices
+and all workflow fields. The optional Advanced bulk editor projects from and
+updates the same model. Card rendering is paged in groups of 12; duplicate,
+remove, validation, and conflict state remain model-indexed. Compact layout
+stacks management, traffic, and workbench bands without a page-level horizontal
+scrollbar. Primary copy no longer describes an internal temporary-table
+migration.
+
+Plan Builder now switches between wide and compact grids for plan identity,
+source selection, and inline editing. Ingredient/review toolbars retain bounded
+internal scrolling, selected-window and RF Guard surfaces use font-aware height
+bounds, and the main timeline remains visible. Effective, pattern, and radio
+projections are capped at 500 displayed rows and RF Guard at 200 displayed
+issues while summaries retain true totals. The projection snapshot is a stable
+canonical representation of every source row and all view/source/radio inputs,
+preventing missed rebuilds without introducing periodic unconditional work.
+
+Delegation and review: Terra/high audited and implemented the bounded SOP model
+and responsive card seam. Luna/high audited and implemented Plan Builder's
+responsive UI seam. Luna/medium created and expanded the focused interaction,
+viewport, theme, text-scale, state, and field-preservation tests. The
+high-reasoning primary model reviewed every delegated diff, replaced unbounded
+card expansion with paging, added guided card controls, closed invalid-time and
+bulk round-trip field-loss gaps, completed projection bounds and canonical
+snapshot coverage, updated the governing documents, and ran final integration.
+
+The focused Slice 5 and affected-area gate passes 321 tests. Four fresh-process
+repository batches pass 2,693 tests with 37 environment skips. Warm
+blank-profile construction is approximately 38–40 ms for SOP Builder and
+47–55 ms for Plan Builder after first-use font initialization. Python
+compilation and `git diff --check` pass. This slice makes no schema or production
+data changes and does not begin Slice 6.
