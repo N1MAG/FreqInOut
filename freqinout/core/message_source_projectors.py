@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_message_policy import (
+    JS8_MESSAGE_POLICY_VERSION,
+    canonicalize_js8_payload,
+    classify_js8_payload,
+    directed_js8_payload,
+    unique_js8_analysis_text,
+)
 from freqinout.core.message_intelligence import analyze_spotter_text
 from freqinout.core.message_file_metadata import cached_message_file_row_summary, ensure_message_file_metadata_table
 from freqinout.core.message_file_scanner import FileRecord
@@ -29,7 +36,7 @@ from freqinout.core.message_projection_store import (
 )
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
-PROJECTOR_VERSION = 2
+PROJECTOR_VERSION = 3
 FILE_PROJECTOR_VERSION = 4
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
@@ -364,15 +371,17 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
         "MAX(COALESCE(utc_ts, 0))",
         "MAX(COALESCE(read_ts, 0))",
     )
+    fingerprint = content_hash(JS8_MESSAGE_POLICY_VERSION, fingerprint)
     if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        return 0
+        with conn:
+            return _reconcile_js8_projection_policy(conn, limit=limit)
     rows = conn.execute(
         """
         SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text,
                state, read_ts, flag_state, source_key, source_id, source_radio_id,
                js8_instance_id, source_path
           FROM js8_messages
-         ORDER BY COALESCE(utc_ts, 0) DESC, COALESCE(source_id, id) DESC
+         ORDER BY utc_ts DESC, source_id DESC, id DESC
          LIMIT ?
         """,
         (limit,),
@@ -386,8 +395,16 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
             message_id = stable_message_id(source_id, "js8_message", external_key)
             status = _upper(row["state"]) or "UNREAD"
             raw_body = _text(row["raw_text"])
-            body = _text(row["decoded_text"]) or raw_body
-            analysis_body = "\n".join(part for part in (raw_body, body) if part)
+            decoded_body = _text(row["decoded_text"])
+            raw_payload = directed_js8_payload(raw_body)
+            decoded_payload = directed_js8_payload(decoded_body)
+            decision = classify_js8_payload(raw_payload or decoded_payload)
+            if decision.inbox_visible:
+                body = canonicalize_js8_payload(decoded_payload or raw_payload)
+                analysis_body = unique_js8_analysis_text(raw_payload, decoded_payload)
+            else:
+                body = decision.canonical_text
+                analysis_body = body
             event_ts = _float(row["utc_ts"])
             form_name = _text(row["msg_type"])
             if not form_name.upper().startswith("F!"):
@@ -414,7 +431,14 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
             projection = MessageProjectionRecord(
                 message_id=message_id,
                 canonical_key=f"{source_id}:js8_message:{external_key}",
-                content_hash=content_hash(PROJECTOR_VERSION, "js8", external_key, status, body),
+                content_hash=content_hash(
+                    PROJECTOR_VERSION,
+                    JS8_MESSAGE_POLICY_VERSION,
+                    "js8",
+                    external_key,
+                    status,
+                    body,
+                ),
                 primary_source_id=source_id,
                 source_family="js8",
                 source_label=source.source_label,
@@ -444,6 +468,9 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
                     "state": _upper(intelligence.state),
                     "grid": _upper(intelligence.grid),
                 },
+                inbox_visible=decision.inbox_visible,
+                inbox_suppression_reason="" if decision.inbox_visible else decision.reason,
+                classification_version=decision.classification_version,
                 retention_class="normal",
                 search_text=_search_text(row["from_call"], row["to_call"], row["msg_type"], body),
                 projection_version=PROJECTOR_VERSION,
@@ -465,7 +492,55 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
             )
             projected += 1
         _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+        projected += _reconcile_js8_projection_policy(conn, limit=limit)
     return projected
+
+
+def _reconcile_js8_projection_policy(conn: sqlite3.Connection, *, limit: int) -> int:
+    """Reclassify a bounded legacy JS8 projection batch without deleting evidence."""
+
+    rows = conn.execute(
+        """
+        SELECT message_id, body_preview, summary
+          FROM message_projection
+         WHERE source_family='js8'
+           AND COALESCE(classification_version, 0) < ?
+         ORDER BY rowid
+         LIMIT ?
+        """,
+        (JS8_MESSAGE_POLICY_VERSION, max(1, min(5000, int(limit or 5000)))),
+    ).fetchall()
+    if not rows:
+        return 0
+    from freqinout.core.ops_focus import index_message_for_ops_focus
+
+    for row in rows:
+        body = _text(row["body_preview"])
+        decision = classify_js8_payload(body or row["summary"])
+        summary = canonicalize_js8_payload(row["summary"])
+        conn.execute(
+            """
+            UPDATE message_projection
+               SET body_preview=?, summary=?, inbox_visible=?, inbox_suppression_reason=?,
+                   classification_version=?
+             WHERE message_id=?
+            """,
+            (
+                decision.canonical_text if body else body,
+                summary,
+                1 if decision.inbox_visible else 0,
+                "" if decision.inbox_visible else decision.reason,
+                decision.classification_version,
+                _text(row["message_id"]),
+            ),
+        )
+        refreshed = conn.execute(
+            "SELECT * FROM message_projection WHERE message_id=?",
+            (_text(row["message_id"]),),
+        ).fetchone()
+        if refreshed is not None:
+            index_message_for_ops_focus(conn, refreshed)
+    return len(rows)
 
 
 def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) -> int:

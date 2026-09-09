@@ -470,6 +470,12 @@ Messages remains the deep workbench:
 - Expect save/review for JS8Spotter drafts
 - MsgAuth verification state only when a signature exists
 
+FIOSpotter Expect requests and JS8 protocol/control frames remain available to
+their dedicated audit and RF-link paths but never appear as operator messages.
+The Messages JS8 focus retains meaningful direct and associated-group content;
+its classifier must use anchored protocol grammar so ordinary prose is not
+mistaken for a command.
+
 SuperSpotter's long form lists should not become long dropdown filters in FIO.
 Use human names such as `Wildfire | F!307`, `Net Check-In | F!103`, and
 category/topic filters instead of exposing every form code as a primary control.

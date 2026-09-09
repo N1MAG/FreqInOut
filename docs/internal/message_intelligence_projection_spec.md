@@ -94,6 +94,9 @@ Required fields:
   `intelligence_version`, `intelligence_utc`, `intelligence_json`.
 - Lifecycle: `read_state`, `pinned`, `archived`, `deleted`, `deleted_utc`,
   `retention_class`.
+- Surface policy: `inbox_visible`, `inbox_suppression_reason`, and
+  `classification_version`. Policy suppression is independent of lifecycle and
+  is the default predicate for Inbox and attention queries.
 - Search: `search_text`, indexed enough for bounded LIKE/FTS migration.
 
 Large raw bodies, file payloads, and reconstructed artifacts belong in linked
@@ -141,7 +144,12 @@ Rules:
 - Ingest and enrichment run off the UI thread.
 - Projection writes are incremental and idempotent.
 - Queries are bounded by time, limit, source, group, status, severity, and
-  deletion/archive state.
+  deletion/archive/policy-visibility state.
+- JS8 link telemetry, heartbeats, SNR, ACK/NACK, query/control, and Expect
+  request frames remain source/link evidence but are not Inbox projections.
+  Meaningful direct and associated-group human traffic remains visible.
+- A source-scoped checkpoint advances across policy-suppressed JS8 inbox rows;
+  suppression must not cause repeated parsing on every refresh.
 - Default inbox queries must return in less than 250 ms on a typical production
   laptop with 100k projected messages.
 - Messages activation is projected-DB-first. Opening Inbox must not parse
@@ -186,6 +194,8 @@ Rules:
 - Mark projected rows deleted when existing source-specific delete actions
   succeed.
 - Mark projection-only rows read/hidden directly in the FIO projection tables.
+- Reclassify existing JS8 projections in bounded, idempotent batches; never
+  delete the native JS8 row or external reference as part of Inbox policy.
 - Lazy-load projected detail refs/artifacts by `message_id`.
 - Process queued hide/source tombstone, audit-only, and file-backed external
   delete effects with audit results on a bounded Messages-tab queue timer.

@@ -480,15 +480,36 @@ FIO incrementally ingests JS8 directed traffic when either condition is true:
 - destination is a JS8 group configured by the user or an operating group with
   which the user is explicitly associated.
 
-This includes conversational or free-form directed traffic even when it is not
-stored as a literal JS8 inbox message. Heartbeats, heartbeat acknowledgements,
-and pure SNR/signal reports are excluded. Source radio/instance, received time,
-event time, sender, destination, path, and original text are retained.
+This includes conversational or free-form directed traffic, including ordinary
+social text addressed to an associated group, even when it is not stored as a
+literal JS8 inbox message. Traffic addressed only between other stations is not
+an Inbox message. Heartbeats, heartbeat acknowledgements, SNR reports and
+queries, pure ACK/NACK frames, JS8 query/control commands, grid/link telemetry,
+and FIOSpotter Expect request frames are excluded from Messages. Classification
+uses anchored protocol grammar; prose is not excluded merely because it contains
+words such as `ack`, `query`, `status`, or `grid`.
 
-The implementation uses a byte/record checkpoint over the directed log and
-indexed upserts. Dedupe identity prevents one transmission appearing twice when
-it is also available from the JS8 inbox or FIOSpotter. Rotated/truncated logs
-are detected without forcing a startup-wide historical parse.
+The exclusion is a projection boundary, not loss of RF evidence. `DIRECTED.TXT`,
+`ALL.TXT`, native JS8 source data, and the independent `js8_links` index retain
+station, path, time, and signal evidence for Map and propagation views. The hot
+message projection records an independent `inbox_visible` policy state,
+suppression reason, and classifier version so a policy-hidden frame is not
+confused with operator read/archive/delete state.
+
+Source radio/instance, received time, event time, sender, destination, path, and
+original source evidence are retained. If JS8 provides identical raw and decoded
+text, intelligence analyzes it once. An exact repeated multi-word payload may be
+canonicalized for display while the native source remains unchanged; ordinary
+human repetition is preserved.
+
+The implementation uses source-scoped byte/record checkpoints over the directed
+log and JS8 inbox plus indexed upserts. A checkpoint advances across suppressed
+rows so a noise-only burst is not reparsed on every refresh. Dedupe identity
+prevents one transmission appearing twice when it is also available from the
+JS8 inbox or FIOSpotter. Rotated/truncated logs are detected without forcing a
+startup-wide historical parse. Existing projection rows are reclassified in
+bounded, resumable background batches; source rows and external references are
+not deleted.
 
 ### Inbox selection and sorting
 
@@ -828,7 +849,11 @@ socket-send behavior remain out of scope.
 - Incremental source projection handles only changed rows and does not project a
   fixed 5,000 rows per source during startup.
 - Relevant directed JS8 fixtures are ingested once; heartbeat/SNR fixtures are
-  excluded; rotation and delayed traffic are covered.
+  excluded; ACK/NACK, query/control, Expect-request, grid/link, duplicate-text,
+  other-station, rotation, and delayed-traffic fixtures are covered. Suppressed
+  JS8 evidence remains available to the independent link/map index.
+- Inbox first paint loads no more than 1,500 projected rows and never loads
+  policy-suppressed rows or their external references into the UI model.
 - CommStat read state, report severity, summary, and source remain independent
   through mark-read, filter, restart, and reprojection.
 - Opening FIO Spotter does not construct or load its history until first use.

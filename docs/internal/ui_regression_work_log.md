@@ -1936,3 +1936,50 @@ review. The focused deferred-screen, HF/Local operator, and navigation set passe
 194 tests. The authoritative fresh-process repository gate passes all 176
 test-bearing files plus two environment-skip-only files with no failures across
 2,614 collected tests. Python compilation and `git diff --check` pass.
+
+## 2026-09-08 — Messages JS8 noise and duplicate-payload remediation
+
+Production showed the Messages queue dominated by JS8 protocol traffic such as
+`SNR?`, `QUERY MSGS`, `QUERY CALL`, grid exchanges, and ACK frames. The same
+rows increased projection, filter, focus-count, external-reference, and model
+work on every refresh. Source review also found that JS8 native projection fed
+identical raw and decoded text to Message Intelligence, explaining doubled
+summaries such as `SNR? SNR?` and repeated human text.
+
+Messages now uses one Qt-free, versioned JS8 payload policy at inbox import,
+directed/API parsing, compatibility-cache loading, and native projection. Exact
+protocol grammar suppresses empty frames, heartbeat/SNR telemetry, ACK/NACK,
+JS8 query/control, grid link telemetry, FIOSpotter Expect requests, and
+third-party relay frames. Natural-language direct and associated-group traffic
+remains visible, including ordinary social text and prose containing words such
+as `ack` or `query`. Exact repeated multi-word payloads are canonicalized for
+display and intelligence without changing the native JS8 source; simple human
+emphasis remains intact.
+
+Suppression is independent of operator lifecycle state. The additive message
+projection fields `inbox_visible`, `inbox_suppression_reason`, and
+`classification_version` hide existing noise in bounded background batches
+without deleting `js8_messages`, external references, JS8 logs, or `js8_links`.
+The Ops entity bridge drops policy-hidden message rows while Map continues to
+receive station/path/SNR evidence from its independent link index. A dedicated
+source-scoped inbox checkpoint advances even when every new row is suppressed,
+preventing noise-only bursts from being reparsed indefinitely.
+
+The projected Messages model load is capped at 1,500 rows; the compatibility
+JS8 cache is newest-first and capped at 2,000. Visibility-aware and JS8
+projection indexes support the bounded reads. Regression coverage proves
+anchored classification, meaningful direct/group retention, historical source
+preservation, hidden-row reconciliation, duplicate correction, source-scoped
+checkpoint progress, blank-slate compatibility, and independent map-link
+retention.
+
+Delegation and review: Terra/high mapped the projection contract and data
+ownership; Luna/high audited the JS8 leak/duplication path; Luna/high audited
+refresh cost; Luna/high implemented the bounded classifier-contract and
+integration regressions. The high-reasoning primary model defined the policy and additive
+projection design, reviewed every delegated result and diff, implemented the
+ingest/projection/UI integration, and ran the integration gate. The affected
+JS8 ingest, projection, Messages responsiveness, and Map set passes 329 tests.
+The repository-wide gate passes 2,621 tests with 37 environment skips. Python
+compilation and `git diff --check` pass. No production database, JS8 source
+log, configuration, radio, or Map/link evidence was modified.

@@ -30,6 +30,7 @@ from freqinout.core.js8_expect_store import (
     evaluate_dynamic_flamp_request,
     evaluate_expect_request,
 )
+from freqinout.core.js8_message_policy import classify_js8_payload, directed_js8_payload
 from freqinout.core.logger import log
 from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
@@ -55,10 +56,6 @@ SPOTTER_STATUS_FORMS = {"104", "301", "304"}
 MCF304_EXPECTED_RESPONSES = 8
 SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
 SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
-JS8_DIRECTED_HEARTBEAT_RE = re.compile(r"^\s*(?:HB|HEARTBEAT)(?:\s+SNR\s+[-+]?\d+(?:\.\d+)?(?:\s*dB)?)?\s*$", re.IGNORECASE)
-JS8_DIRECTED_SNR_ONLY_RE = re.compile(r"^\s*SNR\s+[-+]?\d+(?:\.\d+)?(?:\s*dB)?\s*$", re.IGNORECASE)
-
-
 class JS8FormDecoder:
     def __init__(self, settings: SettingsManager):
         self.settings = settings
@@ -189,7 +186,10 @@ class MessageIngestor:
             return
         self._ensure_local_js8_tables()
         effective_source_key = self._js8_source_key(source_key=source_key, source_radio_id=source_radio_id, js8_instance_id=js8_instance_id)
-        max_local_id = self._local_max_js8_id(source_key=effective_source_key)
+        max_local_id = max(
+            self._local_max_js8_id(source_key=effective_source_key),
+            self._js8_ingest_checkpoint(source_key=effective_source_key),
+        )
         try:
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
@@ -205,7 +205,7 @@ class MessageIngestor:
             rows = []
             for table, cols in queries:
                 try:
-                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
+                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ? ORDER BY 1", (max_local_id,))
                     rows = cur.fetchall()
                     break
                 except Exception:
@@ -217,9 +217,15 @@ class MessageIngestor:
 
         state_map = self._load_js8_state_map(source_key=effective_source_key)
         message_form_codes = self._form_codes_for_flag("messages")
+        directed_callsigns, directed_groups = self._directed_js8_recipients()
         now_ts = time.time()
+        highest_seen_id = max_local_id
         for row in rows:
             rid = row[0] if len(row) > 0 else 0
+            try:
+                highest_seen_id = max(highest_seen_id, int(rid or 0))
+            except Exception:
+                pass
             if rid <= max_local_id:
                 continue
             blob = row[1] if len(row) > 1 else ""
@@ -241,6 +247,31 @@ class MessageIngestor:
             text = (params.get("TEXT") or "").strip()
             from_call = (params.get("FROM") or "").strip().upper()
             to_call = (params.get("TO") or "").strip()
+            parsed_sender, parsed_dest, _parsed_payload = self._split_directed_js8_text(text)
+            if not from_call:
+                from_call = parsed_sender
+            if not to_call:
+                to_call = parsed_dest
+            if to_call and (directed_callsigns or directed_groups) and not self._directed_js8_target_matches(
+                to_call, directed_callsigns, directed_groups
+            ):
+                continue
+            payload = directed_js8_payload(text)
+            try:
+                self._enqueue_next_msg_id(
+                    from_call,
+                    payload,
+                    source_key=effective_source_key,
+                    source_radio_id=source_radio_id,
+                    js8_instance_id=js8_instance_id,
+                    source_path=str(inbox_path),
+                )
+            except Exception:
+                pass
+            decision = classify_js8_payload(payload)
+            if not decision.inbox_visible:
+                continue
+            text = decision.canonical_text
             utc_str = (params.get("UTC") or "").strip()
             try:
                 utc_ts = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
@@ -280,17 +311,10 @@ class MessageIngestor:
                 js8_instance_id=js8_instance_id,
                 source_path=str(inbox_path),
             )
-            try:
-                self._enqueue_next_msg_id(
-                    from_call,
-                    text,
-                    source_key=effective_source_key,
-                    source_radio_id=source_radio_id,
-                    js8_instance_id=js8_instance_id,
-                    source_path=str(inbox_path),
-                )
-            except Exception:
-                pass
+        self._set_js8_ingest_checkpoint(
+            source_key=effective_source_key,
+            last_source_id=highest_seen_id,
+        )
 
     def ingest_spotter_from_directed(
         self,
@@ -1987,6 +2011,15 @@ class MessageIngestor:
         cur.execute(
             "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS js8_ingest_checkpoint (
+                source_key TEXT PRIMARY KEY,
+                last_source_id INTEGER NOT NULL DEFAULT 0,
+                updated_ts REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
         try:
             cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
         except Exception:
@@ -2033,6 +2066,10 @@ class MessageIngestor:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_js8_messages_utc_ts ON js8_messages(utc_ts DESC, from_call)"
         )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_js8_messages_projection "
+            "ON js8_messages(utc_ts DESC, source_id DESC, id DESC)"
+        )
         conn.commit()
         conn.close()
 
@@ -2052,6 +2089,44 @@ class MessageIngestor:
             return int(row[0]) if row and row[0] is not None else 0
         except Exception:
             return 0
+
+    def _js8_ingest_checkpoint(self, *, source_key: str = "") -> int:
+        db_path = self._local_js8_db()
+        if not db_path or not db_path.exists():
+            return 0
+        try:
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT last_source_id FROM js8_ingest_checkpoint WHERE source_key=?",
+                (str(source_key or ""),),
+            ).fetchone()
+            conn.close()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def _set_js8_ingest_checkpoint(self, *, source_key: str = "", last_source_id: int = 0) -> None:
+        if int(last_source_id or 0) <= 0:
+            return
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO js8_ingest_checkpoint(source_key, last_source_id, updated_ts)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        last_source_id=MAX(js8_ingest_checkpoint.last_source_id, excluded.last_source_id),
+                        updated_ts=excluded.updated_ts
+                    """,
+                    (str(source_key or ""), int(last_source_id), time.time()),
+                )
+            conn.close()
+        except Exception as exc:
+            log.debug("MessageIngest: failed to save JS8 ingest checkpoint: %s", exc)
 
     @staticmethod
     def _js8_source_key(*, source_key: str = "", source_radio_id: object = "", js8_instance_id: object = "") -> str:
@@ -2150,10 +2225,7 @@ class MessageIngestor:
 
     @staticmethod
     def _is_js8_directed_noise(text: object) -> bool:
-        payload = str(text or "").strip().upper()
-        if not payload:
-            return True
-        return bool(JS8_DIRECTED_HEARTBEAT_RE.fullmatch(payload) or JS8_DIRECTED_SNR_ONLY_RE.fullmatch(payload))
+        return not classify_js8_payload(text).inbox_visible
 
     def _parse_directed_js8_message_line(
         self,
@@ -2183,8 +2255,10 @@ class MessageIngestor:
         sender, dest, payload = self._split_directed_js8_text(raw_text)
         if not sender or not dest:
             return None
-        if self._is_js8_directed_noise(payload):
+        decision = classify_js8_payload(directed_js8_payload(raw_text))
+        if not decision.inbox_visible:
             return None
+        payload = decision.canonical_text
         if parse_dynamic_flamp_query(payload) is not None:
             return None
         if re.search(r"\bF![0-9]{3}[A-Z]?\b", raw_text, flags=re.IGNORECASE):
@@ -2253,8 +2327,10 @@ class MessageIngestor:
             dest = parsed_dest
         if not sender or not dest:
             return None
-        if self._is_js8_directed_noise(payload or text):
+        decision = classify_js8_payload(directed_js8_payload(text))
+        if not decision.inbox_visible:
             return None
+        payload = decision.canonical_text
         if parse_dynamic_flamp_query(payload or text) is not None:
             return None
         if re.search(r"\bF![0-9]{3}[A-Z]?\b", text, flags=re.IGNORECASE):

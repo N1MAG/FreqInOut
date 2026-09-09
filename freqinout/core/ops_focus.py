@@ -268,7 +268,8 @@ def index_message_for_ops_focus(conn: sqlite3.Connection, record: object) -> Non
     read_state = _safe_text(_value(record, "read_state", "")).strip().lower()
     actionable = 1 if bool(_value(record, "actionable", False)) else 0
     archived = 1 if bool(_value(record, "archived", False)) else 0
-    deleted = 1 if bool(_value(record, "deleted", False)) else 0
+    policy_hidden = not bool(_value(record, "inbox_visible", True))
+    deleted = 1 if bool(_value(record, "deleted", False)) or policy_hidden else 0
     status = _safe_text(_value(record, "status", "")).strip()
     summary = _safe_text(
         _value(record, "summary", "")

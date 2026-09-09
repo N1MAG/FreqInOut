@@ -272,6 +272,11 @@ from freqinout.core.message_delete_policy import (
 from freqinout.core.operator_groups import OperatorGroupFamily, expand_group_selection, load_operator_group_families
 from freqinout.core.ingest_source_model import stable_source_id
 from freqinout.core.js8_runtime_messages import ingest_js8_messages_for_runtime_sources
+from freqinout.core.js8_message_policy import (
+    canonicalize_js8_payload,
+    classify_js8_payload,
+    directed_js8_payload,
+)
 from freqinout.core.js8_source_context import resolve_js8_endpoint_context
 from freqinout.core.varac_runtime_ingest import ingest_varac_for_runtime_sources
 from freqinout.gui.plan_context_label import PlanContextLabel
@@ -13178,7 +13183,7 @@ class MessageViewerTab(QWidget):
             return False
         self._projected_table_loading = True
         try:
-            rows = self._load_projected_message_rows(limit=20000)
+            rows = self._load_projected_message_rows(limit=1500)
             if not rows:
                 return False
             self._message_rows = rows
@@ -20380,6 +20385,10 @@ class MessageViewerTab(QWidget):
         if not any((text, from_call, to_call, utc_str)):
             self._record_bad_js8_record(source=source, source_id=rid, reason="no_message_fields", raw=blob)
             return None
+        decision = classify_js8_payload(directed_js8_payload(text))
+        if not decision.inbox_visible:
+            return None
+        text = decision.canonical_text
         try:
             from datetime import datetime
 
@@ -20529,6 +20538,8 @@ class MessageViewerTab(QWidget):
                        source_key, source_id, source_radio_id, js8_instance_id, source_path
                 FROM js8_messages
                 WHERE utc_ts IS NULL OR utc_ts >= ?
+                ORDER BY COALESCE(utc_ts, 0) DESC, id DESC
+                LIMIT 2000
                 """,
                 (time.time() - JS8_MAX_AGE_SECONDS,),
             )
@@ -20541,6 +20552,13 @@ class MessageViewerTab(QWidget):
             msg = self._js8_message_from_cache_row(r)
             if msg is None:
                 continue
+            decision = classify_js8_payload(msg.raw_text or msg.decoded_text)
+            if not decision.inbox_visible:
+                continue
+            if msg.raw_text:
+                msg.raw_text = decision.canonical_text
+            if msg.decoded_text:
+                msg.decoded_text = canonicalize_js8_payload(msg.decoded_text)
             # If older than retention and read, skip
             now_ts = time.time()
             if msg.state == "READ" and msg.read_ts and (now_ts - msg.read_ts) > (24 * 60 * 60):

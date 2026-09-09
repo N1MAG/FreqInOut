@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from freqinout.core.sqlite_utils import connect_sqlite
 
-PROJECTION_SCHEMA_VERSION = 1
+PROJECTION_SCHEMA_VERSION = 2
 
 
 def utc_now_iso() -> str:
@@ -102,6 +102,9 @@ class MessageProjectionRecord:
     archived: bool = False
     deleted: bool = False
     deleted_utc: str = ""
+    inbox_visible: bool = True
+    inbox_suppression_reason: str = ""
+    classification_version: int = 0
     retention_class: str = "normal"
     search_text: str = ""
     projection_version: int = PROJECTION_SCHEMA_VERSION
@@ -235,6 +238,9 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
             archived INTEGER NOT NULL DEFAULT 0,
             deleted INTEGER NOT NULL DEFAULT 0,
             deleted_utc TEXT,
+            inbox_visible INTEGER NOT NULL DEFAULT 1,
+            inbox_suppression_reason TEXT,
+            classification_version INTEGER NOT NULL DEFAULT 0,
             retention_class TEXT NOT NULL DEFAULT 'normal',
             search_text TEXT,
             projection_version INTEGER NOT NULL DEFAULT 1,
@@ -389,6 +395,9 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
             "archived": "INTEGER NOT NULL DEFAULT 0",
             "deleted": "INTEGER NOT NULL DEFAULT 0",
             "deleted_utc": "TEXT",
+            "inbox_visible": "INTEGER NOT NULL DEFAULT 1",
+            "inbox_suppression_reason": "TEXT",
+            "classification_version": "INTEGER NOT NULL DEFAULT 0",
             "retention_class": "TEXT NOT NULL DEFAULT 'normal'",
             "search_text": "TEXT",
             "projection_version": "INTEGER NOT NULL DEFAULT 1",
@@ -475,6 +484,7 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
         },
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_default ON message_projection(deleted, archived, event_ts DESC, received_ts DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_inbox ON message_projection(inbox_visible, deleted, archived, operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_source ON message_projection(source_family, event_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_group ON message_projection(group_name, event_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_status ON message_projection(status, severity, event_ts DESC)")
@@ -541,9 +551,10 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
             event_utc, received_utc, subject, summary, body_preview, topics_json, entities_json,
             actionable, operator_attention, confidence, recommended_action, intelligence_version,
             intelligence_utc, intelligence_json, pinned, archived, deleted, deleted_utc, retention_class,
+            inbox_visible, inbox_suppression_reason, classification_version,
             search_text, projection_version, projected_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(message_id) DO UPDATE SET
             canonical_key=excluded.canonical_key,
             content_hash=excluded.content_hash,
@@ -589,6 +600,9 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
                 ELSE excluded.deleted_utc
             END,
             retention_class=excluded.retention_class,
+            inbox_visible=excluded.inbox_visible,
+            inbox_suppression_reason=excluded.inbox_suppression_reason,
+            classification_version=excluded.classification_version,
             search_text=excluded.search_text,
             projection_version=excluded.projection_version,
             projected_utc=excluded.projected_utc
@@ -746,6 +760,7 @@ def list_projected_messages(
     received_after_ts: float = 0.0,
     include_archived: bool = False,
     include_deleted: bool = False,
+    include_suppressed: bool = False,
     limit: int = 500,
 ) -> list[sqlite3.Row]:
     clauses: list[str] = []
@@ -754,6 +769,8 @@ def list_projected_messages(
         clauses.append("deleted=0")
     if not include_archived:
         clauses.append("archived=0")
+    if not include_suppressed:
+        clauses.append("inbox_visible=1")
     requested_sources = [
         str(value or "").strip().lower()
         for value in (source_families or ())
@@ -819,6 +836,7 @@ def list_projected_attention_messages(
                   FROM message_projection
                  WHERE deleted=0
                    AND archived=0
+                   AND inbox_visible=1
                    AND (operator_attention=1 OR actionable=1 OR severity IN ('critical', 'warning'))
                  ORDER BY
                    CASE severity
@@ -845,7 +863,7 @@ def list_projected_geo_messages(
     group_name: str = "",
     limit: int = 500,
 ) -> list[sqlite3.Row]:
-    clauses = ["deleted=0", "archived=0", "(COALESCE(state_code, '') != '' OR COALESCE(grid, '') != '' OR (lat IS NOT NULL AND lon IS NOT NULL))"]
+    clauses = ["deleted=0", "archived=0", "inbox_visible=1", "(COALESCE(state_code, '') != '' OR COALESCE(grid, '') != '' OR (lat IS NOT NULL AND lon IS NOT NULL))"]
     params: list[object] = []
     if state_code:
         clauses.append("UPPER(state_code)=?")
@@ -1404,6 +1422,9 @@ def _message_values(message: MessageProjectionRecord, projected_utc: str) -> tup
         1 if message.deleted else 0,
         _sanitize_sql_text(message.deleted_utc),
         _sanitize_sql_text(message.retention_class or "normal"),
+        1 if message.inbox_visible else 0,
+        _sanitize_sql_text(message.inbox_suppression_reason),
+        int(message.classification_version or 0),
         _sanitize_sql_text(message.search_text).lower(),
         int(message.projection_version or PROJECTION_SCHEMA_VERSION),
         _sanitize_sql_text(projected_utc),
