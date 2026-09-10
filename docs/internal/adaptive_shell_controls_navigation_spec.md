@@ -67,7 +67,7 @@ meaning does not depend on platform icon themes.
 | Net Control | Flyout: FLDigi / SSB, JS8Call, VHF/UHF |
 | Calls | Operators flyout: HF Callsigns, Local Callsigns, Local Reports |
 | Plans | Flyout: Plan Builder, SOP Builder, HF Daily, HF Nets, Local Nets, HF Peer Scheds |
-| Resources | Flyout: Frequency Catalog, Net Directory, Resource Import / Export |
+| Resources | Flyout: Frequencies, Shortwave |
 | Station | Flyout: Control Center, Health Details |
 | Settings | Flyout: Main, Radios |
 | Help | Open Help |
@@ -97,8 +97,9 @@ an empty destination in advance of implementation.
 - Every advanced control remains reachable at 1920x1080 Normal Text, 1000x700,
   and approximately 900x560 Large Text without horizontal scrolling.
 - One, two-plus-Mesh, and three-radio awareness states remain usable.
-- Compact navigation contains all six grouped master menus and the three direct
-  destinations, with the correct active-group indication.
+- Compact navigation contains all grouped master menus and direct destinations,
+  with the correct active-group indication; Resources exposes Frequencies and
+  Shortwave while catalog browser tabs remain internal to Frequencies.
 - Map uses a map marker symbol rather than a folder; Messages uses an envelope;
   Net Control uses a radio/wave symbol.
 - Light and Dark themes retain readable icons, labels, focus, and selection.

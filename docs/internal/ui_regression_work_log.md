@@ -2478,3 +2478,39 @@ five-test usability suite covers the normal browser/editor surface and 900x560
 Dark/Large Text geometry. Release preflight, Python compilation,
 `git diff --check`, and an isolated basic GUI smoke across all 22 screens pass;
 the smoke reports zero failed tabs.
+
+## 2026-09-10 — Resources hierarchy, export preview, and Shortwave design review
+
+Status: specification complete; implementation has not begun. The existing LN-6
+release gates remain unchanged.
+
+The operator clarified that Resources is a master navigation group, Frequencies
+is its existing catalog destination, and Shortwave is a new peer destination.
+Frequency Catalog, Net Directory, and Import / Export remain internal browser
+tabs under Frequencies rather than being duplicated in main navigation. The
+specification now requires a human-readable, non-mutating preview before every
+frequency/resource export and a single aggregate transfer bound shared by export
+and import.
+
+The review audited the local EiBi A26 CSV/README, the generated Shortwave idea
+document, Resources navigation/transfer code, catalog persistence, HF scheduling,
+manual QSY controls, and observer SDR ownership. EiBi has 9,442 rows and 1,999
+unique frequencies, but includes cross-midnight windows, `2400`, complex day/date
+rules, inactive/utility records, provider dictionaries, and malformed/ambiguous
+values. Shortwave therefore receives a dedicated immutable, versioned schedule
+model and provider adapter rather than one Frequency Catalog row per transmission.
+The proposed initial workflow is an indexed, bounded Explore view plus explicit
+source import/update preview; a later gated package adds receive-only Listening
+reminders. Automatic tuning, HF scheduler insertion, PTT, software launch, and
+generic SDR control remain out of scope.
+
+Delegation: Terra/high audited Resources navigation and export-preview UX;
+Terra/high audited transceiver, SDR, schedule, Ops, and SOP integration; Luna/high
+audited the EiBi corpus, parser grammar, provenance, schema fit, and performance
+risks. The high-reasoning primary model reconciled the product hierarchy, source
+semantics, migration/concurrency/safety boundaries, delivery gates, and final
+specification.
+
+Artifacts: `shortwave_resources_spec.md` and
+`shortwave_resources_implementation_plan.md`. This review changed documentation
+only; it made no runtime, configuration, schema, or production-data changes.

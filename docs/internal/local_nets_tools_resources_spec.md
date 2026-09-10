@@ -1,8 +1,9 @@
 # Local Nets And Tools & Resources Specification
 
 Status: implementation authority; implementation and focused automated
-qualification complete through LN-6; the exit gate awaits the full soak and
-Linux/operator release validation
+qualification complete through LN-6; navigation and export amendments are
+specified in `shortwave_resources_spec.md`; the exit gate awaits the full soak
+and Linux/operator release validation
 
 Date: 2026-09-09
 
@@ -39,8 +40,9 @@ models rather than create UI-owned copies.
 - SOP behavior: a Local Net may link to and suggest an SOP, while activation
   remains independently controlled.
 - Initial services: Amateur VHF/UHF and GMRS.
-- Reusable catalog navigation: compact navigation label **Resources**; workspace
-  title **Tools & Resources**.
+- Reusable catalog navigation: **Resources** is a master group. **Frequencies**
+  opens the existing workspace titled **Tools & Resources**; **Shortwave** opens
+  its dedicated workspace.
 
 ## Product Mental Model
 
@@ -112,15 +114,17 @@ The Plans flyout becomes:
 Local Nets opens a task workspace. It is not placed in Settings because normal
 use is scheduling and reviewing upcoming activity, not station administration.
 
-### Resources destination
+### Resources master group
 
-The main navigation gains one direct **Resources** destination. Its workspace
-title is **Tools & Resources**. Frequency Catalog, Net Directory, and Resource
-Import / Export remain browser-style tabs inside that workspace; repeating them
-as navigation children adds no new destination and is prohibited. Contextual
-deep links may still open a specific internal tab. The icon should communicate a
-library or catalog, not repair/maintenance, and must use the shared navigation
-canvas, stroke, color, accessible name, and compact-rail geometry.
+The main navigation has one **Resources** master group with two child
+destinations: **Frequencies** and **Shortwave**. Frequencies opens the workspace
+titled **Tools & Resources**. Frequency Catalog, Net Directory, and Resource
+Import / Export remain browser-style tabs inside that workspace; repeating those
+tabs as main-navigation children is prohibited. Contextual deep links may still
+open a specific internal tab. Shortwave is governed by
+`shortwave_resources_spec.md`. The icon should communicate a library or catalog,
+not repair/maintenance, and must use the shared navigation canvas, stroke, color,
+accessible name, and compact-rail geometry.
 
 `Forms & Templates` is a planned resource family, but it must not be exposed as
 an empty or nonfunctional tab. Existing form administration remains where it is
@@ -599,6 +603,13 @@ Export supports selected resources, a net plus its sessions/frequencies, and the
 station's Local Net subscriptions. Stable keys and version metadata are included.
 Secrets and unrelated station configuration are excluded.
 
+Export is also preview-first. Contextual selection opens a human-readable review
+of selected records, included dependencies, provenance, warnings, aggregate item
+count, and projected payload size before a destination is chosen or written. The
+operator may cancel without mutation. Export and import share one aggregate item
+and byte limit so a valid FIO export cannot exceed the matching import preview's
+bounds. `shortwave_resources_spec.md` owns the complete export-preview contract.
+
 ## Performance And Concurrency
 
 - Resources and Local Nets are lazy main-window workspaces.
@@ -692,10 +703,12 @@ The feature is acceptable only when:
 14. Resource use/impact is visible before retirement or destructive removal.
 15. Performance, responsive/theme/text, accessibility, shutdown, and Linux
     production gates pass.
-16. Resources appears once in main navigation; its internal tabs are not repeated
-    as child destinations, frequencies use decimal MHz, and ordinary catalog
-    surfaces expose human source/region/listing language rather than opaque keys,
-    hashes, `Scope`, `Session`, or operationally ambiguous `Active` status.
+16. Resources appears once as a main-navigation master group with Frequencies and
+    Shortwave children; the Frequencies workspace's internal tabs are not
+    repeated as child destinations, frequencies use decimal MHz, and ordinary
+    catalog surfaces expose human source/region/listing language rather than
+    opaque keys, hashes, `Scope`, `Session`, or operationally ambiguous `Active`
+    status.
 
 ## Definition Of Complete
 
