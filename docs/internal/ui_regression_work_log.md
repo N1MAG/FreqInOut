@@ -2883,3 +2883,214 @@ destructive migration is authorized.
 Before this specification work, the completed MES-0 through MES-5 scheduler was
 committed as `71ac840` and pushed to the internal-testing WIP branch. Existing
 Shortwave edits, rendered documents, and Office temporary files were excluded.
+
+## 2026-09-10 — Message ingest projection MIP-0 characterization
+
+Status: exit gate passed; production behavior intentionally unchanged.
+
+The production-shaped characterization fixture covers 5,000 CommStat, 5,000
+SitRep, 1,000 Spotter, representative JS8 and VarAC, and 551 file records. It
+reproduces whole-window replay after one inserted source row, per-bundle schema
+assurance, foreground Qt file-scan completion, deterministic SQLite contention,
+rollback/restart behavior, invalid-surrogate path failure, and database writes
+from a device-profile list operation.
+
+The architecture audit counted 28 schema/introspection SQL operations per
+schema-assurance invocation. Applied to the observed 11,957-row production
+projection, the lower bound is 1,144,556 schema/introspection statements before
+ordinary projection DML and Ops indexing. This quantifies the principal CPU,
+GIL, and writer-lock amplification that MIP-1 and MIP-2 must remove.
+
+Model ownership:
+
+- High-reasoning primary model: architecture and concurrency boundaries,
+  production-evidence correlation, migration safety, delegated-diff review, and
+  exit-gate decision.
+- `gpt-5.6-terra` high: core projection/SQLite and UI/thread audits.
+- `gpt-5.6-luna` high: characterization fixtures and focused test execution.
+
+Acceptance evidence: `tests/test_message_ingest_mip0_characterization.py`
+passes 8 tests in 1.24 seconds; `git diff --check` passes. Details are recorded
+in `message_ingest_projection_mip0_evidence_2026-09-10.md`. No destructive
+migration or production-data rewrite occurred.
+
+## 2026-09-10 — Message ingest projection MIP-1 writer foundation
+
+Status: exit gate passed.
+
+Projection schema version 3 now creates the durable dirty-work, source-state,
+and generation tables through startup's additive migration owner. Runtime row
+helpers and the hot Ops index path no longer execute schema assurance. The new
+projection bundle writer provides one serialized lane per database, immutable
+atomic message/reference/artifact bundles, differential component writes,
+source deduplication, affected-only Ops indexing, 100-bundle/50 ms transaction
+limits, bounded lock retry, cancellation/backpressure outcomes, generation
+advancement, and bounded daemon-worker shutdown. Reprojection also preserves an
+operator-read row when stale source material still reports new or unread.
+
+Model ownership:
+
+- High-reasoning primary model: architecture, additive migration, concurrency,
+  state precedence, registry integration, delegated-diff review, and gate.
+- `gpt-5.6-terra` high: serialized/differential writer module.
+- `gpt-5.6-luna` high: migration, schema-free-helper, atomicity, batching,
+  zero-write, source-deduplication, and writer-registry tests.
+
+Acceptance evidence: the focused MIP/projection/Ops set passes 56 tests,
+including deterministic lock deferral, cancellation, atomic rollback, and the
+100-bundle transaction cap. Python compilation and `git diff --check` pass.
+Details are recorded in
+`message_ingest_projection_mip1_evidence_2026-09-10.md`. No destructive
+migration or production-data rewrite occurred.
+
+## 2026-09-10 — Message ingest projection MIP-2 incremental adapters
+
+Status: exit gate passed.
+
+The five native database families now use durable, coalesced, source-scoped
+dirty identities and bounded watermarks. Exact targeted adapters reuse the
+existing semantic builders, while one serialized writer owns differential
+projection, reference, artifact, Ops-index, dirty-completion, and deletion
+transactions. VarAC uses a rowid discovery watermark so endpoint-local IDs may
+repeat; CommStat deletion markers participate in the queue; and JS8/Spotter
+tables created after initial migration install triggers through their schema
+lifecycle seam. The active Inbox native worker no longer invokes the 5,000-row
+legacy projector.
+
+An independent audit initially held the gate for endpoint identity collisions,
+unscoped deletion, late-table trigger installation, missed CommStat tombstones,
+content-hash-only diffs, stale Ops indexing, and delete-lane contention. Those
+findings were corrected and added to the acceptance matrix.
+
+Model ownership:
+
+- High-reasoning primary model: identity/watermark design, deletion scope,
+  concurrency and migration safety, production cutover, delegated-diff review,
+  and exit gate.
+- `gpt-5.6-terra` high: targeted adapters, read-only concurrency audit,
+  full-semantic differential comparison, persisted-row Ops indexing, and
+  focused tests.
+- `gpt-5.6-luna` high: durable queue, burst/restart/version, endpoint-collision,
+  trigger-lifecycle, deletion-marker, and state-consistency tests.
+
+Acceptance evidence: the focused MIP-2 set passes 65 tests, including a
+500-message burst in five bounded cycles and forced-restart recovery without
+loss or duplicate projection. Compilation, Ruff, and `git diff --check` pass.
+Details are recorded in
+`message_ingest_projection_mip2_evidence_2026-09-10.md`. No production database
+or authoritative source data was modified.
+
+## 2026-09-10 — Message ingest projection MIP-3 file delta pipeline
+
+Status: exit gate passed.
+
+Message-file discovery now emits exact immutable deltas, and a dedicated
+off-UI pipeline prepares only changed files, uses the shared serialized writer
+for atomic message/reference/artifact projection, persists scanner inventory,
+and tombstones removed versions without touching source files. The initial
+additive-migration run performs bounded catch-up even when the older GUI cache
+already knows the files; subsequent unchanged scans are read-only. Opaque,
+reversible path keys and escaped display spellings keep malformed POSIX names
+safe at SQLite and UI boundaries.
+
+The active Qt scanner worker now owns discovery and database pipeline work. Its
+completion callback only swaps snapshot state, records directory generations,
+marks the projection read model stale, and updates status. Legacy cache writes,
+BBS sweeps, observation projection, VarAC refresh, signature verification, and
+table reconstruction are no longer run synchronously from that callback.
+
+Model ownership:
+
+- High-reasoning primary model: pipeline/concurrency architecture, migration
+  catch-up, GUI integration, delegated-diff review, and gate.
+- `gpt-5.6-terra` high: delta/path core, bounded file pipeline, derived
+  inventory, exact projector-builder reuse, and implementation tests.
+- `gpt-5.6-luna` high: 551-file, delta, malformed-name, atomicity, and Qt
+  completion-boundary acceptance tests.
+
+Acceptance evidence: the integrated MIP-0 through MIP-3 projection set passes
+320 tests in 17.71 seconds. Compilation and `git diff --check` pass. Details are
+recorded in `message_ingest_projection_mip3_evidence_2026-09-10.md`. No
+production database or authoritative source data was modified.
+
+## 2026-09-10 — Message ingest projection MIP-4 bounded UI read model
+
+Status: exit gate passed.
+
+Inbox rendering now uses an asynchronous, read-only, 200-row projection query.
+Rows, total count, and generation come from one SQLite snapshot; late request
+and generation results are discarded. Source, group, status, identity, type,
+text, and recent/older age filters run before the row limit. Visible
+invalidations coalesce within 500 ms, while hidden/inactive tabs defer query and
+render work until activation. Normal and forced refresh no longer invoke the
+legacy retained-history row builder.
+
+Runtime profile reads used by the Station Control Bar no longer normalize or
+repair data, and the bar consumes a cache populated outside repaint. Settings
+Save refreshes SOP only when that surface is active. Traffic by Group moved from
+a 20,000-message materialization to an exact read-only aggregate, preserving
+high-volume counts despite the Inbox page cap.
+
+Model ownership:
+
+- High-reasoning primary model: architecture, full filter semantics, Qt worker
+  integration, command-bar cache, lazy SOP, review, and gate.
+- `gpt-5.6-terra` high: read model, generation snapshot, group aggregate,
+  ControlFreq cutover, and focused core tests.
+- `gpt-5.6-luna` high: bounded-model and asynchronous UI acceptance tests.
+
+Acceptance evidence: the core partition passes 150 tests; the clean Qt/UI
+partition passes 361 tests. Compilation and `git diff --check` pass. The known
+cumulative native Qt teardown abort reproduced only in a combined process; all
+affected tests pass in clean partitions. Details are in
+`message_ingest_projection_mip4_evidence_2026-09-10.md`. No production database
+or authoritative source was modified.
+
+## 2026-09-10 — Message ingest projection MIP-5 startup and qualification
+
+Status: implementation exit gate passed; Linux production confirmation remains
+an external release-qualification observation.
+
+Background ingest and projection catch-up now begin after the first usable shell.
+One application-owned maintenance lane coalesces source notifications and
+jittered reconciliation, and Messages no longer owns a competing native
+projection worker. Catch-up uses bounded 100-bundle cycles and retains durable
+work across cancellation, shutdown, and restart.
+
+Message Maintenance now provides an explicit Message Index workflow. Its source
+estimate, derived-state reset, catch-up, progress, and checkpoint reads all run
+off the Qt thread. Preview and confirmation make clear that native messages and
+received files remain untouched. Normal startup, tab activation, filters, and
+Refresh never request a deep rebuild.
+
+Performance logging now uses a non-blocking bounded queue, batched long-lived
+file writes, and bounded rotation. Watchdog hang capture reads only a precomputed,
+credential-redacted scheduler/projection snapshot. Projection transaction
+duration is recorded for budget verification, and the metrics lane is flushed
+before Linux's optional hard-exit fallback.
+
+Model ownership:
+
+- High-reasoning primary model: startup/concurrency architecture, application
+  ownership, rebuild UI and safety, shutdown integration, delegated-diff review,
+  documentation, and exit gate.
+- `gpt-5.6-terra` high: bounded maintenance/rebuild core, source-state helpers,
+  cancellation/resume, and focused tests.
+- `gpt-5.6-luna` high: buffered telemetry, cache-only watchdog diagnostics,
+  redaction, and focused tests.
+- `gpt-5.6-luna` focused test package: scheduler/Expect isolation, burst,
+  restart, idle-zero-write coverage, and the soak tool.
+
+Acceptance evidence: 225 core/message/Expect tests and 371 clean Qt/UI tests
+pass. A current-code real 12,000-row catch-up produced exactly 12,000 unique
+rows in 6.194 seconds with a 10.434 ms p95 preparation batch, 0.390 ms p95
+unchanged reconciliation, and 43.694 ms maximum write transaction. Queue depth
+returned to zero, all concurrent scheduler commands completed, and no endpoint
+threads leaked.
+A disposable macOS profile reached first usable shell in 921.061 ms and shut
+down in 15.293 ms. The 30-minute soak completed 1,787/1,787 scheduler commands
+with zero failures, zero RSS growth, zero final projection backlog, no endpoint
+thread leak, and a 12.845 ms maximum projection transaction. The external Linux
+qualification boundary is recorded in
+`message_ingest_projection_mip5_evidence_2026-09-10.md`. No production database
+or authoritative source was modified.

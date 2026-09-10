@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.js8_defaults import coerce_js8_offset_hz
 from freqinout.core.logger import log
+from freqinout.core.sqlite_utils import connect_sqlite_readonly
 from freqinout.core.multi_rig_guardrails import (
     collect_multi_rig_guardrail_warnings,
     format_multi_rig_guardrail_warnings,
@@ -4999,6 +5000,16 @@ class MultiRadioStore:
         ensure_multi_radio_settings_schema(conn)
         return conn
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        """Open a migrated settings snapshot without repair or normalization."""
+
+        return connect_sqlite_readonly(
+            self.db_path,
+            timeout=2.0,
+            row_factory=sqlite3.Row,
+            busy_timeout_ms=2000,
+        )
+
     def connect(self) -> sqlite3.Connection:
         return self._connect()
 
@@ -5613,34 +5624,41 @@ class MultiRadioStore:
         return _resolve_device_profile_links_conn(conn, _record_by_id(conn, "device_profiles", int(device_profile_id)) or device)
 
     def get_runtime_active_device_profile(self) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
-            active_id = _normalize_runtime_primary_device(conn)
-            if active_id is None:
-                return None
-            row = _record_by_id(conn, "device_profiles", int(active_id))
+        with self._connect_readonly() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM device_profiles
+                 WHERE runtime_active=1 AND runtime_primary=1
+              ORDER BY display_order ASC, id ASC LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT * FROM device_profiles
+                     WHERE runtime_active=1
+                  ORDER BY display_order ASC, id ASC LIMIT 1
+                    """
+                ).fetchone()
             if not row:
                 return None
-            return _resolve_device_profile_links_conn(conn, row)
+            return _resolve_device_profile_links_conn(conn, dict(row))
 
     def get_runtime_primary_device_profile(self) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
-            _normalize_runtime_primary_device(conn)
+        with self._connect_readonly() as conn:
             return _runtime_primary_device_profile(conn)
 
     def list_runtime_active_device_profiles(self) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
-            _normalize_runtime_primary_device(conn)
+        with self._connect_readonly() as conn:
             return _runtime_active_device_profiles(conn)
 
     def list_device_profiles(self) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
-            _normalize_runtime_primary_device(conn)
+        with self._connect_readonly() as conn:
             rows = conn.execute("SELECT * FROM device_profiles ORDER BY display_order ASC, id ASC").fetchall()
             return [_resolve_device_profile_links_conn(conn, dict(row)) for row in rows]
 
     def get_device_profile(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
-            _normalize_runtime_primary_device(conn)
+        with self._connect_readonly() as conn:
             row = _record_by_id(conn, "device_profiles", int(device_profile_id))
             if not row:
                 return None

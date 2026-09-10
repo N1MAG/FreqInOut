@@ -189,6 +189,50 @@ def test_projected_message_upsert_is_idempotent_and_query_is_bounded(tmp_path) -
         conn.close()
 
 
+def test_projection_upsert_indexes_preserved_operator_state_not_stale_replay() -> None:
+    """Ops focus must see the durable row after read/archive/delete preservation."""
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        ensure_message_projection_schema(conn)
+        source = _source()
+        message = _message("operator-owned-state")
+        with conn:
+            upsert_message_source(conn, source)
+            upsert_message_projection(conn, message)
+            conn.execute(
+                """
+                UPDATE message_projection
+                   SET status='READ', read_state='read', pinned=1, archived=1,
+                       deleted=1, deleted_utc='2026-09-10T00:00:00Z'
+                 WHERE message_id=?
+                """,
+                (message.message_id,),
+            )
+            # Source replay reports its original, stale defaults.  The UPSERT
+            # must preserve the operator state and the focus bridge must index
+            # those persisted values.
+            stale_replay = MessageProjectionRecord(
+                **{**message.__dict__, "status": "NEW", "read_state": "new"}
+            )
+            upsert_message_projection(conn, stale_replay)
+
+        projected = conn.execute(
+            "SELECT status, read_state, pinned, archived, deleted, deleted_utc "
+            "FROM message_projection WHERE message_id=?",
+            (message.message_id,),
+        ).fetchone()
+        bridge = conn.execute(
+            "SELECT read_state, archived, deleted FROM ops_focus_message_entities "
+            "WHERE message_id=? LIMIT 1",
+            (message.message_id,),
+        ).fetchone()
+        assert projected == ("READ", "read", 1, 1, 1, "2026-09-10T00:00:00Z")
+        assert bridge == ("read", 1, 1)
+    finally:
+        conn.close()
+
+
 def test_projected_message_query_stays_bounded_on_large_corpus(tmp_path) -> None:
     db_path = tmp_path / "fio.db"
     source = _source()
@@ -210,11 +254,11 @@ def test_projected_message_query_stays_bounded_on_large_corpus(tmp_path) -> None
         limit=100000,
     )
 
-    assert len(rows) == 20000
+    assert len(rows) == 200
     assert len(spotter_rows) == 500
     assert rows[0]["event_ts"] > rows[-1]["event_ts"]
     assert rows[0]["message_id"] == stable_message_id(source.source_id, "bulk", 100049)
-    assert rows[-1]["message_id"] == stable_message_id(source.source_id, "bulk", 80050)
+    assert rows[-1]["message_id"] == stable_message_id(source.source_id, "bulk", 99850)
 
 
 def test_projected_message_query_accepts_multiple_source_families(tmp_path) -> None:

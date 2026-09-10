@@ -1,6 +1,7 @@
 # Message Ingest, Projection, And UI Responsiveness Specification
 
-Status: design approved; production evidence reviewed; implementation not started
+Status: implementation complete; MIP-0 through MIP-5 implementation exit gates
+passed; Linux production confirmation remains external release qualification
 
 Date: 2026-09-10
 
@@ -523,6 +524,19 @@ cache-only watchdog diagnostics, Linux/macOS CPU and lock evidence, and a
 
 Exit gate: every performance/lifecycle budget passes. The physical scheduler
 hardware gate remains separate and is not weakened.
+
+Implementation evidence: non-critical ingest and message catch-up start only
+after the first usable shell; one application-owned maintenance lane performs
+bounded catch-up and jittered reconciliation; explicit Message Index preview,
+reset, and progress work runs off the Qt thread; telemetry is buffered and
+rotated; and watchdog dumps consume only precomputed, credential-redacted
+diagnostics. The automated macOS qualification, real 12,000-row catch-up, clean
+Qt partitions, and 30-minute integrated soak pass. The development host cannot
+measure the user's Linux compositor, filesystem, Bluetooth stack, production
+database, or physical endpoints, so Linux production confirmation remains a
+named external release-qualification observation rather than an invented local
+result. Details are recorded in
+`message_ingest_projection_mip5_evidence_2026-09-10.md`.
 
 No package begins its successor before its gate passes. A migration that deletes,
 rewrites, or reinterprets authoritative source data requires separate operator

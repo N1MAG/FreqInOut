@@ -3947,6 +3947,7 @@ def test_phase7_station_command_bar_uses_card_for_single_active_radio(monkeypatc
     window._station_command_scheduler_suspended_manual_profile_id = 0
     window._station_command_timed_suspend_profile_id = 0
     window._active_runtime_profile = None
+    window._station_command_profile_cache = window.multi_radio_store.list_runtime_active_device_profiles()
     window.station_command_bar = QFrame()
     window.station_command_bar.resize(1200, 220)
     window.station_command_radio_combo = QComboBox()

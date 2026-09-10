@@ -430,6 +430,15 @@
   </table>
   <p><strong>BBS status in plain language</strong>: <code>BBS OK</code> means the configured live BBS path is usable from FIO's point of view. <code>BBS Issue</code> usually means the BBS is enabled but the folder is missing or not configured. <code>BBS Off</code> means the BBS workflow is not currently enabled. For full BBS setup details, see <a href="#settings-varac-details">VarAC Settings Details</a>.</p>
 
+  <h3 id="messages-maintenance">Message Maintenance</h3>
+  <p><strong>Normal operation is automatic</strong>: FIO discovers and indexes new or changed traffic in small background batches after the main window is usable. Opening Messages, changing a filter, or pressing Refresh does not rebuild retained history.</p>
+  <ul class="section-list">
+    <li><strong>Message Index</strong>: choose <code>More... &gt; Message Maintenance...</code>, then open this tab only when troubleshooting a stale or missing indexed view.</li>
+    <li><strong>Preview Message Index Rebuild</strong>: counts the available source evidence and shows an estimate before anything changes. Preview is read-only.</li>
+    <li><strong>Rebuild safety</strong>: confirmation resets only derived indexing watermarks. It does not delete or rewrite native messages, received files, operator read state, BBS mappings, or source evidence.</li>
+    <li><strong>Progress and restart</strong>: the rebuild runs in bounded background batches and can be cancelled. Its durable remaining work may resume during normal background catch-up or after restart. You may keep using FIO while it runs.</li>
+  </ul>
+
   <h3 id="messages-pending">Pending JS8 MSGs</h3>
   <p><strong>Columns</strong>: <code>Callsign</code>, <code>Msg ID</code>, <code>Last Seen</code>, <code>Status</code>, <code>Actions</code>.</p>
   <p><strong>Nested row actions</strong> in Actions column:</p>
@@ -1628,6 +1637,8 @@
     <li>If JS8Spotter/CommStat launch too early, keep JS8Call earlier in Launch Control order; FreqInOut now waits for JS8 API readiness before proceeding.</li>
     <li>If BBS auto-archive does not run, turn on <code>Enable Auto-Archive</code>, confirm both BBS paths are valid and different, then open Messages once after startup.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>
+    <li>If Messages appears stale after its normal background catch-up, use the read-only preview under <code>More... &gt; Message Maintenance... &gt; Message Index</code> before deciding whether a rebuild is warranted.</li>
+    <li>For a recurring CPU or UI-stall report, preserve <code>freqinout.log</code>, the bounded rotated <code>perf_metrics.log</code> files, and any generated <code>ui_hang_dumps</code>. The hang snapshot contains bounded scheduler/projection state and redacts credential fields.</li>
   </ul>
 
   <h2 id="licensing">Licensing</h2>

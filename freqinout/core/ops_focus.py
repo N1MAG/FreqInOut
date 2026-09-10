@@ -256,8 +256,6 @@ def _entity_values(record: object) -> tuple[tuple[str, str, str, dict[str, objec
 
 def index_message_for_ops_focus(conn: sqlite3.Connection, record: object) -> None:
     """Idempotently project one message into compact focus/entity tables."""
-    if not _ops_focus_schema_ready(conn):
-        ensure_ops_focus_schema(conn)
     message_id = str(_value(record, "message_id", "") or "").strip()
     if not message_id:
         return

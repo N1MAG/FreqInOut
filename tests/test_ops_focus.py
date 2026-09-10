@@ -6,7 +6,8 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.message_projection_store import (
     MessageProjectionRecord,
     content_hash,
-    upsert_message_projection,
+    ensure_message_projection_schema,
+    upsert_message_projection as _upsert_message_projection,
 )
 from freqinout.core.operator_identity import change_operator_callsign, resolve_operator_identity
 from freqinout.core.observation_projection import Observation
@@ -15,9 +16,17 @@ from freqinout.core.ops_focus import (
     OpsFocus,
     backfill_ops_focus_index,
     build_focus_snapshot,
+    ensure_ops_focus_schema,
     format_focus_last_known,
     search_focus_suggestions,
 )
+
+
+def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjectionRecord) -> str:
+    """Test boundary: startup owns schema before runtime row helpers execute."""
+    ensure_message_projection_schema(conn)
+    ensure_ops_focus_schema(conn)
+    return _upsert_message_projection(conn, message)
 
 
 def _message(

@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
+import sqlite3
 
+from freqinout.core import traffic_actionability
 from freqinout.core.message_summary import MessageActionValidity, MessageSummary
+from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.traffic_actionability import (
     build_operator_traffic_context,
     build_traffic_group_volumes,
     build_traffic_action_summary,
     filter_traffic_messages,
+    load_projected_traffic_group_volumes,
     message_matches_traffic_bucket,
 )
 
@@ -295,6 +299,116 @@ def test_operator_groups_sort_before_unassociated_volume_spikes() -> None:
     assert [volume.group for volume in volumes] == ["MR08", "GHOSTNET"]
     assert volumes[0].is_operator_group is True
     assert volumes[1].is_operator_group is False
+
+
+def test_projected_group_aggregate_preserves_volume_above_message_page_cap(tmp_path) -> None:
+    """Traffic by Group uses SQL aggregates, never the 200-row Inbox page."""
+    db_path = tmp_path / "projection.sqlite"
+    now = 200_000.0
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        rows = []
+        for index in range(450):
+            rows.append(
+                (
+                    f"mr08-{index}", f"mr08:key:{index}", f"mr08:hash:{index}",
+                    "mr08-source", "js8" if index < 300 else "commstat", "MR08",
+                    "new" if index < 20 else "read", now - (index % 900), now - (index % 900),
+                    "2026-09-10T00:00:00+00:00",
+                )
+            )
+        for index in range(25):
+            rows.append(
+                (
+                    f"mr08-prior-{index}", f"mr08:prior:{index}", f"mr08:prior-hash:{index}",
+                    "mr08-source", "js8", "MR08", "read", now - 5_000 - index,
+                    now - 5_000 - index, "2026-09-10T00:00:00+00:00",
+                )
+            )
+        for index in range(260):
+            rows.append(
+                (
+                    f"ghost-{index}", f"ghost:key:{index}", f"ghost:hash:{index}",
+                    "ghost-source", "js8call", "GHOSTNET", "unread", now - (index % 900),
+                    now - (index % 900), "2026-09-10T00:00:00+00:00",
+                )
+            )
+        conn.executemany(
+            """
+            INSERT INTO message_projection (
+                message_id, canonical_key, content_hash, primary_source_id,
+                source_family, group_name, read_state, event_ts, received_ts, projected_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    volumes = load_projected_traffic_group_volumes(
+        db_path,
+        age_seconds=3_600,
+        now_ts=now,
+        operator_groups=("MR08",),
+    )
+
+    assert [volume.group for volume in volumes] == ["MR08", "GHOSTNET"]
+    mr08, ghostnet = volumes
+    assert mr08.current_count == 450
+    assert mr08.previous_count == 25
+    assert mr08.unread_count == 20
+    assert mr08.sources == (("JS8Call", 300), ("CommStat", 150))
+    assert mr08.is_operator_group is True
+    assert ghostnet.current_count == 260
+    assert ghostnet.unread_count == 260
+
+    js8_only = load_projected_traffic_group_volumes(
+        db_path,
+        age_seconds=3_600,
+        now_ts=now,
+        source_family="JS8",
+        group_filter="MR08",
+        operator_groups=("MR08",),
+    )
+    assert len(js8_only) == 1
+    assert js8_only[0].current_count == 300
+    assert js8_only[0].previous_count == 25
+
+
+def test_projected_group_aggregate_is_readonly_and_never_repairs_schema(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "projection.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_message_projection_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO message_projection (
+                message_id, canonical_key, content_hash, primary_source_id,
+                source_family, group_name, received_ts, projected_utc
+            ) VALUES ('aggregate-read', 'aggregate:read', 'hash', 'source', 'js8', 'MR08', 100, 'now')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    statements: list[str] = []
+    real_readonly = traffic_actionability.connect_sqlite_readonly
+
+    def traced_readonly(*args, **kwargs):
+        connection = real_readonly(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(traffic_actionability, "connect_sqlite_readonly", traced_readonly)
+    volumes = load_projected_traffic_group_volumes(
+        db_path, age_seconds=0, now_ts=200, operator_groups=("MR08",)
+    )
+
+    assert volumes[0].current_count == 1
+    mutating = ("CREATE ", "ALTER ", "INSERT ", "UPDATE ", "DELETE ", "REPLACE ", "DROP ")
+    assert not any(statement.lstrip().upper().startswith(mutating) for statement in statements)
 
 
 def test_projected_wrapper_and_canonical_row_classify_identically() -> None:

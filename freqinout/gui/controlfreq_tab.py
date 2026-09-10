@@ -112,14 +112,14 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_metadata import source_family_label
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.source_view_contracts import source_contract_for
-from freqinout.core.message_projection_store import list_projected_messages
+from freqinout.core.message_projection_store import list_projected_attention_messages
 from freqinout.core.traffic_actionability import (
     TrafficGroupVolume,
     TrafficActionSummary,
-    build_traffic_group_volumes,
     build_traffic_action_summary,
     configured_group_names,
     filter_traffic_messages,
+    load_projected_traffic_group_volumes,
     load_operator_traffic_context,
 )
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory, format_bbs_inventory_detail
@@ -8551,18 +8551,12 @@ class ControlFreqTab(QWidget):
                 configured_local_groups=local_groups,
             )
             try:
-                received_after_ts = (
-                    now_ts - (traffic_age_seconds * 2)
-                    if traffic_age_seconds
-                    else 0.0
-                )
-                projected_rows = (
+                attention_rows = (
                     [
                         dict(row)
-                        for row in list_projected_messages(
+                        for row in list_projected_attention_messages(
                             db_path,
-                            received_after_ts=received_after_ts,
-                            limit=20000,
+                            limit=200,
                         )
                     ]
                     if db_path.exists()
@@ -8570,9 +8564,9 @@ class ControlFreqTab(QWidget):
                 )
             except Exception as exc:
                 log.debug("ControlFreq: actionable traffic projection unavailable: %s", exc)
-                projected_rows = []
+                attention_rows = []
             scoped_rows = filter_traffic_messages(
-                projected_rows,
+                attention_rows,
                 age_seconds=traffic_age_seconds,
                 now_ts=now_ts,
                 source_family=source_family,
@@ -8581,8 +8575,8 @@ class ControlFreqTab(QWidget):
             return {
                 "source_rows": self._message_summary_rows(message_rows, bbs_rows, file_rows),
                 "traffic_summary": build_traffic_action_summary(scoped_rows, context),
-                "traffic_group_volumes": build_traffic_group_volumes(
-                    projected_rows,
+                "traffic_group_volumes": load_projected_traffic_group_volumes(
+                    db_path,
                     age_seconds=traffic_age_seconds,
                     now_ts=now_ts,
                     source_family=source_family,

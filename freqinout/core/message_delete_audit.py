@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from freqinout.core.sqlite_utils import connect_sqlite_readonly
+
 
 MESSAGE_DELETE_AUDIT_MAX_ROWS = 1000
 
@@ -80,9 +82,7 @@ def load_message_delete_audit_rows(db_path: Path | str, *, limit: int = 250) -> 
     if not path.exists():
         return []
     capped = max(1, min(int(limit or 250), MESSAGE_DELETE_AUDIT_MAX_ROWS))
-    with sqlite3.connect(path) as conn:
-        ensure_message_delete_audit_table(conn)
-        conn.row_factory = sqlite3.Row
+    with connect_sqlite_readonly(path, row_factory=sqlite3.Row) as conn:
         rows = conn.execute(
             """
             SELECT audit_ts, batch_id, source, action, result, from_call, to_call, title, detail

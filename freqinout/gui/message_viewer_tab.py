@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QTextEdit,
     QFileDialog,
@@ -83,6 +84,8 @@ MESSAGE_INBOX_BODY_MIN_WIDTH = 900
 MESSAGE_INBOX_FUNNEL_MIN_WIDTH = 0
 MESSAGE_INBOX_FOCUS_MIN_WIDTH = 680
 MESSAGE_PROJECTION_QUEUE_POLL_SECONDS = 30
+MESSAGE_PROJECTION_VISIBLE_COALESCE_MS = 500
+MESSAGE_PROJECTION_HIDDEN_COALESCE_MS = 2000
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.multi_radio_store import MultiRadioStore
@@ -225,14 +228,14 @@ from freqinout.core.message_projection_projector import (
     mark_projected_message_rows_deleted,
     project_unified_message_rows,
 )
-from freqinout.core.message_source_projectors import project_native_file_records, project_native_message_sources
+from freqinout.core.message_source_projectors import project_native_file_records
 from freqinout.core.message_projection_payload import ProjectedMessagePayload, projected_payload_from_row
 from freqinout.core.message_projection_store import (
-    list_projected_messages,
     load_projected_external_refs_for_messages,
     load_projected_message_detail,
     mark_projected_messages_read,
     process_message_delete_queue,
+    query_projected_message_page,
 )
 from freqinout.core.source_view_contracts import (
     contract_gate_failures,
@@ -241,7 +244,6 @@ from freqinout.core.source_view_contracts import (
 from freqinout.core.view_contracts import compose_intent_from_mapping
 from freqinout.core.message_delete_audit import (
     ensure_message_delete_audit_table,
-    load_message_delete_audit_rows,
     record_message_delete_audit,
     safe_audit_text,
 )
@@ -318,6 +320,7 @@ from freqinout.core.message_file_scanner import (
     MessageFileScanner,
     is_fio_bbs_helper_file_name,
 )
+from freqinout.core.message_file_projection_pipeline import MessageFileProjectionPipeline
 from freqinout.core.observation_backfill import backfill_observations, project_message_file_observations
 from freqinout.core.message_intelligence import (
     MessageIntelligence,
@@ -749,9 +752,13 @@ class _FileScanWorker(QObject):
         force: bool,
         base_records: Optional[Dict[str, List[FileRecord]]] = None,
         base_dir_mtimes: Optional[Dict[str, float]] = None,
+        db_path: str = "",
+        watch_signature: str = "",
     ):
         super().__init__()
         self._force = bool(force)
+        self._db_path = str(db_path or "")
+        self._watch_signature = str(watch_signature or "")
         self._scanner = MessageFileScanner(
             watch_dirs,
             force=force,
@@ -760,8 +767,37 @@ class _FileScanWorker(QObject):
         )
 
     def run(self) -> None:
-        records, dir_mtimes, mode = self._scanner.scan()
-        self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": mode}, self._force)
+        records, dir_mtimes, mode, delta = self._scanner.scan_with_delta()
+        projection: Dict[str, object] = {}
+        if self._db_path:
+            result = MessageFileProjectionPipeline(self._db_path).run(
+                records,
+                dir_mtimes,
+                self._watch_signature,
+                delta,
+            )
+            projection = {
+                "state": result.state,
+                "added_or_changed": result.added_or_changed,
+                "removed": result.removed,
+                "unchanged": result.unchanged,
+                "inventory_writes": result.inventory_writes,
+                "projected": result.projected,
+                "tombstoned": result.tombstoned,
+                "deferred": result.deferred,
+                "transactions": result.transactions,
+                "elapsed_ms": result.elapsed_ms,
+                "error": result.error,
+            }
+        self.finished.emit(
+            {
+                "records": records,
+                "dir_mtimes": dir_mtimes,
+                "mode": mode,
+                "projection": projection,
+            },
+            self._force,
+        )
 
     def _run_full(self) -> Tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
         return self._scanner._run_full()
@@ -1641,36 +1677,6 @@ class _MessageProjectionWriteWorker(QObject):
         )
 
 
-class _NativeMessageProjectionWorker(QObject):
-    finished = Signal(object)
-
-    def __init__(self, *, db_path: str, generation: int, force: bool = False):
-        super().__init__()
-        self._db_path = str(db_path or "")
-        self._generation = int(generation)
-        self._force = bool(force)
-
-    def run(self) -> None:
-        started = time.perf_counter()
-        projected: dict[str, int] = {}
-        error = ""
-        try:
-            if self._db_path:
-                projected = project_native_message_sources(self._db_path, force=self._force)
-        except Exception as exc:
-            error = str(exc)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        self.finished.emit(
-            {
-                "generation": self._generation,
-                "projected": projected,
-                "elapsed_ms": elapsed_ms,
-                "error": error,
-                "force": self._force,
-            }
-        )
-
-
 class _NativeFileProjectionWorker(QObject):
     finished = Signal(object)
 
@@ -1705,6 +1711,64 @@ class _NativeFileProjectionWorker(QObject):
                 "elapsed_ms": elapsed_ms,
                 "error": error,
                 "force": self._force,
+            }
+        )
+
+
+class _ProjectedMessageQueryWorker(QObject):
+    """Run one bounded, read-only Inbox projection query away from the UI thread."""
+
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        db_path: str,
+        request_id: int,
+        scope_key: tuple[object, ...],
+        query: Mapping[str, object],
+    ):
+        super().__init__()
+        self._db_path = str(db_path or "")
+        self._request_id = int(request_id or 0)
+        self._scope_key = tuple(scope_key or ())
+        self._query = dict(query or {})
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        error = ""
+        rows: list[dict[str, object]] = []
+        refs: dict[str, list[dict[str, object]]] = {}
+        total_count = 0
+        generation = 0
+        try:
+            page = query_projected_message_page(
+                self._db_path,
+                page_size=200,
+                include_total=True,
+                **self._query,
+            )
+            rows = [dict(row) for row in page.rows]
+            total_count = int(page.total_count or 0)
+            generation = int(getattr(page, "generation", 0) or 0)
+            message_ids = [str(row.get("message_id") or "") for row in rows]
+            loaded_refs = load_projected_external_refs_for_messages(self._db_path, message_ids)
+            refs = {
+                message_id: [dict(ref) for ref in message_refs]
+                for message_id, message_refs in loaded_refs.items()
+            }
+        except Exception as exc:
+            error = str(exc)
+        self.finished.emit(
+            {
+                "request_id": self._request_id,
+                "scope_key": self._scope_key,
+                "rows": rows,
+                "refs": refs,
+                "total_count": total_count,
+                "generation": generation,
+                "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                "error": error,
             }
         )
 
@@ -2064,7 +2128,8 @@ def unified_message_from_presentation(
 class MessageTableModel(QAbstractTableModel):
     def __init__(self, rows: List[UnifiedMessage]):
         super().__init__()
-        self._rows = rows
+        self._rows = list(rows[:200])
+        self._projection_generation = 0
         self._selected_keys: set[tuple] = set()
         self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
@@ -2348,16 +2413,40 @@ class MessageTableModel(QAbstractTableModel):
         return True
 
     def set_rows(self, rows: List[UnifiedMessage]) -> None:
-        if len(rows) == len(self._rows):
-            unchanged = True
-            for old, new in zip(self._rows, rows):
-                if old is not new:
-                    unchanged = False
-                    break
-            if unchanged:
-                return
-        self.beginResetModel()
-        self._rows = rows
+        rows = list(rows[:200])
+        old_keys = [self._row_key(row) for row in self._rows]
+        new_keys = [self._row_key(row) for row in rows]
+        if len(rows) == len(self._rows) and all(old is new for old, new in zip(self._rows, rows)):
+            return
+
+        # The common ingest case keeps the same ordered identities and changes
+        # only one or more row payloads. Preserve selection/scroll state and
+        # avoid a full model reset for that path. Tail growth/removal is also
+        # expressed as a bounded model diff; arbitrary sort changes may reset.
+        if old_keys == new_keys:
+            changed = [index for index, (old, new) in enumerate(zip(self._rows, rows)) if old != new]
+            self._rows = rows
+            if changed and self.columnCount() > 0:
+                self.dataChanged.emit(
+                    self.index(min(changed), 0),
+                    self.index(max(changed), self.columnCount() - 1),
+                    [],
+                )
+        elif len(rows) > len(self._rows) and new_keys[: len(old_keys)] == old_keys:
+            first = len(self._rows)
+            self.beginInsertRows(QModelIndex(), first, len(rows) - 1)
+            self._rows = rows
+            self.endInsertRows()
+        elif len(rows) < len(self._rows) and old_keys[: len(new_keys)] == new_keys:
+            first = len(rows)
+            self.beginRemoveRows(QModelIndex(), first, len(self._rows) - 1)
+            self._rows = rows
+            self.endRemoveRows()
+        else:
+            self.beginResetModel()
+            self._rows = rows
+            self.endResetModel()
+
         row_index_by_key: Dict[tuple, int] = {}
         for i, row in enumerate(rows):
             key = self._row_key(row)
@@ -2366,7 +2455,20 @@ class MessageTableModel(QAbstractTableModel):
         self._row_index_by_key = row_index_by_key
         keep = {self._row_key(r) for r in rows if self._row_key(r) is not None}
         self._selected_keys = {k for k in self._selected_keys if k in keep}
-        self.endResetModel()
+
+    def set_rows_for_generation(self, rows: List[UnifiedMessage], generation: int) -> bool:
+        """Apply one bounded committed snapshot and reject stale worker results."""
+
+        try:
+            requested = int(generation or 0)
+        except Exception:
+            requested = 0
+        if requested and requested < self._projection_generation:
+            return False
+        self.set_rows(rows)
+        if requested:
+            self._projection_generation = requested
+        return True
 
     def index_for_row(self, row: UnifiedMessage) -> int:
         key = self._row_key(row)
@@ -3055,10 +3157,6 @@ class MessageViewerTab(QWidget):
         self._projection_write_worker: _MessageProjectionWriteWorker | None = None
         self._projection_write_generation: int = 0
         self._projection_write_pending_rows: List[UnifiedMessage] = []
-        self._native_projection_thread: QThread | None = None
-        self._native_projection_worker: _NativeMessageProjectionWorker | None = None
-        self._native_projection_generation: int = 0
-        self._native_projection_pending_force: bool = False
         self._native_file_projection_thread: QThread | None = None
         self._native_file_projection_worker: _NativeFileProjectionWorker | None = None
         self._native_file_projection_generation: int = 0
@@ -3067,6 +3165,16 @@ class MessageViewerTab(QWidget):
         self._last_source_rows_build_ts: float = 0.0
         self._last_projection_render_ts: float = 0.0
         self._projected_scope_load_key: tuple[object, ...] | None = None
+        self._projected_total_count: int = 0
+        self._active_projection_generation: int = 0
+        self._projected_query_request_id: int = 0
+        self._projected_query_pending: bool = False
+        self._projected_query_pending_force: bool = False
+        self._projected_query_thread: QThread | None = None
+        self._projected_query_worker: _ProjectedMessageQueryWorker | None = None
+        self._projected_query_timer = QTimer(self)
+        self._projected_query_timer.setSingleShot(True)
+        self._projected_query_timer.timeout.connect(self._start_projected_message_query)
         self._messages_busy_state: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
@@ -5449,19 +5557,29 @@ class MessageViewerTab(QWidget):
     def _reload_projected_messages_for_scope_change(self) -> bool:
         if not self._projection_primary_enabled:
             return False
-        if not getattr(self, "_last_projection_render_ts", 0.0) and not getattr(self, "_message_rows", []):
-            return False
         if self._projected_scope_key() == getattr(self, "_projected_scope_load_key", None):
             return False
         self._unfreeze_table()
-        return self._load_projected_messages_into_table()
+        return self._load_projected_messages_into_table(force=False)
 
     def _projected_scope_key(self) -> tuple[object, ...]:
         try:
             age_seconds = int(self.received_filter.currentData() or 0)
         except Exception:
             age_seconds = 0
-        return (self._projected_source_families_for_current_scope(), age_seconds)
+        status = self.status_filter.currentText() if hasattr(self, "status_filter") else ""
+        groups = self._selected_message_groups()
+        return (
+            str(getattr(self, "_inbox_focus", "all") or "all").strip().lower(),
+            self._projected_source_families_for_current_scope(),
+            age_seconds,
+            (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower(),
+            status,
+            tuple(sorted(groups or ())),
+            self.type_filter.currentText() if hasattr(self, "type_filter") else "",
+            self.from_filter.currentText() if hasattr(self, "from_filter") else "",
+            self.to_filter.currentText() if hasattr(self, "to_filter") else "",
+        )
 
     def _toggle_advanced_filters(self) -> None:
         self._advanced_filters_visible = bool(self.advanced_filters_btn.isChecked())
@@ -9255,39 +9373,6 @@ class MessageViewerTab(QWidget):
             self._messages_model.clear_selection()
         self._update_bulk_delete_buttons()
 
-    def _load_message_delete_audit_rows(self, *, limit: int = 250) -> List[Dict[str, Any]]:
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return []
-        try:
-            return load_message_delete_audit_rows(db_path, limit=limit)
-        except Exception as e:
-            log.debug("MessageViewer: failed to load delete audit rows: %s", e)
-            return []
-
-    def _load_hidden_commstat_rows(self, *, limit: int = 250) -> List[Dict[str, Any]]:
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return []
-        try:
-            capped = max(1, min(int(limit or 250), 1000))
-            with connect_sqlite(db_path, timeout=1.0) as conn:
-                ensure_commstat_artifact_deletion_tables(conn)
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    """
-                    SELECT deleted_ts, artifact_kind, from_call, target, title, event_ts, reason, artifact_key
-                    FROM commstat_artifact_deletions
-                    ORDER BY deleted_ts DESC
-                    LIMIT ?
-                    """,
-                    (capped,),
-                ).fetchall()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            log.debug("MessageViewer: failed to load hidden CommStat rows: %s", e)
-            return []
-
     def _populate_maintenance_table(
         self,
         table: QTableWidget,
@@ -9326,7 +9411,88 @@ class MessageViewerTab(QWidget):
         tabs = QTabWidget()
         audit_table = QTableWidget()
         hidden_table = QTableWidget()
-        audit_rows = self._load_message_delete_audit_rows(limit=300)
+        self._populate_maintenance_table(
+            audit_table,
+            headers=["When", "Result", "Source", "Action", "From", "To", "Message", "Detail"],
+            rows=[("Loading…", "", "", "", "", "", "", "")],
+        )
+        self._populate_maintenance_table(
+            hidden_table,
+            headers=["Hidden", "Type", "From", "To", "Message", "Reason"],
+            rows=[("Loading…", "", "", "", "", "")],
+        )
+        tabs.addTab(audit_table, "Delete Audit")
+        tabs.addTab(hidden_table, "Hidden CommStat")
+        rebuild_panel = QWidget()
+        rebuild_layout = QVBoxLayout(rebuild_panel)
+        rebuild_intro = QLabel(
+            "Rebuild the derived Message Index only when troubleshooting stale or missing indexed views. "
+            "FIO previews the scope first; native message evidence and received files are never deleted."
+        )
+        rebuild_intro.setWordWrap(True)
+        rebuild_layout.addWidget(rebuild_intro)
+        self._message_maintenance_rebuild_status_label = QLabel(
+            "Normal startup and Inbox refresh use bounded incremental catch-up."
+        )
+        self._message_maintenance_rebuild_status_label.setWordWrap(True)
+        rebuild_layout.addWidget(self._message_maintenance_rebuild_status_label)
+        rebuild_action_row = QHBoxLayout()
+        rebuild_btn = QPushButton("Preview Message Index Rebuild")
+        rebuild_btn.setToolTip(
+            "Estimate the native records to re-index, then request an explicit cancellable rebuild."
+        )
+        rebuild_btn.clicked.connect(self._start_message_projection_deep_rebuild)
+        rebuild_btn.setEnabled(self._message_projection_maintenance_service() is not None)
+        rebuild_action_row.addWidget(rebuild_btn)
+        rebuild_action_row.addStretch(1)
+        rebuild_layout.addLayout(rebuild_action_row)
+        rebuild_layout.addStretch(1)
+        tabs.addTab(rebuild_panel, "Message Index")
+        root.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+        service = self._message_projection_maintenance_service()
+        if service is not None and hasattr(service, "load_message_maintenance_rows_async"):
+            future = service.load_message_maintenance_rows_async(limit=300)
+            poll = QTimer(dialog)
+            poll.setInterval(100)
+            poll.timeout.connect(
+                lambda: self._poll_message_maintenance_rows(
+                    future=future,
+                    timer=poll,
+                    tabs=tabs,
+                    audit_table=audit_table,
+                    hidden_table=hidden_table,
+                )
+            )
+            poll.start()
+        else:
+            audit_table.setItem(0, 0, QTableWidgetItem("Maintenance data unavailable"))
+            hidden_table.setItem(0, 0, QTableWidgetItem("Maintenance data unavailable"))
+        dialog.exec()
+
+    def _poll_message_maintenance_rows(
+        self,
+        *,
+        future: object,
+        timer: QTimer,
+        tabs: QTabWidget,
+        audit_table: QTableWidget,
+        hidden_table: QTableWidget,
+    ) -> None:
+        if not hasattr(future, "done") or not future.done():
+            return
+        timer.stop()
+        try:
+            payload = future.result()
+            audit_rows = list(payload.get("audit", []) or [])
+            hidden_rows = list(payload.get("hidden", []) or [])
+        except Exception as exc:
+            log.debug("MessageViewer: maintenance rows unavailable: %s", exc)
+            audit_rows = []
+            hidden_rows = []
         self._populate_maintenance_table(
             audit_table,
             headers=["When", "Result", "Source", "Action", "From", "To", "Message", "Detail"],
@@ -9342,32 +9508,298 @@ class MessageViewerTab(QWidget):
                     row.get("detail", ""),
                 )
                 for row in audit_rows
+                if isinstance(row, Mapping)
             ],
         )
-        hidden_rows = self._load_hidden_commstat_rows(limit=300)
         self._populate_maintenance_table(
             hidden_table,
             headers=["Hidden", "Type", "From", "To", "Message", "Reason"],
             rows=[
                 (
                     self._fmt_ts(float(row.get("deleted_ts") or 0.0)),
-                    artifact_filter_label(str(row.get("artifact_kind", "") or "")) or row.get("artifact_kind", ""),
+                    artifact_filter_label(str(row.get("artifact_kind", "") or ""))
+                    or row.get("artifact_kind", ""),
                     row.get("from_call", ""),
                     MessageTableModel._strip_group_marker(row.get("target", "")),
                     row.get("title", "") or row.get("artifact_key", ""),
                     row.get("reason", ""),
                 )
                 for row in hidden_rows
+                if isinstance(row, Mapping)
             ],
         )
-        tabs.addTab(audit_table, f"Delete Audit ({len(audit_rows)})")
-        tabs.addTab(hidden_table, f"Hidden CommStat ({len(hidden_rows)})")
-        root.addWidget(tabs, 1)
+        tabs.setTabText(0, f"Delete Audit ({len(audit_rows)})")
+        tabs.setTabText(1, f"Hidden CommStat ({len(hidden_rows)})")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
-        buttons.rejected.connect(dialog.reject)
-        root.addWidget(buttons)
-        dialog.exec()
+    def _message_projection_maintenance_service(self):
+        host = self.parent()
+        return getattr(host, "message_projection_maintenance", None)
+
+    def _start_message_projection_deep_rebuild(self) -> None:
+        service = self._message_projection_maintenance_service()
+        if service is None:
+            QMessageBox.information(
+                self,
+                "Message Index Rebuild",
+                "Message Index maintenance is unavailable in this application mode.",
+            )
+            return
+        if bool(getattr(self, "_message_projection_maintenance_busy", False)):
+            QMessageBox.information(
+                self,
+                "Message Index Rebuild",
+                "Message Index maintenance is already in progress.",
+            )
+            return
+        self._message_projection_maintenance_busy = True
+        try:
+            future = service.preview_deep_rebuild_async()
+        except Exception as exc:
+            self._message_projection_maintenance_busy = False
+            QMessageBox.warning(
+                self,
+                "Message Index Rebuild",
+                f"FIO could not prepare the rebuild preview: {type(exc).__name__}.",
+            )
+            return
+        progress = QProgressDialog(
+            "Preparing a read-only Message Index rebuild estimate…",
+            "",
+            0,
+            0,
+            self,
+        )
+        progress.setCancelButton(None)
+        progress.setWindowTitle("Message Index Rebuild Preview")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        poll = QTimer(progress)
+        poll.setInterval(100)
+        poll.timeout.connect(
+            lambda: self._poll_message_projection_rebuild_preview(
+                future=future,
+                progress=progress,
+                timer=poll,
+            )
+        )
+        poll.start()
+        progress.show()
+
+    def _poll_message_projection_rebuild_preview(
+        self,
+        *,
+        future: object,
+        progress: QProgressDialog,
+        timer: QTimer,
+    ) -> None:
+        if not hasattr(future, "done") or not future.done():
+            return
+        timer.stop()
+        progress.close()
+        try:
+            preview = future.result()
+        except Exception as exc:
+            self._message_projection_maintenance_busy = False
+            QMessageBox.warning(
+                self,
+                "Message Index Rebuild",
+                f"FIO could not prepare the rebuild preview: {type(exc).__name__}.",
+            )
+            return
+        estimate = int(getattr(preview, "source_rows", 0) or 0)
+        available = int(getattr(preview, "available_sources", 0) or 0)
+        unavailable = int(getattr(preview, "unavailable_sources", 0) or 0)
+        answer = QMessageBox.question(
+            self,
+            "Rebuild Message Index?",
+            "FIO found approximately "
+            f"{estimate:,} native records across {available} available source table(s). "
+            f"{unavailable} source table(s) are currently unavailable.\n\n"
+            "The rebuild is bounded, cancellable, and safely resumes through normal background catch-up "
+            "or after restart. It changes only the derived "
+            "Message Index; native messages and received files remain untouched. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._message_projection_maintenance_busy = False
+            return
+        service = self._message_projection_maintenance_service()
+        if service is None:
+            self._message_projection_maintenance_busy = False
+            return
+        try:
+            future = service.request_deep_rebuild_async(preview=preview)
+        except Exception as exc:
+            self._message_projection_maintenance_busy = False
+            QMessageBox.warning(
+                self,
+                "Message Index Rebuild",
+                f"FIO could not request the rebuild: {type(exc).__name__}.",
+            )
+            return
+        request_progress = QProgressDialog(
+            "Preparing the derived Message Index for a bounded rebuild…",
+            "",
+            0,
+            0,
+            self,
+        )
+        request_progress.setCancelButton(None)
+        request_progress.setWindowTitle("Message Index Rebuild")
+        request_progress.setWindowModality(Qt.WindowModal)
+        request_progress.setMinimumDuration(0)
+        request_poll = QTimer(request_progress)
+        request_poll.setInterval(100)
+        request_poll.timeout.connect(
+            lambda: self._poll_message_projection_rebuild_request(
+                future=future,
+                progress=request_progress,
+                timer=request_poll,
+                estimate=estimate,
+            )
+        )
+        request_poll.start()
+        request_progress.show()
+
+    def _poll_message_projection_rebuild_request(
+        self,
+        *,
+        future: object,
+        progress: QProgressDialog,
+        timer: QTimer,
+        estimate: int,
+    ) -> None:
+        if not hasattr(future, "done") or not future.done():
+            return
+        timer.stop()
+        progress.close()
+        try:
+            request = future.result()
+        except Exception as exc:
+            self._message_projection_maintenance_busy = False
+            QMessageBox.warning(
+                self,
+                "Message Index Rebuild",
+                f"FIO could not request the rebuild: {type(exc).__name__}.",
+            )
+            return
+        if str(getattr(request, "state", "") or "") == "busy":
+            self._message_projection_maintenance_busy = False
+            QMessageBox.information(
+                self,
+                "Message Index Busy",
+                "A short incremental catch-up is finishing. Try the rebuild again in a moment.",
+            )
+            return
+        rebuild_id = str(getattr(request, "rebuild_id", "") or "")
+        if not rebuild_id:
+            self._message_projection_maintenance_busy = False
+            QMessageBox.warning(self, "Message Index Rebuild", "The rebuild request was not accepted.")
+            return
+        service = self._message_projection_maintenance_service()
+        if service is None:
+            self._message_projection_maintenance_busy = False
+            return
+        future = service.start_deep_rebuild(
+            rebuild_id=rebuild_id,
+            source_rows_estimate=estimate,
+        )
+        progress = QProgressDialog(
+            "Rebuilding the derived Message Index…",
+            "Cancel",
+            0,
+            max(1, estimate),
+            self,
+        )
+        progress.setWindowTitle("Message Index Rebuild")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.canceled.connect(service.cancel)
+        poll = QTimer(progress)
+        poll.setInterval(200)
+        poll.timeout.connect(
+            lambda: self._poll_message_projection_deep_rebuild(
+                future=future,
+                progress=progress,
+                timer=poll,
+            )
+        )
+        self._message_projection_rebuild_future = future
+        self._message_projection_rebuild_progress = progress
+        self._message_projection_rebuild_timer = poll
+        poll.start()
+        progress.show()
+
+    def _poll_message_projection_deep_rebuild(
+        self,
+        *,
+        future: object,
+        progress: QProgressDialog,
+        timer: QTimer,
+    ) -> None:
+        service = self._message_projection_maintenance_service()
+        if service is None:
+            self._message_projection_maintenance_busy = False
+            timer.stop()
+            progress.close()
+            return
+        snapshot = service.diagnostic_snapshot() if hasattr(service, "diagnostic_snapshot") else {}
+        processed = int(snapshot.get("processed", 0) or 0) if isinstance(snapshot, Mapping) else 0
+        estimate = int(snapshot.get("source_rows_estimate", 0) or 0) if isinstance(snapshot, Mapping) else 0
+        if estimate > progress.maximum():
+            progress.setMaximum(estimate)
+        progress.setValue(min(progress.maximum(), processed))
+        progress.setLabelText(
+            f"Rebuilding the derived Message Index… {processed:,} of approximately {max(estimate, progress.maximum()):,} records"
+        )
+        if not hasattr(future, "done") or not future.done():
+            return
+        timer.stop()
+        self._message_projection_maintenance_busy = False
+        try:
+            result = future.result()
+            state = str(getattr(result, "state", "complete") or "complete")
+            processed = int(getattr(result, "processed", processed) or processed)
+        except Exception as exc:
+            state = "failed"
+            failure = type(exc).__name__
+        progress.close()
+        status_label = getattr(self, "_message_maintenance_rebuild_status_label", None)
+        if status_label is not None:
+            try:
+                if state == "complete":
+                    status_label.setText(f"Message Index rebuild complete: {processed:,} records considered.")
+                elif state == "cancelled":
+                    status_label.setText(
+                        "Message Index rebuild paused. Normal background catch-up may resume the remaining work safely."
+                    )
+                else:
+                    status_label.setText(f"Message Index rebuild stopped: {state}.")
+            except RuntimeError:
+                pass
+        if state == "complete":
+            self._request_projected_message_query(force=True, delay_ms=0)
+            QMessageBox.information(
+                self,
+                "Message Index Rebuild",
+                f"The derived Message Index rebuild completed ({processed:,} records considered).",
+            )
+        elif state == "cancelled":
+            QMessageBox.information(
+                self,
+                "Message Index Rebuild Paused",
+                "The rebuild was paused. Its durable work remains safe and may resume during normal "
+                "background catch-up or after FIO restarts.",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Message Index Rebuild",
+                f"The rebuild stopped ({locals().get('failure', state)}). Its checkpoint was retained.",
+            )
 
     def _copy_selected_messages_summary(self) -> None:
         rows = self._messages_model.selected_rows() if hasattr(self, "_messages_model") else []
@@ -10870,7 +11302,7 @@ class MessageViewerTab(QWidget):
             QTimer.singleShot(1500, lambda: self._refresh_files(force=False))
         if getattr(self, "_projection_primary_enabled", False):
             self._request_projected_source_ingest(force=False)
-            self._start_native_message_projection_write(force=False)
+            self._request_application_projection_catchup(reason="messages_initial")
         else:
             self._refresh_js8_messages(rebuild=False)
             self._refresh_varac_messages(force=False, rebuild=False)
@@ -10972,7 +11404,7 @@ class MessageViewerTab(QWidget):
                     self._refresh_files(force=force)
                 if getattr(self, "_projection_primary_enabled", False):
                     self._request_projected_source_ingest(force=force)
-                    self._start_native_message_projection_write(force=force)
+                    self._request_application_projection_catchup(reason="messages_activation")
                     if not self._message_rows:
                         self._populate_messages_table(force=force)
                 else:
@@ -11568,12 +12000,16 @@ class MessageViewerTab(QWidget):
         base_records = None if force else self.files
         base_dir_mtimes = None if force else self._scan_dir_mtime_cache
         scan_watch_dirs = self._effective_watch_dirs(include_source_metadata=True)
+        watch_signature = self._watch_dirs_signature(scan_watch_dirs)
+        db_path = self._db_path()
         self._file_scan_thread = QThread(self)
         self._file_scan_worker = _FileScanWorker(
             scan_watch_dirs,
             force,
             base_records=base_records,
             base_dir_mtimes=base_dir_mtimes,
+            db_path=str(db_path) if db_path else "",
+            watch_signature=watch_signature,
         )
         self._file_scan_worker.moveToThread(self._file_scan_thread)
         self._file_scan_thread.started.connect(self._file_scan_worker.run)
@@ -11602,6 +12038,7 @@ class MessageViewerTab(QWidget):
         records: Dict[str, List[FileRecord]]
         dir_mtimes: Dict[str, float] = {}
         mode = "legacy"
+        projection: Dict[str, object] = {}
         if isinstance(payload, dict) and "records" in payload:
             maybe_records = payload.get("records")
             if isinstance(maybe_records, dict):
@@ -11616,13 +12053,17 @@ class MessageViewerTab(QWidget):
                     except Exception:
                         continue
             mode = str(payload.get("mode", "unknown") or "unknown")
+            maybe_projection = payload.get("projection")
+            if isinstance(maybe_projection, dict):
+                projection = maybe_projection
         elif isinstance(payload, dict):
             records = payload  # type: ignore[assignment]
         else:
             records = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         total_records = sum(len(v) for v in records.values())
-        records_fp = self._files_records_fingerprint(records)
-        unchanged_records = (not force) and (self._files_snapshot_fp == records_fp)
+        changed_count = int(projection.get("added_or_changed", 0) or 0)
+        removed_count = int(projection.get("removed", 0) or 0)
+        unchanged_records = not force and changed_count == 0 and removed_count == 0
         try:
             with perf_span(
                 "messages.file_scan_finished_handler",
@@ -11635,28 +12076,25 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             ):
-                if unchanged_records:
-                    self.files = records
-                    self._save_file_scan_cache_meta_only(dir_mtimes=dir_mtimes)
-                    self._scan_cache_loaded = True
-                    self._start_native_file_projection_write(records, force=force)
-                else:
-                    self.files = records
-                    self._update_fldigi_senders(records)
-                    self._read_state_map = self._load_read_state_map()
-                    self._save_file_scan_cache(records, dir_mtimes=dir_mtimes)
-                    self._scan_cache_loaded = True
-                    self._apply_bbs_sweeper_rules_after_file_scan(records)
-                    self._project_message_files_to_observations(records)
-                    self._start_native_file_projection_write(records, force=force)
-                    self._refresh_varac_messages(force=force, rebuild=False)
-                    self._populate_messages_table(force=force)
-                if not (
-                    bool(getattr(self, "_projection_primary_enabled", False))
-                    and float(getattr(self, "_last_projection_render_ts", 0.0) or 0.0) > 0.0
-                ):
-                    self._start_signature_verification(force=force)
-                self._files_snapshot_fp = records_fp
+                # MIP-3 boundary: scanning, parsing, cache persistence, and
+                # normalized projection have already completed on the worker.
+                # The Qt callback only swaps immutable snapshot state and marks
+                # the read model stale for the next coalesced refresh.
+                self.files = records
+                self._scan_dir_mtime_cache = dir_mtimes
+                self._scan_cache_loaded = True
+                self._files_snapshot_fp = None
+                projection_state = str(projection.get("state", "") or "")
+                projection_error = str(projection.get("error", "") or "")
+                if projection_error:
+                    log.warning("MessageViewer: file projection pipeline failed: %s", projection_error)
+                    self._message_check_status_text = "Message file update deferred"
+                elif changed_count or removed_count or force:
+                    self._message_check_status_text = "Messages updated"
+                    self._deferred_refresh = True
+                elif projection_state in {"unchanged", "cached"}:
+                    self._message_check_status_text = "No new messages"
+                self._update_message_check_status()
         finally:
             self._refresh_files_inflight = False
             self._last_file_refresh_ts = time.time()
@@ -11674,6 +12112,18 @@ class MessageViewerTab(QWidget):
                 },
                 min_ms=5.0,
             )
+            if not unchanged_records or elapsed >= 0.25:
+                emit_span(
+                    "messages.file_discovery",
+                    elapsed * 1000.0,
+                    settings=self.settings,
+                    meta={
+                        "changed": not bool(unchanged_records),
+                        "records": total_records,
+                        "mode": mode,
+                    },
+                    level="warning" if elapsed >= 0.5 else "debug",
+                )
             if elapsed > 0.5:
                 log.debug("MessageViewer: refresh_files took %.2fs", elapsed)
 
@@ -11828,6 +12278,11 @@ class MessageViewerTab(QWidget):
                 self._populate_messages_table(force=force)
 
     def _load_structured_message_projections(self, force: bool = False, rebuild: bool = False) -> None:
+        if getattr(self, "_projection_primary_enabled", False):
+            self._request_application_projection_catchup(reason="messages_structured_refresh")
+            if rebuild:
+                self._request_projected_message_query(force=force, delay_ms=0)
+            return
         try:
             self._load_js8_from_local(force=force, rebuild=False)
         except Exception as e:
@@ -11848,7 +12303,7 @@ class MessageViewerTab(QWidget):
             self._load_mesh_observations_from_store()
         except Exception as e:
             log.debug("MessageViewer: mesh observation load failed: %s", e)
-        self._start_native_message_projection_write(force=False)
+        self._request_application_projection_catchup(reason="messages_source_refresh")
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -12583,6 +13038,11 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         try:
+            if self._projected_query_timer:
+                self._projected_query_timer.stop()
+        except Exception:
+            pass
+        try:
             if self._file_watch_debounce_timer:
                 self._file_watch_debounce_timer.stop()
         except Exception:
@@ -12590,8 +13050,8 @@ class MessageViewerTab(QWidget):
         self._request_worker_thread_stop(self._file_scan_thread)
         self._request_worker_thread_stop(self._rows_build_thread)
         self._request_worker_thread_stop(self._projection_write_thread)
-        self._request_worker_thread_stop(self._native_projection_thread)
         self._request_worker_thread_stop(self._native_file_projection_thread)
+        self._request_worker_thread_stop(self._projected_query_thread)
         self._request_worker_thread_stop(self._signature_verify_thread)
         self._request_worker_thread_stop(self._bbs_auto_archive_thread)
 
@@ -13173,73 +13633,207 @@ class MessageViewerTab(QWidget):
                 log.debug("MessageViewer: table refresh deferred (freeze active)")
                 return
             self._deferred_refresh = False
-            if self._projection_primary_enabled and self._load_projected_messages_into_table():
-                if not force:
-                    return
+            if self._projection_primary_enabled:
+                self._load_projected_messages_into_table(force=force)
+                return
             self._start_rows_build(force=force)
 
-    def _load_projected_messages_into_table(self) -> bool:
-        if getattr(self, "_projected_table_loading", False):
-            return False
-        self._projected_table_loading = True
-        try:
-            rows = self._load_projected_message_rows(limit=1500)
-            if not rows:
-                return False
-            self._message_rows = rows
-            self._last_projection_render_ts = time.time()
-            self._projected_scope_load_key = self._projected_scope_key()
-            with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
-                self._refresh_message_filters(rows)
-            with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
-                self._apply_message_filters(recover_empty_stale_scope=True)
-            model_rows = 0
-            try:
-                model_rows = len(self._messages_model.rows())
-            except Exception:
-                model_rows = 0
-            source_families = self._projected_source_families_for_current_scope()
-            log.info(
-                "MESSAGES|projected_table_loaded rows=%d rendered=%d source_scope=%s scope=%s",
-                len(rows),
-                model_rows,
-                list(source_families) if source_families else ["ALL"],
-                self._active_message_scope_summary(),
-            )
-            return True
-        finally:
-            self._projected_table_loading = False
+    def _load_projected_messages_into_table(self, *, force: bool = False) -> bool:
+        """Compatibility seam: normal projection rendering is always asynchronous."""
 
-    def _load_projected_message_rows(self, *, limit: int = 1500) -> List[UnifiedMessage]:
-        db_path = self._db_path()
-        if db_path is None or not db_path.exists():
-            return []
+        if not self._projection_primary_enabled:
+            return False
+        self._request_projected_message_query(force=force)
+        return True
+
+    def _projected_query_parameters(self) -> Dict[str, object]:
         source_families = self._projected_source_families_for_current_scope()
         try:
             age_seconds = int(self.received_filter.currentData() or 0)
         except Exception:
             age_seconds = 0
-        received_after_ts = time.time() - age_seconds if age_seconds > 0 else 0.0
+        params: Dict[str, object] = {
+            "source_families": source_families,
+            "received_after_ts": time.time() - age_seconds if age_seconds > 0 else 0.0,
+            "received_before_ts": time.time() - abs(age_seconds) if age_seconds < 0 else 0.0,
+            "search_text": (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip(),
+        }
+        focus = str(getattr(self, "_inbox_focus", "all") or "all").strip().lower()
+        if focus == "new":
+            params["statuses"] = ("NEW", "UNREAD")
+        status = self.status_filter.currentText() if hasattr(self, "status_filter") else ""
+        if status not in {"", "Status...", "Action Needed"}:
+            if focus == "new":
+                params["statuses"] = (status,) if status.upper() in {"NEW", "UNREAD"} else ("__NONE__",)
+            else:
+                params["status"] = status
+        groups = self._selected_message_groups()
+        if groups:
+            params["group_names"] = tuple(sorted(groups))
+        from_call = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
+        to_call = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
+        if from_call:
+            params["from_call"] = from_call
+        if to_call:
+            params["to_call"] = to_call
+        type_value = self.type_filter.currentText() if hasattr(self, "type_filter") else ""
+        type_sources = {
+            "CommStat": {"commstat"},
+            "Spotter": {"spotter"},
+            "JS8Call": {"js8"},
+            "FLMSG/FLAMP": {"flmsg", "flamp"},
+            "SitRep": {"sitrep"},
+            "VarAC": {"varac"},
+        }
+        if type_value in type_sources:
+            wanted = type_sources[type_value]
+            current = set(source_families)
+            narrowed = wanted if not current else current.intersection(wanted)
+            params["source_families"] = tuple(sorted(narrowed)) if narrowed else ("__none__",)
+        elif type_value not in {"", "MSG Type..."} and not type_value.startswith("SitRep/"):
+            params["message_type"] = type_value
+        return params
+
+    def _request_projected_message_query(self, *, force: bool = False, delay_ms: int | None = None) -> None:
+        if getattr(self, "_is_shutting_down", False) or not self._projection_primary_enabled:
+            return
+        self._projected_query_request_id += 1
+        if not self._has_active_view or not self._app_active:
+            # Hidden/minimized views do not render. Multiple invalidations are
+            # collapsed into the one activation query, bounded by the declared
+            # hidden coalescing policy rather than periodic table work.
+            self._projected_query_pending = True
+            self._projected_query_pending_force = bool(self._projected_query_pending_force or force)
+            self._deferred_refresh = True
+            return
+        if self._qt_thread_running(self._projected_query_thread):
+            self._projected_query_pending = True
+            self._projected_query_pending_force = bool(self._projected_query_pending_force or force)
+            return
+        if self._projected_query_timer.isActive() and not force:
+            # The already-scheduled query snapshots the latest controls and
+            # request id when it starts, so repeated invalidations collapse
+            # without extending the operator-visible latency window.
+            return
+        if delay_ms is None:
+            delay_ms = 0 if force else min(250, MESSAGE_PROJECTION_VISIBLE_COALESCE_MS)
+        self._projected_query_timer.start(max(0, min(int(delay_ms), MESSAGE_PROJECTION_VISIBLE_COALESCE_MS)))
+
+    def _start_projected_message_query(self) -> None:
+        if self._is_shutting_down or not self._projection_primary_enabled:
+            return
+        if not self._has_active_view or not self._app_active:
+            self._projected_query_pending = True
+            self._deferred_refresh = True
+            return
+        if self._qt_thread_running(self._projected_query_thread):
+            self._projected_query_pending = True
+            return
+        db_path = self._db_path()
+        if db_path is None or not db_path.exists():
+            return
+        request_id = int(self._projected_query_request_id)
+        scope_key = self._projected_scope_key()
+        self._projected_query_pending = False
+        self._projected_query_pending_force = False
+        self._projected_query_thread = QThread(self)
+        self._projected_query_worker = _ProjectedMessageQueryWorker(
+            db_path=str(db_path),
+            request_id=request_id,
+            scope_key=scope_key,
+            query=self._projected_query_parameters(),
+        )
+        self._projected_query_worker.moveToThread(self._projected_query_thread)
+        self._projected_query_thread.started.connect(self._projected_query_worker.run)
+        self._projected_query_worker.finished.connect(self._on_projected_message_query_finished)
+        self._projected_query_worker.finished.connect(self._projected_query_thread.quit)
+        self._projected_query_worker.finished.connect(self._projected_query_worker.deleteLater)
+        self._projected_query_thread.finished.connect(self._on_projected_message_query_thread_finished)
+        self._projected_query_thread.finished.connect(self._projected_query_thread.deleteLater)
+        self._projected_query_thread.start()
+
+    def _on_projected_message_query_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        request_id = int(data.get("request_id", 0) or 0)
+        if request_id != int(self._projected_query_request_id):
+            log.debug("MessageViewer: discarded stale projection query %d", request_id)
+            return
+        error = str(data.get("error", "") or "")
+        if error:
+            log.warning("MessageViewer: projection query failed: %s", error)
+            return
+        if not self._has_active_view or not self._app_active or self._is_shutting_down:
+            self._projected_query_pending = True
+            self._deferred_refresh = True
+            return
+        generation = int(data.get("generation", 0) or 0)
+        if generation and generation < int(self._active_projection_generation or 0):
+            log.debug("MessageViewer: discarded projection generation %d", generation)
+            return
+        apply_started = time.perf_counter()
+        db_rows = data.get("rows", [])
+        refs = data.get("refs", {})
+        rows = self._projected_rows_from_mappings(
+            db_rows if isinstance(db_rows, list) else [],
+            refs if isinstance(refs, dict) else {},
+        )
+        self._projected_table_loading = True
         try:
-            db_rows = list_projected_messages(
-                db_path,
-                limit=limit,
-                source_families=source_families,
-                received_after_ts=received_after_ts,
-            )
-        except Exception as exc:
-            log.debug("MessageViewer: failed to load projected messages: %s", exc)
-            return []
-        try:
-            refs_by_message = load_projected_external_refs_for_messages(
-                db_path,
-                [str(row["message_id"] or "") for row in db_rows],
-            )
-        except Exception as exc:
-            log.debug("MessageViewer: failed to load projected refs: %s", exc)
-            refs_by_message = {}
+            self._message_rows = rows
+            self._last_projection_render_ts = time.time()
+            self._projected_scope_load_key = tuple(data.get("scope_key", ()) or ())
+            self._projected_total_count = int(data.get("total_count", len(rows)) or 0)
+            self._active_projection_generation = generation
+            with perf_span("messages.refresh_filters.projected", settings=self.settings, min_ms=5.0):
+                self._refresh_message_filters(rows)
+            with perf_span("messages.apply_filters.projected", settings=self.settings, min_ms=5.0):
+                self._apply_message_filters(recover_empty_stale_scope=True)
+        finally:
+            self._projected_table_loading = False
+        elapsed_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        emit_span(
+            "messages.model_query",
+            elapsed_ms,
+            settings=self.settings,
+            meta={"rows": len(rows), "total": self._projected_total_count, "generation": generation},
+            min_ms=5.0,
+        )
+        emit_span(
+            "messages.model_apply",
+            (time.perf_counter() - apply_started) * 1000.0,
+            settings=self.settings,
+            meta={
+                "rows": len(rows),
+                "total": self._projected_total_count,
+                "generation": generation,
+            },
+            level="debug",
+        )
+        log.info(
+            "MESSAGES|projected_table_loaded rows=%d total=%d generation=%d scope=%s",
+            len(rows),
+            self._projected_total_count,
+            generation,
+            self._active_message_scope_summary(),
+        )
+
+    def _on_projected_message_query_thread_finished(self) -> None:
+        self._retain_finished_worker_refs(self._projected_query_thread, self._projected_query_worker)
+        self._projected_query_thread = None
+        self._projected_query_worker = None
+        if self._projected_query_pending and not self._is_shutting_down:
+            force = bool(self._projected_query_pending_force)
+            self._projected_query_pending = False
+            self._projected_query_pending_force = False
+            self._request_projected_message_query(force=force)
+
+    def _projected_rows_from_mappings(
+        self,
+        db_rows: Sequence[Mapping[str, object]],
+        refs_by_message: Mapping[str, Sequence[Mapping[str, object]]],
+    ) -> List[UnifiedMessage]:
         rows: List[UnifiedMessage] = []
-        for db_row in db_rows:
+        for db_row in list(db_rows)[:200]:
             try:
                 message_id = str(db_row["message_id"] or "")
                 payload = projected_payload_from_row(
@@ -13269,6 +13863,32 @@ class MessageViewerTab(QWidget):
             except Exception as exc:
                 log.debug("MessageViewer: skipped projected message row: %s", exc)
         return rows
+
+    def _load_projected_message_rows(self, *, limit: int = 200) -> List[UnifiedMessage]:
+        """Bounded synchronous compatibility helper; normal UI paths use the worker."""
+
+        db_path = self._db_path()
+        if db_path is None or not db_path.exists():
+            return []
+        try:
+            page = query_projected_message_page(
+                db_path,
+                page_size=min(int(limit or 200), 200),
+                **self._projected_query_parameters(),
+            )
+            db_rows = page.rows
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load projected messages: %s", exc)
+            return []
+        try:
+            refs_by_message = load_projected_external_refs_for_messages(
+                db_path,
+                [str(row["message_id"] or "") for row in db_rows],
+            )
+        except Exception as exc:
+            log.debug("MessageViewer: failed to load projected refs: %s", exc)
+            refs_by_message = {}
+        return self._projected_rows_from_mappings(db_rows, refs_by_message)
 
     def _spotter_msg_auth_state_for_message(
         self,
@@ -13692,7 +14312,10 @@ class MessageViewerTab(QWidget):
         if self._projection_primary_enabled and not self._is_shutting_down and (
             projected_count > 0 or bool(data.get("force", False))
         ):
-            self._load_projected_messages_into_table()
+            self._request_projected_message_query(
+                force=bool(data.get("force", False)),
+                delay_ms=0 if bool(data.get("force", False)) else MESSAGE_PROJECTION_VISIBLE_COALESCE_MS,
+            )
 
     def _on_message_projection_write_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._projection_write_thread, self._projection_write_worker)
@@ -13703,73 +14326,25 @@ class MessageViewerTab(QWidget):
             self._projection_write_pending_rows = []
             QTimer.singleShot(100, lambda rows=pending: self._start_message_projection_write(rows))
 
-    def _start_native_message_projection_write(self, *, force: bool = False) -> None:
-        if self._is_shutting_down:
-            return
-        db_path = self._db_path()
-        if db_path is None:
-            return
-        if self._qt_thread_running(getattr(self, "_native_projection_thread", None)):
-            self._native_projection_pending_force = bool(self._native_projection_pending_force or force)
-            return
-        self._native_projection_generation = int(getattr(self, "_native_projection_generation", 0) or 0) + 1
-        generation = int(self._native_projection_generation)
-        self._native_projection_pending_force = False
-        self._native_projection_thread = QThread(self)
-        self._native_projection_worker = _NativeMessageProjectionWorker(
-            db_path=str(db_path),
-            generation=generation,
-            force=force,
-        )
-        self._native_projection_worker.moveToThread(self._native_projection_thread)
-        self._native_projection_thread.started.connect(self._native_projection_worker.run)
-        self._native_projection_worker.finished.connect(self._on_native_message_projection_finished)
-        self._native_projection_worker.finished.connect(self._native_projection_thread.quit)
-        self._native_projection_worker.finished.connect(self._native_projection_worker.deleteLater)
-        self._native_projection_thread.finished.connect(self._on_native_message_projection_thread_finished)
-        self._native_projection_thread.finished.connect(self._native_projection_thread.deleteLater)
-        self._native_projection_thread.start()
+    def _request_application_projection_catchup(self, *, reason: str) -> bool:
+        """Ask the application-owned coordinator to process durable work.
 
-    def _on_native_message_projection_finished(self, payload: object) -> None:
-        data = payload if isinstance(payload, dict) else {}
-        error = str(data.get("error", "") or "")
-        if error:
-            log.warning("MessageViewer: native message projection failed: %s", error)
-            return
+        The Inbox owns presentation queries only.  It never creates a second
+        coordinator or drains source history as a consequence of tab activity.
+        """
+
+        if getattr(self, "_is_shutting_down", False):
+            return False
+        host = self.parent()
+        request = getattr(host, "request_message_projection_catchup", None)
+        if not callable(request):
+            return False
         try:
-            elapsed_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
-        except Exception:
-            elapsed_ms = 0.0
-        projected = data.get("projected", {})
-        if elapsed_ms > 0:
-            emit_span(
-                "messages.project_native_sources",
-                elapsed_ms,
-                settings=self.settings,
-                meta={
-                    "projected": projected if isinstance(projected, dict) else {},
-                    "force": bool(data.get("force", False)),
-                },
-                min_ms=5.0,
-            )
-        changed_count = sum(int(value or 0) for value in projected.values()) if isinstance(projected, dict) else 0
-        if changed_count > 0:
-            self._message_check_status_text = "Messages updated"
-        elif self._message_check_status_text == "Checking sources...":
-            self._message_check_status_text = "No new messages"
-        self._update_message_check_status()
-        if self._projection_primary_enabled and not self._is_shutting_down and (
-            changed_count > 0 or bool(data.get("force", False))
-        ):
-            self._load_projected_messages_into_table()
-
-    def _on_native_message_projection_thread_finished(self) -> None:
-        self._retain_finished_worker_refs(self._native_projection_thread, self._native_projection_worker)
-        self._native_projection_thread = None
-        self._native_projection_worker = None
-        if self._native_projection_pending_force and not self._is_shutting_down:
-            self._native_projection_pending_force = False
-            QTimer.singleShot(100, lambda: self._start_native_message_projection_write(force=True))
+            request(reason=str(reason or "messages"))
+            return True
+        except Exception as exc:
+            log.debug("MessageViewer: application projection request failed: %s", exc)
+            return False
 
     def _start_native_file_projection_write(
         self,
@@ -13834,7 +14409,10 @@ class MessageViewerTab(QWidget):
         if self._projection_primary_enabled and not self._is_shutting_down and (
             projected_count > 0 or bool(data.get("force", False))
         ):
-            self._load_projected_messages_into_table()
+            self._request_projected_message_query(
+                force=bool(data.get("force", False)),
+                delay_ms=0 if bool(data.get("force", False)) else MESSAGE_PROJECTION_VISIBLE_COALESCE_MS,
+            )
 
     def _on_native_file_projection_thread_finished(self) -> None:
         self._retain_finished_worker_refs(self._native_file_projection_thread, self._native_file_projection_worker)
@@ -15046,7 +15624,10 @@ class MessageViewerTab(QWidget):
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
         self.messages_table.setUpdatesEnabled(False)
-        self._messages_model.set_rows(rows)
+        self._messages_model.set_rows_for_generation(
+            rows,
+            int(getattr(self, "_active_projection_generation", 0) or 0),
+        )
         if not self._has_active_view:
             self._clear_message_detail_view("No file selected")
             self.current_record = None
@@ -20696,6 +21277,12 @@ class MessageViewerTab(QWidget):
         if self._is_shutting_down:
             return
         name = str(job_name or "").strip().lower()
+        if getattr(self, "_projection_primary_enabled", False):
+            if name in {"messages", "varac", "sitreps", "dynamic_flamp_projection"}:
+                self._request_application_projection_catchup(
+                    reason=f"messages_ingest:{name}"
+                )
+            return
         try:
             if name == "messages":
                 self._load_js8_from_local(force=True, rebuild=False)

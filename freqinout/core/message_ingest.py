@@ -35,6 +35,7 @@ from freqinout.core.logger import log
 from freqinout.core.condition_alert_ingest import condition_alert_observations_for_message_intelligence
 from freqinout.core.condition_alerts import CONDITION_ALERT_RULES_SETTING_KEY
 from freqinout.core.message_intelligence import analyze_spotter_text
+from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.observation_projection import observation_from_message_intelligence
 from freqinout.core.observation_store import upsert_observation_conn
 from freqinout.core.settings_manager import SettingsManager
@@ -172,6 +173,17 @@ class MessageIngestor:
         self._decoder = JS8FormDecoder(settings)
         self._expect_dispatch_client_factory = expect_dispatch_client_factory
         self._expect_auto_reply_enabled_override = expect_auto_reply_enabled
+        self._projection_trigger_tables_ready: set[str] = set()
+
+    def _ensure_projection_triggers_once(
+        self, conn: sqlite3.Connection, table_name: str
+    ) -> None:
+        table = str(table_name or "").strip()
+        if not table or table in self._projection_trigger_tables_ready:
+            return
+        installed = ensure_source_dirty_triggers(conn)
+        if any(f"trg_mip_dirty_{table}_" in name for name in installed):
+            self._projection_trigger_tables_ready.add(table)
 
     def ingest_js8_messages(
         self,
@@ -1916,6 +1928,7 @@ class MessageIngestor:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
             )
+            self._ensure_projection_triggers_once(conn, "spotter_traffic")
             self._backfill_spotter_station_status(cur)
             conn.commit()
             conn.close()
@@ -2070,6 +2083,7 @@ class MessageIngestor:
             "CREATE INDEX IF NOT EXISTS idx_js8_messages_projection "
             "ON js8_messages(utc_ts DESC, source_id DESC, id DESC)"
         )
+        self._ensure_projection_triggers_once(conn, "js8_messages")
         conn.commit()
         conn.close()
 

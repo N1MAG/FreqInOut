@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from freqinout.core.sqlite_utils import connect_sqlite
+from freqinout.core.sqlite_utils import connect_sqlite, connect_sqlite_readonly
 
-PROJECTION_SCHEMA_VERSION = 2
+PROJECTION_SCHEMA_VERSION = 3
+MAX_PROJECTED_MESSAGE_PAGE_SIZE = 200
+MAX_PROJECTED_MESSAGE_DETAIL_ROWS = 200
 
 
 def utc_now_iso() -> str:
@@ -138,6 +140,34 @@ class MessageProjectionCheckpoint:
     last_event_ts: float = 0.0
     content_fingerprint: str = ""
     updated_utc: str = ""
+
+
+@dataclass(frozen=True)
+class MessageProjectionPageCursor:
+    """Stable keyset cursor for the bounded Inbox projection order.
+
+    The cursor deliberately carries the complete durable order key instead of
+    an offset.  A busy station may receive new traffic while an operator pages;
+    an offset would then either repeat or skip rows and force SQLite to walk
+    every preceding result.  Projection rows own these scalar fields and the
+    corresponding model indexes are installed by the startup migration.
+    """
+
+    operator_attention: int
+    actionable: int
+    event_ts: float
+    received_ts: float
+    message_id: str
+
+
+@dataclass(frozen=True)
+class MessageProjectionPage:
+    """One bounded projection page plus its committed invalidation generation."""
+
+    rows: tuple[sqlite3.Row, ...]
+    generation: int = 0
+    next_cursor: MessageProjectionPageCursor | None = None
+    total_count: int | None = None
 
 
 def _json(value: object, default: str) -> str:
@@ -333,6 +363,92 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_projection_dirty (
+            dirty_key TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            source_family TEXT NOT NULL,
+            external_kind TEXT NOT NULL,
+            external_key TEXT NOT NULL,
+            operation TEXT NOT NULL DEFAULT 'upsert',
+            priority INTEGER NOT NULL DEFAULT 0,
+            source_version TEXT,
+            projector_version INTEGER NOT NULL DEFAULT 0,
+            first_observed_utc TEXT NOT NULL,
+            last_observed_utc TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            retry_after_utc TEXT,
+            last_error_code TEXT,
+            lease_owner TEXT,
+            lease_expires_utc TEXT,
+            UNIQUE(source_id, external_kind, external_key)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_projection_source_state (
+            source_id TEXT PRIMARY KEY,
+            source_family TEXT NOT NULL,
+            high_water_key TEXT,
+            high_water_ts REAL NOT NULL DEFAULT 0,
+            source_generation TEXT,
+            projector_version INTEGER NOT NULL DEFAULT 0,
+            classifier_version INTEGER NOT NULL DEFAULT 0,
+            last_reconciled_utc TEXT,
+            last_available_utc TEXT,
+            availability_state TEXT NOT NULL DEFAULT 'unknown',
+            diagnostic_json TEXT NOT NULL DEFAULT '{}',
+            updated_utc TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_projection_generation (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            generation INTEGER NOT NULL DEFAULT 0,
+            updated_utc TEXT NOT NULL
+        )
+        """
+    )
+    # File scanner state is an additive, startup-owned cache.  It records only
+    # inventory metadata; source files remain authoritative and are never
+    # copied, moved, or deleted by projection maintenance.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_file_scan_cache (
+            cache_key TEXT PRIMARY KEY,
+            watch_signature TEXT NOT NULL DEFAULT '',
+            dir_mtimes_json TEXT NOT NULL DEFAULT '{}',
+            inventory_fingerprint TEXT NOT NULL DEFAULT '',
+            record_count INTEGER NOT NULL DEFAULT 0,
+            updated_utc TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_file_scan_inventory (
+            origin TEXT NOT NULL,
+            path_key TEXT NOT NULL,
+            path_display TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL DEFAULT '',
+            source_label TEXT NOT NULL DEFAULT '',
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime REAL NOT NULL DEFAULT 0,
+            updated_utc TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(origin, path_key)
+        )
+        """
+    )
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO message_projection_generation(singleton, generation, updated_utc)
+        VALUES (1, 0, '')
+        """
+    )
     _ensure_columns(
         conn,
         "message_sources",
@@ -483,6 +599,67 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
             "updated_utc": "TEXT NOT NULL DEFAULT ''",
         },
     )
+    _ensure_columns(
+        conn,
+        "message_projection_dirty",
+        {
+            "source_id": "TEXT NOT NULL DEFAULT ''",
+            "source_family": "TEXT NOT NULL DEFAULT ''",
+            "external_kind": "TEXT NOT NULL DEFAULT ''",
+            "external_key": "TEXT NOT NULL DEFAULT ''",
+            "operation": "TEXT NOT NULL DEFAULT 'upsert'",
+            "priority": "INTEGER NOT NULL DEFAULT 0",
+            "source_version": "TEXT",
+            "projector_version": "INTEGER NOT NULL DEFAULT 0",
+            "first_observed_utc": "TEXT NOT NULL DEFAULT ''",
+            "last_observed_utc": "TEXT NOT NULL DEFAULT ''",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "retry_after_utc": "TEXT",
+            "last_error_code": "TEXT",
+            "lease_owner": "TEXT",
+            "lease_expires_utc": "TEXT",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_projection_source_state",
+        {
+            "source_family": "TEXT NOT NULL DEFAULT ''",
+            "high_water_key": "TEXT",
+            "high_water_ts": "REAL NOT NULL DEFAULT 0",
+            "source_generation": "TEXT",
+            "projector_version": "INTEGER NOT NULL DEFAULT 0",
+            "classifier_version": "INTEGER NOT NULL DEFAULT 0",
+            "last_reconciled_utc": "TEXT",
+            "last_available_utc": "TEXT",
+            "availability_state": "TEXT NOT NULL DEFAULT 'unknown'",
+            "diagnostic_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_file_scan_cache",
+        {
+            "watch_signature": "TEXT NOT NULL DEFAULT ''",
+            "dir_mtimes_json": "TEXT NOT NULL DEFAULT '{}'",
+            "inventory_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "record_count": "INTEGER NOT NULL DEFAULT 0",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "message_file_scan_inventory",
+        {
+            "path_display": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT NOT NULL DEFAULT ''",
+            "source_label": "TEXT NOT NULL DEFAULT ''",
+            "size": "INTEGER NOT NULL DEFAULT 0",
+            "mtime": "REAL NOT NULL DEFAULT 0",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_default ON message_projection(deleted, archived, event_ts DESC, received_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_inbox ON message_projection(inbox_visible, deleted, archived, operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_source ON message_projection(source_family, event_ts DESC)")
@@ -492,13 +669,77 @@ def ensure_message_projection_schema(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_calls ON message_projection(from_call, to_call, event_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_geo ON message_projection(state_code, grid, event_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_projection_search ON message_projection(search_text)")
+    # Bounded Inbox pages use a keyset cursor ordered by the following durable
+    # columns.  Keep the broad default and the common equality filters in
+    # separate additive indexes so a view change does not turn into a retained
+    # history scan.  Search is intentionally left as a semantic substring
+    # predicate here; a future FTS migration must preserve its existing search
+    # grammar rather than silently changing it to a prefix-only lookup.
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_default "
+        "ON message_projection(inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, "
+        "received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_source "
+        "ON message_projection(source_family, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, "
+        "received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_group "
+        "ON message_projection(group_name, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, "
+        "received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_status "
+        "ON message_projection(status, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, "
+        "received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_severity "
+        "ON message_projection(severity, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, "
+        "received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_received "
+        "ON message_projection(inbox_visible, deleted, archived, "
+        "COALESCE(NULLIF(received_ts, 0), event_ts, 0) DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_from "
+        "ON message_projection(from_call, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_to "
+        "ON message_projection(to_call, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC, message_id DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_msg_projection_model_type "
+        "ON message_projection(message_type, inbox_visible, deleted, archived, "
+        "operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC, message_id DESC)"
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_refs_message ON message_external_refs(message_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_artifacts_message ON message_artifacts(message_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_artifacts_flamp_qid ON message_artifacts(q_id, transfer_state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_delete_queue_state ON message_delete_queue(state, requested_utc)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_delete_audit_message ON message_delete_audit(message_id, audit_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_dirty_ready ON message_projection_dirty(retry_after_utc, priority DESC, first_observed_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_dirty_source ON message_projection_dirty(source_family, source_id, last_observed_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_file_inventory_updated ON message_file_scan_inventory(origin, updated_utc)")
+    # Ops focus is part of the projection schema lifecycle. Runtime row helpers
+    # assume startup (or an explicit compatibility boundary) completed this
+    # migration and therefore never introspect or execute DDL per message.
+    from freqinout.core.ops_focus import ensure_ops_focus_schema
+
+    ensure_ops_focus_schema(conn)
 def upsert_message_source(conn: sqlite3.Connection, source: MessageSourceRecord, *, updated_utc: str | None = None) -> str:
-    ensure_message_projection_schema(conn)
     stamp = updated_utc or utc_now_iso()
     conn.execute(
         """
@@ -540,7 +781,6 @@ def upsert_message_source(conn: sqlite3.Connection, source: MessageSourceRecord,
 
 
 def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjectionRecord, *, projected_utc: str | None = None) -> str:
-    ensure_message_projection_schema(conn)
     stamp = projected_utc or message.projected_utc or utc_now_iso()
     conn.execute(
         """
@@ -565,9 +805,19 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
             app_instance_id=excluded.app_instance_id,
             message_type=excluded.message_type,
             display_type=excluded.display_type,
-            status=excluded.status,
+            status=CASE
+                WHEN LOWER(COALESCE(message_projection.read_state, ''))='read'
+                     AND UPPER(COALESCE(excluded.status, '')) IN ('NEW', 'UNREAD')
+                THEN message_projection.status
+                ELSE excluded.status
+            END,
             severity=excluded.severity,
-            read_state=excluded.read_state,
+            read_state=CASE
+                WHEN LOWER(COALESCE(message_projection.read_state, ''))='read'
+                     AND LOWER(COALESCE(excluded.read_state, '')) IN ('new', 'unread', '')
+                THEN message_projection.read_state
+                ELSE excluded.read_state
+            END,
             from_call=excluded.from_call,
             to_call=excluded.to_call,
             group_name=excluded.group_name,
@@ -614,12 +864,24 @@ def upsert_message_projection(conn: sqlite3.Connection, message: MessageProjecti
     # dependency cycle at startup.
     from freqinout.core.ops_focus import index_message_for_ops_focus
 
-    index_message_for_ops_focus(conn, message)
+    # The UPSERT intentionally preserves operator-owned state (read, pinned,
+    # archived, and deleted) when an upstream replay reports stale defaults.
+    # Index the durable row, not the incoming dataclass, so compact Ops focus
+    # counts and attention state cannot disagree with the Inbox projection.
+    cursor = conn.execute(
+        "SELECT * FROM message_projection WHERE message_id=?",
+        (_sanitize_sql_text(message.message_id),),
+    )
+    persisted = cursor.fetchone()
+    if persisted is not None:
+        if not hasattr(persisted, "keys"):
+            columns = tuple(str(column[0]) for column in (cursor.description or ()))
+            persisted = dict(zip(columns, persisted))
+        index_message_for_ops_focus(conn, persisted)
     return message.message_id
 
 
 def upsert_external_ref(conn: sqlite3.Connection, ref: ExternalMessageRef, *, updated_utc: str | None = None) -> str:
-    ensure_message_projection_schema(conn)
     stamp = updated_utc or utc_now_iso()
     conn.execute(
         """
@@ -659,7 +921,6 @@ def upsert_external_ref(conn: sqlite3.Connection, ref: ExternalMessageRef, *, up
 
 
 def upsert_message_artifact(conn: sqlite3.Connection, artifact: MessageArtifactRecord, *, updated_utc: str | None = None) -> str:
-    ensure_message_projection_schema(conn)
     stamp = updated_utc or utc_now_iso()
     conn.execute(
         """
@@ -719,7 +980,6 @@ def queue_message_delete(
     source_scope: str = "selected",
     requested_utc: str | None = None,
 ) -> str:
-    ensure_message_projection_schema(conn)
     stamp = requested_utc or utc_now_iso()
     delete_id = stable_message_id("delete", message_id, requested_effect, source_scope, stamp)
     conn.execute(
@@ -754,15 +1014,313 @@ def list_projected_messages(
     source_family: str = "",
     source_families: Sequence[str] | None = None,
     group_name: str = "",
+    group_names: Sequence[str] | None = None,
     status: str = "",
+    statuses: Sequence[str] | None = None,
     severity: str = "",
+    from_call: str = "",
+    to_call: str = "",
+    message_type: str = "",
     search_text: str = "",
     received_after_ts: float = 0.0,
+    received_before_ts: float = 0.0,
     include_archived: bool = False,
     include_deleted: bool = False,
     include_suppressed: bool = False,
     limit: int = 500,
 ) -> list[sqlite3.Row]:
+    """Compatibility list API for non-model consumers.
+
+    The historical API is now also hard-capped at 200 rows so an old caller
+    cannot accidentally rebuild a retained-history widget.  Consumers that
+    need more history must advance with :func:`query_projected_message_page`;
+    aggregate consumers must use a dedicated count/summary query.  This helper
+    is strictly read-only and never repairs projection schema on a view open.
+    """
+    clauses, params = _projected_message_filter_sql(
+        source_family=source_family,
+        source_families=source_families,
+        group_name=group_name,
+        group_names=group_names,
+        status=status,
+        statuses=statuses,
+        severity=severity,
+        from_call=from_call,
+        to_call=to_call,
+        message_type=message_type,
+        search_text=search_text,
+        received_after_ts=received_after_ts,
+        received_before_ts=received_before_ts,
+        include_archived=include_archived,
+        include_deleted=include_deleted,
+        include_suppressed=include_suppressed,
+    )
+    params.append(_bounded_int(limit, default=MAX_PROJECTED_MESSAGE_PAGE_SIZE, maximum=MAX_PROJECTED_MESSAGE_PAGE_SIZE))
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return _read_projected_rows(
+        db_path,
+        f"""
+        SELECT *
+          FROM message_projection
+        {where}
+         ORDER BY operator_attention DESC, actionable DESC, event_ts DESC,
+                  received_ts DESC, message_id DESC
+         LIMIT ?
+        """,
+        tuple(params),
+    )
+
+
+def count_projected_messages(
+    db_path: str | Path,
+    *,
+    source_family: str = "",
+    source_families: Sequence[str] | None = None,
+    group_name: str = "",
+    group_names: Sequence[str] | None = None,
+    status: str = "",
+    statuses: Sequence[str] | None = None,
+    severity: str = "",
+    from_call: str = "",
+    to_call: str = "",
+    message_type: str = "",
+    search_text: str = "",
+    received_after_ts: float = 0.0,
+    received_before_ts: float = 0.0,
+    include_archived: bool = False,
+    include_deleted: bool = False,
+    include_suppressed: bool = False,
+) -> int:
+    """Return the bounded-model result count without mutating projection state."""
+    clauses, params = _projected_message_filter_sql(
+        source_family=source_family,
+        source_families=source_families,
+        group_name=group_name,
+        group_names=group_names,
+        status=status,
+        statuses=statuses,
+        severity=severity,
+        from_call=from_call,
+        to_call=to_call,
+        message_type=message_type,
+        search_text=search_text,
+        received_after_ts=received_after_ts,
+        received_before_ts=received_before_ts,
+        include_archived=include_archived,
+        include_deleted=include_deleted,
+        include_suppressed=include_suppressed,
+    )
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
+        return _count_projected_messages_on_connection(conn, where, params)
+    except sqlite3.Error:
+        # Startup owns the migration.  A tab opened before that owner has
+        # completed simply has no cached projection to render yet.
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_message_projection_generation(db_path: str | Path) -> int:
+    """Return the latest committed projection generation without repair I/O.
+
+    A zero result is the safe pre-migration/unavailable value.  GUI callers
+    compare this compact token instead of retaining message bodies or polling
+    a writer from the UI thread.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
+        return _message_projection_generation_on_connection(conn)
+    except sqlite3.Error:
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def query_projected_message_page(
+    db_path: str | Path,
+    *,
+    source_family: str = "",
+    source_families: Sequence[str] | None = None,
+    group_name: str = "",
+    group_names: Sequence[str] | None = None,
+    status: str = "",
+    statuses: Sequence[str] | None = None,
+    severity: str = "",
+    from_call: str = "",
+    to_call: str = "",
+    message_type: str = "",
+    search_text: str = "",
+    received_after_ts: float = 0.0,
+    received_before_ts: float = 0.0,
+    include_archived: bool = False,
+    include_deleted: bool = False,
+    include_suppressed: bool = False,
+    page_size: int = MAX_PROJECTED_MESSAGE_PAGE_SIZE,
+    cursor: MessageProjectionPageCursor | None = None,
+    include_total: bool = False,
+) -> MessageProjectionPage:
+    """Read one 200-row-at-most projection page using indexed keyset paging.
+
+    This helper has no migration fallback by design: opening, filtering, or
+    paging the Inbox must never contend with a projection writer for DDL.  The
+    optional total is a separate indexed aggregate over the same filter, not a
+    materialized row list.
+    """
+    base_clauses, base_params = _projected_message_filter_sql(
+        source_family=source_family,
+        source_families=source_families,
+        group_name=group_name,
+        group_names=group_names,
+        status=status,
+        statuses=statuses,
+        severity=severity,
+        from_call=from_call,
+        to_call=to_call,
+        message_type=message_type,
+        search_text=search_text,
+        received_after_ts=received_after_ts,
+        received_before_ts=received_before_ts,
+        include_archived=include_archived,
+        include_deleted=include_deleted,
+        include_suppressed=include_suppressed,
+    )
+    clauses = list(base_clauses)
+    params = list(base_params)
+    if cursor is not None:
+        clauses.append(
+            """(
+                operator_attention < ?
+                OR (operator_attention = ? AND actionable < ?)
+                OR (operator_attention = ? AND actionable = ? AND event_ts < ?)
+                OR (operator_attention = ? AND actionable = ? AND event_ts = ? AND received_ts < ?)
+                OR (operator_attention = ? AND actionable = ? AND event_ts = ? AND received_ts = ? AND message_id < ?)
+            )"""
+        )
+        params.extend(
+            (
+                int(cursor.operator_attention or 0),
+                int(cursor.operator_attention or 0),
+                int(cursor.actionable or 0),
+                int(cursor.operator_attention or 0),
+                int(cursor.actionable or 0),
+                float(cursor.event_ts or 0.0),
+                int(cursor.operator_attention or 0),
+                int(cursor.actionable or 0),
+                float(cursor.event_ts or 0.0),
+                float(cursor.received_ts or 0.0),
+                int(cursor.operator_attention or 0),
+                int(cursor.actionable or 0),
+                float(cursor.event_ts or 0.0),
+                float(cursor.received_ts or 0.0),
+                str(cursor.message_id or ""),
+            )
+        )
+    bounded_size = _bounded_int(
+        page_size,
+        default=MAX_PROJECTED_MESSAGE_PAGE_SIZE,
+        maximum=MAX_PROJECTED_MESSAGE_PAGE_SIZE,
+    )
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    conn: sqlite3.Connection | None = None
+    rows: list[sqlite3.Row] = []
+    total_count: int | None = None
+    generation = 0
+    try:
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
+        # Without an explicit transaction, SQLite may complete the page SELECT
+        # before the count/generation queries begin.  A writer could then make
+        # one UI result internally inconsistent.  Keep these compact reads in
+        # one read-only snapshot; this never waits for or mutates the writer.
+        conn.execute("BEGIN")
+        rows = list(
+            conn.execute(
+                f"""
+                SELECT *
+                  FROM message_projection
+                {where}
+                 ORDER BY operator_attention DESC, actionable DESC, event_ts DESC,
+                          received_ts DESC, message_id DESC
+                 LIMIT ?
+                """,
+                tuple(params + [bounded_size + 1]),
+            ).fetchall()
+        )
+        if include_total:
+            base_where = " WHERE " + " AND ".join(base_clauses) if base_clauses else ""
+            total_count = _count_projected_messages_on_connection(conn, base_where, base_params)
+        generation = _message_projection_generation_on_connection(conn)
+    except sqlite3.Error:
+        rows = []
+        total_count = 0 if include_total else None
+        generation = 0
+    finally:
+        if conn is not None:
+            conn.close()
+    page_rows = tuple(rows[:bounded_size])
+    next_cursor = _projected_page_cursor_from_row(page_rows[-1]) if len(rows) > bounded_size and page_rows else None
+    return MessageProjectionPage(
+        rows=page_rows,
+        generation=generation,
+        next_cursor=next_cursor,
+        total_count=total_count,
+    )
+
+
+def _count_projected_messages_on_connection(
+    conn: sqlite3.Connection,
+    where: str,
+    params: Sequence[object],
+) -> int:
+    row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM message_projection{where}",
+        tuple(params),
+    ).fetchone()
+    return int(row["count"] or 0) if row is not None else 0
+
+
+def _message_projection_generation_on_connection(conn: sqlite3.Connection) -> int:
+    try:
+        row = conn.execute(
+            "SELECT generation FROM message_projection_generation WHERE singleton=1"
+        ).fetchone()
+    except sqlite3.Error:
+        # A projection created before the additive MIP migration still has
+        # readable message rows.  The caller treats generation zero as an
+        # invalidation token unavailable until startup completes migration.
+        return 0
+    if row is None:
+        return 0
+    try:
+        return max(0, int(row["generation"] if hasattr(row, "keys") else row[0]))
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+def _projected_message_filter_sql(
+    *,
+    source_family: str,
+    source_families: Sequence[str] | None,
+    group_name: str,
+    group_names: Sequence[str] | None,
+    status: str,
+    statuses: Sequence[str] | None,
+    severity: str,
+    from_call: str,
+    to_call: str,
+    message_type: str,
+    search_text: str,
+    received_after_ts: float,
+    received_before_ts: float,
+    include_archived: bool,
+    include_deleted: bool,
+    include_suppressed: bool,
+) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     if not include_deleted:
@@ -785,40 +1343,91 @@ def list_projected_messages(
     elif requested_sources:
         clauses.append(f"source_family IN ({','.join('?' for _ in requested_sources)})")
         params.extend(requested_sources)
+    requested_groups = [
+        str(value or "").strip().lstrip("@").upper()
+        for value in (group_names or ())
+        if str(value or "").strip().lstrip("@")
+    ]
     if group_name:
+        requested_groups.append(str(group_name or "").strip().lstrip("@").upper())
+    requested_groups = sorted(set(requested_groups))
+    if len(requested_groups) == 1:
         clauses.append("group_name=?")
-        params.append(group_name.lstrip("@"))
+        params.append(requested_groups[0])
+    elif requested_groups:
+        clauses.append(f"group_name IN ({','.join('?' for _ in requested_groups)})")
+        params.extend(requested_groups)
+    requested_statuses = [
+        str(value or "").strip().upper()
+        for value in (statuses or ())
+        if str(value or "").strip()
+    ]
     if status:
+        requested_statuses.append(str(status or "").strip().upper())
+    requested_statuses = sorted(set(requested_statuses))
+    if len(requested_statuses) == 1:
         clauses.append("status=?")
-        params.append(status)
+        params.append(requested_statuses[0])
+    elif requested_statuses:
+        clauses.append(f"status IN ({','.join('?' for _ in requested_statuses)})")
+        params.extend(requested_statuses)
     if severity:
         clauses.append("severity=?")
-        params.append(severity)
+        params.append(str(severity or "").strip().lower())
+    if from_call:
+        clauses.append("from_call=?")
+        params.append(str(from_call or "").strip().upper())
+    if to_call:
+        clauses.append("to_call=?")
+        params.append(str(to_call or "").strip().upper())
+    if message_type:
+        clauses.append("(message_type=? OR display_type=?)")
+        normalized_type = str(message_type or "").strip().upper()
+        params.extend((normalized_type, normalized_type))
     if search_text:
         clauses.append("search_text LIKE ?")
         params.append(f"%{search_text.lower()}%")
     if received_after_ts:
         clauses.append("COALESCE(NULLIF(received_ts, 0), event_ts, 0) >= ?")
         params.append(float(received_after_ts))
-    params.append(max(1, min(20000, int(limit or 500))))
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    if received_before_ts:
+        clauses.append("COALESCE(NULLIF(received_ts, 0), event_ts, 0) <= ?")
+        params.append(float(received_before_ts))
+    return clauses, params
+
+
+def _read_projected_rows(
+    db_path: str | Path,
+    sql: str,
+    params: Sequence[object],
+) -> list[sqlite3.Row]:
+    conn: sqlite3.Connection | None = None
     try:
-        ensure_message_projection_schema(conn)
-        return list(
-            conn.execute(
-                f"""
-                SELECT *
-                  FROM message_projection
-                {where}
-                 ORDER BY operator_attention DESC, actionable DESC, event_ts DESC, received_ts DESC
-                 LIMIT ?
-                """,
-                tuple(params),
-            )
-        )
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
+        return list(conn.execute(sql, tuple(params)).fetchall())
+    except sqlite3.Error:
+        return []
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+
+
+def _projected_page_cursor_from_row(row: sqlite3.Row) -> MessageProjectionPageCursor:
+    return MessageProjectionPageCursor(
+        operator_attention=int(row["operator_attention"] or 0),
+        actionable=int(row["actionable"] or 0),
+        event_ts=float(row["event_ts"] or 0.0),
+        received_ts=float(row["received_ts"] or 0.0),
+        message_id=str(row["message_id"] or ""),
+    )
+
+
+def _bounded_int(value: object, *, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value or default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(int(maximum), parsed))
 
 
 def list_projected_attention_messages(
@@ -826,34 +1435,29 @@ def list_projected_attention_messages(
     *,
     limit: int = 250,
 ) -> list[sqlite3.Row]:
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
-    try:
-        ensure_message_projection_schema(conn)
-        return list(
-            conn.execute(
-                """
-                SELECT *
-                  FROM message_projection
-                 WHERE deleted=0
-                   AND archived=0
-                   AND inbox_visible=1
-                   AND (operator_attention=1 OR actionable=1 OR severity IN ('critical', 'warning'))
-                 ORDER BY
-                   CASE severity
-                       WHEN 'critical' THEN 0
-                       WHEN 'warning' THEN 1
-                       WHEN 'watch' THEN 2
-                       ELSE 3
-                   END,
-                   event_ts DESC,
-                   received_ts DESC
-                 LIMIT ?
-                """,
-                (max(1, min(1000, int(limit or 250))),),
-            )
-        )
-    finally:
-        conn.close()
+    return _read_projected_rows(
+        db_path,
+        """
+        SELECT *
+          FROM message_projection
+         WHERE deleted=0
+           AND archived=0
+           AND inbox_visible=1
+           AND (operator_attention=1 OR actionable=1 OR severity IN ('critical', 'warning'))
+         ORDER BY
+           CASE severity
+               WHEN 'critical' THEN 0
+               WHEN 'warning' THEN 1
+               WHEN 'watch' THEN 2
+               ELSE 3
+           END,
+           event_ts DESC,
+           received_ts DESC,
+           message_id DESC
+         LIMIT ?
+        """,
+        (_bounded_int(limit, default=250, maximum=1_000),),
+    )
 
 
 def list_projected_geo_messages(
@@ -871,33 +1475,27 @@ def list_projected_geo_messages(
     if group_name:
         clauses.append("UPPER(group_name)=?")
         params.append(str(group_name or "").strip().lstrip("@").upper())
-    params.append(max(1, min(2000, int(limit or 500))))
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
-    try:
-        ensure_message_projection_schema(conn)
-        return list(
-            conn.execute(
-                f"""
-                SELECT *
-                  FROM message_projection
-                 WHERE {' AND '.join(clauses)}
-                 ORDER BY event_ts DESC, received_ts DESC
-                 LIMIT ?
-                """,
-                tuple(params),
-            )
-        )
-    finally:
-        conn.close()
+    params.append(_bounded_int(limit, default=500, maximum=2_000))
+    return _read_projected_rows(
+        db_path,
+        f"""
+        SELECT *
+          FROM message_projection
+         WHERE {' AND '.join(clauses)}
+         ORDER BY event_ts DESC, received_ts DESC, message_id DESC
+         LIMIT ?
+        """,
+        tuple(params),
+    )
 
 
 def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[str, Any]:
     clean_id = str(message_id or "").strip()
     if not clean_id:
         return {"message": None, "refs": [], "artifacts": []}
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    conn: sqlite3.Connection | None = None
     try:
-        ensure_message_projection_schema(conn)
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
         message = conn.execute(
             "SELECT * FROM message_projection WHERE message_id=?",
             (clean_id,),
@@ -905,37 +1503,44 @@ def load_projected_message_detail(db_path: str | Path, message_id: str) -> dict[
         refs = conn.execute(
             """
             SELECT *
-              FROM message_external_refs
+             FROM message_external_refs
              WHERE message_id=?
              ORDER BY source_id, external_kind, external_key
+             LIMIT ?
             """,
-            (clean_id,),
+            (clean_id, MAX_PROJECTED_MESSAGE_DETAIL_ROWS),
         ).fetchall()
         artifacts = conn.execute(
             """
             SELECT *
-              FROM message_artifacts
+             FROM message_artifacts
              WHERE message_id=?
              ORDER BY artifact_type, q_id, block_id, path
+             LIMIT ?
             """,
-            (clean_id,),
+            (clean_id, MAX_PROJECTED_MESSAGE_DETAIL_ROWS),
         ).fetchall()
         return {"message": message, "refs": list(refs), "artifacts": list(artifacts)}
+    except sqlite3.Error:
+        return {"message": None, "refs": [], "artifacts": []}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def load_projected_external_refs_for_messages(
     db_path: str | Path,
     message_ids: Sequence[str],
 ) -> dict[str, list[sqlite3.Row]]:
-    clean_ids = [str(value or "").strip() for value in message_ids if str(value or "").strip()]
+    clean_ids = list(dict.fromkeys(
+        str(value or "").strip() for value in message_ids if str(value or "").strip()
+    ))[:MAX_PROJECTED_MESSAGE_DETAIL_ROWS]
     if not clean_ids:
         return {}
     out: dict[str, list[sqlite3.Row]] = {message_id: [] for message_id in clean_ids}
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    conn: sqlite3.Connection | None = None
     try:
-        ensure_message_projection_schema(conn)
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
         for start in range(0, len(clean_ids), 250):
             chunk = clean_ids[start : start + 250]
             placeholders = ",".join("?" for _ in chunk)
@@ -951,8 +1556,11 @@ def load_projected_external_refs_for_messages(
             for row in rows:
                 out.setdefault(str(row["message_id"] or ""), []).append(row)
         return out
+    except sqlite3.Error:
+        return out
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]) -> int:
@@ -977,6 +1585,15 @@ def mark_projected_messages_read(db_path: str | Path, message_ids: Sequence[str]
                     (stamp, message_id),
                 )
                 _mark_source_refs_read(conn, message_id, stamp)
+                if cur.rowcount:
+                    from freqinout.core.ops_focus import index_message_for_ops_focus
+
+                    refreshed = conn.execute(
+                        "SELECT * FROM message_projection WHERE message_id=?",
+                        (message_id,),
+                    ).fetchone()
+                    if refreshed is not None:
+                        index_message_for_ops_focus(conn, refreshed)
                 count += int(cur.rowcount or 0)
             return count
     finally:
@@ -1043,9 +1660,9 @@ def get_message_projection_checkpoint(
     clean_source = str(source_id or "").strip()
     if not clean_source:
         return MessageProjectionCheckpoint(source_id="")
-    conn = connect_sqlite(db_path, row_factory=sqlite3.Row)
+    conn: sqlite3.Connection | None = None
     try:
-        ensure_message_projection_schema(conn)
+        conn = connect_sqlite_readonly(db_path, row_factory=sqlite3.Row)
         row = conn.execute(
             """
             SELECT source_id, last_external_key, last_event_ts, content_fingerprint, updated_utc
@@ -1063,8 +1680,14 @@ def get_message_projection_checkpoint(
             content_fingerprint=str(row["content_fingerprint"] or ""),
             updated_utc=str(row["updated_utc"] or ""),
         )
+    except sqlite3.Error:
+        # Schema lifecycle is startup-owned.  Treat an unavailable derived
+        # checkpoint as empty rather than reopening the database writable from
+        # a read path.
+        return MessageProjectionCheckpoint(source_id=clean_source)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def set_message_projection_checkpoint(
@@ -1073,7 +1696,6 @@ def set_message_projection_checkpoint(
     *,
     updated_utc: str | None = None,
 ) -> str:
-    ensure_message_projection_schema(conn)
     clean_source = str(checkpoint.source_id or "").strip()
     if not clean_source:
         return ""

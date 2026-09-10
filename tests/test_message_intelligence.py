@@ -56,6 +56,7 @@ from freqinout.core.message_row_presentation import (
     varac_message_row_presentation,
 )
 from freqinout.core.message_projection_store import ensure_message_projection_schema, list_projected_messages
+from freqinout.core.message_projection_maintenance import MessageProjectionMaintenanceService
 from freqinout.core.message_source_projectors import project_native_file_records
 from freqinout.core.observation_projection import Observation
 from freqinout.core.message_inbox_filters import (
@@ -3972,7 +3973,7 @@ def test_projection_primary_populate_does_not_start_legacy_rows_build_on_normal_
     tab._freeze_messages_table = False
     tab._deferred_refresh = True
     tab._projection_primary_enabled = True
-    tab._load_projected_messages_into_table = lambda: calls.append("projected") or True
+    tab._load_projected_messages_into_table = lambda **_kwargs: calls.append("projected") or True
     tab._start_rows_build = lambda **_kwargs: calls.append("legacy_build")
 
     MessageViewerTab._populate_messages_table(tab, force=False)
@@ -3981,7 +3982,7 @@ def test_projection_primary_populate_does_not_start_legacy_rows_build_on_normal_
     assert tab._deferred_refresh is False
 
 
-def test_projection_primary_forced_populate_can_rebuild_legacy_rows_for_repair(monkeypatch) -> None:
+def test_projection_primary_forced_populate_stays_on_bounded_projection_path(monkeypatch) -> None:
     from freqinout.gui.message_viewer_tab import MessageViewerTab
 
     calls: list[str] = []
@@ -3992,12 +3993,12 @@ def test_projection_primary_forced_populate_can_rebuild_legacy_rows_for_repair(m
     tab._freeze_messages_table = False
     tab._deferred_refresh = True
     tab._projection_primary_enabled = True
-    tab._load_projected_messages_into_table = lambda: calls.append("projected") or True
+    tab._load_projected_messages_into_table = lambda **_kwargs: calls.append("projected") or True
     tab._start_rows_build = lambda **kwargs: calls.append(f"legacy_build:{bool(kwargs.get('force'))}")
 
     MessageViewerTab._populate_messages_table(tab, force=True)
 
-    assert calls == ["projected", "legacy_build:True"]
+    assert calls == ["projected"]
     assert tab._deferred_refresh is False
 
 
@@ -4076,7 +4077,13 @@ def test_message_maintenance_loads_recent_delete_audit_rows(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    rows = MessageViewerTab._load_message_delete_audit_rows(tab, limit=1)
+    service = MessageProjectionMaintenanceService(db_path)
+    try:
+        rows = service.load_message_maintenance_rows_async(limit=1).result(timeout=2.0)[
+            "audit"
+        ]
+    finally:
+        service.close(wait=True)
 
     assert len(rows) == 1
     assert rows[0]["batch_id"] == "b"
@@ -4087,6 +4094,7 @@ def test_message_maintenance_loads_recent_delete_audit_rows(tmp_path) -> None:
 def test_message_maintenance_loads_hidden_commstat_rows(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     conn = sqlite3.connect(db_path)
+    ensure_message_delete_audit_table(conn)
     ensure_commstat_artifact_deletion_tables(conn)
     tombstone_commstat_artifact(
         conn,
@@ -4100,10 +4108,13 @@ def test_message_maintenance_loads_hidden_commstat_rows(tmp_path) -> None:
     )
     conn.commit()
     conn.close()
-    tab = MessageViewerTab.__new__(MessageViewerTab)
-    tab._db_path = lambda: db_path
-
-    rows = MessageViewerTab._load_hidden_commstat_rows(tab, limit=10)
+    service = MessageProjectionMaintenanceService(db_path)
+    try:
+        rows = service.load_message_maintenance_rows_async(limit=10).result(timeout=2.0)[
+            "hidden"
+        ]
+    finally:
+        service.close(wait=True)
 
     assert len(rows) == 1
     assert rows[0]["artifact_key"] == "commstat:one"
@@ -5796,7 +5807,7 @@ def test_remove_file_record_from_groups_uses_normalized_full_identity(tmp_path) 
     assert files["flamp"] == [other_origin]
 
 
-def test_file_scan_finished_unchanged_scan_does_not_rebuild_rows(tmp_path) -> None:
+def test_file_scan_finished_unchanged_scan_only_swaps_snapshot_state(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     msg_path = tmp_path / "K7ETC-20260803-FIRE.k2s"
     msg_path.write_text("message", encoding="utf-8")
@@ -5832,8 +5843,9 @@ def test_file_scan_finished_unchanged_scan_does_not_rebuild_rows(tmp_path) -> No
         False,
     )
 
-    assert calls == {"meta": 1, "save": 0, "senders": 0, "project": 0, "varac": 0, "populate": 0, "sig": 1}
+    assert calls == {"meta": 0, "save": 0, "senders": 0, "project": 0, "varac": 0, "populate": 0, "sig": 0}
     assert tab._refresh_files_inflight is False
+    assert tab.files == records
 
 
 def test_file_scan_cache_preserves_source_identity_across_restart(tmp_path) -> None:
@@ -5901,7 +5913,7 @@ def test_file_scan_cache_signature_changes_when_source_identity_changes(tmp_path
     assert MessageViewerTab._watch_dirs_signature(tab, left) != MessageViewerTab._watch_dirs_signature(tab, right)
 
 
-def test_file_scan_finished_changed_scan_rebuilds_rows_and_cache(tmp_path) -> None:
+def test_file_scan_finished_changed_scan_defers_model_refresh_without_heavy_hooks(tmp_path) -> None:
     db_path = tmp_path / "freqinout_nets.db"
     old_path = tmp_path / "old.k2s"
     new_path = tmp_path / "new.k2s"
@@ -5944,14 +5956,20 @@ def test_file_scan_finished_changed_scan_rebuilds_rows_and_cache(tmp_path) -> No
 
     MessageViewerTab._on_file_scan_finished(
         tab,
-        {"records": records, "dir_mtimes": {str(tmp_path): new_path.parent.stat().st_mtime}, "mode": "incremental"},
+        {
+            "records": records,
+            "dir_mtimes": {str(tmp_path): new_path.parent.stat().st_mtime},
+            "mode": "incremental",
+            "projection": {"state": "updated", "added_or_changed": 1, "removed": 1},
+        },
         False,
     )
 
-    assert calls == {"meta": 0, "save": 1, "senders": 1, "project": 1, "varac": 1, "populate": 1, "sig": 1}
+    assert calls == {"meta": 0, "save": 0, "senders": 0, "project": 0, "varac": 0, "populate": 0, "sig": 0}
     assert tab.files == records
-    assert tab._read_state_map == {"loaded": ("READ", 1.0, 0)}
-    assert tab._files_snapshot_fp == MessageViewerTab._files_records_fingerprint(records)
+    assert tab._read_state_map == {}
+    assert tab._files_snapshot_fp is None
+    assert tab._deferred_refresh is True
 
 
 def test_visible_message_check_skips_rebuild_when_sources_are_unchanged(tmp_path) -> None:
@@ -6027,17 +6045,15 @@ def test_visible_message_check_rebuilds_when_sources_change() -> None:
 def test_structured_projection_uses_checkpoints_even_when_refresh_is_forced() -> None:
     tab = MessageViewerTab.__new__(MessageViewerTab)
     calls: dict[str, object] = {}
-    tab._load_js8_from_local = lambda **_kwargs: None
-    tab._load_spotter_from_db = lambda **_kwargs: None
-    tab._load_sitrep_from_local = lambda **_kwargs: None
-    tab._load_commstat_from_local = lambda **_kwargs: None
-    tab._load_mesh_observations_from_store = lambda: None
-    tab._start_native_message_projection_write = lambda **kwargs: calls.setdefault("native_force", kwargs.get("force"))
-    tab._populate_messages_table = lambda **_kwargs: calls.setdefault("populate", True)
+    tab._projection_primary_enabled = True
+    tab._request_application_projection_catchup = (
+        lambda **kwargs: calls.setdefault("reason", kwargs.get("reason")) or True
+    )
+    tab._request_projected_message_query = lambda **kwargs: calls.setdefault("query", kwargs)
 
     MessageViewerTab._load_structured_message_projections(tab, force=True, rebuild=False)
 
-    assert calls == {"native_force": False}
+    assert calls == {"reason": "messages_structured_refresh"}
 
 
 def test_message_sources_fingerprint_includes_js8_and_spotter_source_identity() -> None:

@@ -14,6 +14,7 @@ from freqinout.core.operator_identity import (
     canonical_callsign,
     resolve_operator_identity,
 )
+from freqinout.core.perf_metrics import emit_span
 from freqinout.core.sqlite_utils import (
     connect_sqlite,
     connect_sqlite_readonly,
@@ -1047,6 +1048,7 @@ def evaluate_expect_request(
     db_path: Optional[Path] = None,
     write_audit: bool = True,
 ) -> ExpectEvaluationResult:
+    started = time.perf_counter()
     path = Path(db_path) if db_path is not None else default_expect_db_path()
     key = str(expect_key or "").strip().upper()
     call = _norm_call(requesting_callsign)
@@ -1220,6 +1222,18 @@ def evaluate_expect_request(
             conn.commit()
         finally:
             conn.close()
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    emit_span(
+        "messages.expect_fast_path",
+        elapsed_ms,
+        meta={
+            "decision": result.decision,
+            "group_addressed": bool(group),
+            "source_scoped": bool(radio_id or js8_id),
+            "audit": bool(write_audit),
+        },
+        level="warning" if elapsed_ms > 10.0 else "debug",
+    )
     return result
 
 

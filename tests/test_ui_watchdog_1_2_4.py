@@ -13,8 +13,8 @@ def test_ui_watchdog_writes_hang_dump(monkeypatch, tmp_path: Path) -> None:
     from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 
     watchdog = UiEventLoopWatchdog(stall_threshold_sec=2.0, report_cooldown_sec=5.0)
-    watchdog.set_diagnostic_provider(
-        lambda: {"endpoint_lane_count": 5, "endpoint_lanes": [{"state": "running"}]}
+    watchdog.publish_diagnostic_snapshot(
+        {"endpoint_lane_count": 5, "endpoint_lanes": [{"state": "running"}]}
     )
     watchdog._write_hang_dump(9.25)
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.sqlite_utils import connect_sqlite_readonly
 
 
 DISTRIBUTION_ROLES = frozenset({"HUB", "HUB-ALT", "ALT-HUB", "NCS", "ANCS"})
@@ -188,8 +189,7 @@ def load_operator_traffic_context(
     if path is not None and path.exists() and own_call:
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(str(path), timeout=1.0)
-            conn.row_factory = sqlite3.Row
+            conn = connect_sqlite_readonly(path, timeout=0.5, row_factory=sqlite3.Row)
             table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_checkins'"
             ).fetchone()
@@ -460,6 +460,168 @@ def build_traffic_group_volumes(
     return tuple(result)
 
 
+def load_projected_traffic_group_volumes(
+    db_path: str | Path | None,
+    *,
+    age_seconds: object = 24 * 60 * 60,
+    now_ts: float | None = None,
+    source_family: object = "",
+    group_filter: object = "",
+    operator_groups: Iterable[object] = (),
+) -> tuple[TrafficGroupVolume, ...]:
+    """Aggregate Ops traffic volumes from projection rows without loading them.
+
+    Traffic by Group is a dashboard aggregate, not an Inbox page.  It therefore
+    must retain accurate volume totals when a station has more than the 200
+    rows allowed in a presentation page.  SQLite groups only scalar metadata
+    (group, normalized source, read state, and timestamps); no message body or
+    retained message object is materialized in Python.  The connection is
+    strictly read-only and deliberately has no schema-repair fallback.
+    """
+    path = Path(db_path) if db_path else None
+    if path is None or not path.exists():
+        return ()
+    try:
+        age = max(0, int(age_seconds or 0))
+    except (TypeError, ValueError):
+        age = 0
+    now = float(now_ts if now_ts is not None else time.time())
+    source = _normalize_source(source_family)
+    wanted_group = _normalize_group(group_filter)
+    associated_groups = {
+        normalized
+        for normalized in (_normalize_group(value) for value in operator_groups)
+        if normalized
+    }
+    effective_ts = "COALESCE(NULLIF(received_ts, 0), event_ts, 0)"
+    source_sql = _projected_source_sql("source_family")
+    group_sql = _projected_traffic_group_sql("group_name", "to_call")
+    source_clause = ""
+    source_params: list[object] = []
+    if source:
+        source_clause = f" AND {source_sql}=?"
+        source_params.append(source)
+    window_clause = ""
+    window_params: list[object] = []
+    if age:
+        window_clause = f" AND {effective_ts} >= ?"
+        window_params.append(now - (age * 2))
+    group_clause = ""
+    group_params: list[object] = []
+    if wanted_group:
+        group_clause = "WHERE group_key=?"
+        group_params.append(wanted_group)
+    if age:
+        current_sql = f"CASE WHEN effective_ts >= {now - age!r} THEN 1 ELSE 0 END"
+        previous_sql = (
+            f"CASE WHEN effective_ts < {now - age!r} "
+            f"AND effective_ts >= {now - (age * 2)!r} THEN 1 ELSE 0 END"
+        )
+    else:
+        current_sql = "1"
+        previous_sql = "0"
+    sql = f"""
+        WITH projection_scope AS (
+            SELECT
+                {group_sql} AS group_key,
+                {source_sql} AS source_key,
+                {effective_ts} AS effective_ts,
+                CASE
+                    WHEN LOWER(COALESCE(read_state, '')) != ''
+                    THEN CASE WHEN LOWER(read_state) IN ('new', 'unread', 'alert') THEN 1 ELSE 0 END
+                    WHEN UPPER(COALESCE(status, '')) IN ('NEW', 'UNREAD', 'ALERT', 'YELLOW', 'RED') THEN 1
+                    ELSE 0
+                END AS is_unread
+              FROM message_projection
+             WHERE deleted=0
+               AND archived=0
+               AND inbox_visible=1
+               {source_clause}
+               {window_clause}
+        ),
+        volume_scope AS (
+            SELECT group_key, source_key, effective_ts, is_unread,
+                   {current_sql} AS is_current,
+                   {previous_sql} AS is_previous
+              FROM projection_scope
+        )
+        SELECT group_key,
+               source_key,
+               SUM(is_current) AS current_count,
+               SUM(is_previous) AS previous_count,
+               SUM(CASE WHEN is_current=1 AND is_unread=1 THEN 1 ELSE 0 END) AS unread_count,
+               MAX(CASE WHEN is_current=1 THEN effective_ts ELSE 0 END) AS latest_ts
+          FROM volume_scope
+          {group_clause}
+         GROUP BY group_key, source_key
+    """
+    rows: list[sqlite3.Row] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_sqlite_readonly(path, timeout=0.5, row_factory=sqlite3.Row)
+        rows = list(conn.execute(sql, tuple(source_params + window_params + group_params)).fetchall())
+    except sqlite3.Error:
+        return ()
+    finally:
+        if conn is not None:
+            conn.close()
+    buckets: dict[str, dict[str, object]] = {}
+    for row in rows:
+        group = _normalize_group(row["group_key"]) or "UNASSIGNED"
+        current = int(row["current_count"] or 0)
+        previous = int(row["previous_count"] or 0)
+        unread = int(row["unread_count"] or 0)
+        latest = float(row["latest_ts"] or 0.0)
+        bucket = buckets.setdefault(
+            group,
+            {"unread": 0, "current": 0, "previous": 0, "latest": 0.0, "sources": {}},
+        )
+        bucket["current"] = int(bucket["current"]) + current
+        bucket["previous"] = int(bucket["previous"]) + previous
+        bucket["unread"] = int(bucket["unread"]) + unread
+        bucket["latest"] = max(float(bucket["latest"]), latest)
+        if current:
+            sources = bucket["sources"]
+            if isinstance(sources, dict):
+                label = _source_label(row["source_key"])
+                sources[label] = int(sources.get(label, 0)) + current
+    result = [
+        TrafficGroupVolume(
+            group=group,
+            sources=tuple(
+                sorted(
+                    (
+                        (str(label), int(count))
+                        for label, count in (
+                            values["sources"].items()
+                            if isinstance(values.get("sources"), dict)
+                            else ()
+                        )
+                    ),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            is_operator_group=group in associated_groups,
+            unread_count=int(values["unread"]),
+            current_count=int(values["current"]),
+            previous_count=int(values["previous"]),
+            trend=_traffic_trend(int(values["current"]), int(values["previous"]), age),
+            latest_ts=float(values["latest"]),
+        )
+        for group, values in buckets.items()
+        if int(values["current"]) > 0
+    ]
+    result.sort(
+        key=lambda item: (
+            0 if item.is_operator_group else 1,
+            -_trend_rank(item.trend),
+            -item.current_count,
+            item.group,
+        )
+    )
+    return tuple(result)
+
+
 def message_matches_traffic_bucket(
     message: object,
     context: OperatorTrafficContext,
@@ -680,6 +842,52 @@ def _source_label(value: object) -> str:
         "varac": "VarAC",
         "bbs": "BBS",
     }.get(source, str(source or "Unknown").strip().title())
+
+
+def _projected_source_sql(column: str) -> str:
+    """Return the SQL equivalent of :func:`_normalize_source` for a fixed column."""
+    # This module owns the fixed column names passed here; do not accept caller
+    # supplied SQL identifiers.  Keeping aliases in the aggregate prevents a
+    # `js8` source row and a `js8call` source row from becoming two chart bars.
+    if column != "source_family":
+        raise ValueError("unsupported projected source column")
+    return """
+        CASE LOWER(COALESCE(source_family, ''))
+            WHEN 'nbems' THEN 'forms'
+            WHEN 'flmsg' THEN 'forms'
+            WHEN 'flamp' THEN 'forms'
+            WHEN 'js8' THEN 'js8call'
+            WHEN 'commstat_rf' THEN 'commstat'
+            WHEN 'fiospotter' THEN 'spotter'
+            WHEN 'js8spotter' THEN 'spotter'
+            WHEN 'mesh' THEN 'meshcore'
+            WHEN 'meshtastic' THEN 'meshcore'
+            WHEN 'local_mesh' THEN 'meshcore'
+            WHEN 'bbs_archive' THEN 'bbs'
+            ELSE LOWER(COALESCE(source_family, ''))
+        END
+    """
+
+
+def _projected_traffic_group_sql(group_column: str, target_column: str) -> str:
+    """Return the SQL equivalent of the compact Traffic by Group bucket key."""
+    if (group_column, target_column) != ("group_name", "to_call"):
+        raise ValueError("unsupported projected traffic group columns")
+    # `_looks_like_callsign` is deliberately conservative in Python.  SQLite
+    # GLOB has no regex digit token, so these three common prefix forms model
+    # the same 1–3-letter-plus-digit rule without inspecting message bodies.
+    return """
+        CASE
+            WHEN TRIM(COALESCE(group_name, '')) != ''
+            THEN LTRIM(UPPER(TRIM(group_name)), '@')
+            WHEN TRIM(COALESCE(to_call, '')) = '' THEN 'UNASSIGNED'
+            WHEN UPPER(TRIM(to_call)) GLOB '[A-Z][0-9][A-Z0-9]*'
+              OR UPPER(TRIM(to_call)) GLOB '[A-Z][A-Z0-9][0-9][A-Z0-9]*'
+              OR UPPER(TRIM(to_call)) GLOB '[A-Z][A-Z0-9][A-Z0-9][0-9][A-Z0-9]*'
+            THEN 'DIRECT'
+            ELSE LTRIM(UPPER(TRIM(to_call)), '@')
+        END
+    """
 
 
 def _bool_value(message: object, name: str) -> bool:

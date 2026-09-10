@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 from dataclasses import dataclass
@@ -52,10 +53,101 @@ class FileRecord:
     source_label: str = ""
 
     def display_name(self) -> str:
-        return self.path.name
+        # Keep scanner/UI presentation safe even when a filesystem name holds
+        # bytes which are not valid UTF-8.
+        return file_path_display(self.path.name)
 
     def info_line(self) -> str:
         return f"{self.display_name()} - {self.size} bytes"
+
+
+def file_path_key(path: str | os.PathLike[str]) -> str:
+    """Return a stable SQLite-safe identity for an arbitrary filesystem path.
+
+    POSIX filenames are byte sequences.  ``Path`` may therefore contain
+    surrogate escapes which SQLite's text binder rejects.  The opaque key is
+    deliberately based on ``fsencode`` rather than a lossy unicode conversion,
+    and can be reversed with :func:`file_path_from_key` when FIO needs to act on
+    the real file.
+    """
+
+    raw = os.fsencode(os.fspath(path))
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def file_path_from_key(key: str) -> Path:
+    """Reverse :func:`file_path_key` without decoding surrogate paths as text."""
+
+    text = str(key or "")
+    padding = "=" * (-len(text) % 4)
+    return Path(os.fsdecode(base64.urlsafe_b64decode((text + padding).encode("ascii"))))
+
+
+def file_path_display(path: str | os.PathLike[str]) -> str:
+    """Produce printable, database-safe path text without surrogate codepoints."""
+
+    raw = os.fsencode(os.fspath(path))
+    decoded = raw.decode("utf-8", "backslashreplace")
+    # Keep normal unicode readable, while making controls (including embedded
+    # newlines) explicit so a filename can never corrupt a table cell/log line.
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in decoded)
+
+
+@dataclass(frozen=True)
+class FileScanDelta:
+    """Immutable comparison of two scanner snapshots.
+
+    ``replaced`` retains the previous record for a changed path so downstream
+    projection can tombstone the old file-version ref without touching the
+    physical file.  The required public categories remain simple tuples.
+    """
+
+    added_or_changed: tuple[FileRecord, ...] = ()
+    removed: tuple[FileRecord, ...] = ()
+    unchanged: tuple[FileRecord, ...] = ()
+    replaced: tuple[tuple[FileRecord, FileRecord], ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.added_or_changed and not self.removed
+
+    @classmethod
+    def compare(
+        cls,
+        base_records: Dict[str, List[FileRecord]] | None,
+        current_records: Dict[str, List[FileRecord]] | None,
+    ) -> "FileScanDelta":
+        def index(records: Dict[str, List[FileRecord]] | None) -> dict[tuple[str, str], FileRecord]:
+            indexed: dict[tuple[str, str], FileRecord] = {}
+            for origin, values in (records or {}).items():
+                origin_key = str(origin or "").strip().lower()
+                for record in values or ():
+                    if not isinstance(record, FileRecord):
+                        continue
+                    record_origin = str(record.origin or origin_key).strip().lower()
+                    key = (record_origin, MessageFileScanner._norm_path(record.path))
+                    indexed[key] = record
+            return indexed
+
+        before, after = index(base_records), index(current_records)
+        added: list[FileRecord] = []
+        removed: list[FileRecord] = []
+        unchanged: list[FileRecord] = []
+        replaced: list[tuple[FileRecord, FileRecord]] = []
+        for key in sorted(after):
+            current = after[key]
+            prior = before.get(key)
+            if prior is None:
+                added.append(current)
+            elif int(prior.size or 0) != int(current.size or 0) or float(prior.mtime or 0.0) != float(current.mtime or 0.0):
+                added.append(current)
+                replaced.append((prior, current))
+            else:
+                unchanged.append(current)
+        for key in sorted(before):
+            if key not in after:
+                removed.append(before[key])
+        return cls(tuple(added), tuple(removed), tuple(unchanged), tuple(replaced))
 
 
 def is_fio_bbs_helper_file_name(name: object) -> bool:
@@ -460,16 +552,29 @@ class MessageFileScanner:
 
         return self._finalize_maps(records_map), dir_mtimes
 
-    def scan(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float], str]:
+    def scan_with_delta(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float], str, FileScanDelta]:
+        """Scan once and return the legacy result plus a snapshot delta.
+
+        The incremental walk intentionally does not stat files below unchanged
+        directories.  Delta comparison is against the retained snapshots, not
+        another filesystem pass, so callers can safely use it on the UI's scan
+        completion boundary without reintroducing a second file walk.
+        """
         have_base = bool(self._base_dir_mtimes) or any(
             bool(value) for value in (self._base_records or {}).values()
         )
         try:
             if self._force or not have_base:
                 records, dir_mtimes = self._run_full()
-                return records, dir_mtimes, "full"
+                return records, dir_mtimes, "full", FileScanDelta.compare(self._base_records, records)
             records, dir_mtimes = self._run_incremental()
-            return records, dir_mtimes, "incremental"
+            return records, dir_mtimes, "incremental", FileScanDelta.compare(self._base_records, records)
         except Exception:
             records, dir_mtimes = self._run_full()
-            return records, dir_mtimes, "fallback"
+            return records, dir_mtimes, "fallback", FileScanDelta.compare(self._base_records, records)
+
+    def scan(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float], str]:
+        """Legacy scan API retained for all existing callers."""
+
+        records, dir_mtimes, mode, _delta = self.scan_with_delta()
+        return records, dir_mtimes, mode

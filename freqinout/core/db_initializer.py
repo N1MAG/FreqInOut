@@ -15,6 +15,7 @@ from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.message_projection_store import ensure_message_projection_schema
+from freqinout.core.message_projection_queue import ensure_source_dirty_triggers
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.resource_catalog_migration import cutover_resource_catalog_to_canonical
@@ -2080,6 +2081,7 @@ def _ensure_nets_db() -> None:
         ensure_message_projection_schema(conn)
         _ensure_js8_links(conn)
         ensure_varac_local_tables(conn)
+        ensure_source_dirty_triggers(conn)
         _ensure_js8_expect_tables(conn)
         _ensure_controlfreq_support_indexes(conn)
         _repair_sitrep_commstat_groups(conn)

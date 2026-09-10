@@ -5,12 +5,12 @@ import argparse
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QLockFile
+from PySide6.QtCore import QEventLoop, QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
 from freqinout.core import db_initializer
 from freqinout.core.logger import log
-from freqinout.core.perf_metrics import emit_span
+from freqinout.core.perf_metrics import emit_span, shutdown_perf_metrics
 from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.settings_manager import SettingsManager
@@ -141,6 +141,11 @@ def main():
         if splash is not None:
             splash.finish(win)
         _emit_startup_stage("startup_complete", startup_started)
+        # Source listeners and projection catch-up deliberately begin only
+        # after the first usable shell has been painted.  Queuing the call
+        # also prevents post-shell work from extending startup metrics.
+        if hasattr(win, "start_post_shell_services"):
+            QTimer.singleShot(0, win.start_post_shell_services)
         log.info("FreqInOut started.")
     except Exception as e:
         log.exception("FreqInOut failed during startup: %s", e)
@@ -168,6 +173,9 @@ def main():
         lockfile.unlock()
     except Exception:
         pass
+    # Linux may use an intentional hard exit after Qt teardown; flush the
+    # buffered telemetry lane explicitly because ``os._exit`` skips atexit.
+    shutdown_perf_metrics(timeout=1.0)
     hard_exit = os.environ.get("FREQINOUT_HARD_EXIT")
     if hard_exit is None:
         hard_exit = "1" if sys.platform.startswith("linux") else "0"

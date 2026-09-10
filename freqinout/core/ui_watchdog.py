@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import faulthandler
+import itertools
 import json
 import os
 import platform
@@ -9,12 +10,79 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+
+
+_DIAGNOSTIC_SECRET_KEYS = {
+    "password",
+    "passphrase",
+    "token",
+    "secret",
+    "credential",
+    "credentials",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "cookie",
+}
+
+
+def cache_safe_diagnostic_snapshot(
+    value: object,
+    *,
+    max_items: int = 64,
+    max_depth: int = 3,
+    max_text: int = 240,
+) -> dict[str, object]:
+    """Copy a bounded diagnostic mapping while removing credential material.
+
+    This helper is intentionally pure: it performs no database, filesystem,
+    network, Qt, or process inspection.  It is suitable for snapshots
+    published by background services and later consumed by the UI watchdog.
+    """
+
+    seen: set[int] = set()
+
+    def clean(item: object, depth: int) -> object:
+        if depth > max_depth:
+            return "<depth limit>"
+        if item is None or isinstance(item, (bool, int, float)):
+            return item
+        if isinstance(item, str):
+            text = item.replace("\x00", "")
+            return text[:max(1, int(max_text))]
+        identity = id(item)
+        if identity in seen:
+            return "<cycle>"
+        seen.add(identity)
+        try:
+            if isinstance(item, Mapping):
+                output: dict[str, object] = {}
+                for raw_key, raw_value in itertools.islice(item.items(), max(1, int(max_items))):
+                    key = str(raw_key)[:80]
+                    key_norm = key.casefold().replace("-", "_")
+                    if any(secret in key_norm for secret in _DIAGNOSTIC_SECRET_KEYS):
+                        output[key] = "<redacted>"
+                    else:
+                        output[key] = clean(raw_value, depth + 1)
+                return output
+            if isinstance(item, (list, tuple, set, frozenset)):
+                return [
+                    clean(entry, depth + 1)
+                    for entry in itertools.islice(iter(item), max(1, int(max_items)))
+                ]
+            return str(item)[:max(1, int(max_text))]
+        finally:
+            seen.discard(identity)
+
+    cleaned = clean(value, 0)
+    return cleaned if isinstance(cleaned, dict) else {"value": cleaned}
 
 
 class UiEventLoopWatchdog(QObject):
@@ -46,18 +114,22 @@ class UiEventLoopWatchdog(QObject):
         self._running = False
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
-        self._diagnostic_provider: Optional[Callable[[], Mapping[str, object]]] = None
+        self._diagnostic_snapshot: Optional[dict[str, object]] = None
         self._timer = QTimer(self)
         self._timer.setInterval(self._heartbeat_interval_ms)
         self._timer.timeout.connect(self._beat)
 
-    def set_diagnostic_provider(
-        self,
-        provider: Optional[Callable[[], Mapping[str, object]]],
-    ) -> None:
-        """Register a thread-safe, cache-only diagnostic snapshot provider."""
+    def publish_diagnostic_snapshot(self, snapshot: Mapping[str, object] | None) -> None:
+        """Publish a pure cache snapshot for later watchdog consumption.
 
-        self._diagnostic_provider = provider
+        A producer should call this after it has gathered its own state.  The
+        watchdog thread then reads this bounded copy rather than invoking a
+        potentially expensive service method while writing a hang dump.
+        """
+
+        safe = cache_safe_diagnostic_snapshot(snapshot or {})
+        with self._lock:
+            self._diagnostic_snapshot = safe
 
     def start(self) -> None:
         if self._running:
@@ -96,6 +168,16 @@ class UiEventLoopWatchdog(QObject):
         with self._lock:
             self._last_heartbeat = now
 
+    def _diagnostics_for_dump(self) -> dict[str, object]:
+        with self._lock:
+            cached = dict(self._diagnostic_snapshot or {})
+        if cached:
+            return cache_safe_diagnostic_snapshot(cached)
+        # Hang capture must remain cache-only even before the first publisher
+        # tick. Calling a service provider here could reproduce the lock or
+        # endpoint wait that the watchdog is trying to diagnose.
+        return {"state": "not_published"}
+
     def _monitor_loop(self) -> None:
         while self._running:
             if self._stop_event.wait(self._check_interval_sec):
@@ -126,15 +208,10 @@ class UiEventLoopWatchdog(QObject):
                 handle.write(f"Python: {sys.version.replace(chr(10), ' ')}\n")
                 handle.write(f"Platform: {platform.platform()}\n")
                 handle.write(f"UI heartbeat stale for: {stale_for:.3f} seconds\n")
-                provider = self._diagnostic_provider
-                if callable(provider):
-                    try:
-                        diagnostics = dict(provider() or {})
-                        handle.write("\nScheduler diagnostics:\n")
-                        handle.write(json.dumps(diagnostics, indent=2, sort_keys=True, default=str))
-                        handle.write("\n")
-                    except Exception as exc:
-                        handle.write(f"\nScheduler diagnostics unavailable: {type(exc).__name__}\n")
+                diagnostics = self._diagnostics_for_dump()
+                handle.write("\nScheduler diagnostics:\n")
+                handle.write(json.dumps(diagnostics, indent=2, sort_keys=True, default=str)[:24000])
+                handle.write("\n")
                 handle.write("\nThread dump:\n")
                 handle.flush()
                 faulthandler.dump_traceback(file=handle, all_threads=True)

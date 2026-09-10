@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QIcon, QFontMetrics, QAction, QShortcut, QKeySequence
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QMetaObject, QSize, Qt, QThread, QTimer, QUrl
+from PySide6.QtCore import QMetaObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from pathlib import Path
 
 from freqinout.core.logger import log
@@ -65,6 +65,7 @@ from freqinout.core.condition_sop_audit import (
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
+from freqinout.core.message_projection_maintenance import MessageProjectionMaintenanceService
 from freqinout.core.dependency_status_service import get_dependency_status_service, shutdown_dependency_status_service
 from freqinout.core.station_readiness import (
     build_station_readiness_report,
@@ -221,6 +222,9 @@ class MainWindow(QMainWindow):
       - Help
     """
 
+    _message_projection_cycle_finished = Signal(object)
+    _message_projection_progressed = Signal(object)
+
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
         self._startup_status_callback = startup_status
@@ -231,6 +235,17 @@ class MainWindow(QMainWindow):
         self._shutdown_wait_last_log = 0.0
         self._shutdown_deadline_reported = False
         self._shutdown_registry = WorkerShutdownRegistry()
+        self._post_shell_services_started = False
+        self._background_ingest_start_pending = False
+        self._message_projection_future = None
+        self._message_projection_catchup_pending = False
+        self._message_projection_refresh_sequence = 0
+        self._message_projection_cycle_finished.connect(
+            self._on_message_projection_cycle_finished
+        )
+        self._message_projection_progressed.connect(
+            self._on_message_projection_progressed
+        )
         self._app_active = True
         self._ui_resume_pending = False
         self._ui_refresh_dirty = False
@@ -277,6 +292,12 @@ class MainWindow(QMainWindow):
         self.station_runtime_manager.sync_with_store()
         self._runtime_profile_signature: tuple[object, ...] | None = None
         self._active_runtime_profile = self._load_runtime_active_device_profile()
+        try:
+            self._station_command_profile_cache = list(
+                self.multi_radio_store.list_runtime_active_device_profiles()
+            )
+        except Exception:
+            self._station_command_profile_cache = []
         self._active_runtime_policy = self._primary_runtime_policy()
         self._suppressed_screen_labels: set[str] = set()
         self._launch_startup_suppressed = False
@@ -1035,13 +1056,6 @@ class MainWindow(QMainWindow):
             pass
         self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
-        try:
-            if hasattr(self._ui_watchdog, "set_diagnostic_provider"):
-                self._ui_watchdog.set_diagnostic_provider(
-                    self.scheduler.get_multi_endpoint_diagnostics
-                )
-        except Exception as exc:
-            log.debug("MainWindow: scheduler diagnostics wiring failed: %s", exc)
         self.background_ingest = _construct_startup_component(
             "background_ingest",
             lambda: BackgroundIngestController(
@@ -1060,6 +1074,29 @@ class MainWindow(QMainWindow):
                 ),
             ),
         )
+        self.message_projection_maintenance = _construct_startup_component(
+            "message_projection_maintenance",
+            lambda: MessageProjectionMaintenanceService(
+                get_config_dir() / "config" / "freqinout_nets.db"
+            ),
+        )
+        self.message_projection_maintenance.set_progress_callback(
+            self._message_projection_progressed.emit
+        )
+        self._shutdown_registry.register(
+            "message_projection_maintenance",
+            request_stop=getattr(
+                self.message_projection_maintenance, "close", lambda: None
+            ),
+            is_stopped=getattr(
+                self.message_projection_maintenance, "is_stopped", lambda: True
+            ),
+        )
+        self._message_projection_reconcile_timer = QTimer(self)
+        self._message_projection_reconcile_timer.setSingleShot(True)
+        self._message_projection_reconcile_timer.timeout.connect(
+            self._on_message_projection_reconcile_timer
+        )
         try:
             self.background_ingest.condition_sop_invocation_audited.connect(
                 lambda _result=None: self.notify_condition_levels_changed()
@@ -1067,10 +1104,13 @@ class MainWindow(QMainWindow):
             self.background_ingest.condition_sop_invocation_applied.connect(
                 lambda _result=None: self.notify_condition_levels_changed()
             )
+            self.background_ingest.job_finished.connect(
+                self._on_background_ingest_projection_work_ready
+            )
         except Exception:
             pass
         if self._runtime_background_ingest_enabled(self._active_runtime_profile, startup_policy):
-            self.background_ingest.start()
+            self._background_ingest_start_pending = True
         else:
             log.info("MainWindow: background ingest disabled for current runtime policy")
         try:
@@ -1148,7 +1188,9 @@ class MainWindow(QMainWindow):
                 log.debug("MainWindow signal wiring failed: %s: %s", label, e)
 
         self.settings_tab.settings_saved.connect(self._on_settings_saved_for_lazy_tabs)
-        _connect_or_log("settings_saved -> sop_tab", self.settings_tab.settings_saved, self.sop_tab.on_settings_saved)
+        # SOP reconstruction is intentionally lazy. The coalesced Settings
+        # callback refreshes it only while SOP is the active surface and marks
+        # an inactive tab dirty for its next activation.
         try:
             if hasattr(self.settings_tab, "local_net_profiles_changed"):
                 self.settings_tab.local_net_profiles_changed.connect(self.sop_tab.on_local_net_profiles_updated)
@@ -5984,6 +6026,19 @@ class MainWindow(QMainWindow):
             self._refresh_map_prop_target_controls()
         except Exception:
             pass
+        sop_tab = getattr(self, "sop_tab", None)
+        try:
+            active_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        except Exception:
+            active_widget = None
+        if sop_tab is not None and active_widget is sop_tab:
+            self._sop_settings_refresh_pending = False
+            try:
+                self._run_timed_ui_refresh("settings_saved.sop", sop_tab.on_settings_saved)
+            except Exception:
+                pass
+        elif sop_tab is not None:
+            self._sop_settings_refresh_pending = True
 
     def _plan_context_consumer_widgets(self) -> tuple[object | None, ...]:
         return (
@@ -6118,6 +6173,151 @@ class MainWindow(QMainWindow):
             "swap_source_name": str(data.get("swap_source_name", "") or "").strip(),
             "swap_target_name": str(data.get("swap_target_name", "") or "").strip(),
         }
+
+    def start_post_shell_services(self) -> None:
+        """Start non-critical listeners only after the usable shell is painted.
+
+        This lifecycle boundary is intentionally public so ``main`` can queue
+        it after recording the first-shell metric.  It is idempotent because
+        tests, embedded launchers, and runtime-profile changes may call it more
+        than once.
+        """
+
+        if self._shutting_down or self._post_shell_services_started:
+            return
+        self._post_shell_services_started = True
+        background = getattr(self, "background_ingest", None)
+        if self._background_ingest_start_pending and background is not None:
+            try:
+                if not hasattr(background, "is_running") or not background.is_running():
+                    background.start()
+                self._background_ingest_start_pending = False
+                log.info("MainWindow: post-shell background ingest started")
+            except Exception as exc:
+                # Leave the request pending so a later explicit lifecycle call
+                # can retry without blocking or failing application startup.
+                log.warning("MainWindow: post-shell background ingest start failed: %s", exc)
+        self.request_message_projection_catchup(reason="post_shell")
+        self._schedule_message_projection_reconcile()
+        self._publish_watchdog_diagnostic_snapshot()
+
+    def request_message_projection_catchup(self, *, reason: str = "source_change"):
+        """Coalesce message projection work onto the application-owned lane."""
+
+        if self._shutting_down:
+            return None
+        service = getattr(self, "message_projection_maintenance", None)
+        if service is None:
+            return None
+        try:
+            future = service.start_post_shell_catchup()
+        except Exception as exc:
+            log.debug("MainWindow: projection catch-up request failed (%s): %s", reason, exc)
+            return None
+        if future is self._message_projection_future and not future.done():
+            self._message_projection_catchup_pending = True
+        if future is not self._message_projection_future:
+            self._message_projection_future = future
+            self._message_projection_catchup_pending = False
+
+            def _done(done_future, request_reason=str(reason or "source_change")) -> None:
+                try:
+                    result = done_future.result()
+                    payload = {
+                        "reason": request_reason,
+                        "state": str(getattr(result, "state", "complete") or "complete"),
+                        "committed": int(getattr(result, "committed", 0) or 0),
+                        "deleted": int(getattr(result, "deleted", 0) or 0),
+                        "deferred": int(getattr(result, "deferred", 0) or 0),
+                    }
+                except Exception as exc:
+                    payload = {
+                        "reason": request_reason,
+                        "state": "failed",
+                        "error": type(exc).__name__,
+                    }
+                self._message_projection_cycle_finished.emit(payload)
+
+            future.add_done_callback(_done)
+        return future
+
+    def _on_background_ingest_projection_work_ready(self, job_name: str) -> None:
+        name = str(job_name or "").strip().lower()
+        if name in {"messages", "varac", "sitreps", "dynamic_flamp_projection"}:
+            self.request_message_projection_catchup(reason=f"ingest:{name}")
+
+    def _schedule_message_projection_reconcile(self) -> None:
+        timer = getattr(self, "_message_projection_reconcile_timer", None)
+        if timer is None or self._shutting_down or not self._post_shell_services_started:
+            return
+        # Low-cost safety reconciliation runs at a deterministic process-local
+        # jitter in the specified 30-60 second window, avoiding cadence lockstep
+        # with Mesh, BBS, and scheduler timers.
+        self._message_projection_refresh_sequence += 1
+        interval_ms = 30_000 + (
+            (int(time.monotonic() * 1000.0) + self._message_projection_refresh_sequence * 7919)
+            % 30_001
+        )
+        timer.start(interval_ms)
+
+    def _on_message_projection_reconcile_timer(self) -> None:
+        self.request_message_projection_catchup(reason="idle_reconcile")
+        self._schedule_message_projection_reconcile()
+
+    def _on_message_projection_cycle_finished(self, payload: object) -> None:
+        if self._shutting_down:
+            return
+        data = payload if isinstance(payload, Mapping) else {}
+        self._publish_watchdog_diagnostic_snapshot()
+        changed = int(data.get("committed", 0) or 0) + int(data.get("deleted", 0) or 0)
+        viewer = getattr(self, "message_viewer_tab", None)
+        if changed and viewer is not None and hasattr(viewer, "_request_projected_message_query"):
+            try:
+                viewer._request_projected_message_query(force=False, delay_ms=0)
+            except Exception as exc:
+                log.debug("MainWindow: message projection UI invalidation failed: %s", exc)
+        if self._message_projection_catchup_pending:
+            self._message_projection_catchup_pending = False
+            self.request_message_projection_catchup(reason="coalesced_followup")
+
+    def _on_message_projection_progressed(self, progress: object) -> None:
+        """Coalesce committed batch progress into bounded visible Inbox reads."""
+
+        if self._shutting_down:
+            return
+        changed = int(getattr(progress, "committed", 0) or 0) + int(
+            getattr(progress, "deleted", 0) or 0
+        )
+        viewer = getattr(self, "message_viewer_tab", None)
+        if changed and viewer is not None and hasattr(
+            viewer, "_request_projected_message_query"
+        ):
+            viewer._request_projected_message_query(
+                force=False,
+                delay_ms=500,
+            )
+
+    def _publish_watchdog_diagnostic_snapshot(self) -> None:
+        watchdog = getattr(self, "_ui_watchdog", None)
+        if watchdog is None or not hasattr(watchdog, "publish_diagnostic_snapshot"):
+            return
+        scheduler_snapshot: Mapping[str, object] = {}
+        projection_snapshot: Mapping[str, object] = {}
+        try:
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "get_multi_endpoint_diagnostics"):
+                scheduler_snapshot = scheduler.get_multi_endpoint_diagnostics()
+        except Exception:
+            scheduler_snapshot = {"state": "unavailable"}
+        try:
+            service = getattr(self, "message_projection_maintenance", None)
+            if service is not None and hasattr(service, "diagnostic_snapshot"):
+                projection_snapshot = service.diagnostic_snapshot()
+        except Exception:
+            projection_snapshot = {"state": "unavailable"}
+        watchdog.publish_diagnostic_snapshot(
+            {"scheduler": scheduler_snapshot, "message_projection": projection_snapshot}
+        )
 
     @staticmethod
     def _suppressed_screens_for_runtime(profile: object, policy: object) -> set[str]:
@@ -6289,6 +6489,7 @@ class MainWindow(QMainWindow):
             pass
         self._lazy_prewarm_labels = self._runtime_lazy_prewarm_labels(self._suppressed_screen_labels)
         if not self._runtime_background_ingest_enabled(profile, policy):
+            self._background_ingest_start_pending = False
             if hasattr(self, "background_ingest") and self.background_ingest is not None:
                 try:
                     self.background_ingest.stop()
@@ -6297,7 +6498,9 @@ class MainWindow(QMainWindow):
         else:
             if hasattr(self, "background_ingest") and self.background_ingest is not None:
                 try:
-                    if hasattr(self.background_ingest, "is_running"):
+                    if not self._post_shell_services_started:
+                        self._background_ingest_start_pending = True
+                    elif hasattr(self.background_ingest, "is_running"):
                         if not self.background_ingest.is_running():
                             self.background_ingest.start()
                     else:
@@ -8214,12 +8417,23 @@ class MainWindow(QMainWindow):
         backend = str(MainWindow._station_command_value(profile, "control_backend", "manual") or "manual").strip().lower()
         return backend in SUPPORTED_RUNTIME_CONTROL_BACKENDS
 
-    def _station_command_configured_profiles(self) -> list[dict]:
-        try:
-            profiles = list(self.multi_radio_store.list_runtime_active_device_profiles())
-        except Exception:
-            profiles = []
-        return [dict(profile) for profile in profiles if self._station_command_is_controllable_profile(profile)]
+    def _station_command_configured_profiles(self) -> list[object]:
+        # This method is called from the command-bar repaint path. Never open
+        # SQLite here: the runtime manager owns endpoint refresh and publishes
+        # immutable snapshots, while the last rendered choices cover its
+        # brief startup/restart gaps.
+        profiles = list(getattr(self, "_station_command_profile_cache", []) or [])
+        if not profiles:
+            profiles = list(getattr(self, "_station_command_last_choices", []) or [])
+        if not profiles:
+            active = getattr(self, "_active_runtime_profile", None)
+            if isinstance(active, Mapping) and active:
+                profiles = [dict(active)]
+        return [
+            dict(profile) if isinstance(profile, Mapping) else profile
+            for profile in profiles
+            if self._station_command_is_controllable_profile(profile)
+        ]
 
     def _station_command_selected_snapshot(self, choices: list[object]) -> object | None:
         selected_id = getattr(self, "_station_command_selected_profile_id", None)
@@ -11209,6 +11423,12 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_settings_saved(self) -> None:
         self._rebuild_runtime_clients()
+        try:
+            self._station_command_profile_cache = list(
+                self.multi_radio_store.list_runtime_active_device_profiles()
+            )
+        except Exception:
+            pass
         self._apply_runtime_profile_state()
         self._refresh_plan_context_labels("runtime_settings_saved")
         try:
@@ -11224,6 +11444,12 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_device_profiles_changed(self) -> None:
         self._rebuild_runtime_clients()
+        try:
+            self._station_command_profile_cache = list(
+                self.multi_radio_store.list_runtime_active_device_profiles()
+            )
+        except Exception:
+            pass
         self._apply_runtime_profile_state()
         self._refresh_plan_context_labels("runtime_device_profiles_changed")
         try:
@@ -12040,6 +12266,15 @@ class MainWindow(QMainWindow):
                         widget_active.open_section(self._resources_nav_context)
                     if hasattr(widget_active, "set_tab_active"):
                         widget_active.set_tab_active(True)
+                    if label == "SOP" and bool(getattr(self, "_sop_settings_refresh_pending", False)):
+                        self._sop_settings_refresh_pending = False
+                        if hasattr(widget_active, "on_settings_saved"):
+                            QTimer.singleShot(
+                                0,
+                                lambda target=widget_active: self._run_timed_ui_refresh(
+                                    "settings_saved.sop.activate", target.on_settings_saved
+                                ),
+                            )
                 except Exception:
                     pass
                 self._update_map_filters_visibility(index)

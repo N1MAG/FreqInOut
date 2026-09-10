@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -17,8 +18,8 @@ from freqinout.core.js8_message_policy import (
     unique_js8_analysis_text,
 )
 from freqinout.core.message_intelligence import analyze_spotter_text
-from freqinout.core.message_file_metadata import cached_message_file_row_summary, ensure_message_file_metadata_table
-from freqinout.core.message_file_scanner import FileRecord
+from freqinout.core.message_file_metadata import cached_message_file_row_summary
+from freqinout.core.message_file_scanner import FileRecord, file_path_display, file_path_key
 from freqinout.core.message_projection_store import (
     ExternalMessageRef,
     MessageArtifactRecord,
@@ -34,12 +35,40 @@ from freqinout.core.message_projection_store import (
     upsert_message_projection,
     upsert_message_source,
 )
+from freqinout.core.message_projection_writer import ProjectionBundle
 from freqinout.core.sqlite_utils import connect_sqlite, table_exists
 
 PROJECTOR_VERSION = 3
 FILE_PROJECTOR_VERSION = 4
 DEFAULT_SOURCE_NATIVE_LIMIT = 5000
 _PROJECTION_WRITE_LOCK = threading.Lock()
+
+ProjectionBundleSink = Callable[[ProjectionBundle], None]
+
+
+def _emit_projection_bundle(
+    conn: sqlite3.Connection,
+    source: MessageSourceRecord,
+    message: MessageProjectionRecord,
+    ref: ExternalMessageRef,
+    *,
+    artifacts: Sequence[MessageArtifactRecord] = (),
+    bundle_sink: ProjectionBundleSink | None = None,
+) -> None:
+    """Send the existing exact projector output to a sink or legacy DML path."""
+
+    if bundle_sink is not None:
+        bundle_sink(ProjectionBundle(source, message, (ref,), tuple(artifacts)))
+        return
+    _upsert_bundle(conn, source, message, ref, artifacts=artifacts)
+
+
+def _targeted_keys(external_keys: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(_text(key) for key in external_keys or () if _text(key)))[:100]
+
+
+def _targeted_source_ids(source_ids: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(_text(value) for value in source_ids or () if _text(value)))[:100]
 
 
 def _file_metadata_key(rec: FileRecord) -> tuple[str, str, float, int]:
@@ -57,9 +86,9 @@ def _load_file_projection_metadata(
 ) -> dict[tuple[str, str, float, int], dict[str, object]]:
     if not records:
         return {}
-    try:
-        ensure_message_file_metadata_table(conn)
-    except Exception:
+    # Schema ownership belongs to startup.  A projection read must never turn
+    # a missing optional metadata cache into runtime DDL.
+    if not table_exists(conn, "message_file_metadata"):
         return {}
     keys = {_file_metadata_key(rec) for rec in records}
     if not keys:
@@ -123,6 +152,151 @@ def _load_file_read_states(
     return out
 
 
+def _file_projection_bundle(
+    rec: FileRecord,
+    *,
+    metadata: Mapping[str, object] | None = None,
+    read_status: str = "",
+) -> ProjectionBundle:
+    """Build the exact file-scanner projection unit without SQLite writes.
+
+    This is the single semantics seam used by both the compatibility deep
+    rebuild and the MIP-3 incremental file pipeline.  Filesystem paths are
+    converted to printable escaped text at this boundary, before any value can
+    reach SQLite through the writer.
+    """
+
+    origin = _text(rec.origin).lower() or "file"
+    path_text = file_path_display(rec.path)
+    parent_text = file_path_display(rec.path.parent)
+    safe_path = Path(path_text)
+    meta = cached_message_file_row_summary(
+        rec,
+        metadata,
+        fallback_origin=origin,
+        fallback_title=file_path_display(rec.path.name),
+        title_limit=240,
+    )
+    received_ts = float(rec.mtime or 0.0)
+    event_ts = float(getattr(meta, "report_ts", 0.0) or received_ts)
+    status = (read_status or _text(getattr(meta, "status", "")) or "NEW").upper()
+    title = _text(getattr(meta, "title", "")) or file_path_display(rec.path.name)
+    message_type = _text(getattr(meta, "msg_type", "")) or _file_message_type(origin, safe_path)
+    display_type = _text(getattr(meta, "display_type", "")) or _file_source_base_label(origin)
+    from_call = _upper(getattr(meta, "from_call", ""))
+    to_call = _upper(getattr(meta, "to_call", ""))
+    search_text = _text(getattr(meta, "search_text", "")) or _search_text(origin, title, path_text)
+    topics = tuple(getattr(meta, "topics", ()) or ()) or _topics(title, origin)
+    source_id = _text(rec.source_id) or f"{origin}:{file_path_key(rec.path.parent)}"
+    source_label = _text(rec.source_label) or _source_label(_file_source_base_label(origin), "")
+    external_kind = f"{origin}_file"
+    # The display spelling is intentionally not an identity: two raw byte
+    # paths can render similarly after escaping.  Use the reversible opaque
+    # fsencode key for every persisted file-version identity.
+    external_key = f"{file_path_key(rec.path)}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
+    message_id = stable_message_id(source_id, external_kind, external_key)
+    source = MessageSourceRecord(
+        source_id=source_id,
+        source_family=origin,
+        source_label=source_label,
+        endpoint_or_path=parent_text,
+        capabilities={"read": True, "delete": True, "native_open": True},
+        provenance={"source": "file_scan", "origin": origin},
+        last_seen_utc=_utc_from_ts(received_ts),
+        last_ingested_utc=_utc_now(),
+    )
+    projection = MessageProjectionRecord(
+        message_id=message_id,
+        canonical_key=f"{source_id}:{external_kind}:{external_key}",
+        content_hash=content_hash(FILE_PROJECTOR_VERSION, "file", external_key, status, event_ts, received_ts),
+        primary_source_id=source_id,
+        source_family=origin,
+        source_label=source.source_label,
+        message_type=message_type,
+        display_type=display_type,
+        status=status,
+        severity=_severity_from_status(status),
+        read_state=_read_state(status),
+        from_call=from_call,
+        to_call=to_call,
+        group_name=_group(to_call),
+        event_ts=event_ts,
+        received_ts=received_ts,
+        event_utc=_utc_from_ts(event_ts),
+        received_utc=_utc_from_ts(received_ts),
+        subject=title,
+        summary=title,
+        body_preview=title,
+        topics=topics,
+        entities={
+            "origin": origin,
+            "path": path_text,
+            "extension": safe_path.suffix.lower(),
+            "q_id": _q_id_from_path(safe_path),
+            "age_ts_source": "received",
+            "report_ts": event_ts if event_ts != received_ts else 0.0,
+        },
+        retention_class="artifact",
+        search_text=search_text,
+        projection_version=FILE_PROJECTOR_VERSION,
+    )
+    artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(origin, f"{origin}_file")
+    q_id = _q_id_from_path(safe_path)
+    return ProjectionBundle(
+        source,
+        projection,
+        (
+            ExternalMessageRef(
+                message_id=message_id,
+                source_id=source_id,
+                external_kind=external_kind,
+                external_key=external_key,
+                external_path=path_text,
+                external_mtime=float(rec.mtime or 0.0),
+                external_size=int(rec.size or 0),
+                delete_capability="file_delete",
+                read_capability="fio_read_state",
+                metadata={"origin": origin, "source": "file_scan"},
+            ),
+        ),
+        (
+            MessageArtifactRecord(
+                artifact_id=stable_message_id(message_id, artifact_type, path_text, rec.mtime, rec.size),
+                message_id=message_id,
+                artifact_type=artifact_type,
+                source_id=source_id,
+                external_key=external_key,
+                path=path_text,
+                content_hash=content_hash(path_text, rec.mtime, rec.size),
+                q_id=q_id,
+                block_id=_block_id_from_path(safe_path),
+                transfer_id=q_id,
+                transfer_state="seen" if q_id else "",
+                metadata={"mtime": float(rec.mtime or 0.0), "size": int(rec.size or 0)},
+            ),
+        ),
+    )
+
+
+def prepare_file_projection_bundles(
+    conn: sqlite3.Connection,
+    records: Sequence[FileRecord],
+) -> tuple[ProjectionBundle, ...]:
+    """Prepare file bundles only; metadata reads are bounded to supplied files."""
+
+    items = tuple(record for record in records if isinstance(record, FileRecord))[:100]
+    metadata = _load_file_projection_metadata(conn, items)
+    read_states = _load_file_read_states(conn, items)
+    return tuple(
+        _file_projection_bundle(
+            record,
+            metadata=metadata.get(_file_metadata_key(record)),
+            read_status=read_states.get(_file_metadata_key(record), ""),
+        )
+        for record in sorted(items, key=lambda item: float(item.mtime or 0.0), reverse=True)
+    )
+
+
 def project_native_message_sources(
     db_path: str | Path,
     *,
@@ -172,7 +346,10 @@ def project_native_file_records(
                 continue
             flattened.append(
                 FileRecord(
-                    path=Path(rec.path),
+                    # Projection persistence must never receive a surrogate
+                    # filesystem path.  Normal paths are unchanged; invalid
+                    # UTF-8 names become an escaped printable representation.
+                    path=Path(file_path_display(rec.path)),
                     origin=origin_norm or _text(rec.origin).lower() or "file",
                     size=int(rec.size or 0),
                     mtime=float(rec.mtime or 0.0),
@@ -233,123 +410,17 @@ def project_native_file_records(
             projected = 0
             with conn:
                 for rec in sorted(flattened, key=lambda item: float(item.mtime or 0.0), reverse=True):
-                    origin = _text(rec.origin).lower() or "file"
-                    meta = cached_message_file_row_summary(
+                    bundle = _file_projection_bundle(
                         rec,
-                        file_metadata.get(_file_metadata_key(rec)),
-                        fallback_origin=origin,
-                        fallback_title=rec.path.name,
-                        title_limit=240,
+                        metadata=file_metadata.get(_file_metadata_key(rec)),
+                        read_status=file_read_states.get(_file_metadata_key(rec), ""),
                     )
-                    received_ts = float(rec.mtime or 0.0)
-                    event_ts = float(getattr(meta, "report_ts", 0.0) or received_ts)
-                    status = (
-                        file_read_states.get(_file_metadata_key(rec), "")
-                        or _text(getattr(meta, "status", ""))
-                        or "NEW"
-                    ).upper()
-                    title = _text(getattr(meta, "title", "")) or rec.path.name
-                    message_type = _text(getattr(meta, "msg_type", "")) or _file_message_type(origin, rec.path)
-                    display_type = _text(getattr(meta, "display_type", "")) or _file_source_base_label(origin)
-                    from_call = _upper(getattr(meta, "from_call", ""))
-                    to_call = _upper(getattr(meta, "to_call", ""))
-                    search_text = _text(getattr(meta, "search_text", "")) or _search_text(origin, title, rec.path)
-                    topics = tuple(getattr(meta, "topics", ()) or ()) or _topics(title, origin)
-                    source_id = _text(rec.source_id) or f"{origin}:{rec.path.parent}"
-                    source_label = _text(rec.source_label) or _source_label(_file_source_base_label(origin), "")
-                    external_kind = f"{origin}_file"
-                    external_key = f"{rec.path}:{float(rec.mtime or 0.0):.6f}:{int(rec.size or 0)}"
-                    message_id = stable_message_id(source_id, external_kind, external_key)
-                    body = title
-                    source = MessageSourceRecord(
-                        source_id=source_id,
-                        source_family=origin,
-                        source_label=source_label,
-                        endpoint_or_path=str(rec.path.parent),
-                        capabilities={"read": True, "delete": True, "native_open": True},
-                        provenance={"source": "file_scan", "origin": origin},
-                        last_seen_utc=_utc_from_ts(received_ts),
-                        last_ingested_utc=_utc_now(),
-                    )
-                    projection = MessageProjectionRecord(
-                        message_id=message_id,
-                        canonical_key=f"{source_id}:{external_kind}:{external_key}",
-                        content_hash=content_hash(
-                            FILE_PROJECTOR_VERSION,
-                            "file",
-                            external_key,
-                            status,
-                            event_ts,
-                            received_ts,
-                        ),
-                        primary_source_id=source_id,
-                        source_family=origin,
-                        source_label=source.source_label,
-                        message_type=message_type,
-                        display_type=display_type,
-                        status=status,
-                        severity=_severity_from_status(status),
-                        read_state=_read_state(status),
-                        from_call=from_call,
-                        to_call=to_call,
-                        group_name=_group(to_call),
-                        event_ts=event_ts,
-                        received_ts=received_ts,
-                        event_utc=_utc_from_ts(event_ts),
-                        received_utc=_utc_from_ts(received_ts),
-                        subject=title,
-                        summary=title,
-                        body_preview=body,
-                        topics=topics,
-                        entities={
-                            "origin": origin,
-                            "path": str(rec.path),
-                            "extension": rec.path.suffix.lower(),
-                            "q_id": _q_id_from_path(rec.path),
-                            "age_ts_source": "received",
-                            "report_ts": event_ts if event_ts != received_ts else 0.0,
-                        },
-                        retention_class="artifact",
-                        search_text=search_text,
-                        projection_version=FILE_PROJECTOR_VERSION,
-                    )
-                    artifact_type = {"flamp": "flamp_transfer", "flmsg": "form_file", "bbs": "bbs_file"}.get(
-                        origin,
-                        f"{origin}_file",
-                    )
-                    q_id = _q_id_from_path(rec.path)
                     _upsert_bundle(
                         conn,
-                        source,
-                        projection,
-                        ExternalMessageRef(
-                            message_id=message_id,
-                            source_id=source_id,
-                            external_kind=external_kind,
-                            external_key=external_key,
-                            external_path=str(rec.path),
-                            external_mtime=float(rec.mtime or 0.0),
-                            external_size=int(rec.size or 0),
-                            delete_capability="file_delete",
-                            read_capability="fio_read_state",
-                            metadata={"origin": origin, "source": "file_scan"},
-                        ),
-                        artifacts=(
-                            MessageArtifactRecord(
-                                artifact_id=stable_message_id(message_id, artifact_type, rec.path, rec.mtime, rec.size),
-                                message_id=message_id,
-                                artifact_type=artifact_type,
-                                source_id=source_id,
-                                external_key=external_key,
-                                path=str(rec.path),
-                                content_hash=content_hash(rec.path, rec.mtime, rec.size),
-                                q_id=q_id,
-                                block_id=_block_id_from_path(rec.path),
-                                transfer_id=q_id,
-                                transfer_state="seen" if q_id else "",
-                                metadata={"mtime": float(rec.mtime or 0.0), "size": int(rec.size or 0)},
-                            ),
-                        ),
+                        bundle.source,
+                        bundle.message,
+                        bundle.refs[0],
+                        artifacts=bundle.artifacts,
                     )
                     projected += 1
                 _set_checkpoint(conn, checkpoint_id, fingerprint, flattened)
@@ -358,36 +429,51 @@ def project_native_file_records(
             conn.close()
 
 
-def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> int:
+def _project_js8_messages(
+    conn: sqlite3.Connection,
+    limit: int,
+    force: bool,
+    *,
+    external_keys: Sequence[str] | None = None,
+    source_ids: Sequence[str] | None = None,
+    bundle_sink: ProjectionBundleSink | None = None,
+) -> int:
     if not table_exists(conn, "js8_messages"):
         return 0
+    targeted = _targeted_keys(external_keys)
+    targeted_sources = _targeted_source_ids(source_ids)
     checkpoint_id = "native:js8_messages"
-    fingerprint = _table_fingerprint(
-        conn,
-        "js8_messages",
-        "COUNT(*)",
-        "MAX(COALESCE(id, 0))",
-        "MAX(COALESCE(source_id, 0))",
-        "MAX(COALESCE(utc_ts, 0))",
-        "MAX(COALESCE(read_ts, 0))",
-    )
-    fingerprint = content_hash(JS8_MESSAGE_POLICY_VERSION, fingerprint)
-    if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        with conn:
-            return _reconcile_js8_projection_policy(conn, limit=limit)
-    rows = conn.execute(
-        """
+    fingerprint = ""
+    if not targeted:
+        fingerprint = _table_fingerprint(conn, "js8_messages", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(source_id, 0))", "MAX(COALESCE(utc_ts, 0))", "MAX(COALESCE(read_ts, 0))")
+        fingerprint = content_hash(JS8_MESSAGE_POLICY_VERSION, fingerprint)
+        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+            with conn:
+                return _reconcile_js8_projection_policy(conn, limit=limit)
+    query = """
         SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text,
                state, read_ts, flag_state, source_key, source_id, source_radio_id,
                js8_instance_id, source_path
           FROM js8_messages
-         ORDER BY utc_ts DESC, source_id DESC, id DESC
-         LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        query += f" WHERE CAST(COALESCE(source_id, id) AS TEXT) IN ({marks})"
+        params.extend(targeted)
+        if targeted_sources:
+            source_marks = ",".join("?" for _ in targeted_sources)
+            query += (
+                " AND ('js8:' || COALESCE(NULLIF(source_key,''), "
+                "NULLIF(js8_instance_id,''), 'legacy')) "
+                f"IN ({source_marks})"
+            )
+            params.extend(targeted_sources)
+    query += " ORDER BY utc_ts DESC, source_id DESC, id DESC LIMIT ?"
+    params.append(100 if targeted else limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
     projected = 0
-    with conn:
+    with (nullcontext(conn) if targeted else conn):
         for row in rows:
             source_key = _text(row["source_key"]) or _text(row["js8_instance_id"]) or "legacy"
             source_id = f"js8:{source_key}"
@@ -475,7 +561,7 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
                 search_text=_search_text(row["from_call"], row["to_call"], row["msg_type"], body),
                 projection_version=PROJECTOR_VERSION,
             )
-            _upsert_bundle(
+            _emit_projection_bundle(
                 conn,
                 source,
                 projection,
@@ -489,10 +575,12 @@ def _project_js8_messages(conn: sqlite3.Connection, limit: int, force: bool) -> 
                     read_capability="mark_read",
                     metadata={"source_table": "js8_messages", "row_id": _text(row["id"])},
                 ),
+                bundle_sink=bundle_sink,
             )
             projected += 1
-        _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
-        projected += _reconcile_js8_projection_policy(conn, limit=limit)
+        if not targeted:
+            _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+            projected += _reconcile_js8_projection_policy(conn, limit=limit)
     return projected
 
 
@@ -543,33 +631,41 @@ def _reconcile_js8_projection_policy(conn: sqlite3.Connection, *, limit: int) ->
     return len(rows)
 
 
-def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) -> int:
+def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool, *, external_keys: Sequence[str] | None = None, source_ids: Sequence[str] | None = None, bundle_sink: ProjectionBundleSink | None = None) -> int:
     if not table_exists(conn, "spotter_traffic"):
         return 0
+    targeted = _targeted_keys(external_keys)
+    targeted_sources = _targeted_source_ids(source_ids)
     checkpoint_id = "native:spotter_traffic"
-    fingerprint = _table_fingerprint(
-        conn,
-        "spotter_traffic",
-        "COUNT(*)",
-        "MAX(COALESCE(id, 0))",
-        "MAX(COALESCE(utc_ts, 0))",
-        "MAX(COALESCE(read_ts, 0))",
-    )
-    if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        return 0
-    rows = conn.execute(
-        """
+    fingerprint = ""
+    if not targeted:
+        fingerprint = _table_fingerprint(conn, "spotter_traffic", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(utc_ts, 0))", "MAX(COALESCE(read_ts, 0))")
+        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+            return 0
+    query = """
         SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
                raw_text, decoded_text, state, read_ts, flag_state, relay_via,
                source_radio_id, js8_instance_id
           FROM spotter_traffic
-         ORDER BY COALESCE(utc_ts, 0) DESC, id DESC
-         LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        query += f" WHERE CAST(id AS TEXT) IN ({marks})"
+        params.extend(targeted)
+        if targeted_sources:
+            source_marks = ",".join("?" for _ in targeted_sources)
+            query += (
+                " AND ('spotter:' || COALESCE(NULLIF(js8_instance_id,''), "
+                "NULLIF(CAST(source_radio_id AS TEXT),''), 'legacy')) "
+                f"IN ({source_marks})"
+            )
+            params.extend(targeted_sources)
+    query += " ORDER BY COALESCE(utc_ts, 0) DESC, id DESC LIMIT ?"
+    params.append(100 if targeted else limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
     projected = 0
-    with conn:
+    with (nullcontext(conn) if targeted else conn):
         for row in rows:
             source_key = _text(row["js8_instance_id"]) or _text(row["source_radio_id"]) or "legacy"
             source_id = f"spotter:{source_key}"
@@ -637,7 +733,7 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) 
                 search_text=_search_text(row["from_call"], row["to_call"], msg_type, body),
                 projection_version=PROJECTOR_VERSION,
             )
-            _upsert_bundle(
+            _emit_projection_bundle(
                 conn,
                 source,
                 projection,
@@ -650,42 +746,54 @@ def _project_spotter_traffic(conn: sqlite3.Connection, limit: int, force: bool) 
                     read_capability="mark_read",
                     metadata={"source_table": "spotter_traffic", "row_id": external_key},
                 ),
+                bundle_sink=bundle_sink,
             )
             projected += 1
-        _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+        if not targeted:
+            _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
     return projected
 
 
-def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool) -> int:
+def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool, *, external_keys: Sequence[str] | None = None, source_ids: Sequence[str] | None = None, bundle_sink: ProjectionBundleSink | None = None) -> int:
     if not table_exists(conn, "varac_messages"):
         return 0
+    targeted = _targeted_keys(external_keys)
+    targeted_sources = _targeted_source_ids(source_ids)
     checkpoint_id = "native:varac_messages"
-    fingerprint = _table_fingerprint(
-        conn,
-        "varac_messages",
-        "COUNT(*)",
-        "MAX(COALESCE(id, 0))",
-        "MAX(COALESCE(ts, 0))",
-        "SUM(COALESCE(is_deleted, 0))",
-        "SUM(COALESCE(read_status, 0))",
-    )
-    if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        return 0
-    rows = conn.execute(
-        """
+    fingerprint = ""
+    if not targeted:
+        fingerprint = _table_fingerprint(conn, "varac_messages", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(ts, 0))", "SUM(COALESCE(is_deleted, 0))", "SUM(COALESCE(read_status, 0))")
+        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+            return 0
+    query = """
         SELECT ingest_source_key, id, guid, source, msg_type, from_call, to_call,
                subject, body, ts, band, freq_hz, snr, read_status, folder,
                file_path, vmail_guid, is_deleted, folder_label, urgent,
                has_attachment, via_callsign
-          FROM varac_messages
+         FROM varac_messages
          WHERE COALESCE(is_deleted, 0) = 0
-         ORDER BY COALESCE(ts, 0) DESC, id DESC
-         LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        query += (
+            " AND CAST(COALESCE(NULLIF(guid, ''), NULLIF(vmail_guid, ''), id) AS TEXT) "
+            f"IN ({marks})"
+        )
+        params.extend(targeted)
+        if targeted_sources:
+            source_marks = ",".join("?" for _ in targeted_sources)
+            query += (
+                " AND ('varac:' || COALESCE(NULLIF(ingest_source_key,''), 'legacy') || ':' || "
+                "COALESCE(NULLIF(source,''), 'varac')) "
+                f"IN ({source_marks})"
+            )
+            params.extend(targeted_sources)
+    query += " ORDER BY COALESCE(ts, 0) DESC, id DESC LIMIT ?"
+    params.append(100 if targeted else limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
     projected = 0
-    with conn:
+    with (nullcontext(conn) if targeted else conn):
         for row in rows:
             if _upper(row["msg_type"]) == "QSO":
                 continue
@@ -760,7 +868,7 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool) -
                         content_hash=content_hash(file_path),
                     )
                 )
-            _upsert_bundle(
+            _emit_projection_bundle(
                 conn,
                 source,
                 projection,
@@ -775,28 +883,25 @@ def _project_varac_messages(conn: sqlite3.Connection, limit: int, force: bool) -
                     metadata={"source_table": "varac_messages", "source": source_name, "row_id": _text(row["id"])},
                 ),
                 artifacts=artifacts,
+                bundle_sink=bundle_sink,
             )
             projected += 1
-        _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+        if not targeted:
+            _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
     return projected
 
 
-def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool) -> int:
+def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool, *, external_keys: Sequence[str] | None = None, source_ids: Sequence[str] | None = None, bundle_sink: ProjectionBundleSink | None = None) -> int:
     if not table_exists(conn, "sitrep_events"):
         return 0
+    targeted = _targeted_keys(external_keys)
     checkpoint_id = "native:sitrep_events"
-    fingerprint = _table_fingerprint(
-        conn,
-        "sitrep_events",
-        "COUNT(*)",
-        "MAX(COALESCE(id, 0))",
-        "MAX(COALESCE(event_ts, 0))",
-        "MAX(COALESCE(updated_ts, 0))",
-    )
-    if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        return 0
-    rows = conn.execute(
-        """
+    fingerprint = ""
+    if not targeted:
+        fingerprint = _table_fingerprint(conn, "sitrep_events", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(event_ts, 0))", "MAX(COALESCE(updated_ts, 0))")
+        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+            return 0
+    query = """
         SELECT id, report_key, event_ts, event_ts_utc, from_call, target, report_group,
                grid, state_code, state_confidence, geo_confidence, scope, subtype,
                overall_status, power, water, medical, communications, internet,
@@ -804,13 +909,20 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool) ->
                remarks_text, brevity_code, brevity_summary, source_first, source_last,
                source_count, sources_json, source_refs_json, raw_payload_json, updated_ts
           FROM sitrep_events
-         ORDER BY COALESCE(event_ts, 0) DESC, id DESC
-         LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        query += (
+            " WHERE CAST(COALESCE(NULLIF(report_key, ''), id) AS TEXT) "
+            f"IN ({marks})"
+        )
+        params.extend(targeted)
+    query += " ORDER BY COALESCE(event_ts, 0) DESC, id DESC LIMIT ?"
+    params.append(100 if targeted else limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
     projected = 0
-    with conn:
+    with (nullcontext(conn) if targeted else conn):
         for row in rows:
             source_id = "sitrep:fused"
             external_key = _text(row["report_key"]) or _text(row["id"])
@@ -862,7 +974,7 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool) ->
                 search_text=_search_text(row["from_call"], row["target"], row["report_group"], body),
                 projection_version=PROJECTOR_VERSION,
             )
-            _upsert_bundle(
+            _emit_projection_bundle(
                 conn,
                 source,
                 projection,
@@ -875,35 +987,32 @@ def _project_sitrep_events(conn: sqlite3.Connection, limit: int, force: bool) ->
                     read_capability="mark_read",
                     metadata={"source_table": "sitrep_events", "row_id": _text(row["id"]), "source_refs": _json_array(row["source_refs_json"])},
                 ),
+                bundle_sink=bundle_sink,
             )
             projected += 1
-        _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+        if not targeted:
+            _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
     return projected
 
 
-def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: bool) -> int:
+def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: bool, *, external_keys: Sequence[str] | None = None, source_ids: Sequence[str] | None = None, bundle_sink: ProjectionBundleSink | None = None) -> int:
     if not table_exists(conn, "commstat_artifacts"):
         return 0
+    targeted = _targeted_keys(external_keys)
     checkpoint_id = "native:commstat_artifacts"
-    fingerprint = _table_fingerprint(
-        conn,
-        "commstat_artifacts",
-        "COUNT(*)",
-        "MAX(COALESCE(id, 0))",
-        "MAX(COALESCE(event_ts, 0))",
-        "MAX(COALESCE(updated_ts, 0))",
-    )
-    if table_exists(conn, "commstat_artifact_deletions"):
-        fingerprint = content_hash(fingerprint, _table_fingerprint(conn, "commstat_artifact_deletions", "COUNT(*)", "MAX(COALESCE(deleted_ts, 0))"))
-    if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
-        return 0
+    fingerprint = ""
+    if not targeted:
+        fingerprint = _table_fingerprint(conn, "commstat_artifacts", "COUNT(*)", "MAX(COALESCE(id, 0))", "MAX(COALESCE(event_ts, 0))", "MAX(COALESCE(updated_ts, 0))")
+        if table_exists(conn, "commstat_artifact_deletions"):
+            fingerprint = content_hash(fingerprint, _table_fingerprint(conn, "commstat_artifact_deletions", "COUNT(*)", "MAX(COALESCE(deleted_ts, 0))"))
+        if _checkpoint_matches(conn, checkpoint_id, fingerprint, force=force):
+            return 0
     deletion_join = ""
     deletion_where = ""
     if table_exists(conn, "commstat_artifact_deletions"):
         deletion_join = "LEFT JOIN commstat_artifact_deletions cad ON cad.artifact_key = ca.artifact_key"
         deletion_where = "WHERE cad.artifact_key IS NULL"
-    rows = conn.execute(
-        f"""
+    query = f"""
         SELECT ca.id, ca.artifact_key, ca.artifact_kind, ca.subtype, ca.event_ts,
                ca.event_ts_utc, ca.from_call, ca.target, ca.report_group, ca.grid,
                ca.state_code, ca.scope, ca.transport_mode, ca.reach_mode,
@@ -914,13 +1023,21 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
           FROM commstat_artifacts ca
           {deletion_join}
           {deletion_where}
-         ORDER BY COALESCE(ca.event_ts, 0) DESC, ca.id DESC
-         LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: list[object] = []
+    if targeted:
+        marks = ",".join("?" for _ in targeted)
+        target_where = (
+            "CAST(COALESCE(NULLIF(ca.artifact_key, ''), ca.id) AS TEXT) "
+            f"IN ({marks})"
+        )
+        query += f" {' AND ' if deletion_where else ' WHERE '}{target_where}"
+        params.extend(targeted)
+    query += " ORDER BY COALESCE(ca.event_ts, 0) DESC, ca.id DESC LIMIT ?"
+    params.append(100 if targeted else limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
     projected = 0
-    with conn:
+    with (nullcontext(conn) if targeted else conn):
         for row in rows:
             source_id = "commstat:artifacts"
             external_key = _text(row["artifact_key"]) or _text(row["id"])
@@ -973,7 +1090,7 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
                 search_text=_search_text(row["from_call"], row["target"], row["report_group"], row["title"], body),
                 projection_version=PROJECTOR_VERSION,
             )
-            _upsert_bundle(
+            _emit_projection_bundle(
                 conn,
                 source,
                 projection,
@@ -1004,9 +1121,11 @@ def _project_commstat_artifacts(conn: sqlite3.Connection, limit: int, force: boo
                         metadata={"payload": _json_object(row["payload_json"])},
                     ),
                 ),
+                bundle_sink=bundle_sink,
             )
             projected += 1
-        _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
+        if not targeted:
+            _set_checkpoint(conn, checkpoint_id, fingerprint, rows)
     return projected
 
 
@@ -1023,6 +1142,72 @@ def _upsert_bundle(
     upsert_external_ref(conn, ref)
     for artifact in artifacts:
         upsert_message_artifact(conn, artifact)
+
+
+def _dirty_item_value(item: object, name: str) -> str:
+    if isinstance(item, Mapping):
+        return _text(item.get(name, ""))
+    return _text(getattr(item, name, ""))
+
+
+def prepare_native_message_bundles(
+    conn: sqlite3.Connection,
+    dirty_items: Sequence[object],
+) -> tuple[tuple[ProjectionBundle, ...], tuple[object, ...]]:
+    """Prepare exact bundles for named native rows without DML or reconciliation."""
+
+    projectors: Mapping[str, Callable[..., int]] = {
+        "js8": _project_js8_messages,
+        "spotter": _project_spotter_traffic,
+        "varac": _project_varac_messages,
+        "sitrep": _project_sitrep_events,
+        "commstat": _project_commstat_artifacts,
+    }
+    grouped: dict[str, list[object]] = {}
+    unsupported: list[object] = []
+    for item in dirty_items:
+        family = _dirty_item_value(item, "source_family").lower()
+        key = _dirty_item_value(item, "external_key")
+        if family not in projectors or not key:
+            unsupported.append(item)
+            continue
+        grouped.setdefault(family, []).append(item)
+
+    bundles: list[ProjectionBundle] = []
+    missing: list[object] = list(unsupported)
+    for family, family_items in grouped.items():
+        requested = {
+            (
+                _dirty_item_value(item, "source_id"),
+                _dirty_item_value(item, "external_key"),
+            ): item
+            for item in family_items
+        }
+        found: set[tuple[str, str]] = set()
+
+        def sink(bundle: ProjectionBundle) -> None:
+            bundles.append(bundle)
+            for ref in bundle.refs:
+                identity = (_text(ref.source_id), _text(ref.external_key))
+                if identity in requested:
+                    found.add(identity)
+
+        source_keys: dict[str, list[str]] = {}
+        for source_id, key in requested:
+            source_keys.setdefault(source_id, []).append(key)
+        for source_id, values in source_keys.items():
+            keys = tuple(dict.fromkeys(values))
+            for start in range(0, len(keys), 100):
+                projectors[family](
+                    conn,
+                    100,
+                    False,
+                    external_keys=keys[start : start + 100],
+                    source_ids=(source_id,),
+                    bundle_sink=sink,
+                )
+        missing.extend(item for identity, item in requested.items() if identity not in found)
+    return tuple(bundles), tuple(missing)
 
 
 def _checkpoint_matches(conn: sqlite3.Connection, source_id: str, fingerprint: str, *, force: bool) -> bool:
