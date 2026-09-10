@@ -421,7 +421,6 @@ def test_freqplanner_save_plan_updates_existing_editable_plan(monkeypatch, tmp_p
 
     app = QApplication.instance() or QApplication([])
     SettingsManager()
-
     import freqinout.gui.freq_planner_tab as planner_mod
 
     planner_mod = importlib.reload(planner_mod)
@@ -2787,6 +2786,8 @@ def test_hf_net_save_selected_as_resources_does_not_remove_schedule_rows(monkeyp
 
     app = QApplication.instance() or QApplication([])
     settings = SettingsManager()
+    from freqinout.core.db_initializer import ensure_nets_tables
+    ensure_nets_tables()
 
     import freqinout.gui.net_schedule_tab as net_mod
 
@@ -5237,6 +5238,8 @@ def test_source_tabs_refresh_source_identity_after_save(monkeypatch, tmp_path) -
 
     app = QApplication.instance() or QApplication([])
     SettingsManager()
+    from freqinout.core.db_initializer import ensure_nets_tables
+    ensure_nets_tables()
 
     import freqinout.gui.daily_schedule_tab as daily_mod
     import freqinout.gui.net_schedule_tab as net_mod

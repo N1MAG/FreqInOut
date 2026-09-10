@@ -43,6 +43,7 @@ from pathlib import Path
 from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.resource_catalog_migration import resource_catalog_authority_state
 from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
@@ -335,6 +336,7 @@ class MainWindow(QMainWindow):
         self.station_health_tab: StationHealthTab | None = None
         self.station_bbs_tab: StationBbsTab | None = None
         self.fio_spotter_tab: FioSpotterTab | None = None
+        self.resources_tab: QWidget | None = None
         self._refresh_station_health_scope_map()
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
@@ -361,6 +363,7 @@ class MainWindow(QMainWindow):
             "Station Health": self._create_station_health_tab,
             "Managed BBS": self._create_station_bbs_tab,
             "FIO Spotter": self._create_fio_spotter_tab,
+            "Resources": self._create_resources_tab,
             "HF Operators": self._create_operator_history_tab,
             "Local Operators": self._create_local_operator_tab,
             "Local Reports": self._create_local_report_history_tab,
@@ -375,6 +378,7 @@ class MainWindow(QMainWindow):
             ("Station Overview", self._placeholder_widget("Station Overview")),
             ("Managed BBS", self._placeholder_widget("Managed BBS")),
             ("FIO Spotter", self._placeholder_widget("FIO Spotter")),
+            ("Resources", self._placeholder_widget("Resources")),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
@@ -416,6 +420,8 @@ class MainWindow(QMainWindow):
         self._messages_nav_context = "inbox"
         self._messages_nav_filter_context: dict[str, str] = {}
         self._messages_nav_button_indices: dict[str, int] = {}
+        self._resources_nav_context = "frequency_catalog"
+        self._resources_nav_button_indices: dict[str, int] = {}
         # Sidebar button order/text requested by user.
         self._nav_specs = [
             ("Ops Center", "ControlFreq"),
@@ -441,6 +447,13 @@ class MainWindow(QMainWindow):
             ("Radios", "Settings"),
             ("Help", "Help"),
         ]
+        if resource_catalog_authority_state(get_config_dir() / "config" / "freqinout_nets.db") == "canonical":
+            insert_at = self._nav_specs.index(("Plan Builder", "FreqPlanner"))
+            self._nav_specs[insert_at:insert_at] = [
+                ("Frequency Catalog", "Resources"),
+                ("Net Directory", "Resources"),
+                ("Import / Export", "Resources"),
+            ]
         self._nav_screen_index_map: dict[int, int] = {}
         self._nav_base_labels: list[str] = []
 
@@ -515,7 +528,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]
+        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
         self._suppress_initial_nav_group_auto_expand = True
 
@@ -540,6 +553,13 @@ class MainWindow(QMainWindow):
                 btn.clicked.connect(lambda _=False: self.open_messages_section("inbox"))
             elif screen_label == "Messages" and button_label == "Compose":
                 btn.clicked.connect(lambda _=False: self.open_messages_section("compose"))
+            elif screen_label == "Resources":
+                section = {
+                    "Frequency Catalog": "frequency_catalog",
+                    "Net Directory": "net_directory",
+                    "Import / Export": "import_export",
+                }.get(button_label, "frequency_catalog")
+                btn.clicked.connect(lambda _=False, key=section: self.open_resources_section(key))
             else:
                 btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
             if screen_label in {"Settings", "Messages"}:
@@ -558,6 +578,14 @@ class MainWindow(QMainWindow):
                 self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
             elif screen_label == "Messages" and button_label == "Compose":
                 self._messages_nav_button_indices["compose"] = btn_idx
+            elif screen_label == "Resources":
+                section = {
+                    "Frequency Catalog": "frequency_catalog",
+                    "Net Directory": "net_directory",
+                    "Import / Export": "import_export",
+                }.get(button_label, "frequency_catalog")
+                self._resources_nav_button_indices[section] = btn_idx
+                self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
             else:
                 self._nav_screen_index_map[screen_idx] = btn_idx
             self._nav_base_labels.append(button_label)
@@ -3551,6 +3579,7 @@ class MainWindow(QMainWindow):
             ("Spotter", "FIO Spotter", "FIO Spotter", "spotter.svg"),
             ("Net Ctrl", "Net Control", "NCS", "net-control.svg"),
             ("Calls", "Operators", "Operators", "operators.svg"),
+            ("Resources", "Tools and Resources", "Resources", "resources.svg"),
             ("Plans", "Plans", "Plan Builder", "plans.svg"),
             ("Station", "Station", "Station", "station.svg"),
             ("Settings", "Settings", "Settings", "settings.svg"),
@@ -3588,6 +3617,15 @@ class MainWindow(QMainWindow):
                 is_current = is_current and expected_context == str(
                     getattr(self, "_settings_nav_context", "main")
                 )
+            elif screen_label == "Resources":
+                expected_context = {
+                    "Frequency Catalog": "frequency_catalog",
+                    "Net Directory": "net_directory",
+                    "Import / Export": "import_export",
+                }.get(button_label, "frequency_catalog")
+                is_current = is_current and expected_context == str(
+                    getattr(self, "_resources_nav_context", "frequency_catalog")
+                )
             action.setChecked(is_current)
             action.triggered.connect(
                 lambda _checked=False, label=button_label, screen=screen_label: self._activate_navigation_item(label, screen)
@@ -3616,6 +3654,11 @@ class MainWindow(QMainWindow):
         except Exception:
             button_height = 48
         for label, accessible_label, target, icon_name in self._compact_navigation_specs():
+            if target in grouped_keys and not any(
+                self._nav_group_for_label(item_label, screen) == target
+                for item_label, screen in self._nav_specs
+            ):
+                continue
             button = QToolButton(widget)
             button.setObjectName("mainCompactNavButton")
             button.setText(label)
@@ -4131,6 +4174,20 @@ class MainWindow(QMainWindow):
         idx = self._screen_index_by_label.get("FIO Spotter", -1)
         if idx >= 0:
             self._set_screen(idx)
+
+    def open_resources_section(self, section: str = "frequency_catalog") -> None:
+        """Open one implemented Tools & Resources workspace."""
+        key = str(section or "frequency_catalog").strip().lower()
+        if key not in {"frequency_catalog", "net_directory", "import_export"}:
+            key = "frequency_catalog"
+        self._resources_nav_context = key
+        idx = self._screen_index_by_label.get("Resources", -1)
+        if idx < 0:
+            return
+        self._set_screen(idx)
+        tab = self._get_tab_by_label("Resources")
+        if tab is not None and hasattr(tab, "open_section"):
+            tab.open_section(key)
 
     def _open_station_health_runtime_source_related_view(self, payload: object) -> None:
         if not isinstance(payload, Mapping):
@@ -5158,6 +5215,10 @@ class MainWindow(QMainWindow):
                 nav_idx = self._settings_nav_button_indices.get(
                     str(getattr(self, "_settings_nav_context", "main") or "main")
                 )
+            elif label == "Resources":
+                nav_idx = self._resources_nav_button_indices.get(
+                    str(getattr(self, "_resources_nav_context", "frequency_catalog") or "frequency_catalog")
+                )
             else:
                 nav_idx = self._nav_screen_index_map.get(idx)
             if nav_idx is None or not (0 <= nav_idx < len(self.nav_buttons)):
@@ -5450,6 +5511,14 @@ class MainWindow(QMainWindow):
         with perf_span("main_window.create_station_bbs_tab", settings=self.settings, min_ms=5.0):
             tab = StationBbsTab(self, settings=self.settings)
             self.station_bbs_tab = tab
+            return tab
+
+    def _create_resources_tab(self) -> QWidget:
+        from freqinout.gui.resources_tab import ResourcesTab
+
+        with perf_span("main_window.create_resources_tab", settings=self.settings, min_ms=5.0):
+            tab = ResourcesTab(self)
+            self.resources_tab = tab
             return tab
 
     def _create_fio_spotter_tab(self) -> QWidget:
@@ -11148,6 +11217,8 @@ class MainWindow(QMainWindow):
             return "Station"
         if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:
             return "Plan Builder"
+        if screen == "Resources":
+            return "Resources"
         if screen == "Messages":
             return "Messages"
         if screen in {"HF Operators", "Local Operators", "Local Reports"}:
@@ -11713,6 +11784,10 @@ class MainWindow(QMainWindow):
                         nav_idx = self._messages_nav_button_indices.get(
                             str(getattr(self, "_messages_nav_context", "inbox") or "inbox")
                         )
+                    elif label == "Resources":
+                        nav_idx = self._resources_nav_button_indices.get(
+                            str(getattr(self, "_resources_nav_context", "frequency_catalog") or "frequency_catalog")
+                        )
                     else:
                         nav_idx = self._nav_screen_index_map.get(index)
                     if bool(getattr(self, "_suppress_initial_nav_group_auto_expand", False)):
@@ -11746,6 +11821,8 @@ class MainWindow(QMainWindow):
                     widget_active = self.stack.widget(index)
                     if label == "Messages":
                         self._apply_messages_nav_context()
+                    elif label == "Resources" and hasattr(widget_active, "open_section"):
+                        widget_active.open_section(self._resources_nav_context)
                     if hasattr(widget_active, "set_tab_active"):
                         widget_active.set_tab_active(True)
                 except Exception:

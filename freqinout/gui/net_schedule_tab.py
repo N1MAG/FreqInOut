@@ -69,6 +69,12 @@ from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.logger import log
+from freqinout.core.legacy_resource_projection import (
+    dedupe_legacy_resources,
+    delete_legacy_resources,
+    finalize_legacy_resource_projection,
+    upsert_legacy_resource,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.plan_context_label import PlanContextLabel
@@ -3789,17 +3795,6 @@ class NetScheduleTab(QWidget):
 
     # --------- SQLite mirror --------- #
 
-    def _ensure_db_columns(self, conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
-        """
-        Ensure each column in `columns` exists on `table`, adding with ALTER TABLE if missing.
-        """
-        existing = set()
-        for _, name, *_ in conn.execute(f"PRAGMA table_info({table})"):
-            existing.add(name if isinstance(name, str) else str(name))
-        for col, ddl in columns.items():
-            if col not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-
     def _save_to_db(self, rows: List[Dict]):
         """
         Persist net schedule rows into SQLite tables in config/freqinout_nets.db.
@@ -3808,12 +3803,11 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             linked_rows, created_resources, linked_resources = self._ensure_manual_schedule_resources(conn, rows)
             conn.execute("DELETE FROM net_schedule_tab")
             conn.execute("DELETE FROM net_schedule")
             self._insert_rows(conn, linked_rows)
+            finalize_legacy_resource_projection(conn)
             conn.commit()
             if created_resources or linked_resources:
                 log.info(
@@ -3825,251 +3819,9 @@ class NetScheduleTab(QWidget):
         finally:
             conn.close()
 
-    def _create_tables(self, conn: sqlite3.Connection) -> None:
-        """
-        Create the schedule tables with the expected schema.
-        """
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_schedule_tab (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                vfo TEXT,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                auto_tune INTEGER DEFAULT 0,
-                primary_js8call_group TEXT,
-                comment TEXT,
-                net_name TEXT,
-                group_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT,
-                resource_id INTEGER,
-                target_scope TEXT NOT NULL DEFAULT 'station',
-                target_device_profile_id INTEGER,
-                target_operating_profile_id INTEGER
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_schedule (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                auto_tune INTEGER DEFAULT 0,
-                primary_js8call_group TEXT,
-                comment TEXT,
-                net_name TEXT,
-                group_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT,
-                target_scope TEXT NOT NULL DEFAULT 'station',
-                target_device_profile_id INTEGER,
-                target_operating_profile_id INTEGER
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS net_resources (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                resource_set TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                source_ref TEXT,
-                readonly INTEGER DEFAULT 1,
-                day_utc TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'Weekly',
-                biweekly_offset_weeks INTEGER DEFAULT 0,
-                month_weeks TEXT,
-                group_name TEXT,
-                band TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                frequency TEXT NOT NULL,
-                start_utc TEXT NOT NULL,
-                end_utc TEXT NOT NULL,
-                early_checkin INTEGER NOT NULL,
-                primary_js8call_group TEXT,
-                coverage TEXT,
-                comment TEXT,
-                net_name TEXT,
-                fldigi_mode TEXT,
-                fldigi_offset TEXT,
-                updated_utc TEXT
-            )
-            """
-        )
-
-    def _recreate_tables(self, conn: sqlite3.Connection) -> None:
-        """
-        Drop and recreate schedule tables when schema drift is detected.
-        """
-        conn.execute("DROP TABLE IF EXISTS net_schedule_tab")
-        conn.execute("DROP TABLE IF EXISTS net_schedule")
-        self._create_tables(conn)
-
-    def _ensure_columns_with_recreate(self, conn: sqlite3.Connection) -> None:
-        """
-        Ensure expected columns exist; recreate tables once if ALTER fails.
-        """
-        try:
-            self._ensure_db_columns(
-                conn,
-                "net_schedule_tab",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "vfo": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "resource_id": "INTEGER",
-                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
-                    "target_device_profile_id": "INTEGER",
-                    "target_operating_profile_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_schedule",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
-                    "target_device_profile_id": "INTEGER",
-                    "target_operating_profile_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_resources",
-                {
-                    "resource_set": "TEXT",
-                    "source_type": "TEXT",
-                    "source_ref": "TEXT",
-                    "readonly": "INTEGER DEFAULT 1",
-                    "day_utc": "TEXT",
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "band": "TEXT",
-                    "mode": "TEXT",
-                    "frequency": "TEXT",
-                    "start_utc": "TEXT",
-                    "end_utc": "TEXT",
-                    "early_checkin": "INTEGER DEFAULT 0",
-                    "primary_js8call_group": "TEXT",
-                    "coverage": "TEXT",
-                    "comment": "TEXT",
-                    "net_name": "TEXT",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "updated_utc": "TEXT",
-                },
-            )
-        except sqlite3.OperationalError as e:
-            log.warning("Net schedule column update failed (%s); recreating tables.", e)
-            self._recreate_tables(conn)
-            self._ensure_db_columns(
-                conn,
-                "net_schedule_tab",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "vfo": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "resource_id": "INTEGER",
-                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
-                    "target_device_profile_id": "INTEGER",
-                    "target_operating_profile_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_schedule",
-                {
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "auto_tune": "INTEGER DEFAULT 0",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
-                    "target_device_profile_id": "INTEGER",
-                    "target_operating_profile_id": "INTEGER",
-                },
-            )
-            self._ensure_db_columns(
-                conn,
-                "net_resources",
-                {
-                    "resource_set": "TEXT",
-                    "source_type": "TEXT",
-                    "source_ref": "TEXT",
-                    "readonly": "INTEGER DEFAULT 1",
-                    "day_utc": "TEXT",
-                    "recurrence": "TEXT DEFAULT 'Weekly'",
-                    "biweekly_offset_weeks": "INTEGER DEFAULT 0",
-                    "month_weeks": "TEXT",
-                    "group_name": "TEXT",
-                    "band": "TEXT",
-                    "mode": "TEXT",
-                    "frequency": "TEXT",
-                    "start_utc": "TEXT",
-                    "end_utc": "TEXT",
-                    "early_checkin": "INTEGER DEFAULT 0",
-                    "primary_js8call_group": "TEXT",
-                    "coverage": "TEXT",
-                    "comment": "TEXT",
-                    "net_name": "TEXT",
-                    "fldigi_mode": "TEXT",
-                    "fldigi_offset": "TEXT",
-                    "updated_utc": "TEXT",
-                },
-            )
-
     def _insert_rows(self, conn: sqlite3.Connection, rows: List[Dict]) -> None:
-        """
-        Insert schedule rows, recreating tables once if schema drift is detected.
-        """
-        try:
-            self._insert_rows_inner(conn, rows)
-            return
-        except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            if "no column" not in msg and "has no column" not in msg:
-                raise
-            log.warning("Net schedule table schema drift detected (%s); recreating tables.", e)
-            self._recreate_tables(conn)
-            self._insert_rows_inner(conn, rows)
+        """Insert rows into startup-owned schedule tables."""
+        self._insert_rows_inner(conn, rows)
 
     def _insert_rows_inner(self, conn: sqlite3.Connection, rows: List[Dict]) -> None:
         for row in rows:
@@ -4468,260 +4220,24 @@ class NetScheduleTab(QWidget):
         resource_id: Optional[int] = None,
         update_existing: bool = True,
     ) -> int:
-        row = self._strip_internal_row(row)
-        key = self._schedule_dup_key(row)
-        recurrence_key = str(row.get("recurrence", "Weekly") or "Weekly").strip()
-        month_weeks_key = str(row.get("month_weeks", "") or "").strip()
-        group_key = str(row.get("group_name", "") or "").strip()
-        net_name_key = str(row.get("net_name", "") or "").strip()
-        freq_num: Optional[float] = None
-        try:
-            freq_num = float(key[4])
-        except Exception:
-            freq_num = None
-        if resource_id:
-            cur = conn.execute(
-                """
-                UPDATE net_resources
-                   SET resource_set=?,
-                       source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       day_utc=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       band=?,
-                       mode=?,
-                       frequency=?,
-                       start_utc=?,
-                       end_utc=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    resource_set,
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    row.get("day_utc", ""),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("group_name", ""),
-                    row.get("band", ""),
-                    row.get("mode", ""),
-                    self._normalize_freq_key(row.get("frequency")),
-                    row.get("start_utc", ""),
-                    row.get("end_utc", ""),
-                    int(row.get("early_checkin", 0) or 0),
-                    row.get("primary_js8call_group", ""),
-                    row.get("coverage", ""),
-                    row.get("comment", ""),
-                    row.get("net_name", ""),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    int(resource_id),
-                ),
-            )
-            if int(cur.rowcount or 0) > 0:
-                return int(resource_id)
-
-        existing = conn.execute(
-            """
-            SELECT id
-              FROM net_resources
-             WHERE TRIM(resource_set)=TRIM(?)
-               AND TRIM(day_utc)=TRIM(?)
-               AND TRIM(recurrence)=TRIM(?)
-               AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
-               AND UPPER(TRIM(COALESCE(group_name,'')))=UPPER(TRIM(?))
-               AND TRIM(start_utc)=TRIM(?)
-               AND TRIM(end_utc)=TRIM(?)
-               AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
-               AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
-               AND (
-                     (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
-                     OR TRIM(COALESCE(frequency,''))=TRIM(?)
-                   )
-               AND UPPER(TRIM(COALESCE(net_name,'')))=UPPER(TRIM(?))
-             LIMIT 1
-            """,
-            (
-                resource_set,
-                key[0],
-                recurrence_key,
-                month_weeks_key,
-                group_key,
-                key[1],
-                key[2],
-                key[3],
-                key[5],
-                freq_num if freq_num is not None else None,
-                freq_num if freq_num is not None else None,
-                key[4],
-                net_name_key,
-            ),
-        ).fetchone()
-        if existing:
-            rid = int(existing[0])
-            if not update_existing:
-                return rid
-            conn.execute(
-                """
-                UPDATE net_resources
-                   SET source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("group_name", ""),
-                    int(row.get("early_checkin", 0) or 0),
-                    row.get("primary_js8call_group", ""),
-                    row.get("coverage", ""),
-                    row.get("comment", ""),
-                    row.get("net_name", ""),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    rid,
-                ),
-            )
-            return rid
-
-        cur = conn.execute(
-            """
-            INSERT INTO net_resources
-              (resource_set, source_type, source_ref, readonly, day_utc, recurrence, biweekly_offset_weeks,
-               month_weeks, group_name, band, mode, frequency, start_utc, end_utc, early_checkin,
-               primary_js8call_group, coverage, comment, net_name, fldigi_mode, fldigi_offset, updated_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                resource_set,
-                source_type,
-                source_ref,
-                int(readonly),
-                row.get("day_utc", ""),
-                row.get("recurrence", "Weekly"),
-                int(row.get("biweekly_offset_weeks", 0) or 0),
-                row.get("month_weeks", ""),
-                row.get("group_name", ""),
-                row.get("band", ""),
-                row.get("mode", ""),
-                self._normalize_freq_key(row.get("frequency")),
-                row.get("start_utc", ""),
-                row.get("end_utc", ""),
-                int(row.get("early_checkin", 0) or 0),
-                row.get("primary_js8call_group", ""),
-                row.get("coverage", ""),
-                row.get("comment", ""),
-                row.get("net_name", ""),
-                row.get("fldigi_mode", ""),
-                row.get("fldigi_offset", ""),
-                self._utc_now_iso(),
-            ),
+        """Write through the single legacy/canonical compatibility boundary."""
+        normalized = self._strip_internal_row(row)
+        normalized["frequency"] = self._normalize_freq_key(normalized.get("frequency"))
+        return upsert_legacy_resource(
+            conn,
+            normalized,
+            resource_set=resource_set,
+            source_type=source_type,
+            source_ref=source_ref,
+            readonly=readonly,
+            resource_id=resource_id,
+            update_existing=update_existing,
+            synchronize=False,
         )
-        return int(cur.lastrowid or 0)
 
     def _dedupe_net_resources(self, conn: sqlite3.Connection) -> int:
-        """
-        Collapse accidental duplicate resource rows by normalized identity key.
-        Keeps the most recently updated/newest row per key.
-        """
-        table_ok = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='net_resources'"
-        ).fetchone()
-        if not table_ok:
-            return 0
-        cur = conn.execute(
-            """
-            SELECT
-                id,
-                resource_set,
-                day_utc,
-                recurrence,
-                month_weeks,
-                group_name,
-                band,
-                mode,
-                frequency,
-                start_utc,
-                end_utc,
-                net_name,
-                updated_utc
-            FROM net_resources
-            ORDER BY COALESCE(updated_utc, '') DESC, id DESC
-            """
-        )
-        seen: set[Tuple[str, str, str, str, str, str, str, str, str, str, str]] = set()
-        delete_ids: List[int] = []
-        for (
-            rid,
-            resource_set,
-            day_utc,
-            recurrence,
-            month_weeks,
-            group_name,
-            band,
-            mode,
-            frequency,
-            start_utc,
-            end_utc,
-            net_name,
-            _updated_utc,
-        ) in cur.fetchall():
-            freq_norm = self._normalize_freq_key(frequency)
-            key = (
-                str(resource_set or "").strip().upper(),
-                self._normalize_day(str(day_utc or "")),
-                str(recurrence or "Weekly").strip().upper(),
-                str(month_weeks or "").strip().replace(" ", ""),
-                str(group_name or "").strip().upper(),
-                str(band or "").strip().upper(),
-                str(mode or "").strip().upper(),
-                freq_norm,
-                self._normalize_hhmm(str(start_utc or "")),
-                self._normalize_hhmm(str(end_utc or "")),
-                str(net_name or "").strip().upper(),
-            )
-            if key in seen:
-                delete_ids.append(int(rid))
-                continue
-            seen.add(key)
-        if not delete_ids:
-            return 0
-        marks = ",".join(["?"] * len(delete_ids))
-        conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", delete_ids)
-        return len(delete_ids)
+        """Delegate dedupe to the single compatibility transaction owner."""
+        return dedupe_legacy_resources(conn, synchronize=False)
 
     def _sync_builtin_resource_sets(
         self,
@@ -4743,14 +4259,13 @@ class NetScheduleTab(QWidget):
             rows = self._parse_schedule_json(path)
             if not rows:
                 continue
-            conn.execute(
-                """
-                DELETE FROM net_resources
-                 WHERE LOWER(TRIM(COALESCE(source_type, ''))) = 'builtin'
-                   AND TRIM(COALESCE(resource_set, '')) = TRIM(?)
-                """,
+            existing_ids = conn.execute(
+                """SELECT id FROM net_resources
+                     WHERE LOWER(TRIM(COALESCE(source_type, ''))) = 'builtin'
+                       AND TRIM(COALESCE(resource_set, '')) = TRIM(?)""",
                 (resource_set,),
-            )
+            ).fetchall()
+            delete_legacy_resources(conn, (item[0] for item in existing_ids), synchronize=False)
             for row in rows:
                 self._upsert_resource_row(
                     conn,
@@ -4772,14 +4287,6 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_net_resources_set_time
-                    ON net_resources(resource_set, day_utc, start_utc, end_utc)
-                """
-            )
             current_count = int(conn.execute("SELECT COUNT(*) FROM net_resources").fetchone()[0] or 0)
             updated_builtin_sets = self._sync_builtin_resource_sets(conn, force=(current_count == 0))
             if updated_builtin_sets:
@@ -4808,6 +4315,7 @@ class NetScheduleTab(QWidget):
             removed = self._dedupe_net_resources(conn)
             if removed:
                 log.info("NetSchedule: deduped %d net resource rows during bootstrap", removed)
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             log.error("NetSchedule: failed bootstrapping net resources: %s", e)
@@ -5285,8 +4793,6 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             self._upsert_resource_row(
                 conn,
                 edited,
@@ -5296,6 +4802,7 @@ class NetScheduleTab(QWidget):
                 readonly=1,
                 resource_id=int(original.get("id") or 0),
             )
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:
@@ -5334,8 +4841,7 @@ class NetScheduleTab(QWidget):
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
         try:
-            marks = ",".join(["?"] * len(ids))
-            conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", ids)
+            delete_legacy_resources(conn, ids)
             conn.commit()
         except Exception as e:
             try:
@@ -5720,8 +5226,6 @@ class NetScheduleTab(QWidget):
         conn = sqlite3.connect(db_path)
         moved = 0
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             for r in selected:
                 row = by_ui.get(r)
                 if not row:
@@ -5762,6 +5266,7 @@ class NetScheduleTab(QWidget):
                     resource_id=existing_id,
                 )
                 moved += 1
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:
@@ -5819,130 +5324,31 @@ class NetScheduleTab(QWidget):
         source_ref: str,
         readonly: int = 1,
     ) -> Tuple[bool, int]:
-        """
-        Upsert import row using import join key:
-          day + recurrence + month_weeks + band + mode + frequency + start + end + fldigi_mode
-          (within selected resource_set)
-        Returns (inserted, id).
-        """
+        """Match the legacy import key, then write through the compatibility owner."""
         normalized = self._strip_internal_row(row)
-        (
-            day_key,
-            recurrence_key,
-            month_weeks_key,
-            band_key,
-            mode_key,
-            freq_key,
-            start_key,
-            end_key,
-            fld_mode_key,
-        ) = self._resource_import_key(normalized)
-        freq_num: Optional[float] = None
-        try:
-            freq_num = float(freq_key)
-        except Exception:
-            freq_num = None
+        (day_key, recurrence_key, month_weeks_key, band_key, mode_key, freq_key,
+         start_key, end_key, fld_mode_key) = self._resource_import_key(normalized)
         existing = conn.execute(
-            """
-            SELECT id
-              FROM net_resources
-             WHERE TRIM(resource_set)=TRIM(?)
-               AND TRIM(day_utc)=TRIM(?)
-               AND TRIM(COALESCE(recurrence,''))=TRIM(?)
-               AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
-               AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
-               AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
-               AND TRIM(start_utc)=TRIM(?)
-               AND TRIM(end_utc)=TRIM(?)
-               AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
-               AND (
-                     (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
-                     OR TRIM(COALESCE(frequency,''))=TRIM(?)
-                   )
-             ORDER BY id DESC
-             LIMIT 1
-            """,
-            (
-                resource_set,
-                day_key,
-                recurrence_key,
-                month_weeks_key,
-                band_key,
-                mode_key,
-                start_key,
-                end_key,
-                fld_mode_key,
-                freq_num if freq_num is not None else None,
-                freq_num if freq_num is not None else None,
-                freq_key,
-            ),
+            """SELECT id FROM net_resources
+                 WHERE TRIM(resource_set)=TRIM(?)
+                   AND TRIM(day_utc)=TRIM(?)
+                   AND TRIM(COALESCE(recurrence,''))=TRIM(?)
+                   AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
+                   AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
+                   AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
+                   AND TRIM(start_utc)=TRIM(?) AND TRIM(end_utc)=TRIM(?)
+                   AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
+                   AND TRIM(COALESCE(frequency,''))=TRIM(?)
+                 ORDER BY id DESC LIMIT 1""",
+            (resource_set, day_key, recurrence_key, month_weeks_key, band_key, mode_key,
+             start_key, end_key, fld_mode_key, freq_key),
         ).fetchone()
-        if existing:
-            rid = int(existing[0])
-            conn.execute(
-                """
-                UPDATE net_resources
-                   SET resource_set=?,
-                       source_type=?,
-                       source_ref=?,
-                       readonly=?,
-                       day_utc=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       band=?,
-                       mode=?,
-                       frequency=?,
-                       start_utc=?,
-                       end_utc=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       coverage=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    resource_set,
-                    source_type,
-                    source_ref,
-                    int(readonly),
-                    normalized.get("day_utc", ""),
-                    normalized.get("recurrence", "Weekly"),
-                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
-                    normalized.get("month_weeks", ""),
-                    normalized.get("group_name", ""),
-                    normalized.get("band", ""),
-                    normalized.get("mode", ""),
-                    self._normalize_freq_key(normalized.get("frequency")),
-                    normalized.get("start_utc", ""),
-                    normalized.get("end_utc", ""),
-                    int(normalized.get("early_checkin", 0) or 0),
-                    normalized.get("primary_js8call_group", ""),
-                    normalized.get("coverage", ""),
-                    normalized.get("comment", ""),
-                    normalized.get("net_name", ""),
-                    normalized.get("fldigi_mode", ""),
-                    normalized.get("fldigi_offset", ""),
-                    self._utc_now_iso(),
-                    rid,
-                ),
-            )
-            return False, rid
+        resource_id = int(existing[0]) if existing else None
         rid = self._upsert_resource_row(
-            conn,
-            normalized,
-            resource_set=resource_set,
-            source_type=source_type,
-            source_ref=source_ref,
-            readonly=readonly,
-            resource_id=None,
+            conn, normalized, resource_set=resource_set, source_type=source_type,
+            source_ref=source_ref, readonly=readonly, resource_id=resource_id,
         )
-        return True, rid
+        return existing is None, rid
 
     def _import_source_type(self, path: Path) -> str:
         name = path.name.lower()
@@ -6041,8 +5447,6 @@ class NetScheduleTab(QWidget):
         updated = 0
         removed = 0
         try:
-            self._create_tables(conn)
-            self._ensure_columns_with_recreate(conn)
             incoming_keys = {self._resource_import_key(r) for r in rows}
             if import_mode == "replace":
                 existing = conn.execute(
@@ -6090,9 +5494,7 @@ class NetScheduleTab(QWidget):
                     if key not in incoming_keys:
                         delete_ids.append(int(rid))
                 if delete_ids:
-                    marks = ",".join(["?"] * len(delete_ids))
-                    conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", delete_ids)
-                    removed = len(delete_ids)
+                    removed = delete_legacy_resources(conn, delete_ids, synchronize=False)
 
             for row in rows:
                 was_insert, _ = self._upsert_resource_row_by_import_key(
@@ -6107,6 +5509,7 @@ class NetScheduleTab(QWidget):
                     inserted += 1
                 else:
                     updated += 1
+            finalize_legacy_resource_projection(conn)
             conn.commit()
         except Exception as e:
             try:

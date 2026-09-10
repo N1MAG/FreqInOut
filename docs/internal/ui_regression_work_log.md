@@ -2239,3 +2239,34 @@ skip; 42 HF schedule assignment tests pass; 40 SOP tests pass; and five focused
 initializer/Settings compatibility tests pass. Python compilation and
 `git diff --check` pass. No production configuration was used for validation,
 no legacy table was removed, and LN-2 did not begin before this gate passed.
+
+## 2026-09-09 — Local Nets / Resources LN-2 gate
+
+Status: complete; LN-2 passed and LN-3 is authorized next.
+
+The backup-first startup cutover now promotes the resource catalog from
+`shadow_ready` to `canonical` transactionally and exposes Tools & Resources only
+after that state is durable. Full and compact navigation preserve the Resources
+master hierarchy and route to Frequency Catalog, Net Directory, and preview-first
+Import / Export workspaces. Catalog reads remain bounded and query-only opening
+does not create a database or schema.
+
+Existing HF Nets and Plan Builder resource edits now pass through one Qt-free
+compatibility transaction owner, which updates the legacy projection and
+canonical records atomically. Direct resource DML and table/schema ownership
+were removed from GUI modules. Known Operating Group suggestions read the
+canonical compatibility API after cutover. Resource lifecycle actions expose
+provenance, versions, usage, clone, retire, and guarded deletion behavior.
+
+Delegation: Terra/high implemented the bounded resource workspaces and later
+integrated responsive geometry plus preview-first transfer; Terra/medium built
+the compatibility-writer and cutover/static ownership tests; Luna/high produced
+the workspace contracts. The high-reasoning primary model owned cutover,
+transaction boundaries, writer conversion, navigation integration, and final
+review.
+
+Acceptance evidence: 279 focused catalog, cutover, transfer, navigation, HF
+resource, Plan, and schedule-assignment tests pass. The dedicated cutover suite
+proves backup failure rollback and canonical zero-write startup. Responsive
+tests pass at 900x560 and 1000x700, including Large Text, and `git diff --check`
+passes. No legacy table was deleted and LN-3 did not begin before this gate.

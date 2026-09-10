@@ -41,6 +41,7 @@ from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
 from freqinout.core.plan_context_service import PlanContextService
+from freqinout.core.legacy_resource_projection import update_legacy_resource_fields
 from freqinout.core.guided_setup import (
     SCHEDULE_DAILY_NO_NETS,
     SCHEDULE_DAILY_PLUS_NETS,
@@ -4243,57 +4244,17 @@ class FreqPlannerTab(QWidget):
             raise FileNotFoundError(f"Net Resources database not found: {db_path}")
         payload = self._resource_update_payload_from_plan_ref(ref, updates)
         with sqlite3.connect(db_path) as conn:
-            exists = conn.execute(
-                "SELECT id FROM net_resources WHERE id=?",
-                (rid,),
-            ).fetchone()
-            if not exists:
-                raise KeyError(f"Unknown Net Resource id: {rid}")
-            conn.execute(
-                """
-                UPDATE net_resources
-                   SET source_type='manual',
-                       source_ref='updated_from_sop_schedule_plan',
-                       day_utc=?,
-                       recurrence=?,
-                       biweekly_offset_weeks=?,
-                       month_weeks=?,
-                       group_name=?,
-                       band=?,
-                       mode=?,
-                       frequency=?,
-                       start_utc=?,
-                       end_utc=?,
-                       early_checkin=?,
-                       primary_js8call_group=?,
-                       comment=?,
-                       net_name=?,
-                       fldigi_mode=?,
-                       fldigi_offset=?,
-                       updated_utc=?
-                 WHERE id=?
-                """,
-                (
-                    payload["day_utc"],
-                    payload["recurrence"],
-                    int(payload["biweekly_offset_weeks"]),
-                    payload["month_weeks"],
-                    payload["group_name"],
-                    payload["band"],
-                    payload["mode"],
-                    payload["frequency"],
-                    payload["start_utc"],
-                    payload["end_utc"],
-                    int(payload["early_checkin"]),
-                    payload["primary_js8call_group"],
-                    payload["comment"],
-                    payload["net_name"],
-                    payload["fldigi_mode"],
-                    payload["fldigi_offset"],
-                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    rid,
-                ),
+            changed = update_legacy_resource_fields(
+                conn,
+                rid,
+                {
+                    "source_type": "manual",
+                    "source_ref": "updated_from_sop_schedule_plan",
+                    **payload,
+                },
             )
+            if not changed:
+                raise KeyError(f"Unknown Net Resource id: {rid}")
             conn.commit()
         return True
 

@@ -8,6 +8,10 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.mode_utils import normalize_operating_group_mode
+from freqinout.core.resource_catalog_migration import (
+    read_legacy_compatibility_rows,
+    resource_catalog_authority_state,
+)
 
 
 REMOVED_KNOWN_GROUPS = {"AHRN", "RATPACK"}
@@ -260,6 +264,24 @@ def _resource_rows_from_db(db_path: Path | None = None) -> List[Dict[str, Any]]:
     path = Path(db_path) if db_path is not None else net_resources_db_path()
     if not path.exists():
         return []
+    if resource_catalog_authority_state(path) == "canonical":
+        rows = read_legacy_compatibility_rows(path)
+        return [
+            {
+                "resource_id": int(row.get("id") or 0) or None,
+                "resource_set": _clean_text(row.get("resource_set")) or "Custom",
+                "source_type": _clean_text(row.get("source_type")) or "net_resource",
+                "source_ref": _clean_text(row.get("source_ref")),
+                "group_name": _clean_text(row.get("group_name")),
+                "band": _clean_text(row.get("band")).upper(),
+                "mode": _clean_text(row.get("mode")),
+                "frequency": _clean_text(row.get("frequency")),
+                "net_name": _clean_text(row.get("net_name")),
+                "fldigi_mode": _clean_text(row.get("fldigi_mode")),
+                "fldigi_offset": _clean_text(row.get("fldigi_offset")),
+            }
+            for row in rows
+        ]
     conn = sqlite3.connect(path)
     try:
         exists = conn.execute(

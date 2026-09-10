@@ -17,7 +17,7 @@ from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.message_projection_store import ensure_message_projection_schema
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
-from freqinout.core.resource_catalog_migration import ensure_resource_catalog_shadow
+from freqinout.core.resource_catalog_migration import cutover_resource_catalog_to_canonical
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 from freqinout.core.varac_bbs_library_store import (
@@ -1509,6 +1509,7 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
                 fldigi_offset TEXT,
                 resource_id INTEGER,
@@ -1537,6 +1538,7 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
                 "resource_id": "INTEGER",
@@ -1567,6 +1569,7 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
                 fldigi_offset TEXT,
                 target_scope TEXT NOT NULL DEFAULT 'station',
@@ -1593,6 +1596,7 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
                 "target_scope": "TEXT NOT NULL DEFAULT 'station'",
@@ -2031,7 +2035,7 @@ def ensure_nets_tables() -> None:
     _ensure_nets_db()
     config_dir = _config_dir()
     try:
-        report = ensure_resource_catalog_shadow(
+        report = cutover_resource_catalog_to_canonical(
             config_dir / "freqinout_nets.db",
             config_dir / "freqinout.db",
         )
@@ -2042,6 +2046,7 @@ def ensure_nets_tables() -> None:
             report.review_required_count,
         )
     except Exception as exc:
-        # LN-1 leaves legacy ownership intact, so startup can safely continue.
-        log.error("Resource catalog shadow migration failed safely; legacy resources remain active: %s", exc)
+        # Cutover is transactional and backup-first; failure leaves the legacy
+        # schedule surfaces usable and Resources navigation stays hidden.
+        log.error("Resource catalog cutover failed safely; legacy resources remain active: %s", exc)
     log.info("DB init: ensured nets tables.")

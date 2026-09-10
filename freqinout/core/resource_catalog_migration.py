@@ -554,8 +554,11 @@ def apply_resource_catalog_migration(
     *,
     backup_factory: Callable[..., ConfigBackupResult] = create_config_backup,
     fail_after_rows: int | None = None,
+    authority_state: str = "shadow_ready",
 ) -> ResourceCatalogMigrationReport:
     """Back up inputs and transactionally refresh the LN-1 canonical shadow."""
+    if authority_state not in {"shadow_ready", "canonical"}:
+        raise ValueError("authority_state must be shadow_ready or canonical")
     nets_path = Path(nets_db_path)
     settings_path = Path(settings_db_path) if settings_db_path is not None else None
     dry = dry_run_resource_catalog_migration(nets_path, settings_path)
@@ -640,7 +643,7 @@ def apply_resource_catalog_migration(
         conn.execute(
             """INSERT OR REPLACE INTO resource_catalog_migration_state
             (state_key,authority_state,schema_version,details_json,updated_utc) VALUES (?,?,?,?,?)""",
-            (STATE_KEY, "shadow_ready", SCHEMA_VERSION, _canonical(details), now),
+            (STATE_KEY, authority_state, SCHEMA_VERSION, _canonical(details), now),
         )
         conn.commit()
     except Exception:
@@ -651,7 +654,7 @@ def apply_resource_catalog_migration(
     return _report(
         dry.classifications,
         group_updates=dry.group_rows_updated,
-        authority_state="shadow_ready",
+        authority_state=authority_state,
         backup_dir=backup_dir,
         unchanged=unchanged,
     )
@@ -737,6 +740,95 @@ def ensure_resource_catalog_shadow(
     )
 
 
+def synchronize_legacy_rows_in_connection(
+    conn: sqlite3.Connection,
+    *,
+    authority_state: str = "canonical",
+) -> ResourceCatalogMigrationReport:
+    """Refresh legacy projections inside a caller-owned write transaction.
+
+    This is the single cutover seam used by compatibility writers.  It performs
+    no backup and never commits; the caller owns both the legacy mutation and
+    canonical refresh atomically.
+    """
+    if authority_state not in {"shadow_ready", "canonical"}:
+        raise ValueError("invalid catalog authority state")
+    conn.row_factory = sqlite3.Row
+    ensure_resource_catalog_schema(conn)
+    _ensure_hf_subscription_columns(conn)
+    rows = [
+        _classify_legacy_row("net_resources", str(row["id"]), dict(row))
+        for row in conn.execute("SELECT * FROM net_resources ORDER BY id").fetchall()
+    ] if table_exists(conn, "net_resources") else []
+    expected = {(item.legacy_table_name, item.legacy_resource_id) for item in rows}
+    # Compatibility writes own only net_resources; Settings profile mappings
+    # remain intact until their own migration/cutover path changes them.
+    stale = conn.execute(
+        "SELECT legacy_resource_id FROM legacy_net_resource_map WHERE legacy_table_name='net_resources'"
+    ).fetchall()
+    stale_identities = {
+        ("net_resources", str(row["legacy_resource_id"])) for row in stale
+    } - expected
+    if stale_identities:
+        retained = {
+            (str(row["legacy_table_name"]), str(row["legacy_resource_id"]))
+            for row in conn.execute("SELECT legacy_table_name,legacy_resource_id FROM legacy_net_resource_map")
+        } - stale_identities
+        _remove_stale_shadow_rows(conn, retained)
+    now = _now()
+    _upsert_bundled_reference(conn, now)
+    unchanged = 0
+    for item in rows:
+        previous = conn.execute(
+            """SELECT source_row_hash FROM legacy_net_resource_map
+            WHERE legacy_table_name=? AND legacy_resource_id=?""",
+            (item.legacy_table_name, item.legacy_resource_id),
+        ).fetchone()
+        if previous and previous["source_row_hash"] == item.source_row_hash:
+            unchanged += 1
+        source_key = _upsert_source(conn, item.legacy_row, now)
+        _upsert_frequency(conn, item, source_key, now)
+        _upsert_net(conn, item, source_key, now)
+        conn.execute(
+            """INSERT INTO legacy_net_resource_map
+            (legacy_table_name,legacy_resource_id,frequency_resource_key,net_entry_key,net_session_key,
+             classification,source_row_hash,diagnostic_state,diagnostics_json,migrated_utc)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(legacy_table_name,legacy_resource_id) DO UPDATE SET
+            frequency_resource_key=excluded.frequency_resource_key,net_entry_key=excluded.net_entry_key,
+            net_session_key=excluded.net_session_key,classification=excluded.classification,
+            source_row_hash=excluded.source_row_hash,diagnostic_state=excluded.diagnostic_state,
+            diagnostics_json=excluded.diagnostics_json,migrated_utc=excluded.migrated_utc""",
+            (item.legacy_table_name, item.legacy_resource_id, item.frequency_resource_key,
+             item.net_entry_key, item.net_session_key, item.classification, item.source_row_hash,
+             "review_required" if item.classification.startswith("review_required") else "ready",
+             _canonical({"diagnostics": list(item.diagnostics), "legacy_row": dict(item.legacy_row)}), now),
+        )
+    _link_hf_subscription_snapshots(conn)
+    conn.execute(
+        """INSERT OR REPLACE INTO resource_catalog_migration_state
+        (state_key,authority_state,schema_version,details_json,updated_utc) VALUES (?,?,?,?,?)""",
+        (STATE_KEY, authority_state, SCHEMA_VERSION,
+         _canonical({"total_legacy_rows": len(rows), "compatibility_projection": True}), now),
+    )
+    return _report(rows, group_updates=0, authority_state=authority_state, unchanged=unchanged)
+
+
+def cutover_resource_catalog_to_canonical(
+    nets_db_path: str | Path,
+    settings_db_path: str | Path | None = None,
+) -> ResourceCatalogMigrationReport:
+    """Perform the final backup/delta import and atomically claim authority."""
+    if resource_catalog_authority_state(nets_db_path) == "canonical":
+        dry = dry_run_resource_catalog_migration(nets_db_path, settings_db_path)
+        return _report(dry.classifications, group_updates=0, authority_state="canonical", unchanged=dry.total_legacy_rows)
+    return apply_resource_catalog_migration(
+        nets_db_path,
+        settings_db_path,
+        authority_state="canonical",
+    )
+
+
 def read_legacy_compatibility_rows(db_path: str | Path) -> tuple[dict[str, Any], ...]:
     """Reproduce legacy rows from the lossless audit payload without writes."""
     path = Path(db_path)
@@ -767,9 +859,11 @@ __all__ = [
     "ResourceCatalogBackupError",
     "ResourceCatalogMigrationReport",
     "apply_resource_catalog_migration",
+    "cutover_resource_catalog_to_canonical",
     "dry_run_resource_catalog_migration",
     "ensure_resource_catalog_shadow",
     "read_legacy_compatibility_rows",
     "resource_catalog_authority_state",
     "resource_catalog_migration_needed",
+    "synchronize_legacy_rows_in_connection",
 ]
