@@ -50,6 +50,8 @@ Code gate:
 | FreqPlanner | Plan Builder | Schedule/Plan Editor | Partial | P2 |
 | HF Schedule | Daily Schedule | Schedule Outlook / Editor | Partial | P2 |
 | Net Schedule | Net Schedule | Schedule Outlook / Editor | Partial | P2 |
+| Local Nets | Local Net Reminders | Schedule Outlook / Editor | Specified | P2 |
+| Resources | Frequency Catalog / Net Directory | Resource Catalog | Specified | P2 |
 | Peer Schedules | Peer Schedule Review | Schedule Outlook | Partial | P2 |
 | Station Command Bar | Active Radio Cards | Station Command View | Partial | P1 |
 | Station Overview | Control Center | Station Status Summary | Partial | P2 |
@@ -395,6 +397,11 @@ Near-term rule:
   The advanced table is a temporary compatibility editor and must remain clearly
   labeled until card editing fully replaces it. The builder body must be
   scrollable on laptop/minimized windows.
+- The specified Local Nets view is a non-commandable schedule source. It may
+  project reminders into Ops Center and link SOP context, but it must never feed
+  SchedulerEngine or emit QSY. Frequency Catalog and Net Directory are canonical
+  Resources views governed by `local_nets_tools_resources_spec.md`; they are not
+  additional editors embedded separately into HF Nets and Local Nets.
 
 ### Station Command Bar
 

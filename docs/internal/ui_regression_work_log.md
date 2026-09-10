@@ -2130,3 +2130,37 @@ Luna/high handled help and recovery guidance; Luna/medium built the focused
 fixture, transaction, and Qt tests. The high-reasoning primary model owned
 transaction/identity policy and final integration, reviewed all delegated diffs,
 ran the gate, and did not start another slice.
+
+## 2026-09-09 — Local Nets and Tools & Resources specification
+
+Status: specification and implementation plan complete; implementation not
+started.
+
+The approved product direction adds `Plans > Local Nets` as a non-commandable
+awareness calendar for Amateur VHF/UHF and GMRS activity. Operating Group
+association is encouraged but optional. Local occurrences may appear in Ops
+Center and link to SOP guidance, but they cannot enter SchedulerEngine, tune a
+radio, launch software, or automatically activate an SOP.
+
+The supporting Resources model is defined as reusable information FIO knows once
+and uses contextually. The compact navigation label is `Resources`; the workspace
+title is `Tools & Resources`. Initial functional areas are Frequency Catalog, Net
+Directory, and Resource Import / Export. Empty future areas such as Forms &
+Templates are not exposed before implementation.
+
+Repository review found that the existing `net_resources` table is a combined
+row library rather than a normalized net directory. The new contract therefore
+separates catalog source, frequency/range/channel resources, net identity,
+published sessions, HF subscriptions, Local Net subscriptions, and occurrence
+state. General digital standards migrate only to Frequency Catalog; credible net
+rows may also create directory sessions; ambiguous rows remain review-required.
+The legacy table is preserved through an additive, backup-first, dry-runnable,
+transactional, idempotent migration and one canonical writer after cutover.
+
+The implementation plan defines seven independently gated packages: audit and
+contract lock; canonical resource store/migration; Resources UI; HF directory
+subscription; Local Nets; Ops/SOP integration; and release qualification. It
+includes responsive, accessibility, performance, recurrence/timezone, scheduler
+isolation, production migration, shutdown, and Linux platform gates. No code,
+schema, configuration, or production data was changed during this specification
+work.

@@ -4,6 +4,11 @@ The responsive SOP/Plan Builder completion contract and performance gates from
 the September 2026 production review are governed by
 `production_reliability_and_workflow_remediation_spec.md`.
 
+The normalized Net Directory, Frequency Catalog, HF session subscription, and
+non-commandable Local Nets relationship is governed by
+`local_nets_tools_resources_spec.md`. Until that implementation is gated, the
+existing `net_resources` row library remains the active compatibility model.
+
 ## Intent
 
 SOP scheduling becomes a first-class operational plan: where to be, when to be there,

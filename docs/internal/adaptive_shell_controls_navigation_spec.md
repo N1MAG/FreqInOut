@@ -66,7 +66,8 @@ meaning does not depend on platform icon themes.
 | Msgs | Messages flyout: Inbox, Compose |
 | Net Control | Flyout: FLDigi / SSB, JS8Call, VHF/UHF |
 | Calls | Operators flyout: HF Callsigns, Local Callsigns, Local Reports |
-| Plans | Flyout: Plan Builder, SOP Builder, HF Daily, HF Nets, HF Peer Scheds |
+| Plans | Flyout: Plan Builder, SOP Builder, HF Daily, HF Nets, Local Nets, HF Peer Scheds |
+| Resources | Flyout: Frequency Catalog, Net Directory, Resource Import / Export |
 | Station | Flyout: Control Center, Health Details |
 | Settings | Flyout: Main, Radios |
 | Help | Open Help |
@@ -84,6 +85,11 @@ must immediately trigger command-bar reflow when expanded or collapsed. Button
 geometry must subtract both the navigation container margins and compact-widget
 margins; icons, focus treatment, and the complete button border must remain
 inside the available paint area on macOS and Linux.
+
+`Local Nets` and `Resources` are prospective entries governed by
+`local_nets_tools_resources_spec.md`; they are added to navigation only when the
+corresponding functional package passes its exit gate. Navigation must not expose
+an empty destination in advance of implementation.
 
 ## Acceptance Checks
 
