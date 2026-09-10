@@ -6,13 +6,14 @@ perform imports, or make runtime/radio decisions.
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,28 +26,119 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.resource_catalog_models import FrequencyResource, NetDirectorySession
-from freqinout.core.resource_catalog_store import MAX_RESULTS, ResourceCatalogStore
+from freqinout.core.resource_catalog_store import (
+    MAX_RESULTS,
+    STATION_MANUAL_SOURCE_KEY,
+    ResourceCatalogStore,
+)
+
+
+def frequency_mhz_text(value_hz: int | None) -> str:
+    """Format a stored Hz value for operators without locale thousands separators."""
+    if value_hz is None:
+        return "Frequency unavailable"
+    mhz = int(value_hz) / 1_000_000
+    return f"{mhz:.6f}".rstrip("0").rstrip(".") + " MHz"
+
+
+def source_display_labels(
+    store: ResourceCatalogStore, source_keys: Iterable[str]
+) -> Mapping[str, str]:
+    """Resolve a bounded source-key collection without one database read per row."""
+    keys = tuple(dict.fromkeys(str(key or "").strip() for key in source_keys if str(key or "").strip()))
+    try:
+        sources = store.sources_by_keys(keys)
+    except Exception:
+        sources = {}
+    return {
+        key: str(getattr(sources.get(key), "label", "") or "").strip()
+        or "Catalog source unavailable"
+        for key in keys
+    }
+
+
+def source_display_label(store: ResourceCatalogStore, source_key: str) -> str:
+    """Return one operator-facing source name, never its opaque storage key."""
+    return source_display_labels(store, (source_key,)).get(source_key, "Catalog source unavailable")
+
+
+def populate_source_combo(
+    combo: QComboBox, store: ResourceCatalogStore, selected_key: str | None = None
+) -> None:
+    """Populate a mutable-source selector with friendly labels and opaque data."""
+    key = str(selected_key or STATION_MANUAL_SOURCE_KEY).strip()
+    sources = tuple(
+        source
+        for source in store.list_sources(limit=MAX_RESULTS)
+        if source.source_kind == "station" and not source.read_only
+    )
+    choices = [(source.label, source.source_key) for source in sources]
+    choice_keys = {choice_key for _label, choice_key in choices}
+    if key and key not in choice_keys and selected_key:
+        selected = store.sources_by_keys((key,)).get(key)
+        if selected is not None:
+            choices.append((selected.label, selected.source_key))
+        else:
+            choices.append(("Catalog source unavailable", key))
+    if key == STATION_MANUAL_SOURCE_KEY and key not in choice_keys:
+        choices.append(("Station Resources", key))
+    choices.sort(key=lambda item: (item[0].casefold(), item[1]))
+    prior = combo.blockSignals(True)
+    try:
+        combo.clear()
+        for label, source_key in choices:
+            combo.addItem(label, source_key)
+        if key:
+            index = combo.findData(key)
+            combo.setCurrentIndex(index)
+    finally:
+        combo.blockSignals(prior)
+
+
+def populate_frequency_combo(
+    combo: QComboBox, store: ResourceCatalogStore, selected_key: str | None = None
+) -> None:
+    """Populate a frequency selector with readable labels and opaque key data."""
+    rows = store.list_frequencies(active=None, limit=MAX_RESULTS)
+    prior = combo.blockSignals(True)
+    try:
+        combo.clear()
+        combo.addItem("Choose a frequency", None)
+        for resource in rows:
+            combo.addItem(
+                f"{resource.label} · {frequency_where_text(resource)}",
+                resource.frequency_resource_key,
+            )
+        key = str(selected_key or "").strip()
+        if key:
+            index = combo.findData(key)
+            if index < 0:
+                combo.addItem("Frequency unavailable", key)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+    finally:
+        combo.blockSignals(prior)
 
 
 def frequency_where_text(resource: FrequencyResource) -> str:
     """Return a concise display value; keys and Hz remain the comparison API."""
     if resource.resource_kind == "band_range":
-        return f"{resource.lower_hz or 0:,}–{resource.upper_hz or 0:,} Hz"
+        return f"{frequency_mhz_text(resource.lower_hz or 0)}–{frequency_mhz_text(resource.upper_hz or 0)}"
     receive = resource.receive_hz or resource.center_hz
     transmit = resource.transmit_hz
     if receive is None:
         return "Frequency unavailable"
     if transmit is not None and transmit != receive:
-        return f"RX {receive:,} Hz · TX {transmit:,} Hz"
-    return f"{receive:,} Hz"
+        return f"RX {frequency_mhz_text(receive)} · TX {frequency_mhz_text(transmit)}"
+    return frequency_mhz_text(receive)
 
 
 def resource_status_text(resource: FrequencyResource) -> str:
     if resource.retired:
         return "Retired"
     if not resource.active:
-        return "Inactive"
-    return "Active"
+        return "Unlisted"
+    return "Listed"
 
 
 def session_when_text(session: NetDirectorySession) -> str:
@@ -140,7 +232,12 @@ def choose_frequency_resource(store: ResourceCatalogStore, parent: QWidget | Non
 __all__ = [
     "ResourcePicker",
     "choose_frequency_resource",
+    "frequency_mhz_text",
     "frequency_where_text",
+    "populate_frequency_combo",
+    "populate_source_combo",
     "resource_status_text",
     "session_when_text",
+    "source_display_label",
+    "source_display_labels",
 ]

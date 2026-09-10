@@ -51,7 +51,7 @@ The operator-facing distinction is:
 | Operating Group | Who is this activity associated with? | Existing configured group identity and policy |
 | Frequency Resource | Where does it occur? | Tools & Resources frequency catalog |
 | Net Directory Entry | What organized net is this? | Tools & Resources net directory |
-| Published Session | When does that net normally meet? | Net directory child record |
+| Published Net Meeting | When does that net normally meet? | Net directory child record; stored internally as a session |
 | HF Net Schedule | Which HF session will this station actively follow? | Existing commandable HF schedule source |
 | Local Net Schedule | Which local session should this station remember? | New non-commandable reminder calendar |
 | SOP | What should the operator do? | Existing SOP profile/action model |
@@ -68,8 +68,8 @@ place any radio under scheduler control.
 - station-owned frequency catalog;
 - versioned bundled US/FCC reference records;
 - station-defined Amateur VHF/UHF, GMRS, and repeater records;
-- normalized net directory entries with one or more published sessions;
-- adding a published session to HF Nets or Local Nets;
+- normalized net directory entries with one or more published net meetings;
+- adding a published net meeting to HF Nets or Local Nets;
 - creating a new net and schedule in one guided workflow;
 - Local Net recurrence, reminders, occurrence state, and history summary;
 - Operating Group association;
@@ -112,18 +112,15 @@ The Plans flyout becomes:
 Local Nets opens a task workspace. It is not placed in Settings because normal
 use is scheduling and reviewing upcoming activity, not station administration.
 
-### Resources master group
+### Resources destination
 
-The main navigation gains a grouped **Resources** item. Its expanded workspace
-title is **Tools & Resources**. The icon should communicate a library or catalog,
-not repair/maintenance. It must use the shared navigation canvas, stroke, color,
-accessible name, and compact-rail geometry.
-
-Initial implemented children:
-
-- Frequency Catalog
-- Net Directory
-- Resource Import / Export
+The main navigation gains one direct **Resources** destination. Its workspace
+title is **Tools & Resources**. Frequency Catalog, Net Directory, and Resource
+Import / Export remain browser-style tabs inside that workspace; repeating them
+as navigation children adds no new destination and is prohibited. Contextual
+deep links may still open a specific internal tab. The icon should communicate a
+library or catalog, not repair/maintenance, and must use the shared navigation
+canvas, stroke, color, accessible name, and compact-rail geometry.
 
 `Forms & Templates` is a planned resource family, but it must not be exposed as
 an empty or nonfunctional tab. Existing form administration remains where it is
@@ -168,7 +165,7 @@ The shell contains:
 - workspace title and Help;
 - a global resource search;
 - implemented browser-style tabs;
-- source/status chips;
+- source/listing filters;
 - a primary result surface;
 - a selected-resource detail/editor panel; and
 - a compact `Used by` summary.
@@ -195,7 +192,7 @@ Primary filters use chips where the choice set is bounded:
 - Service: Amateur, GMRS;
 - Band/channel family;
 - Source: Reference, Station, Imported;
-- Status: Active, Update available, Retired; and
+- Listing: Listed, Update available, Retired; and
 - Operating Group when associated.
 
 Free-text search covers resource label, repeater/net name, channel, frequency,
@@ -216,14 +213,19 @@ Frequency details include:
 - optional CTCSS/DCS tone data;
 - location, coverage, grid, and notes;
 - associated groups;
-- provenance, version, and last verified time;
-- active/retired state; and
+- a human-readable catalog source, provenance, and last verified time;
+- listed/retired state; and
 - usage summary.
 
 Frequencies and range boundaries are stored as integer Hz. Display formatting
-must not be used as a comparison key. A reference range is useful for advisory
-validation but is not directly schedulable: the user must select or create an
-operational channel, simplex frequency, or repeater resource within it.
+must use radio-standard decimal MHz with a period decimal separator and no
+locale thousands separators, while storage and comparison remain integer Hz.
+Display formatting must not be used as a comparison key. Opaque source keys,
+resource keys, content revisions, and hashes remain available to services,
+transfer files, and advanced diagnostics but are not shown in the normal
+browser or editor. A reference range is useful for advisory validation but is
+not directly schedulable: the user must select or create an operational channel,
+simplex frequency, or repeater resource within it.
 
 ### Regulatory reference behavior
 
@@ -265,13 +267,14 @@ A Net Directory Entry owns stable net identity:
 - net name;
 - associated Operating Group, when configured;
 - purpose/description;
-- scope/coverage;
+- source region/coverage, describing where the listing originates or is
+  primarily organized without limiting who may listen;
 - contact or public information that is not a secret;
-- source and last verified time;
-- active/retired state; and
-- zero or more Published Sessions.
+- human-readable catalog source and last verified time;
+- listed/retired state; and
+- zero or more Published Net Meetings (stored internally as sessions).
 
-A Published Session owns reusable timing and frequency defaults:
+A Published Net Meeting owns reusable timing and frequency defaults:
 
 - service;
 - frequency resource;
@@ -281,12 +284,15 @@ A Published Session owns reusable timing and frequency defaults:
 - exception dates;
 - early-check-in/reminder suggestion;
 - operational mode details; and
-- published-session version/hash.
+- an internal accepted-version identity.
 
-Directory cards show name, group, service, concise session bullets, source, and
-station usage. Actions are `View`, `Add Session`, `Add to HF Nets`, `Add to Local
-Nets`, and context-appropriate edit/retire actions. A session already followed
-by the station shows `Scheduled` and `Open Schedule`, not another ambiguous Add.
+Directory cards show name, region, group, service, concise meeting-time bullets,
+human catalog source, listing state, and station usage. Actions are `View`, `Add
+Net Meeting`, `Add to HF Nets`, `Add to Local Nets`, and context-appropriate
+edit/retire actions. A meeting already followed by the station shows `Scheduled`
+and `Open Schedule`, not another ambiguous Add. `Listed` means the catalog item
+is available for selection; it never means the net is happening now or that this
+station has configured it.
 
 ## HF Nets And Net Directory Relationship
 
@@ -647,6 +653,10 @@ Help must explain:
 - how to apply or reject a resource update; and
 - how to recover from a missing/retired resource.
 
+Normal operator language uses `Net meeting`, `Source region`, and
+`Listed`/`Retired`. The persistence/API terms `session`, `scope`, `active`, and
+opaque keys/hashes do not appear as ordinary field labels or table values.
+
 Placeholders and examples follow the UI neutrality contract and contain no real
 or plausible callsigns. Live configured data may appear in completion results.
 
@@ -682,6 +692,10 @@ The feature is acceptable only when:
 14. Resource use/impact is visible before retirement or destructive removal.
 15. Performance, responsive/theme/text, accessibility, shutdown, and Linux
     production gates pass.
+16. Resources appears once in main navigation; its internal tabs are not repeated
+    as child destinations, frequencies use decimal MHz, and ordinary catalog
+    surfaces expose human source/region/listing language rather than opaque keys,
+    hashes, `Scope`, `Session`, or operationally ambiguous `Active` status.
 
 ## Definition Of Complete
 

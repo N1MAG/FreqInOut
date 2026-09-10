@@ -95,12 +95,13 @@ def test_canonical_cutover_fast_path_is_zero_write(tmp_path: Path) -> None:
     assert nets.stat().st_mtime_ns == before_mtime
 
 
-def test_navigation_declares_resources_master_three_destinations_and_compact_icon() -> None:
+def test_navigation_declares_one_direct_resources_destination_and_compact_icon() -> None:
     source = (ROOT / "freqinout/gui/main_window.py").read_text(encoding="utf-8")
 
     assert '"Resources": self._create_resources_tab' in source
+    assert '("Resources", "Resources")' in source
     for destination in ("Frequency Catalog", "Net Directory", "Import / Export"):
-        assert f'("{destination}", "Resources")' in source
+        assert f'("{destination}", "Resources")' not in source
     assert '("Resources", "Tools and Resources", "Resources", "resources.svg")' in source
 
 

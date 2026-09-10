@@ -120,8 +120,8 @@ map before a schema or UI change.
 5. Document the current Schedule Outlook query/update path and scheduler input
    boundary.
 6. Produce wireframes or executable geometry fixtures for:
-   - Resources > Frequency Catalog;
-   - Resources > Net Directory;
+   - Resources / Frequency Catalog tab;
+   - Resources / Net Directory tab;
    - Add to HF Nets;
    - Local Nets default and editor states; and
    - Ops Center Local Nets summary.
@@ -245,10 +245,10 @@ workspace, then move existing FIO resource writes to the canonical repository.
 
 ### Work
 
-1. Add the Resources master group with only implemented child destinations.
-2. Use lazy factories and preserve full/compact master hierarchy behavior.
-3. Implement shared search, source/status chips, paged results, detail/editor,
-   version/provenance, advisory reference state, and `Used by` impact.
+1. Add one direct Resources destination with implemented browser tabs inside it.
+2. Use lazy factories and preserve full/compact direct-navigation behavior.
+3. Implement shared search, friendly catalog-source/listing filters, paged
+   results, detail/editor, advisory reference state, and `Used by` impact.
 4. Implement station resource creation, clone-from-reference, update, retire,
    and safe unreferenced deletion.
 5. Implement Net Directory identities and multi-session editing.
@@ -265,7 +265,7 @@ workspace, then move existing FIO resource writes to the canonical repository.
 
 ### Tests
 
-- full and compact navigation/flyout mapping;
+- full and compact direct-navigation mapping;
 - no empty Forms/Templates tab;
 - query-only opening does not migrate or write;
 - filters, search, paging, keyboard access, and selection stability;
@@ -552,6 +552,39 @@ Use Luna/Mini-class implementation for:
 Every delegated package must state allowed files, prohibited ownership changes,
 exact tests, performance budget, migration rule, and required diff/test report.
 The primary model reviews every delegated diff before a gate can pass.
+
+## 2026-09-10 Post-LN-6 Resources Usability Correction
+
+Status: implementation and focused automated checks complete. This correction
+does not replace the outstanding LN-6 30-minute soak and Linux/operator gate.
+
+Operator review identified that the first Resources browser exposed persistence
+concepts instead of task language. The correction keeps the canonical schema and
+deep-link routes unchanged while making Resources one direct main-navigation
+destination. Frequency Catalog, Net Directory, and Import / Export remain tabs
+inside the workspace. Frequencies display as decimal MHz; catalog source keys,
+resource keys, and version hashes remain internal; `Source region` replaces the
+ambiguous outward `Scope`; and catalog lifecycle uses `Listed`/`Retired` rather
+than the operationally ambiguous `Active`. Net Directory calls its child records
+published net meetings while the database and service APIs retain `session`.
+
+Source labels and meeting-frequency labels are resolved with bounded batch reads,
+so the presentation correction does not introduce per-row database access. New
+and cloned records expose only mutable station-owned catalog sources, while edit
+flows retain the selected source identity as hidden data. No schema migration or
+catalog rewrite is required.
+
+Delegation: Terra/high implemented the bounded responsive UI; Luna/high authored
+the focused operator-surface, compact Dark/Large Text, and navigation tests;
+Terra/medium audited terminology and lifecycle semantics. The high-reasoning
+primary model owned the read API, compatibility review, specification/help/work
+log reconciliation, delegated-diff review, and final acceptance run.
+
+Acceptance evidence: 253 focused catalog, transfer, HF subscription, Local Nets,
+shell/navigation, and startup tests pass in fresh Qt processes. The dedicated
+five-test operator-surface suite includes the 900x560 Dark/Large Text geometry
+gate. Release preflight, Python compilation, `git diff --check`, and the isolated
+22-screen GUI smoke pass with zero failed screens.
 
 ## Work Log Template
 

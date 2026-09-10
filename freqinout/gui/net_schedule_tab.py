@@ -389,7 +389,7 @@ class NetScheduleTab(QWidget):
 
         self.add_btn = QPushButton("Add Row")
         self.add_hf_net_btn = QPushButton("Add HF Net")
-        self.add_hf_net_btn.setToolTip("Choose published Net Directory sessions and review them before adding drafts to a named HF Net schedule.")
+        self.add_hf_net_btn.setToolTip("Choose published Net Directory meetings and review them before adding drafts to a named HF Net schedule.")
         self.del_btn = QPushButton("Delete Selected")
         self.view_edit_btn = QPushButton("View/Edit")
         self.view_edit_btn.setCheckable(True)

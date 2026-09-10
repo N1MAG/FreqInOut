@@ -449,6 +449,7 @@ class MainWindow(QMainWindow):
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("Local Reports", "Local Reports"),
+            ("Resources", "Resources"),
             ("Plan Builder", "FreqPlanner"),
             ("SOP Builder", "SOP"),
             ("HF Daily", "HF Schedule"),
@@ -461,13 +462,8 @@ class MainWindow(QMainWindow):
             ("Radios", "Settings"),
             ("Help", "Help"),
         ]
-        if resource_catalog_authority_state(get_config_dir() / "config" / "freqinout_nets.db") == "canonical":
-            insert_at = self._nav_specs.index(("Plan Builder", "FreqPlanner"))
-            self._nav_specs[insert_at:insert_at] = [
-                ("Frequency Catalog", "Resources"),
-                ("Net Directory", "Resources"),
-                ("Import / Export", "Resources"),
-            ]
+        if resource_catalog_authority_state(get_config_dir() / "config" / "freqinout_nets.db") != "canonical":
+            self._nav_specs.remove(("Resources", "Resources"))
         self._nav_screen_index_map: dict[int, int] = {}
         self._nav_base_labels: list[str] = []
 
@@ -542,7 +538,7 @@ class MainWindow(QMainWindow):
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
-        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]
+        self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]
         self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
         self._suppress_initial_nav_group_auto_expand = True
 
@@ -598,7 +594,10 @@ class MainWindow(QMainWindow):
                     "Net Directory": "net_directory",
                     "Import / Export": "import_export",
                 }.get(button_label, "frequency_catalog")
-                self._resources_nav_button_indices[section] = btn_idx
+                # One main-navigation button represents every browser tab so a
+                # contextual deep link still highlights Resources.
+                for resource_section in ("frequency_catalog", "net_directory", "import_export"):
+                    self._resources_nav_button_indices[resource_section] = btn_idx
                 self._nav_screen_index_map.setdefault(screen_idx, btn_idx)
             else:
                 self._nav_screen_index_map[screen_idx] = btn_idx
@@ -11399,8 +11398,6 @@ class MainWindow(QMainWindow):
             return "Station"
         if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Local Nets", "Peer Schedules"}:
             return "Plan Builder"
-        if screen == "Resources":
-            return "Resources"
         if screen == "Messages":
             return "Messages"
         if screen in {"HF Operators", "Local Operators", "Local Reports"}:

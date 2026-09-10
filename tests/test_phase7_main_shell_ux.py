@@ -77,7 +77,8 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert '("Compose", "Messages")' in source
     assert '("Main", "Settings")' in source
     assert '("Radios", "Settings")' in source
-    assert 'self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Resources", "Plan Builder", "Station", "Settings"]' in source
+    assert '("Resources", "Resources")' in source
+    assert 'self._nav_group_order: list[str] = ["Messages", "NCS", "Operators", "Plan Builder", "Station", "Settings"]' in source
     assert '"Messages": False' in source
     assert '"Station": False' in source
     assert '"Plan Builder": False' in source

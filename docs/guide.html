@@ -96,7 +96,7 @@
       <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
       <tr><td>Plans</td><td><code>Plan Builder</code>, <code>SOP Builder</code>, <code>HF Daily</code>, <code>HF Nets</code>, <code>Local Nets</code>, <code>HF Peer Schedules</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
-      <tr><td>Resources</td><td><code>Frequency Catalog</code>, <code>Net Directory</code>, <code>Import / Export</code></td></tr>
+      <tr><td>Resources</td><td><code>Resources</code> opens one workspace containing Frequency Catalog, Net Directory, and Import / Export tabs</td></tr>
       <tr><td>Other</td><td><code>Station Health</code>, <code>Settings</code>, <code>Help</code></td></tr>
     </tbody>
   </table>
@@ -171,14 +171,14 @@
       <tr>
         <td><a href="#local-nets">Local Nets</a></td>
         <td>This is the reminder calendar for local amateur and GMRS activity.</td>
-        <td>Search and filter saved reminders, add a directory session or custom local net, choose a frequency resource and Operating Group, review the next occurrence, and optionally open linked SOP context.</td>
+        <td>Search and filter saved reminders, add a published net meeting or custom local net, choose a frequency resource and Operating Group, review the next occurrence, and optionally open linked SOP context.</td>
         <td>Use it to remember nearby nets without putting a local reminder into the HF scheduler. FIO never tunes, transmits, starts software, or activates an SOP because of a Local Net reminder.</td>
       </tr>
       <tr>
         <td><a href="#tools-resources">Tools &amp; Resources</a></td>
         <td>This is the reusable reference catalog.</td>
-        <td>Frequency Catalog stores channels and frequencies. Net Directory stores reusable net identities and sessions. Import / Export previews exchange data before it changes the catalog.</td>
-        <td>Use it when the same channel, repeater, or net session should be selected in more than one planning workflow. Catalog records are references, not instructions to control a radio.</td>
+        <td>Frequency Catalog stores channels and frequencies. Net Directory stores reusable net identities and published net meetings. Import / Export previews exchange data before it changes the catalog.</td>
+        <td>Use it when the same channel, repeater, or net meeting should be selected in more than one planning workflow. Catalog records are references, not instructions to control a radio.</td>
       </tr>
       <tr>
         <td><a href="#hf-peers">HF Peers</a></td>
@@ -972,7 +972,7 @@
   </div>
   <h3 id="local-nets-workflow">Recommended Local Net workflow</h3>
   <ol class="section-list">
-    <li><strong>Start with a reusable resource when one exists.</strong> Choose a published session from <a href="#tools-resources">Net Directory</a>, or choose a station/reference channel from Frequency Catalog. The selected resource appears as the Where context.</li>
+    <li><strong>Start with a reusable resource when one exists.</strong> Choose a published net meeting from <a href="#tools-resources">Net Directory</a>, or choose a station/reference channel from Frequency Catalog. The selected resource appears as the Where context.</li>
     <li><strong>Associate an Operating Group when the activity belongs to one.</strong> This preserves the operational context used elsewhere in FIO. Choose <code>Community / Unassigned</code> for an activity that does not belong to one of your operating groups.</li>
     <li><strong>Set local recurrence and timezone deliberately.</strong> Review the next exact local and UTC occurrences before saving. Exception dates and an effective end date prevent stale reminders.</li>
     <li><strong>Set the reminder lead.</strong> The reminder appears in the Local Nets workspace and Ops Center near the occurrence. <code>Dismiss This Occurrence</code> dismisses only the current occurrence; it does not pause or delete the Local Net.</li>
@@ -982,7 +982,7 @@
   <table>
     <thead><tr><th>Control</th><th>Operator use</th></tr></thead>
     <tbody>
-      <tr><td><code>Add Local Net</code> / <code>Edit</code></td><td>Create or revise a reminder. The editor is organized as Net/Session, Group/Where, When, Reminder &amp; SOP, and Review.</td></tr>
+      <tr><td><code>Add Local Net</code> / <code>Edit</code></td><td>Create or revise a reminder. The editor is organized as Net, Group/Where, When, Reminder &amp; SOP, and Review.</td></tr>
       <tr><td>Group, Service, Enabled, and Needs review filters</td><td>Narrow the bounded reminder list. <code>Needs review</code> identifies a missing, retired, or changed linked frequency resource.</td></tr>
       <tr><td><code>Pause</code> / <code>Enable</code></td><td>Stops or resumes reminder visibility without deleting the saved Local Net history and configuration.</td></tr>
       <tr><td><code>Dismiss This Occurrence</code></td><td>Available only while the selected reminder is due or active. It clears that one operator reminder and leaves future occurrences intact.</td></tr>
@@ -993,19 +993,21 @@
 
   <h2 id="tools-resources">Resources: Tools &amp; Resources</h2>
   <p><strong>Purpose</strong>: manage reference data that can be selected from planning workspaces without making the catalog itself an active schedule, station configuration page, or radio-control surface.</p>
-  <p><strong>Workspace model</strong>: use the browser-style tabs from left to right: <code>Frequency Catalog</code> for channels and frequencies, <code>Net Directory</code> for net identity and published sessions, and <code>Import / Export</code> for preview-first exchange. Search results are bounded so normal catalog work remains responsive.</p>
+  <p><strong>Workspace model</strong>: <code>Resources</code> is one direct main-navigation destination. Inside it, use the browser-style tabs from left to right: <code>Frequency Catalog</code> for channels and frequencies, <code>Net Directory</code> for net identity and published net meetings, and <code>Import / Export</code> for preview-first exchange. Search results are bounded so normal catalog work remains responsive.</p>
   <h3 id="tools-resources-frequency-catalog">Frequency Catalog</h3>
   <ul class="section-list">
-    <li><strong>Reference versus station resource</strong>: bundled and imported records retain their source and version. A station-owned record is the right choice for a locally maintained simplex frequency or repeater pair.</li>
+    <li><strong>Reference versus station resource</strong>: bundled and imported records retain their catalog source internally, while normal screens show its readable name instead of database keys or version hashes. A station-owned record is the right choice for a locally maintained simplex frequency or repeater pair.</li>
+    <li><strong>Frequency display</strong>: frequencies use decimal MHz, such as <code>7.115 MHz</code>. FIO retains exact integer-Hz values internally for comparison and scheduling.</li>
     <li><strong>Reference guidance</strong>: catalog wording such as <code>Within selected reference</code> is advisory. FIO does not determine a license class, location, equipment certification, emission authorization, or whether you may transmit.</li>
     <li><strong>Used by</strong>: inspect this before changing a resource. It shows the saved Local Nets, directory sessions, or other consumers that retain a reference to it.</li>
     <li><strong>Retire instead of delete</strong>: retirement removes a record from normal selection while preserving its identity and history. A referenced record cannot be silently removed. Hard deletion is only available after FIO proves there are no references and asks for confirmation.</li>
   </ul>
   <h3 id="tools-resources-net-directory">Net Directory and HF subscription</h3>
   <ul class="section-list">
-    <li><strong>Directory identity is not a schedule.</strong> A directory entry describes a net; published sessions describe its reusable timing and frequency context. Neither one activates an HF or Local schedule on its own.</li>
-    <li><strong>Add to HF Nets</strong>: select one or more published sessions, choose <code>Add to HF Nets</code>, then review the proposed rows in the named HF Net schedule before saving. This is an explicit subscription workflow, not an automatic import into a live schedule.</li>
-    <li><strong>Add to Local Nets</strong>: choose a published session in the Local Net editor to prefill a reminder draft, then review group, frequency, recurrence, and timezone before saving.</li>
+    <li><strong>Directory identity is not a schedule.</strong> A directory entry describes a net; published net meetings describe its reusable timing and frequency context. <code>Listed</code> means an item is available in the catalog—it does not mean the net is happening now or that your station follows it. Neither a listing nor a meeting activates an HF or Local schedule on its own.</li>
+    <li><strong>Source region</strong>: this describes where a listing originates or is primarily organized. It does not restrict who may listen.</li>
+    <li><strong>Add to HF Nets</strong>: select one or more published net meetings, choose <code>Add to HF Nets</code>, then review the proposed rows in the named HF Net schedule before saving. This is an explicit subscription workflow, not an automatic import into a live schedule.</li>
+    <li><strong>Add to Local Nets</strong>: choose a published net meeting in the Local Net editor to prefill a reminder draft, then review group, frequency, recurrence, and timezone before saving.</li>
     <li><strong>Updates do not rewrite schedules.</strong> A changed directory resource can mark a linked Local Net as needing review, while the accepted reminder snapshot remains unchanged. Review the directory and saved reminder deliberately before making any edit.</li>
   </ul>
   <h3 id="tools-resources-import-export">Import, export, and recovery</h3>

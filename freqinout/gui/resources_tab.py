@@ -121,7 +121,7 @@ class ResourceImportExportView(QWidget):
         except OSError as exc:
             self.diagnostics.setPlainText(f"Export failed: {exc}")
             return
-        self.diagnostics.setPlainText(f"Exported {len(payload['frequencies'])} frequency record(s), {len(payload['net_entries'])} net(s), and {len(payload['sessions'])} session(s).")
+        self.diagnostics.setPlainText(f"Exported {len(payload['frequencies'])} frequency record(s), {len(payload['net_entries'])} net(s), and {len(payload['sessions'])} net meeting(s).")
 
     def choose_import_and_preview(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Preview Catalog Import", "", "JSON files (*.json)")

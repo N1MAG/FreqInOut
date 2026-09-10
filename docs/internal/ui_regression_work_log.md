@@ -2440,3 +2440,41 @@ Remaining release evidence is intentionally not inferred from offscreen macOS
 automation: run the full 30-minute soak and the Linux 1920x1080 Normal Text,
 compact, Large Text, Light/Dark, keyboard, and operator workflow matrix before
 promoting this feature to a release branch.
+
+## 2026-09-10 — Resources catalog operator-language correction
+
+Status: implementation and focused automated checks complete; the outstanding
+LN-6 30-minute soak and Linux/operator matrix remain release gates. No later
+Local Nets package was started.
+
+Production UI review found that Resources repeated its three internal browser
+tabs in main navigation, displayed frequencies as locale-grouped integer Hz, and
+surfaced database source/version identifiers. Net Directory also used `Scope`,
+`Session`, and `Active` in ways that could be mistaken for listening limits,
+station configuration, or a net currently in progress.
+
+Resources is now one direct full/compact navigation destination. Its internal
+Frequency Catalog, Net Directory, and Import / Export tabs and contextual deep
+links remain intact. Normal catalog surfaces show decimal MHz and friendly,
+batched catalog-source names; opaque identifiers remain hidden widget/model data.
+Net Directory uses `Source region`, `Published net meeting`, and
+`Listed`/`Retired`. The UI explains that a listed directory item is selectable
+reference data, not evidence that it is scheduled or on air. Responsive action
+layouts avoid horizontal overflow at the compact Dark/Large Text viewport.
+
+The canonical schema, stable keys, import/export payloads, and compatibility APIs
+are unchanged. Two bounded, query-only source read methods were added so friendly
+labels do not create N+1 database work or write during browsing. No migration or
+production-data mutation was required.
+
+Delegation: Terra/high implemented the responsive UI; Luna/high added the focused
+usability and geometry regression suite; Terra/medium performed the independent
+semantic audit. The high-reasoning primary model owned the bounded store API,
+review corrections, documentation, and integration gate.
+
+Acceptance evidence: 253 focused catalog, transfer, HF subscription, Local Nets,
+shell/navigation, and startup tests pass in fresh Qt processes. The dedicated
+five-test usability suite covers the normal browser/editor surface and 900x560
+Dark/Large Text geometry. Release preflight, Python compilation,
+`git diff --check`, and an isolated basic GUI smoke across all 22 screens pass;
+the smoke reports zero failed tabs.

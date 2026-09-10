@@ -270,6 +270,36 @@ class ResourceCatalogStore:
     def get_source(self, source_key: str) -> CatalogSource | None:
         return self._read_one("resource_catalog_sources", "source_key", source_key, self._source_from_row)
 
+    def sources_by_keys(self, keys: Iterable[str]) -> Mapping[str, CatalogSource]:
+        """Load source presentation metadata for a bounded result set at once."""
+        return self._read_by_keys(
+            "resource_catalog_sources",
+            "source_key",
+            keys,
+            self._source_from_row,
+        )
+
+    def list_sources(
+        self,
+        *,
+        enabled: bool | None = True,
+        limit: int = MAX_RESULTS,
+    ) -> tuple[CatalogSource, ...]:
+        """Return bounded catalog-source metadata for operator-facing selectors."""
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
+        if enabled is not None:
+            clauses.append("enabled=?")
+            params.append(int(enabled))
+        params.append(_limit(limit))
+        return self._read_many(
+            "resource_catalog_sources",
+            f"SELECT * FROM resource_catalog_sources WHERE {' AND '.join(clauses)} "
+            "ORDER BY label COLLATE NOCASE, source_key LIMIT ?",
+            params,
+            self._source_from_row,
+        )
+
     def ensure_station_source(
         self,
         source_key: str = STATION_MANUAL_SOURCE_KEY,

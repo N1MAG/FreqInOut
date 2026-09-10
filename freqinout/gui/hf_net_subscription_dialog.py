@@ -187,7 +187,7 @@ class HfNetSubscriptionDialog(QDialog):
     def _update_review_copy(self) -> None:
         count = len(self._selected_sessions())
         destination = self.destination_combo.currentText() or "no destination"
-        self.review_label.setText(f"Review: {count} published session(s) will be added as drafts to '{destination}'. Confirm recurrence/time, target/radio, early check-in, mode, frequency, and conflict policy in HF Nets before Save Schedule.")
+        self.review_label.setText(f"Review: {count} published net meeting(s) will be added as drafts to '{destination}'. Confirm recurrence/time, target/radio, early check-in, mode, frequency, and conflict policy in HF Nets before Save Schedule.")
 
     def _accept_draft(self) -> None:
         sessions = self._selected_sessions()
@@ -229,7 +229,7 @@ class HfNetSubscriptionDialog(QDialog):
             entry = self.store.create_net_entry(NetDirectoryEntry(new_net_entry_key(), source_key, name.text(), scope="Station private" if private_one_time else "Station", description="Station-private one-time schedule" if private_one_time else None))
             session = self.store.create_session(NetDirectorySession(new_net_session_key(), entry.net_entry_key, source_key, "AMATEUR", key, recurrence="One-time" if private_one_time else "Weekly", day_utc=day.text().strip() or None, local_start_time=start.text().strip() or None, duration_minutes=60, timezone=timezone.text().strip() or "UTC"))
         except (CatalogValidationError, ReadOnlyResourceError, ValueError) as exc:
-            self.review_label.setText(f"Cannot create Net Directory session: {exc}")
+            self.review_label.setText(f"Cannot create Net Directory meeting: {exc}")
             return
         self.initial_session_keys = (session.net_session_key,)
         self.search_edit.setText(entry.name)

@@ -32,6 +32,8 @@ def test_query_methods_do_not_create_a_database_or_schema(tmp_path):
 
     assert store.list_frequencies(search="calling") == ()
     assert store.get_frequency("frequency_2m") is None
+    assert store.list_sources() == ()
+    assert store.sources_by_keys(("source_missing",)) == {}
     assert not path.exists()
 
     store.create_schema()
@@ -52,6 +54,8 @@ def test_query_methods_do_not_write_an_existing_database_without_catalog_schema(
     store = ResourceCatalogStore(path)
 
     assert store.get_source("source_missing") is None
+    assert store.list_sources() == ()
+    assert store.sources_by_keys(("source_missing",)) == {}
     assert store.get_frequency("frequency_missing") is None
     assert store.list_frequencies(search="anything") == ()
     assert store.list_net_entries(search="anything") == ()
@@ -71,6 +75,8 @@ def test_frequency_crud_hash_diff_usage_retire_and_unreferenced_delete(tmp_path)
     created = store.create_frequency(_frequency(), group_keys=("group_county",))
 
     assert created.center_hz == 146_520_000
+    assert store.sources_by_keys(("source_station", "missing"))["source_station"].label == "Station"
+    assert [source.label for source in store.list_sources()] == ["Station"]
     created = store.update_frequency(created, group_keys={"group_county": "County Group"})
     assert store.frequency_group_links(created.frequency_resource_key) == (("group_county", "County Group"),)
     assert created.content_hash and created.version_hash

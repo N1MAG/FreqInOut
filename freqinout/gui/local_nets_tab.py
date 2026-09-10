@@ -83,7 +83,7 @@ class LocalNetEditorDialog(QDialog):
         warning = QLabel(REMINDER_COPY); warning.setObjectName("localNetsReminderOnly"); warning.setWordWrap(True); warning.setStyleSheet("font-weight: 700;")
         layout.addWidget(warning)
 
-        net_box = QGroupBox("1. Net / Session", body); net_form = QFormLayout(net_box)
+        net_box = QGroupBox("1. Net", body); net_form = QFormLayout(net_box)
         self.session_combo = QComboBox(net_box); self.session_combo.addItem("Custom local reminder", None)
         sessions = self.catalog.list_sessions(active=True, limit=200)
         entries = self.catalog.net_entries_by_keys(session.net_entry_key for session in sessions)
@@ -91,9 +91,9 @@ class LocalNetEditorDialog(QDialog):
             entry = entries.get(session.net_entry_key)
             name = entry.name if entry is not None else session.net_entry_key
             self.session_combo.addItem(f"{name} · {session_when_text(session)}", session.net_session_key)
-        self.use_session_btn = QPushButton("Use selected directory session", net_box)
+        self.use_session_btn = QPushButton("Use selected net meeting", net_box)
         self.name_edit = QLineEdit(net_box); self.service_combo = QComboBox(net_box); self.service_combo.addItems(["AMATEUR", "GMRS"])
-        net_form.addRow("Known directory session", self.session_combo); net_form.addRow("", self.use_session_btn)
+        net_form.addRow("Known net meeting", self.session_combo); net_form.addRow("", self.use_session_btn)
         net_form.addRow("Name", self.name_edit); net_form.addRow("Service", self.service_combo); layout.addWidget(net_box)
 
         group_box = QGroupBox("2. Group / Where", body); group_form = QFormLayout(group_box)
@@ -245,7 +245,7 @@ class LocalNetEditorDialog(QDialog):
             group_key, group_name = self.group_combo.currentData()
             draft = schedule_from_directory_session(self.catalog, key, schedule_key=self.schedule.local_net_schedule_key if self.schedule else None, operating_group_key=group_key, operating_group_name=group_name)
             self.schedule = draft; self._load(draft)
-        except Exception as exc: QMessageBox.warning(self, "Directory session", str(exc))
+        except Exception as exc: QMessageBox.warning(self, "Net meeting", str(exc))
 
     def _choose_frequency(self) -> None:
         selected = choose_frequency_resource(self.catalog, self, service=self.service_combo.currentText())
