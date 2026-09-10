@@ -2009,6 +2009,72 @@ def _ensure_nets_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sop_layer_profile_day ON sop_schedule_layer(profile_id, day_utc, start_utc)"
         )
 
+        # Local Nets are reminder-only station calendars.  These tables are
+        # intentionally separate from every SchedulerEngine input table.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_net_schedules (
+                local_net_schedule_key TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                service TEXT NOT NULL,
+                recurrence TEXT NOT NULL,
+                local_start_time TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL DEFAULT 60,
+                weekdays_json TEXT NOT NULL DEFAULT '[]',
+                month_weeks_json TEXT NOT NULL DEFAULT '[]',
+                biweekly_anchor_date TEXT,
+                one_time_local_date TEXT,
+                effective_start_date TEXT,
+                effective_end_date TEXT,
+                exception_dates_json TEXT NOT NULL DEFAULT '[]',
+                reminder_minutes INTEGER NOT NULL DEFAULT 15,
+                net_entry_key TEXT,
+                net_session_key TEXT,
+                frequency_resource_key TEXT,
+                operating_group_key TEXT,
+                operating_group_name TEXT,
+                sop_id INTEGER,
+                participation_notes TEXT,
+                accepted_session_version_hash TEXT,
+                accepted_resource_version_hash TEXT,
+                accepted_snapshot_json TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                next_occurrence_utc TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_next
+               ON local_net_schedules(enabled, next_occurrence_utc, local_net_schedule_key)"""
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_filter
+               ON local_net_schedules(operating_group_key, service, enabled)"""
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_schedules_session
+               ON local_net_schedules(net_session_key)"""
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_net_occurrence_state (
+                occurrence_key TEXT PRIMARY KEY NOT NULL,
+                local_net_schedule_key TEXT NOT NULL,
+                occurrence_start_utc TEXT NOT NULL,
+                state TEXT NOT NULL,
+                operator_note TEXT,
+                updated_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """CREATE INDEX IF NOT EXISTS idx_local_net_occurrence_schedule
+               ON local_net_occurrence_state(local_net_schedule_key, occurrence_start_utc)"""
+        )
+
         _ensure_operator_checkins(conn)
         _ensure_local_operator_tables(conn)
         ensure_message_projection_schema(conn)

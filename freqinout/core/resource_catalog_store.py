@@ -45,6 +45,7 @@ CATALOG_TABLES = (
     "resource_catalog_migration_state",
 )
 MAX_RESULTS = 200
+MAX_BATCH_KEYS = 2_000
 STATION_MANUAL_SOURCE_KEY = "source_station_manual"
 
 
@@ -343,6 +344,19 @@ class ResourceCatalogStore:
     def get_frequency(self, frequency_resource_key: str) -> FrequencyResource | None:
         return self._read_one("frequency_resources", "frequency_resource_key", frequency_resource_key, self._frequency_from_row)
 
+    def frequencies_by_keys(self, keys: Iterable[str]) -> Mapping[str, FrequencyResource]:
+        """Load a bounded set of frequencies with one read connection.
+
+        Presentation code uses this instead of opening one SQLite connection per
+        result row.  Unknown keys are intentionally absent from the result.
+        """
+        return self._read_by_keys(
+            "frequency_resources",
+            "frequency_resource_key",
+            keys,
+            self._frequency_from_row,
+        )
+
     def list_frequencies(self, *, search: str = "", service: str | None = None, source_key: str | None = None,
                          active: bool | None = True, limit: int = MAX_RESULTS, offset: int = 0) -> tuple[FrequencyResource, ...]:
         clauses, params = ["1=1"], []
@@ -423,6 +437,15 @@ class ResourceCatalogStore:
     def get_net_entry(self, net_entry_key: str) -> NetDirectoryEntry | None:
         return self._read_one("net_directory_entries", "net_entry_key", net_entry_key, self._entry_from_row)
 
+    def net_entries_by_keys(self, keys: Iterable[str]) -> Mapping[str, NetDirectoryEntry]:
+        """Load directory identities for a bounded UI result set."""
+        return self._read_by_keys(
+            "net_directory_entries",
+            "net_entry_key",
+            keys,
+            self._entry_from_row,
+        )
+
     def net_entry_group_links(self, net_entry_key: str) -> tuple[tuple[str, str | None], ...]:
         return self._read_group_links(
             "net_directory_entry_group_links", "net_entry_key", net_entry_key
@@ -466,6 +489,15 @@ class ResourceCatalogStore:
 
     def get_session(self, net_session_key: str) -> NetDirectorySession | None:
         return self._read_one("net_directory_sessions", "net_session_key", net_session_key, self._session_from_row)
+
+    def sessions_by_keys(self, keys: Iterable[str]) -> Mapping[str, NetDirectorySession]:
+        """Load directory sessions for a bounded UI result set."""
+        return self._read_by_keys(
+            "net_directory_sessions",
+            "net_session_key",
+            keys,
+            self._session_from_row,
+        )
 
     def list_sessions(self, *, net_entry_key: str | None = None, frequency_resource_key: str | None = None, active: bool | None = True, limit: int = MAX_RESULTS, offset: int = 0) -> tuple[NetDirectorySession, ...]:
         clauses, params = ["1=1"], []
@@ -549,6 +581,40 @@ class ResourceCatalogStore:
         except sqlite3.Error:
             return ()
         finally: conn.close()
+
+    def _read_by_keys(
+        self,
+        table: str,
+        key_column: str,
+        keys: Iterable[str],
+        decoder: Any,
+    ) -> Mapping[str, Any]:
+        distinct = tuple(dict.fromkeys(str(key).strip() for key in keys if str(key).strip()))[
+            :MAX_BATCH_KEYS
+        ]
+        if not distinct:
+            return {}
+        conn = self._read_connection()
+        if conn is None:
+            return {}
+        try:
+            if not table_exists(conn, table):
+                return {}
+            result: dict[str, Any] = {}
+            for offset in range(0, len(distinct), 400):
+                batch = distinct[offset : offset + 400]
+                marks = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT * FROM {table} WHERE {key_column} IN ({marks})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    result[str(row[key_column])] = decoder(row)
+            return result
+        except sqlite3.Error:
+            return {}
+        finally:
+            conn.close()
 
     @staticmethod
     def _key(value: object, field_name: str) -> str:
@@ -634,7 +700,11 @@ class ResourceCatalogStore:
         # An accepted snapshot may be deliberately partial (for example, an HF
         # schedule stores only fields it subscribed to).  Missing accepted fields
         # are unknown, not changes, so diff only the captured field set.
-        diffs = () if snapshot is None else tuple(FieldDiff(name, snapshot.get(name), current.get(name)) for name in sorted(snapshot) if snapshot.get(name) != current.get(name))
+        diffs = () if snapshot is None else tuple(
+            FieldDiff(name, snapshot.get(name), current.get(name))
+            for name in sorted(snapshot)
+            if _canonical_json(snapshot.get(name)) != _canonical_json(current.get(name))
+        )
         return VersionComparison(key, accepted_hash, current_hash, bool(accepted_hash and accepted_hash != current_hash), diffs)
 
     @staticmethod

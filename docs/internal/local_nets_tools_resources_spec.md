@@ -1,6 +1,6 @@
 # Local Nets And Tools & Resources Specification
 
-Status: implementation authority; LN-0 through LN-3 passed; Local Nets workspace is the next gated package
+Status: implementation authority; LN-0 through LN-4 passed; Ops Center and SOP integration is the next gated package
 
 Date: 2026-09-09
 

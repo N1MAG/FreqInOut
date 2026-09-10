@@ -85,7 +85,7 @@ def test_phase7_navigation_groups_station_health_and_schedule_editors() -> None:
     assert "self._suppress_initial_nav_group_auto_expand = True" in source
     assert 'if screen in {"Station Overview", "Station Health"}:' in source
     assert 'return "Station"' in source
-    assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:' in source
+    assert 'if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Local Nets", "Peer Schedules"}:' in source
     assert 'return "Plan Builder"' in source
     assert 'if screen == "Messages":' in source
     assert 'return "Messages"' in source
@@ -548,7 +548,7 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
         assert tab._net_action_layout.itemAtPosition(0, 5).widget() is tab.save_btn
         assert tab._net_action_layout.itemAtPosition(0, 6).widget() is tab.rename_source_btn
         assert tab._net_action_layout.itemAtPosition(0, 7).widget() is tab.delete_source_btn
-        assert tab._net_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
+        assert tab._net_action_layout.itemAtPosition(1, 4).widget() is tab.move_to_resources_btn
         assert tab._net_resource_filter_layout.itemAtPosition(1, 0).widget() is tab.add_to_schedule_btn
         assert tab.net_schedule_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
         assert tab.table.horizontalHeader().sectionResizeMode(tab.COL_GROUP) == QHeaderView.Stretch
@@ -577,7 +577,7 @@ def test_phase7_hf_nets_action_rows_reflow_at_compact_width(monkeypatch, tmp_pat
         assert tab._net_action_layout.itemAtPosition(0, 6).widget() is tab.save_btn
         assert tab._net_action_layout.itemAtPosition(0, 7).widget() is tab.rename_source_btn
         assert tab._net_action_layout.itemAtPosition(0, 8).widget() is tab.delete_source_btn
-        assert tab._net_action_layout.itemAtPosition(1, 3).widget() is tab.move_to_resources_btn
+        assert tab._net_action_layout.itemAtPosition(1, 4).widget() is tab.move_to_resources_btn
         assert tab._net_resource_filter_layout.itemAtPosition(0, 4).widget() is tab.add_to_schedule_btn
     finally:
         tab.deleteLater()

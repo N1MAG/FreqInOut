@@ -45,6 +45,7 @@ from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.resource_catalog_migration import resource_catalog_authority_state
 from freqinout.core.multi_radio_store import MultiRadioStore, SUPPORTED_RUNTIME_CONTROL_BACKENDS
+from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.plan_context_service import PlanContextService
 from freqinout.core.settings_manager import SettingsManager
@@ -356,6 +357,7 @@ class MainWindow(QMainWindow):
             "Messages": self._create_message_viewer_tab,
             "HF Schedule": self._create_hf_schedule_tab,
             "Net Schedule": self._create_net_schedule_tab,
+            "Local Nets": self._create_local_nets_tab,
             "NCS-FLDigi/SSB": self._create_fldigi_ncs_tab,
             "NCS-JS8": self._create_js8_ncs_tab,
             "NCS-Local": self._create_local_ncs_tab,
@@ -391,6 +393,7 @@ class MainWindow(QMainWindow):
             ("Map", self._placeholder_widget("Map")),
             ("HF Schedule", self._placeholder_widget("HF Schedule")),
             ("Net Schedule", self._placeholder_widget("Net Schedule")),
+            ("Local Nets", self._placeholder_widget("Local Nets")),
             ("Peer Schedules", self._placeholder_widget("Peer Schedules")),
             ("Station Health", self._placeholder_widget("Station Health")),
             ("Settings", self.settings_tab),
@@ -440,6 +443,7 @@ class MainWindow(QMainWindow):
             ("SOP Builder", "SOP"),
             ("HF Daily", "HF Schedule"),
             ("HF Nets", "Net Schedule"),
+            ("Local Nets", "Local Nets"),
             ("HF Peer Scheds", "Peer Schedules"),
             ("Control Center", "Station Overview"),
             ("Health Details", "Station Health"),
@@ -4175,9 +4179,11 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._set_screen(idx)
 
-    def open_resources_section(self, section: str = "frequency_catalog") -> None:
+    def open_resources_section(self, section: str | NavigationIntent = "frequency_catalog") -> None:
         """Open one implemented Tools & Resources workspace."""
-        key = str(section or "frequency_catalog").strip().lower()
+        intent = section if isinstance(section, NavigationIntent) else None
+        requested = intent.destination_route.rsplit(".", 1)[-1] if intent else section
+        key = str(requested or "frequency_catalog").strip().lower()
         if key not in {"frequency_catalog", "net_directory", "import_export"}:
             key = "frequency_catalog"
         self._resources_nav_context = key
@@ -4186,8 +4192,27 @@ class MainWindow(QMainWindow):
             return
         self._set_screen(idx)
         tab = self._get_tab_by_label("Resources")
-        if tab is not None and hasattr(tab, "open_section"):
-            tab.open_section(key)
+        if tab is not None:
+            if hasattr(tab, "set_navigation_intent"):
+                tab.set_navigation_intent(intent)
+            if hasattr(tab, "open_section"):
+                tab.open_section(key)
+
+    def _open_navigation_intent(self, intent: object) -> None:
+        if not isinstance(intent, NavigationIntent):
+            return
+        if intent.destination_route.startswith("resources."):
+            self.open_resources_section(intent)
+        elif intent.destination_route == "settings.operating_groups":
+            self.open_settings_section("operating_groups", settings_nav_context="main")
+
+    def _return_navigation_intent(self, intent: object) -> None:
+        if not isinstance(intent, NavigationIntent):
+            return
+        if intent.return_route == "plans.local_nets":
+            index = self._screen_index_by_label.get("Local Nets", -1)
+            if index >= 0:
+                self._set_screen(index)
 
     def open_hf_net_subscription(self, session_keys: object) -> None:
         """Hand canonical directory sessions to the existing HF Nets editor."""
@@ -5459,6 +5484,32 @@ class MainWindow(QMainWindow):
             )
             return tab
 
+    def _create_local_nets_tab(self) -> QWidget:
+        """Construct the reminder-only Local Nets workspace on first visit."""
+        from freqinout.gui.local_nets_tab import LocalNetsTab
+
+        with perf_span("main_window.create_local_nets_tab", settings=self.settings, min_ms=5.0):
+            tab = LocalNetsTab(self, settings=self.settings)
+            self.local_nets_tab = tab
+            self._connect_lazy_screen_signal(
+                "local_nets.resources",
+                getattr(tab, "open_resources_requested", None),
+                lambda section="frequency_catalog": self.open_resources_section(str(section)),
+            )
+            self._connect_lazy_screen_signal(
+                "local_nets.settings",
+                getattr(tab, "open_settings_requested", None),
+                lambda _section=None: self.open_settings_section(
+                    "operating_groups", settings_nav_context="main"
+                ),
+            )
+            self._connect_lazy_screen_signal(
+                "local_nets.navigation",
+                getattr(tab, "navigation_requested", None),
+                self._open_navigation_intent,
+            )
+            return tab
+
     def _create_fldigi_ncs_tab(self) -> QWidget:
         with perf_span("main_window.create_fldigi_ncs_tab", settings=self.settings, min_ms=5.0):
             tab = FldigiNetControlTab(self)
@@ -5546,6 +5597,7 @@ class MainWindow(QMainWindow):
             tab = ResourcesTab(self)
             tab.add_to_hf_nets_requested.connect(self.open_hf_net_subscription)
             tab.open_hf_schedule_requested.connect(self.open_hf_net_schedule_for_session)
+            tab.return_requested.connect(self._return_navigation_intent)
             self.resources_tab = tab
             return tab
 
@@ -11243,7 +11295,7 @@ class MainWindow(QMainWindow):
             return "NCS"
         if screen in {"Station Overview", "Station Health"}:
             return "Station"
-        if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Peer Schedules"}:
+        if screen in {"FreqPlanner", "SOP", "HF Schedule", "Net Schedule", "Local Nets", "Peer Schedules"}:
             return "Plan Builder"
         if screen == "Resources":
             return "Resources"
@@ -11294,7 +11346,9 @@ class MainWindow(QMainWindow):
         section_layout.setSpacing(2)
 
         header = QPushButton(section)
-        header.setText(key)
+        # Keep the stable persisted route key while presenting the operator's
+        # broader task language in the navigation rail.
+        header.setText("Plans" if key == "Plan Builder" else key)
         header.setCheckable(True)
         expanded = bool(self._nav_group_states.get(key, True))
         header.setChecked(expanded)

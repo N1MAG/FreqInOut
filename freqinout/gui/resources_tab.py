@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.known_operating_groups import net_resources_db_path
+from freqinout.core.navigation_intent import NavigationIntent
 from freqinout.core.resource_catalog_store import MAX_RESULTS, ResourceCatalogStore
 from freqinout.core.resource_catalog_transfer import (
     ImportPreview,
@@ -173,11 +174,13 @@ class ResourcesTab(QWidget):
     SECTION_INDEX = {"frequency_catalog": 0, "net_directory": 1, "import_export": 2}
     add_to_hf_nets_requested = Signal(object)
     open_hf_schedule_requested = Signal(object)
+    return_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None, *, store: ResourceCatalogStore | None = None, db_path: str | Path | None = None) -> None:
         super().__init__(parent)
         self.store = store or ResourceCatalogStore(Path(db_path) if db_path is not None else net_resources_db_path())
         self._pages: dict[int, QWidget] = {}
+        self._navigation_intent: NavigationIntent | None = None
         self._build_ui()
         self._ensure_page(0)
 
@@ -195,6 +198,17 @@ class ResourcesTab(QWidget):
         self.help_label.setWordWrap(True)
         header.addWidget(self.help_label)
         layout.addLayout(header)
+        self.context_bar = QWidget(self)
+        context_layout = QHBoxLayout(self.context_bar)
+        context_layout.setContentsMargins(8, 4, 8, 4)
+        self.context_label = QLabel("", self.context_bar)
+        self.context_label.setWordWrap(True)
+        context_layout.addWidget(self.context_label, 1)
+        self.return_btn = QPushButton("Return", self.context_bar)
+        self.return_btn.clicked.connect(self._return_to_origin)
+        context_layout.addWidget(self.return_btn)
+        self.context_bar.setVisible(False)
+        layout.addWidget(self.context_bar)
         self.tabs = QTabWidget(self)
         self.tabs.setObjectName("toolsResourcesTabs")
         self.tabs.setDocumentMode(True)
@@ -241,6 +255,27 @@ class ResourcesTab(QWidget):
         self._ensure_page(index)
         self.tabs.setCurrentIndex(index)
         return self._pages.get(index)
+
+    def set_navigation_intent(self, intent: NavigationIntent | None) -> None:
+        """Present an explicit return path for contextual catalog work."""
+        self._navigation_intent = intent
+        if intent is None:
+            self.context_bar.setVisible(False)
+            return
+        origin = "Local Nets" if intent.origin_surface == "local_nets_editor" else "previous workspace"
+        self.context_label.setText(
+            f"Catalog opened from {origin}. Your unsaved selections are retained."
+        )
+        self.return_btn.setText(f"Return to {origin}")
+        self.context_bar.setVisible(True)
+
+    def _return_to_origin(self) -> None:
+        intent = self._navigation_intent
+        if intent is None:
+            return
+        self._navigation_intent = None
+        self.context_bar.setVisible(False)
+        self.return_requested.emit(intent)
 
 
 ToolsResourcesTab = ResourcesTab

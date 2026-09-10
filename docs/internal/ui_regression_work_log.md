@@ -2304,3 +2304,50 @@ that test environment. The 17-test dedicated LN-3 suite passes without skips.
 Python compilation and `git diff --check` pass. The legacy row library remains
 as an explicitly temporary compatibility surface until full parity; it is not a
 second canonical writer. LN-4 did not begin before this gate passed.
+
+## 2026-09-09 — Local Nets / Resources LN-4 gate
+
+Status: complete; LN-4 passed and LN-5 is authorized next. Ops Center and SOP
+integration did not begin before this gate passed.
+
+LN-4 adds startup-owned, additive Local Net schedule and per-occurrence state
+tables; immutable Qt-free schedule/occurrence models; and deterministic bounded
+Daily, Weekly, Periodic, Bi-weekly, and one-time recurrence. Projection uses
+IANA timezones, skips nonexistent DST wall times, selects the first ambiguous
+fold deterministically, handles overnight and leap-day boundaries, applies
+effective/exception dates, and never materializes more than the configured
+90-day/500-occurrence bounds. Dismissing one due occurrence does not pause its
+recurring schedule.
+
+The lazy `Plans > Local Nets` workspace provides Now/Next/Today/Upcoming and
+attention summaries, bounded filters and results, known-directory and custom
+creation, optional Operating Group association, Amateur/GMRS and
+simplex/repeater support, exact local/UTC review, pause, and active-window-only
+dismiss. It visibly states that Local Nets are reminders only and cannot tune a
+radio. Full navigation presents the master as `Plans` while retaining its
+stable persisted internal key.
+
+Primary integration review removed N+1 catalog access: resource status for as
+many as 2,000 schedules now uses a fixed two bounded catalog reads, selected-row
+dismiss checks project only that schedule, and directory choices show operator
+names rather than internal session keys. Explicit frequency overrides capture
+their own accepted snapshots. Contextual Frequency Catalog and Operating Group
+handoffs carry an immutable, Qt-free `NavigationIntent`; incomplete editor
+values survive the trip, Resources offers an explicit return action, and no
+draft is written before Save.
+
+Delegation: Terra/high implemented and refined the responsive Local Nets UI and
+navigation package. Luna/high built and strengthened the recurrence, storage,
+resource, scheduler-isolation, performance, theme, and geometry tests.
+The high-reasoning primary model owned schema/migration boundaries, recurrence
+and concurrency review, accepted-snapshot semantics, batch-read performance,
+typed navigation integration, delegated-diff review, and the final gate.
+
+Acceptance evidence: the dedicated LN-4 suite passes 29 tests without skips,
+including its 1,000-schedule corpus and 900x560/Large Text surfaces. The combined
+catalog, migration, HF subscription, shell/navigation, Local Nets, and scheduler
+gate passes 231 tests; one pre-existing macOS-environment shutdown test is
+skipped because importing QtCore aborts in that test environment. Python
+compilation and `git diff --check` pass. Static and runtime tests confirm that
+SchedulerEngine never reads Local Net inputs and no QSY, launch, radio mutation,
+or automatic SOP activation path exists.
